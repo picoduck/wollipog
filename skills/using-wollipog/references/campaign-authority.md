@@ -9,7 +9,7 @@ An absent control mode is Custom. A prompt saying “Full Control” does not es
 | Decision | Required Review and Execution |
 | --- | --- |
 | Implementation Question | Exact typed question/options; use the selected answer only after consumption. Authentication, secrets and unverified effects remain human-owned. |
-| PR Merge | Reviewed head, required checks on that head, dependencies and stacked children; arm and execute the exact canonical merge command. Wait for merge-group CI and actual MERGED state. |
+| PR Merge | Reviewed head, required checks on that head, dependencies and stacked children; arm and execute the exact canonical merge command. Wait for merge-group CI and actual MERGED state. When GitHub reports no required checks for the pull request, cite every check reported for the head with `checksBasis: "all_reported"`: each must pass and the merge state must be clean, which the runner verifies. A head with no checks at all is never green: list none, and the merge is the person's (`no_checks`). |
 | Merged-Branch Deletion | Separate typed approval after actual merge; protect and verify stacked dependents before deleting. |
 | Follow-Up Publication | Exact sanitized repository/title/body/labels, fresh duplicate search, accepted recommendation and authorized lineage where required. Review the public payload, consume once, publish, then read it back. |
 | Scope Change | Exact additions/removals and current revision. Custom retains human review. Full Control needs separate server-established issue authority and verified lineage/limits. Resolution applies and consumes scope atomically. Re-read scope. |
@@ -31,6 +31,70 @@ Only an explicitly authorized policy-alignment task can propose repository instr
 through its normal review and merge gates. A committed policy change does not change the current
 session's higher-priority instructions or installed skills. Continue independent work while a
 required decision is pending.
+
+Full Control launches with zero overhead: no form, budget, preflight panel or question comes before
+the first message. The root Orchestrator (no parent session) therefore makes this preflight visible
+after launch, in one user-visible first report posted after `get_campaign` and before its first
+`create_session`. The report names:
+
+- the objective and the authorized issue scope;
+- the follow-up behavior and the operations the boundary permits;
+- campaign limits (`limits` and `budget`);
+- the evidence upload destination and reviewer provider disclosure;
+- the Human Required exceptions (`fullControlHumanRequired`, or none);
+- every unsupported or degraded capability: `uiEvidenceReview` and `videoEvidenceReview` status
+  with their reasons, whether mandatory review runs through controlled review sessions or a native
+  reviewer outside them (`budget.requiredNativeReview`), and execution isolation where a runner
+  reports it (otherwise unknown);
+- every unresolved mandatory human rule from installed skills or user-authored instructions, with
+  its exact source file and quoted requirement, and that each such gate will reach the owner typed
+  as described below, never only in prose.
+
+The report is not a question: it asks nothing, waits for nobody, and the root continues in the same
+turn. A nested Orchestrator does not repeat it. The always-injected Orchestrator preset carries the
+same requirement.
+
+When the owner's first message started the campaign, the server reads no scope from it: the root's
+first campaign action, right after the report, is proposing the initial scope with
+`request_campaign_issue_scope_change` and `proposal` (each issue's origin and rationale, the count,
+the constraints read and the operations withheld). `create_session` refuses campaign work until that
+proposal is admitted. Deterministic checks refuse a proposal naming its issue and condition; one of
+only owner-named issues the message writes as issue references, with nothing else to check, is
+admitted with no model call; anything else goes to the Decision Model's constraint check, which
+admits, refuses naming the question and issue, or, when uncertain or failed, makes it the owner's one
+approval, asked as an Owner Question. Ranking criteria are the root's own call and are never checked.
+
+A Custom root does the same for its person's first message when that message writes an issue number:
+`create_session` refuses with `seed_proposal_required` until the root proposes exactly the issues the
+message asks for, each `owner_named` (or none). The constraint check always runs; an admit seeds the
+epic the person approves (one issue with members) or makes the issues the campaign's issue numbers
+with no person step, and an uncertain or failed check leaves the scope to the person, who approves it
+or chooses Continue Without an Epic.
+
+When such a rule keeps a gate for a person, the gate reaches the owner as a typed request, never
+only as prose:
+
+- The requester, usually a child, still files the exact typed decision, such as `pr_merge`, with
+  `request_workflow_decision`, and names the rule in `ownerRule`: `source` is the file and `quote`
+  the requirement, on one line (CLI `--owner-rule-source` and `--owner-rule-quote`; control plane
+  v296). The occurrence is created human-owned (`owner_kept`) under any mode, grant or category. It
+  reaches the owner's Inbox and Campaign Status under Waiting for You with the rule, and every later
+  request for the same resource stays the owner's. `ownerRule` only narrows authority.
+- A Full Control root hands an occurrence already filed without the rule to the owner with
+  `hand_workflow_decision_to_owner`.
+- For a gate with no typed category, a Full Control root asks the owner with
+  `request_owner_decision` and `kind: "approval"`.
+- For a design choice, clarification or preference, a Full Control root asks an Owner Question:
+  `request_owner_decision` with `kind: "question"` (protocol v303). The owner answers in their own
+  words, the answer grants nothing, and no scope, boundary or policy change revokes the question.
+- Nobody, child or root, ends a turn with such a gate only in prose.
+
+Children ask clarifications, preferences and design choices with `request_workflow_decision`,
+`category: "implementation_question"`, `kind: "question"` (protocol v332). These use normal question
+forms with 0–12 suggested options and free text. The existing policy still decides who answers,
+including owner-kept rules and credential screening. Answers grant no action authority and are not
+consumed as approvals. Legacy requests without `kind` retain their original approval semantics.
+Never retry an unsupported question as a legacy approval.
 
 No campaign grants authentication/sign-in, secret disclosure, persistent grants or provider access
 expansion. Under Custom they come to the human. Under Full Control the server declines each one

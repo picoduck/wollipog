@@ -41,7 +41,8 @@ One unit of committed or proposed campaign work, with or without an issue or a s
 | `generation` | `0` for original scope; for a follow-up, one more than the highest generation among its origin items, or `1` when the recommendation names no origin item (for example, one recorded before the ledger existed). |
 | `dispatchState` | Orchestrator record for undispatched work: `planned` (known, not ready) or `queued` (ready, waiting for capacity or dependencies). |
 | `queuePosition` | Optional recorded queue order. Lower is earlier. |
-| `dependsOn` | Work item ids in the same campaign. |
+| `dependsOn` | Work item ids in the same campaign, in any of its repositories. A dependency on an item in another repository is a merge dependency (#4120, see [Merge Dependencies](#merge-dependencies-4120)). |
+| `repository` | Derived, never recorded (#4120): where the latest attempt's child is placed (a Location of a campaign repository, #4119), else the repository of the first pull request the item names, else its issue's. Null when none is known. |
 | `commitment` | `committed`, `cancelled`, or `scope_removed`, with a reason (required for the latter two), time, and recording session. |
 | `stage` | The latest reported stage, see below. |
 | `blocker` | An optional recorded blocker: reason, responsible actor (`human`, `orchestrator`, `child`, `external`), and optional Request occurrence id. |
@@ -154,7 +155,8 @@ its verifications. The state is never stored. The first matching rule wins:
    postdates every attempt → **delivered**. Opening a new attempt on a delivered item reopens it
    visibly.
 3. The item has an open attempt:
-   1. a recorded blocker → **blocked** (`recorded_blocker`);
+   1. a recorded blocker → **blocked** (`recorded_blocker`); otherwise a failed merge dependency
+      (#4120) → **blocked** (`dependency_blocked`);
    2. the session is deleted → **blocked** (`attempt_session_unavailable`);
    3. the session is held, failed, stopped, or archived (without a delivered verification, by
       rule 2) → **blocked** (`attempt_session_held`, `attempt_session_failed`,
@@ -162,12 +164,13 @@ its verifications. The state is never stored. The first matching rule wins:
    4. the session is `input_required` or has a pending request → **waiting**
       (`attempt_session_input_required`, `attempt_session_pending_decision`);
    5. the session is `idle` or `completed` → **waiting** (`attempt_awaiting_verification`): the
-      Orchestrator owes a verification;
+      Orchestrator owes a verification. While a merge dependency is unmerged, `dependency_unmerged`
+      (Waiting for Prerequisite Merge) comes first (#4120);
    6. otherwise (`queued`, `starting`, `running`) → **running**.
 4. The item has no open attempt:
    1. a recorded blocker → **blocked** (`recorded_blocker`);
-   2. a dependency is `blocked`, `cancelled`, or `removed` → **blocked** (`dependency_blocked`); a
-      dependency cycle is treated the same way;
+   2. a dependency is `blocked`, `cancelled`, or `removed`, or a merge dependency failed →
+      **blocked** (`dependency_blocked`); a dependency cycle is treated the same way;
    3. `dispatchState` is `queued` → **queued**;
    4. otherwise → **planned**.
 
@@ -180,6 +183,130 @@ delivery the control plane checked. An idle session, a closed issue, a successfu
 
 The unfinished states are `planned`, `queued`, `running`, `waiting`, and `blocked`. Accepted work
 waiting on dependencies or approvals stays unfinished.
+
+### Merge Dependencies (#4120)
+
+Forges have no atomic cross-repository merge, so a change that needs another repository's change
+must land after it. `dependsOn` may name items in any of the campaign's repositories. An item works
+in every repository it is known to touch: its child's placement and each pull request it names
+(`campaignItemRepositories`). Its issue's repository counts only when neither is known, since a
+feature issue in one repository is often delivered by work in another: two items placed in owner/api
+under an owner/app issue are in one repository. Only a campaign of several repositories has merge
+dependencies. A campaign of one repository, or one that records none (from before #4117), keeps every
+dependency display-only, as before, whatever repository an item names; adding a second repository to
+its boundary makes them merge dependencies. In a campaign of several, a dependency is a **merge
+dependency** when any repository the prerequisite works in differs from any its dependent works in,
+and it fails closed (`isCampaignMergeDependency`): an item whose repository is not yet known might
+work in any of them, so a dependency on or from it is a merge dependency. At the merge gate the
+dependent's only repository is that of the pull request being merged, so there it is any prerequisite
+working outside that repository.
+
+A merge dependency is met only when every pull request the prerequisite names, by its reported stage
+and its recorded deliveries, is freshly observed MERGED on its forge.
+`delivered` doesn't meet it (delivery is the Orchestrator's verification), nor does an enqueued pull
+request (a merge queue can still eject it), a stale or unavailable fact (only once a merge is armed
+does a stale MERGED still meet it; see the armed window below), a prerequisite that names no pull
+request yet, or a
+pull request in a repository outside the campaign's repositories (state `outside`: no Location of
+the campaign can observe it, and a fact read through the root's login never stands in for one). A
+dependency within one repository keeps its earlier, display-only meaning; holding those too is
+possible later work.
+
+- **What is held.** A merge of a pull request is held by the prerequisites of every work item that
+  names that pull request, by its stage or a recorded delivery, and of the requester's own open
+  attempt (`mergePrerequisitesForMerge`). The requester may be any campaign session: a child whose
+  attempt has ended, a descendant worker with no attempt of its own, or the root Orchestrator merging
+  itself. The dependent's repository at the gate is the repository of the pull request being merged.
+- **Merge holds.** When a campaign session consumes an approved `pr_merge` to arm it, or asks
+  Wollipog to perform an armed one, the server reads the prerequisites' pull requests now, through a
+  Location of their repository ([Forge Status](#forge-status-slice-8), #4119), and refuses while one
+  is unmet. The refusal is a fixed sentence (`campaignMergeHoldReason`) naming the prerequisite and
+  its pull request. Nothing is armed, no forge-action attempt is spent, and the approval stays
+  approved: once the prerequisite merges, the same approval is consumed again. A hold defers an
+  operation already approved; it never grants or revokes one. A read that doesn't answer for every
+  pull request (a Location offline, the read queue full, a timeout) holds the merge as not freshly
+  observed, even over a fresh MERGED already stored. The hold is evaluated again from what is stored,
+  with nothing awaited, immediately before arming and before Wollipog dispatches an enqueue, so a
+  dependency added or a prerequisite cancelled during the merge's own forge reads still holds it; an
+  enqueue stopped that late records its attempt as refused with `merge_held`, and the approval stands.
+  These checks before arming and enqueueing need a fresh MERGED, so a prerequisite added during the
+  read, which the read never covered, holds whatever is stored. Once a merge is armed, the
+  permission and policy-hook checks below count a stored MERGED as met as it ages: the arming read
+  proved each prerequisite MERGED afresh, the ledger refuses new ones while it is armed, and a forge
+  never un-merges a pull request. A fact whose latest read failed holds the merge and is read again
+  in the background, so the hold lifts by itself once a Location answers.
+- **The armed window.** A provider may run an armed enqueue without asking the control plane again,
+  so while a `pr_merge` is armed and unconsumed the ledger refuses (409), and rolls back, any change
+  that would alter what holds that merge: a new dependency, a new item naming the pull request, a
+  prerequisite cancelled, a pull request named on a prerequisite's stage or delivery, or a
+  prerequisite moved into another repository. Make the change after the merge settles. When the
+  provider does ask (a permission request for the armed command), the stored hold is checked once
+  more, before automatic admission, a policy or a person could allow it, and a held merge is
+  rejected there; the approval stays armed and the requester is parked on the prerequisite. A card
+  for that command asked before the hold formed can't be allowed while it holds; it can still be
+  rejected.
+- **Claude's policy hook.** The hook never carries a command (raw tool input doesn't cross that
+  boundary), so it can't tell the armed command from another shell command. While a session's armed
+  merge is held, the hook denies every use of a tool that can run a command (Bash, PowerShell,
+  Monitor) by that session and parks it on the prerequisite, and a policy-hook card for one can't be
+  allowed; other tools are unaffected, and those tools pass again once the hold lifts. The denial
+  stays session-wide even if the hook could see the command: denying only the armed command is a
+  deny-list, and a rewritten or compound form of it would pass under a mode that asks nobody.
+- **What can't be intercepted.** A provider running the armed command with neither a permission
+  request nor a policy-hook evaluation reports it only afterwards, so the guard above is the only
+  fence on that path. A person merging on the forge, and a raw `gh pr merge` that was never armed,
+  are outside Wollipog's gate; agents are told never to run one.
+- **Wake.** A refusal while the prerequisite is still to merge parks the requester on that pull
+  request with #4071's watch, which the control plane keeps itself (`PREREQUISITE_MERGE_WATCH_RUNNER`):
+  the requester's runner may not be able to read that repository. The watch appears in
+  `parkedChildren` and `get_session` like any other, the child's turn may end without owing its
+  Orchestrator a continuation, and the campaign's forge observation settles it: MERGED fires its wake
+  (outcome `merged`), and closed without merging fires `closed`. A prerequisite cancelled or removed,
+  or a dependency removed, so that no approved merge of the requester still waits on that pull
+  request, ends the watch as lost with a reason. Each wake is one durable prompt that grants nothing.
+- **Never attempted.** A prerequisite pull request closed without merging, or a prerequisite cancelled
+  or removed, makes the merge dependency **failed**: the dependent is blocked
+  (`dependency_blocked`), its merge is refused, and the Orchestrator reports it as blocked work. A
+  replacement pull request named on the prerequisite's stage replaces the closed one and lifts the
+  failure; that is accepted, since the replacement must itself be observed MERGED.
+- **Verified but unmerged.** A delivered verification is the Orchestrator's check of a report, not a
+  merge. While a dependent with merge dependencies has its own pull requests unmerged, a verified
+  report doesn't make it delivered: it reads **waiting** with `dependency_unmerged` while a
+  prerequisite has yet to merge, and **blocked** with `dependency_blocked` once one can never merge.
+  Either way it stays unfinished, so campaign completion and its dependents wait for it; the
+  completion loop keeps such an item unfinished rather than judging it from one repository's merges.
+  Once its own merge happened it is delivered whatever its prerequisites do, as is an item with a
+  recorded delivery (#4070), which is itself a merge. Its own merge is judged as closure proof judges
+  delivery: the candidates are the pull requests it names and those a delivered attempt merged
+  through a consumed `pr_merge` gate (at a head the gate approved); one closed without merging is set
+  aside, every other must have merged, and at least one must have. Unlike the proof it needs no fresh
+  read: a stored MERGED counts as it ages, and a later read that failed doesn't undo it. Holds still
+  fail closed on a stale or unreadable prerequisite.
+- **An armed merge held for good.** An armed `pr_merge` can't be withdrawn, since its command may
+  already have run; one whose prerequisite can never merge keeps the session's command tools denied
+  at Claude's policy hook. A new `pr_merge` request for the same pull request supersedes it, which
+  restores them; the new request is decided like any other. The hold reason and the policy hook's
+  denial both name that way out, through the `request_workflow_decision` tool, since the CLI form
+  needs the denied shell.
+- **Display.** Each item lists its merge dependencies (`mergeDependencies`) with their repository
+  (null when unknown, shown as Unknown Repository), status (`merged`, `unmerged`, `failed`) and pull
+  requests. A merge already observed stays merged as its observation ages, since a forge never
+  un-merges a pull request; the gate itself always reads fresh. A dependent whose child is idle while
+  a merge dependency is unmerged reads **waiting** with `dependency_unmerged` first. Pull-request
+  states follow forge-fact visibility: a reader without access to the runner whose login supplied a
+  fact sees its state as `unknown`, and the status as `unknown` unless it is decided without forge
+  facts (a cancelled prerequisite). The item's derived state is the campaign's and is shown to every
+  reader, as its reported stage is.
+- **Reading.** The background pass also reads the pull requests of every unfinished dependent's
+  prerequisites, so a delivered prerequisite keeps being read until it merges or closes, and every
+  prerequisite pull request a held merge is parked on, whatever state its items are in (a merge of a
+  finished item's pull request is held too); a pull request outside the campaign's repositories is
+  never read, nor is one a closure's on-demand refresh would otherwise read through the root's login
+  (the proof still names it, as `pull_request_outside_repository`). With no Location of the
+  prerequisite's repository online, its facts read `unavailable` and the hold stays.
+
+The Orchestrator states "not safe to land alone" by recording the dependency; items without one
+merge independently, in any order.
 
 ### Campaign Completion (#4070)
 
@@ -291,6 +418,14 @@ the client restarts.
     revision, and, for the `cost` and `elapsed` sorts, to the order its first page saw (see the
     Orchestrator routes above). A cursor from another revision returns
     `409 {code: "revision_changed", revision}` and the client restarts from the first page.
+    `repository` (#4120) lists only items whose derived `repository` is that one, compared
+    case-insensitively; the cursor is bound to it too. Every page also carries `repositories`: each
+    repository's item counts by state over all its items, whatever the filters, in the order its
+    first item was recorded, with an unknown repository last. Campaign Status groups the loaded rows
+    under one header per repository and offers a **Repository** filter only when there are two or
+    more; a single-repository campaign's list, and any list from an older control plane, stays
+    ungrouped. A row shows **Depends On** `owner/repo: Title` for each merge dependency, and a held
+    item shows **Waiting for Prerequisite Merge** with the pull request it waits on.
   - `GET /api/sessions/:id/campaign/work-items/:itemId` returns a `CampaignWorkItemDetailResponse`.
   - `GET /api/sessions/:id/campaign/recommendations?cursor&limit&disposition` returns a
     `CampaignRecommendationsPage`: recommendations awaiting adjudication or publication, and
@@ -405,9 +540,11 @@ only the open attempt.
   only when the principal can access that attempt's session (or the session was deleted and the
   principal can access the root). A campaign bucket is `unavailable{not_authorized}` when the
   principal cannot access every session contributing to it.
-- **Forge facts** (slice 8) need more than campaign access. They are read through the `gh` login of
-  the runner hosting the root campaign, so a human also needs access to that runner
-  (`canAccessRunner`); a shared campaign never extends a personal runner owner's GitHub visibility.
+- **Forge facts** (slice 8) need more than campaign access. Each is read through the forge login of
+  one runner: the root campaign's for the launch repository, a Location's for another campaign
+  repository (#4119). A human also needs access to the runner whose login supplied the fact
+  (`canAccessRunner`), or, before any value is stored, to the runner that would read it; a shared
+  campaign never extends a personal runner owner's forge visibility.
   Everyone else receives each fact as `unavailable{not_authorized}`, with no last value, while the
   pull-request references and the reported stage stay visible to every campaign reader. An agent
   reads them only as the campaign's own Orchestrator (the credential rule above). The on-demand
@@ -445,7 +582,7 @@ only the open attempt.
 | Campaign Elapsed | Root creation to verified campaign completion, or now while unfinished. Never a sum of item durations: two concurrent ten-minute items take about ten minutes. |
 | Item Elapsed | First attempt start to the delivered verification, or now while unfinished, including intervening waits. Planned items without an attempt show their recorded age instead. |
 | Queue Time | Recorded intervals in which the item was `queued`. |
-| Waiting Time | Recorded intervals in which the item was `waiting` or `blocked`. |
+| Waiting Time | Recorded intervals in which the item was `waiting` or `blocked`. A verified item held on a merge dependency (#4120) counts from its verification until the hold ends, which is the first of its own merge and its last prerequisite's merge. Merge times are the forge's, see below. |
 | Active Time | Recorded intervals within an attempt while its session was running. |
 
 Queue, Waiting, and Active Time come from durable intervals recorded by slice 6, kept independent
@@ -465,6 +602,17 @@ metric counts exactly the spans in which the item's primary state was `queued`, 
 session's status are not recorded, which only matters for telling `waiting` from `blocked` and
 Waiting Time counts both; and dependencies use their current edges for the whole replay. A
 dependency without recorded history at an instant counts as unfinished, never as blocking.
+
+A hold's end comes from `mergedAt` on the stored forge fact, the time GitHub or GitLab reports. It is
+not a recorded interval and no gate or state reads it. An ended hold adds Waiting Time to the held
+item only: it replays as waiting even over a failed prerequisite, so an unassigned dependent keeps
+its Queue Time. The time is unknown when a pull request's fact came
+from a runner that doesn't report it, or was stored before runners did (the background pass doesn't
+read a merged pull request again). A merge that happened with an unknown time leaves the item
+delivered from its verification, so that hold counts nothing: Waiting Time can undercount there, and
+never counts a hold past its end. An item with a recorded delivery (#4070) counts no hold either,
+since the replay doesn't read recorded deliveries. A pull request closed without merging is set
+aside, so when it closes after the item's last merge, the hold is measured as ending at that merge.
 
 Recording begins once per database (`campaign_work_accounting_meta.started_at`). At that moment
 every existing item and open attempt receives one interval stamped with the start time. Time before
@@ -550,6 +698,14 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
   credential is therefore wherever that `gh` keeps its login (`gh auth status`; `GH_TOKEN`,
   `GITHUB_TOKEN`, `GH_CONFIG_DIR`, or `HOME` in that environment, or `gh`'s own configuration). A
   root whose repository is not runner-local is `forge_unsupported`.
+- **Another campaign repository (#4119):** its pull requests are read by the runner of one of its
+  Locations, with that runner's own login, in that Location's path, and never with the root's. A
+  read names one repository's pull requests and a runner refuses any other's. With no such runner
+  online, or only one below v326, nothing is read and the fact says why. A stored value names the
+  one runner whose login supplied it, and another runner's failure removes it rather than keeping it
+  as a last value. A person needs access to that runner to see the fact, and to the runner that
+  would read next to cause a read. The background pass runs while the root's runner is online;
+  on-demand reads don't need it.
 - **What is read:** only the pull requests named by work items' reported stages
   (`stage.pullRequests`), never a search. For each: state, draft, head SHA, base branch, review
   decision, the check rollup of every check on the head (from GitHub's own rollup state, with
@@ -565,6 +721,16 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
   GitHub still computes it, they read `unknown`. A seen failure or pending check is reported as
   such. When more checks exist than one read covers (100) and none of those seen failed, the
   required rollup is `unknown` too.
+- **Latest run per check (#4263):** a head can carry several runs of one check, such as a cancelled
+  run from a closed pull request and the replacement pull request's passing run. Only each check's
+  most recent run counts, by check run id (creation order) and otherwise by start or creation time;
+  runs that cannot be ordered keep the worse result. Check runs and status contexts are
+  de-duplicated separately, and a check run's workflow keeps same-named jobs of two workflows
+  apart. GitHub's own rollup state counts superseded runs too, so when every context was read, a
+  `FAILURE` or `ERROR` state that superseded failures explain is set aside, but only when each is
+  a status context or a check run whose workflow is known (another app's run, or a login that
+  cannot read workflow runs, leaves it unknown). Past a truncated read it still reads `failing`.
+  The session Git panel's checks summary de-duplicates the same way.
 - **Refresh:** on demand, `POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh`, which
   the panel sends when an item's details open and every 60 seconds while they stay open; it waits
   at most 20 seconds and returns the item's facts (`CampaignForgeRefreshResponse`). The panel does
@@ -574,7 +740,9 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
   **unfinished** items whose last read, successful or not (a timed-out or rejected read included),
   finished more than `backgroundIntervalMs` (5 minutes) ago,
   oldest first, at most `backgroundRefsPerTick` (32) per pass, skipping a pull request last seen
-  merged or closed (on-demand reads still refresh it) and campaigns whose root is archived.
+  merged or closed (on-demand reads still refresh it) and campaigns whose root is archived. A
+  merged pull request whose branch cleanup is still owed (#4067) is not skipped. That includes one
+  read before its runner reported head branches, until that runner, now v284, reads it once (#4145).
 - **Bounds:** one pull request is read at most once per `minIntervalMs` (30 seconds, counted from
   when the previous read finished) whoever asks;
   a read already in flight is shared; at most `concurrentRequests` (2) runner requests run at once,
@@ -591,12 +759,12 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
 | Reason | Meaning |
 | --- | --- |
 | `not_observed` | The runner is reachable but this pull request has not been read yet. |
-| `runner_disconnected` | Nothing was ever read and the root's runner is disconnected. |
-| `runner_unsupported` | The root's runner predates `campaignForgeStatus` (protocol v198) and is never asked. |
+| `runner_disconnected` | Nothing was ever read and the runner that reads this repository is disconnected: the root's for the launch repository, or every Location's for another. |
+| `runner_unsupported` | That runner predates `campaignForgeStatus` (protocol v198), or for a Location `locationForgeObservation` (v326), and is never asked. |
 | `forge_cli_missing` | The runner has no `gh` executable. |
 | `forge_unauthenticated` | `gh` is not signed in to github.com, or GitHub refused its credentials. |
 | `forge_unreachable` | GitHub could not be reached (offline, DNS, proxy, or timeout). |
-| `forge_unsupported` | Not a GitHub repository, or the root's repository is not runner-local. |
+| `forge_unsupported` | Not a GitHub repository, or the reading checkout is not runner-local. |
 | `forge_not_found` | The repository or pull request does not exist, or the runner's `gh` login cannot see it. |
 | `forge_rate_limited` | GitHub's API rate limit for that login is exhausted. |
 | `forge_error` | Any other failure, or an answer that does not validate. |

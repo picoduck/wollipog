@@ -213,13 +213,36 @@ export function rankGoToFileResults(
       if (!found) return [];
       const lifted = priority.has(path) && fuzzyPathMatchIsClean(path, found.positions);
       if (index >= answered && !lifted) return [];
-      return [{ match: goToFileMatch(path, found.positions), index, score: found.score, first: lifted ? 0 : 1 }];
+      return [{ match: fuzzyMatchParts(path, found.positions), index, score: found.score, first: lifted ? 0 : 1 }];
     })
     .sort((a, b) => a.first - b.first || b.score - a.score || a.match.path.length - b.match.path.length || a.index - b.index)
     .map(({ match }) => match);
 }
 
-function goToFileMatch(path: string, positions: readonly number[]): GoToFileMatch {
+/**
+ * Ranks the runner's fuzzy answer for the composer's @ picker (#4129) as Go to File ranks its own,
+ * without the changed and recent files: paths, folders included, whose characters hold the query's
+ * in order, best match first, then the shorter path, then the runner's order.
+ */
+export function rankFuzzyWorkspacePaths<T extends { path: string }>(results: readonly T[], query: string): T[] {
+  const needle = fuzzyPathNeedle(query);
+  return results
+    .flatMap((result, index) => {
+      const found = fuzzyPathMatch(result.path, needle);
+      return found ? [{ result, index, score: found.score }] : [];
+    })
+    .sort((a, b) => b.score - a.score || a.result.path.length - b.result.path.length || a.index - b.index)
+    .map(({ result }) => result);
+}
+
+/** A path split into its name and folder with the query's matched characters in each, as a Go to
+ * File row is; null when the query's characters are not in the path in order. */
+export function fuzzyPathParts(path: string, query: string): GoToFileMatch | null {
+  const found = fuzzyPathMatch(path, fuzzyPathNeedle(query));
+  return found ? fuzzyMatchParts(path, found.positions) : null;
+}
+
+function fuzzyMatchParts(path: string, positions: readonly number[]): GoToFileMatch {
   const slash = path.lastIndexOf("/");
   const nameStart = slash + 1;
   return {

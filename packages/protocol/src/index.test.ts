@@ -48,6 +48,8 @@ import {
   sessionEventWireProjectionVariant,
   SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET,
   SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
+  CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL,
+  PROJECT_LOCATION_INSPECTION_FAILURES,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -120,7 +122,6 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 291);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,11 +359,86 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 291", () => {
-  assert.equal(PROTOCOL_VERSION, 291);
+test("public runner capability floors retain their recorded version boundaries", () => {
+  // The ledger tests verify the current version; these historical floors do not move with it.
+  assert.equal(runnerSupportsProtocol(333, "providerAccountSelectionPolicy"), false);
+  assert.equal(runnerSupportsProtocol(334, "providerAccountSelectionPolicy"), true);
+  assert.equal(runnerSupportsProtocol(331, "childQuestions"), false);
+  assert.equal(runnerSupportsProtocol(332, "childQuestions"), true);
+  assert.equal(runnerSupportsProtocol(334, "parallelWorktreeReviews"), false);
+  assert.equal(runnerSupportsProtocol(335, "parallelWorktreeReviews"), true);
+  assert.equal(runnerSupportsProtocol(336, "providerAccountAgentChoice"), false);
+  assert.equal(runnerSupportsProtocol(337, "providerAccountAgentChoice"), true);
+  // A runner reports an evidence-less retirement fence from v331 (#4331).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRetirementHold, 331);
+  assert.equal(runnerSupportsProtocol(330, "campaignRetirementHold"), false);
+  // A consumed merge is watched until it lands only on a v330 runner (#4323).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.mergeClosureWatch, 330);
+  assert.equal(runnerSupportsProtocol(329, "mergeClosureWatch"), false);
+  assert.equal(runnerSupportsProtocol(330, "mergeClosureWatch"), true);
+  // A Location joins a campaign only on a runner that can perform all of its gates (#4319). Each gate
+  // done through a Location is a capability named `location*`, so a new one that raises the highest
+  // floor without raising the campaign's fails here. One named otherwise would not; name it so.
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignLocationGates, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+  const locationGates = Object.entries(RUNNER_CAPABILITY_MIN_PROTOCOL).filter(([name]) => name.startsWith("location")).map(([name, floor]) => [name, floor] as const);
+  assert.deepEqual(locationGates.map(([name]) => name).sort(), ["locationForgeObservation", "locationIssueClosure", "locationIssuePublication"]);
+  assert.equal(CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, Math.max(...locationGates.map(([, floor]) => floor)));
+  assert.equal(runnerSupportsProtocol(CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1, "campaignLocationGates"), false);
+  assert.equal(runnerSupportsProtocol(CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, "campaignLocationGates"), true);
+  assert.match(PROJECT_LOCATION_INSPECTION_FAILURES.runner_below_gates, new RegExp(`protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer`, "u"));
+  // A publication created through a Location needs a v327 runner there (#4119).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssuePublication, 327);
+  assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssuePublication - 1, "locationIssuePublication"), false);
+  assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssuePublication, "locationIssuePublication"), true);
+  // Forge facts read through a Location need a v326 runner there (#4119).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.locationForgeObservation, 326);
+  assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.locationForgeObservation - 1, "locationForgeObservation"), false);
+  assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.locationForgeObservation, "locationForgeObservation"), true);
+  // A closure through a Location needs a v323 runner there (#4119).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssueClosure, 323);
+  assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssueClosure - 1, "locationIssueClosure"), false);
+  assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssueClosure, "locationIssueClosure"), true);
+  // An epic in another repository is resolved through a v322 Location's runner (#4118).
+  assert.equal(runnerSupportsProtocol(321, "repositoryQualifiedEpics"), false);
+  assert.equal(runnerSupportsProtocol(322, "repositoryQualifiedEpics"), true);
+  // A control plane reads a proposal's repository list from v320 (#4117).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryLimits, 320);
+  // Another repository's proposed issues are read through a v318 Location's runner (#4118).
+  assert.equal(runnerSupportsProtocol(317, "repositoryQualifiedProposals"), false);
+  assert.equal(runnerSupportsProtocol(318, "repositoryQualifiedProposals"), true);
+  // Merges on every reported check need a v315 runner to read them (#4119).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeChecksBasis, 315);
+  assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeChecksBasis - 1, "githubMergeChecksBasis"), false);
+  assert.equal(runnerSupportsProtocol(RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeChecksBasis, "githubMergeChecksBasis"), true);
+  // A scope proposal's constraint check (#4282) is a typed Decision call, sent only to a v307 runner.
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.typedDecisionQuestions, 307);
+  // Only a v308 runner sends a structured scope proposal, and only to a v308 control plane (#4282).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals, 308);
+  // Only a v307 runner is sent a typed-question Decision call's larger schema and output (#4283).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.typedDecisionQuestions, 307);
+  assert.equal(runnerSupportsProtocol(306, "typedDecisionQuestions"), false);
+  assert.equal(runnerSupportsProtocol(307, "typedDecisionQuestions"), true);
+  // Owner Questions need a v303 control plane and root runner (#4270).
+  assert.equal(runnerSupportsProtocol(302, "ownerQuestions"), false);
+  assert.equal(runnerSupportsProtocol(303, "ownerQuestions"), true);
+  // Only a v302 runner takes a granted issue-number delivery to a live Orchestrator (#4269).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueNumberGrant, 302);
+  assert.equal(runnerSupportsProtocol(301, "campaignIssueNumberGrant"), false);
+  assert.equal(runnerSupportsProtocol(302, "campaignIssueNumberGrant"), true);
+  // Campaign activity statuses reach dashboards from v297 (#4146).
+  assert.equal(runnerSupportsProtocol(296, "campaignActivityStatus"), false);
+  assert.equal(runnerSupportsProtocol(297, "campaignActivityStatus"), true);
+  // An owner rule on a typed decision needs a v296 control plane (#4137).
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule, 296);
+  // A v294 runner cannot report the closing references of a GitLab merge (#3762).
+  assert.equal(runnerSupportsProtocol(294, "gitlabMergeClosingReferences"), false);
+  assert.equal(runnerSupportsProtocol(295, "gitlabMergeClosingReferences"), true);
   // Selection floors read issue facts from a v291 runner (#4103).
   assert.equal(runnerSupportsProtocol(290, "campaignIssueFacts"), false);
   assert.equal(runnerSupportsProtocol(291, "campaignIssueFacts"), true);
+  // Campaign control metadata is ordered by its own revision on a v310 runner (#3363).
+  assert.equal(runnerSupportsProtocol(309, "campaignControlRevision"), false);
+  assert.equal(runnerSupportsProtocol(310, "campaignControlRevision"), true);
   // A regular session's Location switch needs a v287 runner and control plane (#4138), and
   // Switch and Continue of the live session a v289 runner.
   assert.equal(runnerSupportsProtocol(286, "sessionLocationSwitch"), false);
@@ -375,6 +451,11 @@ test("PROTOCOL_VERSION is 291", () => {
   assert.equal(runnerSupportsProtocol(284, "forgeDecisionActions"), true);
   assert.equal(runnerSupportsProtocol(287, "campaignRepositoryBoundary"), false);
   assert.equal(runnerSupportsProtocol(288, "campaignRepositoryBoundary"), true);
+  // A multi-repository issue scope needs a v313 participant outside the launch repository (#4118).
+  assert.equal(runnerSupportsProtocol(312, "repositoryQualifiedIssueScope"), false);
+  assert.equal(runnerSupportsProtocol(313, "repositoryQualifiedIssueScope"), true);
+  assert.equal(runnerSupportsProtocol(316, "campaignRepositoryAddition"), false);
+  assert.equal(runnerSupportsProtocol(317, "campaignRepositoryAddition"), true);
   // Every name Git accepts is tracked, including `+`, `#` and non-ASCII (#4067).
   for (const name of ["agent/s_f0be1d3165d8", "fix/4067-branches", "release/v0.33.0", "feature/foo+bar", "fix/issue#4067", "ok/é"]) {
     assert.equal(forgeActionBranchName(name), true, name);
@@ -407,6 +488,11 @@ test("PROTOCOL_VERSION is 291", () => {
   assert.equal(campaignStatusTerminal("verified_complete"), true);
   assert.equal(campaignStatusTerminal("complete_with_handoffs"), true);
   for (const status of ["waiting_human", "active", "blocked", null, undefined] as const) assert.equal(campaignStatusTerminal(status), false);
+  // #4146: Complete, Needs Cleanup ends Campaign Elapsed and automatic turns; Campaign Stuck does not.
+  assert.equal(runnerSupportsProtocol(296, "campaignActivityStatus"), false);
+  assert.equal(runnerSupportsProtocol(297, "campaignActivityStatus"), true);
+  assert.equal(campaignStatusTerminal("complete_needs_cleanup"), true);
+  assert.equal(campaignStatusTerminal("stuck"), false);
   assert.equal(runnerSupportsProtocol(271, "pullRequestWatch"), false);
   assert.equal(runnerSupportsProtocol(272, "pullRequestWatch"), true);
   assert.equal(runnerSupportsProtocol(269, "runnerProcessingBarriers"), false);
@@ -1287,6 +1373,8 @@ test("runner command capability gates fail closed for unknown/old protocols", ()
   assert.equal(runnerSupportsProtocol(78, "subscriptionUsage"), false);
   assert.equal(runnerSupportsProtocol(79, "subscriptionUsage"), false);
   assert.equal(runnerSupportsProtocol(80, "subscriptionUsage"), true);
+  assert.equal(runnerSupportsProtocol(341, "claudeSubscriptionUsageRefresh"), false);
+  assert.equal(runnerSupportsProtocol(342, "claudeSubscriptionUsageRefresh"), true);
   assert.equal(runnerSupportsProtocol(80, "managedBackgroundDelivery"), false);
   assert.equal(runnerSupportsProtocol(81, "managedBackgroundDelivery"), false);
   assert.equal(runnerSupportsProtocol(82, "managedBackgroundDelivery"), true);
@@ -1912,7 +2000,7 @@ test("image tool results are installation truth that session snapshots never dro
   assert.equal(mergeSessionCapabilities(caps(), plain), plain, "nothing to inherit keeps the snapshot as is");
 });
 
-test("a worktree-recovery hold names its recovery step with a pasteable command (#1650)", () => {
+test("a worktree-recovery hold names its recovery step, the branch and the worktree, without a command to run inside it (#1650)", () => {
   const recovery = {
     recoveryId: "worktree-recovery:x",
     detectedAt: 7,
@@ -1920,10 +2008,12 @@ test("a worktree-recovery hold names its recovery step with a pasteable command 
     expectedBranch: "agent/s_1",
     detail: "the selected worktree could not be verified before a live turn",
   };
-  assert.match(worktreeRecoveryAction(recovery),
-    /git -C '\/tmp\/my repo\/it'\\''s here' switch agent\/s_1/u, "a path with spaces or quotes is shell-quoted");
-  assert.match(worktreeRecoveryAction({ selectedPath: "/w/s_1", expectedBranch: "agent/s_1" }),
-    /git -C \/w\/s_1 switch agent\/s_1/u);
+  assert.equal(worktreeRecoveryAction(recovery),
+    "Restore branch agent/s_1 in /tmp/my repo/it's here and select that worktree again with select_worktree, or select " +
+    "or create another worktree for this session with select_worktree or create_worktree.");
+  for (const reader of [undefined, { canManageWorktrees: true }, { canManageWorktrees: false }]) {
+    assert.doesNotMatch(worktreeRecoveryAction(recovery, reader), /`|\bgit\b|-C\b/u, "no shell command for the agent-managed worktree");
+  }
   assert.match(worktreeRecoveryAction(recovery), /select_worktree/u);
   assert.match(worktreeRecoveryAction(recovery), /create_worktree/u);
   assert.deepEqual(sessionHolds({}), []);
@@ -1949,7 +2039,7 @@ test("worktree-recovery advice names select_worktree and create_worktree only to
   const refused = worktreeRecoveryAction(recovery, { canManageWorktrees: false });
   assert.equal(refused,
     "Only the session owner or its controlling Orchestrator can recover this session's worktree: ask them to restore " +
-    "branch agent/s_1 in /w/s_1 (for example `git -C /w/s_1 switch agent/s_1`) and select that worktree again, or to " +
+    "branch agent/s_1 in /w/s_1 and select that worktree again, or to " +
     "select or create another worktree for this session.");
   assert.doesNotMatch(refused, /select_worktree|create_worktree/u);
 
@@ -2186,4 +2276,9 @@ test("a hold's reason says when Background Work does not list the work it waits 
     oldestUnfinishedJob: { launchType: "shell", startedAt: Date.UTC(2026, 9, 28, 4, 0) },
     unlistedJobs: [{ id: "tool:toolu_1", kind: "provisional" }],
   }), /\(the oldest, a shell command started at 2026-10-28T04:00Z\), 1 of which Background Work does not list\.$/u);
+});
+
+test("reviewer executable security requires a runner that understands the human policy", () => {
+  assert.equal(runnerSupportsProtocol(324, "reviewerSecurityPolicy"), false);
+  assert.equal(runnerSupportsProtocol(325, "reviewerSecurityPolicy"), true);
 });

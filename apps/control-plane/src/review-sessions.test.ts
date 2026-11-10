@@ -9,6 +9,7 @@ import {
   type ReviewSessionCapability, type ReviewSessionRequest, type RunnerMetadata, type StartSessionMessage,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
+import { ReviewSessions } from "./review-sessions.js";
 import { Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { SessionsService } from "./sessions.js";
@@ -431,6 +432,102 @@ test("a requester has one active review; another starts once it settles", () => 
     const older = h.svc.reviewSessionsPage("s1", { limit: 1, afterReviewSessionId: page.data!.nextAfterReviewSessionId! });
     assert.equal(older.data?.reviews[0]?.reviewSessionId, first.reviewSessionId);
     assert.equal(older.data?.nextAfterReviewSessionId, null);
+  } finally { h.db.close(); }
+});
+
+test("install migrates the requester-wide index and retains per-PR uniqueness", () => {
+  const h = harness();
+  try {
+    const sql = h.db.raw();
+    sql.exec(`DROP INDEX review_sessions_one_active_pr;
+      CREATE UNIQUE INDEX review_sessions_one_active ON review_sessions(requester_session_id)
+      WHERE state IN ('requested','running')`);
+    const a = requested(h);
+    ReviewSessions.install(sql);
+    assert.equal(sql.prepare("SELECT name FROM sqlite_master WHERE name='review_sessions_one_active'").get(), undefined);
+    const b = h.svc.requestReviewSession("s1", request({ pullRequest: { repository: "picoduck/wollipog", number: 4329 } }));
+    assert.ok(b.ok, b.error ?? "request refused");
+    assert.throws(() => h.db.reviewSessions.record({ reviewSessionId: "duplicate", requesterSessionId: "s1", runnerId: "r",
+      pullRequest: { ...a.pullRequest, repository: "Picoduck/Wollipog" }, headSha: HEAD, reviewer: "codex" }, 10), /UNIQUE/);
+    // Older binaries must not be started on this database until these reviews settle.
+    assert.throws(() => sql.exec(`CREATE UNIQUE INDEX review_sessions_one_active ON review_sessions(requester_session_id)
+      WHERE state IN ('requested','running')`), /UNIQUE/);
+  } finally { h.db.close(); }
+});
+
+test("campaign reviews split a human ceiling while retaining independent allowance reservations", () => {
+  for (const costUsd of [undefined, 140]) {
+    const h = harness({ campaign: true });
+    try {
+      h.db.updateSessionCostBudget("s1", 8, 4);
+      h.enableCampaign({ costUsd });
+      h.db.addSessionUsage("s1", { costUsd: 3 }, 5);
+      const a = requested(h);
+      const b = h.svc.requestReviewSession("s1", request({ pullRequest: { repository: "picoduck/wollipog", number: 4329 } }));
+      assert.ok(b.ok && b.data, b.error ?? "request refused");
+      assert.equal(h.db.campaignBudgets.allocation(a.reviewSessionId)!.costUsd, 2.5);
+      assert.equal(h.db.campaignBudgets.allocation(b.data.reviewSessionId)!.costUsd, 1.25);
+      assert.equal(h.db.reviewSessions.reservedFor("s1"), 3.75);
+      if (costUsd !== undefined) assertConserved(h);
+    } finally { h.db.close(); }
+  }
+});
+
+test("different pull requests run concurrently and each delivers its own continuation", () => {
+  const h = harness();
+  try {
+    const a = requested(h);
+    const pr = { repository: "picoduck/wollipog", number: 4329 };
+    const b = h.svc.requestReviewSession("s1", request({ pullRequest: pr }));
+    assert.ok(b.ok && b.data, b.error ?? "request refused");
+    assert.equal(h.svc.requestReviewSession("s1", request()).status, 409);
+    assert.equal(h.svc.requestReviewSession("s1", request({ pullRequest: { ...pr, repository: "Picoduck/Wollipog" } })).status, 409);
+    assert.equal(h.db.reviewSessions.history("s1", pr).validRounds, 0);
+    for (const id of [a.reviewSessionId, b.data.reviewSessionId]) {
+      h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: id, state: "failed" });
+      assert.equal(h.db.reviewSessions.view(id)!.terminal, true);
+    }
+    h.db.updateSessionStatus("s1", "idle", Date.now());
+    h.svc.retryDuePrompts();
+    const commands = continuationCommands(h);
+    const prompts = [...commands.values()].join("\n");
+    assert.ok(prompts.includes(a.reviewSessionId));
+    assert.ok(prompts.includes(b.data.reviewSessionId));
+    for (const commandId of commands.keys()) {
+      h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update", commandId, sessionId: "s1", state: "started", revision: 5 } as never);
+    }
+    assert.equal(h.db.reviewSessions.view(a.reviewSessionId)!.continuation, "delivered");
+    assert.equal(h.db.reviewSessions.view(b.data.reviewSessionId)!.continuation, "delivered");
+  } finally { h.db.close(); }
+});
+
+test("older runners still serialize reviews of different pull requests", () => {
+  const h = harness({ protocol: 334 });
+  try {
+    requested(h);
+    const b = h.svc.requestReviewSession("s1", request({ pullRequest: { repository: "picoduck/wollipog", number: 4329 } }));
+    assert.equal(b.status, 409);
+    assert.equal(h.starts().length, 1);
+  } finally { h.db.close(); }
+});
+
+test("concurrent review reservations share the remaining ceiling and release only at terminal", () => {
+  const h = harness();
+  try {
+    h.db.updateSessionCostBudget("s1", 10, 5);
+    h.db.addSessionUsage("s1", { costUsd: 2 }, 6);
+    const a = requested(h);
+    assert.equal(h.starts()[0]!.spec.config?.costBudgetUsd, 4);
+    h.db.addSessionUsage(a.reviewSessionId, { costUsd: 1 }, 7);
+    const b = h.svc.requestReviewSession("s1", request({ pullRequest: { repository: "picoduck/wollipog", number: 4329 } }));
+    assert.ok(b.ok, b.error ?? "request refused");
+    assert.equal(h.starts()[1]!.spec.config?.costBudgetUsd, 2);
+    assert.equal(h.db.reviewSessions.reservedFor("s1"), 5);
+    assert.equal(h.db.reviewSessions.spentFor("s1"), 1);
+    h.db.updateSessionCostBudget("s1", 8, 8);
+    assert.match(h.svc.requestReviewSession("s1", request({ pullRequest: { repository: "picoduck/wollipog", number: 4330 } })).error!, /no cost budget/);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: a.reviewSessionId, state: "failed" });
+    assert.equal(h.db.reviewSessions.reservedFor("s1"), 2);
   } finally { h.db.close(); }
 });
 
@@ -1457,8 +1554,9 @@ test("a campaign member's review reserves allowance and settles actual usage wit
       assert.deepEqual(start.spec.campaignBudgetDispatch, h.db.campaignBudgets.dispatch(id));
       assert.equal(start.spec.config?.costBudgetUsd, allocation.costUsd);
       assert.equal(start.spec.config?.maxToolCalls, allocation.toolCalls);
-      assert.equal(allocation.costUsd, 40, "uses free campaign capacity, not the requester's reserved allocation");
-      assert.equal(h.db.campaignBudgets.view("root")!.outstanding.costUsd, before.outstanding.costUsd + 40);
+      // Two of four slots are free, so the review is a third claimant on the free capacity (#3618).
+      assert.equal(allocation.costUsd, before.remaining.costUsd! / 3, "uses free campaign capacity, not the requester's reserved allocation");
+      assert.equal(h.db.campaignBudgets.view("root")!.outstanding.costUsd, before.outstanding.costUsd + allocation.costUsd!);
       assert.equal(h.db.campaignBudgets.view("root")!.occupied, before.occupied);
       assert.equal(h.db.getSession(id)!.parentSessionId, "s1", "display parentage grants no descendant authority");
       assert.equal(h.db.getSession("s1")!.liveChildCapacity?.occupied, 0);
@@ -1510,8 +1608,8 @@ test("an authenticated prelaunch review checkpoint returns the reservation witho
   } finally { h.db.close(); }
 });
 
-test("campaign review ceilings preserve the requester's original human budget across attempts", () => {
-  const h = harness({ campaign: true });
+test("legacy campaign review ceilings preserve the requester's original human budget across attempts", () => {
+  const h = harness({ campaign: true, protocol: 334 });
   try {
     h.db.updateSessionCostBudget("s1", 8, 4);
     h.enableCampaign();
@@ -1578,6 +1676,126 @@ test("review admission and spending remain available with every campaign worker 
   } finally { h.db.close(); }
 });
 
+/** Spend plus every outstanding reservation stays within the authorized allowance. */
+function assertConserved(h: ReturnType<typeof harness>) {
+  const view = h.db.campaignBudgets.view("root")!;
+  assert.ok(view.actual.costUsd + view.outstanding.costUsd <= view.authority.costUsd! + 1e-9, "cost reservations exceed the allowance");
+  assert.ok(view.actual.toolCalls + view.outstanding.toolCalls <= view.authority.toolCalls!, "tool reservations exceed the allowance");
+  return view;
+}
+
+test("concurrent reviews share the remaining allowance at full worker concurrency (#3618)", () => {
+  const h = harness({ campaign: true });
+  try {
+    h.enableCampaign({ concurrency: 2 });
+    const before = h.db.campaignBudgets.view("root")!;
+    assert.equal(before.occupied, 2, "both worker slots are taken");
+    assert.ok(before.remaining.costUsd! > 0);
+    const first = requested(h, "s1").reviewSessionId;
+    const firstAllocation = h.db.campaignBudgets.allocation(first)!;
+    assert.equal(firstAllocation.costUsd, before.remaining.costUsd! / 2, "the first review leaves half the remainder");
+    assert.equal(firstAllocation.toolCalls, Math.floor(before.remaining.toolCalls! / 2));
+    const between = assertConserved(h);
+    const second = requested(h, "s2").reviewSessionId;
+    const secondAllocation = h.db.campaignBudgets.allocation(second)!;
+    assert.equal(secondAllocation.costUsd, between.remaining.costUsd! / 2);
+    assert.ok(secondAllocation.costUsd! > 0 && secondAllocation.toolCalls! > 0);
+    assert.equal(h.starts().length, 2, "both reviews launch while the first still runs");
+    assert.equal(h.db.reviewSessions.view(first)!.terminal, false);
+    const after = assertConserved(h);
+    assert.equal(after.occupied, 2, "reviews take no worker slot");
+    assert.equal(after.outstanding.costUsd, before.outstanding.costUsd + firstAllocation.costUsd! + secondAllocation.costUsd!);
+    assert.equal(h.starts()[0]!.spec.config?.costBudgetUsd, firstAllocation.costUsd);
+    assert.equal(h.starts()[1]!.spec.config?.costBudgetUsd, secondAllocation.costUsd);
+  } finally { h.db.close(); }
+});
+
+test("at partial worker concurrency a review leaves each free slot at least its own share (#3618)", () => {
+  for (const concurrency of [3, 4]) {
+    const h = harness({ campaign: true });
+    try {
+      h.enableCampaign({ concurrency });
+      const before = h.db.campaignBudgets.view("root")!;
+      const free = concurrency - before.occupied;
+      assert.ok(free >= 1, `${concurrency}: a worker slot is free`);
+      const first = h.db.campaignBudgets.allocation(requested(h, "s1").reviewSessionId)!;
+      assert.equal(first.costUsd, before.remaining.costUsd! / Math.max(2, free + 1), `${concurrency}`);
+      const between = assertConserved(h);
+      assert.ok(between.remaining.costUsd! / free >= first.costUsd! - 1e-9, `${concurrency}: each free slot keeps a share as large as the review's`);
+      const second = h.db.campaignBudgets.allocation(requested(h, "s2").reviewSessionId)!;
+      assert.equal(second.costUsd, between.remaining.costUsd! / Math.max(2, free + 1), `${concurrency}`);
+      // A worker admitted next still divides what is left among the free slots, as before.
+      const worker = h.db.campaignBudgets.prepare("root", "next-worker", {});
+      assert.equal(worker.costUsd, assertConserved(h).remaining.costUsd! / free, `${concurrency}`);
+    } finally { h.db.close(); }
+  }
+});
+
+test("interleaved review admissions never reserve more than the remaining allowance (#3618)", () => {
+  const h = harness({ campaign: true });
+  try {
+    h.enableCampaign({ concurrency: 2 });
+    const before = h.db.campaignBudgets.view("root")!;
+    // Three reviews each prepared from the same view before any of them is admitted.
+    const ids = ["review-a", "review-b", "review-c"];
+    const prepared = ids.map((id) => h.db.campaignBudgets.prepare("root", id, {}, true));
+    for (const allocation of prepared) assert.equal(allocation.costUsd, before.remaining.costUsd! / 2);
+    const admitted: string[] = [];
+    for (const allocation of prepared) {
+      h.db.reviewSessions.record({ reviewSessionId: allocation.sessionId, requesterSessionId: `requester-${allocation.sessionId}`, runnerId: "r",
+        pullRequest: request().pullRequest, headSha: HEAD, reviewer: "codex" }, 10);
+      try {
+        h.db.campaignBudgets.admit("root", allocation, {});
+        admitted.push(allocation.sessionId);
+      } catch (error) { assert.match((error as Error).message, /unreserved campaign allowance/u); }
+      assertConserved(h);
+    }
+    assert.deepEqual(admitted, ["review-a", "review-b"], "the third would overdraw the allowance and is refused");
+    assert.equal(h.db.campaignBudgets.allocation("review-c"), null, "a refused admission reserves nothing");
+    assert.ok(h.db.campaignBudgets.view("root")!.remaining.costUsd! < 1e-9);
+  } finally { h.db.close(); }
+});
+
+test("a concurrent review settles its actual usage and returns only the unused reservation (#3618)", () => {
+  const h = harness({ campaign: true });
+  try {
+    h.enableCampaign({ concurrency: 2 });
+    const before = h.db.campaignBudgets.view("root")!;
+    const first = requested(h, "s1").reviewSessionId;
+    const second = requested(h, "s2").reviewSessionId;
+    const reserved = h.db.campaignBudgets.allocation(second)!.costUsd!;
+    h.db.addSessionUsage(first, { costUsd: 3 }, 7);
+    h.db.appendEvent(first, { kind: "tool_call", toolCallId: "read", title: "Read", status: "completed" }, 8);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: first, state: "failed", reason: "invalid report" });
+    h.svc.onSessionStatus(first, "stopped");
+    const generation = h.starts()[0]!.spec.campaignBudgetDispatch!.generation;
+    h.db.campaignBudgets.recordCheckpoint(first, { generation, historyEpoch: 0, throughSeq: 1, costUsd: 3 });
+    assert.ok(h.db.campaignBudgets.settleCheckpoint(first, { historyEpoch: 0, hydratedSeq: 1 }));
+    const settled = assertConserved(h);
+    assert.equal(settled.actual.costUsd, before.actual.costUsd + 3, "settlement records actual usage");
+    assert.equal(settled.actual.toolCalls, before.actual.toolCalls + 1);
+    assert.equal(settled.outstanding.costUsd, before.outstanding.costUsd + reserved, "only the running review stays reserved");
+    // A review that reaches its reservation is stopped as before; the share does not relax that.
+    h.db.addSessionUsage(second, { costUsd: reserved }, 9);
+    assert.match(h.db.campaignBudgets.admissionError(second) ?? "", /allocation reached/u);
+  } finally { h.db.close(); }
+});
+
+test("a requester's own ceiling lowers a campaign review's share but never raises it (#3618)", () => {
+  for (const ceiling of [500, 4]) {
+    const h = harness({ campaign: true });
+    try {
+      h.db.updateSessionCostBudget("s1", ceiling, 4);
+      h.enableCampaign({ concurrency: 2, costUsd: 1000, toolCalls: 1000 });
+      const share = h.db.campaignBudgets.view("root")!.remaining.costUsd! / 2;
+      assert.ok(share > 4 && share < 500, "the fixture's share lies between the two ceilings");
+      const allocation = h.db.campaignBudgets.allocation(requested(h, "s1").reviewSessionId)!;
+      assert.equal(allocation.costUsd, Math.min(ceiling / 2, share), `ceiling ${ceiling}`);
+      assertConserved(h);
+    } finally { h.db.close(); }
+  }
+});
+
 test("a refused requester archive leaves its reviewer active", () => {
   const h = harness();
   try {
@@ -1624,8 +1842,8 @@ test("the retired bridge points campaign allowance members to their own review s
   } finally { h.db.close(); }
 });
 
-test("a requester's cost budget bounds its review, and an exhausted budget refuses one", () => {
-  const h = harness();
+test("a legacy requester's cost budget bounds its review, and an exhausted budget refuses one", () => {
+  const h = harness({ protocol: 334 });
   try {
     h.db.updateSessionCostBudget("s1", 10, 5);
     h.db.addSessionUsage("s1", { costUsd: 4 }, 6);
@@ -1948,6 +2166,25 @@ test("configured reviews refuse unavailable models, same-family selection withou
         assert.match(result.error!, scenario === "missing" ? /codex.*retired.*unavailable/u : scenario === "same-family" ? /same-family/u : /configured codex reviewer \(default model, high effort\).*Update Wollipog/u);
         assert.equal(h.starts().length, 0);
       }
+    } finally { h.db.close(); }
+  }
+});
+
+test("configured review refusals preserve discovery and trust reasons rather than asking to restore a healthy reviewer", () => {
+  for (const reason of ["Claude Code capability discovery timed out. Discovery will retry automatically.",
+    "The selected provider account is not signed in.", "The reviewer installation is writable by a session."]) {
+    const h = harness({ configuration: true, driver: "codex-app-server", reviewSession: {
+      configuration: true, reviewers: [], unavailable: { "claude-code": reason },
+    } });
+    try {
+      h.db.reviewSettings.set(h.db.localIdentityContext().userId, null, { version: 1, roundBudget: 4, reviewers: [{
+        implementer: { agentId: "codex", driver: "codex-app-server", context: { kind: "native" } },
+        harness: "claude-code", model: "claude-opus-5-5", effort: "high", allowSameFamily: false,
+      }] });
+      const result = h.svc.requestReviewSession("s1", request());
+      assert.equal(result.ok, false);
+      assert.ok(result.error?.includes(reason), result.error ?? "expected an admission refusal");
+      assert.equal(h.starts().length, 0);
     } finally { h.db.close(); }
   }
 });

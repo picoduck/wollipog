@@ -17,6 +17,13 @@ export const MAX_SUBSCRIPTION_USAGE_SNAPSHOTS = 32;
 const MAX_BUCKETS = 64;
 const MAX_SPEND_CONTROLS = 64;
 
+/** A Claude Code installation its runner starts locked down to answer `get_usage`, as the runner
+ * decides it: discovery saw stream-json input, the control protocol and every lockdown flag. */
+export function claudeUsageProbeable(agent: AgentDefinition): boolean {
+  const claude = agent.driver === "claude-code" ? agent.claudeCode : undefined;
+  return claude?.streamJsonInput === true && claude.controlProtocol === true && claude.sessionNaming === true;
+}
+
 export function subscriptionUsageRefreshTimeoutMs(codexSourceCount: number): number {
   return Math.min(
     MAX_SUBSCRIPTION_USAGE_REFRESH_TIMEOUT_MS,
@@ -77,6 +84,7 @@ function bucket(value: unknown, now: number): SubscriptionUsageBucket {
   const remainingPercent = number(input.remainingPercent, "bucket remainingPercent", 0, 100, true);
   const windowDurationMinutes = number(input.windowDurationMinutes, "bucket duration", 1, 2 * 365 * 24 * 60, true);
   const resetsAt = number(input.resetsAt, "bucket reset", 1, now + 2 * 365 * 24 * 60 * 60_000, true);
+  const observedAt = number(input.observedAt, "bucket observedAt", 1, now + 5 * 60_000, true);
   const status = input.status;
   if (status !== undefined && status !== "available" && status !== "warning" && status !== "exhausted") {
     throw new Error("bucket status is invalid");
@@ -88,6 +96,7 @@ function bucket(value: unknown, now: number): SubscriptionUsageBucket {
     ...(remainingPercent === undefined ? {} : { remainingPercent }),
     ...(windowDurationMinutes === undefined ? {} : { windowDurationMinutes }),
     ...(resetsAt === undefined ? {} : { resetsAt }),
+    ...(observedAt === undefined ? {} : { observedAt }),
     ...(status === undefined ? {} : { status }),
   };
 }
@@ -161,6 +170,11 @@ export function validateSubscriptionUsageSnapshot(
   const detail = text(input.detail, "detail", 500, true);
   const plan = text(input.plan, "plan", 80, true);
   const accountLabel = text(input.accountLabel, "accountLabel", 160, true);
+  const subscriptionIdentity = input.subscriptionIdentity;
+  if (subscriptionIdentity !== undefined &&
+      (typeof subscriptionIdentity !== "string" || !/^[a-f0-9]{64}$/.test(subscriptionIdentity))) {
+    throw new Error("subscription usage subscriptionIdentity is invalid");
+  }
   const creditsInput = input.credits === undefined ? undefined : record(input.credits);
   const credits = creditsInput ? {
     ...(boolean(creditsInput.hasCredits, "credits hasCredits") === undefined
@@ -188,6 +202,7 @@ export function validateSubscriptionUsageSnapshot(
     ...(plan === undefined ? {} : { plan }),
     ...(accountLabel === undefined ? {} : { accountLabel }),
     ...(providerAccountId === undefined ? {} : { providerAccountId }),
+    ...(subscriptionIdentity === undefined ? {} : { subscriptionIdentity }),
     ...(credits === undefined ? {} : { credits }),
     ...(input.spendControls === undefined
       ? {}

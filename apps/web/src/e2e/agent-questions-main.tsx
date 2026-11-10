@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { summarizeQuestionAnswers, type AgentQuestion, type PendingApproval, type SessionView } from "@wollipog/protocol";
+import { ownerQuestionAgentQuestions, presentOwnerQuestionRequest, scopeProposalAgentQuestions, summarizeQuestionAnswers, type AgentQuestion,
+  type CampaignIssueScopeSnapshot, type CampaignScopeProposal, type OwnerDecisionSnapshot,
+  type PendingApproval, type SessionView, type WorkflowDecisionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { focusSessionRequest, useQuestionDraftRetirement } from "../components/SessionApproval.js";
@@ -17,6 +19,8 @@ import { ResolverGallery, SignInResolverGallery } from "./resolver-gallery.js";
 import { setQuestionResponseStyle, useQuestionResponseStyle } from "../question-response-style.js";
 import { useSessionReadingKeys } from "../useSessionReadingKeys.js";
 import { useFollowTail } from "../useFollowTail.js";
+import { SessionStatusIndicators } from "../components/common.js";
+import { withPresentedOwnerQuestions } from "../owner-question-presentation.js";
 import "../styles.css";
 
 interface AnswerCall {
@@ -194,6 +198,90 @@ const issueDraftQuestions: AgentQuestion[] = [{
   options: [{ label: "Publish These Three Issues" }, { label: "Keep as Drafts" }],
 }, { id: "note", question: "Add an optional review note.", options: [], required: false, allowOther: true }];
 
+// A Full Control root's question for its campaign's owner (#4270). `set=owner-question` presents it
+// as the question it now is; `set=owner-raw` shows the workflow decision card it used to be.
+const ownerDecision: OwnerDecisionSnapshot = {
+  category: "owner_decision",
+  question: "Should the follow-up issue for the provider bridge keep retrying a failed credential lease, or stop and report it?",
+  material: "The bridge loses its lease when the provider restarts. See [#4244](https://github.com/picoduck/wollipog/issues/4244) " +
+    "and the [design note](https://github.com/picoduck/wollipog/blob/main/docs/campaign-authority.md).\n\n" +
+    "- **Retry** keeps children working through short outages.\n- **Stop** surfaces the failure at once.",
+  recommendedOptionId: "retry",
+  options: [
+    { optionId: "retry", label: "Retry with Backoff", description: "Up to three attempts, then report." },
+    { optionId: "stop", label: "Stop and Report", description: "Fail the child's step at once." },
+  ],
+};
+const ownerQuestionSnapshot = { ...ownerDecision, kind: "question" as const };
+const ownerQuestionSet = ownerQuestionAgentQuestions(ownerQuestionSnapshot);
+const ownerRaw = params.get("set") === "owner-raw";
+
+// The owner's one approval of an Orchestrator's scope proposal (#4282). `set=scope-proposal` presents
+// it as the Owner Question it now is; `set=scope-proposal-raw` shows the workflow decision card.
+const scopeProposalSnapshot: CampaignIssueScopeSnapshot & { scopeProposal: CampaignScopeProposal } = {
+  category: "campaign_issue_scope", repository: "picoduck/wollipog", expectedRevision: 2, before: [], additions: [4101, 4131, 4140], removals: [],
+  explanation: "You named #4101. For the other two I ranked open UI bugs by priority label, then by age.",
+  affectedAssignments: [], affectedDecisions: [], activeChildren: [],
+  scopeProposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: 3, constraints: ["open", "UI only"], withheldOperations: ["pr_merge"],
+    checks: ["chosen_issues", "constraints", "withheld_operations"], route: "owner", ownerCause: "constraint_check_uncertain",
+    constraintCheck: { occurrenceId: "dec_scope_check", verdict: "uncertain",
+      reason: "The answer can't be settled for 'picoduck/wollipog#4140 Badge Contrast in Light Theme — UI only'." },
+    ownerMessage: "Fix #4101 and the two most important open UI bugs, but don't merge anything yet.",
+    issues: [
+      { number: 4101, origin: "owner_named", rationale: "You named it.", title: "Composer Loses Draft on Reconnect" },
+      { number: 4131, origin: "orchestrator_chosen", rationale: "Open UI bug, priority:high, oldest.", title: "Sidebar Collapses on Resize" },
+      { number: 4140, origin: "orchestrator_chosen", rationale: "Open UI bug, priority:high.", title: "Badge Contrast in Light Theme" },
+    ] },
+};
+const scopeProposalSet = params.get("set") === "scope-proposal";
+const scopeProposalRaw = params.get("set") === "scope-proposal-raw";
+function scopeProposalCard(requestId: string): PendingApproval {
+  const occurrenceId = `${params.get("epoch") ?? "occurrence"}:${requestId}`;
+  return {
+    kind: "workflow_decision", requestId: occurrenceId, occurrenceId, requestedAt: askedAt, title: "Campaign Issue Scope", async: true,
+    options: [{ optionId: "__workflow_approve__", name: "Approve", kind: "allow_once" as const },
+      { optionId: "__workflow_deny__", name: "Deny", kind: "reject_once" as const }],
+    context: { toolName: "Typed Workflow Decision", input: JSON.stringify(scopeProposalSnapshot, null, 2) },
+    workflowDecision: { occurrenceId, requestId, sessionId: "agent-question-session", controllingSessionId: "agent-question-session",
+      resourceKey: "campaign_issue_scope:agent-question-session", category: "campaign_issue_scope", status: "pending", authority: "human", policyRevision: 2,
+      resourceDigest: "digest", createdAt: askedAt, authorityEvaluation: { owner: "human", reason: "protected_request" },
+      resourceSnapshot: scopeProposalSnapshot } as unknown as WorkflowDecisionView,
+  };
+}
+const ownerQuestion = params.get("set") === "owner-question";
+const childDelegated = params.get("set") === "child-delegated";
+const childQuestion = params.get("set") === "child-question" || childDelegated;
+const childRaw = params.get("set") === "child-raw";
+const childQuestionSnapshot = { category: "implementation_question" as const, kind: "question" as const,
+  question: "Which approach should the child session use?", recommendedOptionId: "retry", options: ownerDecision.options };
+function childQuestionCard(requestId: string): PendingApproval {
+  const card = ownerRawCard(requestId);
+  const { kind: _kind, ...legacy } = childQuestionSnapshot;
+  return { ...card, async: undefined, title: childRaw ? "Implementation Decision Required" : "Question",
+    workflowDecision: { ...card.workflowDecision!, category: "implementation_question", controllingSessionId: "campaign-root",
+      authority: childDelegated ? "orchestrator" : "human",
+      resourceSnapshot: childRaw ? legacy : childQuestionSnapshot } };
+}
+/** The owner decision card as the control plane stores it: an Owner Approval (`owner-raw`), or the
+ * Owner Question clients present as a question card (`owner-question`). */
+function ownerRawCard(requestId: string, snapshot: OwnerDecisionSnapshot = ownerDecision): PendingApproval {
+  const occurrenceId = `${params.get("epoch") ?? "occurrence"}:${requestId}`;
+  const question = snapshot.kind === "question";
+  return {
+    kind: "workflow_decision", requestId: occurrenceId, occurrenceId, requestedAt: askedAt,
+    title: question ? "Owner Question" : "Owner Decision Required", async: true,
+    options: [
+      ...snapshot.options.map((option) => ({ optionId: option.optionId, name: option.label, description: option.description, kind: "allow_once" as const })),
+      { optionId: "__workflow_deny__", name: question ? "Dismiss Question" : "Do Not Proceed", kind: "reject_once" as const },
+    ],
+    context: { toolName: "Typed Workflow Decision", input: JSON.stringify(snapshot, null, 2) },
+    workflowDecision: { occurrenceId, requestId, sessionId: "agent-question-session", controllingSessionId: "agent-question-session",
+      resourceKey: "bridge-retry", category: "owner_decision", status: "pending", authority: "human", policyRevision: 1,
+      resourceDigest: "digest", createdAt: askedAt, authorityEvaluation: { owner: "human", reason: "owner_kept" },
+      resourceSnapshot: snapshot } as unknown as WorkflowDecisionView,
+  };
+}
+
 // The production session shell clips page overflow. Document scrolling must not mask a missing
 // scroll region in the composer (#3256).
 function SessionShell({ children }: { children: React.ReactNode }) {
@@ -308,7 +396,13 @@ function Fixture() {
   const responseStyle = useQuestionResponseStyle();
   const [requestId, setRequestId] = useState("ask-1");
   const [questions, setQuestions] = useState(
-    params.get("set") === "issue-drafts"
+    childQuestion || childRaw
+      ? ownerQuestionAgentQuestions(childQuestionSnapshot)
+      : params.get("set") === "owner-question" || ownerRaw
+      ? ownerQuestionSet
+      : scopeProposalSet || scopeProposalRaw
+      ? scopeProposalAgentQuestions(scopeProposalSnapshot)
+      : params.get("set") === "issue-drafts"
       ? issueDraftQuestions
       : params.get("set") === "long"
       ? longQuestions
@@ -394,7 +488,9 @@ function Fixture() {
     }]),
     ...Array.from({ length: rowsAfter }, (_, index) => transcriptRow(QUESTION_EVENT_ID + 1 + index, index, "Later")),
   ], [dismissed, lastCall, questions, requestId, resolved]);
-  const request = useMemo<PendingApproval | null>(() => resolved ? null : {
+  const request = useMemo<PendingApproval | null>(() => resolved ? null : ownerRaw ? ownerRawCard(requestId)
+    : childRaw ? childQuestionCard(requestId) : childQuestion ? presentOwnerQuestionRequest(childQuestionCard(requestId))
+    : scopeProposalRaw ? scopeProposalCard(requestId) : scopeProposalSet ? presentOwnerQuestionRequest(scopeProposalCard(requestId)) : {
     kind: "question",
     requestId,
     occurrenceId: `${params.get("epoch") ?? "occurrence"}:${requestId}`,
@@ -410,6 +506,15 @@ function Fixture() {
     pendingApproval: request ?? undefined,
   }) as SessionView, [request]);
   useQuestionDraftRetirement(session);
+  // The session header's badges (#4270): from the Owner Question card the control plane stores, as the
+  // session detail presents it, on a root that keeps working while it waits.
+  const ownerStatusSession = useMemo(() => ownerQuestion || childQuestion || childRaw ? withPresentedOwnerQuestions({
+    id: SESSION_ID, runnerId: "runner-1", title: "Agent Questions", status: "running",
+    pendingApproval: resolved ? undefined : childQuestion || childRaw ? childQuestionCard(requestId) : ownerRawCard(requestId, ownerQuestionSnapshot),
+    ...(childDelegated ? { pendingRequestOwners: { human: 0, orchestrator: 1, requests: [
+      { requestId: childQuestionCard(requestId).requestId, owner: "orchestrator" },
+    ] } } : {}),
+  } as SessionView) : null, [requestId, resolved]);
 
   // Reading back and Show Where Asked work as in a session: the reader follows its tail, and a reveal
   // pauses it, so the dock takes its strip.
@@ -451,7 +556,8 @@ function Fixture() {
 
   // Composer Response answers in the composer (#2212): the dock's card is compact, and while Answer
   // Mode is open the question is shown there alone.
-  const composerAnswers = !resolved && responseStyle === "composer" && (!recoveryRequired || recoveryCanResume);
+  const composerAnswers = request?.kind === "question" && !resolved && !ownerRaw && !childRaw &&
+    responseStyle === "composer" && (!recoveryRequired || recoveryCanResume);
   const answering = composerAnswers && answerActive;
   const composerContent = answering ? (
     <div className="composer-box answer-mode">
@@ -478,6 +584,9 @@ function Fixture() {
       <main id="question-frame" className="app" style={{ display: "block", height: "100dvh" }}>
         <SessionShell>
         <section className="session-detail expanded" style={{ height: "100%" }}>
+          {ownerStatusSession && (
+            <header className="session-bar"><SessionStatusIndicators session={ownerStatusSession} /></header>
+          )}
           <div className="detail-columns">
             <div className="detail-chat">
               <div className="chat-reading">

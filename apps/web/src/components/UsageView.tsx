@@ -380,8 +380,8 @@ function PersonTable({ users }: { users: readonly UserCostWindows[] }) {
 }
 
 /**
- * Usage and Cost (#3010): API Usage at `/usage`, Subscriptions at `/usage/subscriptions`. In the
- * shell the tab is the route and `onSelectTab` navigates; a standalone render keeps it locally.
+ * Usage and Cost (#3010): Subscriptions at `/usage`, API Usage at `/usage/api`. In the shell the
+ * tab is the route and `onSelectTab` navigates; a standalone render keeps it locally.
  */
 export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
   tab?: UsageTab;
@@ -688,8 +688,8 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
   const rateSource = safeExternalHref(data?.pricing?.source);
   const coverageStartedAt = data?.retention.coverageStartedAt ?? knownRetention?.coverageStartedAt;
   const tabs = [
-    { id: undefined, key: "api", label: "API Usage", count: 0 },
-    { id: "subscriptions", key: "subscriptions", label: "Subscriptions", count: attention.length },
+    { id: undefined, key: "subscriptions", label: "Subscriptions", count: attention.length },
+    { id: "api", key: "api", label: "API Usage", count: 0 },
   ] as const;
 
   const toolbar = (
@@ -835,14 +835,14 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
         title={destination("usage").name}
         description={destination("usage").description}
         // On a phone the secondary is in the app bar's More Actions (§3.3).
-        secondary={tab !== "subscriptions" && data?.canManageRetention ? [{
+        secondary={tab === "api" && data?.canManageRetention ? [{
           label: "Budget and History…",
           onClick: () => setBudgetHistory({ focusBudget: false }),
           disabled: !dailyBudget || !knownRetention,
           ...(!dailyBudget ? { title: usersError ? "The daily budget couldn't be loaded." : "Loading the daily budget…" } : {}),
         }] : undefined}
         // On phones Refresh All leaves the tab's head for the app bar's More Actions (#3014).
-        menu={phone && tab === "subscriptions" && (subscriptions.data?.sources.length ?? 0) > 0 ? [{
+        menu={phone && tab !== "api" && (subscriptions.data?.sources.length ?? 0) > 0 ? [{
           label: "Refresh Subscriptions",
           icon: subscriptions.refreshing ? <Spinner decorative /> : <RefreshIcon size={16} />,
           onClick: () => void subscriptions.refresh(),
@@ -871,7 +871,7 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
         )}
       />
 
-      {tab === "subscriptions" ? (
+      {tab !== "api" ? (
         <section id="usage-subscriptions-panel" role="tabpanel" aria-labelledby="usage-subscriptions-tab" className="subscriptions">
           <SubscriptionsTab usage={subscriptions} phone={phone} onOpenConnections={onOpenConnections} />
         </section>

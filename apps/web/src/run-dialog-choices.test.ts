@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentDefinition, ProjectView, RunnerView, WorkflowDefinition } from "@wollipog/protocol";
 import {
+  agentNeedsAccountChoice,
+  choosableRunAgentIds,
   defaultRunAgentIds,
+  memberAccountsRequest,
+  runAgentChoices,
   folderName,
   newRunBlockedReason,
   runLocationOptions,
@@ -167,4 +171,63 @@ test("newRunBlockedReason follows the fields' order and names the fix", () => {
   assert.equal(newRunBlockedReason({ ...ready, mode: "workflow", workflowChosen: true, workflowBound: true }), null);
   assert.equal(newRunBlockedReason({ ...ready, placedByMachine: true, runnerId: "" }), "Choose a machine to continue.");
   assert.equal(newRunBlockedReason({ ...ready, placedByMachine: true, workspaceId: "" }), "Choose a folder to continue.");
+});
+
+test("an agent its policy can't place, with another account ready, is choosable but never starts chosen (#4353)", () => {
+  const defaults = [{ provider: "claude" as const, accountId: null, revision: 1, mode: "priority" as const, priorityAccountIds: ["ranked"] }];
+  const needsChoice = agent("claude", "claude-code", { authStatus: "authenticated", providerAccountReadiness: { defaultAuthStatus: "unknown", readyAccountIds: ["unranked"] } });
+  assert.equal(agentNeedsAccountChoice(needsChoice, defaults), true);
+  assert.deepEqual(defaultRunAgentIds([needsChoice], defaults), [], "nothing starts on a choice nobody made");
+  assert.deepEqual(selectableRunAgentIds([needsChoice], defaults), []);
+  assert.deepEqual(choosableRunAgentIds([needsChoice], defaults), ["claude"]);
+  const [choice] = runAgentChoices([needsChoice], "Build Server", true, defaults);
+  assert.equal(choice?.disabledReason, undefined);
+  assert.equal(choice?.description, "Build Server · Needs an account chosen");
+
+  // With nothing ready there is nothing to choose: the row keeps its reason.
+  const noneReady = agent("claude", "claude-code", { authStatus: "authenticated", providerAccountReadiness: { defaultAuthStatus: "unknown", readyAccountIds: [] } });
+  assert.equal(agentNeedsAccountChoice(noneReady, defaults), false);
+  assert.deepEqual(choosableRunAgentIds([noneReady], defaults), []);
+  assert.match(runAgentChoices([noneReady], "Build Server", true, defaults)[0]?.disabledReason ?? "", /No account in the Priority Order is ready/u);
+
+  // A saved Default Account that isn't ready stays disabled: nothing works around someone's own choice.
+  const fixed = [{ provider: "claude" as const, accountId: "a", revision: 1 }];
+  const defaultNotReady = agent("claude", "claude-code", { authStatus: "authenticated", providerAccountReadiness: { defaultAuthStatus: "unauthenticated", defaultAccountId: "a", readyAccountIds: ["b"] } });
+  assert.equal(agentNeedsAccountChoice(defaultNotReady, fixed), false);
+  assert.deepEqual(choosableRunAgentIds([defaultNotReady], fixed), []);
+});
+
+test("a launch names accounts only for members still in it, and accounts that can still start them (#4353)", () => {
+  const account = (id: string, provider: "claude" | "codex", overrides: object = {}) =>
+    ({ id, label: id, provider, authStatus: "authenticated", billing: "subscription", ...overrides });
+  const claude = agent("claude", "claude-code", { providerAccountReadiness: { defaultAuthStatus: "authenticated", readyAccountIds: ["work", "out", "theirs"] } });
+  const free = agent("free", "claude-code");
+  const runner = { agents: [claude, free], providerAccounts: [
+    account("work", "claude"),
+    account("home", "claude"),
+    account("out", "claude", { authStatus: "unauthenticated" }),
+    account("theirs", "claude", { profile: { access: "not_granted" } }),
+    account("codex-one", "codex"),
+  ] } as unknown as RunnerView;
+  const request = (accountId: string, member = "a", agentId = "claude") => memberAccountsRequest({ a: accountId }, { [member]: agentId }, runner);
+  assert.equal(memberAccountsRequest({}, { a: "claude" }, runner), undefined);
+  assert.deepEqual(request("work"), { a: "work" });
+  assert.equal(request("work", "someone-else"), undefined, "a member no longer in the launch");
+  assert.equal(request("removed"), undefined, "an account no longer on the Machine");
+  assert.equal(request("home"), undefined, "an account this agent reports as not ready");
+  assert.equal(request("out"), undefined, "an account that signed out");
+  assert.equal(request("theirs"), undefined, "an account this server may not use");
+  assert.equal(request("codex-one", "a", "free"), undefined, "another provider's account");
+  assert.deepEqual(request("home", "a", "free"), { a: "home" }, "an agent reporting no readiness takes any signed-in account");
+  assert.equal(request("work", "a", "gone"), undefined, "an agent no longer on the Machine");
+  assert.equal(memberAccountsRequest({ a: "work" }, { a: "claude" }, undefined), undefined);
+});
+
+test("the primary waits for a member's account, after the fields above it (#4353)", () => {
+  const input = { task: "Do it", machinesOnline: true, placedByMachine: true, projectChosen: true, project: null, location: null,
+    runners: new Map(), runnerId: "r1", workspaceId: "w1", mode: "parallel" as const, agentCount: 1, workflowChosen: true, workflowBound: true };
+  assert.equal(newRunBlockedReason(input), null);
+  assert.equal(newRunBlockedReason({ ...input, accountChoiceMissing: "Claude Code" }), "Choose an account for Claude Code to continue.");
+  assert.equal(newRunBlockedReason({ ...input, agentCount: 0, accountChoiceMissing: "Claude Code" }), "Choose at least one agent.");
+  assert.equal(newRunBlockedReason({ ...input, mode: "workflow", accountChoiceMissing: "Builder Agent" }), "Choose an account for Builder Agent to continue.");
 });

@@ -2,8 +2,9 @@
  * Campaign forge status (#2417 slice 8, GitLab since #3600; docs/campaign-work-ledger.md "Forge Status").
  *
  * The control plane stores no forge credentials. It asks the runner hosting the root campaign
- * session to read the GitHub pull requests the campaign's work items name, through that runner's
- * existing `gh` login, and keeps the last answer per pull request with its observation time. A
+ * session, or for another campaign repository a runner of one of its Locations (#4119), to read the
+ * GitHub pull requests the campaign's work items name, through that runner's existing `gh` login,
+ * and keeps the last answer per pull request with its observation time. A
  * fact is derived on read: `fresh` until it is `CAMPAIGN_FORGE_OBSERVATION.staleAfterMs` old, then
  * `stale`; `unavailable{reason}` when the latest read failed or nothing could be read. Unavailable
  * and stale facts never stand in for a passing, approved, or merged one.
@@ -22,6 +23,7 @@ import {
   type CampaignForgePullRequestObservation,
   type CampaignObservedFact,
   type CampaignPullRequestRef,
+  type GithubIssueClosureLocation,
 } from "@wollipog/protocol";
 
 export const CAMPAIGN_FORGE_OBSERVATION_SCHEMA = `
@@ -52,6 +54,7 @@ export type ForgeObserverState = "online" | "offline" | "unsupported";
 interface ObservationRow {
   repository_key: string;
   number: number;
+  runner_id: string;
   value_json: string | null;
   observed_at: number | null;
   failure_reason: CampaignForgeObservationFailure | null;
@@ -93,7 +96,7 @@ export class CampaignForgeObservationStore {
 
   constructor(
     private readonly db: DatabaseSync,
-    private readonly observerState: (campaignId: string) => ForgeObserverState,
+    private readonly observerState: (campaignId: string, repository: string) => ForgeObserverState,
   ) {}
 
   private stmt(sql: string): ReturnType<DatabaseSync["prepare"]> {
@@ -107,18 +110,32 @@ export class CampaignForgeObservationStore {
 
   private row(campaignId: string, ref: CampaignPullRequestRef): ObservationRow | undefined {
     return this.stmt(
-      `SELECT repository_key, number, value_json, observed_at, failure_reason, failed_at
+      `SELECT repository_key, number, runner_id, value_json, observed_at, failure_reason, failed_at
        FROM campaign_forge_observations WHERE campaign_session_id=? AND repository_key=? AND number=?`,
     ).get(campaignId, ref.repository.toLowerCase(), ref.number) as ObservationRow | undefined;
+  }
+
+  /** Whose login this pull request's stored fact came from, or null when none is stored. A stored
+   * value always came from this runner (see `record`), so a reader's access is checked against it,
+   * whichever runner would read the repository next (#4119). */
+  supplier(campaignId: string, ref: CampaignPullRequestRef): string | null {
+    return this.row(campaignId, ref)?.runner_id ?? null;
   }
 
   /** One fact per ref, in order. A ref is one point lookup; an item names at most 16. */
   facts(campaignId: string, refs: readonly CampaignPullRequestRef[], now: number): ForgeFactEntry[] {
     if (refs.length === 0) return [];
-    const observer = this.observerState(campaignId);
+    // Each repository has one observer (#4119), read once per call.
+    const observers = new Map<string, ForgeObserverState>();
+    const observer = (repository: string) => {
+      const key = repository.toLowerCase();
+      let state = observers.get(key);
+      if (!state) observers.set(key, state = this.observerState(campaignId, repository));
+      return state;
+    };
     return refs.map((ref) => ({
       ref: { repository: ref.repository, number: ref.number },
-      fact: forgeFact(this.row(campaignId, ref), observer, now),
+      fact: forgeFact(this.row(campaignId, ref), observer(ref.repository), now),
     }));
   }
 
@@ -144,16 +161,21 @@ export class CampaignForgeObservationStore {
              runner_id=excluded.runner_id, value_json=excluded.value_json, observed_at=excluded.observed_at,
              failure_reason=NULL, failed_at=NULL`,
         ).run(campaignId, key, result.ref.number, runnerId, json, at);
-        if (!before || before.value_json !== json || before.failure_reason !== null) changed = true;
+        // The supplier decides who may see a fact, so a new one changes what some readers get.
+        if (!before || before.value_json !== json || before.failure_reason !== null || before.runner_id !== runnerId) changed = true;
       } else if (result.failure && FAILURES.has(result.failure)) {
+        // A failure keeps the last value only when it came from the same runner: a row names one
+        // supplier, and another runner's login must not vouch for, or expose, this one's value (#4119).
         this.stmt(
           `INSERT INTO campaign_forge_observations
              (campaign_session_id, repository_key, number, runner_id, value_json, observed_at, failure_reason, failed_at)
            VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)
            ON CONFLICT(campaign_session_id, repository_key, number) DO UPDATE SET
+             value_json=CASE WHEN runner_id=excluded.runner_id THEN value_json END,
+             observed_at=CASE WHEN runner_id=excluded.runner_id THEN observed_at END,
              runner_id=excluded.runner_id, failure_reason=excluded.failure_reason, failed_at=excluded.failed_at`,
         ).run(campaignId, key, result.ref.number, runnerId, result.failure, at);
-        if (!before || before.failure_reason !== result.failure) changed = true;
+        if (!before || before.failure_reason !== result.failure || before.runner_id !== runnerId) changed = true;
       }
     }
     return changed;
@@ -162,16 +184,24 @@ export class CampaignForgeObservationStore {
   /** For the background pass: when each ref was last read, successfully or not (a failed read waits
    * the same interval as a successful one), and whether its last value is a finished pull request
    * (merged or closed) with no failure since. A merged pull request whose head branch is still on
-   * the remote is not finished: its cleanup is still owed (#4067). */
-  readState(campaignId: string, refs: readonly CampaignPullRequestRef[]): Map<string, { readAt: number; finished: boolean }> {
+   * the remote is not finished: its cleanup is still owed (#4067). `branchesReported` says the
+   * observing runner reports head branches (v284), so a merged observation stored before it did is
+   * not finished either until that runner reads it once (#4145). */
+  readState(
+    campaignId: string,
+    refs: readonly CampaignPullRequestRef[],
+    branchesReported: boolean,
+  ): Map<string, { readAt: number; finished: boolean }> {
     return new Map(refs.flatMap((ref) => {
       const row = this.row(campaignId, ref);
       if (!row) return [];
       const value = row.value_json ? JSON.parse(row.value_json) as CampaignForgeChangeRequestObservation : null;
       // A merged branch still on the remote, or a same-repository one the forge did not name usably,
-      // is cleanup still owed: keep reading it.
+      // is cleanup still owed: keep reading it. So is one read before branches were reported, which
+      // the campaign status counts as pending too, while the runner can now report it.
       const branchRemains = value?.forge === undefined && value?.state === "merged" &&
-        (typeof value.headBranch?.tipSha === "string" || (!value.headBranch && value.crossRepository === false));
+        (typeof value.headBranch?.tipSha === "string" || (!value.headBranch &&
+          (value.crossRepository === false || (value.crossRepository === undefined && branchesReported))));
       return [[forgeRefKey(ref), {
         readAt: Math.max(row.observed_at ?? 0, row.failed_at ?? 0),
         finished: !row.failure_reason && (value?.state === "merged" || value?.state === "closed") && !branchRemains,
@@ -185,9 +215,22 @@ export class CampaignForgeObservationStore {
 /** Runner requests waiting behind the concurrency limit; past this, new reads are dropped. */
 const MAX_QUEUED_READS = 8;
 
+/** Who reads forge status about a repository's pull requests. */
+export interface CampaignForgeObservingRunner {
+  runnerId: string;
+  protocolVersion: number | null;
+  online: boolean;
+  /** #4119: the Location of another campaign repository this runner reads from; the root's otherwise. */
+  location?: GithubIssueClosureLocation;
+}
+
+const askable = (runner: CampaignForgeObservingRunner | null): runner is CampaignForgeObservingRunner =>
+  Boolean(runner?.online) && runnerSupportsProtocol(runner!.protocolVersion, runner!.location ? "locationForgeObservation" : "campaignForgeStatus");
+
 export interface CampaignForgeObserverDeps {
-  /** The runner hosting the root campaign session, or null when the session is gone. */
-  observingRunner(campaignId: string): { runnerId: string; protocolVersion: number | null; online: boolean } | null;
+  /** Who reads this repository's pull requests, or with no repository the runner hosting the root
+   * campaign session; null when the session is gone or the repository has no Location left. */
+  observingRunner(campaignId: string, repository?: string): CampaignForgeObservingRunner | null;
   requestFromRunner(runnerId: string, requestId: string, message: CampaignForgeObserveMessage, timeoutMs: number): Promise<unknown>;
   store: Pick<CampaignForgeObservationStore, "record" | "readState">;
   /** Unfinished items' reported pull requests, per campaign whose root is live and for which
@@ -222,43 +265,62 @@ export class CampaignForgeObserver {
   /** Read these refs now, subject to the rate limit. Resolves when every read it started or joined
    * has finished; never rejects. */
   async refresh(campaignId: string, refs: readonly CampaignPullRequestRef[]): Promise<void> {
-    const runner = this.deps.observingRunner(campaignId);
-    // An old or disconnected runner is never asked; facts derive their reason from its state.
-    if (!runner || !runner.online || !runnerSupportsProtocol(runner.protocolVersion, "campaignForgeStatus")) return;
     const now = this.now();
     if (this.lastRead.size > 4_096) {
       for (const [key, at] of this.lastRead) if (now - at >= CAMPAIGN_FORGE_OBSERVATION.backgroundIntervalMs) this.lastRead.delete(key);
     }
     const waits: Promise<void>[] = [];
-    const due: CampaignPullRequestRef[] = [];
-    const seen = new Set<string>();
-    for (const ref of refs) {
-      const key = `${campaignId}|${forgeRefKey(ref)}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const flight = this.inFlight.get(key);
-      if (flight) waits.push(flight);
-      else if (now - (this.lastRead.get(key) ?? -Infinity) >= CAMPAIGN_FORGE_OBSERVATION.minIntervalMs) due.push(ref);
-    }
-    for (let start = 0; start < due.length; start += CAMPAIGN_FORGE_OBSERVATION.refsPerRequest) {
-      const batch = due.slice(start, start + CAMPAIGN_FORGE_OBSERVATION.refsPerRequest);
-      // A full queue drops the read; the facts keep their last state and age into `stale`.
-      if (this.queue.length >= MAX_QUEUED_READS) break;
-      const keys = batch.map((ref) => `${campaignId}|${forgeRefKey(ref)}`);
-      for (const key of keys) this.lastRead.set(key, now);
-      const read = this.limited(async () => { await this.read(campaignId, runner.runnerId, batch); }).finally(() => {
-        // The interval runs from when the read finished, whatever it learned: a read that waited in
-        // the queue or timed out is not repeated at once, by a caller or by the background pass.
-        const finished = this.now();
-        for (const key of keys) {
-          this.lastRead.set(key, finished);
-          if (this.inFlight.get(key) === read) this.inFlight.delete(key);
-        }
-      });
-      for (const key of keys) this.inFlight.set(key, read);
-      waits.push(read);
+    for (const group of this.readers(campaignId, refs)) {
+      // An old or disconnected runner is never asked; facts derive their reason from its state.
+      const runner = group.runner;
+      if (!askable(runner)) continue;
+      const due: CampaignPullRequestRef[] = [];
+      const seen = new Set<string>();
+      for (const ref of group.refs) {
+        const key = `${campaignId}|${forgeRefKey(ref)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const flight = this.inFlight.get(key);
+        if (flight) waits.push(flight);
+        else if (now - (this.lastRead.get(key) ?? -Infinity) >= CAMPAIGN_FORGE_OBSERVATION.minIntervalMs) due.push(ref);
+      }
+      for (let start = 0; start < due.length; start += CAMPAIGN_FORGE_OBSERVATION.refsPerRequest) {
+        const batch = due.slice(start, start + CAMPAIGN_FORGE_OBSERVATION.refsPerRequest);
+        // A full queue drops the read; the facts keep their last state and age into `stale`.
+        if (this.queue.length >= MAX_QUEUED_READS) break;
+        const keys = batch.map((ref) => `${campaignId}|${forgeRefKey(ref)}`);
+        for (const key of keys) this.lastRead.set(key, now);
+        const read = this.limited(async () => { await this.read(campaignId, runner, batch); }).finally(() => {
+          // The interval runs from when the read finished, whatever it learned: a read that waited in
+          // the queue or timed out is not repeated at once, by a caller or by the background pass.
+          const finished = this.now();
+          for (const key of keys) {
+            this.lastRead.set(key, finished);
+            if (this.inFlight.get(key) === read) this.inFlight.delete(key);
+          }
+        });
+        for (const key of keys) this.inFlight.set(key, read);
+        waits.push(read);
+      }
     }
     await Promise.all(waits);
+  }
+
+  /** These refs by who reads them (#4119): one group per Location of another campaign repository,
+   * and one for the root's runner. A group's runner is null when its repository has no reader. */
+  private readers(campaignId: string, refs: readonly CampaignPullRequestRef[]): Array<{ runner: CampaignForgeObservingRunner | null; refs: CampaignPullRequestRef[] }> {
+    const byRepository = new Map<string, CampaignForgeObservingRunner | null>();
+    const groups = new Map<string, { runner: CampaignForgeObservingRunner | null; refs: CampaignPullRequestRef[] }>();
+    for (const ref of refs) {
+      const repository = ref.repository.toLowerCase();
+      if (!byRepository.has(repository)) byRepository.set(repository, this.deps.observingRunner(campaignId, ref.repository));
+      const runner = byRepository.get(repository)!;
+      const key = runner ? `${runner.runnerId}\0${runner.location?.workspaceId ?? ""}\0${runner.location?.repository ?? ""}` : "";
+      const group = groups.get(key);
+      if (group) group.refs.push(ref);
+      else groups.set(key, { runner, refs: [ref] });
+    }
+    return [...groups.values()];
   }
 
   /** One authoritative read of these refs now, for proof that must not rest on an earlier answer
@@ -267,17 +329,22 @@ export class CampaignForgeObserver {
    * and the runner's per-request limit. Resolves to one result per ref in order, or null when the
    * runner cannot be asked, the queue is full, or any batch was not answered; never rejects. */
   async readNow(campaignId: string, refs: readonly CampaignPullRequestRef[]): Promise<ForgeReadResult[] | null> {
-    const runner = this.deps.observingRunner(campaignId);
-    if (!refs.length || !runner || !runner.online || !runnerSupportsProtocol(runner.protocolVersion, "campaignForgeStatus")) return null;
-    const batches: CampaignPullRequestRef[][] = [];
-    for (let start = 0; start < refs.length; start += CAMPAIGN_FORGE_OBSERVATION.refsPerRequest) {
-      batches.push(refs.slice(start, start + CAMPAIGN_FORGE_OBSERVATION.refsPerRequest));
+    if (!refs.length) return null;
+    const batches: Array<{ runner: CampaignForgeObservingRunner; refs: CampaignPullRequestRef[] }> = [];
+    for (const { runner, refs: own } of this.readers(campaignId, refs)) {
+      if (!askable(runner)) return null;
+      for (let start = 0; start < own.length; start += CAMPAIGN_FORGE_OBSERVATION.refsPerRequest) {
+        batches.push({ runner, refs: own.slice(start, start + CAMPAIGN_FORGE_OBSERVATION.refsPerRequest) });
+      }
     }
     if (this.queue.length + batches.length > MAX_QUEUED_READS) return null;
     const answers = await Promise.all(batches.map((batch) => new Promise<ForgeReadResult[] | null>((resolve) => {
-      void this.limited(async () => resolve(await this.read(campaignId, runner.runnerId, batch))).finally(() => resolve(null));
+      void this.limited(async () => resolve(await this.read(campaignId, batch.runner, batch.refs))).finally(() => resolve(null));
     })));
-    return answers.every((answer): answer is ForgeReadResult[] => answer !== null) ? answers.flat() : null;
+    if (!answers.every((answer): answer is ForgeReadResult[] => answer !== null)) return null;
+    // One result per ref in the order asked, whichever reader answered it.
+    const byRef = new Map(answers.flat().map((result) => [forgeRefKey(result.ref), result]));
+    return refs.map((ref) => byRef.get(forgeRefKey(ref))!);
   }
 
   /** One background pass: unfinished items' pull requests not read for `backgroundIntervalMs`,
@@ -289,18 +356,21 @@ export class CampaignForgeObserver {
     try {
       const now = this.now();
       const due: Array<{ campaignId: string; ref: CampaignPullRequestRef; readAt: number }> = [];
-      const askable = (campaignId: string) => {
-        const runner = this.deps.observingRunner(campaignId);
-        return Boolean(runner?.online && runnerSupportsProtocol(runner.protocolVersion, "campaignForgeStatus"));
-      };
-      for (const { campaignId, refs } of this.deps.backgroundTargets(askable)) {
-        const state = this.deps.store.readState(campaignId, refs);
-        for (const ref of refs) {
-          const stored = state.get(forgeRefKey(ref));
-          if (stored?.finished) continue;
-          // A read that stored nothing (timed out, disconnected, malformed) still counts.
-          const readAt = Math.max(stored?.readAt ?? 0, this.lastRead.get(`${campaignId}|${forgeRefKey(ref)}`) ?? 0);
-          if (now - readAt >= CAMPAIGN_FORGE_OBSERVATION.backgroundIntervalMs) due.push({ campaignId, ref, readAt });
+      // The same pull request may be named by several targets of one campaign; it is read once.
+      const seen = new Set<string>();
+      for (const { campaignId, refs: targets } of this.deps.backgroundTargets((campaignId) => askable(this.deps.observingRunner(campaignId)))) {
+        for (const { runner, refs } of this.readers(campaignId, targets)) {
+          const branchesReported = runnerSupportsProtocol(runner?.protocolVersion ?? null, "forgeDecisionActions");
+          const state = this.deps.store.readState(campaignId, refs, branchesReported);
+          for (const ref of refs) {
+            if (seen.has(`${campaignId}|${forgeRefKey(ref)}`)) continue;
+            seen.add(`${campaignId}|${forgeRefKey(ref)}`);
+            const stored = state.get(forgeRefKey(ref));
+            if (stored?.finished) continue;
+            // A read that stored nothing (timed out, disconnected, malformed) still counts.
+            const readAt = Math.max(stored?.readAt ?? 0, this.lastRead.get(`${campaignId}|${forgeRefKey(ref)}`) ?? 0);
+            if (now - readAt >= CAMPAIGN_FORGE_OBSERVATION.backgroundIntervalMs) due.push({ campaignId, ref, readAt });
+          }
         }
       }
       due.sort((a, b) => a.readAt - b.readAt);
@@ -345,7 +415,8 @@ export class CampaignForgeObserver {
     });
   }
 
-  private async read(campaignId: string, runnerId: string, refs: CampaignPullRequestRef[]): Promise<ForgeReadResult[] | null> {
+  private async read(campaignId: string, reader: CampaignForgeObservingRunner, refs: CampaignPullRequestRef[]): Promise<ForgeReadResult[] | null> {
+    const { runnerId } = reader;
     const requestId = this.deps.newRequestId();
     let response: unknown;
     try {
@@ -356,6 +427,7 @@ export class CampaignForgeObserver {
         pullRequests: refs.map((ref) => ({ repository: ref.repository, number: ref.number })),
         // This control plane validates GitLab observations, so the runner may read them (#3600).
         gitlab: true,
+        ...(reader.location ? { location: reader.location } : {}),
       }, CAMPAIGN_FORGE_OBSERVATION.requestTimeoutMs);
     } catch (error) {
       // Disconnected or timed out: nothing was learned. The facts keep their last state, a missing
@@ -460,7 +532,14 @@ export function sanitizedGitLabObservation(mr: CampaignForgeGitLabMergeRequestOb
     pipeline: mr.pipeline ? { id: mr.pipeline.id, status: mr.pipeline.status } : null,
     mergeTrain: mr.mergeTrain ? { status: mr.mergeTrain.status, position: mr.mergeTrain.position } : null,
     mergeCommitSha: mr.mergeCommitSha,
+    ...mergedAtField(mr.mergedAt),
   };
+}
+
+/** Waiting Time alone reads a merge time, so an unusable one is dropped rather than refusing the
+ * observation, which a merge gate does read. */
+function mergedAtField(value: unknown): { mergedAt?: number } {
+  return Number.isSafeInteger(value) && (value as number) > 0 ? { mergedAt: value as number } : {};
 }
 
 /** The runner is trusted to read, not to shape what is stored: only the wire fields survive. */
@@ -503,6 +582,7 @@ export function sanitizedObservation(pr: CampaignForgePullRequestObservation): C
     requiredChecks: rollup(pr.requiredChecks),
     mergeQueue: pr.mergeQueue ? { state: pr.mergeQueue.state, position: pr.mergeQueue.position } : null,
     mergeCommitSha: pr.mergeCommitSha,
+    ...mergedAtField(pr.mergedAt),
     ...(pr.defaultBranch !== undefined ? { defaultBranch: pr.defaultBranch } : {}),
     ...(pr.headBranch !== undefined ? { headBranch: { name: pr.headBranch.name, tipSha: pr.headBranch.tipSha } } : {}),
     ...(pr.crossRepository !== undefined ? { crossRepository: pr.crossRepository } : {}),

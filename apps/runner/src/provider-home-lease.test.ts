@@ -425,6 +425,31 @@ test("two partial-journal recoverers elect one fixed recovery checkpoint", (t) =
   winner.releaseAll();
 });
 
+test("a stale contender cannot publish over the successor name a winner's first checkpoint covers", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-stale-successor-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lock = writeLegacyLease(home);
+  const alive = (pid: number) => pid === process.pid;
+  const winner = new ProviderHomeLeaseRegistry(OWNER_A, { hostname: "host-a", isProcessAlive: alive });
+  // Both contenders read the same legacy tip. The winner publishes and finishes its first checkpoint
+  // while this one sits between its last read and its link, as a descheduled process does.
+  const loser = new ProviderHomeLeaseRegistry(OWNER_A, {
+    hostname: "host-a", isProcessAlive: alive,
+    beforeSuccessorLinkForTest: () => winner.acquire(request(home)),
+  });
+  assert.throws(() => loser.acquire(request(home)), /lease changed during recovery/);
+  assert.ok(existsSync(join(lock, `next-${LEGACY_ID}.json`)), "the successor name stays taken once its record is published");
+  // The journal stays readable: the next contender is refused by the live winner, not by corruption.
+  const verifier = new ProviderHomeLeaseRegistry(OWNER_A, { hostname: "host-a", isProcessAlive: alive });
+  assert.throws(() => verifier.acquire(request(home)), /already in use by process/);
+  // The winner's release finishes the retirement its first checkpoint deferred, and the HOME moves on.
+  assert.equal(winner.releaseAll(), true);
+  assert.equal(existsSync(join(lock, `next-${LEGACY_ID}.json`)), false);
+  const next = new ProviderHomeLeaseRegistry(OWNER_A, { hostname: "host-a", isProcessAlive: alive });
+  next.acquire(request(home));
+  assert.equal(next.releaseAll(), true);
+});
+
 test("retained partial evidence and external canonical records are rechecked after recovery", (t) => {
   for (const mutate of ["retained", "canonical"] as const) {
     const home = mkdtempSync(join(tmpdir(), "wollipog-provider-recovery-corruption-"));

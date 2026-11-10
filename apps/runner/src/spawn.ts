@@ -372,6 +372,31 @@ export function buildCloudArgs(
   ];
 }
 
+/**
+ * Git configuration every process in a protected worktree's boundary runs with, in the form `git -c`
+ * hands its children. Rerere keeps its shared resolutions in the common `rr-cache`, which stays
+ * read-only here because another session's or a person's merge would replay anything written to it.
+ * With rerere on, a conflict there makes `git commit` crash after the commit lands and leaves
+ * `MERGE_RR.lock`, so every later commit exits non-zero. This turns off a feature the boundary already
+ * denies, and makes nothing writable.
+ *
+ * This variable rather than `GIT_CONFIG_COUNT` and `GIT_CONFIG_KEY_0`: a provider that filters
+ * environment names containing `KEY` would keep the count and drop the key, and Git then fails every
+ * command. Filtering this one only restores the behavior above.
+ */
+export const PROTECTED_WORKTREE_GIT_CONFIG = "'rerere.enabled=false'";
+
+/**
+ * The launch environment's `GIT_CONFIG_PARAMETERS` for a protected worktree: whatever it already
+ * carried, such as `core.hooksPath` or `core.fsmonitor` overrides, with rerere turned off after it.
+ * Git reads the entries in order and the last one wins, so nothing earlier is lost. It goes into the
+ * environment itself rather than a bubblewrap `--setenv`, because the Claude namespace provider
+ * re-executes its worker with the serialized launch environment, not the supervisor's.
+ */
+export function protectedWorktreeGitConfig(existing: string | undefined): string {
+  return existing?.trim() ? `${existing.trimEnd()} ${PROTECTED_WORKTREE_GIT_CONFIG}` : PROTECTED_WORKTREE_GIT_CONFIG;
+}
+
 export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" | "cwd">, isolation: BwrapSpawnIsolation): string[] {
   const bridge = isolation.wslAgentControl;
   const socketDir = bridge?.socketPath ? posix.dirname(bridge.socketPath) : undefined;
@@ -488,6 +513,45 @@ export function bwrapPathWritable(options: readonly string[], path: string): boo
     if (destination === undefined || !posix.isAbsolute(destination)) return false;
     const mounted = bwrapMountPath(destination);
     if (contains(mounted)) writable = mount.writable && (!mount.empty || target === mounted);
+    index += 1 + mount.operands;
+  }
+  return writable;
+}
+
+/** The only mounts `bwrapPathMayBeWritable` accepts as read-only. `BWRAP_MOUNTS.writable` answers a
+ * different question (is this an existing writable directory?), so `--dev`, `--proc` and `--mqueue`,
+ * which bwrap mounts writable, are read-only there and must not be here. */
+const BWRAP_READ_ONLY_MOUNTS = new Set(["--ro-bind", "--ro-bind-try", "--ro-bind-data"]);
+
+/** Whether the provider might write or create `path` inside the sandbox the given bwrap options
+ * describe: the opposite stance of `bwrapPathWritable`, for a caller proving a path stays read-only.
+ * The last mount containing the path decides; only a read-only bind proves read-only, every other
+ * mount (a tmpfs, `--dev`, `--proc`) counts as writable, and a path below a fresh tmpfs counts too,
+ * since the provider can create it. `--remount-ro` changes only the mount at its own target, not one
+ * below it, so it decides only when that mount is the deciding one. An option or operand this model
+ * does not know answers `true`. */
+export function bwrapPathMayBeWritable(options: readonly string[], path: string): boolean {
+  if (!posix.isAbsolute(path)) return true;
+  const target = bwrapMountPath(path);
+  const contains = (mount: string) => mount === "/" || target === mount || target.startsWith(`${mount}/`);
+  let writable = true;
+  let decidingMount: string | undefined;
+  for (let index = 0; index < options.length && options[index] !== "--";) {
+    const option = options[index]!;
+    if (BWRAP_FLAGS.has(option)) { index += 1; continue; }
+    const skipped = BWRAP_NON_MOUNT_OPTIONS.get(option);
+    if (skipped) { index += 1 + skipped; continue; }
+    const mount = BWRAP_MOUNTS.get(option);
+    if (!mount) return true;
+    const destination = options[index + mount.operands];
+    if (destination === undefined || !posix.isAbsolute(destination)) return true;
+    const mounted = bwrapMountPath(destination);
+    if (option === "--remount-ro") {
+      if (mounted === decidingMount) writable = false;
+    } else if (contains(mounted)) {
+      decidingMount = mounted;
+      writable = !BWRAP_READ_ONLY_MOUNTS.has(option);
+    }
     index += 1 + mount.operands;
   }
   return writable;
@@ -855,6 +919,9 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     worktreeDescendantMarker ? { [WORKTREE_DESCENDANT_MARKER_ENV]: worktreeDescendantMarker } : {},
   ]);
   if (bwrapOptions) Object.assign(launchEnv, bwrapTemporaryEnvironment(launchEnv, bwrapOptions));
+  if (opts.isolation?.backend === "bwrap" && opts.isolation.protectedWorktree) {
+    launchEnv.GIT_CONFIG_PARAMETERS = protectedWorktreeGitConfig(launchEnv.GIT_CONFIG_PARAMETERS);
+  }
   if (opts.claudeNamespaceProvider && opts.isolation?.backend === "bwrap" &&
       opts.context?.kind !== "wsl" && opts.descendantOwner) {
     return spawnClaudeNamespaceProvider(
@@ -1167,6 +1234,103 @@ async function namespaceEnded(namespace: ClaudeNamespaceLifetime, terminate: boo
   return disposed && namespace.ended && namespace.endedGracefully;
 }
 
+// taskkill names each tree member it could not terminate on an ERROR line, followed by a Reason line.
+// The text is localized, so another language is unrecognized and stays a failure.
+const WINDOWS_TREE_MEMBER_FAILURE = /^ERROR: The process with PID (\d+)(?: \(child process of PID \d+\))? could not be terminated\.$/;
+const WINDOWS_TREE_MEMBER_REASON = /^Reason: /;
+
+/** The tree members a failed taskkill names, or undefined when any of its output is not that. */
+export function windowsTreeKillFailures(stderr: string): number[] | undefined {
+  const members: number[] = [];
+  for (const raw of stderr.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || WINDOWS_TREE_MEMBER_REASON.test(line)) continue;
+    const failure = WINDOWS_TREE_MEMBER_FAILURE.exec(line);
+    if (!failure) return undefined;
+    members.push(Number(failure[1]));
+  }
+  return members.length > 0 ? members : undefined;
+}
+
+export type WindowsTreeKillDeps = {
+  taskkill(pid: number, done: (error: (Error & { code?: unknown }) | null, stderr: string) => void): void;
+  isRunning(pid: number): boolean;
+  settleMs: number;
+};
+
+const WINDOWS_TREE_KILL_POLL_MS = 25;
+
+const windowsTreeKillDeps: WindowsTreeKillDeps = {
+  // /T = tree, /F = force.
+  taskkill(pid, done) {
+    execFile("taskkill", ["/pid", String(pid), "/T", "/F"], (error, _stdout, stderr) => done(error, String(stderr)));
+  },
+  isRunning(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  },
+  // Only a process already on its way out needs this long: a lease helper mid-call takes about half
+  // a second on hosted Windows. Anything still running after it stays a failure, as it always was.
+  settleMs: 3_000,
+};
+
+/** taskkill exits nonzero when any tree member could not be terminated, including one that exited
+ * by itself while taskkill was working. Hosted Windows reports that as "There is no running
+ * instance of the task" or "The operation attempted is not supported". Neither says whether the
+ * tree survived, so check what it named. The tree is gone once the root has closed and no named
+ * member still runs. A PID reused meanwhile reads as running, so this errs toward the failure it
+ * replaces. */
+export function killWindowsTreeAndWait(child: AgentProcess, deps: WindowsTreeKillDeps = windowsTreeKillDeps): Promise<boolean> {
+  const pid = child.pid!;
+  return new Promise<boolean>((resolve) => {
+    let taskkillComplete = false;
+    let closeObserved = child.closeObserved === true;
+    const finish = () => {
+      if (taskkillComplete && closeObserved) resolve(true);
+    };
+    child.once("close", () => {
+      closeObserved = true;
+      finish();
+    });
+    deps.taskkill(pid, (error, stderr) => {
+      const code = error?.code;
+      // 128 = "process not found" / already exited — benign.
+      if (error && code !== 128) {
+        const members = windowsTreeKillFailures(stderr);
+        if (!members) {
+          console.error(`[runner] taskkill failed for pid ${pid}: ${error.message}`);
+          resolve(false);
+          return;
+        }
+        const startedAt = performance.now();
+        const settle = () => {
+          const running = members.filter((member) => deps.isRunning(member));
+          if (closeObserved && running.length === 0) {
+            console.error(`[runner] taskkill for pid ${pid} named members ${members.join(", ")}, gone after ${Math.round(performance.now() - startedAt)}ms: ${stderr.trim()}`);
+            resolve(true);
+            return;
+          }
+          if (performance.now() - startedAt >= deps.settleMs) {
+            console.error(`[runner] taskkill failed for pid ${pid}: root closed=${closeObserved}, still running: ${running.join(", ") || "none"}: ${error.message}`);
+            resolve(false);
+            return;
+          }
+          setTimeout(settle, WINDOWS_TREE_KILL_POLL_MS);
+        };
+        settle();
+        return;
+      }
+      taskkillComplete = true;
+      if (code === 128) closeObserved = true;
+      finish();
+    });
+  });
+}
+
 /** Kill a process and all of its children, returning exact completion for callers that own one
  * cleanup boundary. Global shutdown still registers the same promise through killTree(). */
 export function killTreeAndWait(child: AgentProcess): Promise<boolean> {
@@ -1199,30 +1363,7 @@ export function killTreeAndWait(child: AgentProcess): Promise<boolean> {
     return child.wslReapCompletion;
   }
   if (isWindows) {
-    // /T = tree, /F = force.
-    return new Promise<boolean>((resolve) => {
-        let taskkillComplete = false;
-        let closeObserved = child.closeObserved === true;
-        const finish = () => {
-          if (taskkillComplete && closeObserved) resolve(true);
-        };
-        child.once("close", () => {
-          closeObserved = true;
-          finish();
-        });
-        execFile("taskkill", ["/pid", String(child.pid), "/T", "/F"], (err) => {
-          const code = (err as { code?: number } | null)?.code;
-          // 128 = "process not found" / already exited — benign.
-          if (err && code !== 128) {
-            console.error(`[runner] taskkill failed for pid ${child.pid}: ${err.message}`);
-            resolve(false);
-            return;
-          }
-          taskkillComplete = true;
-          if (code === 128) closeObserved = true;
-          finish();
-        });
-      });
+    return killWindowsTreeAndWait(child);
   } else {
     // The child was spawned detached (its own process group, PGID == its pid), so a
     // negative-pid kill signals the agent AND everything it spawned. Fall back to a

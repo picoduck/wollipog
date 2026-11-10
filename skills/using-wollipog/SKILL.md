@@ -21,7 +21,8 @@ wollipog session get <session-id> --json
 wollipog session events <session-id> [--after <seq> [--event-epoch <n>]] [--limit <n>] --json
 wollipog session capabilities --runner <id> --agent <id> [--offset <n>] [--limit <n>] [--include-hidden] --json
 wollipog session capabilities --runner <id> --agent <id> --model <id> --json
-wollipog session create --runner <id> --agent <id> --workspace <id> --prompt <task> [--model <id>] [--effort <level>] --json
+wollipog session create --runner <id> --agent <id> --workspace <id> --prompt <task> [--model <id>] [--effort <level>] [--provider-account <account-ref>] --json
+wollipog session accounts --runner <id> --agent <id> [--workspace <id>] [--model <id>] --json
 wollipog session prompt <session-id> <message> --json
 wollipog session wait <session-id> --for input_required,completed,failed,stopped --json
 wollipog session stop <session-id> --json
@@ -29,8 +30,8 @@ wollipog session unarchive <session-id> --json
 wollipog session stop-job <session-id> <job-id> --json
 wollipog session release-hold <session-id> <hold-id> --json
 wollipog pr wait <number|owner/name#number|host/group/project!iid|url> [--head <sha>] [--timeout <ms>] --json
-wollipog pr closures <number|owner/name#number|url> [--intended <issue>]... --json
-wollipog pr closures --file <description.md> [--repo <owner/name>] [--intended <issue>]... --json
+wollipog pr closures <number|owner/name#number|host/group/project!iid|url> [--intended <issue>]... --json
+wollipog pr closures --file <description.md> [--repo <owner/name|gitlab-host/group/project>] [--intended <issue>]... --json
 wollipog review session run --repo <owner/name|gitlab-host/group/project> --pr <number> --head <sha> --brief-file <path> [--full-reason <text>] --json
 wollipog review session get <review-session-id> --json
 wollipog artifact attach --file <absolute-path> [--name <display-name>] --json
@@ -100,8 +101,14 @@ it takes the same authority as `stop-job` and is refused if the hold changed sin
 An Orchestrator campaign must use the management tools as the policy boundary, not infer authority
 from its prompt. Call `get_campaign` at campaign start and after a human changes policy. It returns
 the effective behavior, typed decision owners, revision, admission and guardrail limits, child and
-follow-up counts, UI-review compatibility, and one of `waiting_human`, `active`, `blocked`,
-`verified_complete`, or `complete_with_handoffs`, without returning credentials. Its `behavior` holds the Child Harness, Child
+follow-up counts, UI-review compatibility, and one of `waiting_human`, `active`,
+`complete_needs_cleanup`, `verified_complete`, or `stuck` (older hosts report `blocked` and
+`complete_with_handoffs`), without returning credentials. `active` means work is actually running
+(listed in `activity.live`); an idle campaign with owed housekeeping is `complete_needs_cleanup`
+and lists each item's action in `cleanup`; an idle, unfinished campaign with nothing scheduled is
+`stuck` and names what is unfinished in `stuck`. Before either shows, Wollipog tries once to
+settle the leftovers itself and may wake the root with one `campaign_idle` continuation naming
+them. Its `behavior` holds the Child Harness, Child
 Model, Child Effort, Follow-Ups and Completion the next child creation enforces. A person can change
 them while the campaign runs; changed values carry the `active_campaign` source and a higher
 `behavior.revision`. They apply to children created afterwards, existing children keep their own
@@ -126,7 +133,14 @@ Every child creation receives a server-derived campaign-policy block in its init
 For Automatic model or effort, use `get_agent_capabilities` and send the selected pair in the same
 `create_session` call; fixed values are server-enforced. The block is not blanket approval. Children
 must use `request_workflow_decision`, `get_workflow_decision`, and `consume_workflow_decision` for
-implementation questions, PR merge, merged-branch deletion, follow-up publication, and UI evidence.
+action approvals: PR merge, merged-branch deletion, follow-up publication, and UI evidence.
+For a child's clarification, preference or design choice, use `request_workflow_decision` with
+`category: "implementation_question"` and `kind: "question"` (protocol v332). Supply the question,
+0–12 suggested options and an optional recommended option. It appears as a normal question, accepts
+free text and follows the existing decision owner. Read its answer with `get_workflow_decision`
+or the Question Answer prompt; never consume it as an approval. An answer grants no action authority.
+Omitting `kind` preserves legacy fixed-choice approval semantics; never omit it to work around an
+older peer's refusal. Update the unsupported peers instead.
 When those MCP tools are unavailable, use the equivalent self-scoped `wollipog decision request`,
 `get`, and `consume` commands above; the exact resource snapshot and optional PR-merge action are
 JSON objects. The CLI refuses `--session` for request, consume, and reconcile and exposes no resolution operation.
@@ -262,7 +276,8 @@ requests the forge confirms, or from the child's exact report inside its attempt
 an unfinished item's next step belongs to a person or an outside party, record a `handoff` with
 `update_campaign_work_item` (who, why, and the next action) instead of cancelling it: once every
 unfinished item is handed to `human` or `external` and nothing else is pending, the campaign ends
-as `complete_with_handoffs`, which is terminal and lists those items for the owner. `Retain` keeps
+as `complete_needs_cleanup` (`complete_with_handoffs` on older hosts), which is terminal and lists
+those items for the owner. `Retain` keeps
 it visible.
 `Stop and Archive` starts the durable stop/archive operation and automatically requests managed
 retirement of each clean, fully delivered runner-owned child worktree when the runner supports it.
@@ -288,7 +303,9 @@ forge itself: an earlier push of a pull request that later moved on and merged i
 any local commit outside its history is kept. An unchanged recorded branch may instead prove its stable head is
 contained by the current remote-tracking default branch. Discard refuses attached, dirty, other
 upstream-less, or unpushed trees. Push a worktree branch with upstream tracking, for example
-`git push -u origin HEAD:<branch>`, so the tree stays retirable without forge recovery.
+`git push -u origin HEAD:<branch>`, so the tree stays retirable without forge recovery. In an isolated
+session Git cannot record the upstream (see Git in an Isolated Session), so retirement relies on the
+forge-verified head above.
 
 Child creation may select a supported model and reasoning effort in the same request. Explicit
 values apply before the initial prompt and override saved harness defaults; read the effective pair
@@ -301,6 +318,21 @@ child model or effort. It returns paginated installation-specific models, labels
 harness fallback efforts, distinguishes unavailable discovery from no configurable effort, and
 excludes hidden models unless explicitly requested. Follow `page.nextOffset` until `truncated` is
 false; creation still revalidates the chosen pair against current discovery.
+
+A Machine's policy picks the provider account for a new session. To choose one yourself, read
+`session accounts` (MCP `get_provider_account_selection`, protocol v337) and pass an `accountRef`
+whose `canName` is true as `session create --provider-account` (MCP `create_session`
+`providerAccountId`). Accounts appear only as these opaque references: an account's id contains its
+label, which is personal data, so don't look for it elsewhere or repeat it. A named account overrides
+the policy for that session and is checked again at creation. An account that needs sign-in, can't
+run in this agent's environment, or would spend API credits is refused for an agent; ask a person.
+A usage limit is what naming overrides, so `reason` reports it even when `canName` is true.
+
+A `PROVIDER_ACCOUNT_CHOICE_REQUIRED` refusal started nothing. Act on its `actions`: name an account
+as above, wait until `retryAt`, or relay a sign-in or review to a person. `create_run` takes
+`providerAccountIds` by agent id and `create_workflow_run` takes `providerAccountBindings` by role, each
+with the same references. Whether an account's plan offers a model isn't known; when you name a model under a
+policy the result says so, and if the provider refuses it, name another account.
 
 ## Waiting for Pull Request Checks
 
@@ -384,20 +416,34 @@ or resolve, in any tense or case) directly before the issue's reference, whateve
 "does not close #12", "must not auto-close #12" and "doesn't resolve #12's cause" all close #12. An
 issue linked in the pull request's Development section closes too.
 
+The same rule covers GitLab merge requests, with a wider pattern. GitLab closes an issue when a merge
+request reaches the default branch and its title, description or a commit message puts close, fix,
+resolve or implement, in any form ("closing", "fixing", "implements"), before the reference, even
+negated, and in code too. One keyword closes every reference in a list: "Closes #1, #2 and
+group/project#3" closes all three. An instance may configure its own pattern; GitLab's own list of
+the issues a merge request closes then decides.
+
 - Write "Refs #N" for every issue that must stay open, in the description, the title and commit
-  messages. Never put a closing verb directly before such a reference, not even in an example that
+  messages. Never put a closing verb before such a reference, not even in an example that
   describes this rule; paraphrase it instead.
 - Check a draft description before publishing it with `wollipog pr closures --file <draft> --json`,
-  and an open pull request with `wollipog pr closures <pr> --json`. Pass each issue the merge should
-  close with `--intended`. Exit status 3 lists `undeclared` closures and `unmade` declarations; 0
-  means the merge closes exactly the intended issues.
-- A GitHub `pr_merge` snapshot names the issues the merge should close in `intendedClosures` (`#N`,
-  `owner/repo#N`, or an issue URL); omit it when the merge must close none. A current runner reads
-  the pull request before the decision is created and again before it is armed. If GitHub would
-  close anything else, or not close a declared issue, the request is refused with each reference and
-  its line, and a changed description revokes an approval at consume. Fix the text or the
-  declaration and request again. The decision's `closingReferenceCheck` shows its reviewer what the
-  merge closes; it is absent when the child's runner predates the check.
+  and an open pull request with `wollipog pr closures <pr> --json`. A GitLab merge request works the
+  same way: name it by URL or `<host>/group/project!<iid>`, or pass `--repo <host>/group/project` with
+  `--file`. Pass each issue the merge should close with `--intended`. Exit status 3 lists
+  `undeclared` closures and `unmade` declarations; 0 means the merge closes exactly the intended issues.
+- A `pr_merge` snapshot names the issues the merge should close in `intendedClosures` (`#N`,
+  `owner/repo#N`, or an issue URL; for GitLab `#N`, `group/project#N`, `<host>/group/project#N`, or an
+  issue URL on that instance); omit it when the merge must close none. A current runner (GitLab from
+  v295) reads the pull or merge request before the decision is created and again before it is armed.
+  If the forge would close anything else, or not close a declared issue, the request is refused with
+  each reference and its line, and a changed description revokes an approval at consume. Fix the text
+  or the declaration and request again. The decision's `closingReferenceCheck` shows its reviewer what
+  the merge closes; it is absent ("Not checked") when the child's runner predates the check.
+- After the decision is consumed, a current runner keeps reading what the merge would close until it
+  lands. Don't edit the description, title or commits of a queued pull or merge request: if what it
+  would close changes, Wollipog takes it out of the merge queue or train, the decision stops covering
+  it, and you are told why. Fix the text and request a new `pr_merge` for that head. A merge that
+  lands closing an issue nobody approved is reported to the campaign's owner.
 
 ## Review Sessions
 
@@ -421,7 +467,10 @@ wollipog review session run --repo <owner/name|gitlab-host/group/project> --pr <
 The runner launches the other model family as its own read-only Wollipog session against a private
 checkout of exactly that pushed head. It never writes to your worktree or loads the repository's
 settings, hooks, skills or MCP servers. The pull request must be open, from your project's
-repository, on your managed worktree's branch, with `headSha` equal to its current pushed head.
+repository, on one of your own linked managed worktrees' branches, with `headSha` equal to its current pushed head.
+On protocol 335+, every owned worktree can be reviewed without selecting it; review requests never
+change the selection or the live provider's working directory. Attached worktrees do not qualify
+(the existing verified Location-reuse exception still applies).
 For a GitLab merge request, `repository` is the project's `<host>/group[/subgroup…]/project` and
 `number` its IID; the runner reads it with its own trusted `glab`.
 The brief supplies intent, acceptance criteria, applicable invariants and verification already run;
@@ -478,7 +527,10 @@ reuse it for later requests. Preserve your workflow's reviewer, isolation and ad
   Exhausted, stopped or unavailable allowances refuse admission with a reason. Original human
   cost ceilings still apply across review attempts. Reviews take no session or child slot.
   Report admission or budget refusals; never use a native subprocess or the bridge to bypass them.
-- One review session is active per requester at a time; `review session list` lists them and
+- On protocol 335+, reviews of different pull requests may run concurrently, with one active review
+  per pull request. Each review reserves half the unreserved remaining original human requester
+  ceiling, when set; campaign reviews also retain their per-review allowance reservation. Older runners require
+  selecting the worktree and serializing requests. `review session list` lists them and
   `review session cancel` stops one. A review session takes no messages; request a new one after
   pushing a new head. An upvote grants no merge authority or exemption from exact-head CI.
 
@@ -562,7 +614,10 @@ that states the task, what is done, any branches or pull requests, and what rema
 `trigger` `worktree_attach` or `review` when attaching a worktree or requesting a review is
 refused because the repository differs; those refusals say so. When the target repository
 already has a branch with this task's work (for example an open pull request's head branch),
-name it as `recoverBranch` so the work continues there instead of starting over.
+name it as `recoverBranch` so the work continues there instead of starting over. If a worktree
+of that repository already has the branch checked out and no session uses it, the switch
+continues in that worktree as it is, uncommitted changes included; a worktree another session
+holds is refused with that session's name, so continue there instead.
 
 The control plane inspects every Location of your Project and shows your person a card with
 the verified Locations of that repository, your current Location, and the reasons any
@@ -586,6 +641,32 @@ choice is carried out.
 Orchestrators never switch: they stay in their Location and dispatch a child to a Location of
 that repository. A child session keeps the repository it was assigned and reports the
 mismatch to the session that started it instead. Both are refused by the tool.
+
+Under Full Control a child must run in a Location of a repository in the campaign's
+boundary: every verified Location of the campaign's Project, grouped by repository. Any other
+machine, folder or ad-hoc path is refused with "Full Control children must use a Location of a
+repository in the campaign's boundary". Each child, and every session it starts, works in
+exactly one repository: tool approvals are checked against its own worktree, and an effect on
+another Location's path is declined. Its pull request gates (merge, extra review rounds, merged
+branch deletion) must name a pull request of its own repository and follow that repository's
+own checks, merge queue and instructions.
+
+An Orchestrator plans cross-repository work as one work item per repository, with the dependency
+recorded in `dependsOnKeys`, dispatches prerequisites first, and never asks one child to change two
+repositories. A dependency on an item in another repository is a merge dependency: a merge of any
+pull request a work item names, by any campaign session (the Orchestrator included), is refused
+with "Merge held until prerequisite pull request … is observed MERGED" until every pull request of
+the prerequisite is freshly observed MERGED on its forge, read through a Location of that
+repository. `delivered` and enqueued don't count, and neither does a pull request in a repository
+outside the campaign's. The approval stays valid and nothing is armed. The refusal parks the session
+on that pull request, so it ends its turn; Wollipog wakes it on the merge, and it consumes the same
+approval again. If a permission request for an armed merge command is rejected, the merge gained a
+hold after arming: end the turn and wait for the wake the same way. A prerequisite closed without
+merging, cancelled or removed holds the merge: the work item is blocked, and the child reports that
+to its Orchestrator. An armed merge held that way can't be withdrawn and keeps your command tools
+blocked; request a new `pr_merge` for the same pull request with the `request_workflow_decision`
+tool (not the CLI, which needs the shell), which replaces it. Never merge any pull request except
+through its armed `pr_merge`.
 
 ## Private Session Artifacts
 
@@ -632,6 +713,28 @@ file does not approve evidence or a merge. External evidence URLs and review rul
 Attach the exact completed capture you intend to cite. Re-attaching an unchanged identical file
 returns the existing artifact; a changed file needs new metadata and any applicable new review.
 Keep files within the authorized task scope and respect privacy, retention, and approval policies.
+
+## Git in an Isolated Session
+
+On a native Linux managed worktree, Git can write this worktree, its admin directory and the shared
+objects, refs and logs, but not the repository's shared `config`, `packed-refs` or `rr-cache`. Use
+ordinary Git, with these exceptions:
+
+- **Pushing:** `git push -u` lands the push and exits 0, but prints `could not lock config file` and
+  records no upstream. Prefer `git push origin HEAD:refs/heads/<branch>`.
+- **Upstream and config:** `git branch --set-upstream-to` and `git config` writes fail. There is no
+  way to set them from inside the session.
+- **Branches:** do not leave a selected worktree on another branch. `git switch` works, but the next
+  turn is held for worktree recovery until the branch is restored. For new work, use
+  `create_worktree` and end the turn.
+- **A worktree created this turn:** it cannot be committed in until the session relaunches there.
+  Follow `isolation.nextStep`; do not work around it.
+- **Fetching:** `git fetch origin main` moves `origin/main` as usual. `git fetch --prune` cannot
+  delete refs.
+- **Rerere** is turned off in the session, because its shared cache stays read-only. Conflicts are
+  resolved by hand each time.
+- **Stalled SSH:** this is the network, not the sandbox. Use HTTPS, for example
+  `git -c credential.helper= -c 'credential.helper=!gh auth git-credential' fetch https://github.com/<owner>/<repo>.git <ref>`.
 
 ## Deleting Refs From an Isolated Session
 
@@ -709,7 +812,11 @@ Never attempt to approve the current session's own permission or governance card
 
 The root Orchestrator can propose closing an issue in its human-authorized campaign scope with
 `request_github_issue_closure` (`requestId`, `issue`, `reason`: `completed` or `not_planned`,
-`explanation`, `evidence`, and an optional exact `comment`). The runner derives the repository,
+`explanation`, `evidence`, and an optional exact `comment`). In a campaign with several repositories,
+also pass `repository` for an issue outside the launch repository: the root still asks, and the
+issue is inspected and closed through a Location of that repository, with that runner's own forge
+login. A repository that is not one of the campaign's is refused; ask its owner to add it with
+`request_campaign_repository_addition`. The runner derives the repository,
 current issue, and related open pull requests; the server includes the assignments of active
 children whose work can bear on the issue. A child is left out only when its launch prompt is
 recorded, it has an open attempt (from `create_session` or `assign_campaign_work_item`), and every
@@ -762,13 +869,27 @@ follow-ups, or closing an epic), a root on control plane and runner protocol v28
 as a typed request instead:
 
 - `request_owner_decision` (CLI `wollipog decision ask-owner --request-id <id> --resource-key <key>
-  --question <text> --options '<json-array>' [--recommended <option-id>] [--material <text>]`) asks
-  the owner a question with explicit options. Put the decision material in `material`: links, the
-  exact head SHA, check state and what each option does. It waits in the owner's Inbox and Campaign
-  Status without stopping your turn or other work, and only the owner can answer it. The chosen
-  option, or Do Not Proceed, comes back to you as a Workflow Decision prompt; `get_workflow_decision`
-  reads it at any time. You may withdraw your own pending one with `withdraw_workflow_decision`.
-  Full Control asks nobody for credentials or sign-in, so a question asking for a value is refused.
+  --question <text> [--kind question|approval] --options '<json-array>' [--recommended <option-id>]
+  [--material <text>]`) asks the owner. Choose the kind by what the answer does:
+  - **Owner Question** (`kind: "question"`, protocol v303): design choices, clarifications and
+    preferences. This is the default for anything that does not authorize an exact action. The owner
+    sees a normal question with your 0 to 12 suggested options (mark one with `recommendedOptionId`),
+    an Other choice and a free-text answer, so they can add nuance, combine options or say "do X,
+    but also Y". Their answer (the option chosen, their own words, or both) comes back to you as a
+    Wollipog Owner Answer prompt. It grants nothing, and scope, boundary or policy changes never
+    revoke it: it ends only when the owner answers or dismisses it, you withdraw it, or a newer
+    question under the same `resourceKey` replaces it.
+  - **Owner Approval** (`kind: "approval"`, the default when `kind` is omitted): an exact action the
+    owner kept that has no typed category, with 2 to 12 explicit options. The chosen option, or Do
+    Not Proceed, comes back to you as a Workflow Decision prompt. For a gate that has a typed
+    category (a child's `pr_merge`, an issue closure, a publication), file that typed decision or
+    hand it over with `hand_workflow_decision_to_owner` instead.
+
+  Put the background in `material`, as Markdown: links, the exact head SHA, check state and what
+  each option does. Either kind waits in the owner's Inbox and Campaign Status without stopping your
+  turn or other work, and only the owner can answer it. `get_workflow_decision` reads it at any time,
+  and you may withdraw your own pending one with `withdraw_workflow_decision`. Full Control asks
+  nobody for credentials or sign-in, so a question asking for a value is refused.
 - `hand_workflow_decision_to_owner` (CLI `wollipog decision hand-to-owner <occurrence-id> --reason
   <text> [--session <child-id>]`) gives the owner one pending decision you own, such as a child's
   `pr_merge` or your own issue closure. It is one way: you and every child are refused if you try
@@ -779,32 +900,149 @@ Neither tool exists for a child or under Custom, where a person already sees the
 requests, and an older runner or control plane refuses them by name. Never decide an owner-kept
 decision yourself, and never ask the owner to approve one in chat.
 
+When an installed skill or user-authored instruction keeps a typed gate for a person (a per-PR
+merge approval, say), any requester, child or root and in any mode, files the exact typed decision
+anyway and names the rule in `ownerRule` on `request_workflow_decision`: `source` is the file and
+`quote` the requirement, on one line (CLI `wollipog decision request ... --owner-rule-source <path>
+--owner-rule-quote <text>`; control plane v296). The occurrence is created owner-kept and reaches
+the owner's Inbox and Campaign Status with the rule; later requests for the same resource stay the
+owner's. It can never give the Orchestrator a decision. See
+[references/campaign-authority.md](references/campaign-authority.md). Never end a turn with such a
+gate only in prose.
+
+## Adding a Repository to a Campaign
+
+A campaign covers the verified repositories of its Project's Locations; `get_campaign` lists them
+under `repositoryBoundary`. When recorded work needs a Project repository the campaign does not
+cover (most often a follow-up in another repository), a root Orchestrator on protocol v317, in Full
+Control or Custom, asks the campaign's owner to add it:
+
+- `request_campaign_repository_addition` (CLI `wollipog campaign repository-addition request --input
+  '<json>'`) names one Project Location by id, a one-line reason, and the recorded follow-up or work
+  item that needs it. The control plane inspects that Location first; a Location outside the Project
+  or one that fails inspection is refused before the owner sees it. The decision is always the
+  owner's: nobody acting for the campaign can approve it, and your reason is shown as your words.
+  A pending request for the same repository is reused; a declined one is not asked again for the
+  same work.
+- When the owner approves, call `execute_campaign_repository_addition` (CLI `wollipog campaign
+  repository-addition execute <occurrence-id> --digest <digest>`) with the occurrence and its digest.
+  It inspects the exact approved Location again and adds its repository at a new boundary revision.
+- When the owner declines, record the dependent work as blocked on the owner, never as delivered.
+
+When the owner's first message limited the campaign to other repositories, its launch repository stays
+listed but gets no work. To bring it back, request an addition naming one of its Locations, even one
+already listed. Its approval adds the repository to the limit and changes no Location.
+
+You cannot create a Location. When no Location of the repository exists in the Project, report that
+the work needs one; once the owner adds it, it joins the campaign on its own.
+
+A Location on a runner too old to perform the campaign's gates doesn't join: `repositoryBoundary` lists
+it under `excludedLocations` with a reason naming the version it needs, and asking to add its repository
+is refused with that reason. A merge, branch deletion, closure or follow-up naming that repository is
+refused the same way, with no other login standing in, so don't look for one: report that its runner
+needs updating. The refusal holds until a Location of that repository joins, without a new launch: the
+owner's own Location joins once its runner updates, and someone else's then waits for the owner's Include
+in Campaign. A join revokes what was approved in that repository meanwhile, so request again afterward.
+While such a Location's repository hasn't been read yet, every repository the campaign holds no entry
+for is refused the same way, naming that Location: report that its runner needs updating so it can be
+read, or that the owner can remove the Location from the Project. Removing it revokes what was approved
+in those repositories, so request again afterward. The refusal's own text says which way in applies.
+
 ## Inspecting and Changing Campaign Issue Scope
 
-Before delegating an epic, use `get_campaign_issue_scope` (CLI: `wollipog issue-scope get --epic <number>`).
-It returns authorized repository-qualified issues, a revision, recorded work outside scope, and reviewable
-umbrella/member candidates. Native GitHub sub-issues and leading checklist entries under Units, Members,
+Before delegating an epic, use `get_campaign_issue_scope` (CLI: `wollipog issue-scope get --epic <number>`,
+with `--repository <owner/name>` for an epic outside the launch repository).
+It returns authorized repository-qualified issues grouped by repository under `repositories` (one entry
+per campaign repository, the launch repository first, with whether one of its Locations is online), a
+revision, recorded work outside scope, and reviewable umbrella/member candidates. Native GitHub sub-issues and leading checklist entries under Units, Members,
 Child Issues, Sub-Issues, or Implementation Issues are candidates; dependencies and incidental references
 are not members and never grant authority. Inspect candidates and select the intended members.
 
 To recover or extend an existing campaign, use `request_campaign_issue_scope_change` (CLI:
 `wollipog issue-scope request --proposal '<json>'`) with `requestId`, `expectedRevision`, `explanation`,
-and exact `additions` and `removals`, each an array of `{ "repository": "owner/repo", "number": 123 }`.
-Custom requires an authenticated human to approve the exact change. In Full Control with a separate
+and exact `additions` and `removals`, each an array of `{ "repository": "owner/repo", "number": 123 }`
+in any of the campaign's repositories. The same number in two repositories is two separate issues. Each
+repository's part is verified through one of its own online Locations; a repository with none online
+refuses the whole request by name. A repository outside the campaign is refused with
+`repository_outside_boundary` before any runner call: if the campaign's Project has a Location of it,
+ask the owner with `request_campaign_repository_addition`, then retry once it is carried out. Custom requires an authenticated human to approve the exact change. In Full Control with a separate
 human-established issue boundary, use `lineage: {kind: "epic", epic: <number>}` for verified intended
-members or `{kind: "follow_up", publicationOccurrenceId: <id>}` for an exact authorized publication.
+members (adding `repository` for an epic outside the launch repository; its members must all be in it) or `{kind: "follow_up", publicationOccurrenceId: <id>}` for an exact authorized publication.
 A publication the boundary's author or a campaign owner approved as a person under the current
-objective also qualifies. When the owner's first message set the scope and its Scope Grant in Campaign
-Status failed or was uncertain, propose the issues you chose without lineage: the proposal goes to the
-owner as one typed approval, so put your rationale in `explanation`. When the grant asked the campaign
-to select issues, propose the open issues you chose with `lineage: {kind: "selection"}`, additions
-only, with your ranking in `explanation`, including any you find mid-run. Deterministic checks refuse
-an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope,
-one another active campaign holds, one past the selection count or Maximum Issues, and one with a
-label a Human Required rule names; choose another issue rather than asking. A proposal that passes
-goes to the owner as one typed approval. The server
-refuses incidental references, foreign repositories and changes beyond human-set limits, naming the
-failed condition in a bounded `code`; a campaign owner can still propose the change from Campaign Status.
+objective also qualifies.
+
+When the owner's first message started a Full Control campaign, you read that message and propose
+its scope; the server reads nothing from it. The campaign starts with an empty scope and dispatches
+nothing until your initial proposal is admitted, so proposing it is your first campaign action, after
+`get_campaign` and the preflight report. Send the issues as `additions` with `proposal`: for each
+issue its `origin`, `owner_named` when its number is in the owner's message or `orchestrator_chosen`,
+and a one-line `rationale`; `requestedCount`, the number the owner asked for or `null`;
+`constraints`, each checkable limit you read ("open", "UI only", "skip anything labeled security");
+and `withheldOperations`, operations the message rules out ("fix but don't merge" withholds
+`pr_merge`). A proposal may add issues in any of the campaign's repositories. A bare `#12` means the
+launch repository, so an issue in another repository counts as `owner_named` only when the message
+writes `owner/repo#12` or its URL. When the message limits the work to some of the campaign's
+repositories, send its own words for each as `repositoryNames` (["the api repo", "web"]): the server
+resolves each by full name, name without the owner, or Location name, and refuses an issue outside
+them, now or in a later addition. Admission removes every other repository from the campaign; one comes
+back only through `request_campaign_repository_addition`, which its owner decides. If the message names
+only other repositories, the launch repository gets no campaign work: place every child in a named one.
+The constraint check
+judges whether the message really limits the work to them, so never send a repository the message only
+mentions or excludes, and never leave out one it limits the work to. Any name that matches none or
+several decides nothing for the whole list, so the proposal becomes the owner's one approval. Ranking criteria such as "highest priority" are your call: explain them in each
+rationale and in `explanation`, never as constraints. A task that needs no issues proposes no
+additions. Deterministic checks run first and refuse, naming the issue and condition: an owner-named
+number the message doesn't write, an issue outside the campaign's repositories, a pull request, a
+closed issue, one already in scope, one another active campaign holds, one past an explicit Maximum
+Issues, and one with a label a Human Required rule names; revise and propose again rather than asking.
+A proposal of only owner-named issues that the message writes as issue references (`#12`,
+`owner/repo#12` or the issue's URL), with no constraint, withheld operation or other count, returns
+an Orchestrator-owned scope change that you resolve and apply yourself. Anything else goes to the
+Decision Model's constraint check, which checks only what the owner's words allow (the count, which
+issues were asked for rather than mentioned, each stated constraint, omissions and withheld
+operations), never priority. Its admit also returns an Orchestrator-owned change. Its refusal names
+the question and issue: revise and propose again, since the same issues with another rationale get
+the same answer. When it is uncertain or fails, the proposal becomes the owner's one approval, asked
+as an Owner Question with your proposal and rationale; proposing the same issues again returns that
+same request, and an answer in the owner's own words declines it and reaches you as a prompt. A
+stated count must be one the message writes, your chosen issues stay within it (3 when none is
+stated), and later additions take the same route within the admitted count.
+
+A Custom campaign's first message gets the same propose-then-check treatment, with the authority it
+always had and no new person step. When the first message writes an issue number, `create_session`
+refuses with `seed_proposal_required` until you propose: call `request_campaign_issue_scope_change`
+with exactly the issues the person's message asks the campaign to work on as `additions`, and a
+`proposal` in which every issue is `owner_named` with a one-line `rationale`, plus the count,
+constraints and withheld operations you read. Never add an issue the message only mentions (as
+background, context, an example or something to avoid), and never one you chose: those go through the
+person's ordinary scope approval. Propose no additions when the message asks for no issue work. The
+server checks every such proposal against the person's own words, the empty one included. When it is
+admitted, one issue with sub-issues or checklist members seeds the epic, which the person still
+approves (or they choose Continue Without an Epic); otherwise the issues become the campaign's issue
+numbers and you delegate. A refusal names the issue and question: revise and propose again. When the
+result says the person now decides, wait for their scope approval without proposing again.
+
+A campaign whose stored Scope Grant predates this keeps it. When that grant failed or was uncertain,
+propose the issues you chose without lineage: the proposal goes to the owner as one typed approval,
+so put your rationale in `explanation`. When it asked the campaign to select issues, propose the open
+issues you chose with `lineage: {kind: "selection"}`, additions only, with your ranking in
+`explanation`: the same deterministic checks run (and one past the selection count), then the Decision
+Model checks the proposal against the owner's stated constraints, never your ranking; an uncertain or
+failed check becomes the owner's one typed approval, and proposing the same issues again returns that
+same request. For any other addition,
+such as an issue the owner asks for mid-run, propose it without lineage: it becomes the owner's one
+typed approval, stating any Maximum Issues increase it needs, and the returned occurrence tells you
+what to ask the owner to approve in their Inbox or Campaign Status; proposing the same issues again
+returns that same request. Lineage that needs a person becomes the same single, person-owned Scope Approval: epic_not_authorized,
+follow_ups_not_authorized, publication_unapproved, publication_authority_changed,
+publication_approved_under_earlier_boundary, publication_approver_not_owner and selection_not_granted.
+The server derives the cause, explains it in plain words and states any Maximum Issues increase.
+Keep published follow-up lineage: only server-verified consumed payloads settle their reserved slots
+on approval, so Maximum Issues counts the issue once. Denial changes nothing. Fixable errors
+(for example follow_up_not_single, publication_not_consumed, publication_already_admitted,
+payload_mismatch and epic_members_unverified) remain refusals; correct them and retry.
+Never supply an owner-review cause or a settled publication yourself.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve
 only an eligible occurrence backed by its standing human authorization: when the effective owner is
 `orchestrator`, resolve it with `resolve_descendant_workflow_decision` and its own session ID as
@@ -813,8 +1051,9 @@ Pending, denied, stale and replayed proposals leave scope unchanged. After appro
 Humans can inspect, resolve epic candidates, and request changes in Campaign Status's Authorized Issue Scope.
 
 Scope changes preserve conversation and work history. Removals display affected assignments and revoke
-outstanding action decisions; issue closure retains its separate exact decision. Active Orchestrator
-participants must use the campaign's runner and repository workspace. Updates require protocol v208
+outstanding action decisions; issue closure retains its separate exact decision. Every active
+Orchestrator participant must run in a Location of one of the campaign's repositories, and stores only
+its own repository's issues; one outside the launch repository needs protocol v313. Updates require protocol v208
 on the control plane and participating runners; unsupported peers must be updated and reconnected.
 The authoritative revision is persisted on both sides, delivered on reconnect and restart, and checked
 again by closure execution. An offline or unsynchronized runner cannot execute a revised closure.
@@ -827,3 +1066,15 @@ and labels; include `recommendationId` in the workflow request. Review the exact
 resolving. Duplicate/sanitation and lineage checks repeat before one-shot consumption. Read the
 published issue back and record it on that recommendation before proposing its scope addition.
 Missing issue-boundary authority never turns ledger acceptance or ordinary prose into a grant.
+A follow-up may target any repository of the campaign's boundary, not only its origin's: under Full
+Control it is reviewed under the same floors, its duplicate search runs in the target repository
+through one of its Locations, and its lineage names both repositories. When that repository isn't the
+one you work in, don't consume the approval or create the issue yourself: call
+`execute_workflow_decision`, and a Location of that repository creates it with that runner's own login
+and records the issue in `decision.forgeAction`. With no capable Location online nothing is published;
+retry once one is. After an uncertain answer, calling it again only looks for the issue. Once published and recorded,
+propose it as one repository-qualified addition with its follow-up lineage, as for any follow-up; its
+payload is read back through that repository's Location. A target outside the boundary
+is a person's (`target_outside_boundary`); if it is a repository of the campaign's Project, ask the
+owner to add it with `request_campaign_repository_addition` naming the follow-up, then request the
+publication again once the addition is carried out.

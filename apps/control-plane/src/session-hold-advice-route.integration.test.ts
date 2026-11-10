@@ -183,7 +183,7 @@ test("hold advice an agent credential reads names exactly the tools its routes a
 
     const workerRefusal = await call("worker", "POST", "/api/sessions/worker-wt/prompt", { text: "are you there?" });
     assert.equal(workerRefusal.status, 409);
-    assert.match(String(workerRefusal.json.error), /switch fix\/child/u, "the branch to restore is still named");
+    assert.match(String(workerRefusal.json.error), /branch fix\/child in \/w\/child/u, "the branch to restore is still named");
     assert.doesNotMatch(String(workerRefusal.json.error), /select_worktree|create_worktree/u,
       "prompt_session's refusal is written for the worker parent");
     const orchestratorRefusal = await call("orch", "POST", "/api/sessions/orch-wt/prompt", { text: "are you there?" });

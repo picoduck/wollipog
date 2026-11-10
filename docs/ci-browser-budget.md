@@ -1,5 +1,18 @@
 # Browser CI Budget
 
+The [ten-project evaluation](ci-browser-ten-shards-2026-11-05.md) uses a
+**54-minute Chromium cap**, derived from both complete ten-job samples
+42054331358 and 42063471740. Job 127371354382 measured maximum non-install
+1147s; round upward to 1150s.
+`720 + 1150 + 480 + 180 + 480 + 180 = 3190s <= 3240s`, retaining 230s residual
+reserve. Production/setup/cleanup are included; runner wait and timestamp-conflict
+allocation are excluded. The current fixture is
+`scripts/fixtures/browser-ci-ten-shard-timings.json`. Historical five-shard models
+below remain provenance, not today's deadline. Later measured workload/setup
+changes require recalculation; no hosted guarantee is implied.
+
+## Historical Five-Shard Budget: November 2, 2026
+
 The [November 2 natural-run reconciliation](ci-browser-shards-2026-11-02.md)
 extends evidence through 2026-11-02T15:00:00Z (1012 first attempts, 44 reruns).
 The maximum coherent measured non-install remainder is 2453s, rounded
@@ -10,9 +23,9 @@ not interpreted as test workload or silently corrected by subtracting an hour.
 `720 + 2460 + 480 + 180 + 480 + 180 = 4500s <= 4500s`
 derives **75 minutes**, retaining 180s residual reserve.
 This is an envelope for coherent measured phases, not a certification of unknown
-allocation or future workloads. Five jobs and weights remain unchanged.
+allocation or future workloads. At that revision five jobs and weights remained unchanged.
 
-The browser job retains five shards and a finite **75-minute** budget. The
+At that revision the browser job retained five shards and a finite **75-minute** budget. The
 2026-10-18 remeasurement replaces the stale 1,448-second non-install envelope with
 2,016 seconds. The prior 49-minute limit cannot reserve three minutes beyond the
 configured attempts, measured remainder, enforcement and failure diagnostics.
@@ -179,16 +192,17 @@ propagation; success and cancellation do not trigger retry.
 The 2453-second coherent natural measured remainder is a dated snapshot. Natural-run margin
 evidence triggers remeasurement: collect the five consecutive complete runs
 below, retaining phase timings and at least 180 seconds spare on every shard.
-If a shard loses that margin, remeasure all five shards and revisit the finite
+If a shard loses that margin, remeasure all ten shards and revisit the finite
 budget or distribution using those observations. A pre-merge exact tree-hash
 gate would block new e2e work before its natural integration measurements exist;
 authors must not edit a provenance hash to imply a measurement that never happened.
 
 Local checks and PR/merge-group CI do not complete #2700. Observe **five consecutive
 naturally occurring complete main or merge-group runs containing this change**,
-all five browser shards successful with at least 180 seconds spare:
-`active <= 4320s` at the current 75-minute limit. The earlier 59-minute model
-used a 3360-second threshold; its observations are historical, not evidence for
+all ten browser shards successful with at least 180 seconds spare:
+`active <= 3060s` at the current 54-minute limit. The earlier 59-minute and
+75-minute models used 3360-second and 4320-second thresholds respectively;
+their observations are historical, not evidence for
 the revised setup model. Read exact first-attempt metadata for each run:
 
 ```sh

@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { managedWorktreeGitLayout, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
-import { buildBwrapArgs } from "./spawn.js";
+import { buildBwrapArgs, spawnAgent } from "./spawn.js";
 import { confinedGitRunner, deleteOwnedWorktreeRefs, findBubblewrap, SEQUENCER_LEFTOVER_REFS } from "./worktree-ref-deletion.js";
 
 /** Never inherit this process's stdin: a sandboxed child that reads it blocks the whole suite
@@ -673,6 +673,92 @@ test("every managed worktree the session owns stays usable while another session
   assert.equal(readFileSync(join(ownedAdmin, "gitdir"), "utf8"), ownedGitdir);
   assert.equal(readFileSync(join(ownedAdmin, "config.worktree"), "utf8"), "");
   assert.ok(lstatSync(worktreePath).isDirectory());
+});
+
+test("a conflict in a real sandbox commits cleanly while rerere's shared cache stays read-only", {
+  skip: bubblewrapUsable() ? false : "bubblewrap cannot create a user namespace on this host",
+}, async () => {
+  const { root, repoPath, worktreePath, home } = managedWorktreeFixture(UNMASKED_FIXTURE_BASE);
+  const common = join(repoPath, ".git");
+  const setup = (args: string[], cwd = repoPath) => {
+    const result = run("git", args, cwd);
+    assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.output}`);
+  };
+  setup(["config", "rerere.enabled", "true"]);
+  const recorded = join(common, "rr-cache", "0".repeat(40));
+  mkdirSync(recorded, { recursive: true });
+  writeFileSync(join(recorded, "postimage"), "recorded\n");
+  writeFileSync(join(repoPath, "tracked.txt"), "main\n");
+  setup(["commit", "--quiet", "-am", "main"]);
+  setup(["pack-refs", "--all"]);
+  const packedRefs = readFileSync(join(common, "packed-refs"), "utf8");
+  const config = readFileSync(join(common, "config"), "utf8");
+  const readOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath, repoPath }], true);
+  const isolation = await resolveExecutionIsolation(
+    { mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
+      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
+      sessionId: "s_managed", cwd: worktreePath, readOnlyPaths,
+      protectedWorktree: { path: worktreePath,
+        gitWritableRoots: managedWorktreeGitWritableRoots(worktreePath, [{ worktreePath, repoPath }]),
+        requiredReadOnlyPaths: readOnlyPaths },
+      preserveProviderHome: true,
+    },
+  );
+  assert.equal(isolation?.backend, "bwrap");
+  // Through the launcher a provider uses, so the environment it gives the provider is the one tested.
+  const sandboxed = async (script: string) => {
+    const child = spawnAgent({
+      command: "/bin/sh", args: ["-c", script], cwd: worktreePath, context: { kind: "native" },
+      env: { GIT_CONFIG_PARAMETERS: "'core.fsmonitor=false'" },
+      isolation: isolation as Extract<typeof isolation, { backend: "bwrap" }>, trackDescendants: false,
+    });
+    child.stdin.end();
+    let output = "";
+    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    const status = await new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code) => resolve(code));
+    });
+    return { status, output };
+  };
+  const admin = gitAdminDirectory(worktreePath);
+
+  const configured = await sandboxed("git config --type=bool --get rerere.enabled; git config --type=bool --get core.fsmonitor");
+  assert.equal(configured.output.trim(), "false\nfalse", "rerere off, and the launch's own setting kept");
+  const work = await sandboxed([
+    "set -e",
+    "printf feature > tracked.txt",
+    `${COMMITTER} commit --quiet -am feature`,
+    `if ${COMMITTER} merge --no-edit main; then echo expected-a-conflict; exit 9; fi`,
+    "printf resolved > tracked.txt",
+    "git add tracked.txt",
+    `${COMMITTER} commit --no-edit`,
+    "printf later > tracked.txt",
+    `${COMMITTER} commit --quiet -am later`,
+  ].join("\n"));
+  assert.equal(work.status, 0, work.output);
+  assert.deepEqual(run("git", ["log", "--format=%s", "-2"], worktreePath).output.trim().split("\n"),
+    ["later", "Merge branch 'main' into agent/s_managed"]);
+  assert.equal(existsSync(join(admin, "MERGE_RR.lock")), false);
+
+  // Everything that would have made rerere work by widening the boundary stays closed.
+  for (const script of [
+    `printf x > ${JSON.stringify(join(common, "rr-cache", "planted"))}`,
+    `printf x > ${JSON.stringify(join(recorded, "postimage"))}`,
+    `printf x >> ${JSON.stringify(join(common, "config"))}`,
+    `printf x >> ${JSON.stringify(join(common, "packed-refs"))}`,
+    `printf x > ${JSON.stringify(join(common, "packed-refs.lock"))}`,
+    `printf x >> ${JSON.stringify(join(admin, "config.worktree"))}`,
+  ]) {
+    const attempted = await sandboxed(script);
+    assert.notEqual(attempted.status, 0, `${script}: ${attempted.output}`);
+  }
+  assert.deepEqual(readdirSync(join(common, "rr-cache")), ["0".repeat(40)]);
+  assert.equal(readFileSync(join(recorded, "postimage"), "utf8"), "recorded\n");
+  assert.equal(readFileSync(join(common, "config"), "utf8"), config);
+  assert.equal(readFileSync(join(common, "packed-refs"), "utf8"), packedRefs);
+  assert.equal(existsSync(join(common, "packed-refs.lock")), false);
 });
 
 test("another owned worktree cannot widen the selected worktree's boundary", async () => {

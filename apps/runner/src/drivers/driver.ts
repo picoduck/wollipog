@@ -74,6 +74,8 @@ export interface DriverSteerInput {
   images?: PromptImage[];
   /** Absolute deadline for the whole steering submission, computed once at admission. */
   deadlineAt: number;
+  /** Exact provider receipt, including after the initial result; never a stdin write receipt. */
+  onLateAccepted?: (providerTurnId: string) => void;
 }
 
 /** Preserve the provider-delivery boundary: only a confirmed response is accepted, while a
@@ -333,6 +335,7 @@ export interface Driver {
     occurrenceId: string,
     command: string,
     fence?: CompletedCommandReconciliationFence,
+    onFailure?: (reason: string) => void,
   ): Promise<CompletedCommandReconciliationProof | null>;
 
   /** Incorporate input into the currently active provider turn when the transport can receipt it. */
@@ -358,6 +361,11 @@ export interface Driver {
    * conversation and every other job keep running (#1780). The ended job is reported as `killed`
    * with `endedByRunner`. Drivers that cannot end a single job omit it. */
   stopBackgroundJob?(jobId: string): Promise<DriverBackgroundJobStopResult>;
+
+  /** Whether a provider process is running that takes the next prompt without a new spawn (#3542).
+   * False means the next turn launches a process from this instance's stored launch settings, such
+   * as its isolation bind list. Drivers that cannot tell omit it, and callers treat that as live. */
+  providerProcessLive?(): boolean;
 
   /** Answer a pending permission/approval request surfaced via onEvent. Returns true iff a
    * live ask was answered (the response reached the agent); false = nothing was waiting

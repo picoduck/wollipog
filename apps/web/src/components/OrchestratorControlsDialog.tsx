@@ -13,7 +13,8 @@ import {
 import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
 import { titleCaseLabel } from "../format.js";
-import { FULL_CONTROL_LINE } from "../orchestrator-policy.js";
+import { WORKFLOW_DECISION_LABELS } from "../full-control-readiness.js";
+import { FullControlReadinessNote } from "./CampaignAuthoritySummary.js";
 import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { integrationIsolationDisclosure, ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE } from "../session-preset-defaults.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
@@ -26,7 +27,7 @@ import { StatusBadge } from "./StatusBadge.js";
 import { ChoiceRows, SegmentedControl, type ChoiceRowOption } from "./ui/ChoiceControls.js";
 import { SAVED_MS } from "./ui/SettingsRows.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import { enableFullControlCampaign, OrchestratorControlChoice } from "./FullControlPreparation.js";
+import { enableFullControlCampaign, FullControlLocationNotices, FullControlLocationsToReview, OrchestratorControlChoice, type FullControlLocationReport } from "./FullControlPreparation.js";
 import { CampaignBehaviorEditor } from "./CampaignBehaviorEditor.js";
 
 /** Who answers a descendant session's requests (§8.4 choice rows). The off choice is "Human",
@@ -37,14 +38,7 @@ export const CHILD_SESSION_REQUEST_OPTIONS: readonly ChoiceRowOption<ParentContr
   { value: "questions_and_approvals", title: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
 ];
 
-export const WORKFLOW_DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
-  implementation_question: "Implementation Questions",
-  pr_merge: "PR Merge Approval",
-  merged_branch_deletion: "Merged Branch Deletion",
-  follow_up_issue_publication: "Follow-Up Issue Publication",
-  ui_evidence_approval: "UI Evidence Approval",
-  review_round_extension: "Review Round Extensions",
-};
+export { WORKFLOW_DECISION_LABELS };
 
 const AUTHORITY_OPTIONS = [
   { value: "human", label: "Human", description: "Require a person's decision for this exact workflow gate." },
@@ -114,6 +108,9 @@ function campaignStatusMeta(status: OrchestratorCampaignProjection["status"]): S
   switch (status) {
     case "waiting_human": return statusMeta("workflow", "awaiting_decision");
     case "active": return statusMeta("workflow", "running");
+    // #4146: finished with cleanup left reads as complete, informational; stuck needs a person.
+    case "complete_needs_cleanup": return statusMeta("session", "campaign_needs_cleanup");
+    case "stuck": return statusMeta("session", "campaign_stuck");
     case "blocked": return statusMeta("campaignWork", "blocked");
     case "verified_complete": return statusMeta("workflow", "succeeded");
     // Finished, but the owner has handed-off items left: Campaign Status lists them.
@@ -332,15 +329,19 @@ export function OrchestratorControlsDialog({
   // campaign's own scope or first message, and only a genuine impossibility stops it.
   const [enabling, setEnabling] = useState(false);
   const [enableError, setEnableError] = useState<string | null>(null);
-  useEffect(() => { setEnableError(null); }, [controlPreview]);
+  const [enableReport, setEnableReport] = useState<FullControlLocationReport | null>(null);
+  useEffect(() => { setEnableError(null); setEnableReport(null); }, [controlPreview]);
   const enable = async () => {
     if (enabling) return;
     setEnabling(true); setEnableError(null);
     try {
-      onSessionChanged(await enableFullControlCampaign(api, session.id));
+      onSessionChanged(await enableFullControlCampaign(api, session.id, enableReport));
+      setEnableReport(null);
       showSaved("control");
     } catch (cause) {
-      setEnableError(cause instanceof Error ? cause.message : "Full Control was not enabled.");
+      // Not a failure (#4319): the person sees what this enable leaves out, and Enable again proceeds.
+      if (cause instanceof FullControlLocationsToReview) setEnableReport(cause.report);
+      else setEnableError(cause instanceof Error ? cause.message : "Full Control was not enabled.");
     } finally { setEnabling(false); }
   };
   // Full Control, chosen or in effect, shows only its choice, its line and its one action (#2940): the
@@ -373,9 +374,12 @@ export function OrchestratorControlsDialog({
         <p className="section-note">Effective Mode: {effectiveMode === "full_control" ? "Full Control" : effectiveMode === "custom" ? "Custom" : "Current Root State Not Reported"}.</p>
         {canEnable && <>
           <OrchestratorControlChoice embedded mode={controlPreview} onChange={setControlPreview} disabled={refusal !== null || enabling} />
+          {controlPreview === "full_control" && <FullControlLocationNotices report={enableReport} />}
           {controlPreview === "full_control" && enableError && <Notice tone="danger" role="alert" title="Couldn't Enable Full Control">{enableError}</Notice>}
         </>}
-        {effectiveMode === "full_control" && !canEnable && <p className="section-note">{FULL_CONTROL_LINE}</p>}
+        {/* Readiness from the server's live facts (#2940): the bare "end to end" line only when
+            nothing comes to a person and no needed capability is limited. */}
+        {effectiveMode === "full_control" && !canEnable && <FullControlReadinessNote campaign={session.orchestratorCampaign} />}
         {fullControl && <>
           <p className="section-note">Revoking Full Control updates this root campaign and its descendants and invalidates unused approvals. Your saved defaults and selected session configuration stay unchanged.</p>
           <button type="button" className="btn" disabled={!canRevoke || Object.keys(pending).length > 0}

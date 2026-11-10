@@ -358,12 +358,12 @@ test("an offline machine's settings say what saves now and what waits, and still
   await expect(page.getByRole("button", { name: "New Harness Release · View Settings" })).toHaveCount(0);
   await openSettings(page);
   await expect(settingsDialog(page).locator(".notice").first()).toHaveText(
-    "Design Workstation is offline. Changes save now; Capacity Limit and automatic switching take effect when it reconnects.",
+    "Design Workstation is offline. Changes save now; Capacity Limit and reviewer executable policy take effect when it reconnects.",
   );
   await expect(installationGroup(page, "Codex").getByRole("radio")).toHaveCount(2);
   // Nothing here needs the machine online, so every field stays enabled.
   await expect(settingsDialog(page).getByLabel("Capacity Limit")).toBeEnabled();
-  await expect(settingsDialog(page).getByRole("switch", { name: "Switch Accounts Automatically" })).toBeEnabled();
+  await expect(settingsDialog(page).getByRole("switch")).toHaveCount(0);
   await expect(settingsDialog(page).getByRole("button", { name: "Delete Machine…" })).toBeEnabled();
 });
 
@@ -420,7 +420,7 @@ test("an SSH machine with two installations and a missing saved choice shows the
 const providerAccounts = (page: import("@playwright/test").Page) =>
   page.getByRole("region", { name: /^Provider Accounts/ });
 const accountRow = (page: import("@playwright/test").Page, label: string) =>
-  providerAccounts(page).locator(".surface > .row").filter({ has: page.locator(".row-title", { hasText: label }) });
+  providerAccounts(page).locator(".provider-accounts-list > .row").filter({ has: page.locator(".row-title", { hasText: label }) });
 /** A row's sign-in steps or ending, in the expansion under it (#2996). */
 const signInSteps = (page: import("@playwright/test").Page, label: string) =>
   accountRow(page, label).locator("xpath=following-sibling::*[1][contains(concat(' ', @class, ' '), ' provider-account-expansion ')]");
@@ -436,12 +436,11 @@ test("Provider Accounts show one status per account: Signed In, Sign-In Required
   await page.goto(`/machine-management-e2e.html?signingIn&${DESIGN_WORKSTATION}`);
   const section = providerAccounts(page);
   await expect(section.getByRole("heading", { name: "Provider Accounts 4" })).toBeVisible();
-  await expect(accountRow(page, "Work").locator(".status")).toHaveText("Signed In");
-  await expect(accountRow(page, "Work").locator(".status")).toHaveClass(/t-success/);
+  await expect(accountRow(page, "Work").locator(".status")).toHaveCount(0);
   await expect(accountRow(page, "Personal").locator(".status")).toHaveText("Sign-In Required");
   await expect(accountRow(page, "Personal").locator(".status")).toHaveClass(/t-warning/);
   await expect(accountRow(page, "Codex Team").locator(".status")).toHaveText("Signing In");
-  await expect(accountRow(page, "Personal").locator(".row-sub")).toHaveText("Claude");
+  await expect(accountRow(page, "Personal").locator(".row-sub")).toHaveCount(0);
   await expect(accountRow(page, "Personal").getByRole("button", { name: "Sign In", exact: true })).toBeVisible();
   await expect(section).not.toContainText(/Logged In|Login Required/);
   await expect(signInSteps(page, "Codex Team").locator("ol.steps > li")).toHaveCount(2);
@@ -528,53 +527,39 @@ test("Viewers see each account's status only", async ({ page }) => {
   await page.goto(`/machine-management-e2e.html?role=viewer&${DESIGN_WORKSTATION}`);
   const section = providerAccounts(page);
   await expect(section).toContainText("Only this machine's owner or an organization admin can add or remove its accounts.");
-  await expect(section.getByRole("button")).toHaveCount(0);
+  await expect(section.locator(".provider-account-actions button, .provider-settings-heading button, .provider-account-add button")).toHaveCount(0);
   await expect(accountRow(page, "Personal").locator(".status")).toHaveText("Sign-In Required");
   await section.scrollIntoViewIfNeeded();
   await section.screenshot({ path: "test-results/provider-accounts/viewer-desktop.png" });
 });
 
-test("Owners adopt and revoke provider profiles, confirming active sessions; members only see the state (#3239)", async ({ page }) => {
+test("Account Access explains restrictions and preserves consent and active-session removal checks", async ({ page }) => {
   await page.goto(`/machine-management-e2e.html?profiles&${DESIGN_WORKSTATION}`);
-  const sub = (label: string) => accountRow(page, label).locator(".row-sub");
-  const items = async (label: string) => {
-    const menu = await openAccountMenu(page, label);
-    const names = await menu.locator(".menu-item .menu-text").allTextContents();
-    await page.keyboard.press("Escape");
-    return names.filter((name) => name === "Adopt as Profile…" || name === "Revoke Access…");
-  };
-  await expect(sub("Work")).toHaveText("ClaudeProfile");
-  await expect(sub("Personal")).toHaveText("ClaudeGrant Pending");
-  await expect(sub("Codex Team")).toHaveText("CodexNot Granted");
-  await expect(sub("Codex Solo")).toHaveText("Codex");
-  await expect(accountRow(page, "Codex Solo").locator(".status")).toHaveText("Signed In");
-  expect(await items("Work")).toEqual(["Revoke Access…"]);
-  expect(await items("Personal")).toEqual(["Adopt as Profile…", "Revoke Access…"]);
-  await providerAccounts(page).screenshot({ path: "test-results/provider-accounts/profile-states.png" });
-
-  await (await openAccountMenu(page, "Codex Solo")).getByRole("menuitem", { name: "Adopt as Profile…" }).click();
-  const adoption = page.getByRole("dialog", { name: "Adopt as Profile" });
-  await expect(adoption).toContainText("only control planes granted this profile can use this account's HOME");
-  await page.screenshot({ path: "test-results/provider-accounts/adopt-profile-confirm.png", fullPage: true });
-  await adoption.getByRole("button", { name: "Adopt as Profile" }).click();
-  await expect(page.getByText("Account adopted as a profile.", { exact: true })).toBeVisible();
-  await expect(sub("Codex Solo")).toHaveText("CodexProfile");
-
-  await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Revoke Access…" }).click();
-  await page.getByRole("dialog", { name: "Revoke Access" }).getByRole("button", { name: "Revoke Access" }).click();
+  await expect(accountRow(page, "Work").locator(".row-sub")).toHaveCount(0);
+  await expect(accountRow(page, "Personal").locator(".row-sub")).toHaveText("Grant Pending");
+  await expect(accountRow(page, "Codex Team").locator(".row-sub")).toHaveText("No Access Here");
+  await (await openAccountMenu(page, "Codex Solo")).getByRole("menuitem", { name: "Account Access…" }).click();
+  const access = page.getByRole("dialog", { name: "Account Access", exact: true });
+  await expect(access).toContainText("doesn't change the default account");
+  await access.getByRole("button", { name: "Limit Access to This Server…" }).click();
+  const consent = page.getByRole("dialog", { name: "Limit Access to This Server", exact: true });
+  await expect(consent).toContainText("only Wollipog servers with access can use this account");
+  await consent.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(access).toBeVisible();
+  await access.getByRole("button", { name: "Limit Access to This Server…" }).click();
+  await consent.getByRole("button", { name: "Limit Access", exact: true }).click();
+  await expect(page.getByText("Account access updated.", { exact: true })).toBeVisible();
+  await expect(access).toHaveCount(0);
+  await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Account Access…" }).click();
+  await access.getByRole("button", { name: "Remove This Server's Access…" }).click();
+  await page.getByRole("dialog", { name: "Revoke Access", exact: true }).getByRole("button", { name: "Revoke Access", exact: true }).click();
   const force = page.getByRole("dialog", { name: "Revoke Access from Active Sessions" });
   await expect(force).toContainText("3 active sessions use this account's profile.");
-  await expect(force).toContainText("Fix the half-cent rounding bug");
-  await expect(force).toContainText("and 1 more");
-  await page.screenshot({ path: "test-results/provider-accounts/revoke-profile-force-confirm.png", fullPage: true });
-  await force.getByRole("button", { name: "Revoke Access" }).click();
+  await force.getByRole("button", { name: "Revoke Access", exact: true }).click();
   await expect(page.getByText("Access revoked.", { exact: true })).toBeVisible();
-  await expect(sub("Work")).toHaveText("Claude");
-
   await page.goto(`/machine-management-e2e.html?profiles&role=machine-owner&${DESIGN_WORKSTATION}`);
-  await expect(sub("Personal")).toHaveText("ClaudeGrant Pending");
-  expect(await items("Personal")).toEqual([]);
-  expect(await items("Work")).toEqual([]);
+  const menu = await openAccountMenu(page, "Personal");
+  await expect(menu.getByRole("menuitem", { name: "Account Access…" })).toHaveCount(0);
 });
 
 test("Owners recover a stale provider HOME lease only where the machine can prove it abandoned (#3241)", async ({ page }) => {
@@ -584,11 +569,11 @@ test("Owners recover a stale provider HOME lease only where the machine can prov
     const menu = await openAccountMenu(page, label);
     return menu.getByRole("menuitem", { name: /^Recover Account…/u });
   };
-  await expect(sub("Personal")).toHaveText("ClaudeRecovery Needed");
-  await expect(sub("Codex Team")).toHaveText("CodexRecovery Needed");
+  await expect(sub("Personal")).toHaveText("Recovery Needed");
+  await expect(sub("Codex Team")).toHaveText("Recovery Needed");
   await expect(accountRow(page, "Codex Team").locator(".provider-account-lease"))
     .toHaveAttribute("title", "Wollipog can't safely unlock this account until this machine has restarted. Save your work, restart the machine, then recover the account in Connections.");
-  await expect(sub("Work")).toHaveText("Claude");
+  await expect(sub("Work")).toHaveCount(0);
   await expect(await recoverItem("Codex Team")).toBeDisabled();
   await page.keyboard.press("Escape");
   await providerAccounts(page).screenshot({ path: "test-results/provider-accounts/stale-leases.png" });
@@ -599,7 +584,7 @@ test("Owners recover a stale provider HOME lease only where the machine can prov
   await page.screenshot({ path: "test-results/provider-accounts/recover-lease-confirm.png", fullPage: true });
   await recovery.getByRole("button", { name: "Recover Account" }).click();
   await expect(page.getByText("Account unlocked.", { exact: true })).toBeVisible();
-  await expect(sub("Personal")).toHaveText("Claude");
+  await expect(sub("Personal")).toHaveCount(0);
   await providerAccounts(page).screenshot({ path: "test-results/provider-accounts/lease-recovered.png" });
 
   await page.goto(`/machine-management-e2e.html?leases&role=machine-owner&${DESIGN_WORKSTATION}`);
@@ -617,7 +602,7 @@ test("Machine owners can start both provider sign-in flow shapes", async ({ page
   // A new account's sign-in is a row at the end of the list, expanded into its steps (#2996).
   const claude = signInSteps(page, "Studio Claude");
   await expect(accountRow(page, "Studio Claude").locator(".status")).toHaveText("Signing In");
-  await expect(providerAccounts(page).locator(".surface > .row").last()).toContainText("Studio Claude");
+  await expect(providerAccounts(page).locator(".provider-account-group").filter({ has: page.getByRole("heading", { name: "Claude", exact: true }) }).locator(".provider-accounts-list > .row").last()).toContainText("Studio Claude");
   await expect(claude.getByRole("link", { name: "Open Claude Sign-In" })).toBeVisible();
   await expect(claude.getByLabel("Paste the Code It Shows")).toHaveAttribute("type", "password");
   await page.screenshot({ path: "test-results/provider-login/claude-paste-code.png", fullPage: true });
@@ -640,7 +625,7 @@ test("Machine owners can start both provider sign-in flow shapes", async ({ page
 
 test("a sign-in runs inside its own row: Work is listed once with Cancel, and a rejected code is an error under the field (#2996)", async ({ page }) => {
   await page.goto(`/machine-management-e2e.html?signIn=rejected&${DESIGN_WORKSTATION}`);
-  await expect(providerAccounts(page).locator(".surface > .row").filter({ hasText: "Work" })).toHaveCount(1);
+  await expect(providerAccounts(page).locator(".provider-accounts-list > .row").filter({ hasText: "Work" })).toHaveCount(1);
   await expect(accountRow(page, "Work").locator(".status")).toHaveText("Signing In");
   await expect(accountRow(page, "Work").getByRole("button", { name: "Cancel" })).toBeVisible();
   await expect(providerAccounts(page).locator("article")).toHaveCount(0);
@@ -667,7 +652,7 @@ test("each sign-in ending is one notice in its row, and Dismiss removes it for g
   let steps = signInSteps(page, "Work");
   await expect(steps.locator(".notice.t-danger .notice-title")).toHaveText("Sign-In Failed");
   await expect(steps.getByRole("button")).toHaveText(["Try Again", "Dismiss"]);
-  await expect(accountRow(page, "Work").locator(".status")).toHaveText("Signed In");
+  await expect(accountRow(page, "Work").locator(".status")).toHaveCount(0);
 
   await page.goto(`/machine-management-e2e.html?signIn=timed-out&${DESIGN_WORKSTATION}`);
   steps = signInSteps(page, "Work");
@@ -730,11 +715,11 @@ test("at 390px the code field and Submit Code stack at full width, and wrapped s
   }
 });
 
-test("a hidden email's sign-in head reads Signing In to Codex in full at 390px, its badge wrapping under it (#2996)", async ({ page }) => {
+test("a hidden email's sign-in head and badge remain unclipped at 390px (#2996)", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("wollipog.hide-account-emails", "true"));
   for (const [fixture, title] of [["code", "Signing In to Claude"], ["device", "Signing In to Codex"]] as const) {
     await page.goto(`/machine-management-e2e.html?signIn=${fixture}&emailLabels&${DESIGN_WORKSTATION}`);
-    const row = providerAccounts(page).locator(".surface > .row").filter({ has: page.locator(".row-title", { hasText: title }) });
+    const row = providerAccounts(page).locator(".provider-accounts-list > .row").filter({ has: page.locator(".row-title", { hasText: title }) });
     const head = async () => row.evaluate((element) => {
       const name = element.querySelector<HTMLElement>(".row-title")!;
       const badge = element.querySelector<HTMLElement>(".status")!.getBoundingClientRect();
@@ -750,7 +735,7 @@ test("a hidden email's sign-in head reads Signing In to Codex in full at 390px, 
     await page.setViewportSize({ width: 390, height: 844 });
     await row.scrollIntoViewIfNeeded();
     measured = await head();
-    expect(measured, `${fixture} at 390`).toMatchObject({ text: title, clipped: false, overflows: false, badgeBelow: true, sub: "Email hidden" });
+    expect(measured, `${fixture} at 390`).toMatchObject({ text: title, clipped: false, overflows: false, sub: "Email hidden" });
     await page.setViewportSize({ width: 1280, height: 720 });
   }
 });
@@ -1011,59 +996,290 @@ for (const width of [1440, 390]) {
   });
 }
 
-test("turning on automatic switching confirms the provider terms first, and Cancel saves nothing (#2991)", async ({ page }) => {
-  await openSettings(page);
-  const dialog = settingsDialog(page);
-  const toggle = dialog.getByRole("switch", { name: "Switch Accounts Automatically" });
+test("inline switching retains terms consent and cancellation, and disabling applies directly", async ({ page }) => {
+  const toggle = providerAccounts(page).getByRole("switch", { name: "Switch Accounts at a Usage Limit" });
   await expect(toggle).toHaveAttribute("aria-checked", "false");
-  await expect(dialog).toContainText("When an account reaches its usage limit, the next turn moves to another account from the same provider on this machine.");
   await toggle.click();
-  await dialog.getByRole("button", { name: "Save Changes" }).click();
   const confirmation = page.getByRole("dialog", { name: "Turn On Automatic Switching" });
   await expect(confirmation.locator(".notice.t-warning")).toContainText("prohibit circumventing rate limits");
-  await expect(confirmation.locator(".modal-tone-icon")).toHaveCount(0);
-  const turnOn = confirmation.getByRole("button", { name: "Turn On Automatic Switching" });
-  await expect(turnOn).toHaveClass(/\bprimary\b/);
-  await expect(turnOn).toBeFocused();
-  await confirmation.getByRole("button", { name: "Cancel" }).click();
-  await expect(dialog).toBeVisible();
-  await expect.poll(() => page.evaluate(() => document.querySelector('[role="switch"]')?.getAttribute("aria-checked"))).toBe("true");
-
-  await dialog.getByRole("button", { name: "Save Changes" }).click();
-  await page.getByRole("dialog", { name: "Turn On Automatic Switching" }).getByRole("button", { name: "Turn On Automatic Switching" }).click();
-  await expect(dialog).toHaveCount(0);
-  await openSettings(page);
-  await expect(settingsDialog(page).getByRole("switch", { name: "Switch Accounts Automatically" })).toHaveAttribute("aria-checked", "true");
+  await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await toggle.click();
+  await confirmation.getByRole("button", { name: "Turn On Automatic Switching" }).click();
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
-test("Machine settings save independent Claude and Codex default accounts", async ({ page }) => {
-  await openSettings(page);
-  const dialog = settingsDialog(page);
-  await expect(dialog.getByRole("group", { name: "Default Accounts" })).toBeVisible();
-  const claude = dialog.getByRole("button", { name: /Default Claude Account:/u });
-  const codex = dialog.getByRole("button", { name: /Default Codex Account:/u });
-  await expect(claude).toHaveAccessibleName(/No Default/u);
-  await expect(codex).toHaveAccessibleName(/No Default/u);
-
-  await claude.click();
-  await expect(page.getByRole("option", { name: /Work/u })).toContainText("Signed In");
-  await expect(page.getByRole("option", { name: /Personal/u })).toContainText("Sign-In Required");
-  await expect(page.getByRole("listbox")).not.toContainText(/Logged In|Login Required/u);
-  await page.getByRole("option", { name: /Personal/u }).click();
-  await codex.click();
-  await page.getByRole("option", { name: /Codex Solo/u }).click();
-  await dialog.getByRole("button", { name: "Save Changes" }).click();
-  await expect(dialog).toHaveCount(0);
-
-  await openSettings(page);
-  await expect(settingsDialog(page).getByRole("button", { name: /Default Claude Account:/u })).toHaveAccessibleName(/Personal/u);
-  await expect(settingsDialog(page).getByRole("button", { name: /Default Codex Account:/u })).toHaveAccessibleName(/Codex Solo/u);
-  await settingsDialog(page).getByRole("button", { name: "Cancel" }).click();
+test("account menus save independent defaults and explicitly recover a missing default", async ({ page }) => {
+  const accounts = providerAccounts(page);
+  await expect(accounts.getByRole("combobox")).toHaveCount(0);
+  await expect(accounts.getByRole("button", { name: /^Change New/ })).toHaveCount(0);
+  for (const account of ["Personal", "Codex Solo"]) {
+    await (await openAccountMenu(page, account)).getByRole("menuitem", { name: "Set as Default", exact: true }).click();
+    await expect(accountRow(page, account).locator(".provider-default-marker")).toHaveText("Default");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  }
   await (await openAccountMenu(page, "Personal")).getByRole("menuitem", { name: "Remove Account…" }).click();
-  await page.getByRole("dialog", { name: "Remove Account" }).getByRole("button", { name: "Remove Account" }).click();
-  await openSettings(page);
-  await expect(settingsDialog(page).getByRole("button", { name: /Default Claude Account:/u }))
-    .toHaveAccessibleName(/Saved Account Not Found/u);
+  await page.getByRole("dialog", { name: "Remove Account", exact: true }).getByRole("button", { name: "Remove Account", exact: true }).click();
+  await expect(accounts).toContainText("The saved default account is missing.");
+  await accounts.getByRole("button", { name: "Clear Claude Default" }).click();
+  await expect(accounts.getByText("Default Account Unavailable")).toHaveCount(0);
+  await expect(accountRow(page, "Codex Solo").locator(".provider-default-marker")).toHaveText("Default");
+});
+
+test.describe("usage through a failed refresh (#4353)", () => {
+  const dropAndFailReads = async (page: import("@playwright/test").Page) => {
+    await page.evaluate(() => {
+      window.__WOLLIPOG_MACHINE_E2E__.setUsageReadFailure(true);
+      window.__WOLLIPOG_MACHINE_E2E__.setRunnerStatus("offline");
+    });
+  };
+  const usage = (page: import("@playwright/test").Page) =>
+    accountRow(page, "Codex Team").getByRole("button", { name: /Usage Details/u });
+
+  test("keeps each account's last reading, marked Last Known, and keeps it after a reconnect", async ({ page }) => {
+    await page.goto(`/machine-management-e2e.html?${DESIGN_WORKSTATION}`);
+    await expect(usage(page)).toContainText("% Left");
+    await expect(usage(page)).not.toContainText("Last Known");
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/usage-1-read-desktop.png" });
+
+    await dropAndFailReads(page);
+    await expect(usage(page)).toContainText("Last Known");
+    await expect(usage(page)).toContainText("% Left");
+    await expect(usage(page)).not.toContainText("Usage Not Reported");
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/usage-2-failed-refresh-offline-desktop.png" });
+
+    await usage(page).click();
+    await expect(accountRow(page, "Codex Team").getByText(/^Last known reading/u)).toBeVisible();
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/usage-3-details-desktop.png" });
+    await usage(page).click();
+
+    // Back online with reads still failing: nothing newer is known, and a recent reading stays.
+    await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setRunnerStatus("online"));
+    await expect(usage(page)).toContainText("% Left");
+    await expect(usage(page)).not.toContainText("Last Known");
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/usage-4-reconnected-read-failing-desktop.png" });
+  });
+
+  for (const theme of ["dark", "light"] as const) {
+    test(`reads at phone width in the ${theme} theme`, async ({ browser }) => {
+      // The same touch device in both themes, so their controls are the same size.
+      const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+      const phone = await context.newPage();
+      try {
+        await phone.goto(`/machine-management-e2e.html?theme=${theme}&${DESIGN_WORKSTATION}`);
+        await expect(usage(phone)).toContainText("% Left");
+        await dropAndFailReads(phone);
+        await expect(usage(phone)).toContainText("Last Known");
+        await providerAccounts(phone).screenshot({ path: `playwright-report/provider-accounts/usage-failed-refresh-${theme}-phone.png` });
+      } finally { await context.close(); }
+    });
+  }
+});
+
+test.describe("Priority Order (#4353)", () => {
+  const openPriority = async (page: import("@playwright/test").Page, query: string, viewport?: { width: number; height: number }) => {
+    if (viewport) await page.setViewportSize(viewport);
+    await page.goto(`/machine-management-e2e.html?priority=on&priorityLimit=1&${query}`);
+    await expect(providerAccounts(page)).toBeVisible();
+  };
+  const moveButton = (page: import("@playwright/test").Page, id: string, direction: "up" | "down") =>
+    providerAccounts(page).locator(`[data-move="${id}:${direction}"]`);
+
+  test("shows its ranking, expected account and skip reasons, and reorders by keyboard alone", async ({ page }) => {
+    await openPriority(page, DESIGN_WORKSTATION);
+    const accounts = providerAccounts(page);
+    await expect(accounts.getByRole("radiogroup", { name: "Claude Account Selection" }).getByRole("radio", { name: "Priority Order" })).toHaveAttribute("aria-checked", "true");
+    await expect(accounts.getByRole("radio", { name: /balance/i })).toHaveCount(0);
+    await expect(accounts.getByText("New sessions use")).toBeVisible();
+    await expect(accounts.getByText("Skipped: needs sign-in.")).toBeVisible();
+    await expect(accounts.getByText(/Skipped: at a usage limit \(Session Window\)\. Resets in 2 hours\./u)).toBeVisible();
+    await expect(accountRow(page, "work@example.com").getByRole("button", { name: /Usage Details/u }), "the usage line reads the same window").toContainText("0% Left · Resets in 2 hours");
+    await expect(accounts.getByText("Skipped: no longer on this machine.")).toBeVisible();
+    await expect(accounts.getByText("Next Session")).toBeVisible();
+    await expect(accounts.getByText("Not Ranked")).toBeVisible();
+    await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-desktop.png" });
+
+    const down = moveButton(page, "claude-work", "down");
+    await down.focus();
+    await page.keyboard.press("Enter");
+    await expect(accounts.getByRole("status").filter({ hasText: /Moved .* to position 3 of 4\./u }), "the new position is shown, not only announced").toBeVisible();
+    await expect(down, "focus stays with the moved row").toBeFocused();
+    await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-keyboard-focus-desktop.png" });
+    await page.keyboard.press("Space");
+    await expect(accounts.getByRole("status").filter({ hasText: /position 4 of 4\./u })).toBeVisible();
+    await expect(moveButton(page, "claude-work", "up"), "at the edge, focus moves to the direction that still works").toBeFocused();
+    await expect(down).toHaveAttribute("aria-disabled", "true");
+    await page.keyboard.press("Enter");
+    await expect(accounts.getByRole("status").filter({ hasText: /position 3 of 4\./u })).toBeVisible();
+  });
+
+  test("reads in the light theme at both widths", async ({ browser, page }) => {
+    await openPriority(page, `theme=light&${DESIGN_WORKSTATION}`);
+    await expect(providerAccounts(page).getByText("Skipped: needs sign-in.")).toBeVisible();
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/priority-light-desktop.png" });
+    // The same touch device as the dark capture, so their controls are the same size.
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    const phone = await context.newPage();
+    try {
+      await openPriority(phone, `theme=light&${DESIGN_WORKSTATION}`);
+      await expect(providerAccounts(phone).getByText("Skipped: needs sign-in.")).toBeVisible();
+      await providerAccounts(phone).screenshot({ path: "playwright-report/provider-accounts/priority-light-mobile.png" });
+    } finally { await context.close(); }
+  });
+
+  test("the account menu adds to and removes from the order", async ({ page }) => {
+    await openPriority(page, DESIGN_WORKSTATION);
+    const addMenu = await openAccountMenu(page, "credits@example.com");
+    await expect(addMenu.getByRole("menuitem", { name: "Add to Priority Order", exact: true })).toBeVisible();
+    await expect(addMenu.getByRole("menuitem", { name: "Set as Default", exact: true }), "a default wouldn't apply here").toHaveCount(0);
+    await settleAnimations(page);
+    await page.screenshot({ path: "playwright-report/provider-accounts/priority-menu-add-desktop.png" });
+    await page.keyboard.press("Escape");
+    const removeMenu = await openAccountMenu(page, "team@example.com");
+    await expect(removeMenu.getByRole("menuitem", { name: "Remove from Priority Order", exact: true })).toBeVisible();
+    await settleAnimations(page);
+    await page.screenshot({ path: "playwright-report/provider-accounts/priority-menu-remove-desktop.png" });
+    await removeMenu.getByRole("menuitem", { name: "Remove from Priority Order", exact: true }).click();
+    await expect(accountRow(page, "team@example.com").locator(".provider-default-marker")).toHaveText("Not Ranked");
+  });
+
+  test("a missing account takes only Remove, and the others can move past it", async ({ page }) => {
+    await openPriority(page, DESIGN_WORKSTATION);
+    await moveButton(page, "claude-team", "down").click();
+    await expect(providerAccounts(page).getByRole("status").filter({ hasText: /position 4 of 4\./u })).toBeVisible();
+    await expect(accountRow(page, "Missing Account").getByRole("button", { name: /^Remove Missing Account 3 from Priority Order$/u })).toBeVisible();
+  });
+
+  test("moves by tap on a phone, with targets large enough to touch", async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    const page = await context.newPage();
+    try {
+      await openPriority(page, DESIGN_WORKSTATION);
+      const accounts = providerAccounts(page);
+      await expect(accounts.getByText("Skipped: needs sign-in.")).toBeVisible();
+      const up = moveButton(page, "claude-team", "up");
+      const box = await up.boundingBox();
+      expect(box!.width).toBeGreaterThanOrEqual(28);
+      const scroll = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      expect(scroll, "the rows fit without sideways scrolling").toBeLessThanOrEqual(0);
+      const clipped = await accounts.locator(".provider-account-skip").evaluateAll((reasons) => reasons
+        .filter((reason) => reason.scrollWidth > reason.clientWidth).map((reason) => reason.textContent));
+      expect(clipped, "every skip reason reads whole").toEqual([]);
+      await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-mobile.png" });
+      await up.tap();
+      await expect(accounts.getByRole("status").filter({ hasText: /position 2 of 4\./u })).toBeVisible();
+      const usageRows = accounts.locator(".provider-accounts-list > .row:has(.provider-usage-toggle)");
+      for (const row of await usageRows.all()) {
+        const [menu, usage] = [await row.getByRole("button", { name: /^More Actions for/u }).boundingBox(), await row.locator(".provider-usage-toggle").boundingBox()];
+        expect(Math.abs((menu!.y + menu!.height / 2) - (usage!.y + usage!.height / 2)), "the menu sits level with its usage line").toBeLessThanOrEqual(2);
+      }
+      await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-mobile-moved.png" });
+    } finally { await context.close(); }
+  });
+
+  test("no eligible account says so, and a lost race shows the saved order", async ({ page }) => {
+    await page.goto(`/machine-management-e2e.html?priority=none&${DESIGN_WORKSTATION}`);
+    const accounts = providerAccounts(page);
+    await expect(accounts.getByText("No Eligible Account")).toBeVisible();
+    await expect(accounts.getByText(/one would spend API credits/u)).toBeVisible();
+    await expect(accounts.getByText(/each new session needs an account chosen when it starts/u)).toBeVisible();
+    await expect(accounts.getByText(/Choose an account for this session|review this machine's Provider Accounts/u), "that's a launch's wording, not this page's").toHaveCount(0);
+    await expect(accounts.getByText("Next Session")).toHaveCount(0);
+    await accounts.screenshot({ path: "playwright-report/provider-accounts/priority-no-eligible-desktop.png" });
+
+    await page.goto(`/machine-management-e2e.html?priority=on&policyConflict=1&${DESIGN_WORKSTATION}`);
+    await expect(accountRow(page, "personal@example.com").locator(".provider-account-rank")).toContainText("1");
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/priority-conflict-before-desktop.png" });
+    // Attempts work above personal; another client saved the reverse order first.
+    await moveButton(page, "claude-work", "up").click();
+    const refusal = providerAccounts(page).getByRole("alert");
+    await expect(refusal).toContainText("Couldn't Update Claude Account Selection");
+    await expect(refusal).toContainText("Claude account selection changed in another client. The list now shows what's saved.");
+    await expect(accountRow(page, "personal@example.com").locator(".provider-account-rank"), "the saved order shows, not the attempted one").toContainText("4");
+    await expect(accountRow(page, "work@example.com").locator(".provider-account-rank")).toContainText("3");
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/priority-conflict-desktop.png" });
+  });
+
+  test("turning it on starts from the saved order, and an older runner can't", async ({ page }) => {
+    await page.goto(`/machine-management-e2e.html?priority=off&${DESIGN_WORKSTATION}`);
+    const accounts = providerAccounts(page);
+    await (await openAccountMenu(page, "work@example.com")).getByRole("menuitem", { name: "Set as Default", exact: true }).click();
+    const claude = accounts.getByRole("radiogroup", { name: "Claude Account Selection" });
+    await expect(claude.getByRole("radio", { name: "Default Account" })).toHaveAttribute("aria-checked", "true");
+    await claude.getByRole("radio", { name: "Priority Order" }).click();
+    await expect(claude.getByRole("radio", { name: "Priority Order" })).toHaveAttribute("aria-checked", "true");
+    await expect(moveButton(page, "claude-work", "up"), "the saved default ranks first").toHaveAttribute("aria-disabled", "true");
+    await claude.getByRole("radio", { name: "Default Account" }).click();
+    await expect(accountRow(page, "work@example.com").locator(".provider-default-marker"), "and returning restores it").toHaveText("Default");
+
+    await page.goto(`/machine-management-e2e.html?priority=off&policyOutdated=1&${DESIGN_WORKSTATION}`);
+    await expect(providerAccounts(page).getByText("Update this machine's runner to use Priority Order.").first()).toBeVisible();
+    await page.goto(`/machine-management-e2e.html?priority=on&policyOutdated=1&${DESIGN_WORKSTATION}`);
+    await expect(providerAccounts(page).getByText("Priority Order Isn't Being Applied")).toBeVisible();
+    await expect(providerAccounts(page).locator("[data-move]"), "an order it can't enforce can't be changed").toHaveCount(0);
+    await expect(providerAccounts(page).getByText(/^Skipped:/u), "nor read as if it were checked").toHaveCount(0);
+    await expect(providerAccounts(page).getByText("Next Session")).toHaveCount(0);
+    await expect(providerAccounts(page).getByRole("radiogroup", { name: "Claude Account Selection" }).getByRole("radio", { name: "Default Account" }), "it can still be replaced").toBeEnabled();
+    await providerAccounts(page).screenshot({ path: "playwright-report/provider-accounts/priority-older-runner-desktop.png" });
+  });
+});
+
+for (const width of [390, 320]) {
+  test("at " + width + "px Account Access is content-height and its consent returns safely", async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto("/machine-management-e2e.html?credentialImport&machine=native-t14s");
+    await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Account Access…" }).click();
+    const access = page.getByRole("dialog", { name: "Account Access", exact: true });
+    await expect(access).toContainText("doesn't change the default");
+    expect((await access.boundingBox())!.height).toBeLessThan(600);
+    await access.getByRole("button", { name: "Limit Access to This Server…", exact: true }).click();
+    const consent = page.getByRole("dialog", { name: "Limit Access to This Server", exact: true });
+    await expect(consent).toContainText("only Wollipog servers with access can use this account");
+    await consent.getByRole("button", { name: "Back to Account Access", exact: true }).click();
+    await expect(access).toBeVisible();
+    await access.getByRole("button", { name: "Close", exact: true }).last().click();
+    await expect(access).toHaveCount(0);
+    await expect(accountRow(page, "Work").getByRole("button", { name: "More Actions for Work", exact: true })).toBeFocused();
+    await page.goto("/machine-management-e2e.html?profiles&machine=native-t14s");
+    await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Account Access…" }).click();
+    await access.getByRole("button", { name: "Remove This Server's Access…", exact: true }).click();
+    const revoke = page.getByRole("dialog", { name: "Revoke Access", exact: true });
+    await revoke.getByRole("button", { name: "Back to Account Access", exact: true }).click();
+    await expect(access).toContainText("This server has access.");
+  });
+  test("at " + width + "px the compact list sets defaults directly and discloses usage", async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    const accounts = providerAccounts(page);
+    await expect(accounts.getByRole("button", { name: "Add Account…" })).toHaveCount(1);
+    expect((await accounts.boundingBox())!.height).toBeLessThan(500);
+    await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Set as Default", exact: true }).click();
+    await expect(accountRow(page, "Work").locator(".provider-default-marker")).toHaveText("Default");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(accountRow(page, "Work")).not.toContainText("Weekly Window");
+    const usage = accounts.getByRole("button", { name: /^Usage Details for Work/u });
+    expect((await usage.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await usage.click();
+    await expect(accountRow(page, "Work")).toContainText("Weekly Window");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Clear Default", exact: true }).click();
+    await expect(accountRow(page, "Work").locator(".provider-default-marker")).toHaveCount(0);
+  });
+}
+
+test("offline default and switching actions save while adding/sign-in stay unavailable", async ({ page }) => {
+  await setOffline(page);
+  const accounts = providerAccounts(page);
+  await expect(accounts.getByRole("button", { name: "Add Account…" })).toBeDisabled();
+  await expect(accounts.getByRole("button", { name: /^Usage Details for Work/u })).toHaveAccessibleName(/Last Known/u);
+  await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Set as Default", exact: true }).click();
+  await expect(accountRow(page, "Work").locator(".provider-default-marker")).toHaveText("Default");
+  const toggle = accounts.getByRole("switch", { name: "Switch Accounts at a Usage Limit" });
+  await toggle.click();
+  await page.getByRole("dialog", { name: "Turn On Automatic Switching", exact: true }).getByRole("button", { name: "Turn On Automatic Switching", exact: true }).click();
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
 });
 
 test("ordinary members can inspect Runner Capacity but cannot change it", async ({ page }) => {
@@ -1081,11 +1297,14 @@ test("a Machine owner can change capacity without receiving organization-wide co
   await openSettings(page);
   const dialog = settingsDialog(page);
   await expect(dialog.getByLabel("Capacity Limit")).toBeEnabled();
-  await expect(dialog.getByRole("switch", { name: "Switch Accounts Automatically" })).toBeVisible();
-  await expect(dialog.getByRole("group", { name: "Default Accounts" })).toBeVisible();
+  await expect(dialog.getByRole("switch")).toHaveCount(0);
+  await expect(dialog.getByRole("group", { name: "Default Accounts" })).toHaveCount(0);
   await expect(dialog.getByLabel("Machine Name")).toHaveCount(0);
   await expect(dialog.getByRole("group", { name: "Agent Installations" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Delete Machine…" })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(providerAccounts(page).getByRole("button", { name: "Change New Claude Sessions" })).toHaveCount(0);
+  await expect(providerAccounts(page).getByRole("switch", { name: "Switch Accounts at a Usage Limit" })).toBeDisabled();
 });
 
 test("Delete Machine… waits for an online native runner to stop, saying so, then confirms the deletion", async ({ page }) => {
@@ -1154,10 +1373,10 @@ test("at 390px Machine Settings is a bottom sheet: two 48px footer buttons, Dele
   await expect(last.getByRole("button", { name: "Delete Machine…" })).toBeVisible();
   await expect(last).toContainText("Stop the runner to delete.");
   // The confirmation replaces the sheet, with Back, rather than stacking a second one (§7.5).
-  await dialog.getByRole("switch", { name: "Switch Accounts Automatically" }).click();
-  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await providerAccounts(page).getByRole("switch", { name: "Switch Accounts at a Usage Limit" }).click();
   const confirmation = page.getByRole("dialog", { name: "Turn On Automatic Switching" });
-  await expect(confirmation.getByRole("button", { name: "Back to Machine Settings" })).toBeVisible();
+  await expect(confirmation.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
   await expect(dialog).toBeHidden();
 });
 
@@ -1553,4 +1772,43 @@ test("a Reconnect that fails from All Machines reads as it does from the machine
   await machineRow(page).click();
   await page.locator("article.machine-detail .notice").getByRole("button", { name: "Reconnect" }).click();
   await expect(toast.locator(".toast-detail")).toHaveText("Wollipog couldn't be reached. Check the connection, then try again.");
+});
+
+for (const width of [1280, 390]) {
+  test(`reviewer executable policy persists from Machine Settings at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`/machine-management-e2e.html?${DESIGN_WORKSTATION}`);
+    await openSettings(page);
+    const dialog = settingsDialog(page);
+    const choice = dialog.getByRole("button", { name: "Reviewer Executable Policy: Strict", exact: true });
+    await choice.click();
+    await page.getByRole("option", { name: "Personal Machine", exact: true }).click();
+    await dialog.getByRole("button", { name: "Save Changes", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await openSettings(page);
+    const selected = dialog.getByRole("button", { name: "Reviewer Executable Policy: Personal Machine", exact: true });
+    await expect(selected).toBeVisible();
+    await selected.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("reviewer-policy.png") });
+    await selected.click();
+    await page.getByRole("option", { name: "Strict", exact: true }).click();
+    await dialog.getByRole("button", { name: "Save Changes", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await openSettings(page);
+    await expect(dialog.getByRole("button", { name: "Reviewer Executable Policy: Strict", exact: true })).toBeVisible();
+  });
+}
+
+test("keyboard default actions keep focus on the account menu after delayed saves", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?defaultSaveDelay&machine=native-t14s");
+  const row = accountRow(page, "Work");
+  const more = row.getByRole("button", { name: "More Actions for Work", exact: true });
+  await more.focus(); await page.keyboard.press("Enter");
+  await page.getByRole("menuitem", { name: "Set as Default", exact: true }).press("Enter");
+  await expect(row.locator(".provider-default-marker")).toHaveText("Default");
+  await expect(more).toBeFocused();
+  await more.press("Enter");
+  await page.getByRole("menuitem", { name: "Clear Default", exact: true }).press("Enter");
+  await expect(row.locator(".provider-default-marker")).toHaveCount(0);
+  await expect(more).toBeFocused();
 });

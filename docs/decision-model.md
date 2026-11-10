@@ -24,6 +24,10 @@ A harness qualifies when its runner speaks protocol v285 and discovery advertise
 Claude Code with the session-naming lockdown flags plus `--json-schema`, or Codex App Server at the
 session-naming floor.
 
+A Claude Code alias that only means one model in plan mode, such as `opusplan`, is not offered as a
+target and a saved one is refused as unavailable, because these calls never run in plan mode (see
+Calls).
+
 ## Calls
 
 A call runs on the runner, with credentials that stay on the runner, through `run_decision`. The
@@ -31,6 +35,24 @@ runner runs the harness in a neutral directory with no tools, no MCP servers, no
 access and no persistence, and returns only the structured output and usage. Claude Code's
 `structured_output` and Codex's schema-constrained final message are the only answers; free text is
 never parsed.
+
+Claude Code calls and session naming use `--permission-mode dontAsk`, never `plan` (#4367). Both
+refuse every tool here, and `--tools ""` already leaves none but the schema's own. Measured on
+2.1.318 with otherwise identical flags, `plan` also does two things a call must not get:
+
+- It changes the model behind an alias. `--model haiku` answers on `claude-sonnet-5-5` at about 20
+  times the cost, while `--model opusplan` means Opus only in plan mode.
+- It adds about 2,500 tokens of planning instructions, which a call can answer instead of its own
+  prompt. An exact model id under `plan` stayed on Haiku and still replied that plan mode was active.
+
+Discovery advertises `sessionNaming` and `decisionCalls` only for a release whose help lists
+`dontAsk`. The `discovery` probe in `pnpm probe:claude-assumptions` re-measures the model a real
+`claude` asks for on these flags, so a release that changes it is reported.
+
+A Decision record shows both models: **Target Model**, which the setting chose, and **Answered By**,
+the exact id the provider reported for its attempts: Claude Code's `modelUsage`, and for Codex App
+Server the turn's model, or the `model/rerouted` target when the server reports one. A record whose
+attempts reported none, such as a call that never reached a provider, shows no answering model.
 
 Each kind lives in `apps/control-plane/src/decision-kinds.ts`: a fixed `promptVersion`, fixed
 instructions, its verdicts (always including `uncertain`) and any extra fields. Untrusted inputs
@@ -57,6 +79,14 @@ const outcome = await decisionRuntime.decide({
 ```
 
 ### Scope Grant
+
+Since #4282 a Full Control first message gets no call of this kind: the Orchestrator reads the
+owner's first message and proposes the scope, and the server's deterministic floors bind that
+proposal to the message (`docs/full-control-launch-preparation.md`). Full Control grants stored
+before then still read as below. Since #4282's third slice a Custom campaign's epic seed gets no call
+of this kind either: it is the constraint check of the Custom Orchestrator's first-message proposal
+(see [Custom Epic Seed](#custom-epic-seed-issue_scope_seed-4104)). Seed readings recorded before then
+still show in Campaign Status.
 
 `scope_grant` (#4102) reads a Full Control owner's exact first message and nothing else: no data
 fields, no tools, no repository or issue content. Its fields are `explicit`, `ranges` and `context`
@@ -98,14 +128,77 @@ ceiling, change a repository or grant an operation; callers enforce that before 
 with `narrowToProposal`. Write a repository floor as "a repository in the campaign's boundary" so it
 holds for single- and multi-repository boundaries.
 
+## Typed Questions (#4283)
+
+A kind may set `typed` instead of returning a verdict. It then lists fixed questions
+(`apps/control-plane/src/decision-questions.ts`), each with:
+
+- a stable `questionId`, a short Title Case `label` and fixed text, which never contains caller data;
+- an answer type: `boolean`, `choice` with allowed values, or an integer `score` with a range;
+- a rule saying which values satisfy the question, which violate it, and which (such as
+  `cannot_tell`) settle nothing;
+- optionally a per-item `subject` ("for each proposed issue") and `parameterized`, which asks the
+  question once per caller parameter (such as each constraint the owner stated, quoted as data).
+
+The caller passes `inputs.questions`: each subject's items (a schema-safe `id` and a display `label`)
+and each parameterized question's parameters. Malformed, missing, unused or oversized question inputs
+throw `DecisionInputError`; a typed decision never asks a partial set. Zero parameters simply ask
+nothing for that question, so a caller with nothing checkable should not call at all.
+
+All of a decision's questions go in one call with one output schema (`typedOutputSchema`): exactly
+one property per question, each answer exactly `value`, `confidence` (0 to 1) and `evidence` (at
+most 160 characters), and a per-item question exactly one entry per listed item. There is no verdict
+property. The same schema goes to Claude Code's `--json-schema` and Codex's `outputSchema`. Output
+with an added or missing question, an extra field, a verdict, a value outside the allowed answers,
+or a missing or repeated item is `invalid_output`, retried like any other, and never read leniently.
+
+The server derives the verdict (`deriveTypedVerdict`) with the kind's fixed `confidenceThreshold`:
+
+- **refuse** when any answer is a violation at or above the threshold, naming the first such
+  question and item, for example "Issue 4120 violates 'Skip Security'.";
+- **admit** when every answer is satisfied at or above the threshold;
+- otherwise **uncertain**, naming the first answer that could not admit, which takes the failure
+  rule's one person-owned request.
+
+The reason is the server's sentence, never the model's prose. The occurrence's `typed_answers`
+column records the threshold, each question as asked (with its items, and a parameterized question's
+complete parameter, since its display label may be shortened), each answer with its
+confidence, evidence and assessment, and the deciding answer; `DecisionOccurrenceView.typedAnswers`
+projects it, and Campaign Status shows it as a checklist. Records from before typed questions keep
+their single-verdict form. Item labels and parameters are stored there for display, like
+`campaign_selection_proposals`; the other inputs are still kept only as digests.
+
+A typed call goes only to a v307 runner (`typedDecisionQuestions`), which accepts its larger schema
+(`DECISION_SCHEMA_MAX_CHARS`) and output (`DECISION_OUTPUT_MAX_BYTES`). With an older runner the
+occurrence records one non-transient `runner_incapable` attempt and takes the person route.
+
+The credential screen, follow-up relatedness and closure-reason kinds are typed (prompt version
+`v2`, each with a fixed confidence threshold of 0.8; see their sections below). The scope constraint
+check (#4282) comes next. Their verdict names are unchanged, so every caller, and every record from
+before typed questions, keeps its meaning: a replay of a `v1` occurrence joins its recorded
+single-verdict outcome and is never asked again. The optional dedicated decisions provider is
+deferred, and #4283 closes without it.
+
 ## The Question and Credential Screen (`credential_screen`, #4104)
 
 `apps/control-plane/src/credential-screen.ts` screens Full Control question and tool text that the
 deterministic floor in `@wollipog/protocol` (`campaign-authority.ts`) left open. The `request`
 data field is one JSON document: the `surface` (`implementation_question`, `provider_question`,
-`tool_request` or `owner_decision`) and the request's own text, quoted. Verdicts are `ask`,
-`discusses` and `uncertain`. The occurrence key names the session, the request occurrence and a
-digest of that text, so a replay joins the recorded outcome.
+`tool_request` or `owner_decision`) and the request's own text, quoted. The occurrence key names the
+session, the request occurrence and a digest of that text, so a replay joins the recorded outcome.
+
+It asks three typed yes-or-no questions about what answering or approving the request would do. Each
+one excludes a request that only names its subject as part of a design or the code:
+**No Credential Handed Over** (`hands_over_credential`), **No Sign-In Performed**
+(`performs_sign_in`) and **No Access Granted** (`grants_access`). The server derives:
+
+- `ask` from a confident yes to any of them, which declines the request;
+- `discusses` from a confident no to all three, which leaves it to the Orchestrator;
+- `uncertain` from anything else, including a yes below the threshold, which holds the request for
+  the owner to classify.
+
+The screen's authority is unchanged. A low-confidence yes holds the request rather than declining it,
+and nobody may answer a held request.
 
 - The typed route screens an implementation question before it is admitted and passes the fact to
   the evaluation. A re-evaluation of a stored occurrence never re-screens it.
@@ -126,12 +219,138 @@ digest of that text, so a replay joins the recorded outcome.
 - inputs too large for one call, or a runtime that cannot finish, recorded as a failed occurrence
   rather than judged in part.
 
+Both are typed:
+
+- Follow-up relatedness asks one choice, **Related to the Requested Work** (`relation`).
+  `completes_requested_work` or `gap_found_in_requested_work` satisfy it, `separate_work` violates it,
+  and `cannot_tell` settles nothing.
+- Closure-reason choice asks **Evidence Supports the Reason** (`supports`, `does_not_support`,
+  `cannot_tell`) and **Explanation Matches the Evidence** (`consistent`, `contradicts_evidence`,
+  `cannot_tell`).
+
 The confirming verdict (`related`, `fits`) leaves the request as its floor admitted it. The refusing
-one (`unrelated`, `does_not_fit`) returns it to the Orchestrator with the model's reason. An uncertain
+one (`unrelated`, `does_not_fit`) returns it to the Orchestrator with the server's sentence naming the
+deciding question, followed by that answer's evidence. An uncertain
 or failed check makes the affected publication or closure the person's: that request is the one
 typed, person-owned request, so no second one is created. `follow_up_relatedness` is the only kind
 besides `scope_grant` that reads the owner's message (the boundary objective). See
 `docs/campaign-issue-scope.md` for where each check sits.
+
+## First-Message Intent (#4104)
+
+No verb list decides what a first message asks for. The `DIRECTIVE`, `BACKGROUND` and `NEGATION`
+classification (#3920) is removed. Under Full Control, the scope grant above is the only source of
+scope and context references. `issueReferenceSpans` remains only as the exact-reference fast path
+and the reference bounds; the digit-string floor is `writtenAsDigits` in `scope-grant.ts`. The #3920
+and #4061 regression cases run through `scopeGrantCandidates` in `scope-grant.test.ts`.
+
+### Custom Epic Seed (`issue_scope_seed`, #4104)
+
+A Custom campaign's epic seed and first-message issues (#4104, #4259) come from propose-then-check
+since #4282, with the authority the server reading had and no new person step. The server reads
+nothing from the message. When the first message writes a digit string (`needsCampaignIssueScopeSeed`)
+the seed is `pending`, awaiting the Custom Orchestrator's proposal (`proposal: true`), and records who
+wrote the message (`author`: the owner's create request, the owner's first prompt, someone else, or a
+transcript with no author). Delegation is held meanwhile: `create_session` refuses with
+`seed_proposal_required` and tells the Orchestrator to propose. The seed starts once the session is
+created, or once the person's first prompt is admitted when the campaign was launched without one. A
+campaign whose first message was recorded before the seed existed gets the same pending seed the
+first time it tries to delegate, its issue scope is read (#4258), or it is restarted. A restart
+leaves a pending proposal seed waiting; only a pre-#4282 reading interrupted mid-flight becomes the
+owner's.
+
+The Orchestrator calls `request_campaign_issue_scope_change` with the issues the message asks for as
+additions (or none) and a structured `proposal`, every issue `owner_named`. `proposeCampaignSeedScope`
+in `apps/control-plane/src/sessions.ts` then runs:
+
+1. Deterministic floors, with no model call and no runner read of an unwritten number: additions only;
+   every issue in the campaign repository; every number written in the person's exact message as
+   digits, inside a `#`-written range, or inside a bare-digit range written right after "issue" or
+   "issues" (`digitRangeMembers`), and not only as another repository's; an issue the Orchestrator
+   chose is refused (`seed_owner_named_only`). One proposed issue is read for its members; every
+   issue must be one the runner reads as an issue of the campaign repository.
+2. The typed constraint check (`scope_check`, below) against the person's message, always, as the
+   server reading always ran: an empty proposal and one that adds every referenced issue are checked
+   too, so the Orchestrator alone never decides that a number is only background or that no epic is
+   named. At most three distinct checks per seed whatever each proposes, and one proposal is checked
+   at a time (`seed_proposal_in_flight`).
+3. An admit grants exactly what the reading did. One issue with sub-issues or checklist members is the
+   seeded epic, which still waits for the person's scope approval or **Continue Without an Epic**.
+   Otherwise the issues become the campaign's `issueNumbers` with no person step, when the owner wrote
+   the message (only the owner's create request carries `issueNumbersSource: "human_launch_request"`),
+   and a v302 runner receives them for the live Orchestrator without a relaunch (#4269, see
+   `docs/campaign-issue-scope.md`). An admitted empty proposal seeds nothing and holds nothing.
+
+A refusal (a floor's or the check's) names why, and the seed stays pending while the Orchestrator
+revises. An uncertain or failed check, the fourth distinct check, an unstructured proposal, a root
+runner older than structured proposals or typed questions, a message the server can't confirm, or
+issues from a message the owner didn't write leave the seed with the owner: today's Custom human scope
+approval with no seed. It never falls back to parsing the text. That is the typed, person-owned
+request: the owner approves a scope, or chooses **Continue Without an Epic**. Every check is recorded
+with the `issue_scope_seed` subject, so Campaign Status shows it under Decision Model Checks as
+**Epic Seed**, with the seed's state. See `docs/campaign-issue-scope.md` for the states.
+
+## Scope Review (`scope_review`, #4103)
+
+When the owner's first message asked the campaign to choose issues, the Orchestrator proposes the
+issues it chose with selection lineage. Deterministic floors run first: a repository in the
+campaign's boundary, an open issue, not already in scope, held by no other active campaign, within
+the selection's count and Maximum Issues, and no Human Required label rule. Only a proposal that
+passes all of them is reviewed. `proposeSelectionScope` in `apps/control-plane/src/sessions.ts` calls
+the runtime; `apps/control-plane/src/scope-selection.ts` builds the inputs and the occurrence key.
+
+- **Inputs.** The owner's exact first message is the owner's words. The data fields are quoted and
+  untrusted: `grant` (the stored grant's repositories, named issues and selection), `issues` (each
+  issue's number, title, state, labels and a body excerpt that shrinks so any number of issues fits)
+  and `rationale` (the Orchestrator's `explanation`).
+- **Verdicts.** `admit`, `refuse` with a reason, or `uncertain`. Only `admit` can confirm, and only
+  the exact proposal the floors already admitted; fields outside the schema are ignored. No verdict
+  can raise the count, change a repository or grant an operation.
+- **Occurrence key.** The campaign, the boundary revision, the scope revision, the grant's digest and
+  the sorted additions. The rationale is left out on purpose: re-proposing the same issues returns the
+  recorded outcome, so a reworded rationale is never a second review, a second owner request or a
+  second admission. Any re-authorization, such as the owner changing the selection count, reviews
+  afresh, and a linked request retired without a decision is replaced rather than returned.
+- **Failure rule.** An uncertain or failed review creates the owner's one scope approval
+  (`grantReview.cause` `selection_uncertain` or `selection_failed`, with `reviewOccurrenceId`), and
+  the occurrence's `humanRequestId` names it.
+
+`campaign_selection_proposals` keeps each reviewed proposal's issues and rationale, and the scope
+change an admit created, for Campaign Status. The audit still keeps only input digests. Since #4282
+this review serves only campaigns whose stored grant predates the propose-then-check flow.
+
+## Scope Check (`scope_check`, #4282)
+
+Under the propose-then-check flow the Orchestrator reads the owner's first message and proposes the
+scope; the server reads nothing from the text. After the deterministic floors, a proposal that states
+anything checkable is asked the `scope_check` kind's typed questions (#4283) in one call.
+`proposeOrchestratorScope` and `scopeProposalCheck` in `apps/control-plane/src/sessions.ts` run it;
+`apps/control-plane/src/scope-check.ts` builds the inputs, the key and the Campaign Status view.
+
+- **Inputs.** The owner's exact message is the owner's words. The data fields are quoted and
+  untrusted: `proposal` (each issue's origin and rationale, the count, constraints, withheld
+  operations and the overall rationale), `issues` (each issue's number, title, state, labels and a
+  body excerpt that shrinks to fit) and `campaign` (repository, operations, issues in scope and any
+  admitted count, constraints and withheld operations).
+- **Questions** (`SCOPE_CHECK_TYPED`, threshold 0.8): `count_consistent`; `named_asked_for`, one per
+  owner-named issue; `constraint_met`, one per chosen issue and stated constraint, so a refusal names
+  both; `constraints_complete`; `nothing_omitted`; `operations_respected`. Each is a choice with a
+  `cannot_tell` answer that never admits or refuses. None asks about priority, importance, impact or
+  effort. Too many questions for one call is never checked in part: the proposal is the owner's.
+- **Verdicts.** The server derives `admit`, `refuse` (naming the deciding question and item) or
+  `uncertain`. Admit records `constraintCheck` on an Orchestrator-owned change; refuse returns
+  `constraint_check_refused`; uncertain, a failure after the runtime's retries, or inputs that can't
+  fit, make the proposal the owner's one approval, presented as an Owner Question. The runtime's own
+  person route creates nothing: the caller does.
+- **Occurrence key.** The campaign, boundary revision, scope revision, the sorted additions (a shared
+  prefix) and the structured proposal: origins, count, normalized and sorted constraints, withheld
+  operations. The rationale is left out, so a repeat reads the recorded outcome. One set of additions
+  gets at most three distinct checks per scope revision; past that it is the owner's. A check still
+  pending with other inputs is waited for within the runtime's bound, then settled as timed out.
+- **Custom seed.** A Custom campaign's first-message proposal ([Custom Epic Seed](#custom-epic-seed-issue_scope_seed-4104))
+  is always checked, with no fast path, under a seed-wide key prefix
+  (`scope_check:issue_scope_seed:<root>:<message digest>:`), so its three distinct checks count every
+  proposal of that seed whatever issues it names, and one proposal is checked at a time.
 
 ## Audit and Usage
 
@@ -139,7 +358,18 @@ besides `scope_grant` that reads the owner's message (the boundary objective). S
 effort), SHA-256 digests of every input and of the rendered request, the verdict, a reason of at most
 300 characters, the failure class and the person-owned request ID. It never stores the inputs.
 `decision_attempts` records each attempt's number, error class, latency and usage. Cost comes from
-the rate table, and an unpriced attempt has a null cost.
+the rate table, priced by the model that answered, or by the target's model when the attempt named
+none. An unpriced attempt has a null cost, never $0, and makes its occurrence's and campaign's total
+unknown.
+
+A rate can depend on the service tier and each request's input size, so the runner reports what the
+provider said (#4368): Claude Code's `usage.service_tier` and `usage.iterations`, and Codex App
+Server's `thread/start` `serviceTier` and token usage. `iterations` counts only when it adds up to
+`usage`, because it can list just the latest request; otherwise the total only bounds each request.
+Nothing is assumed. A model that has a rate for the missing value stays unpriced, as does one whose
+request sizes span a threshold. The table is the only source: Claude Code's `total_cost_usd` is not used, so a model the table can't
+price stays unpriced. The table has one cache-write rate, so a call whose cache writes last an hour
+records less than Claude Code reports: $0.000255 against $0.000339 on a measured Haiku call.
 
 Campaign decisions are attributed to the campaign root. They are read through
 `GET /api/sessions/:id/campaign/decisions`, with their own usage total. That total is separate from

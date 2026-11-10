@@ -23,6 +23,7 @@ import { CLAUDE_MEDIA_REVIEWER_CLI_VERSION, CLAUDE_MEDIA_REVIEWER_ENV, CLAUDE_ME
 import { CLAUDE_CONTROL_CONTRACT_MIN_VERSION, CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION, CLAUDE_STEERING_MIN_VERSION,
   claudeCapabilitiesFromProbe, claudeVersionAtLeast, probeClaudeCode } from "../src/discovery/claude-code.js";
 import type { ExecResult } from "../src/discovery/resolve.js";
+import { claudeDecisionArgs } from "../src/decision-calls.js";
 import { buildClaudeUserMessage, claudePermissionArgs } from "../src/drivers/claude-code.js";
 import { MANAGED_WORKTREE_GUARD_MATCHER } from "../src/managed-worktree-guard.js";
 import { MEDIA_MCP_SERVER_NAME } from "../src/media-review-relay.js";
@@ -170,6 +171,8 @@ interface SessionSpec {
   allowUnfinished?: boolean;
   args: (paths: IsolatedHome) => string[];
   stdin?: (paths: IsolatedHome) => string[];
+  /** A one-shot `-p` call reads to end of input, so its stdin ends after those lines. */
+  closeStdin?: boolean;
   onEvent?: Parameters<typeof runClaude>[0]["onEvent"];
   prepare?: (paths: IsolatedHome) => void;
   /** Run in an earlier session's homes (resume) instead of fresh ones. */
@@ -198,7 +201,7 @@ async function session(context: Context, spec: SessionSpec): Promise<Session> {
     const env = { ...isolatedClaudeEnv(paths, stub.url, proxy.url), ...spec.env };
     const run = await runClaude({
       bin: context.bin, args: spec.args(paths), cwd: paths.work, env, timeoutMs: TURN_TIMEOUT_MS,
-      traceFile: context.detector.ok ? join(paths.root, `trace-${randomUUID()}.log`) : undefined, stdin: spec.stdin?.(paths), onEvent: spec.onEvent,
+      traceFile: context.detector.ok ? join(paths.root, `trace-${randomUUID()}.log`) : undefined, stdin: spec.stdin?.(paths), closeStdinAfterWrite: spec.closeStdin, onEvent: spec.onEvent,
     });
     // Record what the run contacted before judging it: a failed case still counts against silence.
     for (const request of stub.requests) context.routes.add(`${request.method} ${request.path.split("?")[0]}`);
@@ -420,11 +423,10 @@ async function controlCase(context: Context, answer: "allow" | "deny", subagent:
   const result = await session(context, {
     prepare: (paths) => mkdirSync(join(paths.work, "build")),
     conversations: conversations,
-    // The driver's own interactive argument set for `default` and its stream-json prompt shape. The
-    // mode is named explicitly so the envelope is measured even on a release whose flagless default
-    // differs; whether the flagless launch starts in `default` is its own assumption below.
+    // The driver's own interactive argument set for `default` (which names the mode explicitly) and its
+    // stream-json prompt shape.
     args: () => ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--session-id", randomUUID(),
-      "--model", MODEL, ...claudePermissionArgs("default").args, "--permission-mode", "default"],
+      "--model", MODEL, ...claudePermissionArgs("default").args],
     stdin: () => [JSON.stringify(buildClaudeUserMessage(marker, []))],
     onEvent: (event, write, closeStdin) => {
       if (event.type === "control_request") {
@@ -469,22 +471,25 @@ async function controlCase(context: Context, answer: "allow" | "deny", subagent:
 }
 
 async function probeControl(context: Context): Promise<void> {
-  // claudePermissionArgs("default") passes no --permission-mode: the driver relies on the CLI's own
-  // default being `default`. Measured on 2.1.296: with an auto-capable model it starts in `auto`.
-  await measure("the driver's flagless `default` launch starts the CLI in default mode", `${DRIVERS} (2.6 Approvals mapping)`, async () => {
+  // Left without --permission-mode, 2.1.296 starts an auto-capable model in `auto` (#3849), so the driver
+  // names `default` explicitly. This measures the driver's own argument set, whatever it is.
+  await measure("the driver's `default` launch starts the CLI in default mode", `${DRIVERS} (2.6 Approvals mapping)`, async () => {
+    const perm = claudePermissionArgs("default").args;
+    const named = perm.includes("--permission-mode") ? perm[perm.indexOf("--permission-mode") + 1] : "(none)";
+    expect(named === "default", `the driver's default launch passes --permission-mode ${named}`);
     const marker = `PROBE-${randomUUID().slice(0, 8)}`;
     const result = await session(context, {
       conversations: [{ marker, steps: [] }],
       args: () => ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--session-id", randomUUID(),
-        "--model", MODEL, ...claudePermissionArgs("default").args],
+        "--model", MODEL, ...perm],
       stdin: () => [JSON.stringify(buildClaudeUserMessage(marker, []))],
       onEvent: (event, _write, closeStdin) => { if (event.type === "result") closeStdin(); },
     });
     completed(result);
     const mode = result.init?.permissionMode;
     if (typeof mode !== "string") throw new CouldNotRun("the init event reports no permission mode");
-    expect(mode === "default", `with ${MODEL} and no --permission-mode the CLI started in ${mode}`);
-    return `started in default with ${MODEL}`;
+    expect(mode === "default", `with ${MODEL} and --permission-mode default the CLI started in ${mode}`);
+    return `started in default with ${MODEL} and --permission-mode default`;
   });
   for (const [answer, subagent] of [["allow", false], ["deny", false], ["allow", true]] as const) {
     await measure(`can_use_tool envelope matches ${FIXTURE.split("/").pop()} (default, ${subagent ? "subagent" : "top-level"}, ${answer})`,
@@ -650,7 +655,7 @@ async function probeDiscovery(context: Context): Promise<void> {
     if (discovery.failure?.code === "probe_timeout" || discovery.failure?.code === "version_unverified") throw new CouldNotRun(`discovery failed: ${discovery.failure.code}`);
     expect(discovery.installedVersion === context.version, `discovery read ${String(discovery.installedVersion)}`);
     expect(discovery.streamJsonInput, "help no longer advertises --input-format stream-json");
-    for (const mode of ["acceptEdits", "auto", "bypassPermissions", "plan"]) expect(discovery.permissionModes.includes(mode), `help no longer lists permission mode ${mode}`);
+    for (const mode of ["acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"]) expect(discovery.permissionModes.includes(mode), `help no longer lists permission mode ${mode}`);
     expect(discovery.status !== "unsupported", `discovery classified this release unsupported (${discovery.failure?.message ?? ""})`);
     return `status ${discovery.status}; modes ${discovery.permissionModes.join(",")}; replay ${discovery.replayUserMessages}; fork ${discovery.forkSession}`;
   });
@@ -669,6 +674,29 @@ async function probeDiscovery(context: Context): Promise<void> {
       return `${context.version} ${at ? "meets" : "is below"} ${floor}; attested=${attested}`;
     });
   }
+  await measure("a Decision call on the `haiku` alias asks for Haiku, in dontAsk, with no tools but its schema and no MCP servers", DISCOVERY, async () => {
+    const marker = "DECISION-CALL-PROBE";
+    const schema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false };
+    const result = await session(context, {
+      conversations: [{ marker, steps: [() => tool("structured-1", "StructuredOutput", { answer: "ok" })] }],
+      // The structured answer ends the call, so the scripted conversation has no later final turn.
+      allowUnfinished: true,
+      args: () => [...claudeDecisionArgs([], { agentId: "claude-code", driver: "claude-code", model: "haiku", effort: "low" }, "Answer with the schema.", schema),
+        // The call itself reads one JSON envelope; the startup init is only in the stream.
+        "--output-format", "stream-json", "--verbose"],
+      stdin: () => [marker],
+      closeStdin: true,
+    });
+    const final = completed(result);
+    expect(JSON.stringify(final.structured_output) === '{"answer":"ok"}', `the call answered ${JSON.stringify(final.structured_output)}`);
+    requireMode(result, "dontAsk");
+    const tools = result.init?.tools as string[] | undefined;
+    expect(JSON.stringify(tools) === '["StructuredOutput"]', `the call offered tools ${JSON.stringify(tools)}`);
+    expect(Array.isArray(result.init?.mcp_servers) && !(result.init.mcp_servers as unknown[]).length, "the call loaded MCP servers");
+    const requested = [...new Set(result.requests.flatMap((request) => typeof request.body?.model === "string" ? [request.body.model] : []))];
+    expect(requested.length > 0 && requested.every((model) => /haiku/iu.test(model)), `the call asked for ${requested.join(", ")}`);
+    return `init mode dontAsk; tools ${JSON.stringify(tools)}; asked for ${requested.join(", ")}`;
+  });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -677,8 +705,8 @@ async function probeDiscovery(context: Context): Promise<void> {
 /** The release the media reviewer accepts; the suite compares the measured release with it. */
 export const REVIEWER_PIN = CLAUDE_MEDIA_REVIEWER_CLI_VERSION;
 /** Measured on 2.1.296 with this probe (2026-10-30): under `--bare` the CLI emits this before its
- * startup init. ClaudeMediaReviewerStream requires init first, so this is recorded as the pin's
- * baseline and reported separately rather than hidden (see docs/claude-assumption-probes.md). */
+ * startup init. ClaudeMediaReviewerStream accepts exactly this one notice before init (#3849); a
+ * release that emits anything else first is reported as changed (see docs/claude-assumption-probes.md). */
 export const REVIEWER_PIN_PRE_INIT_EVENTS: readonly string[] = ["system/ui_invalidate"];
 
 async function probeReviewer(context: Context): Promise<void> {
@@ -737,11 +765,11 @@ async function probeReviewer(context: Context): Promise<void> {
     const initIndex = events.findIndex((e) => e.type === "system" && e.subtype === "init");
     if (initIndex < 0) throw new CouldNotRun("no startup init event");
     expect(events[initIndex]!.claude_code_version === context.version, `init reports ${String(events[initIndex]!.claude_code_version)}, not ${context.version}`);
-    // Two deliberate substitutions, both measured separately: the pre-init events (above) are not fed
-    // to the parser, and the version equality, which is the pin itself, is checked as the pin.
+    // The whole stream, pre-init events included, goes to the production parser. One deliberate
+    // substitution: the version equality, which is the pin itself, is checked as the pin.
     const stream = new ClaudeMediaReviewerStream({ model: MODEL });
     let refusal: string | null = null;
-    for (const event of events.slice(initIndex)) {
+    for (const event of events) {
       const checked = event.type === "system" && event.subtype === "init" ? { ...event, claude_code_version: REVIEWER_PIN } : event;
       refusal ??= stream.push(JSON.stringify(checked) + "\n");
     }

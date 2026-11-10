@@ -160,6 +160,21 @@ export class WorktreePortAllocator {
     });
   }
 
+  /** The block an existing worktree can really use before a session commits to it (#4209): the one
+   * its view names, or a new one when another owner took that block or this owner holds another.
+   * Throws when no block can be had, or the journal cannot be read or written: only a real conflict
+   * replaces the block, never a failure to find out. */
+  revalidate(owner: string, preferred: WorktreePortBlock): { block: WorktreePortBlock; replaced: boolean } {
+    const usable = this.withMutation(() => {
+      const held = this.get(owner);
+      if (held) return held.start === preferred.start && held.end === preferred.end && held.size === preferred.size;
+      return validBlock(preferred) && ![...this.allocations.values()].some((allocation) => overlaps(allocation, preferred));
+    });
+    return usable
+      ? { block: this.allocate(owner, preferred), replaced: false }
+      : { block: this.allocate(owner), replaced: true };
+  }
+
   release(owner: string): boolean {
     return this.withMutation(() => {
       const allocation = this.allocations.get(owner);

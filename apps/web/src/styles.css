@@ -5607,6 +5607,44 @@ body.shell-dock-dragging * {
   flex: none;
   font-variant-numeric: tabular-nums;
 }
+/* #4120: a third filter (Repository) takes the whole row below the first two. */
+.campaign-work-filters > :nth-child(3) {
+  grid-column: 1 / -1;
+}
+/* #4120: one repository's rows under a header with its counts. */
+.campaign-work-group + .campaign-work-group {
+  margin-top: var(--space-3);
+}
+.campaign-work-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  font: var(--type-small);
+}
+.campaign-work-group-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.campaign-work-group-counts {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.campaign-work-row-dependency,
+.campaign-work-row-held {
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-small);
+  overflow-wrap: anywhere;
+}
+.campaign-work-row-dependency-label {
+  color: var(--text);
+  font-weight: 500;
+}
 .campaign-work-more {
   justify-self: start;
 }
@@ -5671,6 +5709,39 @@ body.shell-dock-dragging * {
   border-top: 1px solid var(--border);
 }
 .campaign-screen-item:last-child { border-bottom: 1px solid var(--border); }
+/* A typed Decision's answers (#4283): a short checklist, one line per question and item, its icon
+   in the line's first column so the claims align and the answer's details sit under the claim. */
+.decision-answers {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.decision-answer-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* The icon sits beside the claim's line; the answer's details sit under the claim. */
+.decision-answer {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--space-2);
+  overflow-wrap: anywhere;
+}
+.decision-answer > .campaign-status-meta { grid-column: 2; }
+.decision-answer[data-standing="satisfies"] .decision-answer-icon { color: var(--positive-text); }
+.decision-answer[data-standing="violates"] .decision-answer-icon { color: var(--danger-text); }
+.decision-answer[data-standing="unsure"] .decision-answer-icon { color: var(--warning-on-tint); }
+/* The claim's words carry the standing; in forced colors each icon follows them. */
+@media (forced-colors: active) {
+  .decision-answer[data-standing="satisfies"] .decision-answer-icon,
+  .decision-answer[data-standing="violates"] .decision-answer-icon,
+  .decision-answer[data-standing="unsure"] .decision-answer-icon { color: inherit; }
+}
+.decision-answer-claim { color: var(--text); }
 .campaign-screen-actions {
   display: flex;
   flex-wrap: wrap;
@@ -5774,6 +5845,19 @@ body.shell-dock-dragging * {
   font: var(--type-small);
 }
 .review-pr { display: grid; gap: var(--space-1); margin-top: var(--space-2); }
+
+.review-request-facts {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  font: var(--type-small);
+}
+.review-request-facts > div { display: flex; gap: var(--space-2); min-width: 0; }
+.review-request-facts dt { color: var(--text-dim); flex-shrink: 0; }
+.review-request-facts dd { margin: 0; overflow-wrap: anywhere; min-width: 0; }
+.review-request-checks { font: var(--type-small); overflow-wrap: anywhere; }
+.review-request-checks summary { cursor: pointer; }
+.review-request-checks ul { padding-left: var(--space-4); }
 .review-pr-refusal {
   margin: 0;
   padding-left: calc(var(--icon-sm) + var(--space-2));
@@ -7611,9 +7695,9 @@ body.shell-dock-dragging * {
   color: var(--text-dim);
   font: var(--type-small);
 }
-/* Snooze's footer also holds Remove Reminder, and Orchestrator Policy's holds Reset to Defaults, so its reason takes the room left beside the three
-   buttons and wraps there, rather than pushing the primary onto a second row. */
-.modal-foot > :is(.snooze-blocked-reason, .orchestrator-policy-reason) { flex: 1 1 0; }
+/* Snooze's footer also holds Remove Reminder, and Orchestrator Policy's holds Reset to Defaults, and New Multi-Agent Run's reason can name a long role, so the reason takes the room left
+   beside the buttons and wraps there, rather than pushing the primary onto a second row. */
+.modal-foot > :is(.snooze-blocked-reason, .orchestrator-policy-reason, .new-run-reason) { flex: 1 1 0; }
 @media (max-width: 760px) {
   .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-pod-reason, .pod-member-reason, .new-run-reason, .budget-history-reason) { flex-basis: 100%; }
 }
@@ -8627,6 +8711,15 @@ textarea {
 }
 .tl-message-stack { display: grid; gap: 4px; min-width: 0; max-width: 80%; }
 .tl-message-stack .tl-bubble { max-width: 100%; }
+.tl-message-timestamp {
+  display: block;
+  color: var(--text-faint);
+  font: var(--type-micro);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: var(--space-1);
+}
+.tl-message-stack.user > .tl-message-timestamp { justify-self: end; margin-bottom: 0; }
+.tl-message-stack.user > .tl-bubble { justify-self: end; }
 .tl-timestamp-meta {
   display: inline-flex;
   flex-wrap: wrap;
@@ -10705,6 +10798,87 @@ textarea {
   padding: 0 var(--space-3) var(--space-3);
 }
 .provider-accounts-list > .provider-account-expansion + .row { box-shadow: inset 0 1px 0 var(--border); }
+/* One shared account list: compact provider labels, account actions in the row menu. */
+.provider-account-group { min-width: 0; }
+.provider-settings-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: calc(var(--space-8) - var(--space-1));
+  padding: var(--space-1) var(--space-3);
+  background: var(--bg-elev-2);
+}
+.provider-settings-heading h4 { margin: 0; font: var(--type-small); }
+.provider-account-group + .provider-account-group { border-top: 1px solid var(--border); }
+.provider-accounts-list > .row + .row { box-shadow: inset 0 1px 0 var(--border); }
+.provider-accounts-surface > .provider-account-group:first-child > .provider-settings-heading { border-top-left-radius: var(--radius-md); border-top-right-radius: var(--radius-md); }
+.provider-default-marker { color: var(--accent); font: var(--type-small); }
+/* Priority Order (#4353): the rank leads the account's name at every width, and each account's Move
+   Up and Move Down sit before its menu, where the actions' gap keeps their touch areas apart. */
+.provider-account-rank { flex: none; color: var(--text-dim); font: var(--type-small); font-variant-numeric: tabular-nums; }
+.provider-selection-summary { padding: var(--space-2) var(--space-3); border-top: 1px solid var(--border); }
+.provider-selection-summary p { margin: 0; }
+.provider-selection-note { margin: 0; padding: var(--space-2) var(--space-3); }
+.provider-selection-status { margin: 0; padding: 0 var(--space-3); color: var(--text-dim); font: var(--type-small); }
+.provider-selection-status:not(:empty) { padding-bottom: var(--space-2); }
+.provider-account-move[aria-disabled="true"] { opacity: 0.45; cursor: default; }
+/* A skip reason is why the account wasn't chosen, so it wraps rather than truncates. */
+.provider-account-sub:has(.provider-account-skip) { white-space: normal; overflow: visible; flex-wrap: wrap; }
+.provider-account-skip { white-space: normal; overflow-wrap: anywhere; }
+.provider-accounts-list > .row {
+  border-radius: unset;
+  height: auto;
+  min-height: var(--row-h);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.provider-account-group:last-child .provider-accounts-list > .row:last-child { border-bottom-left-radius: var(--radius-md); border-bottom-right-radius: var(--radius-md); }
+.provider-accounts-list > .row:has(.provider-account-usage) {
+  display: grid;
+  grid-template-columns: var(--icon) minmax(0, 1fr) minmax(0, calc(var(--space-16) * 4)) auto;
+}
+.provider-account-usage { display: contents; }
+.provider-accounts-list .provider-account-usage + .provider-account-actions { grid-column: 4; grid-row: 1; }
+.provider-usage-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: calc(var(--space-12) - var(--space-1));
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-align: left;
+  cursor: pointer;
+}
+.provider-usage-toggle > svg { flex: none; }
+.provider-usage-empty { color: var(--text-dim); font: var(--type-small); text-align: right; }
+.provider-usage-details { grid-column: 2 / -1; padding: var(--space-2) 0; font: var(--type-small); }
+.provider-usage-details p { margin: var(--space-2) 0; }
+.provider-usage-details .account-usage { display: grid; }
+@media (max-width: 760px) {
+  .provider-accounts-list > .row,
+  .provider-accounts-list > .row:has(.provider-account-usage) { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 var(--space-2); min-height: var(--row-h-2); }
+  .provider-accounts-list > .row > .row-icon { display: none; }
+  .provider-accounts-list .row-body { grid-column: 1; }
+  .provider-accounts-list .provider-usage-toggle { grid-column: 1; justify-content: flex-start; }
+  .provider-accounts-list .provider-usage-empty { grid-column: 1; text-align: left; }
+  .provider-accounts-list .provider-usage-details { grid-column: 1 / -1; grid-row: 3; }
+  .provider-accounts-list .provider-account-actions,
+  .provider-accounts-list .provider-account-usage + .provider-account-actions { grid-column: 2; grid-row: 1 / span 2; }
+  /* A row's controls need the width its name and skip reason would lose beside them, so the name
+     takes the first line whole and the controls share the second, level with its usage. */
+  .provider-accounts-list > .row:has(.provider-account-usage) > .row-body { grid-column: 1 / -1; }
+  .provider-accounts-list > .row:has(.provider-account-usage) .provider-usage-toggle,
+  .provider-accounts-list > .row:has(.provider-account-usage) .provider-usage-empty { grid-column: 1; grid-row: 2; align-self: center; }
+  .provider-accounts-list > .row:has(.provider-account-usage) .provider-account-actions { grid-column: 2; grid-row: 2; align-self: center; padding-block: var(--space-1); }
+  .provider-accounts-list > .row:has(.provider-account-usage) .provider-usage-details { grid-row: 3; }
+  .provider-default-marker { white-space: nowrap; }
+}
 /* A provider sign-in's two numbered steps and its endings (#2996, §8.7, §13.2): a local block of the
    shared ProviderSignIn part. Each step's first line is a 28px control (36px or 44px on touch), and
    its number is centred on it; the code field's step centres it on the field's label instead. Under
@@ -11077,11 +11251,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font: var(--type-section);
 }
 .machine-settings-fieldset > .field-helper { margin-top: calc(-1 * var(--space-2)); }
-/* The switch row's text starts at the fields' left edge and takes all but the track's width. */
-.machine-settings-switch > .setting-row {
-  grid-template-columns: minmax(0, 1fr) auto;
-  padding-inline: 0;
-}
 /* An installation is named by its path. */
 .machine-settings-installations .choice-row-title {
   font-family: var(--font-mono);
@@ -17576,6 +17745,14 @@ button.review-finding-location {
   flex-wrap: wrap;
   gap: var(--space-1) var(--space-3);
 }
+/* A shared subscription's machines. The summary's chevron lines up with the card's text; the rows
+   carry their own inset, so only the summary is indented. */
+.subscription-plan-machines {
+  padding-block: var(--space-2);
+  box-shadow: inset 0 1px 0 var(--border);
+}
+.subscription-plan-machines[open] { padding-bottom: 0; }
+.subscription-plan-machines > summary { margin-inline-start: var(--space-3); }
 .subscription-unavailable-list {
   margin: 0;
   padding: 0;

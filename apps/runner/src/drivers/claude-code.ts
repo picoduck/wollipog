@@ -70,6 +70,7 @@ import type {
 } from "./driver.js";
 import { isProviderAuthenticationFailure, shouldRecoverProviderAuthentication } from "./provider-auth-failure.js";
 import { SKILL_TOOL_KIND, skillToolTitle } from "./skill-tool.js";
+import { isolationWithoutRetiredWorktrees, ownedWorktreeRetired } from "./retired-worktree-isolation.js";
 import { readCompatibleEnv, type Environment } from "../env-compat.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -159,6 +160,7 @@ interface PendingClaudeSteer {
 }
 
 interface UnacknowledgedClaudeSteer {
+  onLateAccepted?: (providerTurnId: string) => void;
   turnId: number;
   generation: number;
 }
@@ -290,7 +292,8 @@ const ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV = ["GH_REPO", "GH_HOST"] as const;
 
 /**
  * Map a Claude permission mode to CLI flags. Exported for tests.
- * - "default": ask before every tool (stdio control protocol -> Allow/Reject UI).
+ * - "default": ask before every tool (stdio control protocol -> Allow/Reject UI). The mode is
+ *   always passed as --permission-mode default rather than left to the CLI's own starting mode.
  * - "auto": the classifier model reviews each action — it auto-approves safe ones and
  *   blocks risky ones inline (the agent is told and adapts). We keep the stdio control
  *   channel open so the headless turn streams and settles gracefully on a block rather
@@ -314,7 +317,13 @@ export function claudePermissionArgs(
   routineControlChannel = false,
 ): { interactive: boolean; streamInput: boolean; args: string[] } {
   if (mode === "default") {
-    return { interactive: true, streamInput: true, args: ["--input-format", "stream-json", "--permission-prompt-tool", "stdio"] };
+    // Named explicitly: the CLI's own starting mode is not `default` on every release. 2.1.296
+    // starts an auto-capable model in `auto` when no mode is passed (#3849).
+    return {
+      interactive: true,
+      streamInput: true,
+      args: ["--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--permission-mode", "default"],
+    };
   }
   if (mode === "auto") {
     return {
@@ -589,6 +598,11 @@ export class ClaudeCodeDriver implements Driver {
   private readonly usageAccounting: ClaudeUsageAccounting;
   private usageBaselinePrepared = false;
   private usageBaselinePreparing = false;
+  /** Bound sibling worktrees (by path) found retired since launch. Once one is left out of a spawn it
+   * stays out, even if a directory appears at its path again: binding that needs a fresh launch. */
+  private readonly retiredOwnedWorktrees = new Set<string>();
+  /** Retired siblings a spawn actually left out, each reported once in the Agent Logs. */
+  private readonly announcedRetiredWorktrees = new Set<string>();
   /** The top-level request streaming now: its `message_start` usage, completed by `message_delta`.
    * Published live on `message_stop` when the control plane can settle it (#3086). */
   private liveRequest: { model: string; usage: Record<string, unknown> } | null = null;
@@ -752,6 +766,11 @@ export class ClaudeCodeDriver implements Driver {
     return this.sessionEstablished ? this.sessionId : null;
   }
 
+  /** A retiring process takes no further prompt: the next one waits for it, then spawns (#3542). */
+  providerProcessLive(): boolean {
+    return !this.disposed && this.child != null && this.retiringPersistentTransport == null;
+  }
+
   agentTurnId(): string | null {
     // Claude's CLI forks the current transcript, not an individual provider turn. SessionManager
     // therefore records this stable provider coordinate and exposes only the latest checkpoint.
@@ -773,6 +792,42 @@ export class ClaudeCodeDriver implements Driver {
 
   private managedProtections(): ManagedWorktreeProtection[] {
     return this.opts.managedWorktreeProtections?.() ?? [];
+  }
+
+  /**
+   * The isolation every spawn of this driver uses: the stored launch isolation without any sibling
+   * worktree it binds that has been retired since (#3402). The session manager relaunches a provider
+   * that binds a retired worktree, but that relaunch stands aside while the live process's background
+   * work is unfinished (#4210), and this driver can still spawn in that window: a model, effort or
+   * permission-mode change once its own tasks have ended, a resume usage probe, or a process that
+   * exited. bubblewrap refuses the stored bind of a removed worktree, so that spawn, and the
+   * person's turn, would fail. Leaving the retired binds out only narrows the boundary (see
+   * `isolationWithoutRetiredWorktrees` for what is kept), and the session manager's own relaunch
+   * still follows once the work ends.
+   */
+  private spawnIsolation(): SpawnIsolation | undefined {
+    const isolation = this.opts.isolation;
+    if (isolation?.backend !== "bwrap") return isolation;
+    const owned = isolation.protectedWorktree?.ownedWorktrees ?? [];
+    if (owned.length === 0) return isolation;
+    const managed = this.opts.managedWorktreeProtections
+      ? new Set(this.managedProtections().map((protection) => protection.worktreePath))
+      : undefined;
+    for (const worktree of owned) {
+      if (!this.retiredOwnedWorktrees.has(worktree.path) && ownedWorktreeRetired(worktree, managed)) {
+        this.retiredOwnedWorktrees.add(worktree.path);
+      }
+    }
+    const result = isolationWithoutRetiredWorktrees(isolation,
+      owned.filter((worktree) => this.retiredOwnedWorktrees.has(worktree.path)));
+    const kept = result?.backend === "bwrap" ? result.protectedWorktree?.ownedWorktrees ?? [] : [];
+    const leftOut = owned.filter((worktree) => !this.announcedRetiredWorktrees.has(worktree.path) &&
+      !kept.some((entry) => entry.path === worktree.path));
+    for (const worktree of leftOut) this.announcedRetiredWorktrees.add(worktree.path);
+    if (leftOut.length) {
+      this.cb.onStderr(`Claude launch leaves out retired worktree ${leftOut.map((worktree) => worktree.path).join(", ")} from its sandbox.`);
+    }
+    return result;
   }
 
   private effectivePermissionMode(): string {
@@ -1008,7 +1063,7 @@ export class ClaudeCodeDriver implements Driver {
           LEGACY_CLAUDE_PENDING_MAX_MS,
           ...(this.opts.orchestrator ? ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV : []),
         ],
-        isolation: options?.isolation ?? this.opts.isolation,
+        isolation: options?.isolation ?? this.spawnIsolation(),
         containerAgentLaunch: true,
         cloudAgentLaunch: true,
         descendantMarker: options?.descendantMarker ?? this.opts.descendantMarker,
@@ -1180,7 +1235,7 @@ export class ClaudeCodeDriver implements Driver {
     this.turnFailureCategory = null;
   }
 
-  async steer({ submissionId, text, images = [], deadlineAt }: DriverSteerInput): Promise<DriverSteerResult> {
+  async steer({ submissionId, text, images = [], deadlineAt, onLateAccepted }: DriverSteerInput): Promise<DriverSteerResult> {
     if (!text && images.length === 0) return { outcome: "rejected", reason: "steering input is empty" };
     if (this.opts.capabilities?.supportsSteering !== true) {
       return { outcome: "rejected", reason: "Claude steering was not verified for this installation" };
@@ -1219,7 +1274,7 @@ export class ClaudeCodeDriver implements Driver {
       };
       this.pendingSteersByMessage.set(providerMessageId, pending);
       this.pendingSteerSubmissions.add(submissionId);
-      this.unacknowledgedSteerMessages.set(providerMessageId, { turnId: turn.id, generation });
+      this.unacknowledgedSteerMessages.set(providerMessageId, { turnId: turn.id, generation, onLateAccepted });
 
       try {
         child.stdin.write(JSON.stringify(buildClaudeUserMessage(text, images, providerMessageId)) + "\n", (error?: Error | null) => {
@@ -1356,7 +1411,7 @@ export class ClaudeCodeDriver implements Driver {
             LEGACY_CLAUDE_PENDING_MAX_MS,
             ...(this.opts.orchestrator ? ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV : []),
           ],
-          isolation: this.opts.isolation,
+          isolation: this.spawnIsolation(),
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
           descendantOwner: this.processes.owner,
@@ -1661,7 +1716,7 @@ export class ClaudeCodeDriver implements Driver {
             LEGACY_CLAUDE_PENDING_MAX_MS,
             ...(this.opts.orchestrator ? ORCHESTRATOR_REPOSITORY_OVERRIDE_ENV : []),
           ],
-          isolation: this.opts.isolation,
+          isolation: this.spawnIsolation(),
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
           descendantOwner: this.processes.owner,
@@ -1872,8 +1927,9 @@ export class ClaudeCodeDriver implements Driver {
       return true;
     }
     this.unacknowledgedSteerMessages.delete(msg.uuid);
-    // A replay after Wollipog's deadline proves provider receipt but cannot retroactively replace
-    // the already-published Uncertain result. It does make retaining this transport safe.
+    unacknowledged.onLateAccepted?.(this.sessionId!);
+    // Only the exact replay UUID, session and live generation prove receipt. The deadline
+    // bounded the initial response, not the lifetime of this evidence. Never write again.
     if (!pending) return true;
     this.settleClaudeSteer(pending, {
       outcome: "accepted",

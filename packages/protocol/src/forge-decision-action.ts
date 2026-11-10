@@ -12,6 +12,10 @@
  * - `pr_merge_enqueue`: an approved, armed GitHub `pr_merge`. The control plane re-reads the issues
  *   GitHub would close, then the runner runs the canonical `gh pr merge <url> --squash
  *   --match-head-commit <sha>` (never `--delete-branch`).
+ * - `issue_publication` (v327, #4119): an approved `follow_up_issue_publication` in another of the
+ *   campaign's repositories. The control plane sends it to the runner of a Location of that
+ *   repository, which creates the issue with its own forge login, with no session of its own. That
+ *   is the only route for such a publication: its requester's own login is never used.
  *
  * The provider classifier is not switched off or worked around: the agent's own commands stay
  * subject to it. An approval authorizes one action and is consumed once, only on proof that the
@@ -19,7 +23,7 @@
  * proving the snapshot stale revokes it.
  */
 
-export type ForgeDecisionActionKind = "branch_deletion" | "pr_merge_enqueue";
+export type ForgeDecisionActionKind = "branch_deletion" | "pr_merge_enqueue" | "issue_publication";
 
 /** Why Wollipog did not perform an approved forge action. A fixed code, never forge output. */
 export type ForgeDecisionActionRefusalReason =
@@ -40,11 +44,18 @@ export type ForgeDecisionActionRefusalReason =
   /** The forge could not be read or written (unreachable, signed out, CLI missing). */
   | "forge_unavailable"
   /** The runner could not be asked. */
-  | "runner_unavailable";
+  | "runner_unavailable"
+  /** A publication's fresh evidence or duplicate inspection no longer holds; nothing was created. */
+  | "publication_refused"
+  /** #4120: the merge gained a cross-repository hold while it was being prepared; nothing was
+   * enqueued and the approval stands. Recorded by the control plane only, never by a runner, so it
+   * is not in `FORGE_DECISION_ACTION_REFUSAL_REASONS`. */
+  | "merge_held";
 
+/** The reasons a runner may report. */
 export const FORGE_DECISION_ACTION_REFUSAL_REASONS: readonly ForgeDecisionActionRefusalReason[] = [
   "tip_moved", "dependent_pull_request_open", "pull_request_mismatch", "closure_mismatch",
-  "repository_mismatch", "forge_refused", "forge_unavailable", "runner_unavailable",
+  "repository_mismatch", "forge_refused", "forge_unavailable", "runner_unavailable", "publication_refused",
 ];
 
 /** Refusals that prove the approved snapshot no longer describes the forge: the approval is revoked
@@ -56,17 +67,19 @@ export const FORGE_DECISION_ACTION_STALE_REFUSALS: ReadonlySet<ForgeDecisionActi
 /** Outcomes that prove the approved action took effect; each consumes the approval. */
 export type ForgeDecisionActionSuccess =
   | "deleted" | "already_deleted"
-  | "enqueued" | "already_queued" | "already_merged";
+  | "enqueued" | "already_queued" | "already_merged"
+  | "published" | "already_published";
 
 export type ForgeDecisionActionOutcome =
   | ForgeDecisionActionSuccess
   | "refused"
   /** Dispatched, but no answer proved what happened. A deletion may be retried (compare-and-delete
-   * is idempotent); an enqueue is not replayed and is reconciled once the forge reads MERGED. */
+   * is idempotent); an enqueue is not replayed and is reconciled once the forge reads MERGED; a
+   * publication is never created again, and a later attempt only looks for the issue. */
   | "uncertain";
 
 export const FORGE_DECISION_ACTION_SUCCESSES: ReadonlySet<ForgeDecisionActionOutcome> = new Set([
-  "deleted", "already_deleted", "enqueued", "already_queued", "already_merged",
+  "deleted", "already_deleted", "enqueued", "already_queued", "already_merged", "published", "already_published",
 ]);
 
 /** Dispatch attempts one approval allows, successful or not. */
@@ -79,6 +92,10 @@ export interface WorkflowDecisionForgeAction {
   /** `in_progress` while one attempt is being dispatched. */
   outcome: ForgeDecisionActionOutcome | "in_progress";
   refusal?: { reason: ForgeDecisionActionRefusalReason; summary: string };
+  /** A publication's result (v327): the issue created in the snapshot's repository, and the runner
+   * whose forge login created it. */
+  publishedIssue?: number;
+  performedByRunnerId?: string;
   updatedAt: number;
 }
 
@@ -94,15 +111,30 @@ export type ForgeDecisionAction =
    * performed. `already_merged` means GitHub merged exactly `headSha`; anything else refuses. Its own
    * kind, never a flag on the enqueue, so a runner that does not know it refuses it as unknown
    * instead of running an enqueue. */
-  | { kind: "pr_merge_observe"; repository: string; pullRequest: number; headSha: string };
+  | { kind: "pr_merge_observe"; repository: string; pullRequest: number; headSha: string }
+  /** Create the approved issue, once, through the Location named by the message. */
+  | { kind: "issue_publication"; repository: string; title: string; body: string; labels: string[] }
+  /** Look for that issue only, never create it: after a publication that may have run, its own kind
+   * for the same reason as `pr_merge_observe`. `already_published` means an issue with exactly this
+   * title and body exists; anything else stays `uncertain`. */
+  | { kind: "issue_publication_observe"; repository: string; title: string; body: string };
 
-/** Control plane to the requesting child's runner: perform exactly this approved action. */
+/** The Location whose runner performs a publication (v327). Resolved by the control plane. */
+export interface ForgeDecisionActionLocation {
+  workspaceId: string;
+  workspacePath: string;
+  repository: string;
+}
+
+/** Control plane to the runner that performs this approved action: the requesting child's, or for a
+ * publication the runner of `location`, which holds no session for it. */
 export interface ForgeDecisionActionMessage {
   type: "forge_decision_action";
   requestId: string;
   sessionId: string;
   occurrenceId: string;
   action: ForgeDecisionAction;
+  location?: ForgeDecisionActionLocation;
 }
 
 export interface ForgeDecisionActionResultMessage {
@@ -112,6 +144,8 @@ export interface ForgeDecisionActionResultMessage {
   occurrenceId: string;
   outcome: ForgeDecisionActionOutcome;
   refusal?: { reason: ForgeDecisionActionRefusalReason; summary: string };
+  /** With `published` or `already_published`. */
+  issue?: number;
 }
 
 /** Longest refusal summary kept on a decision. */
@@ -141,8 +175,9 @@ export interface CampaignMergedBranch {
   branch: string | null;
   /** The approved merged head. */
   headSha: string;
-  /** `pending` keeps the campaign from finishing; `retained` (a handoff to a person or an outside
-   * party on its work item) lets it finish as `complete_with_handoffs`. */
+  /** `pending` or `retained` (a handoff to a person or an outside party on its work item) is cleanup
+   * the campaign owes: a delivered, idle campaign reads `complete_needs_cleanup` (v297, #4146;
+   * older control planes keep it `active` or finish as `complete_with_handoffs`). */
   state: "deleted" | "retained" | "pending";
   /** Why it is retained (the handoff's reason) or what is pending. */
   reason?: string;

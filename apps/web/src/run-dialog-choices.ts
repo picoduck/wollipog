@@ -1,5 +1,5 @@
 import type { AgentDefinition, ProjectLocationView, ProjectView, RunnerView, WorkflowDefinition } from "@wollipog/protocol";
-import { agentAvailableForRunnerDefault } from "@wollipog/protocol";
+import { agentAvailableForRunnerDefault, providerForDriver } from "@wollipog/protocol";
 import { agentOptions, agentSetupReason, type AgentOption } from "./components/agent-options.js";
 import { titleCaseLabel } from "./format.js";
 import { liveLocationAvailability } from "./project-session-selection.js";
@@ -30,6 +30,15 @@ export interface RunAgentChoice {
   disabledReason?: string;
 }
 
+/** A policy that chooses among accounts can't place this agent, though an account of its provider could
+ * run it: a member that can start once someone chooses that account (#4353). A person's own Default
+ * Account that isn't ready stays that person's to fix, and is never quietly worked around here. */
+export function agentNeedsAccountChoice(agent: AgentDefinition, defaults?: RunnerView["providerAccountDefaults"]): boolean {
+  const mode = defaults?.find((choice) => choice.provider === providerForDriver(agent.driver ?? "acp"))?.mode ?? "fixed";
+  return mode !== "fixed" && (agent.context?.kind ?? "native") === "native" && agent.available === true &&
+    !agentAvailableForRunnerDefault(agent, defaults) && (agent.providerAccountReadiness?.readyAccountIds?.length ?? 0) > 0;
+}
+
 /**
  * Every agent the Machine offers, in agentOptions' order: the ones that can run with a meta line
  * naming the Machine and, when known, the sign-in, and the ones that cannot as disabled rows with
@@ -48,8 +57,12 @@ export function runAgentChoices(
       const disabledReason = agentSetupReason(agent, machine, availabilityVerified);
       return { option, description: disabledReason, disabledReason };
     }
+    if (agentNeedsAccountChoice(agent, defaults)) return { option, description: `${machine} · Needs an account chosen` };
     if (!agentAvailableForRunnerDefault(agent, defaults)) {
-      const disabledReason = `The default provider account is not ready on ${machine}.`;
+      const provider = providerForDriver(agent.driver ?? "acp");
+      const disabledReason = defaults?.find((choice) => choice.provider === provider)?.mode === "priority"
+        ? `No account in the Priority Order is ready on ${machine}.`
+        : `The default provider account is not ready on ${machine}.`;
       return { option, description: disabledReason, disabledReason };
     }
     if (agentSignedOut(agent)) {
@@ -67,6 +80,43 @@ export function selectableRunAgentIds(agents: AgentDefinition[], defaults?: Runn
   return agentOptions(agents)
     .filter((option) => !option.disabled && !agentSignedOut(option.agent) && agentAvailableForRunnerDefault(option.agent, defaults))
     .map((option) => option.agent.id);
+}
+
+/** What a person may pick: those, and any that first needs an account chosen. Nothing starts chosen on
+ * a choice nobody has made, so `selectableRunAgentIds` still decides the defaults. */
+export function choosableRunAgentIds(agents: AgentDefinition[], defaults?: RunnerView["providerAccountDefaults"]): string[] {
+  return agentOptions(agents)
+    .filter((option) => !option.disabled && (agentNeedsAccountChoice(option.agent, defaults) ||
+      (!agentSignedOut(option.agent) && agentAvailableForRunnerDefault(option.agent, defaults))))
+    .map((option) => option.agent.id);
+}
+
+type RunAccount = NonNullable<RunnerView["providerAccounts"]>[number];
+
+/** Why this account can't start this agent's run member, or null when it can. A run starts unattended, so
+ * one that would only fail its first turn isn't offered, and a choice that stops being usable stops counting,
+ * as with a signed-out agent. A usage limit isn't here: overriding one is what an explicit choice is for. */
+export function memberAccountUnusable(account: RunAccount, agent: AgentDefinition | undefined): "access" | "not_ready" | null {
+  if (account.profile?.access === "not_granted") return "access";
+  if (account.authStatus === "unauthenticated") return "not_ready";
+  const ready = agent?.providerAccountReadiness?.readyAccountIds;
+  return ready && !ready.includes(account.id) ? "not_ready" : null;
+}
+
+/** The accounts a launch names, by member, given the agent each member runs: only for members still in it,
+ * and accounts still on the Machine, of that agent's provider, that can still start it. */
+export function memberAccountsRequest(
+  chosen: Readonly<Record<string, string>>,
+  members: Readonly<Record<string, string>>,
+  runner: Pick<RunnerView, "agents" | "providerAccounts"> | undefined,
+): Record<string, string> | undefined {
+  const named = Object.entries(chosen).filter(([member, accountId]) => {
+    if (!Object.hasOwn(members, member)) return false;
+    const agent = runner?.agents.find((candidate) => candidate.id === members[member]);
+    const account = runner?.providerAccounts?.find((candidate) => candidate.id === accountId);
+    return Boolean(agent && account && account.provider === providerForDriver(agent.driver ?? "acp") && !memberAccountUnusable(account, agent));
+  });
+  return named.length ? Object.fromEntries(named) : undefined;
 }
 
 /** The most agents a new comparison starts with; a large Machine would otherwise start six. */
@@ -227,6 +277,8 @@ export interface NewRunBlockInput {
   agentCount: number;
   workflowChosen: boolean;
   workflowBound: boolean;
+  /** The first member, by its visible name, that can't start until it has an account. */
+  accountChoiceMissing?: string | null;
 }
 
 /** Why the primary is unavailable, in the order the fields read, or null once the run can start. */
@@ -245,7 +297,8 @@ export function newRunBlockedReason(input: NewRunBlockInput): string | null {
     if (!input.location) return "Choose a location to continue.";
     if (!launchable(input.location)) return "Choose an available location to continue.";
   }
-  if (input.mode === "parallel") return input.agentCount > 0 ? null : "Choose at least one agent.";
+  const account = input.accountChoiceMissing ? `Choose an account for ${input.accountChoiceMissing} to continue.` : null;
+  if (input.mode === "parallel") return input.agentCount > 0 ? account : "Choose at least one agent.";
   if (!input.workflowChosen) return "Choose a workflow to continue.";
-  return input.workflowBound ? null : "Choose an agent for every role.";
+  return input.workflowBound ? account : "Choose an agent for every role.";
 }

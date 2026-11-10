@@ -266,6 +266,8 @@ test("AC8: two concurrent ten-minute items show ten minutes of campaign elapsed,
     s.tick(10 * MINUTE);
     s.deliver(first, ids.one!);
     s.deliver(second, ids.two!);
+    // The root's own turn is live work (#4146); the campaign completes once it ends.
+    s.svc.onSessionStatus(s.root, "idle");
 
     for (const key of ["one", "two"] as const) {
       const item = await s.detail(ids[key]!);

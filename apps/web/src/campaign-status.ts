@@ -7,10 +7,12 @@
  * zero; and a cost says where it came from (provider-reported, estimated, partially priced).
  */
 import {
+  CAMPAIGN_AUTOMATION_HOLD_REASONS,
   CAMPAIGN_FORGE_OBSERVATION,
   CAMPAIGN_WORK_ITEM_PRIMARY_STATES,
   CAMPAIGN_WORK_ITEM_UNFINISHED_STATES,
   campaignRepositoryLocation,
+  campaignStatusTerminal,
   type CampaignCostValue,
   type CampaignElapsed,
   type CampaignForgeCheckRollup,
@@ -35,6 +37,8 @@ import {
   type CampaignWorkItemStateFilter,
   type CampaignWorkItemSummary,
   type CampaignWorkSummary,
+  type CampaignWorkRepositoryCounts,
+  type CampaignMergeDependencyView,
   type OrchestratorCampaignProjection,
   type SessionView,
 } from "@wollipog/protocol";
@@ -298,6 +302,7 @@ const STATE_CAUSE_TEXT: Record<CampaignWorkItemStateCause, string> = {
   attempt_session_input_required: "The child session needs input.",
   attempt_session_pending_decision: "The child session is waiting for a decision.",
   attempt_awaiting_verification: "The Orchestrator has not verified delivery yet.",
+  dependency_unmerged: "Its merge waits until a prerequisite in another repository is merged.",
 };
 
 export function stateCauseText(cause: CampaignWorkItemStateCause): string {
@@ -520,17 +525,51 @@ export function forgePullRequestView(
   return { kind: "observed", forge: "GitHub", current, observedAt: fact.observedAt, status: seen(status), rows };
 }
 
+/** The campaign's status in its own words (#4146). `blocked` and `complete_with_handoffs` come only
+ * from control planes older than v297. */
 const CAMPAIGN_LIFECYCLE_LABELS: Record<OrchestratorCampaignProjection["status"], string> = {
   waiting_human: "Waiting for Human",
-  active: "Active",
+  active: "Campaign Active",
+  complete_needs_cleanup: "Complete, Needs Cleanup",
+  verified_complete: "Campaign Complete",
+  stuck: "Campaign Stuck",
   blocked: "Blocked",
-  verified_complete: "Verified Complete",
   complete_with_handoffs: "Complete with Handoffs",
 };
 
 export function campaignLifecycleLabel(status: string): string {
   return CAMPAIGN_LIFECYCLE_LABELS[status as OrchestratorCampaignProjection["status"]]
     ?? titleCaseLabel(status.replaceAll("_", " "));
+}
+
+/** How Campaign Status shows the recovery automation's hold, or null when it shows nothing (#3361). */
+export interface CampaignRecoveryAutomationNotice {
+  tone: "neutral" | "warning";
+  title: string;
+  body: string;
+}
+
+/**
+ * The recovery automation's hold, told apart by what it means (#3361). A finished campaign
+ * (Campaign Complete, Complete, Needs Cleanup, or Complete with Handoffs) has nothing to recover, so
+ * its hold shows nothing: servers since #4070 already send no reason then, and an older server's
+ * reason is not a blocker either. Outside those, the hold the server gives for a campaign with no
+ * unfinished original scoped obligation reads as neutral No Recovery Needed, unless the campaign is
+ * Campaign Stuck or Blocked, where nothing is progressing and it stays a warning. Every other reason
+ * (lifecycle or recovery hold, authority, capability, budget) is a real blocker and keeps its
+ * warning. This only chooses words: what the server admits or resumes is unchanged.
+ */
+export function campaignRecoveryAutomationNotice(
+  status: OrchestratorCampaignProjection["status"] | undefined,
+  automation: NonNullable<OrchestratorCampaignProjection["recovery"]>["automation"],
+): CampaignRecoveryAutomationNotice | null {
+  const reason = automation?.reason;
+  if (!reason || campaignStatusTerminal(status)) return null;
+  if (automation?.state === "lifecycle_held" && reason === CAMPAIGN_AUTOMATION_HOLD_REASONS.complete &&
+      status !== "stuck" && status !== "blocked") {
+    return { tone: "neutral", title: "No Recovery Needed", body: reason };
+  }
+  return { tone: "warning", title: "Authorized Recovery Unavailable", body: reason };
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -643,10 +682,90 @@ export interface CampaignWorkFilters {
   origin: CampaignWorkOriginFilter;
   state: CampaignWorkItemStateFilter;
   sort: CampaignWorkItemSort;
+  /** #4120: one repository, lower-cased, or `all`. Absent (filters remembered before #4120) is `all`. */
+  repository?: string;
 }
 
 /** Unfinished work first, in the Orchestrator's queue order; finished work is one filter away. */
-export const DEFAULT_CAMPAIGN_WORK_FILTERS: CampaignWorkFilters = { origin: "all", state: "unfinished", sort: "queue" };
+export const DEFAULT_CAMPAIGN_WORK_FILTERS: CampaignWorkFilters = { origin: "all", state: "unfinished", sort: "queue", repository: "all" };
+
+/** #4120: the Repository filter's options, or none when the campaign works in one repository (or an
+ * older control plane did not say), so a single-repository campaign's list looks as it did. A chosen
+ * repository stays listed even if it no longer has items. */
+export function campaignRepositoryFilterOptions(repositories: readonly CampaignWorkRepositoryCounts[] | null | undefined,
+  chosen: string): { value: string; label: string }[] {
+  const named = (repositories ?? []).flatMap((entry) => entry.repository ? [entry.repository] : []);
+  if (chosen !== "all" && !named.includes(chosen)) named.push(chosen);
+  return named.length > 1 || chosen !== "all"
+    ? [{ value: "all", label: "All Repositories" }, ...named.map((repository) => ({ value: repository, label: repository }))] : [];
+}
+
+/** #4120: the loaded rows grouped by repository, in the order the control plane lists repositories,
+ * each with that repository's counts. Fewer than two known repositories means no grouping: null. */
+export interface CampaignWorkRepositoryGroup {
+  repository: string | null;
+  label: string;
+  items: CampaignWorkItemSummary[];
+  counts: CampaignWorkRepositoryCounts | null;
+}
+
+export function groupCampaignWorkByRepository(items: readonly CampaignWorkItemSummary[],
+  repositories: readonly CampaignWorkRepositoryCounts[] | null | undefined): CampaignWorkRepositoryGroup[] | null {
+  // Two known repositories: items whose repository is unknown never make a one-repository campaign
+  // look like two, which would reorder its list.
+  if (!repositories || repositories.filter((entry) => entry.repository !== null).length < 2) return null;
+  const order = repositories.map((entry) => entry.repository);
+  const groups = new Map<string | null, CampaignWorkItemSummary[]>();
+  for (const item of items) {
+    const repository = item.repository ?? null;
+    groups.set(repository, [...groups.get(repository) ?? [], item]);
+  }
+  const rank = (repository: string | null) => { const index = order.indexOf(repository); return index === -1 ? order.length : index; };
+  return [...groups.entries()].sort(([a], [b]) => rank(a) - rank(b)).map(([repository, rows]) => ({
+    repository, label: repository ?? "No Repository", items: rows,
+    counts: repositories.find((entry) => entry.repository === repository) ?? null,
+  }));
+}
+
+/** #4120: a group header's counts in words, unfinished states first, for example
+ * "3 Items: 1 Running, 1 Waiting, 1 Delivered". */
+export function repositoryCountsLabel(counts: CampaignWorkRepositoryCounts | null, shown: number): string {
+  if (!counts) return `${shown} ${shown === 1 ? "Item" : "Items"}`;
+  const parts = CAMPAIGN_WORK_ITEM_PRIMARY_STATES.filter((state) => counts.byState[state] > 0)
+    .map((state) => `${counts.byState[state]} ${CAMPAIGN_WORK_STATE_LABELS[state]}`);
+  return `${counts.total} ${counts.total === 1 ? "Item" : "Items"}${parts.length ? `: ${parts.join(", ")}` : ""}`;
+}
+
+export const MERGE_DEPENDENCY_STATUS_LABELS: Record<CampaignMergeDependencyView["status"], string> = {
+  merged: "Merged",
+  unmerged: "Not Merged",
+  failed: "Will Not Merge",
+  unknown: "Merge Unknown",
+};
+
+/** #4120: the cause a held item shows, as a label. */
+export const WAITING_FOR_PREREQUISITE_MERGE = "Waiting for Prerequisite Merge";
+
+/** #4120: how a merge dependency reads in a row, for example "owner/api: Add Account Field". */
+export function mergeDependencyLabel(dependency: CampaignMergeDependencyView): string {
+  return `${dependency.repository ?? "Unknown Repository"}: ${dependency.title ?? dependency.key}`;
+}
+
+/** #4120: what a Depends On line shows for a merge dependency: the prerequisite and whether it merged. */
+export function mergeDependencyLine(dependency: CampaignMergeDependencyView): { label: string; status: string } {
+  return { label: mergeDependencyLabel(dependency), status: MERGE_DEPENDENCY_STATUS_LABELS[dependency.status] };
+}
+
+/** #4120: the prerequisite pull request an item waits on, for the Waiting for Prerequisite Merge cause. */
+export function heldOnPullRequest(item: Pick<CampaignWorkItemSummary, "stateCauses" | "mergeDependencies">): string | null {
+  if (!item.stateCauses.includes("dependency_unmerged")) return null;
+  for (const dependency of item.mergeDependencies ?? []) {
+    if (dependency.status === "merged") continue;
+    const waiting = dependency.pullRequests.find((entry) => entry.state !== "merged") ?? null;
+    return waiting ? `${waiting.ref.repository}#${waiting.ref.number}` : mergeDependencyLabel(dependency);
+  }
+  return null;
+}
 
 export const CAMPAIGN_STATE_FILTER_OPTIONS: readonly { value: CampaignWorkItemStateFilter; label: string }[] = [
   { value: "unfinished", label: "Unfinished" },
@@ -680,6 +799,8 @@ export function stateMatchesFilter(state: CampaignWorkItemPrimaryState, filter: 
 export function campaignWorkItemsQuery(filters: CampaignWorkFilters, cursor: string | null, limit: number): string {
   const query = new URLSearchParams({ limit: String(limit), sort: filters.sort, state: filters.state });
   if (filters.origin !== "all") query.set("origin", filters.origin);
+  // Filters remembered before #4120 have no repository: that is every repository.
+  if (filters.repository && filters.repository !== "all") query.set("repository", filters.repository);
   if (cursor) query.set("cursor", cursor);
   return query.toString();
 }
@@ -720,10 +841,12 @@ export function applyCampaignWorkFilters(
   now: number,
 ): CampaignWorkItemSummary[] {
   return items
-    .filter((item) => (filters.origin === "all" || item.origin === filters.origin) && stateMatchesFilter(item.primaryState, filters.state))
+    .filter((item) => (filters.origin === "all" || item.origin === filters.origin) && stateMatchesFilter(item.primaryState, filters.state) &&
+      (!filters.repository || filters.repository === "all" || item.repository === filters.repository))
     .sort(compareWorkItems(filters.sort, now));
 }
 
 export function filtersAreDefault(filters: CampaignWorkFilters): boolean {
-  return filters.origin === DEFAULT_CAMPAIGN_WORK_FILTERS.origin && filters.state === DEFAULT_CAMPAIGN_WORK_FILTERS.state;
+  return filters.origin === DEFAULT_CAMPAIGN_WORK_FILTERS.origin && filters.state === DEFAULT_CAMPAIGN_WORK_FILTERS.state &&
+    (filters.repository ?? "all") === DEFAULT_CAMPAIGN_WORK_FILTERS.repository;
 }

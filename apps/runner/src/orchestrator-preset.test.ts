@@ -17,6 +17,7 @@ import {
   codexOrchestratorMcpArgs,
   codexOrchestratorMcpProbe,
   declaredCodexMcpServerNames,
+  FULL_CONTROL_FIRST_REPORT_INSTRUCTION,
   isolateCodexMcpServers,
   orchestratorAcpSessionMeta,
   orchestratorInstructions,
@@ -63,6 +64,59 @@ test("Orchestrator instructions separate delegation from explicit parent impleme
   assert.match(strict, /Project locations are read-only: "\/repo"/);
   assert.match(strict, /Do not implement project changes yourself/);
   assert.match(strict, /create branches or worktrees for yourself/);
+});
+
+test("Full Control roots post a first report naming scope, unsupported paths and owner rules before dispatch (#2940)", () => {
+  for (const strict of [true, false]) {
+    const text = orchestratorInstructions(["/repo"], strict);
+    assert.ok(text.includes(FULL_CONTROL_FIRST_REPORT_INSTRUCTION), "every Orchestrator preset carries the requirement");
+    // Only after get_campaign, only for the root of a Full Control campaign, and before the first child.
+    assert.ok(text.indexOf("call get_campaign") < text.indexOf(FULL_CONTROL_FIRST_REPORT_INSTRUCTION));
+  }
+  const report = FULL_CONTROL_FIRST_REPORT_INSTRUCTION;
+  assert.match(report, /control\.mode full_control and this session is the root campaign Orchestrator \(get_session reports no parentSessionId\)/);
+  assert.match(report, /user-visible first report .* before your first create_session/);
+  assert.match(report, /objective and authorized issue scope/);
+  assert.match(report, /follow-up behavior and the operations the boundary permits/);
+  assert.match(report, /campaign limits \(limits and budget\)/);
+  assert.match(report, /evidence upload destination and reviewer provider disclosure/);
+  assert.match(report, /fullControlHumanRequired/);
+  assert.match(report, /uiEvidenceReview and videoEvidenceReview status with their reasons/);
+  assert.match(report, /controlled review sessions or a native reviewer outside them/);
+  assert.match(report, /execution isolation where a runner reports it \(otherwise say it is unknown\)/);
+  assert.match(report, /every unresolved mandatory human rule in installed skills or user-authored instructions, with its exact source file and quoted requirement/);
+  assert.match(report, /typed decision with ownerRule, handed over with hand_workflow_decision_to_owner, or asked with request_owner_decision, never left only in prose/);
+  // Zero-overhead launch: a report, never a question or a wait on a person.
+  assert.match(report, /a report, not a question: ask nothing, wait for nobody, and continue dispatch in the same turn/);
+  assert.match(report, /nested Orchestrator does not repeat it/);
+  assert.doesNotMatch(report, /AskUserQuestion|request_user_input|confirm/i);
+});
+
+test("a Custom root proposes the issues its person's first message asks for, never background or its own choice (#4282)", () => {
+  for (const strict of [true, false]) {
+    const text = orchestratorInstructions(["/repo"], strict);
+    assert.match(text, /Custom first-message scope: when this root campaign Orchestrator's first message writes an issue number and create_session refuses with seed_proposal_required/);
+    assert.match(text, /every issue's origin is owner_named/);
+    assert.match(text, /Never add an issue the message only mentions as background, context, an example or something to avoid, and never one you chose/);
+    assert.match(text, /Propose no additions when the message asks for no issue work/);
+    assert.match(text, /wait for their scope approval or Continue Without an Epic without proposing again/);
+    // Only this session's own repository's issues become its numbers; another's waits for the person (#4118).
+    assert.match(text, /otherwise issues of this session's own repository become the campaign's issue numbers/);
+    assert.match(text, /a proposal with any issue outside this session's repository becomes one scope change the person approves, so nothing in it is granted until they do/);
+    assert.doesNotMatch(text, /otherwise the issues become the campaign's issue numbers/);
+  }
+});
+
+test("UI evidence guidance follows the effective owner under Custom and Full Control (#2940)", () => {
+  for (const strict of [true, false]) {
+    const text = orchestratorInstructions(["/repo"], strict);
+    // Full Control never hands an Orchestrator-owned gate back to a person when the client cannot see images.
+    assert.doesNotMatch(text, /UI evidence remains human-owned whenever/);
+    assert.match(text, /UI evidence approval belongs to get_campaign\.uiEvidenceReview\.effectiveOwner/);
+    assert.match(text, /Under Custom, an Orchestrator whose client cannot inspect evidence bytes hands that gate to the person/);
+    assert.match(text, /Under Full Control an Orchestrator-owned gate stays with the Orchestrator even then/);
+    assert.match(text, /ask for screenshots attached as Session artifacts or deny the claim as unproven/);
+  }
 });
 
 test("orchestrator capability requires a native harness or discovery-verified WSL bridge", () => {

@@ -157,12 +157,12 @@ for (const width of [390, 1440]) {
     await management.goto("/machine-management-e2e.html?emailLabels=1&machine=native-t14s");
     // Provider Accounts is a section of the machine (#2995), no longer a disclosure to reopen.
     const accounts = management.getByRole("region", { name: /^Provider Accounts/ });
-    const row = accounts.locator(".surface > .row").filter({ hasText: "work@example.com" });
+    const row = accounts.locator(".provider-accounts-list > .row").filter({ hasText: "work@example.com" });
     await expect(row).toBeVisible();
     await expect(row.getByRole("button", { name: "Show Account Email" })).toHaveCount(0);
     await management.screenshot({ path: join(evidenceDir, `management-${width}-off.png`) });
     await privacy.click();
-    const maskedRow = accounts.locator(".surface > .row").filter({ hasText: "Email Hidden" });
+    const maskedRow = accounts.locator(".provider-accounts-list > .row").filter({ hasText: "Email Hidden" });
     const show = maskedRow.getByRole("button", { name: "Show Account Email" });
     await show.focus(); await management.keyboard.press("Enter");
     await expect(row).toBeVisible();
@@ -247,30 +247,29 @@ for (const [width, theme] of [[390, "light"], [1440, "dark"]] as const) {
   });
 }
 
-test("default account settings follow privacy and changing their selection resets a reveal", async ({ page, context }) => {
+test("account default menus and access dialogs follow privacy across tabs without revealing identifiers in toasts", async ({ page, context }) => {
   await page.goto("/settings-rows-e2e.html?section=behavior");
   const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
   const management = await context.newPage();
-  // The machine's own route: with nothing selected the detail is the All Machines overview (#2986).
   await management.goto("/machine-management-e2e.html?emailLabels=1&machine=native-t14s");
-  await management.locator(".machine-detail-title-row").getByRole("button", { name: "Settings…", exact: true }).click();
-  const dialog = management.getByRole("dialog", { name: "Machine Settings" });
-  const defaults = dialog.getByRole("group", { name: "Default Accounts" });
-  const claude = dialog.getByRole("button", { name: /Default Claude Account:/ });
-  await claude.click();
-  await management.getByRole("option", { name: /work@example\.com/ }).click();
-  await expect(claude).toHaveAccessibleName(/work@example\.com/);
-  await expect(defaults.getByRole("button", { name: "Show Emails" })).toHaveCount(0);
+  const section = management.getByRole("region", { name: /^Provider Accounts/ });
   await privacy.click();
-  await expect(claude).toHaveAccessibleName(/Hidden Account/);
-  await defaults.getByRole("button", { name: "Show Emails" }).click();
-  await expect(claude).toHaveAccessibleName(/work@example\.com/);
-  await claude.click();
-  await management.getByRole("option", { name: /Personal/ }).click();
-  await expect(defaults.getByRole("button", { name: "Show Emails" })).toBeVisible();
-  await claude.click();
-  await expect(management.getByRole("option", { name: /Hidden Account/ })).toBeVisible();
-  expect(await management.getByRole("listbox").innerHTML()).not.toContain("work@example.com");
+  const trigger = section.getByRole("button", { name: "More Actions for Hidden Account", exact: true }).first();
+  await trigger.click();
+  let menu = management.getByRole("menu").last();
+  expect(await menu.innerHTML()).not.toContain("work@example.com");
+  await menu.getByRole("menuitem", { name: "Set as Default", exact: true }).click();
+  await expect(section.locator(".provider-default-marker")).toHaveCount(1);
+  await expect(management.locator(".toast").filter({ hasText: "Default Claude account updated." })).toBeVisible();
+  expect((await management.locator(".toast").allTextContents()).join(" ")).not.toContain("work@example.com");
+  await trigger.click();
+  await management.getByRole("menuitem", { name: "Account Access…" }).click();
+  const access = management.getByRole("dialog", { name: "Account Access", exact: true });
+  await expect(access).not.toContainText("work@example.com");
+  await privacy.click();
+  await expect(access).toContainText("work@example.com");
+  await privacy.click();
+  await expect(access).not.toContainText("work@example.com");
   await management.close();
 });
 

@@ -40,7 +40,7 @@ for (const width of [390, 1280]) for (const theme of ["dark", "light"] as const)
     await page.goto(`/machine-management-e2e.html?leases&machine=native-t14s&lease-cause=process_uninspectable_not_delegated`);
     await page.evaluate(value => { document.documentElement.dataset.theme = value; }, theme);
     const region = page.getByRole("region", { name: /^Provider Accounts/ });
-    const row = region.locator(".surface > .row").filter({ has: page.locator(".row-title", { hasText: "Codex Team" }) });
+    const row = region.locator(".provider-accounts-list > .row").filter({ has: page.locator(".row-title", { hasText: "Codex Team" }) });
     await row.getByRole("button", { name: "More Actions for Codex Team" }).click();
     const menu = page.getByRole("menu", { name: "Codex Team", exact: true });
     await expect(menu.getByRole("menuitem", { name: /^Recover Account/ })).toBeDisabled();

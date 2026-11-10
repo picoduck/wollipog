@@ -24,6 +24,12 @@ route; Revoke is unchanged. Orchestrator defaults save the preferred mode and a 
 campaign budget. Neither grants authority, and older settings APIs refuse saving the mode. With
 no saved campaign budget, the campaign has no limit.
 
+The app runs the launch or enable preflight and authorizes its digest in the same action, so no
+person reads the preflight's repository list. Campaign Status is where they are shown, afterward.
+So an enable never admits a Project Location its owner didn't add, or one with no recorded adder: it
+isn't inspected, and it waits for Include in Campaign (#4117). A launch does build its boundary from
+every verified Project Location, including those, because #4117 adds no step before launch.
+
 The Full Control boundary owns every operation it lists, so the Custom per-decision owners never
 apply under it, whatever their toggles say. Review Round Extensions follow a Parent Control grant,
 and otherwise Full Control owns them only within its per-pull-request cap (#4075 changed #3369).
@@ -32,6 +38,32 @@ inline blocker, and Enable Full Control or Revoke. Child Session Requests, Workf
 evidence and retention notes, and Campaign Behavior return when Custom is chosen. On the
 Customize… Decisions tab, Full Control likewise hides Descendant Requests and the per-gate owners.
 A row that has a problem blocking the launch stays visible.
+
+## After Launch: Campaign Status
+
+Because nothing is reviewed before launch, the facts a preflight would have shown appear after it,
+in Campaign Status's **Full Control** section: the objective (truncated behind Show All), the
+operations, issue authority (Maximum Issues, Related Follow-Ups, Closure Reasons), the authorized
+limits and the boundary revision; **Human Required**, listing person-marked rules and any decision
+the boundary leaves out or Wollipog can't delegate now; **Capabilities**, every non-verified
+capability the launch or enable recorded, with its state and reason; and **Evidence**, the recorded
+destination, screenshot reviewer and handling, the provider retention disclosure, and the live
+screenshot and video review status. The admission stores the preflight's capabilities and evidence
+block (never the destination or organization identifier) beside the boundary as
+`orchestratorPolicy.launchDisclosure`, and the campaign projection carries it. An enable records
+its own; a revoke drops it. A campaign authorized before the record existed reads Not Recorded.
+When the section is shown, the Scope Grant section leaves out the Maximum Issues and operations
+rows it would repeat.
+
+The readiness line states only what the server's live facts prove. "The Orchestrator runs this
+campaign end to end." appears only when no Human Required rule exists, every decision and request
+class (questions, tool approvals, policy asks) the campaign makes is the Orchestrator's, no recovery
+item waits for the person or is blocked, screenshot review is available, and automatic recovery
+isn't blocked by missing authority or capability. Otherwise it is qualified ("…except the decisions listed under
+Human Required", or "some capabilities it needs are limited, so it may not finish unattended"),
+and a server that doesn't report these facts gets no readiness claim. Orchestrator Controls and the
+session row's Campaign Active description use the same rule and point to Campaign Status. Video
+the Orchestrator can't watch is not a limit, since it asks for screenshots instead.
 
 ## The First Message Is the Task
 
@@ -48,52 +80,79 @@ only) establishes the boundary before the Orchestrator's first turn:
   text: a slash command or image-only message is refused, so that the task is stated.
 - The objective is the message, normalized to one line and bounded to 4000 characters. The
   boundary records the SHA-256 digest of the exact message text (`messageDigest`).
-- The issue scope comes from a typed **scope grant** (#4102). During delivery, the Decision Model
-  (`docs/decision-model.md`, kind `scope_grant`) reads only the exact message: no tools, no
-  repository and no issue content. It returns `explicit` issue numbers in any notation (`#4090`,
-  `issue 4090`, a bare number that names an issue, an issue URL), `ranges` (`#2997–#3005`, "issues
-  10 through 14"), `context` numbers mentioned without being asked for, a `selection` the campaign
-  should choose itself (count, criteria and constraints, as in "find the 5 highest-priority open
-  issues"), and any narrowing of the launch's operations ("fix but don't merge"). This happens
-  inside the runtime's time bound and retry budget; nothing is added before launch.
-- Deterministic floors only remove from that answer (`scope-grant.ts`): every explicit number and
-  both ends of every range must be written in the message as a digit string, so an invented number
-  is dropped; every reference must resolve to a repository in the campaign's boundary, and a number
-  the message writes only as another repository's (`other/repo#5`, another repository's issue or
-  pull request URL) is dropped even when the model left it unqualified; a range expands only when
-  ascending and narrower than 100 issues, and only while the message stays within 100 distinct
-  issues; a number listed both as named and as context is context; and the operations are
-  intersected with the launch's. No verdict can raise a ceiling, change a repository or grant an
-  operation. The exact-reference parser (`issueReferenceSpans`) is only a fast path that starts the
-  runner reading exact references while the model runs; it never grants anything itself.
-- The runner then reads every remaining number, named or context, and only verified issues are
-  kept: a pull request, a missing issue, or an unreadable origin leaves it out. Verified named issues
-  become the scope and its `issueAuthority.epics`. Verified context references, and named issues an
-  explicit Maximum Issues left out, are recorded on the first-message record
-  (`firstMessageScope.contextIssueNumbers`), disjoint from the scope. They grant nothing.
-- The ceilings: Maximum Issues holds the named issues plus `selection.count` plus follow-up room
-  derived as before; the selection never counts against follow-up room. A selection without a count
-  gets `SCOPE_GRANT_DEFAULT_SELECTION_COUNT` (3) and is marked `defaulted`. An explicit Maximum
-  Issues still caps everything (the named issues first, then the selection, marked `capped`) and
-  never grows. The grant is stored on the first-message record (`firstMessageScope.grant`), bound
-  to its `messageDigest`, with the ceilings, the dropped numbers and why, and the Decision Model
-  that read it with its reason.
-- When the Decision Model fails after its bounded retries, fails non-transiently (including a
-  runner that cannot host Decision calls), or answers `uncertain`, the boundary is established with
-  an empty scope and the launch's ceilings, the message is still delivered, and nothing is parsed
-  from its text instead: no scope and no context references. The grant records `failed` or
-  `uncertain` with the failure class or reason. The Orchestrator then proposes its scope as usual,
-  and its proposal of issues without lineage becomes exactly one typed, person-owned scope approval
-  (`campaign_issue_scope` with `grantReview`) showing the owner's message, the proposed issues, the
-  Orchestrator's rationale, and the failure class or uncertain reason. A revised proposal replaces
-  it. The owner's approval also sets a derived Maximum Issues to fit the scope they approved; an
-  explicit one never grows. Until the Decision Model reviews selection proposals (#4103), a
-  proposal that fills a healthy grant's selection goes to the owner the same way, within the
-  selection's ceiling.
-- Campaign Status shows a **Scope Grant** section above Authorized Issue Scope: Named Issues,
-  Selection Count (with Defaulted or Capped), Selection Criteria, Selection Constraints, Maximum
-  Issues, Repository, Operations, any operations the message withheld, numbers not granted and why,
-  the Decision Model, and its reason or failure.
+- The Orchestrator proposes the issue scope (#4282); the server reads nothing from the message.
+  The boundary is established with an empty scope and the launch's ceilings, and the first-message
+  record keeps a grant of status `proposal` (`firstMessageScope.grant`) with those ceilings. Nothing
+  is dispatched (`create_session` for campaign work answers 409 `initial_scope_not_admitted`) until
+  an initial scope is applied (`firstMessageScope.initialScope`).
+- The Orchestrator's first campaign action is that proposal: `request_campaign_issue_scope_change`
+  with `proposal` (protocol 308): each issue's `origin` (`owner_named` or `orchestrator_chosen`) and
+  `rationale`, the `requestedCount` the owner stated or `null`, the `constraints` it read, and the
+  `withheldOperations` the message rules out. Ranking criteria ("highest priority") are its own call,
+  recorded in its rationale and never checked. Its issues are exactly the additions; a task that
+  needs none proposes no additions.
+- Deterministic floors run first, in order, and refuse with a fixed code naming the issue: additions
+  only (`proposal_additions_only`), in a boundary repository (`repository_outside_boundary`); every
+  owner-named number written in the owner's exact message for its own repository: qualified by it,
+  or standing alone for the launch repository only (`owner_named_not_in_message`); inside any
+  repository limit the proposal names or the initial scope was admitted with
+  (`repository_constraint_mismatch`); an open issue, not a pull request (`not_an_issue`,
+  `issue_not_open`); not already in scope (`already_in_scope`) nor held by another active campaign
+  (`other_campaign_scope`); within an explicit Maximum Issues (`capacity_exhausted`; a derived one
+  grows to fit the scope plus follow-up room, never past 100); and no Human Required label
+  (`human_required_label`); a stated count written in the message as digits or a word
+  (`requested_count_not_in_message`); and chosen issues within the count, counting every chosen
+  issue earlier proposals admitted, even one since removed (`proposal_count_exceeded`: the stated
+  count, the admitted count for a later addition, or 3). Withheld operations only ever narrow the
+  launch's.
+- A proposal with nothing checkable beyond owner-named issues (every one written in the message as
+  an issue reference of its own repository, `owner/repo#12` or its URL, or `#12` for the launch
+  repository, not only as a
+  bare number such as a count; no Orchestrator-chosen issue, no constraint, no withheld operation,
+  and no count other than the named issues') is admitted after
+  the floors with no model call: an Orchestrator-owned `campaign_issue_scope` change carrying
+  `scopeProposal` and server-derived `issueAdmission`, which the Orchestrator applies by resolving
+  it. Anything else goes to the Decision Model's constraint check (`scope_check`, #4283's typed
+  questions, in one call). It reads the owner's exact message, the proposal and the proposed issues'
+  facts as quoted data, and answers only checkable questions: does the count agree with the message;
+  is each owner-named issue asked for, not only mentioned; does each chosen issue meet each stated
+  constraint (one question per issue and constraint); does the proposal list every stated constraint;
+  does it omit an issue the owner asked for; does it withhold every operation the message rules out.
+  It never asks about priority, importance, impact or effort. The server derives the verdict at an 80%
+  confidence threshold. Admit is an Orchestrator-owned change carrying `constraintCheck`. Refuse
+  (`constraint_check_refused`) names the deciding question and issue, and the Orchestrator revises.
+  One check per structured proposal (additions with origins, count, normalized constraints, withheld
+  operations; never the rationale) is recorded, so a repeat reads its outcome; one set of additions
+  gets at most three distinct checks per scope revision, after which it is the owner's. A later
+  addition that marks an issue owner-named is always checked (`later_named_issues`), and a reference
+  the message writes but the proposal doesn't add as owner-named needs the check
+  (`unproposed_references`). When the check is uncertain, fails after the runtime's retries, or can't
+  run (inputs too large for one call), it fails closed: the owner gets exactly one person-owned
+  approval of the proposal (`scopeProposal.route: "owner"`, `ownerCause` naming why), presented as
+  an Owner Question (Approve Scope, Decline Scope, or an answer in their own words, which declines
+  it and reaches the Orchestrator as a prompt). Proposing the same issues again returns that request.
+  Approving applies exactly the proposal, grows a derived Maximum Issues to fit and withholds the
+  stated operations. Nothing is parsed from the message text on any route.
+- A root runner older than protocol 308 cannot send a structured proposal: its additions take the
+  owner's approval route (`proposal_unstructured`).
+- Later additions take the same route; epic and follow-up lineage keep their own rules.
+- Campaign Status shows a **Scope Proposal** section in place of the Scope Grant: Maximum Issues,
+  Repository and Operations, then each proposal with its issues (Named by You or Chosen by
+  Orchestrator, with the rationale), the count, constraints, withheld operations, rationale, how it
+  was checked and what it led to; a checked proposal also shows the Decision Model Verdict and each
+  typed question with its answer, confidence and evidence (#4283's checklist). When the Full Control
+  section already shows Maximum Issues and Operations, this section leaves those two rows out. Each
+  check, a refused one included, is also listed in Decision Model Checks as a Scope Proposal. A
+  proposal that became the owner's one approval is listed under **Waiting for You** too, with an Open
+  Request (#4334).
+- A campaign whose first message was read before #4282 keeps its stored grant and scope, and the
+  rest of this section describes that grant. The issue scope came from a typed **scope grant**
+  (#4102): the Decision Model (`scope_grant`) read only the exact message and returned explicit
+  issues, ranges, context numbers, a selection and any narrowing of the launch's operations, and
+  deterministic floors (`scope-grant.ts`) only removed from that answer. A failed or uncertain grant
+  left the scope empty and routed the Orchestrator's proposal to one typed, person-owned approval
+  (`grantReview`), whose approval also sets a derived Maximum Issues. Campaign Status shows its
+  **Scope Grant** section, and lists that approval under **Waiting for You** (#4334).
 - On the campaign's own Campaign Status, the owner can change a granted selection's count with
   Change Count (`POST /api/sessions/:id/orchestrator-campaign/scope-grant/selection-count`, Human
   only, compare-and-set on the policy revision, `setScopeGrantSelectionCount`). Only the person who
@@ -164,10 +223,13 @@ review. Revoking Full Control restores Custom: the wait applies only while the c
 Control.
 
 Enabling Full Control on an existing campaign that has no issue scope derives one. The repository
-comes from the runner's inspection of the root's checkout. The issues are only those parsed from
-the authenticated Human's own create request (`issueNumbersSource: "human_launch_request"`), as
-the runner verifies them. Transcript messages record no author, and a restart backfill reads the
-transcript, so neither is ever scope. Without such issues the scope is task-only. A campaign with
+comes from the runner's inspection of the root's checkout. The issues are only those the Custom
+Orchestrator's checked first-message proposal granted from the authenticated Human's own create
+request (`issueNumbersSource: "human_launch_request"`, #4259, #4282), as the runner verifies them. No
+grammar parses that request. Transcript messages record no author, so a restart's proposal for one
+grants no issue at all and leaves it with the owner. While the first message's seed is pending,
+enabling is refused with a retry message; a check that failed or was uncertain grants no issue, and its
+person-owned request stays in Campaign Status. Without such issues the scope is task-only. A campaign with
 any history is established at once in the same action, with its existing task as the objective,
 and its retained work then runs under that boundary. Only a fresh root with no trusted issues
 waits for the owner's first message through the fenced path. A campaign whose scope another person established can't be enabled

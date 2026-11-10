@@ -94,6 +94,8 @@ function harness(t: { after(fn: () => void): void }, options: {
         reviewDiagnostics: () => ({ permissionDenials: options.denials ?? 0 }),
         cancel: () => finish?.(),
         dispose: () => { record.disposed = true; },
+        // A retired campaign reviewer's slot is released on its whole-tree proof (#4257).
+        proveProcessTreeExit: async () => record.disposed,
         setConfig: () => {},
         resolvePermission: () => false,
         agentSessionId: () => "provider-session",
@@ -333,6 +335,32 @@ test("a recorded equivalence completes before any reviewer launches, and keeps i
         "the reservation comes back unspent");
     } else assert.deepEqual(h.manager.reviewSessionUpdates(), [expected], "a lost frame is re-sent at the next registration");
   }
+});
+
+test("an accepted base-merge round launches its reviewer, and only that reviewer's report settles it (#4075)", async (t) => {
+  const round: ReviewAttemptRound = { ...ROUND, round: 5, mode: "delta", since: "a".repeat(40), baseMerge: true };
+  const checkout = mkdtempSync(join(tmpdir(), "wollipog-review-base-merge-"));
+  t.after(() => rmSync(checkout, { recursive: true, force: true }));
+  const prepare: ReviewSessionHooks["prepare"] = async () => ({ checkout, prompt: "THE RESOLUTION", baseSha: "b".repeat(40), round });
+
+  const reviewed = harness(t, { prepare });
+  assert.equal(await reviewed.manager.start(reviewSpec(), "brief"), true);
+  await until(() => reviewed.updates().length > 0, "the reviewed outcome");
+  assert.equal(reviewed.drivers.length, 1, "a reviewer ran");
+  assert.ok(reviewed.drivers[0]!.prompts.some((prompt) => prompt.includes("THE RESOLUTION")), "with the round's prompt");
+  assert.equal(reviewed.observations.length, 1, "its report was evaluated");
+  assert.deepEqual(reviewed.updates(), [{
+    type: "review_session_update", sessionId: "s_review", state: "completed", output: OUTPUT, round, verdict: VALID,
+  }]);
+
+  // A reviewer that reports nothing does not pass the head: the round fails, with no vote.
+  const silent = harness(t, { prepare, output: null });
+  assert.equal(await silent.manager.start(reviewSpec(), "brief"), true);
+  await until(() => silent.updates().length > 0, "the silent outcome");
+  assert.deepEqual(silent.updates(), [{
+    type: "review_session_update", sessionId: "s_review", state: "failed", reason: "the review ended without a result",
+    round, verdict: NO_REPORT,
+  }]);
 });
 
 test("a review refused before its session exists keeps a durable outcome to re-send", async (t) => {

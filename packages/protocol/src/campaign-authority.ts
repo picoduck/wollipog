@@ -2,7 +2,8 @@ import { supportsPacedVideoReviewPeer } from "./paced-video-review.js";
 import { campaignEvidenceAuthorityBound, type CampaignEvidenceAuthority } from "./campaign-evidence-authority.js";
 import { parentControlRequestEligible, runnerCapabilityRequirementError, runnerSupportsProtocol, type RunnerCapabilityRequirementDetails } from "./index.js";
 import { validCampaignBudgetAuthority, type CampaignBudgetAuthority } from "./campaign-budget.js";
-import { campaignRepositoryLocation } from "./campaign-work-ledger.js";
+import { canonicalCampaignIssues } from "./campaign-issue-scope.js";
+import { campaignRepositoryLocation, type CampaignIssueRef } from "./campaign-work-ledger.js";
 import type { CampaignPublicationAdmissionFailure } from "./campaign-issue-publication.js";
 import type { ApprovalContext, GovernancePolicy, ParentControlDecisionPolicy, ParentControlMode, PendingApproval, WorkflowDecisionCategory, WorkflowDecisionResourceSnapshot } from "./index.js";
 
@@ -26,7 +27,12 @@ export interface CampaignAuthorityBoundary {
   delegatablePolicyIds: string[];
   /** Human-established issue-write boundary. Omission preserves human-only scope/closure. */
   issueAuthority?: {
+    /** The authorized epics in the launch repository. A boundary stored before #4118 holds only
+     * these, and they read as that repository's. */
     epics: number[];
+    /** The authorized epics in the boundary's other repositories (#4118), canonical and never
+     * empty. Read every epic through `campaignBoundaryEpics`. */
+    otherEpics?: CampaignIssueRef[];
     relatedFollowUps: boolean;
     maxIssues: number;
     closureReasons: Array<"completed" | "not_planned">;
@@ -61,6 +67,20 @@ export function campaignBoundaryRepository(boundary: Pick<CampaignAuthorityBound
   repository: string): CampaignBoundaryRepository | null {
   const wanted = repository.toLowerCase();
   return campaignBoundaryRepositories(boundary).find((entry) => entry.repository.toLowerCase() === wanted) ?? null;
+}
+
+/** Every epic the boundary authorizes, repository-qualified (#4118), the launch repository's first. */
+export function campaignBoundaryEpics(boundary: Pick<CampaignAuthorityBoundary, "repository" | "issueAuthority">): CampaignIssueRef[] {
+  const repository = boundary.repository.toLowerCase();
+  return [...(boundary.issueAuthority?.epics ?? []).map((number) => ({ repository, number })),
+    ...(boundary.issueAuthority?.otherEpics ?? []).map((issue) => ({ ...issue }))];
+}
+
+/** A campaign's repository list on its own: one entry per repository, unique Location ids, within
+ * bounds. A Full Control boundary also requires its first entry to be the boundary's repository. */
+export function validCampaignRepositoryList(value: unknown): value is CampaignBoundaryRepository[] {
+  return Array.isArray(value) && value.length > 0 && typeof (value[0] as CampaignBoundaryRepository | null)?.repository === "string" &&
+    validBoundaryRepositories(value, (value[0] as CampaignBoundaryRepository).repository);
 }
 
 function validBoundaryRepositories(value: unknown, repository: string): boolean {
@@ -109,6 +129,9 @@ export interface CampaignAuthorityEvaluation {
     /** #4062: a Full Control merge whose closures nothing reads (a GitLab merge, or a GitHub merge
      * from a runner older than the closing-reference check) and whose declared ones prove nothing. */
     "unverified_closures" |
+    /** #4119: a merge in a repository without required checks whose head reports no checks at
+     * all. Nothing reported is never green, so it stays the person's in every mode. */
+    "no_checks" |
     /** #4058: a Full Control closure of an issue inside the boundary that failed delegated proof.
      * It stays the person's; the closure snapshot's `deliveryGaps` name what a new request needs. */
     "closure_proof_incomplete" |
@@ -152,9 +175,10 @@ const operations: CampaignAuthorityOperation[] = ["implementation_question", "pr
 export function campaignWorkflowOwner(control: CampaignControl | undefined, decisions: ParentControlDecisionPolicy,
   category: WorkflowDecisionCategory, supported: boolean, fullControlReviewExtensions = false): "human" | "orchestrator" {
   // A follow-up past the campaign's approval limit is the Human's in every mode (#2940), and so is a
-  // decision its owner kept (#4064). A Location switch widens a session's reach (#4138).
+  // decision its owner kept (#4064). A Location switch widens a session's reach (#4138), and a
+  // repository addition widens the campaign's (#4117).
   if (!supported || category === "automation_creation" || category === "campaign_follow_up_admission" ||
-      category === "owner_decision" || category === "location_switch") return "human";
+      category === "owner_decision" || category === "location_switch" || category === "campaign_repository_addition") return "human";
   if (category === "issue_closure" || category === "campaign_issue_scope") return control?.mode === "full_control" &&
     validCampaignControl(control) && control.boundary.issueAuthority && control.boundary.operations.includes(category) ? "orchestrator" : "human";
   if (!control || control.mode === "custom") return decisions[category];
@@ -174,7 +198,7 @@ export function validCampaignControl(value: unknown): value is CampaignControl {
   const bounded = (v: unknown, max: number) => typeof v === "string" && v.trim().length > 0 && v.length <= max && !/[\x00-\x1f\x7f]/u.test(v);
   return Boolean(b && !Array.isArray(b) && b.version === 1 &&
     Object.keys(b).every((key) => ["version", "revision", "issueScopeRevision", "repository", "objective", "authorizedByUserId", "authorizedAt", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority", "evidenceAuthority", "repositories"].includes(key)) &&
-    (b.issueAuthority === undefined || validIssueAuthority(b.issueAuthority)) &&
+    (b.issueAuthority === undefined || validIssueAuthority(b.issueAuthority, b)) &&
     (b.repositories === undefined || typeof b.repository === "string" && validBoundaryRepositories(b.repositories, b.repository)) &&
     (b.budgetAuthority === undefined || validCampaignBudgetAuthority(b.budgetAuthority)) &&
     Number.isSafeInteger(b.revision) && b.revision > 0 && bounded(b.repository, 256) && campaignRepositoryLocation(b.repository) !== null &&
@@ -187,10 +211,20 @@ export function validCampaignControl(value: unknown): value is CampaignControl {
     (b.evidenceAuthority === undefined || campaignEvidenceAuthorityBound(b.evidenceAuthority, b)));
 }
 
-function validIssueAuthority(value: NonNullable<CampaignAuthorityBoundary["issueAuthority"]>): boolean {
-  return Boolean(value && Object.keys(value).every((key) => ["epics", "relatedFollowUps", "maxIssues", "closureReasons"].includes(key)) &&
+/** Another repository's epics: canonical, never empty, and each in a boundary repository other than the launch one. */
+function validOtherEpics(value: unknown, boundary: Pick<CampaignAuthorityBoundary, "repository" | "repositories">): boolean {
+  const canonical = canonicalCampaignIssues(value);
+  if (!canonical?.length || JSON.stringify(canonical) !== JSON.stringify(value) || typeof boundary.repository !== "string") return false;
+  const launch = boundary.repository.toLowerCase();
+  return canonical.every((issue) => issue.repository !== launch && campaignBoundaryRepository(boundary, issue.repository) !== null);
+}
+
+function validIssueAuthority(value: NonNullable<CampaignAuthorityBoundary["issueAuthority"]>,
+  boundary: Pick<CampaignAuthorityBoundary, "repository" | "repositories">): boolean {
+  return Boolean(value && Object.keys(value).every((key) => ["epics", "otherEpics", "relatedFollowUps", "maxIssues", "closureReasons"].includes(key)) &&
     Array.isArray(value.epics) && value.epics.length <= 100 && new Set(value.epics).size === value.epics.length &&
-    value.epics.every((n) => Number.isSafeInteger(n) && n > 0) && typeof value.relatedFollowUps === "boolean" &&
+    value.epics.every((n) => Number.isSafeInteger(n) && n > 0) && (value.otherEpics === undefined || validOtherEpics(value.otherEpics, boundary)) &&
+    typeof value.relatedFollowUps === "boolean" &&
     Number.isSafeInteger(value.maxIssues) && value.maxIssues > 0 && value.maxIssues <= 100 &&
     Array.isArray(value.closureReasons) && new Set(value.closureReasons).size === value.closureReasons.length &&
     value.closureReasons.every((reason) => ["completed", "not_planned"].includes(reason)));
@@ -431,7 +465,8 @@ export function resolveCampaignAuthority(input: {
   if (Boolean(request) === Boolean(input.snapshot)) return result("human", "human_required", "unverified_intent");
   // The owner kept this decision (#4064): no mode, boundary or grant makes it an agent's.
   if (category === "owner_decision") return result("human", "human_required", "owner_kept");
-  if (category === "automation_creation" || category === "campaign_follow_up_admission" || category === "location_switch") {
+  if (category === "automation_creation" || category === "campaign_follow_up_admission" || category === "location_switch" ||
+      category === "campaign_repository_addition") {
     return result("human", "human_required", "protected_request");
   }
   if (!input.supported) return result("human", "human_required", "unsupported_provider");
@@ -451,7 +486,7 @@ export function resolveCampaignAuthority(input: {
     // the server-enforced cap of its pull request (#4075). Past the cap they stay the person's.
     if (!eligible && category === "review_round_extension" && input.control?.mode === "full_control" && !input.root &&
         input.reviewExtensionCap !== undefined && validCampaignControl(input.control) && input.trustedSource === "workflow_route" &&
-        input.snapshot!.repository.toLowerCase() === input.control.boundary.repository.toLowerCase()) {
+        campaignBoundaryRepository(input.control.boundary, input.snapshot!.repository) !== null) {
       return input.reviewExtensionCap === "within" ? result("orchestrator", "campaign_delegation", "authorized_operation")
         : result("human", "human_required", "review_extension_cap_reached");
     }
@@ -462,8 +497,10 @@ export function resolveCampaignAuthority(input: {
   const boundary = input.control.boundary;
   if (category === "follow_up_issue_publication" && boundary.issueAuthority &&
       !(input.snapshot && "issueAdmission" in input.snapshot && input.snapshot.issueAdmission)) return result("human", "human_required", "unverified_intent");
+  // A gate is in the boundary when its repository is one of the boundary's entries (#4119); the
+  // server checks the requester's own place and the gate's evidence against that entry.
   if (!boundary.operations.includes(operation) || (input.snapshot && "repository" in input.snapshot &&
-      input.snapshot.repository.toLowerCase() !== boundary.repository.toLowerCase())) return result("human", "human_required", "outside_boundary");
+      campaignBoundaryRepository(boundary, input.snapshot.repository) === null)) return result("human", "human_required", "outside_boundary");
   if (category) {
     if (input.trustedSource !== "workflow_route") return result("human", "human_required", "unverified_intent");
     if (category === "implementation_question") {
@@ -598,9 +635,11 @@ const FULL_CONTROL_ROOT_QUESTION_GUIDANCE = "You own every Orchestrator-owned " 
 /** The root guidance with the owner-decision route (#4064) in place of "report it instead of asking". */
 const FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_GUIDANCE = FULL_CONTROL_ROOT_QUESTION_GUIDANCE.slice(0,
   FULL_CONTROL_ROOT_QUESTION_GUIDANCE.indexOf("A human-owned decision")) +
-  "For a decision the campaign's owner kept for themselves, call request_owner_decision with the question, its options " +
-  "and the decision material: it reaches the owner's Inbox without stopping your turn or other work, and their choice " +
-  "is delivered back to you. To give the owner one of your pending Orchestrator-owned decisions instead, such as a " +
+  "To ask the campaign's owner a design choice, clarification or preference, call request_owner_decision with kind " +
+  "\"question\", the question, any suggested options and the background as Markdown: the owner answers in their own words, " +
+  "and the answer is delivered back to you. For an exact action the owner kept that has no typed category, use kind " +
+  "\"approval\" with explicit options. Either reaches the owner's Inbox without stopping your turn or other work. " +
+  "To give the owner one of your pending Orchestrator-owned decisions instead, such as a " +
   "child's pr_merge, call hand_workflow_decision_to_owner; that cannot be undone. Never decide a human-owned decision yourself.";
 
 const FULL_CONTROL_ROOT_QUESTION_NOTICE = "[Wollipog Full Control] Your question was dismissed: under Full Control " +

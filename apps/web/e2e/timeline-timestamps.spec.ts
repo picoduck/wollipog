@@ -26,7 +26,8 @@ test("a running step's duration ticks without layout shift and freezes when the 
   await expect(page.locator(".tl-work-title"), "prompts follow this group, so it has settled").toHaveText("Worked for 1m 20s");
   await page.locator(".tl-work > .disclosure-trigger").click();
 
-  await expect(page.locator(".tl-agent-msg time, .tl-step time")).toHaveCount(0);
+  await expect(page.locator(".tl-step time")).toHaveCount(0);
+  await expect(page.locator(".tl-agent-msg time")).toHaveCount(1);
   await expect(page.locator(".tl-step")).toHaveCount(3);
   for (const head of await page.locator(".tl-step-head").allInnerTexts()) {
     expect(head, "no step shows Started, Last Activity or Recorded").not.toMatch(/Started|Last Activity|Recorded/);
@@ -139,9 +140,14 @@ for (const theme of ["dark", "light"]) {
       await expect(footers).toHaveCount(3);
       await expect(footers.locator(".tl-turn-label")).toHaveText(["Turn 1", "Turn 2", "Turn 3"]);
       await expect(page.getByText(/Start Turn|End Turn/)).toHaveCount(0);
-      for (const time of await footers.locator("time").allTextContents()) expect(time).toMatch(/^\d{1,2}:\d{2}\s?[AP]M$/);
+      for (const time of await footers.locator("time").all()) {
+        const expected = await time.evaluate((element) => new Intl.DateTimeFormat(undefined, {
+          dateStyle: "medium", timeStyle: "medium",
+        }).format(new Date(element.getAttribute("datetime")!)));
+        await expect(time).toHaveText(expected);
+      }
       await expect(footers.first().locator(".tl-turn-usage")).toContainText("$0.04");
-      await expect(page.locator(".tl-row.user time, .tl-agent-msg time")).toHaveCount(0);
+      await expect(page.locator(".tl-row.user time, .tl-agent-msg time")).toHaveCount(9);
 
       const geometry = await readerGeometry(page);
       expect(geometry.proseInset, `${width}px prose inset`).toBeGreaterThanOrEqual(gutter);

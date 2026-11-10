@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { campaignPublicationSafe, campaignPublicationTitle, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
+import { campaignBoundaryRepository, campaignPublicationSafe, campaignPublicationTitle, campaignScopeIssues, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
   type WorkflowDecisionResourceSnapshot, type CampaignWorkItemDetail, type CampaignPullRequestRef, type CampaignRecommendation,
   ISSUE_CLOSURE_DELIVERY_GAPS_MAX, issueClosureDeliveryGap, type IssueClosureDeliveryGap, type IssueClosureDeliveryGapCode,
-  type IssueClosureEpicMembers } from "@wollipog/protocol";
+  type IssueClosureEpicMembers, type CampaignForgeChangeRequestObservation } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
-import { campaignBoundaryCurrent } from "./campaign-authority.js";
+import { campaignBoundaryCurrent, campaignClosureIssueHeld, campaignIssueInScope, campaignScopeRepositories } from "./campaign-authority.js";
 import { forgeRefKey, type ForgeFactEntry } from "./campaign-forge-observations.js";
 
 export const issueEvidenceDigest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -29,37 +29,44 @@ export function campaignScopeTargetFailureMessage(reason: unknown): string {
   }
 }
 
+/** How many issues the campaign holds across every repository (#4118): the size Maximum Issues
+ * limits. `issueNumbers` is only the launch repository's part. */
+export function heldCampaignIssues(root: Pick<SessionView, "orchestratorPolicy">): number {
+  const policy = root.orchestratorPolicy;
+  return policy?.issueScope ? campaignScopeIssues(policy.issueScope).length : policy?.issueNumbers?.length ?? 0;
+}
+
 export function issueBoundary(root: SessionView) {
   const control = root.orchestratorPolicy?.control;
   return control?.mode === "full_control" && campaignBoundaryCurrent(root) && control.boundary.issueAuthority ? control.boundary : null;
 }
 
-export function issueWork(db: ControlPlaneDb, root: SessionView, issue: number): CampaignWorkItemDetail[] {
-  const repository = root.orchestratorPolicy?.issueScope?.repository;
+export function issueWork(db: ControlPlaneDb, root: SessionView, issue: number,
+  repository: string | undefined = root.orchestratorPolicy?.issueScope?.repository): CampaignWorkItemDetail[] {
   const fixedBy = repository && db.campaignWorkLedger.fixedBy(root.id, repository, issue);
   const items: CampaignWorkItemDetail[] = [];
   if (fixedBy) {
     const cited = fixedBy.map((id) => db.campaignWorkLedger.detail(root.id, id, Date.now()));
     // Do not silently drop a missing or out-of-scope unit and prove only a subset.
     if (cited.some((item) => !item || !item.issue || item.issue.repository.toLowerCase() !== repository!.toLowerCase() ||
-        !root.orchestratorPolicy?.issueNumbers?.includes(item.issue.number))) return [];
+        !campaignClosureIssueHeld(root.orchestratorPolicy, item.issue))) return [];
     items.push(...cited as CampaignWorkItemDetail[]);
   }
-  const tracked = trackedIssueWork(db, root, issue);
+  const tracked = trackedIssueWork(db, root, issue, repository);
   if (!tracked) return [];
   for (const detail of tracked) if (!items.some((existing) => existing.id === detail.id)) items.push(detail);
   return items;
 }
 
 /** The ledger's own work items for this issue, without its fixed-by plan; null when the ledger cannot be read. */
-function trackedIssueWork(db: ControlPlaneDb, root: SessionView, issue: number): CampaignWorkItemDetail[] | null {
+function trackedIssueWork(db: ControlPlaneDb, root: SessionView, issue: number, repository: string | undefined): CampaignWorkItemDetail[] | null {
   const items: CampaignWorkItemDetail[] = [];
   let cursor: string | undefined;
   do {
     const page = db.campaignWorkLedger.page(root.id, { state: "all", limit: 100, ...(cursor ? { cursor } : {}) }, Date.now());
     if (!page.ok) return null;
     for (const item of page.data.items) if (item.issue?.number === issue &&
-        item.issue.repository.toLowerCase() === root.orchestratorPolicy?.issueScope?.repository.toLowerCase()) {
+        item.issue.repository.toLowerCase() === repository?.toLowerCase()) {
       const detail = db.campaignWorkLedger.detail(root.id, item.id, Date.now());
       if (detail && !items.some((existing) => existing.id === detail.id)) items.push(detail);
     }
@@ -79,8 +86,9 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
   snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>) {
   const failed = (failure: CampaignPublicationAdmissionFailure) => ({ failure });
   const boundary = issueBoundary(root);
-  if (!boundary?.issueAuthority?.relatedFollowUps || !boundary.operations.includes(snapshot.category) ||
-      snapshot.repository !== boundary.repository.toLowerCase()) return failed("no_issue_boundary");
+  if (!boundary?.issueAuthority?.relatedFollowUps || !boundary.operations.includes(snapshot.category)) return failed("no_issue_boundary");
+  // #4119: any repository of the boundary; another Project repository must be added first.
+  if (!campaignBoundaryRepository(boundary, snapshot.repository)) return failed("target_outside_boundary");
   if (!snapshot.recommendationId) return failed("recommendation_not_found");
   if (!campaignPublicationSafe(snapshot.sanitizedTitle, snapshot.sanitizedBody, snapshot.labels)) return failed("unsafe_payload");
   const recommendation = db.campaignWorkLedger.recommendation(root.id, snapshot.recommendationId);
@@ -90,38 +98,50 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
   if (campaignPublicationTitle(recommendation.title) !== campaignPublicationTitle(snapshot.sanitizedTitle)) return failed("title_mismatch");
   if (!recommendation.originWorkItemIds.length) return failed("origin_outside_scope");
   const origins = recommendation.originWorkItemIds.map((id) => db.campaignWorkLedger.detail(root.id, id, Date.now())?.issue);
-  if (origins.some((issue) => !issue || issue.repository.toLowerCase() !== snapshot.repository || !root.orchestratorPolicy?.issueNumbers?.includes(issue.number))) return failed("origin_outside_scope");
+  // #4119: the originating work is in the campaign's scope, in whichever of its repositories.
+  if (origins.some((issue) => !issue || !campaignIssueInScope(root.orchestratorPolicy, issue))) return failed("origin_outside_scope");
+  // A follow-up in another repository than its origins records both in its lineage.
+  const originRefs = [...new Set(origins.map((issue) => `${issue!.repository.toLowerCase()}#${issue!.number}`))].sort();
+  const lineage = originRefs.some((ref) => !ref.startsWith(`${snapshot.repository}#`))
+    ? { target: snapshot.repository, origins: originRefs } : undefined;
   // Scope capacity includes every outstanding publication reservation, so concurrent approvals
   // cannot consume the same final slot. This hook composes with aggregate campaign limits.
   const grants = db.campaignPublicationReservations(root.id);
   if (grants.some((d) => d.status === "consumed" && d.resourceSnapshot.category === snapshot.category && d.resourceSnapshot.recommendationId === snapshot.recommendationId)) return failed("recommendation_spent");
   const reservations = reservedPublicationSlots(db, root, undefined, snapshot.recommendationId);
-  if ((root.orchestratorPolicy?.issueNumbers?.length ?? 0) + reservations >= db.campaignIssueLimit(root.id, boundary.issueAuthority.maxIssues)) {
+  if (heldCampaignIssues(root) + reservations >= db.campaignIssueLimit(root.id, boundary.issueAuthority.maxIssues)) {
     return failed("capacity_exhausted");
   }
-  return { evidence: { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision } };
+  return { evidence: { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision,
+    ...(lineage ? { lineage } : {}) } };
 }
 
 /** Why the server refused an Orchestrator's own Full Control scope change (#2940). Each code names
- * the one condition that failed and maps to a fixed sentence; neither carries issue or payload text. */
+ * the one condition that failed and maps to a fixed sentence; neither carries issue or payload text.
+ * Additions without any lineage are not refused: they become the owner's typed approval (#4267). */
 export type CampaignScopeAdmissionFailure =
-  | "capacity_exhausted" | "lineage_missing" | "epic_not_authorized" | "epic_members_unverified"
+  | "capacity_exhausted" | "epic_not_authorized" | "epic_members_unverified"
   | "follow_ups_not_authorized" | "follow_up_not_single" | "publication_not_found" | "publication_not_consumed"
   | "publication_already_admitted" | "publication_unapproved" | "publication_approved_under_earlier_boundary" | "publication_approver_not_owner"
   | "publication_authority_changed" | "recommendation_not_found" | "recommendation_not_accepted" | "resulting_issue_mismatch" | "origin_outside_scope" | "payload_mismatch"
   // Selection lineage (#4103): its deterministic floors, in the order they run.
-  | "selection_not_granted" | "selection_additions_only" | "repository_outside_boundary" | "not_an_issue" | "issue_not_open"
-  | "already_in_scope" | "other_campaign_scope" | "selection_count_exhausted" | "human_required_label";
+  | "selection_not_granted" | "selection_additions_only" | "selection_launch_repository_only" | "repository_outside_boundary" | "not_an_issue" | "issue_not_open"
+  | "already_in_scope" | "other_campaign_scope" | "selection_count_exhausted" | "human_required_label"
+  // The Orchestrator's own scope proposal (#4282): its floors beyond those above.
+  | "owner_named_not_in_message" | "proposal_additions_only" | "proposal_count_exceeded" | "requested_count_not_in_message"
+  | "repository_name_not_in_message" | "repository_constraint_mismatch"
+  // The Decision Model's constraint check of that proposal (#4282) refused it.
+  | "constraint_check_refused";
 
 const HUMAN_SCOPE_ROUTE = "ask the campaign owner to propose this change from Campaign Status";
 
+// The seven owner-review causes retain their legacy refusal catalog for compatibility. The current
+// proposal route uses them as server-derived review causes, never as refusals (#4333).
 export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdmissionFailure, { status: number; message: string }>> = {
   // Names the limit and the owner's route to raise it (#4061); no agent can raise it.
   capacity_exhausted: { status: 409, message: "Scope and publication reservations exceed this campaign's Maximum Issues, the issue limit " +
     "its Full Control authorization set. Only the person who authorized Full Control can raise it: in Campaign Status, raise the " +
     "Follow-Up Limit, which raises Maximum Issues by as much, or choose No Limit. Ask that person; an Orchestrator can't raise it." },
-  lineage_missing: { status: 403, message: "Scope additions require authorized epic or exact related-publication lineage; incidental references cannot grant scope. " +
-    `Name a human-authorized epic or the consumed publication of an accepted follow-up, or ${HUMAN_SCOPE_ROUTE}.` },
   epic_not_authorized: { status: 403, message: `The named epic is not one this campaign's Full Control boundary authorizes; ${HUMAN_SCOPE_ROUTE}.` },
   epic_members_unverified: { status: 409, message: "Additions are not verified members of a human-authorized epic" },
   follow_ups_not_authorized: { status: 403, message: `This campaign's Full Control boundary does not authorize related follow-ups; ${HUMAN_SCOPE_ROUTE}.` },
@@ -143,8 +163,11 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
   selection_not_granted: { status: 403, message: "Selection lineage needs a scope grant in which the owner's first message asked the campaign to choose " +
     `issues, and this campaign's grant has none. Name a human-authorized epic or the consumed publication of an accepted follow-up, or ${HUMAN_SCOPE_ROUTE}.` },
   selection_additions_only: { status: 400, message: "A selection proposal adds issues only; propose removals as their own change." },
+  selection_launch_repository_only: { status: 409, message: "A selection fills only the launch repository's part of the scope, so it can't add an " +
+    "issue in another of the campaign's repositories. The campaign's owner can add that issue from Campaign Status." },
   repository_outside_boundary: { status: 403, message: "A proposed issue is not in a repository in this campaign's boundary; " +
-    "propose issues from the campaign's own repositories." },
+    "propose issues from the campaign's own repositories. If the campaign's Project has a Location of that repository, ask the " +
+    "campaign's owner to add it with request_campaign_repository_addition, then retry once the addition is carried out." },
   not_an_issue: { status: 409, message: "A proposed number is a pull request, not an issue; propose issues only." },
   issue_not_open: { status: 409, message: "A proposed issue is closed; propose open issues only." },
   already_in_scope: { status: 409, message: "A proposed issue is already in this campaign's scope." },
@@ -153,6 +176,19 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
     "Only the owner can change that count, in Campaign Status; an Orchestrator can't." },
   human_required_label: { status: 403, message: "A proposed issue has a label that a Human Required rule names, so only the campaign owner " +
     "can add it; choose another issue or ask the owner to propose it from Campaign Status." },
+  owner_named_not_in_message: { status: 409, message: "A proposed issue is marked as named by the owner, but the owner's message doesn't " +
+    "write its number for that issue's repository; a bare number means the launch repository. Mark it as your own choice, with your rationale, or leave it out." },
+  repository_name_not_in_message: { status: 409, message: "The proposal names a repository the owner's message doesn't write. " +
+    "Send the message's own words for each repository, or leave repositoryNames out." },
+  repository_constraint_mismatch: { status: 409, message: "A proposed issue is outside the repositories the owner's message limits the work to; " +
+    "propose issues from those repositories only." },
+  proposal_additions_only: { status: 400, message: "A scope proposal adds issues only; propose removals as their own change." },
+  proposal_count_exceeded: { status: 409, message: "The proposal chooses more issues than the owner's count allows: the count the owner " +
+    "stated, the campaign's admitted count, or 3 when the owner stated none. Choose fewer issues." },
+  requested_count_not_in_message: { status: 409, message: "The proposal's count isn't written in the owner's message, as digits or a " +
+    "word. Give the count the owner wrote, or null when the message states none." },
+  constraint_check_refused: { status: 409, message: "The Decision Model found that this proposal doesn't stay within what the owner's " +
+    "message allows. Revise it and propose again; proposing the same issues with another rationale gets the same answer." },
 };
 
 /** The accepted recommendation a consumed publication delivered as `issue`. A bounded grant names it.
@@ -204,15 +240,22 @@ export function reservedPublicationSlots(db: ControlPlaneDb, root: SessionView, 
 
 type DeliveryCandidate = ForgeFactEntry & { approvedHeads: string[] };
 
+/** #4120: the repositories whose merged pull requests may prove a closure in `repository`: that
+ * repository and every other one in the campaign's boundary. Pull requests anywhere else stay
+ * `pull_request_outside_repository`. */
+function proofRepositories(root: SessionView, repository: string | undefined): Set<string> {
+  return new Set([...(repository ? [repository.toLowerCase()] : []), ...campaignScopeRepositories(root).map((entry) => entry.repository.toLowerCase())]);
+}
+
 /** The pull requests that may prove one item's delivery (#2940): every consumed `pr_merge` gate a
  * verified-delivered attempt's session passed inside that attempt (server-recorded at an exact
  * head), and every pull request the item's reported stage names. Each is only a candidate; its
  * forge fact decides. A gate from before the attempt began or after its verified report, or one
  * meant to close neither this item's issue nor the fixed-by target, belongs to other work. */
-function deliveryCandidates(db: ControlPlaneDb, root: SessionView, item: CampaignWorkItemDetail, closureIssue: number): DeliveryCandidate[] {
+function deliveryCandidates(db: ControlPlaneDb, root: SessionView, item: CampaignWorkItemDetail, closureIssue: number, closureRepository: string | undefined): DeliveryCandidate[] {
   const candidates = new Map<string, DeliveryCandidate>();
   for (const entry of item.observed.pullRequests ?? []) candidates.set(forgeRefKey(entry.ref), { ...entry, approvedHeads: [] });
-  const repository = root.orchestratorPolicy?.issueScope?.repository.toLowerCase();
+  const repository = closureRepository?.toLowerCase();
   const issue = item.issue ? `${item.issue.repository}#${item.issue.number}`.toLowerCase() : null;
   const target = `${repository}#${closureIssue}`;
   const windows = (item.verifications ?? []).flatMap((v) => {
@@ -222,9 +265,10 @@ function deliveryCandidates(db: ControlPlaneDb, root: SessionView, item: Campaig
       ? [{ sessionId: attempt.sessionId, from: attempt.startedAt, until }] : [];
   });
   const gated = new Map<string, { ref: CampaignPullRequestRef; heads: string[] }>();
+  const proof = proofRepositories(root, repository);
   for (const decision of db.consumedPullRequestMerges(windows.map((w) => w.sessionId))) {
     const gate = decision.resourceSnapshot;
-    if (gate.category !== "pr_merge" || gate.repository.toLowerCase() !== repository ||
+    if (gate.category !== "pr_merge" || !proof.has(gate.repository.toLowerCase()) ||
         !windows.some((w) => w.sessionId === decision.sessionId && decision.createdAt >= w.from && decision.createdAt <= w.until) ||
         gate.intendedClosures?.length && !gate.intendedClosures.some((closure) =>
           closure.toLowerCase() === issue || closure.toLowerCase() === target)) continue;
@@ -238,10 +282,16 @@ function deliveryCandidates(db: ControlPlaneDb, root: SessionView, item: Campaig
   return [...candidates.values()];
 }
 
-/** Every pull request a completed closure of this issue would read, for an on-demand refresh. */
-export function closureCandidateRefs(db: ControlPlaneDb, root: SessionView, issue: number): CampaignPullRequestRef[] {
+/** Every pull request a completed closure of this issue would read, for an on-demand refresh. One in
+ * a repository outside the proof's (#4120) is left out: no runner holding a Location of that
+ * repository could read it, and the root's login never stands in. The proof still names it as a gap. */
+export function closureCandidateRefs(db: ControlPlaneDb, root: SessionView, issue: number,
+  repository: string | undefined = root.orchestratorPolicy?.issueScope?.repository): CampaignPullRequestRef[] {
+  const proof = proofRepositories(root, repository?.toLowerCase());
   const refs = new Map<string, CampaignPullRequestRef>();
-  for (const item of issueWork(db, root, issue)) for (const { ref } of deliveryCandidates(db, root, item, issue)) refs.set(forgeRefKey(ref), ref);
+  for (const item of issueWork(db, root, issue, repository)) for (const { ref } of deliveryCandidates(db, root, item, issue, repository)) {
+    if (proof.has(ref.repository.toLowerCase())) refs.set(forgeRefKey(ref), ref);
+  }
   return [...refs.values()];
 }
 
@@ -252,14 +302,48 @@ export function closureExcludedRefs(proof: ReturnType<typeof closureEvidence>): 
 }
 
 /** The candidates freshly observed merged, for the runner to re-verify at their exact heads. */
-export function closureDeliveryPullRequests(db: ControlPlaneDb, root: SessionView, issue: number) {
+export function closureDeliveryPullRequests(db: ControlPlaneDb, root: SessionView, issue: number,
+  repository: string | undefined = root.orchestratorPolicy?.issueScope?.repository) {
   const delivery = new Map<number, { number: number; headSha: string; mergeCommitSha: string }>();
-  for (const item of issueWork(db, root, issue)) for (const { ref, fact } of deliveryCandidates(db, root, item, issue)) {
-    if (fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha) {
+  for (const item of issueWork(db, root, issue, repository)) for (const { ref, fact } of deliveryCandidates(db, root, item, issue, repository)) {
+    // The closure repository's runner verifies only its own repository's pull requests (#4120).
+    if (ref.repository.toLowerCase() === repository?.toLowerCase() &&
+        fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha) {
       delivery.set(ref.number, { number: ref.number, headSha: fact.value.headSha, mergeCommitSha: fact.value.mergeCommitSha });
     }
   }
   return [...delivery.values()];
+}
+
+/** #4120: the candidates in the campaign's other repositories freshly observed merged, for an
+ * authoritative read through a Location of each one's own repository. */
+export function closureCrossRepositoryPullRequests(db: ControlPlaneDb, root: SessionView, issue: number,
+  repository: string | undefined = root.orchestratorPolicy?.issueScope?.repository): CampaignPullRequestRef[] {
+  const proof = proofRepositories(root, repository);
+  const own = repository?.toLowerCase();
+  const refs = new Map<string, CampaignPullRequestRef>();
+  for (const item of issueWork(db, root, issue, repository)) for (const { ref, fact } of deliveryCandidates(db, root, item, issue, repository)) {
+    const named = ref.repository.toLowerCase();
+    if (named !== own && proof.has(named) && fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha) {
+      refs.set(forgeRefKey(ref), { repository: ref.repository, number: ref.number });
+    }
+  }
+  return [...refs.values()];
+}
+
+/** #4120: an authoritative read's answer as the snapshot's cross-repository delivery: each pull
+ * request read MERGED, with its head and merge commit, in the order asked. Undefined when the read
+ * did not answer for every one, which proves none of them. */
+export function closureCrossRepositoryDelivery(refs: readonly CampaignPullRequestRef[],
+  results: ReadonlyArray<{ ref: CampaignPullRequestRef; observation?: CampaignForgeChangeRequestObservation }> | null): GithubIssueClosureSnapshot["crossRepositoryDelivery"] {
+  if (!refs.length || !results || results.length !== refs.length) return undefined;
+  // Merged into that repository's default branch, as a recorded delivery requires (#4070): the forge
+  // must name its default branch (a GitLab merge request, or an older runner's read, names none and
+  // proves nothing) and the pull request's base must be it.
+  const delivered = results.flatMap(({ ref, observation }) => observation && observation.forge === undefined && observation.state === "merged" &&
+    observation.mergeCommitSha && observation.defaultBranch && observation.baseRef === observation.defaultBranch
+    ? [{ repository: ref.repository.toLowerCase(), number: ref.number, headSha: observation.headSha, mergeCommitSha: observation.mergeCommitSha }] : []);
+  return delivered.length ? delivered : undefined;
 }
 
 /** Delivery is an independently verified report plus observed forge merges. Stage prose alone,
@@ -269,11 +353,12 @@ export function closureDeliveryPullRequests(db: ControlPlaneDb, root: SessionVie
  * snapshot carrying the runner's member read is proven from the epic's members instead (#4060). */
 export function closureEvidence(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot) {
   const boundary = issueBoundary(root);
+  // #4119: that repository's boundary entry; operations and reasons stay campaign-wide.
   if (!boundary?.issueAuthority?.closureReasons.includes(snapshot.reason) || !boundary.operations.includes("issue_closure") ||
-      snapshot.repository.toLowerCase() !== boundary.repository.toLowerCase() || snapshot.openPullRequests.length ||
-      !root.orchestratorPolicy?.issueNumbers?.includes(snapshot.issue)) return null;
+      !campaignBoundaryRepository(boundary, snapshot.repository) || snapshot.openPullRequests.length ||
+      !campaignClosureIssueHeld(root.orchestratorPolicy, { repository: snapshot.repository, number: snapshot.issue })) return null;
   if (snapshot.epicMembers) return epicMemberEvidence(db, root, snapshot);
-  const items = issueWork(db, root, snapshot.issue);
+  const items = issueWork(db, root, snapshot.issue, snapshot.repository);
   // Fixed-by evidence is completion-only; it cannot cancel another issue's units.
   if (snapshot.reason !== "completed" && db.campaignWorkLedger.fixedBy(root.id, snapshot.repository, snapshot.issue)) return null;
   if (snapshot.reason === "not_planned") {
@@ -287,22 +372,34 @@ export function closureEvidence(db: ControlPlaneDb, root: SessionView, snapshot:
   const excluded = new Set<string>();
   if (!items.length || items.some((item) => !itemDelivered(db, root, item, snapshot, excluded))) return null;
   return { items: items.map((item) => ({ id: item.id, verifications: item.verifications })), delivery: snapshot.delivery,
+    ...(snapshot.crossRepositoryDelivery ? { crossRepositoryDelivery: snapshot.crossRepositoryDelivery } : {}),
     ...(excluded.size ? { excluded: [...excluded].sort() } : {}) };
 }
 
+/** Whether a merged pull request's merge was verified for this snapshot: by the closure repository's
+ * runner at its exact head, or, for another campaign repository's (#4120), by an authoritative read
+ * through a Location of that repository just before the request. */
+function deliveryVerified(snapshot: GithubIssueClosureSnapshot, ref: CampaignPullRequestRef, headSha: string, mergeCommitSha: string): boolean {
+  const repository = ref.repository.toLowerCase();
+  const verified = repository === snapshot.repository.toLowerCase() ? snapshot.delivery
+    : snapshot.crossRepositoryDelivery?.filter((delivered) => delivered.repository.toLowerCase() === repository);
+  return Boolean(verified?.some((delivered) => delivered.number === ref.number && delivered.headSha === headSha && delivered.mergeCommitSha === mergeCommitSha));
+}
+
 /** One item's delivery proof: a delivered verification with an exact report digest, no open
- * attempt, and at least one fresh merge the runner verified, at an approved head when gated. */
+ * attempt, and at least one fresh merge verified for it, at an approved head when gated. A pull
+ * request in another of the campaign's repositories counts (#4120); one anywhere else disproves it. */
 function itemDelivered(db: ControlPlaneDb, root: SessionView, item: CampaignWorkItemDetail, snapshot: GithubIssueClosureSnapshot,
   excluded: Set<string>): boolean {
   if (item.primaryState !== "delivered" || item.currentAttempt || !item.verifications.some((v) => v.outcome === "delivered" && v.report.digest)) return false;
+  const proof = proofRepositories(root, snapshot.repository);
   let merged = 0;
-  for (const { ref, fact, approvedHeads } of deliveryCandidates(db, root, item, snapshot.issue)) {
-    if (ref.repository.toLowerCase() !== snapshot.repository.toLowerCase() || fact.availability !== "fresh") return false;
+  for (const { ref, fact, approvedHeads } of deliveryCandidates(db, root, item, snapshot.issue, snapshot.repository)) {
+    if (!proof.has(ref.repository.toLowerCase()) || fact.availability !== "fresh") return false;
     if (fact.value.state === "closed") { excluded.add(forgeRefKey(ref)); continue; }
     const value = fact.value;
     if (value.state !== "merged" || !value.mergeCommitSha || approvedHeads.length && !approvedHeads.includes(value.headSha) ||
-        !snapshot.delivery?.some((delivered) => delivered.number === ref.number && delivered.headSha === value.headSha &&
-          delivered.mergeCommitSha === value.mergeCommitSha)) return false;
+        !deliveryVerified(snapshot, ref, value.headSha, value.mergeCommitSha)) return false;
     merged++;
   }
   return merged > 0;
@@ -329,8 +426,9 @@ export function epicSourceApplies(db: ControlPlaneDb, root: SessionView, snapsho
 function epicMemberEvidence(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot) {
   const read = snapshot.epicMembers;
   if (!read?.readable || !read.members.length || !epicSourceApplies(db, root, snapshot) ||
-      read.members.some((member) => member.state !== "completed" || !root.orchestratorPolicy?.issueNumbers?.includes(member.number))) return null;
-  const own = trackedIssueWork(db, root, snapshot.issue);
+      read.members.some((member) => member.state !== "completed" ||
+        !campaignClosureIssueHeld(root.orchestratorPolicy, { repository: snapshot.repository, number: member.number }))) return null;
+  const own = trackedIssueWork(db, root, snapshot.issue, snapshot.repository);
   if (!own) return null;
   const excluded = new Set<string>();
   const placeholders = own.filter(epicPlaceholderItem).map((item) => item.id);
@@ -338,6 +436,7 @@ function epicMemberEvidence(db: ControlPlaneDb, root: SessionView, snapshot: Git
   if (items.some((item) => !itemDelivered(db, root, item, snapshot, excluded))) return null;
   return { source: "epic_members" as const, members: read.members.map((member) => ({ ...member })), placeholders,
     items: items.map((item) => ({ id: item.id, verifications: item.verifications })), delivery: snapshot.delivery,
+    ...(snapshot.crossRepositoryDelivery ? { crossRepositoryDelivery: snapshot.crossRepositoryDelivery } : {}),
     ...(excluded.size ? { excluded: [...excluded].sort() } : {}) };
 }
 
@@ -352,8 +451,8 @@ export function closureDeliveryGaps(db: ControlPlaneDb, root: SessionView, snaps
   checked: { proven: boolean; commentSafe: boolean; membersUnreadable?: boolean }): IssueClosureDeliveryGap[] | null {
   const boundary = issueBoundary(root);
   if (!boundary?.issueAuthority?.closureReasons.includes(snapshot.reason) || !boundary.operations.includes("issue_closure") ||
-      snapshot.repository.toLowerCase() !== boundary.repository.toLowerCase() ||
-      !root.orchestratorPolicy?.issueNumbers?.includes(snapshot.issue)) return null;
+      !campaignBoundaryRepository(boundary, snapshot.repository) ||
+      !campaignClosureIssueHeld(root.orchestratorPolicy, { repository: snapshot.repository, number: snapshot.issue })) return null;
   const gaps: IssueClosureDeliveryGap[] = [];
   const add: AddGap = (code, details = {}) => {
     if (gaps.length < ISSUE_CLOSURE_DELIVERY_GAPS_MAX) gaps.push(issueClosureDeliveryGap(code, details));
@@ -368,7 +467,7 @@ export function closureDeliveryGaps(db: ControlPlaneDb, root: SessionView, snaps
   return gaps;
 }
 
-type AddGap = (code: IssueClosureDeliveryGapCode, details?: { verificationFailure?: GithubIssueClosureSnapshot["deliveryVerificationFailure"]; workItemId?: string; pullRequests?: number[]; members?: number[] }) => void;
+type AddGap = (code: IssueClosureDeliveryGapCode, details?: { verificationFailure?: GithubIssueClosureSnapshot["deliveryVerificationFailure"]; workItemId?: string; pullRequests?: number[]; members?: number[]; repository?: string }) => void;
 
 function deliveryGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot, add: AddGap, count: () => number): void {
   // Open related PRs block every reason. A PR whose title and body no longer mention the issue still
@@ -381,10 +480,10 @@ function deliveryGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: Githu
     const item = db.campaignWorkLedger.detail(root.id, id, Date.now());
     if (!item) { add("missing_work_item", { workItemId: id }); continue; }
     if (!item.issue || item.issue.repository.toLowerCase() !== snapshot.repository.toLowerCase() ||
-        !root.orchestratorPolicy?.issueNumbers?.includes(item.issue.number)) { add("work_item_outside_scope", { workItemId: id }); continue; }
+        !campaignClosureIssueHeld(root.orchestratorPolicy, item.issue)) { add("work_item_outside_scope", { workItemId: id }); continue; }
     items.push(item);
   }
-  const tracked = trackedIssueWork(db, root, snapshot.issue);
+  const tracked = trackedIssueWork(db, root, snapshot.issue, snapshot.repository);
   if (!tracked) return add("delivery_unverified");
   for (const item of tracked) if (!items.some((existing) => existing.id === item.id)) items.push(item);
   if (!items.length) {
@@ -411,7 +510,7 @@ function epicGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIss
   const read = snapshot.epicMembers!;
   if (!read.readable) return add("epic_members_unreadable");
   if (!epicSourceApplies(db, root, snapshot)) return add("delivery_unverified");
-  const inScope = (number: number) => Boolean(root.orchestratorPolicy?.issueNumbers?.includes(number));
+  const inScope = (number: number) => campaignClosureIssueHeld(root.orchestratorPolicy, { repository: snapshot.repository, number });
   const named = (keep: (member: IssueClosureEpicMembers["members"][number]) => boolean) => read.members.filter(keep).map((member) => member.number);
   const outside = named((member) => !inScope(member.number));
   if (outside.length) add("epic_member_outside_scope", { members: outside });
@@ -420,7 +519,7 @@ function epicGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIss
     const members = named((member) => inScope(member.number) && member.state === state);
     if (members.length) add(code, { members });
   }
-  const own = trackedIssueWork(db, root, snapshot.issue);
+  const own = trackedIssueWork(db, root, snapshot.issue, snapshot.repository);
   if (!own) return add("delivery_unverified");
   itemGapsInto(db, root, snapshot, own.filter((item) => !epicPlaceholderItem(item)), add, count);
 }
@@ -429,7 +528,7 @@ function itemGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIss
   add: AddGap, count: () => number): void {
   // The runner confirms merges only once everything else holds, so an unconfirmed merge is a gap of
   // its own only when nothing else is: otherwise the runner was never asked.
-  const unconfirmed: Array<{ workItemId: string; pullRequests: number[] }> = [];
+  const unconfirmed: Array<{ workItemId: string; pullRequests: number[]; repository?: string }> = [];
   for (const item of items) {
     if (item.currentAttempt) {
       add(item.stateCauses.includes("attempt_awaiting_verification") ? "attempt_awaiting_verification" : "attempt_open", { workItemId: item.id });
@@ -438,24 +537,37 @@ function itemGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIss
     if (!item.verifications.some((v) => v.outcome === "delivered" && v.report.digest)) { add("no_delivered_verification", { workItemId: item.id }); continue; }
     if (item.primaryState !== "delivered") { add("work_item_not_delivered", { workItemId: item.id }); continue; }
     const before = count();
-    const outside: number[] = [], stale: number[] = [], open: number[] = [], wrongHead: number[] = [], unverified: number[] = [];
+    const own = snapshot.repository.toLowerCase();
+    const proof = proofRepositories(root, own);
+    const outside: number[] = [];
+    // #4120: per repository, the closure's own first, so another repository's pull requests are named by it.
+    const byRepository = new Map<string, { stale: number[]; open: number[]; wrongHead: number[]; unverified: number[] }>([[own, { stale: [], open: [], wrongHead: [], unverified: [] }]]);
     let merged = 0;
-    for (const { ref, fact, approvedHeads } of deliveryCandidates(db, root, item, snapshot.issue)) {
-      if (ref.repository.toLowerCase() !== snapshot.repository.toLowerCase()) outside.push(ref.number);
-      else if (fact.availability !== "fresh") stale.push(ref.number);
+    for (const { ref, fact, approvedHeads } of deliveryCandidates(db, root, item, snapshot.issue, snapshot.repository)) {
+      const repository = ref.repository.toLowerCase();
+      if (!proof.has(repository)) { outside.push(ref.number); continue; }
+      if (!byRepository.has(repository)) byRepository.set(repository, { stale: [], open: [], wrongHead: [], unverified: [] });
+      const lists = byRepository.get(repository)!;
+      if (fact.availability !== "fresh") lists.stale.push(ref.number);
       else if (fact.value.state === "closed") continue;
-      else if (fact.value.state !== "merged" || !fact.value.mergeCommitSha) open.push(ref.number);
-      else if (approvedHeads.length && !approvedHeads.includes(fact.value.headSha)) wrongHead.push(ref.number);
-      else if (!snapshot.delivery?.some((delivered) => delivered.number === ref.number && delivered.headSha === fact.value.headSha &&
-          delivered.mergeCommitSha === fact.value.mergeCommitSha)) unverified.push(ref.number);
+      else if (fact.value.state !== "merged" || !fact.value.mergeCommitSha) lists.open.push(ref.number);
+      else if (approvedHeads.length && !approvedHeads.includes(fact.value.headSha)) lists.wrongHead.push(ref.number);
+      else if (!deliveryVerified(snapshot, ref, fact.value.headSha, fact.value.mergeCommitSha)) lists.unverified.push(ref.number);
       else merged++;
     }
     if (outside.length) add("pull_request_outside_repository", { workItemId: item.id, pullRequests: outside });
-    if (stale.length) add("stale_pull_request", { workItemId: item.id, pullRequests: stale });
-    if (open.length) add("unmerged_pull_request", { workItemId: item.id, pullRequests: open });
-    if (wrongHead.length) add("delivery_not_verified_at_exact_head", { workItemId: item.id, pullRequests: wrongHead });
-    if (unverified.length) unconfirmed.push({ workItemId: item.id, pullRequests: unverified });
-    else if (!merged && count() === before) add("no_merged_delivery_pull_request", { workItemId: item.id });
+    let unverifiedAny = false;
+    for (const [repository, lists] of byRepository) {
+      const named = repository === own ? {} : { repository };
+      if (lists.stale.length) add("stale_pull_request", { workItemId: item.id, pullRequests: lists.stale, ...named });
+      if (lists.open.length) add("unmerged_pull_request", { workItemId: item.id, pullRequests: lists.open, ...named });
+      if (lists.wrongHead.length) add("delivery_not_verified_at_exact_head", { workItemId: item.id, pullRequests: lists.wrongHead, ...named });
+      if (lists.unverified.length) {
+        unverifiedAny = true;
+        unconfirmed.push({ workItemId: item.id, pullRequests: lists.unverified, ...named });
+      }
+    }
+    if (!unverifiedAny && !merged && count() === before) add("no_merged_delivery_pull_request", { workItemId: item.id });
   }
   if (!count()) for (const gap of unconfirmed) add("delivery_merge_unconfirmed", { ...gap, verificationFailure: snapshot.deliveryVerificationFailure });
 }

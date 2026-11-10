@@ -93,6 +93,12 @@ test("retired worker cap refuses only that start and retains earlier background 
     }
     throw new Error(`supervisor did not send ${kind}/${generation}: ${stderr}`);
   };
+  // Opening a shell redirection creates the file before echo writes its content.
+  // Poll for the completed write; the assertions below still enforce its value.
+  const hasTaskContent = (name: string, expected: string) => {
+    const path = join(tasks, name);
+    return existsSync(path) && readFileSync(path, "utf8").trim() === expected;
+  };
   try {
     await until(1, 0);
     for (const generation of [1, 2]) {
@@ -107,7 +113,9 @@ test("retired worker cap refuses only that start and retains earlier background 
     assert.equal(messages.some((message) => message.kind === 12 && message.generation === 3), false);
     assert.equal(messages.some((message) => message.kind === 9 && message.generation === 3), false);
     assert.equal(outer.exitCode, null);
-    for (let i = 0; i < 200 && (!existsSync(join(tasks, "task-1")) || !existsSync(join(tasks, "task-2"))); i++) {
+    const retainedDeadline = Date.now() + 2_000;
+    while (Date.now() < retainedDeadline &&
+      (!hasTaskContent("task-1", "kept") || !hasTaskContent("task-2", "kept"))) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.equal(readFileSync(join(tasks, "task-1"), "utf8").trim(), "kept");
@@ -135,7 +143,8 @@ test("retired worker cap refuses only that start and retains earlier background 
     await until(13, 6);
     send(5, 6);
     await until(9, 6);
-    for (let i = 0; i < 100 && !existsSync(join(tasks, "epipe-retained")); i++) {
+    const survivalDeadline = Date.now() + 1_000;
+    while (Date.now() < survivalDeadline && !hasTaskContent("epipe-retained", "survived")) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.equal(readFileSync(join(tasks, "epipe-retained"), "utf8").trim(), "survived");

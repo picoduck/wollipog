@@ -79,7 +79,8 @@ export function sessionHelp(): string {
     "  session create --runner <runner-id> --agent <agent-id> [--workspace <workspace-id> | --path <path>]",
     "                 [--prompt <text>] [--title <title>] [--model <model>] [--effort <effort>] [--permission-mode <mode>] [--worktree]",
     "                 [--cost-budget <usd>] [--max-tool-calls <count>] [--max-child-sessions <count>]",
-    "                 [--work-item <campaign-work-item-id>] [--json]",
+    "                 [--work-item <campaign-work-item-id>] [--provider-account <account-ref>] [--json]",
+    "  session accounts --runner <runner-id> --agent <agent-id> [--workspace <workspace-id>] [--model <model>] [--json]",
     "  session prompt <session-id> <text> [--json]",
     "  session steering <session-id> [--json]",
     "  session steering-get <session-id> <submission-id> [--json]",
@@ -141,7 +142,9 @@ result wrote nothing; its refusal.reason and refusal.summary say why, and a new 
 needed. If the result is uncertain, inspect GitHub and never replay the action or substitute
 a shell command.
 
-Issue scope: issue-scope get [--epic <number>]; issue-scope request --proposal <json>.
+Issue scope: issue-scope get [--epic <number> [--repository <owner/name>]]; issue-scope request --proposal <json>.
+The scope is grouped by repository; a proposal may name issues in any of the campaign's
+repositories, and one outside them is refused with repository_outside_boundary.
 Tools: get_campaign_issue_scope, request_campaign_issue_scope_change, request_github_issue_closure, close_github_issue; recover with decision get.
 `;
 }
@@ -163,6 +166,12 @@ Commands:
   work-items [--item <id>] [--state <state>] [--origin original|follow_up]
              [--sort queue|activity|elapsed|cost] [--limit <n>] [--cursor <cursor>]
              [--recommendations]                 Read the summary and one page or one item
+  repository-addition request --input '<json>'  Ask the owner to add a Project Location's repository
+                                                 (protocol v317+): {requestId, locationId, reason,
+                                                 work: {kind: follow_up|work_item, id}}
+  repository-addition get <occurrence-id>        Read the request and the owner's answer
+  repository-addition execute <occurrence-id> --digest <resource-digest>
+                                                 Carry out the exact Location the owner approved
 
 Only an injected Orchestrator session with control plane protocol v196+ may use these. Every
 record lands in the root campaign's ledger. Records grant no authority: they never dispatch,
@@ -172,21 +181,23 @@ reported merged stage does not mark an item delivered. Hand an item whose next s
 person to them with update-item's handoff.
 
 Tools: record_campaign_plan, update_campaign_work_item, assign_campaign_work_item,
-record_campaign_work_item_delivery, adjudicate_campaign_recommendation, get_campaign_work_items.
+record_campaign_work_item_delivery, adjudicate_campaign_recommendation, get_campaign_work_items,
+request_campaign_repository_addition, get_campaign_repository_addition, execute_campaign_repository_addition.
+A repository addition is always the campaign owner's decision; records and reasons never add one.
 `;
 }
 
 export function decisionHelp(): string {
   return [
     "Usage: wollipog decision <command> [options]",
-    "  decision request --request-id <id> --resource-key <key> --snapshot <json> [--json]",
+    "  decision request --request-id <id> --resource-key <key> --snapshot <json> [--owner-rule-source <path> --owner-rule-quote <text>] [--json]",
     "  decision get <occurrence-id> [--session <id>] [--json]",
     "  decision list [--session <id>] [--limit <1-100>] [--cursor <occurrence-id>] [--json]",
     "  decision consume <occurrence-id> --snapshot <json> [--action <json>] [--json]",
     "  decision reconcile <occurrence-id> --snapshot <json> [--json]",
     "  decision execute <occurrence-id> --resource-digest <sha256> [--json]",
     "  decision withdraw <occurrence-id> --reason <text> [--session <id>] [--json]",
-    "  decision ask-owner --request-id <id> --resource-key <key> --question <text> --options <json-array> [--recommended <option-id>] [--material <text>] [--json]",
+    "  decision ask-owner --request-id <id> --resource-key <key> --question <text> [--kind question|approval] --options <json-array> [--recommended <option-id>] [--material <text>] [--json]",
     "  decision hand-to-owner <occurrence-id> --reason <text> [--session <id>] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
     "Reads may target an accessible descendant with --session for an Orchestrator, and so may a withdrawal of a decision that Orchestrator owns; request, consume, execute, and reconcile remain self-scoped and refuse --session. Tools: request_workflow_decision, get_workflow_decision, list_workflow_decisions, consume_workflow_decision, execute_workflow_decision, reconcile_workflow_decision, withdraw_workflow_decision.",
@@ -195,7 +206,8 @@ export function decisionHelp(): string {
     "Pass the exact typed resourceSnapshot as a JSON object in --snapshot. For a pr_merge consume, pass the exact WorkflowDecisionAction JSON object in --action; other categories omit it. A pr_merge --action carries the canonical enqueue command byte-for-byte: GitHub is gh pr merge https://github.com/<owner>/<repo>/pull/<number> --squash --match-head-commit <approved-head>; a GitLab train merge is glab api --method POST projects/<percent-encoded-project-path>/merge_trains/merge_requests/<iid> --hostname <host> -f sha=<approved-head> -F squash=<bool>, and a direct merge is glab api --method PUT projects/<percent-encoded-project-path>/merge_requests/<iid>/merge --hostname <host> -f sha=<approved-head> -F squash=<bool> -F should_remove_source_branch=<bool>. A refused enqueue names the approved command in its error.",
     "Reconcile only an already-successful, exactly armed pr_merge action after the approved head has merged. Use its original snapshot; reconciliation never runs the merge command and requires control plane protocol v153.",
     "Withdraw a pending or approved decision that was never consumed or armed when it is no longer needed. It approves and consumes nothing, records you and the reason, and the decision then reads revoked with withdrawal provenance. Withdrawal requires control plane protocol v269.",
-    "ask-owner and hand-to-owner are for a Full Control campaign's root Orchestrator (tools request_owner_decision and hand_workflow_decision_to_owner; control plane protocol v281). ask-owner gives the campaign's owner a decision the owner kept, with the options as a JSON array of {optionId, label, description?}; it waits in the owner's Inbox without stopping your turn, only the owner can answer it, and their choice comes back to you. hand-to-owner gives the owner one of your pending Orchestrator-owned decisions (pass --session for a child's); that is one way, and you can never resolve it afterwards.",
+    "When an installed skill or user-authored instruction keeps the gate for a person (a per-PR merge approval, say), request the exact typed decision anyway and name the rule with --owner-rule-source (the file) and --owner-rule-quote (the requirement, on one line). The decision is then the owner's under any mode or grant, and so is every later request for the same resource; it reaches their Inbox and Campaign Status. It can never give the Orchestrator a decision. Requires control plane protocol v296. Never end a turn with such a gate only in prose.",
+    "ask-owner and hand-to-owner are for a Full Control campaign's root Orchestrator (tools request_owner_decision and hand_workflow_decision_to_owner; control plane protocol v281). ask-owner gives the campaign's owner a decision the owner kept, with the options as a JSON array of {optionId, label, description?}; it waits in the owner's Inbox without stopping your turn, only the owner can answer it, and their answer comes back to you. Use --kind question (an Owner Question, protocol v303) for a design choice, clarification or preference: --options becomes optional suggestions, the owner may answer in their own words, and no scope or policy change revokes it. The default --kind approval is for an exact action with no typed category, with 2 to 12 options. hand-to-owner gives the owner one of your pending Orchestrator-owned decisions (pass --session for a child's); that is one way, and you can never resolve it afterwards.",
     "The control plane remains authoritative: it validates the category, policy owner, current resource snapshot, and one-shot consumption. This command cannot resolve its own decision.",
   ].join("\n");
 }
@@ -226,8 +238,8 @@ export function pullRequestHelp(): string {
   return [
     "Usage: wollipog pr wait <number|owner/name#number|url> [--repo <owner/name>] [--head <sha>]",
     "                        [--timeout <ms>] [--interval <ms>] [--any-failure] [--json]",
-    "       wollipog pr closures <number|owner/name#number|url> [--repo <owner/name>] [--intended <issue>]... [--json]",
-    "       wollipog pr closures --file <description.md> [--repo <owner/name>] [--intended <issue>]... [--json]",
+    "       wollipog pr closures <number|owner/name#number|url> [--repo <owner/name|gitlab-project>] [--intended <issue>]... [--json]",
+    "       wollipog pr closures --file <description.md> [--repo <owner/name|gitlab-project>] [--intended <issue>]... [--json]",
     "Block until the pull request's required checks pass or fail, GitHub marks its merge-queue entry",
     "UNMERGEABLE or it leaves the queue, it merges or closes, its head moves, or the timeout expires.",
     "A failed merge-group check alone does not end the wait: GitHub may rebuild the group and merge it.",
@@ -260,8 +272,14 @@ export function pullRequestHelp(): string {
     "(#N, owner/name#N, or an issue URL), and write \"Refs #N\" for one that must stay open. It reads locally",
     "with this machine's `gh` login, like pr wait. A GitHub pr_merge decision makes the same read and is",
     "refused unless its intendedClosures match.",
+    "For a GitLab merge request (as for pr wait, or --file with --repo <gitlab-host>/group/project), it reads",
+    "with `glab` and reports GitLab's default closing pattern on the description: close, fix, resolve or",
+    "implement in any form, including \"closing\" and \"implements\", even negated, closes every reference in a",
+    "list such as \"Closes #1, #2 and #3\", in code too. GitLab's own list of issues the merge request closes",
+    "(which covers the title, commits and an instance's own closing pattern) is reported as well and decides",
+    "where the two differ. --intended takes #N, group/project#N, <host>/group/project#N, or an issue URL.",
     "Exit status: 0 the closures are exactly the intended ones; 3 they differ (see undeclared and unmade);",
-    "1 GitHub or the file could not be read; 2 usage.",
+    "1 the forge or the file could not be read; 2 usage.",
   ].join("\n");
 }
 
@@ -273,7 +291,7 @@ export function reviewHelp(): string {
     "  review session get <review-session-id> [--json]",
     "  review session list [--limit <1-100>] [--cursor <review-session-id>] [--json]",
     "  review session cancel <review-session-id> [--json]",
-    "review session run starts a review session: the other model family as its own read-only session, launched by the runner outside this session's sandbox against the runner's checkout of the pull request's pushed head, loading none of the repository's settings, hooks, skills or MCP servers. It takes no session slot; one review session is active per session at a time. Reviews of a pull request form a run: the first round reviews it in full, later rounds only the changes since the last valid round with its open findings (or in full with --full-reason), and a rebased head starts a new epoch that reviews the range-diff. Each epoch has at most 4 valid rounds and each round 2 counted attempts. Poll review session get until terminal is true; its verdict says whether the report met the review contract, and only a valid report's vote and findings count. Tools: request_review_session, get_review_session, list_review_sessions, cancel_review_session.",
+    "review session run starts a review session: the other model family as its own read-only session, launched by the runner outside this session's sandbox against the runner's checkout of the pull request's pushed head, loading none of the repository's settings, hooks, skills or MCP servers. It takes no session slot; on protocol 335+ each owned linked worktree can be reviewed without selecting it and different pull requests can be reviewed concurrently, with one active review per pull request. Older runners require selection and serial requests. Reviews of a pull request form a run: the first round reviews it in full, later rounds only the changes since the last valid round with its open findings (or in full with --full-reason), and a rebased head starts a new epoch that reviews the range-diff. Each epoch has at most 4 valid rounds and each round 2 counted attempts. Poll review session get until terminal is true; its verdict says whether the report met the review contract, and only a valid report's vote and findings count. Tools: request_review_session, get_review_session, list_review_sessions, cancel_review_session.",
   ].join("\n");
 }
 

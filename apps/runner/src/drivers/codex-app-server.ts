@@ -24,7 +24,7 @@ import {
   type SessionConfig,
 } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
-import { isAbsolute, join, posix } from "node:path";
+import { dirname, isAbsolute, join, posix } from "node:path";
 import { JsonRpcPeer, type RpcError } from "../jsonrpc.js";
 import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
@@ -71,6 +71,7 @@ import {
   type CodexPermissionProfileBase,
 } from "../codex-permission-profile.js";
 import { readCodexRolloutCompletedCommand } from "./codex-rollout-proof.js";
+import { codexCliAdmission, codexCliAdmissionScript } from "./codex-cli-admission.js";
 import {
   commandTargetsManagedWorktree,
   type ManagedWorktreeProtection,
@@ -530,6 +531,11 @@ export const CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS = 120_000;
  * failure is reported only after it settles, so its bound is kept short. */
 export const CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS = 30_000;
 
+/** A `turn/start` response without a turn id leaves the turn unowned (#4054). Codex streams its
+ * first turn-scoped notification (the user message item) as the turn begins, so a turn that names
+ * none within this bound is ended with a visible error instead of running without an owner. */
+export const CODEX_TURN_CONFIRMATION_TIMEOUT_MS = 60_000;
+
 /** A request outside the launch handshake that did not settle within its bound. The message names
  * only the method, never request or provider payload. */
 export class CodexAppServerRequestStalledError extends Error {
@@ -642,6 +648,15 @@ export class CodexAppServerDriver implements Driver {
   /** The request response is the causal boundary between predecessor notifications and this
    * prompt. A turn/started notification before it is provisional and cannot bind ownership. */
   private turnStartResponseGeneration: number | null = null;
+  /** Root-thread turn ids seen before this prompt's turn/start response (#4054). They cannot bind
+   * ownership on their own, but a response without a turn id may adopt a single one of them. */
+  private readonly provisionalRootTurnIds = new Set<string>();
+  /** Root-thread turn ids this prompt can never own: settled turns, and turns whose notifications
+   * arrived while no turn/start was in flight. */
+  private readonly staleRootTurnIds = new Set<string>();
+  /** Ends a turn whose turn/start response named no turn and no notification has since (#4054). */
+  private turnConfirmationTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly turnConfirmationTimeoutMs: number;
   /** Why the latest submission never started a turn, and whether that is proven (#3085). Codex
    * answering turn/start with an error, or the driver refusing to send it, proves non-delivery;
    * a transport failure after the write does not. */
@@ -707,6 +722,7 @@ export class CodexAppServerDriver implements Driver {
       initializationRequestTimeoutMs: number;
       forkRequestTimeoutMs: number;
       archiveRequestTimeoutMs: number;
+      turnConfirmationTimeoutMs: number;
       sandboxProbeCommand: () => { argv: string[]; visited: string[] } | null;
     }> = {},
   ) {
@@ -724,6 +740,7 @@ export class CodexAppServerDriver implements Driver {
     this.initializationRequestTimeoutMs = deps.initializationRequestTimeoutMs ?? CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS;
     this.forkRequestTimeoutMs = deps.forkRequestTimeoutMs ?? CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS;
     this.archiveRequestTimeoutMs = deps.archiveRequestTimeoutMs ?? CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS;
+    this.turnConfirmationTimeoutMs = deps.turnConfirmationTimeoutMs ?? CODEX_TURN_CONFIRMATION_TIMEOUT_MS;
   }
 
   /** Send one launch handshake request under the initialization bound (#3099). This returns the
@@ -775,7 +792,9 @@ export class CodexAppServerDriver implements Driver {
     occurrenceId: string,
     command: string,
     fence?: CompletedCommandReconciliationFence,
+    onFailure?: (reason: string) => void,
   ): Promise<CompletedCommandReconciliationProof | null> {
+    onFailure?.("provider history could not prove command and admission ordering");
     if (!boundedProviderCorrelationId(occurrenceId) ||
         typeof command !== "string" || !command || command.length > 2000 ||
         !boundedProviderCorrelationId(this.threadId)) return null;
@@ -796,7 +815,22 @@ export class CodexAppServerDriver implements Driver {
           let liveSawAdmissionCandidate = false;
           for (const turn of read.thread.turns as Json[]) {
             if (!Array.isArray(turn?.items)) continue;
-            const items = turn.items as Json[];
+            const items = (turn.items as Json[]).map((item) => {
+              if (item?.type !== "commandExecution" || typeof item.command !== "string") return item;
+              const cli = codexCliAdmission(codexCliAdmissionScript(item.command),
+                typeof item.aggregatedOutput === "string" ? item.aggregatedOutput : "", this.threadId!, turn.id);
+              if (!cli) return item.command.includes(" decision consume ") ? {
+                id: item.id, type: "mcpToolCall", server: "wollipog", tool: "consume_workflow_decision",
+                arguments: null, status: item.status,
+              } : item;
+              // Normalize provider-owned CLI input/output into the same admission timeline as MCP.
+              // The command's success and exact provider coordinates remain mandatory.
+              return { id: item.id, type: "mcpToolCall", server: "wollipog", tool: "consume_workflow_decision",
+                arguments: { occurrenceId: cli.occurrenceId, action: { kind: "pr_merge_enqueue", command: cli.command } },
+                status: item.status, error: item.exitCode === 0 && cli.approved ? null : "unproven CLI admission",
+                result: { content: [{ text: JSON.stringify({ decision: { occurrenceId: cli.occurrenceId,
+                  status: "approved", actionAdmission: { kind: "pr_merge_enqueue", command: cli.command } } }) }] } };
+            });
             const turnSawAdmissionCandidate = items.some((candidate) =>
               candidate?.type === "mcpToolCall" && candidate?.server === "wollipog" &&
               candidate?.tool === "consume_workflow_decision");
@@ -845,7 +879,10 @@ export class CodexAppServerDriver implements Driver {
           }
           // An additional invocation can still become a second success. Do not select a
           // completed proof while that duplicate is unfinished, including via a receipt fence.
-          if (liveSawUnfinishedExactCommand) return null;
+          if (liveSawUnfinishedExactCommand) {
+            onFailure?.("provider history contains an unfinished exact command");
+            return null;
+          }
           if (matches.length !== 0) {
             // A same-head re-enqueue leaves an earlier successful command behind its own admission
             // (#3991), so a count cannot decide; provider order ties the landed command to this one.
@@ -877,7 +914,14 @@ export class CodexAppServerDriver implements Driver {
           // append-only rollout independently recover that admission, then require its exact
           // provider turn/item coordinates to agree with the successful live command below.
           if (liveSawExactCommand) {
-            if (fence || liveSawAdmissionCandidate || successfulExactCommands.length !== 1) return null;
+            if (fence || liveSawAdmissionCandidate || successfulExactCommands.length !== 1) {
+              onFailure?.(successfulExactCommands.length === 0
+                ? "provider history did not prove successful completion of the exact command"
+                : successfulExactCommands.length > 1
+                  ? "provider history contains ambiguous repeated successful exact commands"
+                  : "provider history did not prove the exact action admission before the successful command");
+              return null;
+            }
             liveProjectionRequiresAgreement = true;
             liveCompletedCommand = successfulExactCommands[0]!;
           }
@@ -896,13 +940,19 @@ export class CodexAppServerDriver implements Driver {
       : undefined;
     const configuredCodexHome = this.opts.env.CODEX_HOME ?? inheritedCodexHome ??
       defaultCodexHome;
+    // A private bwrap transcript bind exists at a different host path than CODEX_HOME/sessions.
+    // Use only the runner-attested exact bind, never search neighboring accounts or sessions.
+    const transcriptBind = this.opts.context.kind === "native" && this.opts.isolation?.backend === "bwrap" && configuredCodexHome
+      ? this.opts.isolation.writableBinds?.filter((bind) => bind.target === join(configuredCodexHome, "sessions")) : undefined;
+    const rolloutHome = transcriptBind?.length === 1 ? dirname(transcriptBind[0]!.source) : configuredCodexHome;
     const proof = await this.readRolloutProof(
       this.opts.context,
-      configuredCodexHome,
+      rolloutHome,
       this.threadId,
       occurrenceId,
       command,
       fence,
+      (reason) => { onFailure?.(reason); },
     );
     if (!liveProjectionRequiresAgreement) return proof;
     if (!liveCompletedCommand) return null;
@@ -1385,6 +1435,8 @@ export class CodexAppServerDriver implements Driver {
       generation !== this.promptGeneration || !this.promptBusy || !this.turnResolve ||
       id === this.completedTurnId || (this.turnId != null && this.turnId !== id)
     ) return false;
+    this.clearTurnConfirmationTimer();
+    this.provisionalRootTurnIds.clear();
     this.lastTurnId = id;
     this.setSteeringTurn(id);
     if (this.stagedImages?.generation === generation && this.stagedImages.turnId == null) {
@@ -1420,6 +1472,89 @@ export class CodexAppServerDriver implements Driver {
       }
       this.settleTurn(this.turnStop);
     }
+  }
+
+  /** Every root-thread notification passes through here before its own handler (#4054). One that
+   * names a turn can confirm the turn a `turn/start` response left unconfirmed; the response is
+   * still the causal boundary, so an earlier one is only provisional. */
+  private observeRootTurnNotification(method: string, p: Json): void {
+    if (typeof p?.threadId !== "string" || !p.threadId || p.threadId !== this.threadId) return;
+    const id = method.startsWith("turn/") ? p?.turn?.id ?? p?.turnId : p?.turnId;
+    if (!boundedProviderCorrelationId(id)) return;
+    if (!this.promptBusy || !this.turnResolve) {
+      // No turn/start is in flight, so this turn belongs to a predecessor.
+      this.rememberStaleRootTurn(id);
+      return;
+    }
+    if (this.turnId || id === this.completedTurnId || this.staleRootTurnIds.has(id)) return;
+    if (this.turnStartResponseGeneration !== this.promptGeneration) {
+      if (this.provisionalRootTurnIds.size < 16) this.provisionalRootTurnIds.add(id);
+      return;
+    }
+    if (this.confirmRootTurn(id)) {
+      this.cb.onStderr(JSON.stringify({ event: "codex_turn_confirmed", source: "notification", method }));
+    }
+  }
+
+  private rememberStaleRootTurn(id: string): void {
+    this.staleRootTurnIds.delete(id);
+    this.staleRootTurnIds.add(id);
+    if (this.staleRootTurnIds.size > 32) {
+      this.staleRootTurnIds.delete(this.staleRootTurnIds.keys().next().value!);
+    }
+  }
+
+  /** `turn/start` answered without a turn id (#4054). Adopt the one turn already announced for this
+   * thread, wait a bounded time for the first that is, or end the turn: it is never left running
+   * without a confirmed provider turn. */
+  private awaitRootTurnConfirmation(generation: number): void {
+    const candidates = [...this.provisionalRootTurnIds]
+      .filter((id) => id !== this.completedTurnId && !this.staleRootTurnIds.has(id));
+    if (candidates.length > 1) {
+      // Settlement retires every candidate, so neither can be adopted by the next prompt.
+      this.failUnconfirmedTurn(generation,
+        "Codex did not confirm which provider turn started, so the turn was ended. Send the message again.");
+      return;
+    }
+    if (candidates.length === 1 && this.confirmRootTurn(candidates[0]!, generation)) {
+      this.cb.onStderr(JSON.stringify({ event: "codex_turn_confirmed", source: "provisional_notification" }));
+      return;
+    }
+    this.provisionalRootTurnIds.clear();
+    this.cb.onStderr(`Codex turn/start did not confirm a turn id; waiting up to ${formatDuration(this.turnConfirmationTimeoutMs)} for a turn notification to confirm it (running server: ${this.serverIdentity}; installed CLI version may differ).`);
+    this.clearTurnConfirmationTimer();
+    this.turnConfirmationTimer = setTimeout(() => {
+      this.turnConfirmationTimer = null;
+      this.failUnconfirmedTurn(generation,
+        `Codex did not confirm a provider turn within ${formatDuration(this.turnConfirmationTimeoutMs)} of starting it, so the turn was ended. Send the message again.`);
+    }, this.turnConfirmationTimeoutMs);
+    this.turnConfirmationTimer.unref?.();
+  }
+
+  /** End a turn no provider turn id was confirmed for. The interrupt is thread-scoped, so it needs no
+   * turn id; usage observed so far is recorded before the turn settles. */
+  private failUnconfirmedTurn(generation: number, message: string): void {
+    if (generation !== this.promptGeneration || !this.promptBusy || !this.turnResolve || this.turnId) return;
+    this.clearTurnConfirmationTimer();
+    if (this.threadId && this.peer) {
+      try {
+        this.peer.notify("turn/interrupt", { threadId: this.threadId });
+      } catch {
+        /* ignore */
+      }
+    }
+    this.streamedAgentResponse = false;
+    this.turnStartError = message;
+    this.emitDriverError(message);
+    this.declinePendingRequests();
+    this.closeTurnUsage();
+    this.settleTurn("refusal");
+  }
+
+  private clearTurnConfirmationTimer(): void {
+    if (!this.turnConfirmationTimer) return;
+    clearTimeout(this.turnConfirmationTimer);
+    this.turnConfirmationTimer = null;
   }
 
   /** The complete invocable catalog: this launch's custom prompts, then its skills. */
@@ -1533,6 +1668,7 @@ export class CodexAppServerDriver implements Driver {
     this.lastTurnId = null;
     const generation = ++this.promptGeneration;
     this.deferredRootTurnTerminals.clear();
+    this.provisionalRootTurnIds.clear();
     this.turnStartResponseGeneration = null;
     let staged: StagedPromptImages;
     try {
@@ -1609,9 +1745,7 @@ export class CodexAppServerDriver implements Driver {
         this.turnStartResponseGeneration = generation;
         const id = response?.turn?.id;
         if (typeof id === "string" && id) this.confirmRootTurn(id, generation);
-        if (!this.turnId) {
-          this.cb.onStderr(`Codex steering unavailable: turn/start did not confirm an active turn (running server: ${this.serverIdentity}; installed CLI version may differ).`);
-        }
+        if (!this.turnId) this.awaitRootTurnConfirmation(generation);
       }).catch((e: Json) => {
         if (generation !== this.promptGeneration || !this.turnResolve) return;
         this.turnFailureCategory = codexFailureCategory(e);
@@ -1865,10 +1999,15 @@ export class CodexAppServerDriver implements Driver {
     // steer() must observe the generation/turn/busy fence before cleanup performs its first await.
     this.lastTurnId = this.turnId ?? this.lastTurnId;
     this.completedTurnId = this.turnId ?? this.completedTurnId;
+    if (this.turnId) this.rememberStaleRootTurn(this.turnId);
+    // A turn announced to a prompt that settled unconfirmed can never be adopted by a later one.
+    for (const id of this.provisionalRootTurnIds) this.rememberStaleRootTurn(id);
     this.setSteeringTurn(null);
     this.promptBusy = false;
     this.promptGeneration++;
     this.deferredRootTurnTerminals.clear();
+    this.provisionalRootTurnIds.clear();
+    this.clearTurnConfirmationTimer();
     this.turnStartResponseGeneration = null;
     void this.cleanupStagedImages(owner).finally(() => {
       resolve(r);
@@ -2104,7 +2243,16 @@ export class CodexAppServerDriver implements Driver {
     return owner ? { ownerToolUseId: owner } : {};
   }
 
-  private registerHandlers(peer: JsonRpcPeer): void {
+  private registerHandlers(transport: Pick<JsonRpcPeer, "onRequest" | "onNotification">): void {
+    // Each notification can confirm an unconfirmed root turn before its handler reads the turn.
+    // Handlers that check for a replaced process compare `this.peer` with `transport`, not `peer`.
+    const peer: Pick<JsonRpcPeer, "onRequest" | "onNotification"> = {
+      onRequest: (method, handler) => transport.onRequest(method, handler),
+      onNotification: (method, handler) => transport.onNotification(method, (params) => {
+        this.observeRootTurnNotification(method, params);
+        handler(params);
+      }),
+    };
     // Server -> client approval requests: park a promise until the UI answers. The
     // method is captured so the response is built in the shape that method expects
     // (command/file -> {decision}; permissions -> {permissions, scope}).
@@ -2235,7 +2383,7 @@ export class CodexAppServerDriver implements Driver {
 
     peer.onNotification("skills/changed", () => this.refreshSkillCatalog());
     peer.onNotification("warning", (params: Json) => {
-      if (this.disposed || this.peer !== peer) return;
+      if (this.disposed || this.peer !== transport) return;
       if (!codexHttpFallbackWarning(params?.message)) return;
       if (params?.threadId && params.threadId !== this.threadId) {
         if (this.subagentToolByThread.has(params.threadId)) this.reportInferenceHttpFallback("subagent", params.threadId);

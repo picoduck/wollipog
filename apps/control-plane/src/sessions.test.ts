@@ -37,7 +37,9 @@ import type {
   SteerSessionResultMessage,
   WorkspaceReference,
   WorkflowDefinitionSpec,
+  ProviderAccountDefinition,
 } from "@wollipog/protocol";
+import { PROVIDER_ACCOUNT_CHOICE_REQUIRED, supportsClaudeProjectMemory } from "@wollipog/protocol";
 import {
   BACKGROUND_JOB_STALL_MS,
   EVENT_PAYLOAD_PREVIEW_BYTES,
@@ -55,12 +57,13 @@ import {
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   WORKSPACE_REFERENCE_MIME_TYPE,
   githubIssueClosureRefusal,
+  issueClosureExclusionReasonText,
   pendingRequests,
   projectSessionEventPayloadForProtocol,
 } from "@wollipog/protocol";
 import { dispatch as dispatchManagerTool } from "../../runner/src/session-management-mcp.js";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
-import { WITHHELD_RUNNER_ERROR } from "./github-issue-closure.js";
+import { WITHHELD_RUNNER_ERROR, issueClosureBindingSnapshot, issueClosureChildren, normalizeIssueClosureSnapshot } from "./github-issue-closure.js";
 import { scopeView } from "./campaign-issue-scope.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA } from "./campaign-work-ledger-store.js";
 import { applyClaudeReconciliation, previewClaudeReconciliation, observeReconciliationRevision } from "./claude-cost-reconciliation.js";
@@ -96,6 +99,85 @@ import {
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
 import { RunnerFrameQueue } from "./runner-frame-queue.js";
+import { fakeDecisionKind, fakeDecisionRuntime, HEALTHY_VERDICTS } from "./credential-screen-test-fixture.js";
+import { scopeCheckAnswer } from "./scope-grant-test-fixture.js";
+import type { DecisionRuntime } from "./decision-runtime.js";
+
+/** A Decision Model that reads a Custom campaign's first message as naming epic #123 (#4104). */
+/** A healthy fake Decision Model whose constraint check admits a Custom seed proposal (#4282). */
+function epicSeedReading(db: ControlPlaneDb) {
+  return fakeDecisionRuntime(db, (message) => fakeDecisionKind(message) === "scope_check"
+    ? { outputText: (scopeCheckAnswer(message) as { outputText: string }).outputText }
+    : { verdict: HEALTHY_VERDICTS[fakeDecisionKind(message)]! }).runtime;
+}
+
+/** The Custom root proposes `epic` as the issue its person's first message `prompt` names (#4282),
+ * after the runner's echo of that prompt; the test's runner handler also reports issue facts. */
+async function proposeSeedEpic(svc: SessionsService, db: ControlPlaneDb, hub: FakeHub, id: string, prompt: string, epic: number, repository = "team/repo") {
+  if (db.initialUserMessageText(id) === null) db.appendEvent(id, { kind: "user_message", text: prompt }, Date.now());
+  const handler = hub.requestHandler!;
+  hub.requestHandler = async (message) => {
+    const result = await handler(message);
+    if (message.type !== "campaign_issue_scope" || message.operation !== "inspect" || !message.facts || result.type !== "campaign_issue_scope_result" || !result.ok) return result;
+    return { ...result, issueFacts: (message.issues ?? []).map((number) => ({ number, kind: "issue" as const, state: "open" as const, labels: [], assignees: [],
+      title: `Issue ${number}`, bodyExcerpt: "" })) };
+  };
+  try {
+    const result = await svc.proposeCampaignSeedScope(id, { requestId: `seed-epic-${epic}`, expectedRevision: 0, removals: [],
+      additions: [{ repository, number: epic }], explanation: "The epic the message names.",
+      proposal: { issues: [{ repository, number: epic, origin: "owner_named", rationale: "Named." }], requestedCount: null, constraints: [], withheldOperations: [] } });
+    assert.equal(result?.data?.seedProposal.outcome, "epic_seeded", result?.error ?? JSON.stringify(result?.data));
+  } finally { hub.requestHandler = handler; }
+}
+
+/**
+ * Creates a person-created Custom campaign whose first message names `numbers`, and grants them the
+ * only way a first message can (#4259, #4282): the root proposes exactly those issues as the ones the
+ * message names, the fake constraint check admits, and the runner reads each as an issue of
+ * team/repo. The runner's echo of the launch prompt is recorded as the first user message when the
+ * test hasn't recorded one. Resolves once the proposal settled, with the harness's own Decision
+ * runtime and runner handler restored.
+ */
+async function createWithIssueListReading<T extends { ok: boolean; data?: { id: string } }>(
+  svc: SessionsService, db: ControlPlaneDb, hub: FakeHub, numbers: number[], create: () => T): Promise<T> {
+  const internals = svc as unknown as { decisionRuntime: DecisionRuntime };
+  const previousRuntime = internals.decisionRuntime;
+  const previousHandler = hub.requestHandler;
+  svc.setDecisionRuntime(fakeDecisionRuntime(db, (message) => fakeDecisionKind(message) === "scope_check"
+    ? { outputText: (scopeCheckAnswer(message) as { outputText: string }).outputText }
+    : { verdict: HEALTHY_VERDICTS[fakeDecisionKind(message)]! }).runtime);
+  hub.requestHandler = (message) => {
+    if (message.type === "campaign_issue_scope" && message.operation === "inspect") {
+      const issues = message.issues ?? [];
+      return { type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId, ok: true, repository: "team/repo",
+        candidates: issues.map((number) => ({ issue: { repository: "team/repo", number }, title: `Issue ${number}`, source: "member_checklist" as const })),
+        ...(message.facts ? { issueFacts: issues.map((number) => ({ number, kind: "issue" as const, state: "open" as const, labels: [], assignees: [],
+          title: `Issue ${number}`, bodyExcerpt: "" })) } : {}) };
+    }
+    if (message.type === "campaign_issue_scope" && message.operation === "grant_issue_numbers") {
+      return { type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId, ok: true, issueNumbersGrant: "applied" };
+    }
+    if (previousHandler) return previousHandler(message);
+    throw new Error("runner did not respond in time");
+  };
+  try {
+    const created = create();
+    const id = created.ok ? created.data?.id : undefined;
+    const seed = id ? db.getSession(id)?.orchestratorPolicy?.issueScopeSeed : undefined;
+    if (id && seed?.state === "pending" && seed.proposal) {
+      const prompt = hub.sentOfType("start_session").filter((message) => message.spec.sessionId === id).at(-1)?.initialPrompt;
+      if (db.initialUserMessageText(id) === null && prompt) db.appendEvent(id, { kind: "user_message", text: prompt }, Date.now());
+      await svc.proposeCampaignSeedScope(id, { requestId: `seed-${id}`, expectedRevision: 0, removals: [],
+        additions: numbers.map((number) => ({ repository: "team/repo", number })), explanation: "The issues the message names.",
+        proposal: { issues: numbers.map((number) => ({ repository: "team/repo", number, origin: "owner_named" as const, rationale: "Named." })),
+          requestedCount: null, constraints: [], withheldOperations: [] } });
+    }
+    return created;
+  } finally {
+    svc.setDecisionRuntime(previousRuntime);
+    hub.requestHandler = previousHandler;
+  }
+}
 
 /** A runner capability refusal: the exact sentence, with the versions beside it and never in it. */
 function assertRunnerRefusal(
@@ -368,6 +450,7 @@ class FakeHub {
   deliveryHandler?: (runnerId: string, msg: ControlPlaneToRunner) => boolean;
   requestHandler?: (msg: ControlPlaneToRunner) => RunnerRequestResult | Promise<RunnerRequestResult>;
   githubMergePreflight?: (msg: Extract<ControlPlaneToRunner, { type: "github_merge_preflight" }>) => RunnerRequestResult | Promise<RunnerRequestResult>;
+  gitlabMergeClosures?: (msg: Extract<ControlPlaneToRunner, { type: "gitlab_merge_closures" }>) => RunnerRequestResult | Promise<RunnerRequestResult>;
   activeTurnIds = new Map<string, string>();
   queuedPrompts = new Map<string, QueuedPromptView[]>();
 
@@ -421,6 +504,13 @@ class FakeHub {
       return this.githubMergePreflight
         ? await this.githubMergePreflight(msg)
         : { type: "github_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId,
+            ok: true, check: { checkedAt: 1, closures: [] } };
+    }
+    if (msg.type === "gitlab_merge_closures") {
+      // A merge request that closes no issue, unless a test answers otherwise (#3762).
+      return this.gitlabMergeClosures
+        ? await this.gitlabMergeClosures(msg)
+        : { type: "gitlab_merge_closures_result", requestId: msg.requestId, sessionId: msg.sessionId,
             ok: true, check: { checkedAt: 1, closures: [] } };
     }
     if (!this.requestHandler) throw new Error("runner did not respond in time");
@@ -818,16 +908,14 @@ test("orchestrator separates default provider execution from the negotiated stri
     "strict Native TUI still needs its static fixed-rule mode");
     agent.capabilities.permissionModes = ["default", "dontAsk", "orchestrator"];
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
+    // A launch prompt grants no issue scope at creation (#4259): the Orchestrator's checked proposal
+    // decides later (#4282), and a runner that can't send one takes the person-owned route at once.
     const outdatedScope = svc.createSession({ ...request, prompt: "Claim and orchestrate issue 1245.",
       config: { permissionMode: "orchestrator" } },
     undefined, undefined, false, false, false, { defaultOwnerUserId: "human" });
-    assertRunnerRefusal(
-      outdatedScope,
-      "This machine needs a newer runner for campaign issue coordination. Update and restart the runner.",
-      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope,
-      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1,
-      "an older runner fails actionably instead of silently losing the issue scope",
-    );
+    assert.equal(outdatedScope.ok, true, outdatedScope.error);
+    assert.equal(outdatedScope.data!.orchestratorPolicy!.issueNumbers, undefined, "an older runner is never silently granted an issue scope");
+    assert.equal(outdatedScope.data!.orchestratorPolicy!.issueScopeSeed?.state, "owner");
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
       config: { permissionMode: "orchestrator" } }).ok, true);
@@ -1047,7 +1135,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
         effortLevels: ["high"], installations: 1, compatibleInstallations: 1, status: "available",
       },
     };
-    const created = svc.createSession({
+    const created = await createWithIssueListReading(svc, db, hub, [1209, 1210, 1211], () => svc.createSession({
       runnerId: RUNNER_ID,
       workspaceId: WORKSPACE_ID,
       agentId: "test-orchestrator",
@@ -1061,7 +1149,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       defaultOwnerUserId: "owner",
       orchestratorDefaults: settings,
       validateOrchestratorDefaults: () => null,
-    });
+    }));
     assert.ok(created.ok && created.data, created.error);
     const parent = created.data;
     assert.equal(parent.maxChildSessions, 3);
@@ -1072,37 +1160,52 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(parent.orchestratorPolicy?.sources.behavior.maximumConcurrentChildren, "session_override");
     assert.equal(parent.orchestratorPolicy?.sources.delegation.decisions.pr_merge, "session_override");
     assert.equal(parent.parentControlPolicy?.revision, 1);
+    // The launch goes out before the reading settles (#4259): the first launch carries no issues, the
+    // reading grants them, and the next launch delivers them to the runner.
     const parentStart = hub.sentOfType("start_session").find((message) => message.spec.sessionId === parent.id)!;
-    assert.deepEqual(parentStart.spec.orchestrator?.issueNumbers, [1209, 1210, 1211]);
+    assert.deepEqual(parentStart.spec.orchestrator?.issueNumbers ?? [], [], "nothing granted at creation");
     assert.deepEqual(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, [1209, 1210, 1211]);
     const restartedParent = svc.restart(parent.id);
     assert.ok(restartedParent.ok, restartedParent.error);
     assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.orchestrator?.issueNumbers,
-      [1209, 1210, 1211], "restart preserves the immutable campaign issue scope");
-    const legacyPolicy = db.sessionOrchestratorPolicy(parent.id)!;
-    delete legacyPolicy.issueNumbers;
-    db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?")
-      .run(JSON.stringify(legacyPolicy), parent.id);
+      [1209, 1210, 1211], "restart delivers and preserves the immutable campaign issue scope");
+    // A pre-v158 campaign: no issue numbers and no reading of its recorded first message.
+    const unseed = () => {
+      const legacyPolicy = db.sessionOrchestratorPolicy(parent.id)!;
+      delete legacyPolicy.issueNumbers; delete legacyPolicy.issueNumbersSource; delete legacyPolicy.issueScopeSeed;
+      db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(legacyPolicy), parent.id);
+    };
+    unseed();
     db.appendEvent(parent.id, {
       kind: "user_message",
-      text: "Claim and delegate issue 1209 through 1211.",
+      text: "Claim and delegate issues 1209, 1210 and 1211.",
     }, Date.now());
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
-    const legacyRunnerRestart = svc.restart(parent.id);
-    assertRunnerRefusal(
-      legacyRunnerRestart,
-      "This machine needs a newer runner for campaign issue coordination. Update and restart the runner.",
-      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope,
-      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1,
-    );
+    const legacyRunnerRestart = await createWithIssueListReading(svc, db, hub, [1209, 1210, 1211], () => svc.restart(parent.id));
+    assert.ok(legacyRunnerRestart.ok, legacyRunnerRestart.error);
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, undefined,
-      "an old runner cannot make recovered scope durable before it can enforce that scope");
+      "an old runner never holds a recovered scope it can't enforce: the reading is the owner's");
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueScopeSeed?.state, "owner");
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-    const upgradedParent = svc.restart(parent.id);
+    unseed();
+    const upgradedParent = await createWithIssueListReading(svc, db, hub, [1209, 1210, 1211], () => svc.restart(parent.id));
     assert.ok(upgradedParent.ok, upgradedParent.error);
-    assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.orchestrator?.issueNumbers,
-      [1209, 1210, 1211], "restart safely backfills pre-v158 human campaign scope from its first prompt");
-    assert.deepEqual(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, [1209, 1210, 1211]);
+    // The recorded first prompt has no stored author, so no grammar and no reading grants its issues:
+    // they are the owner's to approve through the one person-owned request.
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, undefined,
+      "restart's reading of an unattributed transcript message grants no pre-v158 campaign scope");
+    const ownerSeed = db.getSession(parent.id)!.orchestratorPolicy!.issueScopeSeed!;
+    assert.equal(ownerSeed.state, "owner");
+    // The owner settles the one request: Continue Without an Epic, which grants nothing.
+    const released = svc.classifyCampaignDecision(parent.id, ownerSeed.occurrenceId!, { classification: "orchestrator" }, { kind: "human", id: db.localIdentityContext().userId });
+    assert.ok(released.ok, released.error);
+    assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, undefined);
+    // A persisted scope (here the one the launch's reading granted) is what the next check protects.
+    const persisted = db.sessionOrchestratorPolicy(parent.id)!;
+    persisted.issueNumbers = [1209, 1210, 1211];
+    db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(persisted), parent.id);
+    assert.ok(svc.restart(parent.id).ok);
+    assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.orchestrator?.issueNumbers, [1209, 1210, 1211]);
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
     const outdatedRestart = svc.restart(parent.id);
     assertRunnerRefusal(
@@ -1431,10 +1534,20 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     }]);
     assert.notEqual(db.campaignProjection(parent.id)?.status, "verified_complete",
       "a stopped child with a retained worktree is not campaign-complete");
+    // #4146: Cleanup never offers a removal that could discard the changes, and names the next step in
+    // words rather than a command to run inside the agent-managed worktree.
+    const dirty = db.campaignProjection(parent.id)?.cleanup?.items.find((item) => item.kind === "worktree");
+    assert.ok(dirty, "the refused worktree is listed under Cleanup");
+    assert.equal(dirty.reason, "The worktree has uncommitted changes.");
+    assert.deepEqual(dirty.action, { kind: "person", text: "Review the child's work from its session in Wollipog. " +
+      "Ask its session or the Orchestrator to commit and push the changes you want to keep, or confirm they are not needed. " +
+      "Then ask the Orchestrator to retire the worktree through Wollipog." });
     db.raw().prepare("UPDATE sessions SET archived=1, worktree_path=NULL, worktrees='[]' WHERE id=?")
       .run(child.data.id);
-    // #4067: the grandchild's merged pull request still owes its branch until the forge reports it gone.
-    assert.equal(db.campaignProjection(parent.id)?.status, "active");
+    // #4067, #4146: the grandchild's merged pull request still owes its branch until the forge reports it
+    // gone; once the root is idle that is Complete, Needs Cleanup, never Active.
+    db.updateSessionStatus(parent.id, "idle", Date.now());
+    assert.equal(db.campaignProjection(parent.id)?.status, "complete_needs_cleanup");
     assert.equal(db.campaignProjection(parent.id)?.mergedBranches?.pending, 1);
     db.campaignForgeObservations.record(parent.id, RUNNER_ID, [{ ref: { repository: "picoduck/wollipog", number: 1091 }, observation: {
       state: "merged", draft: false, headSha: "b".repeat(40), baseRef: "main", reviewDecision: "approved",
@@ -1445,6 +1558,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.deepEqual(db.campaignProjection(parent.id)?.followUps, {
       unique: 2, duplicates: 2,
     });
+    db.updateSessionStatus(parent.id, "running", Date.now()); // The root dispatches more work.
     let failedChild = svc.createSession(childRequest, undefined, undefined, false, false, false, {
       parentSessionId: parent.id,
     });
@@ -1457,8 +1571,14 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     }
     assert.ok(failedChild.ok && failedChild.data, failedChild.error);
     svc.onSessionStatus(failedChild.data.id, "failed");
-    assert.equal(db.campaignProjection(parent.id)?.status, "blocked",
+    db.updateSessionStatus(parent.id, "idle", Date.now());
+    // #4146: the failed child's turn end owes the root a continuation, which is live work; the
+    // failed child alone would leave the campaign stuck, never complete.
+    const afterFailure = db.campaignProjection(parent.id)!;
+    assert.equal(afterFailure.status, "active",
       "an unverified failed child blocks campaign completion without stalling unrelated work");
+    assert.deepEqual(afterFailure.activity?.live, ["continuation"]);
+    db.updateSessionStatus(parent.id, "running", Date.now());
     const emptyChildRequest = {
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
     };
@@ -1503,7 +1623,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
 });
 
 test("approved UI evidence and implementation-question decisions do not block campaign child verification, and a blocking 409 names each decision", async () => {
-  const { db, svc } = makeHarness();
+  const { db, svc, hub } = makeHarness();
   try {
     const meta = runnerMeta();
     const planner = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
@@ -1520,7 +1640,7 @@ test("approved UI evidence and implementation-question decisions do not block ca
       ui_evidence_approval: "human",
       review_round_extension: "human",
     } as const;
-    const created = svc.createSession({
+    const created = await createWithIssueListReading(svc, db, hub, [1404], () => svc.createSession({
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issue 1404.",
       orchestrator: { behavior: { completion: "retain" } },
@@ -1541,7 +1661,7 @@ test("approved UI evidence and implementation-question decisions do not block ca
         },
       },
       validateOrchestratorDefaults: () => null,
-    });
+    }));
     assert.ok(created.ok && created.data, created.error);
     const parent = created.data;
     db.updateSessionStatus(parent.id, "running", Date.now());
@@ -1689,8 +1809,9 @@ test("approved UI evidence and implementation-question decisions do not block ca
   }
 });
 
-/** A Stop and Archive campaign whose children the tests stop, report from, and verify. */
-function stopAndArchiveCampaignFixture(completion: "retain" | "stop_and_archive" = "stop_and_archive") {
+/** A Stop and Archive campaign whose children the tests stop, report from, and verify. Its first
+ * message's issue, #1440, is granted through the scripted scope grant reading (#4259). */
+async function stopAndArchiveCampaignFixture(completion: "retain" | "stop_and_archive" = "stop_and_archive") {
   const { db, svc, hub } = makeHarness();
   const meta = runnerMeta();
   const planner = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
@@ -1707,7 +1828,7 @@ function stopAndArchiveCampaignFixture(completion: "retain" | "stop_and_archive"
     ui_evidence_approval: "human",
     review_round_extension: "human",
   } as const;
-  const created = svc.createSession({
+  const created = await createWithIssueListReading(svc, db, hub, [1440], () => svc.createSession({
     runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
     config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issue 1440.",
     orchestrator: { behavior: { completion } },
@@ -1728,9 +1849,10 @@ function stopAndArchiveCampaignFixture(completion: "retain" | "stop_and_archive"
       },
     },
     validateOrchestratorDefaults: () => null,
-  });
+  }));
   assert.ok(created.ok && created.data, created.error);
-  const parent = created.data;
+  assert.deepEqual(db.getSession(created.data.id)!.orchestratorPolicy!.issueNumbers, [1440], "the reading granted the named issue");
+  const parent = db.getSession(created.data.id)!;
   db.updateSessionStatus(parent.id, "running", Date.now());
   const spawn = (parentSessionId: string, prompt: string) => {
     const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt };
@@ -1753,7 +1875,7 @@ function stopAndArchiveCampaignFixture(completion: "retain" | "stop_and_archive"
 }
 
 test("Stop and Archive retires the original worktree but retains provider-owned and unsafe worktrees as cleanup-pending", async (context) => {
-  const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   // A temporary forge failure schedules a five-minute retry. Keep that timer owned by this test
   // so it cannot wake after the fixture's database has closed.
   context.mock.timers.enable({ apis: ["setTimeout"] });
@@ -1826,7 +1948,7 @@ test("Stop and Archive retires the original worktree but retains provider-owned 
 });
 
 test("Stop and Archive leaves old runners pending and retries an undelivered archive on reconnect", async () => {
-  const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {
     const child = spawn(parent.id, "Deliver another issue");
     const path = `/worktrees/${child}/original`;
@@ -1853,14 +1975,15 @@ test("Stop and Archive leaves old runners pending and retries an undelivered arc
     svc.reconcileArchivedCampaignWorktrees(RUNNER_ID);
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(hub.sentOfType("session_worktree").length, 1);
+    db.updateSessionStatus(parent.id, "idle", Date.now()); // The root's own turn is live work (#4146).
     assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
   } finally {
     db.close();
   }
 });
 
-test("a stopped campaign child with a final report can still be verified, and archived by that verification", () => {
-  const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+test("a stopped campaign child with a final report can still be verified, and archived by that verification", async () => {
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {
     const child = spawn(parent.id, "Implement the assigned issue");
     assert.match(hub.sentOfType("start_session").find((message) => message.spec.sessionId === child)?.initialPrompt ?? "",
@@ -1955,8 +2078,8 @@ test("a stopped campaign child with a final report can still be verified, and ar
   }
 });
 
-test("a guardrail-stopped campaign child waits for its runner to confirm the stop (#1466)", () => {
-  const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+test("a guardrail-stopped campaign child waits for its runner to confirm the stop (#1466)", async () => {
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {
     const child = spawn(parent.id, "Implement the assigned issue");
     svc.setConfig(child, { costBudgetUsd: 1 });
@@ -1993,8 +2116,8 @@ test("a guardrail-stopped campaign child waits for its runner to confirm the sto
   }
 });
 
-test("a disconnect-stopped campaign child is verifiable only once its runner confirms the stop (#1466)", () => {
-  const { db, svc, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+test("a disconnect-stopped campaign child is verifiable only once its runner confirms the stop (#1466)", async () => {
+  const { db, svc, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {
     const restored = spawn(parent.id, "Child the runner still holds");
     const ended = spawn(parent.id, "Child the runner no longer holds");
@@ -3423,8 +3546,8 @@ test("campaign continuation recovery holds for humans and never replays an ambig
       error: "provider accepted the turn but no terminal result was persisted",
     }), true);
     assert.equal(db.campaignProjection(root.id)?.continuation?.state, "missing_result");
-    assert.equal(svc.campaignProjection(root.id).data?.status, "blocked",
-      "get_campaign no longer reports an accepted-without-result campaign as active (#1352)");
+    assert.equal(svc.campaignProjection(root.id).data?.status, "active",
+      "its children's queued turns are live work, so it is Active beside the stall (#1352, #4146)");
     assert.equal(svc.campaignProjection(root.id).data?.stalled, "continuation_missing_result");
     db.raw().prepare("UPDATE session_prompt_commands SET expires_at=0 WHERE command_id=?").run(first.commandId);
     svc.maintainPrompts(Date.now());
@@ -3581,8 +3704,8 @@ test("campaign continuation failures back off finitely and stopped campaigns rej
       }), true);
       assert.equal(db.campaignProjection(root.id)?.continuation?.attemptCount, attempt);
       assert.equal(db.campaignProjection(root.id)?.continuation?.state, "failed");
-      // The next iteration's retry proves a blocked status does not starve the scheduler (#1352).
-      assert.equal(db.campaignProjection(root.id)?.status, "blocked");
+      // The next iteration's retry proves a stuck status does not starve the scheduler (#1352, #4146).
+      assert.equal(db.campaignProjection(root.id)?.status, "stuck");
       assert.equal(db.campaignProjection(root.id)?.stalled, "continuation_failed");
       clock += 60_000;
     }
@@ -5224,8 +5347,24 @@ test("consuming a GitLab merge first checks GitLab on the child's runner, revoki
     const approved = (key: string) => {
       const decision = svc.createWorkflowDecision(child.id, { requestId: key, resourceKey: key, resourceSnapshot: GITLAB_MERGE });
       assert.ok(decision.ok && decision.data, decision.error);
-      assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
-        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      assert.equal(svc.workflowDecision(child.id, decision.data.occurrenceId).data?.approvedAction, undefined);
+      svc.onSessionStatus(child.id, "idle");
+      const resolution = svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+      assert.ok(resolution.ok, resolution.error);
+      const discovered = svc.workflowDecision(child.id, decision.data.occurrenceId).data!;
+      assert.deepEqual(resolution.data?.approvedAction, discovered.approvedAction,
+        "the resolver and child learn the same action before any consume attempt (#4242)");
+      assert.deepEqual(svc.workflowDecisions(child.id, undefined, 100).data!.decisions
+        .find((entry) => entry.occurrenceId === decision.data!.occurrenceId)?.approvedAction, discovered.approvedAction);
+      assert.equal(discovered.actionAdmission, undefined, "discovering a command does not arm it");
+      assert.equal(discovered.approvedAction?.command,
+        `glab api --method POST projects/platform%2Fagents%2Fwollipog/merge_trains/merge_requests/7 --hostname gitlab.example.com -f sha=${GITLAB_MERGE.headSha} -F squash=false`);
+      const resume = promptsSentTo(hub, child.id).at(-1)!.text;
+      assert.ok(resume.includes(`Approved enqueue action: ${JSON.stringify(discovered.approvedAction)}`),
+        "the child receives the exact action before its first attempt");
+      assert.match(resume, /not armed until consumption succeeds/);
+      db.updateSessionStatus(child.id, "running", Date.now());
       return decision.data.occurrenceId;
     };
     const command = canonicalPrMergeEnqueueCommand(GITLAB_MERGE);
@@ -5238,7 +5377,8 @@ test("consuming a GitLab merge first checks GitLab on the child's runner, revoki
       return { type: "gitlab_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId, ...answer } as RunnerRequestResult;
     };
     const consume = (occurrenceId: string) => svc.consumeWorkflowDecision(child.id, occurrenceId,
-      { resourceSnapshot: GITLAB_MERGE, action: { kind: "pr_merge_enqueue", command } });
+      { resourceSnapshot: svc.workflowDecision(child.id, occurrenceId).data!.resourceSnapshot,
+        action: svc.workflowDecision(child.id, occurrenceId).data!.approvedAction });
 
     const armed = approved("gitlab-ok");
     const result = await consume(armed);
@@ -5250,6 +5390,18 @@ test("consuming a GitLab merge first checks GitLab on the child's runner, revoki
       mergeMethod: "merge_train", squash: false, removeSourceBranch: false,
     });
 
+    const direct = svc.createWorkflowDecision(child.id, { requestId: "gitlab-direct-discovery", resourceKey: "gitlab-direct-discovery",
+      resourceSnapshot: { ...GITLAB_MERGE, mergeMethod: "merge", squash: true, removeSourceBranch: true } });
+    assert.ok(direct.ok && direct.data, direct.error);
+    assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, direct.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    const directRead = svc.workflowDecision(child.id, direct.data.occurrenceId).data!;
+    assert.equal(directRead.approvedAction?.command,
+      `glab api --method PUT projects/platform%2Fagents%2Fwollipog/merge_requests/7/merge --hostname gitlab.example.com -f sha=${GITLAB_MERGE.headSha} -F squash=true -F should_remove_source_branch=true`);
+    assert.ok((await svc.consumeWorkflowDecision(child.id, direct.data.occurrenceId,
+      { resourceSnapshot: directRead.resourceSnapshot, action: directRead.approvedAction })).ok,
+      "a direct merge also arms on the first attempt using only the decision read");
+
     for (const [refusal, revoked] of [["stale_head", true], ["mismatch", true], ["unavailable", false]] as const) {
       answer = { ok: false, refusal, reason: `GitLab said ${refusal}.` };
       const occurrence = approved(`gitlab-${refusal}`);
@@ -5259,6 +5411,8 @@ test("consuming a GitLab merge first checks GitLab on the child's runner, revoki
       assert.equal(db.workflowDecisionByOccurrence(occurrence)?.status, revoked ? "revoked" : "approved",
         `${refusal} ${revoked ? "revokes the stale or unusable approval" : "arms nothing and stays retryable"}`);
       assert.equal(db.workflowDecisionByOccurrence(occurrence)?.actionAdmission, undefined);
+      if (revoked) assert.equal(svc.workflowDecision(child.id, occurrence).data?.approvedAction, undefined,
+        "a revoked merge no longer advertises an approved action");
     }
     answer = new Error("runner did not respond in time");
     const silent = approved("gitlab-silent");
@@ -5299,8 +5453,150 @@ test("a GitHub merge snapshot's intendedClosures normalize to sorted unique issu
   for (const intendedClosures of [["3713"], ["closes #1"], "#1", [1], Array.from({ length: 101 }, (_, i) => `#${i + 1}`)]) {
     assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE, intendedClosures }).status, 400, JSON.stringify(intendedClosures).slice(0, 60));
   }
-  assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures: ["#1"] }).status, 400,
-    "GitLab closes issues by its own rules, which this check does not read");
+  // A GitLab merge declares issues on its own instance (#3762).
+  const gitlab = normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures: [
+    "#9", "sibling#2", "Platform/Other#3", "gitlab.example.com/platform/agents/wollipog#9",
+    "https://gitlab.example.com/platform/agents/wollipog/-/issues/1"] });
+  assert.deepEqual(gitlab.data && "intendedClosures" in gitlab.data && gitlab.data.intendedClosures, [
+    "gitlab.example.com/platform/agents/sibling#2", "gitlab.example.com/platform/agents/wollipog#1",
+    "gitlab.example.com/platform/agents/wollipog#9", "gitlab.example.com/platform/other#3"]);
+  assert.deepEqual(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures: [] }).data, GITLAB_MERGE);
+  for (const intendedClosures of [["https://github.com/picoduck/wollipog/issues/1"], ["https://other.example.com/a/b/-/issues/1"], ["3"]]) {
+    assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures }).status, 400, JSON.stringify(intendedClosures));
+  }
+});
+
+test("a GitLab merge is requested and armed only while GitLab would close exactly its intendedClosures (#3762)", async () => {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "off",
+    });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "GitLab Child" };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parent.data.id, db.getSession(parent.data.id)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data;
+    db.updateSessionStatus(child.id, "running", Date.now());
+    assert.ok(svc.setParentControlPolicy(parent.data.id, {
+      implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
+    }, 0).ok);
+
+    const reads: Array<Extract<ControlPlaneToRunner, { type: "gitlab_merge_closures" }>> = [];
+    let answer: Record<string, unknown> | Error = { ok: true, check: { checkedAt: 5, closures: [] } };
+    hub.gitlabMergeClosures = async (msg) => {
+      reads.push(msg);
+      if (answer instanceof Error) throw answer;
+      return { type: "gitlab_merge_closures_result", requestId: msg.requestId, sessionId: msg.sessionId, ...answer } as RunnerRequestResult;
+    };
+    const preflights: ControlPlaneToRunner[] = [];
+    hub.requestHandler = async (msg) => {
+      if (msg.type !== "gitlab_merge_preflight") throw new Error(`unexpected ${msg.type}`);
+      preflights.push(msg);
+      return { type: "gitlab_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true } as RunnerRequestResult;
+    };
+    const issue = (n: number) => `gitlab.example.com/platform/agents/wollipog#${n}`;
+    const negated = { issue: issue(12), sources: ["description"], excerpt: "This MR is not closing #12 yet." };
+    const delivered = { issue: issue(3762), sources: ["description", "linked"], excerpt: "Implements #3762." };
+    const ask = (key: string, snapshot: Record<string, unknown> = GITLAB_MERGE) =>
+      svc.createWorkflowDecisionWithVideo(child.id, { requestId: key, resourceKey: key,
+        resourceSnapshot: snapshot as unknown as WorkflowDecisionResourceSnapshot });
+
+    // An undeclared closure, here an "-ing" form, never reaches review, and is named with its line.
+    answer = { ok: true, check: { checkedAt: 5, closures: [negated] } };
+    const refused = await ask("negated");
+    assert.equal(refused.status, 409);
+    assert.match(refused.error ?? "", new RegExp(`merge request would close an issue that intendedClosures does not list: ${issue(12)}, ` +
+      "from the description: “This MR is not closing #12 yet\\.”", "u"));
+    assert.match(refused.error ?? "", /GitLab closes an issue when close, fix, resolve or implement/u);
+    assert.deepEqual(reads[0], { type: "gitlab_merge_closures", requestId: reads[0]!.requestId, sessionId: child.id,
+      repository: GITLAB_MERGE.repository, pullRequest: 7, headSha: GITLAB_MERGE.headSha });
+    assert.deepEqual(svc.workflowDecisions(child.id, undefined, 10).data?.decisions, [], "no decision was created");
+
+    // GitLab's own list (from the title, commits or an instance's own pattern) is a closure too.
+    answer = { ok: true, check: { checkedAt: 5, closures: [{ issue: issue(9), sources: ["linked"] }] } };
+    assert.match((await ask("linked")).error ?? "", /wollipog#9, which GitLab reports the merge request closes/u);
+    // A declared closure GitLab would not make.
+    answer = { ok: true, check: { checkedAt: 5, closures: [] } };
+    assert.match((await ask("unmade", { ...GITLAB_MERGE, intendedClosures: ["#3762"] })).error ?? "",
+      /intendedClosures lists gitlab\.example\.com\/platform\/agents\/wollipog#3762, but merging this merge request would not close it/u);
+    for (const [refusal, pattern] of [["stale_head", /no longer matches the merge request: GitLab said stale_head/u],
+      ["unavailable", /GitLab could not be read .*GitLab said unavailable Try again/u]] as const) {
+      answer = { ok: false, refusal, reason: `GitLab said ${refusal}` };
+      assert.match((await ask(`refused-${refusal}`)).error ?? "", pattern);
+    }
+    answer = new Error("runner did not respond in time");
+    assert.match((await ask("silent")).error ?? "", /the runner did not answer/u);
+    // A GitHub-shaped issue is not a GitLab merge's closure.
+    answer = { ok: true, check: { checkedAt: 5, closures: [{ issue: "picoduck/wollipog#9", sources: ["linked"] }] } };
+    assert.match((await ask("malformed")).error ?? "", /the runner's answer was incomplete/u);
+    assert.deepEqual(svc.workflowDecisions(child.id, undefined, 10).data?.decisions, [], "nothing unread or mismatched was created");
+
+    // A merge that closes exactly what it declares is created, and records what was read.
+    answer = { ok: true, check: { checkedAt: 5, closures: [delivered] } };
+    const intended = await ask("intended", { ...GITLAB_MERGE, intendedClosures: ["#3762"] });
+    assert.ok(intended.ok && intended.data, intended.error);
+    assert.deepEqual(intended.data.resourceSnapshot, { ...GITLAB_MERGE, intendedClosures: [issue(3762)] });
+    assert.deepEqual(intended.data.closingReferenceCheck, { checkedAt: 5, closures: [delivered] });
+
+    // Arming reads GitLab again, alongside the merge preflight.
+    const snapshot = intended.data.resourceSnapshot as Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>;
+    const command = canonicalPrMergeEnqueueCommand(snapshot);
+    const approve = async (key: string) => {
+      const decision = await ask(key, snapshot);
+      assert.ok(decision.ok && decision.data, decision.error);
+      assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      return decision.data.occurrenceId;
+    };
+    const consume = (occurrenceId: string) => svc.consumeWorkflowDecision(child.id, occurrenceId,
+      { resourceSnapshot: snapshot, action: { kind: "pr_merge_enqueue", command } });
+    const edited = await approve("edited-after-approval");
+    answer = { ok: true, check: { checkedAt: 6, closures: [negated, delivered] } };
+    const revoked = await consume(edited);
+    assert.equal(revoked.status, 409);
+    assert.match(revoked.error ?? "", /wollipog#12.*This approval was revoked, so nothing was armed/u);
+    assert.equal(db.workflowDecisionByOccurrence(edited)?.status, "revoked");
+    assert.equal(db.workflowDecisionByOccurrence(edited)?.actionAdmission, undefined);
+    assert.equal(preflights.length, 1, "the merge preflight ran alongside the read");
+
+    answer = { ok: true, check: { checkedAt: 6, closures: [delivered] } };
+    const retried = await approve("unreadable-then-armed");
+    answer = { ok: false, refusal: "unavailable", reason: "gitlab.example.com could not be reached." };
+    const unreadable = await consume(retried);
+    assert.match(unreadable.error ?? "", /gitlab\.example\.com could not be reached\. Try again\./u);
+    assert.equal(db.workflowDecisionByOccurrence(retried)?.status, "approved", "an unreadable GitLab proves nothing; retry is allowed");
+    answer = { ok: true, check: { checkedAt: 7, closures: [delivered] } };
+    const armed = await consume(retried);
+    assert.ok(armed.ok, armed.error);
+    assert.equal(db.workflowDecisionByOccurrence(retried)?.actionAdmission?.command, command);
+
+    // A runner that predates the check is not asked; its decision says nothing was read.
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabMergeClosingReferences - 1);
+    const asked = reads.length;
+    answer = { ok: true, check: { checkedAt: 8, closures: [negated] } };
+    const legacy = await ask("legacy-runner");
+    assert.ok(legacy.ok && legacy.data, legacy.error);
+    assert.equal(legacy.data.closingReferenceCheck, undefined);
+    assert.equal(reads.length, asked, "a pre-v295 runner receives no gitlab_merge_closures");
+  } finally {
+    db.close();
+  }
 });
 
 test("a GitHub merge is requested and armed only while GitHub would close exactly its intendedClosures (#3713)", async () => {
@@ -5439,6 +5735,101 @@ test("a GitHub merge is requested and armed only while GitHub would close exactl
   }
 });
 
+test("a repository without required checks merges on every reported check, verified by the runner; no checks stays a person's (#4119)", async () => {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  try {
+    const meta = runnerMeta();
+    meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "off" });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "GitHub Child" };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parent.data.id, db.getSession(parent.data.id)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data;
+    db.updateSessionStatus(child.id, "running", Date.now());
+    // The Orchestrator owns merges here, so only the basis decides who owns this one.
+    assert.ok(svc.setParentControlPolicy(parent.data.id, {
+      implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
+    }, 0).ok);
+
+    const preflights: Array<Extract<ControlPlaneToRunner, { type: "github_merge_preflight" }>> = [];
+    let checks: Record<string, unknown> | undefined;
+    hub.githubMergePreflight = async (msg) => {
+      preflights.push(msg);
+      return { type: "github_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true,
+        check: { checkedAt: 5, closures: [] }, ...(checks ? { checks } : {}) } as RunnerRequestResult;
+    };
+    const cite = (...names: string[]) => ({ ...GITHUB_MERGE, checksBasis: "all_reported",
+      requiredChecks: { ...GITHUB_MERGE.requiredChecks, checks: names.map((name) => ({ name, state: "passed" })) } });
+    const ask = (key: string, snapshot: Record<string, unknown>) => svc.createWorkflowDecisionWithVideo(child.id,
+      { requestId: key, resourceKey: key, resourceSnapshot: snapshot as unknown as WorkflowDecisionResourceSnapshot });
+    const passed = (name: string) => ({ name, state: "passed" });
+
+    // Every reported check passing under a clean merge state admits it, recording the basis.
+    checks = { required: 0, clean: true, reported: [passed("build"), passed("lint")] };
+    const admitted = await ask("all-reported", cite("lint", "build"));
+    assert.ok(admitted.ok && admitted.data, admitted.error);
+    assert.equal(admitted.data.authority, "orchestrator");
+    assert.equal((admitted.data.resourceSnapshot as { checksBasis?: string }).checksBasis, "all_reported");
+    assert.equal(preflights.at(-1)!.checks, true, "the runner is asked for the head's checks");
+
+    // Pending, failing, unclean, required, or differently named checks refuse it; nothing is created.
+    for (const [label, read, pattern] of [
+      ["pending", { required: 0, clean: true, reported: [passed("build"), { name: "lint", state: "pending" }] }, /has not finished/u],
+      ["failing", { required: 0, clean: true, reported: [passed("build"), { name: "lint", state: "failing" }] }, /is failing/u],
+      ["unclean", { required: 0, clean: false, reported: [passed("build"), passed("lint")] }, /merge state as clean/u],
+      ["required", { required: 1, clean: true, reported: [passed("build"), passed("lint")] }, /must cite its required checks/u],
+      ["other names", { required: 0, clean: true, reported: [passed("build"), passed("test")] }, /exactly the checks GitHub reports/u],
+      ["malformed", { required: -1, clean: true, reported: [] }, /the runner's answer was incomplete/u],
+    ] as const) {
+      checks = read as unknown as Record<string, unknown>;
+      const refused = await ask(`refused-${label}`, cite("build", "lint"));
+      assert.equal(refused.status, 409, label);
+      assert.match(refused.error ?? "", pattern, label);
+    }
+
+    // A head with no checks at all is never green: the merge is the person's, even here.
+    checks = { required: 0, clean: false, reported: [] };
+    const none = await ask("no-checks", cite());
+    assert.ok(none.ok && none.data, none.error);
+    assert.equal(none.data.authority, "human");
+    assert.equal(none.data.authorityEvaluation?.reason, "no_checks");
+    // Only the all-reported basis may cite no checks, and only for GitHub.
+    assert.equal((await ask("empty-required", { ...GITHUB_MERGE, requiredChecks: { ...GITHUB_MERGE.requiredChecks, checks: [] } })).status, 400);
+    assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE, checksBasis: "required" }).status, 400);
+    assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, checksBasis: "all_reported" }).status, 400);
+
+    // A required-checks merge keeps its snapshot, digest and preflight unchanged.
+    checks = undefined;
+    const plain = await ask("required-basis", GITHUB_MERGE);
+    assert.ok(plain.ok && plain.data, plain.error);
+    assert.deepEqual(plain.data.resourceSnapshot, GITHUB_MERGE);
+    assert.equal("checks" in preflights.at(-1)!, false);
+
+    // A runner that cannot read checks cannot support the basis.
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeChecksBasis - 1);
+    const asked = preflights.length;
+    const older = await ask("older-runner", cite("build", "lint"));
+    assert.equal(older.status, 409);
+    assert.match(older.error ?? "", /newer runner/u);
+    assert.equal(preflights.length, asked);
+  } finally {
+    db.close();
+  }
+});
+
 test("a nested Orchestrator's verification counts toward the root campaign (#1462)", () => {
   const { db, svc, hub } = makeHarness();
   try {
@@ -5496,6 +5887,7 @@ test("a nested Orchestrator's verification counts toward the root campaign (#146
       hub.sessionChangedByIdCalls.includes(nested.id),
     "both campaign views embed the root projection, so both refresh");
 
+    db.updateSessionStatus(root.data.id, "idle", Date.now()); // The root's own turn is live work (#4146).
     const rootVerification = svc.verifyCampaignChild(root.data.id, {
       childSessionId: nested.id, reportEventSeq: report(nested.id, "Nested campaign report"),
       followUpsAccounted: true,
@@ -6625,6 +7017,11 @@ test("resolving any Orchestrator-owned typed decision resumes the idle child wit
           `${label}: the child leaves idle into the resumed turn, which reads queued until the runner starts it (#1651)`);
         assert.equal(promptsToChild().length, before + 1, `${label}: exactly one resuming prompt`);
         const text = promptsToChild().at(-1)!.text;
+        assert.equal(text.includes("Approved enqueue action:"), category === "pr_merge" && outcome === "approve",
+          "only approved merge prompts advertise an action (#4242)");
+        const exposed = svc.workflowDecision(child.id, decision.data.occurrenceId).data!;
+        assert.equal(exposed.approvedAction?.command,
+          category === "pr_merge" && outcome === "approve" ? canonicalPrMergeEnqueueCommand(snapshots.pr_merge) : undefined);
         assert.ok(text.includes(`[Wollipog Workflow Decision — ${decision.data.occurrenceId}]\n`), label);
         assert.ok(text.includes(`Your Orchestrator ${outcome === "approve" ? "approved" : "denied"} your ${category} ` +
           `decision ${decision.data.occurrenceId} (resource "wake:${category}:${outcome}")`), label);
@@ -6875,6 +7272,51 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       assert.equal(svc.governanceAudit(child.id).filter((entry) =>
         entry.requestId === requested.decision.occurrenceId && entry.outcome === "consumed").length, 1,
       "a later Guardian event cannot double-consume the existing requestApproval path");
+    } finally { db.close(); }
+  });
+
+  await t.test("a refused runner admission names its cause and leaves the approval consumable (#4054)", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      const accept = hub.requestHandler!;
+      hub.requestHandler = (message) => {
+        assert.equal(message.type, "record_workflow_action_admission");
+        const request = message as Extract<ControlPlaneToRunner, { type: "record_workflow_action_admission" }>;
+        return {
+          type: "workflow_action_admission_recorded",
+          requestId: request.requestId,
+          sessionId: request.sessionId,
+          occurrenceId: request.occurrenceId,
+          accepted: false,
+          error: "Codex has not confirmed a provider turn for the current turn",
+        };
+      };
+      const refused = await arm(1150, 409);
+      assert.equal(refused.armed.error, "The runner could not arm this App Server action: Codex has not " +
+        "confirmed a provider turn for the current turn. Nothing was armed and the approval is still approved, " +
+        "so consume it again. If the refusal repeats, finish this turn and consume the approval in the " +
+        "session's next turn; stopping the session would revoke it.");
+      const held = db.workflowDecisionByOccurrence(refused.decision.occurrenceId);
+      assert.equal(held?.status, "approved", "a refused admission revokes nothing");
+      assert.equal(held?.actionAdmission, undefined, "a refused admission arms nothing");
+
+      hub.requestHandler = () => { throw new Error("runner did not respond in time"); };
+      const offline = await svc.consumeWorkflowDecision(child.id, refused.decision.occurrenceId, {
+        resourceSnapshot: refused.snapshot,
+        action: { kind: "pr_merge_enqueue", command: refused.command },
+      });
+      assert.equal(offline.status, 409);
+      assert.match(offline.error ?? "", /^The runner could not arm this App Server action\. Nothing was armed/u,
+        "an unclassified transport failure still names the recovery without inventing a cause");
+
+      hub.requestHandler = accept;
+      const retried = await svc.consumeWorkflowDecision(child.id, refused.decision.occurrenceId, {
+        resourceSnapshot: refused.snapshot,
+        action: { kind: "pr_merge_enqueue", command: refused.command },
+      });
+      assert.equal(retried.status, 200, retried.error);
+      assert.equal(db.workflowDecisionByOccurrence(refused.decision.occurrenceId)?.actionAdmission?.providerTurnId,
+        "provider-session-turn-1", "the same approval arms once the runner confirms the provider turn");
     } finally { db.close(); }
   });
 
@@ -7274,6 +7716,65 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       assert.equal(again.data?.status, "consumed", again.error);
       assert.equal(again.data?.forgeAction?.outcome, "already_queued");
     } finally { db.close(); }
+  });
+
+  await t.test("an all-reported merge whose checks change after approval is neither armed nor enqueued (#4119)", async () => {
+    const { db, hub, svc, parent, child } = setup(AGENT_ID);
+    try {
+      const passed = (name: string) => ({ name, state: "passed" });
+      let checks: Record<string, unknown> = { required: 0, clean: true, reported: [passed("build")] };
+      hub.githubMergePreflight = (message) => ({ type: "github_merge_preflight_result", requestId: message.requestId, sessionId: message.sessionId, ok: true,
+        check: { checkedAt: 2, closures: [] }, checks } as RunnerRequestResult);
+      const dispatched: ForgeDecisionActionMessage[] = [];
+      const approved = async (pullRequest: number) => {
+        const headSha = String(pullRequest).padStart(40, "a").slice(-40);
+        const snapshot = { category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest, headSha, reviewResult: "merge" as const, checksBasis: "all_reported" as const,
+          requiredChecks: { headSha, status: "passed" as const, checkedAt: 10, checks: [{ name: "build", state: "passed" as const }] } };
+        const decision = await svc.createWorkflowDecisionWithVideo(child.id, { requestId: `all-reported-${pullRequest}`, resourceKey: `all-reported-${pullRequest}`, resourceSnapshot: snapshot });
+        assert.ok(decision.ok && decision.data, decision.error);
+        assert.equal(decision.data.authority, "orchestrator");
+        assert.ok(svc.resolveDescendantRequest(parent.id, child.id, decision.data.occurrenceId, { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+        const consume = () => svc.consumeWorkflowDecision(child.id, decision.data!.occurrenceId,
+          { resourceSnapshot: snapshot, action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(snapshot) } });
+        const perform = () => svc.executeWorkflowDecision(child.id, decision.data!.occurrenceId, { resourceDigest: decision.data!.resourceDigest });
+        return { decision: decision.data, consume, perform };
+      };
+
+      // At arming: a check that fails after approval arms nothing, and the approval waits.
+      const first = await approved(4119);
+      checks = { required: 0, clean: true, reported: [{ name: "build", state: "failing" }] };
+      const failing = await first.consume();
+      assert.equal(failing.status, 409);
+      assert.match(failing.error ?? "", /is failing/u);
+      assert.equal(db.workflowDecisionByOccurrence(first.decision.occurrenceId)?.status, "approved");
+      assert.equal(db.workflowDecisionByOccurrence(first.decision.occurrenceId)?.actionAdmission, undefined, "nothing was armed");
+
+      // At performing: it armed while passing, then a check went back to pending. Nothing reaches the forge.
+      checks = { required: 0, clean: true, reported: [passed("build")] };
+      assert.equal((await first.consume()).status, 200);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }), dispatched);
+      checks = { required: 0, clean: true, reported: [{ name: "build", state: "pending" }] };
+      const pending = await first.perform();
+      assert.equal(pending.data?.status, "approved");
+      assert.equal(pending.data?.forgeAction?.refusal?.reason, "forge_unavailable");
+      assert.match(pending.data?.forgeAction?.refusal?.summary ?? "", /has not finished/u);
+
+      // A merge state that stopped being clean refuses the same way, and a new required check revokes it.
+      checks = { required: 0, clean: false, reported: [passed("build")] };
+      assert.equal((await first.perform()).data?.forgeAction?.refusal?.reason, "forge_unavailable");
+      checks = { required: 1, clean: true, reported: [passed("build")] };
+      const required = await first.perform();
+      assert.equal(required.data?.status, "revoked", "its basis no longer applies");
+      assert.equal(dispatched.length, 0, "nothing reached the forge");
+
+      // Still passing and clean, it is enqueued.
+      checks = { required: 0, clean: true, reported: [passed("build")] };
+      const second = await approved(4120);
+      assert.equal((await second.consume()).status, 200);
+      const enqueued = await second.perform();
+      assert.equal(enqueued.data?.forgeAction?.outcome, "enqueued", enqueued.error);
+      assert.equal(dispatched.length, 1);
+    } finally { hub.githubMergePreflight = undefined; db.close(); }
   });
 
   await t.test("a refused enqueue that never ran stays approved for a retry, and a stale one is revoked (#4067)", async () => {
@@ -10213,6 +10714,544 @@ test("saved per-provider defaults govern new sessions but explicit choices and e
   assert.equal(override.data.providerAccountId, "personal");
 });
 
+/** A Machine with three subscription Claude accounts, ranked by the caller (#4353). */
+function priorityHarness(overrides: { protocolVersion?: number; accounts?: ProviderAccountDefinition[]; order?: string[] } = {}) {
+  const harness = makeHarness();
+  const meta = runnerMeta();
+  meta.providerAccounts = overrides.accounts ?? [
+    { id: "first-person-example-com", label: "first@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "second", label: "second@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "third", label: "third@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "codex-account", label: "codex@example.com", provider: "codex", authStatus: "authenticated", billing: "subscription" },
+  ];
+  // A Claude Code with Wollipog's project memory, whose memory isn't held in the account's HOME.
+  meta.agents = meta.agents.map((agent) => agent.id === AGENT_ID ? { ...agent, version: "2.1.300" } : agent);
+  harness.db.registerRunner(meta, Date.now(), overrides.protocolVersion ?? PROTOCOL_VERSION);
+  const order = overrides.order ?? ["first-person-example-com", "second", "third"];
+  const saved = harness.db.setMachineProviderAccountPolicy(RUNNER_ID, "claude",
+    { mode: "priority", fixedAccountId: null, priorityAccountIds: order }, 0, Date.now());
+  assert.ok(saved.ok);
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+  const setAccounts = (accounts: ProviderAccountDefinition[]) => {
+    harness.db.updateRunnerAgents(RUNNER_ID, meta.agents, Date.now(), undefined, accounts);
+  };
+  return { ...harness, meta, request, setAccounts };
+}
+
+test("Priority Order chooses at dispatch, records why, and tells the runner to recheck (#4353)", () => {
+  const { db, hub, svc, request, setAccounts, meta } = priorityHarness();
+  const created = svc.createSession(request);
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(created.data.providerAccountId, "first-person-example-com");
+  assert.deepEqual(created.data.providerAccountSelection, {
+    schemaVersion: 1, source: "priority", mode: "priority", policyRevision: 1, revalidateAtLaunch: true,
+  });
+  const spec = hub.sentOfType("start_session").at(-1)!.spec;
+  assert.equal(spec.providerAccountId, "first-person-example-com");
+  assert.equal(spec.providerAccountSelection?.revalidateAtLaunch, true);
+  assert.equal(db.getSession(created.data.id)?.providerAccountSelection?.source, "priority", "the reason survives a reload");
+
+  setAccounts(meta.providerAccounts!.map((account) => account.id === "first-person-example-com"
+    ? { ...account, authStatus: "unauthenticated" } : account));
+  const next = svc.createSession(request);
+  assert.ok(next.ok && next.data, next.error);
+  assert.equal(next.data.providerAccountId, "second", "the first eligible account wins");
+  assert.deepEqual(next.data.providerAccountSelection?.skipped, { signed_out: 1 });
+  assert.equal(db.getSession(created.data.id)?.providerAccountId, "first-person-example-com", "a policy outcome never moves an existing session");
+});
+
+test("an explicit account overrides Priority Order, even one the policy would skip (#4353)", () => {
+  const { hub, svc, request, setAccounts, meta } = priorityHarness();
+  setAccounts(meta.providerAccounts!.map((account) => account.id === "third" ? { ...account, billing: "api" } : account));
+  const explicit = svc.createSession({ ...request, providerAccountId: "third" });
+  assert.ok(explicit.ok && explicit.data, explicit.error);
+  assert.equal(explicit.data.providerAccountId, "third");
+  assert.equal(explicit.data.providerAccountSelection?.source, "explicit");
+  const spec = hub.sentOfType("start_session").at(-1)!.spec;
+  assert.equal(spec.providerAccountId, "third");
+  assert.equal(spec.providerAccountSelection?.revalidateAtLaunch, undefined, "a named account keeps its recovery path");
+});
+
+test("concurrent launches each resolve to the same first eligible account (#4353)", () => {
+  const { svc, request } = priorityHarness();
+  const results = [svc.createSession(request), svc.createSession(request), svc.createSession(request)];
+  assert.deepEqual(results.map((result) => result.data?.providerAccountId), Array(3).fill("first-person-example-com"));
+});
+
+test("no eligible account refuses with a structured result that names nobody (#4353)", () => {
+  const entries: string[] = [];
+  const { hub, svc, request, setAccounts, meta } = priorityHarness();
+  (svc as unknown as { log: { info(message: string): void } }).log = { ...NOOP_LOG, info: (message: string) => entries.push(message) };
+  setAccounts(meta.providerAccounts!.map((account) => account.provider === "claude"
+    ? { ...account, authStatus: "unauthenticated" } : account));
+  const before = hub.sentOfType("start_session").length;
+  const refused = svc.createSession(request);
+  assert.equal(refused.status, 409);
+  assert.equal(refused.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
+  assert.equal(refused.providerAccountSelection?.refusal, "no_eligible_account");
+  assert.deepEqual(refused.providerAccountSelection?.actions, ["choose_account", "sign_in", "review_provider_accounts"]);
+  assert.deepEqual(refused.providerAccountSelection?.candidates.map((candidate) => [candidate.accountId, candidate.reason]), [
+    ["first-person-example-com", "signed_out"], ["second", "signed_out"], ["third", "signed_out"],
+  ]);
+  assert.equal(hub.sentOfType("start_session").length, before);
+  // The Machine's accounts reach only the caller's response: its sentence and every log line name none.
+  for (const text of [refused.error ?? "", ...entries]) {
+    for (const personal of ["first-person", "second", "third", "example.com"]) assert.ok(!text.includes(personal), text);
+  }
+  assert.ok(entries.some((entry) => entry.includes("provider_account_selection_refused")));
+  const chosen = svc.createSession({ ...request, providerAccountId: "second" });
+  assert.ok(chosen.ok, chosen.error);
+});
+
+test("a retried staged launch keeps its account after the policy changes (#4353)", () => {
+  const { db, svc, request } = priorityHarness();
+  const stage = { sessionId: "s_staged_policy", stage() {}, activate() {} };
+  const first = svc.createSession(request, stage);
+  assert.ok(first.ok && first.data, first.error);
+  assert.equal(first.data.providerAccountId, "first-person-example-com");
+  const moved = db.setMachineProviderAccountPolicy(RUNNER_ID, "claude",
+    { mode: "priority", fixedAccountId: null, priorityAccountIds: ["third", "second"] }, 1, Date.now());
+  assert.ok(moved.ok);
+  const retried = svc.createSession(request, stage);
+  assert.ok(retried.ok && retried.data, retried.error);
+  assert.equal(retried.data.id, first.data.id);
+  assert.equal(retried.data.providerAccountId, "first-person-example-com", "the retry keeps the account it first resolved to");
+  assert.equal(svc.createSession(request).data?.providerAccountId, "third", "a new launch reads the new order");
+  const conflicting = svc.createSession({ ...request, providerAccountId: "second" }, stage);
+  assert.equal(conflicting.status, 409, "a different explicit account conflicts rather than moving the accepted launch");
+});
+
+test("a retried launch that named an account by reference keeps it (#4353)", () => {
+  const { db, svc, request } = priorityHarness();
+  const ref = svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID }).data!.choices!.find((choice) => choice.position === 2)!.accountRef;
+  const stage = { sessionId: "s_staged_named", stage() {}, activate() {} };
+  const named = { ...request, providerAccountId: ref };
+  const first = svc.createSession(named, stage);
+  assert.ok(first.ok && first.data, first.error);
+  assert.equal(first.data.providerAccountId, "second");
+  assert.ok(db.setMachineProviderAccountPolicy(RUNNER_ID, "claude",
+    { mode: "priority", fixedAccountId: null, priorityAccountIds: ["third"] }, 1, Date.now()).ok);
+  const retried = svc.createSession(named, stage);
+  assert.ok(retried.ok && retried.data, retried.error);
+  assert.deepEqual([retried.data.id, retried.data.providerAccountId], [first.data.id, "second"], "the policy changing doesn't move it");
+});
+
+test("a restart keeps the session's account whatever the policy says now (#4353)", async () => {
+  const { db, hub, svc, request } = priorityHarness();
+  const created = svc.createSession(request);
+  assert.ok(created.ok && created.data, created.error);
+  const moved = db.setMachineProviderAccountPolicy(RUNNER_ID, "claude",
+    { mode: "priority", fixedAccountId: null, priorityAccountIds: ["third"] }, 1, Date.now());
+  assert.ok(moved.ok);
+  svc.onSessionStatus(created.data.id, "stopped");
+  const restarted = await svc.restart(created.data.id);
+  assert.ok(restarted.ok, restarted.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.providerAccountId, "first-person-example-com");
+  assert.equal(db.getSession(created.data.id)?.providerAccountId, "first-person-example-com");
+});
+
+test("a run's members resolve accounts the way a session does, before anything is created (#4353)", () => {
+  const { db, hub, svc, request, setAccounts, meta } = priorityHarness();
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID], task: "Compare" });
+  assert.ok(run.ok && run.data, run.error);
+  const byAgent = new Map(run.data.sessions.map((session) => [session.agentId, session]));
+  assert.equal(byAgent.get(AGENT_ID)?.providerAccountId, "first-person-example-com", "the policy applies to its provider");
+  assert.equal(byAgent.get(AGENT_ID)?.providerAccountSelection?.source, "priority");
+  assert.equal(byAgent.get(CODEX_APP_AGENT_ID)?.providerAccountId, "codex-account", "never across providers");
+  const specs = hub.sentOfType("start_session").slice(-2).map((message) => message.spec.providerAccountId).sort();
+  assert.deepEqual(specs, ["codex-account", "first-person-example-com"]);
+
+  setAccounts(meta.providerAccounts!.map((account) => account.provider === "claude" ? { ...account, billing: "api" } : account));
+  const runsBefore = db.listRuns().length;
+  const refused = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID], task: "Compare" });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED, "API credits are never spent automatically");
+  assert.equal(db.listRuns().length, runsBefore, "one member without an account refuses the whole run");
+});
+
+test("a run or workflow with no ready ranked account gets the structured refusal, not an unknown agent (#4353)", () => {
+  const { db, svc, meta } = priorityHarness();
+  meta.agents = meta.agents.map((agent) => agent.id === AGENT_ID
+    ? { ...agent, providerAccountReadiness: { defaultAuthStatus: "unauthenticated", readyAccountIds: [] } } : agent);
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Compare" });
+  assert.equal(run.status, 409, run.error);
+  assert.equal(run.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
+  const workflow = svc.createWorkflowRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build it",
+    workflowId: "builtin:build-review", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } });
+  assert.equal(workflow.status, 409, workflow.error);
+  assert.equal(workflow.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
+  assert.equal(db.listRuns().length, 0);
+});
+
+test("a run honors a fixed Default Account, which it used to ignore (#4353)", () => {
+  const { db, hub, svc } = makeHarness();
+  const meta = runnerMeta();
+  meta.providerAccounts = [
+    { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+  ];
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+  db.setMachineProviderAccountDefault(RUNNER_ID, "claude", "personal", 0, Date.now());
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Check" });
+  assert.ok(run.ok && run.data, run.error);
+  assert.equal(run.data.sessions[0]?.providerAccountId, "personal");
+  assert.equal(run.data.sessions[0]?.providerAccountSelection?.source, "fixed_default");
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.providerAccountId, "personal");
+});
+
+test("a workflow's members resolve accounts the way a session does (#4353)", () => {
+  const { hub, svc } = priorityHarness();
+  const run = svc.createWorkflowRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build it",
+    workflowId: "builtin:build-review", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } });
+  assert.ok(run.ok && run.data, run.error);
+  const claude = run.data.sessions.find((session) => session.agentId === AGENT_ID);
+  assert.equal(claude?.providerAccountId, "first-person-example-com");
+  assert.equal(claude?.providerAccountSelection?.source, "priority");
+  assert.ok(hub.sentOfType("start_session").some((message) => message.spec.agentId === AGENT_ID &&
+    message.spec.providerAccountId === "first-person-example-com"));
+});
+
+test("a child session resolves its account the same way (#4353)", () => {
+  const { db, svc, request } = priorityHarness();
+  const parent = svc.createSession(request);
+  assert.ok(parent.ok && parent.data, parent.error);
+  svc.onSessionStatus(parent.data.id, "running");
+  const create = () => svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data!.id });
+  assert.equal(create().status, 428, "a child asks first, under its parent's ordinary approval");
+  assert.ok(svc.approve(parent.data.id, db.getSession(parent.data.id)!.pendingApproval!.requestId, "allow").ok);
+  const child = create();
+  assert.ok(child.ok && child.data, child.error);
+  assert.equal(child.data.providerAccountId, "first-person-example-com");
+  assert.equal(child.data.providerAccountSelection?.source, "priority");
+});
+
+test("an older runner can't appear to enforce Priority Order, yet keeps explicit choices (#4353)", () => {
+  const { db, hub, svc, request, meta } = priorityHarness();
+  db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountSelectionPolicy - 1);
+  const refused = svc.createSession(request);
+  assert.equal(refused.status, 409);
+  assert.equal(refused.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
+  assert.equal(refused.capabilityRequirement?.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountSelectionPolicy);
+  assert.ok(refused.providerAccountSelection?.actions.includes("update_runner"));
+  const explicit = svc.createSession({ ...request, providerAccountId: "second" });
+  assert.ok(explicit.ok && explicit.data, explicit.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.providerAccountSelection, undefined, "an older runner receives no recheck it would ignore");
+  assert.equal(explicit.data.providerAccountSelection?.source, "explicit");
+  const preview = svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "claude" });
+  assert.equal(preview.data?.enforcement, "runner_update_required");
+  assert.equal(preview.data?.status, "choice_required");
+});
+
+test("a runner too old for accounts at all still can't bypass a saved Priority Order (#4353)", () => {
+  for (const version of [RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts - 1, undefined]) {
+    const { db, hub, svc, request, meta } = priorityHarness();
+    db.registerRunner(meta, Date.now(), version);
+    const before = hub.sentOfType("start_session").length;
+    const refused = svc.createSession(request);
+    assert.equal(refused.status, 409, String(version));
+    assert.equal(refused.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
+    assert.equal(refused.providerAccountSelection?.refusal, "runner_update_required");
+    assert.equal(hub.sentOfType("start_session").length, before, "nothing starts");
+    const preview = svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID });
+    assert.equal(preview.data?.mode, "priority");
+    assert.equal(preview.data?.enforcement, "runner_update_required");
+    assert.equal(preview.data?.status, "choice_required");
+  }
+});
+
+test("a policy saved under a newer schema also fails closed (#4353)", () => {
+  const { db, svc, request } = priorityHarness();
+  (db as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db
+    .prepare("UPDATE machine_provider_account_defaults SET schema_version=2 WHERE runner_id=?").run(RUNNER_ID);
+  assert.equal(db.machineProviderAccountDefault(RUNNER_ID, "claude")?.mode, "unsupported");
+  assert.equal(svc.createSession(request).providerAccountSelection?.refusal, "unsupported_mode");
+});
+
+test("a mode written by a newer server fails closed until it is replaced (#4353)", () => {
+  const { db, svc, request } = priorityHarness();
+  (db as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db
+    .prepare("UPDATE machine_provider_account_defaults SET mode='unrecognized_mode' WHERE runner_id=?").run(RUNNER_ID);
+  assert.equal(db.machineProviderAccountDefault(RUNNER_ID, "claude")?.mode, "unsupported");
+  const refused = svc.createSession(request);
+  assert.equal(refused.providerAccountSelection?.refusal, "unsupported_mode");
+  assert.equal(refused.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
+});
+
+test("the preview says what a launch would do and whether the Machine can enforce it (#4353)", () => {
+  const { hub, svc, request, setAccounts, meta } = priorityHarness();
+  const preview = svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID });
+  assert.ok(preview.ok && preview.data, preview.error);
+  assert.equal(preview.data.accountId, "first-person-example-com");
+  assert.equal(preview.data.enforcement, "enforced");
+  assert.equal(svc.createSession(request).data?.providerAccountId, preview.data.accountId, "the launch matches its preview");
+
+  setAccounts(meta.providerAccounts!.map((account) => account.id === "first-person-example-com"
+    ? { ...account, selectionCooldownUntil: Date.now() + 60_000 } : account));
+  const cooling = svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "claude" });
+  assert.equal(cooling.data?.accountId, "second");
+  assert.equal(cooling.data?.candidates[0]?.reason, "cooldown");
+
+  hub.online = false;
+  assert.equal(svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "claude" }).data?.enforcement, "machine_offline");
+  hub.online = true;
+  assert.equal(svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: "nope" }).status, 404);
+  assert.equal(svc.providerAccountSelectionPreview("nope", { provider: "claude" }).status, 404);
+});
+
+test("Priority Order won't move a project's account-held memory between accounts (#4353)", () => {
+  const { db, svc, request, meta } = priorityHarness();
+  const owner = db.localIdentityContext();
+  const project = db.createProject({ name: "Memory", scope: { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } } });
+  const location = db.addProjectLocation(project.id, { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID });
+  const inProject = { ...request, projectId: project.id, projectLocationId: location.id };
+  assert.ok(svc.createSession(inProject).ok, "Wollipog's project memory stays put whichever account runs");
+  // A Claude Code before Wollipog's project memory keeps it in the account's HOME.
+  meta.agents = meta.agents.map((agent) => agent.id === AGENT_ID ? { ...agent, version: "2.1.0" } : agent);
+  assert.equal(supportsClaudeProjectMemory("2.1.0"), false);
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+  const refused = svc.createSession(inProject);
+  assert.equal(refused.providerAccountSelection?.refusal, "account_memory");
+  assert.equal(svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, projectId: project.id }).data?.refusal, "account_memory");
+  const explicit = svc.createSession({ ...inProject, providerAccountId: "second" });
+  assert.ok(explicit.ok, explicit.error);
+});
+
+test("an agent names an account by reference, and only one it could actually use (#4353)", () => {
+  const { db, hub, svc, request, setAccounts, meta } = priorityHarness();
+  const owner = db.localIdentityContext();
+  const parent = svc.createSession(request, undefined, { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } });
+  assert.ok(parent.ok && parent.data, parent.error);
+  db.updateSessionStatus(parent.data.id, "running", Date.now());
+  const asChild = (providerAccountId?: string) => svc.createSession({ ...request, ...(providerAccountId ? { providerAccountId } : {}) },
+    undefined, db.sessionScope(parent.data!.id) ?? undefined, false, false, false, { parentSessionId: parent.data!.id });
+  const choices = () => svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, parentSessionId: parent.data!.id }).data!.choices!;
+  const refOf = (position: number) => choices().find((choice) => choice.position === position)!.accountRef;
+
+  // The listing tells accounts apart without saying whose they are.
+  const listing = JSON.stringify(choices());
+  for (const personal of ["first-person", "second", "third", "example.com", "codex"]) assert.ok(!listing.includes(personal), listing);
+  assert.deepEqual(choices().map((choice) => [choice.position, choice.expected ?? false, choice.canName]), [[1, true, true], [2, false, true], [3, false, true]]);
+
+  const named = asChild(refOf(2));
+  assert.ok(named.ok && named.data, named.error);
+  assert.equal(named.data.providerAccountId, "second", "an explicit choice overrides the policy");
+  assert.equal(named.data.providerAccountSelection?.source, "explicit");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.providerAccountId, "second", "the runner receives the real account");
+
+  assert.match(asChild("acct:0000000000000000").error ?? "", /not available for the selected agent/u);
+  // Another provider's account on the same Machine is no choice for this agent.
+  const codexRef = svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "codex" }).data!.choices![0]!.accountRef;
+  assert.match(asChild(codexRef).error ?? "", /not available for the selected agent/u);
+
+  const set = (id: string, change: Partial<ProviderAccountDefinition>) => setAccounts(meta.providerAccounts!.map((account) =>
+    account.id === id ? { ...account, ...change } : account));
+  // An agent can't sign in, and it never decides to spend API credits.
+  set("second", { authStatus: "unauthenticated" });
+  const ref = refOf(2);
+  assert.equal(choices().find((choice) => choice.accountRef === ref)?.canName, false);
+  assert.equal(choices().find((choice) => choice.accountRef === ref)?.reason, "signed_out");
+  const signedOut = asChild(ref);
+  assert.equal(signedOut.status, 409);
+  assert.match(signedOut.error ?? "", /needs sign-in, so an agent can't start a session with it/u);
+  set("second", { billing: "api" });
+  assert.match(asChild(ref).error ?? "", /would spend API credits/u);
+  // A person keeps both decisions.
+  assert.ok(svc.createSession({ ...request, providerAccountId: "second" }).ok, "a person's explicit choice is unchanged");
+
+  // A usage limit is what an explicit choice overrides: it stays nameable and says what it overrides.
+  set("second", { billing: "subscription" });
+  set("third", { selectionCooldownUntil: Date.now() + 60_000 });
+  const cooling = choices().find((choice) => choice.position === 3)!;
+  assert.deepEqual([cooling.canName, cooling.reason], [true, "cooldown"]);
+  assert.ok(asChild(cooling.accountRef).ok);
+});
+
+test("a run names an account per member, under the same rules as a session (#4353)", () => {
+  const { db, hub, svc, meta, setAccounts } = priorityHarness();
+  const run = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID], task: "Do it" };
+
+  // A named member overrides the policy; the other still follows it, and each records which applied.
+  const named = svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "second" } });
+  assert.ok(named.ok && named.data, named.error);
+  const member = (id: string) => named.data!.sessions.find((session) => session.agentId === id)!;
+  assert.equal(member(AGENT_ID).providerAccountId, "second");
+  assert.equal(member(AGENT_ID).providerAccountSelection?.source, "explicit");
+  assert.equal(member(AGENT_ID).providerAccountSelection?.revalidateAtLaunch, undefined, "a named account is not rechecked as a policy's choice");
+  assert.notEqual(member(CODEX_APP_AGENT_ID).providerAccountSelection?.source, "explicit");
+  const spec = hub.sentOfType("start_session").find((start) => start.spec.sessionId === member(AGENT_ID).id)!.spec;
+  assert.equal(spec.providerAccountId, "second", "the runner receives the named account");
+  assert.equal(db.getSession(member(AGENT_ID).id)?.providerAccountId, "second", "and a retry finds it on the session");
+
+  // Wrong provider, unknown account, a key that is no member, a bad shape: refused, and nothing starts.
+  const before = db.listRuns().length;
+  const wrongProvider = svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "codex-account" } });
+  assert.equal(wrongProvider.status, 409);
+  assert.match(wrongProvider.error ?? "", new RegExp(`^${AGENT_ID}: The chosen provider account is not available`, "u"));
+  assert.equal(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "no-such-account" } }).status, 409);
+  const stranger = svc.createRun({ ...run, providerAccountIds: { stranger: "second" } });
+  assert.equal(stranger.status, 400);
+  assert.match(stranger.error ?? "", /names 'stranger'/u);
+  assert.equal(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "not valid!" } }).status, 400);
+  assert.equal(svc.createRun({ ...run, providerAccountIds: ["second"] as unknown as Record<string, string> }).status, 400);
+  assert.equal(db.listRuns().length, before, "a refused account starts no member");
+
+  // With every ranked account used up the run has no account of its own, and naming one is the way past.
+  setAccounts(meta.providerAccounts!.map((account) => account.provider === "claude" ? { ...account, selectionCooldownUntil: Date.now() + 60_000 } : account));
+  const refused = svc.createRun(run);
+  assert.equal(refused.errorDetails?.code, "PROVIDER_ACCOUNT_CHOICE_REQUIRED", refused.error);
+  assert.equal(refused.providerAccountSelection?.refusal, "no_eligible_account");
+  assert.ok(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "third" } }).ok, "a person's explicit choice overrides a cooldown");
+});
+
+test("an agent names a run member's account by reference, and only one it could use (#4353)", () => {
+  const { db, svc, request, setAccounts, meta } = priorityHarness();
+  const owner = db.localIdentityContext();
+  const parent = svc.createSession(request, undefined, { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } });
+  assert.ok(parent.ok && parent.data, parent.error);
+  db.updateSessionStatus(parent.data.id, "running", Date.now());
+  const context = { parentSessionId: parent.data.id };
+  const run = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Do it" };
+  const refOf = (position: number) => svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, parentSessionId: context.parentSessionId })
+    .data!.choices!.find((choice) => choice.position === position)!.accountRef;
+
+  const named = svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: refOf(2) } }, context);
+  assert.ok(named.ok && named.data, named.error);
+  assert.equal(named.data.sessions[0]?.providerAccountId, "second");
+
+  setAccounts(meta.providerAccounts!.map((account) => account.id === "second" ? { ...account, authStatus: "unauthenticated" } : account));
+  const signedOut = svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: refOf(2) } }, context);
+  assert.equal(signedOut.status, 409);
+  assert.match(signedOut.error ?? "", /needs sign-in, so an agent can't start a session with it/u);
+  assert.ok(!(signedOut.error ?? "").includes("example.com"), signedOut.error);
+  const codexRef = svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "codex" }).data!.choices![0]!.accountRef;
+  assert.match(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: codexRef } }, context).error ?? "", /not available for the selected agent/u);
+  assert.ok(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "second" } }).ok, "a person keeps the sign-in decision");
+});
+
+test("a workflow names an account per role and for its orchestrator (#4353)", () => {
+  const { svc, setAccounts, meta } = priorityHarness();
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review", task: "Build and review",
+    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } };
+  const named = svc.createWorkflowRun({ ...request, providerAccountBindings: { claude: "second" } });
+  assert.ok(named.ok && named.data, named.error);
+  const builder = named.data.sessions.find((session) => session.agentId === AGENT_ID)!;
+  assert.equal(builder.providerAccountId, "second");
+  assert.equal(builder.providerAccountSelection?.source, "explicit");
+  assert.notEqual(named.data.sessions.find((session) => session.agentId === CODEX_APP_AGENT_ID)?.providerAccountSelection?.source, "explicit");
+
+  const wrongProvider = svc.createWorkflowRun({ ...request, providerAccountBindings: { claude: "codex-account" } });
+  assert.equal(wrongProvider.status, 409);
+  assert.match(wrongProvider.error ?? "", /^claude: The chosen provider account is not available/u);
+  assert.equal(svc.createWorkflowRun({ ...request, providerAccountBindings: { nobody: "second" } }).status, 400);
+  assert.equal(svc.createWorkflowRun({ ...request, orchestratorProviderAccountId: "second" }).status, 400, "there is no orchestrator to give it to");
+
+  setAccounts(meta.providerAccounts!.map((account) => account.provider === "claude" ? { ...account, selectionCooldownUntil: Date.now() + 60_000 } : account));
+  assert.equal(svc.createWorkflowRun(request).providerAccountSelection?.refusal, "no_eligible_account");
+  const chosen = svc.createWorkflowRun({ ...request, providerAccountBindings: { claude: "third" } });
+  assert.ok(chosen.ok, chosen.error);
+});
+
+test("a launch and its preview follow the project a Location infers, not only a chosen one (#4353)", () => {
+  const { db, svc, request, meta } = priorityHarness();
+  // A registered workspace has one Location, so a session naming no project joins that one.
+  const location = db.findProjectLocation(RUNNER_ID, WORKSPACE_ID);
+  assert.ok(location);
+  meta.agents = meta.agents.map((agent) => agent.id === AGENT_ID ? { ...agent, version: "2.1.0" } : agent);
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+
+  // On a Claude Code that keeps project memory in the account's HOME, that memory would move.
+  const inferred = svc.createSession(request);
+  assert.equal(inferred.providerAccountSelection?.refusal, "account_memory", inferred.error);
+  const preview = svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, workspaceId: WORKSPACE_ID });
+  assert.equal(preview.data?.refusal, "account_memory", "the preview says what the launch will say");
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Do it" });
+  assert.equal(run.providerAccountSelection?.refusal, "account_memory", run.error);
+
+  // No Project is a choice: nothing is inferred on either side.
+  const noProject = svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, workspaceId: WORKSPACE_ID, projectId: null });
+  assert.equal(noProject.data?.status, "selected");
+  const launched = svc.createSession({ ...request, projectId: null, projectLocationId: null });
+  assert.ok(launched.ok && launched.data, launched.error);
+  assert.equal(launched.data.providerAccountId, noProject.data?.accountId);
+  assert.equal(launched.data.projectId, null);
+
+  // With no workspace to read, as in Provider Accounts, there is no project to predict.
+  assert.equal(svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "claude" }).data?.status, "selected");
+});
+
+test("only a launch naming a model under a policy is told its plan wasn't checked (#4353)", () => {
+  const { db, svc, request, meta, setAccounts } = priorityHarness();
+  meta.agents = meta.agents.map((agent) => agent.id === AGENT_ID ? { ...agent, capabilities: { ...agent.capabilities!, models: [{ id: "chosen-model", label: "Chosen" }] } } : agent);
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+  setAccounts(meta.providerAccounts!);
+  const plain = svc.createSession(request);
+  assert.ok(plain.ok && plain.data, plain.error);
+  assert.equal(plain.data.providerAccountSelection?.modelCompatibility, undefined, "no model, no note");
+  assert.equal(svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID }).data?.modelCompatibility, undefined);
+
+  const named = svc.createSession({ ...request, config: { model: "chosen-model" } });
+  assert.ok(named.ok && named.data, named.error);
+  assert.equal(named.data.providerAccountSelection?.modelCompatibility, "unknown");
+  assert.equal(svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, model: "chosen-model" }).data?.modelCompatibility, "unknown");
+
+  // A person's choice of account isn't a policy's: nothing was claimed, so there is nothing to qualify.
+  const explicit = svc.createSession({ ...request, providerAccountId: "second", config: { model: "chosen-model" } });
+  assert.ok(explicit.ok && explicit.data, explicit.error);
+  assert.equal(explicit.data.providerAccountSelection?.modelCompatibility, undefined);
+});
+
+test("a workflow's orchestrator answers for the project it joins, not its workers' (#4353)", () => {
+  const { db, svc } = priorityHarness();
+  // Project memory is fine on the workers' Claude Code; `test-orchestrator` reports no such version.
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review", task: "Build and review",
+    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID }, orchestratorAgentId: "test-orchestrator" };
+
+  // Everyone in the organization can reach the workspace's project, so the orchestrator joins it too.
+  const shared = svc.createWorkflowRun(request);
+  assert.equal(shared.providerAccountSelection?.refusal, "account_memory", shared.error);
+
+  // A narrower project keeps the organization-scoped orchestrator out, whether named or inferred, so
+  // it has no project memory to move. Its workers still join.
+  const { project, location, scope } = makeTeamOwnedProject(db);
+  assert.equal(db.setResourceScope({ resource: "workspace", runnerId: RUNNER_ID, resourceId: WORKSPACE_ID, scope, now: 3 }), true);
+  for (const placement of [{}, { projectId: project.id, projectLocationId: location.id }]) {
+    const run = svc.createWorkflowRun({ ...request, ...placement });
+    assert.ok(run.ok && run.data, run.error);
+    const orchestrator = run.data.sessions.find((session) => session.agentId === "test-orchestrator")!;
+    assert.equal(orchestrator.projectId, null);
+    assert.equal(orchestrator.providerAccountSelection?.source, "priority");
+    for (const worker of run.data.sessions.filter((session) => session.agentId !== "test-orchestrator")) {
+      assert.equal(worker.projectId, project.id);
+    }
+  }
+});
+
+test("an account reference and a configured id can never be each other (#4353)", () => {
+  const base: ProviderAccountDefinition = { id: "work", label: "Work", provider: "claude", authStatus: "authenticated", billing: "subscription" };
+  const probe = priorityHarness({ accounts: [base], order: ["work"] });
+  const ref = probe.svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID }).data!.choices![0]!.accountRef;
+  assert.match(ref, /^acct:[0-9a-f]{16}$/u);
+  // Everything a runner's configuration admits for an id excludes the separator, so this is the closest
+  // an id can get: the same characters, which name that account and no other.
+  const lookalike = ref.replace(":", "_");
+  const { svc, request } = priorityHarness({ order: ["work"], accounts: [base, { ...base, id: lookalike, label: "Other" }] });
+  assert.equal(svc.createSession({ ...request, providerAccountId: lookalike }).data?.providerAccountId, lookalike);
+  assert.equal(svc.createSession({ ...request, providerAccountId: ref }).data?.providerAccountId, "work");
+  assert.equal(svc.createSession({ ...request, providerAccountId: "acct:not-a-digest" }).status, 400, "a malformed reference is no id either");
+});
+
+test("a launch that infers a project joins the one the shared rule names (#4353)", () => {
+  const { db, svc, request } = priorityHarness();
+  const location = db.findProjectLocation(RUNNER_ID, WORKSPACE_ID);
+  assert.ok(location);
+  const scope = db.workspaceScope(RUNNER_ID, WORKSPACE_ID) ?? db.runnerScope(RUNNER_ID)!;
+  assert.equal(db.inferredSessionProjectLocation(RUNNER_ID, WORKSPACE_ID, scope)?.id, location.id);
+  const created = svc.createSession(request);
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(created.data.projectId, location.projectId, "the rule and the session agree on a project");
+});
+
 test("a session without a chosen account never takes a profile only other control planes may use (#3240)", () => {
   const { db, hub, svc } = makeHarness();
   const accountMeta = runnerMeta();
@@ -10964,6 +12003,29 @@ test("createSession online → 201 and sends start_session with the right launch
   assert.equal(hub.sessionEventCalls.length, 0);
 });
 
+test("an agent's named account is refused on a target that can't use it, not dropped (#4353)", () => {
+  const { db, svc } = makeHarness();
+  const owner = db.localIdentityContext();
+  const container = {
+    id: `runner:${RUNNER_ID}:container:offline-tools`, runnerId: RUNNER_ID, name: "host · Offline tools",
+    kind: "container" as const, workspaceStrategy: "worktree" as const, adapter: "container" as const,
+    boundaries: { filesystem: "container" as const, network: "deny" as const, secrets: "none" as const, billing: "none" as const },
+    environment: { id: "offline-tools", revision: 1, image: `example/agent@sha256:${"3".repeat(64)}`, setupCheckDigest: "4".repeat(64) },
+    compatibleAgentIds: [AGENT_ID], available: true,
+  };
+  const meta = runnerMeta();
+  meta.providerAccounts = [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated", billing: "subscription" }];
+  db.registerRunner({ ...meta, executionTargets: [container] }, Date.now(), PROTOCOL_VERSION);
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+  const parent = svc.createSession(request, undefined, { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } });
+  assert.ok(parent.ok && parent.data, parent.error);
+  db.updateSessionStatus(parent.data.id, "running", Date.now());
+  const refused = svc.createSession({ ...request, executionTargetId: container.id, useWorktree: true, providerAccountId: "work" },
+    undefined, db.sessionScope(parent.data.id) ?? undefined, false, false, false, { parentSessionId: parent.data.id });
+  assert.equal(refused.status, 409);
+  assert.match(refused.error ?? "", /doesn't use this machine's provider accounts/u);
+});
+
 test("createSession selects and persists an exact compatible container environment", () => {
   const { db, hub, svc } = makeHarness();
   const image = `example/agent@sha256:${"3".repeat(64)}`;
@@ -11378,7 +12440,7 @@ for (const durable of [false, true]) test(`createSession preserves ${durable ? "
     assert.equal(dispatchCalls, 1);
     const frame = durable ? staged! : hub.sentOfType("start_session").at(-1)!;
     const fields = [
-      "sessionId", "workspaceId", "workspacePath", "agentId", "providerAccountId", "providerAccountLabel",
+      "sessionId", "workspaceId", "workspacePath", "agentId", "providerAccountId", "providerAccountLabel", "providerAccountSelection",
       "agentVersion", "capabilities", "title", "titleSource", "command", "args", "env", "useWorktree",
       "executionTarget", "executionHandoff", "driver", "context", "config", "orchestrator", "acpSessionContext",
     ];
@@ -21846,6 +22908,154 @@ test("capability gates reject old/unknown runners before requests or cache mutat
   assert.equal(files.capabilityRequirement?.requiredRunnerProtocolVersion, 16);
 });
 
+/* Workspace search options (#1263 match, #4129 fuzzyWithDirectories; pinned by #4254). */
+
+type WorkspaceSearchReply = Omit<Extract<RunnerRequestResult, { type: "search_workspace_references_result" }>, "type" | "requestId">;
+
+/** A seeded session whose runner answers every workspace search with `reply`; returns what it sent. */
+function workspaceSearchHarness(reply: WorkspaceSearchReply = { ok: true, results: [] }) {
+  const harness = makeHarness();
+  const sessionId = seedSession(harness.svc, harness.hub);
+  harness.hub.requestHandler = (message) => {
+    if (message.type !== "search_workspace_references") throw new Error(`unexpected request ${message.type}`);
+    return { type: "search_workspace_references_result", requestId: message.requestId, ...reply };
+  };
+  const sent = () => harness.hub.sentOfType("search_workspace_references")
+    .map(({ requestId, ...rest }) => {
+      assert.match(requestId, /^wsr_search_/u);
+      return rest;
+    });
+  return { ...harness, sessionId, sent };
+}
+
+test("workspace search forwards match and fuzzyWithDirectories only when given, so an older runner sees a substring request", async () => {
+  const { svc, sessionId, sent } = workspaceSearchHarness();
+  assert.equal((await svc.searchWorkspaceReferences(sessionId, "src/app")).ok, true);
+  assert.equal((await svc.searchWorkspaceReferences(sessionId, "sapp", "fuzzy")).ok, true);
+  assert.equal((await svc.searchWorkspaceReferences(sessionId, "sapp", undefined, true)).ok, true);
+  assert.equal((await svc.searchWorkspaceReferences(sessionId, "sapp", "fuzzy", true)).ok, true);
+  assert.deepEqual(sent(), [
+    { type: "search_workspace_references", sessionId, query: "src/app" },
+    { type: "search_workspace_references", sessionId, query: "sapp", match: "fuzzy" },
+    { type: "search_workspace_references", sessionId, query: "sapp", fuzzyWithDirectories: true },
+    { type: "search_workspace_references", sessionId, query: "sapp", match: "fuzzy", fuzzyWithDirectories: true },
+  ]);
+  for (const message of sent().slice(0, 2)) {
+    assert.equal("fuzzyWithDirectories" in message, false, "an unrequested folder option is omitted, not false");
+  }
+  assert.equal("match" in sent()[0]!, false, "a substring search carries no match key");
+});
+
+test("workspace search echoes match only when the runner applied it", async () => {
+  const results = [{ path: "src/app.ts", isDirectory: false }];
+  const applied = workspaceSearchHarness({ ok: true, results, match: "fuzzy" });
+  assert.deepEqual(await applied.svc.searchWorkspaceReferences(applied.sessionId, "sapp", "fuzzy"),
+    { ok: true, status: 200, data: { results, truncated: false, match: "fuzzy" } });
+
+  // A runner that predates `match` answers with substring results and no echo.
+  const older = workspaceSearchHarness({ ok: true, results });
+  assert.deepEqual(await older.svc.searchWorkspaceReferences(older.sessionId, "sapp", "fuzzy"),
+    { ok: true, status: 200, data: { results, truncated: false } });
+
+  // An echo nobody asked for is not reported either: the request was a substring search.
+  const unrequested = workspaceSearchHarness({ ok: true, results, match: "fuzzy", fuzzyWithDirectories: true });
+  assert.deepEqual(await unrequested.svc.searchWorkspaceReferences(unrequested.sessionId, "app"),
+    { ok: true, status: 200, data: { results, truncated: false } });
+});
+
+test("workspace search echoes fuzzyWithDirectories only when the runner applied both it and fuzzy matching", async () => {
+  const results = [{ path: "src", isDirectory: true }, { path: "src/app.ts", isDirectory: false }];
+  const applied = workspaceSearchHarness({ ok: true, results, match: "fuzzy", fuzzyWithDirectories: true });
+  assert.deepEqual(await applied.svc.searchWorkspaceReferences(applied.sessionId, "sapp", undefined, true),
+    { ok: true, status: 200, data: { results, truncated: false, match: "fuzzy", fuzzyWithDirectories: true } });
+  const appliedWithMatch = workspaceSearchHarness({ ok: true, results, match: "fuzzy", fuzzyWithDirectories: true });
+  assert.deepEqual(await appliedWithMatch.svc.searchWorkspaceReferences(appliedWithMatch.sessionId, "sapp", "fuzzy", true),
+    { ok: true, status: 200, data: { results, truncated: false, match: "fuzzy", fuzzyWithDirectories: true } });
+
+  const partialReplies: WorkspaceSearchReply[] = [
+    // A runner that predates both options: a plain substring answer.
+    { ok: true, results },
+    // A runner that knows `match` but predates `fuzzyWithDirectories` echoes neither for this request.
+    { ok: true, results, match: "fuzzy" },
+    // A folder echo without the fuzzy echo is not an applied fuzzy search.
+    { ok: true, results, fuzzyWithDirectories: true },
+  ];
+  for (const reply of partialReplies) {
+    const { svc, sessionId } = workspaceSearchHarness(reply);
+    assert.deepEqual(await svc.searchWorkspaceReferences(sessionId, "sapp", undefined, true),
+      { ok: true, status: 200, data: { results, truncated: false } }, JSON.stringify(reply));
+    // Asking for match as well does not let a partial echo through as a plain fuzzy answer.
+    const withMatch = workspaceSearchHarness(reply);
+    assert.deepEqual(await withMatch.svc.searchWorkspaceReferences(withMatch.sessionId, "sapp", "fuzzy", true),
+      { ok: true, status: 200, data: { results, truncated: false } }, `match + ${JSON.stringify(reply)}`);
+  }
+});
+
+test("workspace search passes limit through only for entries or results, and truncated only when the runner says so", async () => {
+  const cases: Array<[reply: WorkspaceSearchReply, expected: Record<string, unknown>]> = [
+    [{ ok: true, results: [], truncated: true, match: "fuzzy", limit: "entries" }, { truncated: true, limit: "entries" }],
+    [{ ok: true, results: [], truncated: true, match: "fuzzy", limit: "results" }, { truncated: true, limit: "results" }],
+    [{ ok: true, results: [], truncated: true, match: "fuzzy" }, { truncated: true }],
+    [{ ok: true, results: [], truncated: true, match: "fuzzy", limit: "bytes" as never }, { truncated: true }],
+    [{ ok: true, results: [], truncated: "true" as never, match: "fuzzy", limit: "entries" }, { truncated: false, limit: "entries" }],
+    [{ ok: true, results: [], truncated: false, match: "fuzzy" }, { truncated: false }],
+    [{ ok: true, match: "fuzzy" }, { truncated: false }],
+  ];
+  for (const [reply, expected] of cases) {
+    const { svc, sessionId } = workspaceSearchHarness(reply);
+    assert.deepEqual(await svc.searchWorkspaceReferences(sessionId, "sapp", "fuzzy"),
+      { ok: true, status: 200, data: { results: [], match: "fuzzy", ...expected } }, JSON.stringify(reply));
+  }
+  // A substring search keeps a runner-reported limit as well; only the echo depends on the option.
+  const substring = workspaceSearchHarness({ ok: true, results: [], truncated: true, limit: "results" });
+  assert.deepEqual(await substring.svc.searchWorkspaceReferences(substring.sessionId, "app"),
+    { ok: true, status: 200, data: { results: [], truncated: true, limit: "results" } });
+});
+
+test("workspace search keeps its 404, 409, capability, 502 and 504 failure statuses", async () => {
+  const missing = workspaceSearchHarness();
+  assert.deepEqual(await missing.svc.searchWorkspaceReferences("no-such-session", "app", "fuzzy"),
+    { ok: false, status: 404, error: "session not found" });
+  assert.deepEqual(missing.sent(), []);
+
+  const offline = workspaceSearchHarness();
+  offline.hub.online = false;
+  assert.deepEqual(await offline.svc.searchWorkspaceReferences(offline.sessionId, "app", "fuzzy"),
+    { ok: false, status: 409, error: "runner is offline" });
+  assert.deepEqual(offline.sent(), []);
+
+  const old = workspaceSearchHarness();
+  old.db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.workspaceReferences - 1);
+  const unsupported = await old.svc.searchWorkspaceReferences(old.sessionId, "app", undefined, true);
+  assert.equal(unsupported.ok, false);
+  assert.equal(unsupported.status, 409);
+  assert.match(unsupported.error ?? "", /workspace references/u);
+  assert.equal(unsupported.capabilityRequirement?.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.workspaceReferences);
+  assert.deepEqual(old.sent(), [], "an unsupported runner is never asked");
+
+  const refused = workspaceSearchHarness({ ok: false, error: "workspace root is unavailable" });
+  assert.deepEqual(await refused.svc.searchWorkspaceReferences(refused.sessionId, "app", "fuzzy"),
+    { ok: false, status: 502, error: "workspace root is unavailable" });
+  const refusedSilently = workspaceSearchHarness({ ok: false });
+  assert.deepEqual(await refusedSilently.svc.searchWorkspaceReferences(refusedSilently.sessionId, "app"),
+    { ok: false, status: 502, error: "could not search workspace paths" });
+
+  const mismatched = workspaceSearchHarness();
+  mismatched.hub.requestHandler = (message) => ({
+    type: "list_session_files_result", requestId: message.type === "search_workspace_references" ? message.requestId : "x", ok: true,
+  }) as RunnerRequestResult;
+  assert.deepEqual(await mismatched.svc.searchWorkspaceReferences(mismatched.sessionId, "app"),
+    { ok: false, status: 502, error: "unexpected runner reply" });
+
+  const timedOut = workspaceSearchHarness();
+  timedOut.hub.requestHandler = () => { throw new RunnerRequestTimeoutError(); };
+  const timeout = await timedOut.svc.searchWorkspaceReferences(timedOut.sessionId, "app", "fuzzy");
+  assert.equal(timeout.ok, false);
+  assert.equal(timeout.status, 504);
+  assert.equal(timeout.error, new RunnerRequestTimeoutError().message);
+  assert.equal(timedOut.sent().length, 1);
+});
+
 test("Pi discovery and adoption fail closed until the runner supports managed transcript copies", async () => {
   const { db, hub, svc } = makeHarness();
   const metadata = runnerMeta();
@@ -25100,6 +26310,36 @@ test("operator video validation is confined to one controller and revokes review
   } finally { h.db.close(); }
 });
 
+test("a video an owner rule kept is never derived into Orchestrator-owned frames under a new key (#4137 review)", async (t) => {
+  if (!await shortVideoDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+    return t.skip("no isolated video decoder on this host");
+  }
+  const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, true, undefined, true);
+  const inside = new SessionsService(h.db, h.hub as unknown as Hub, NOOP_LOG,
+    undefined, undefined, undefined, undefined, undefined, undefined, true, h.parent.id);
+  try {
+    const child = h.createChild("Ruled Video Child");
+    const attached = h.svc.attachSessionVideo(child.id, {
+      name: "kept.webm", mimeType: "video/webm", data: transientVideoBytes().toString("base64"),
+    }, { kind: "agent", id: child.id });
+    assert.ok(attached.ok && attached.data, attached.error);
+    const item = { evidenceId: "kept", artifactId: attached.data.artifactId, sha256: attached.data.sha256, mediaType: "video/webm" };
+    const ownerRule = { source: "AGENTS.md", quote: "A person reviews every video before merge." };
+    const ruled = await inside.createWorkflowDecisionWithVideo(child.id, { requestId: "ruled-video", resourceKey: "ruled-video",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] }, ownerRule });
+    assert.ok(ruled.ok && ruled.data, ruled.error);
+    assert.deepEqual([ruled.data.authority, ruled.data.ownerRule], ["human", ownerRule]);
+    // The same video under a new requestId and key, without the rule, still goes to the owner.
+    const again = await inside.createWorkflowDecisionWithVideo(child.id, { requestId: "same-video", resourceKey: "another-key",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] } });
+    assert.ok(again.ok && again.data, again.error);
+    assert.deepEqual([again.data.authority, again.data.ownerRule], ["human", ownerRule]);
+    assert.equal(again.data.resourceSnapshot.category === "ui_evidence_approval" && again.data.resourceSnapshot.videoReview, undefined,
+      "no frames are derived for the Orchestrator");
+  } finally { h.db.close(); }
+});
+
 test("validated local video path binds all source frames, ordered receipts, source digest, and exact occurrence", async (t) => {
   if (!await shortVideoDecoderAvailable()) {
     assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
@@ -25672,9 +26912,184 @@ test("delegated UI evidence review fails closed on tampering, policy change, sup
   }
 });
 
+for (const refusal of ["harness", "capacity", "placement"] as const) {
+  test("#4245 delegated image reviewers bypass implementation " + refusal + " admission", () => {
+    const h = uiEvidenceReviewHarness();
+    try {
+      const child = h.createChild("UI Child");
+      const policy = h.db.sessionOrchestratorPolicy(h.parent.id)!;
+      if (refusal === "harness") {
+        policy.behavior.childHarness = { agentId: "codex-app-server", driver: "codex-app-server", context: { kind: "native" } };
+        policy.behavior.childModel = "implementation-model";
+        policy.behavior.childEffort = "high";
+        h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), h.parent.id);
+      }
+      if (refusal === "capacity") h.db.raw().prepare("UPDATE sessions SET max_child_sessions=1 WHERE id=?").run(h.parent.id);
+      {
+        policy.issueScope = { repository: "team/repo", issueNumbers: [4245], revision: 1,
+          authorizedByUserId: h.db.localIdentityContext().userId, authorizedAt: 1 };
+        policy.issueNumbers = [4245];
+        h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), h.parent.id);
+        const principal = { ...h.db.localIdentityContext(), kind: "human" as const, actorId: h.db.localIdentityContext().userId };
+        const enabled = h.svc.setCampaignControl(h.parent.id, { mode: "full_control", objective: "Review UI evidence",
+          operations: ["ui_evidence_approval"], delegatablePolicyIds: [] }, 1, principal);
+        assert.ok(enabled.ok, enabled.error);
+        if (refusal === "placement") h.db.raw().prepare("UPDATE sessions SET workspace_path='/ad-hoc-review' WHERE id=?").run(h.parent.id);
+      }
+      const shot = h.screenshot(child.id, refusal);
+      const ordinary = h.svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+        agentId: h.parent.agentId!, ...(refusal === "placement" ? { workspacePath: "/ad-hoc-review" } : {}),
+        // Caller-supplied fields cannot mint the private reviewer exemption.
+        delegatedImageReview: { reviewId: "forged" }, uiEvidenceReviewer: { reviewId: "forged" },
+      } as never, undefined, undefined, false, false, false, { parentSessionId: h.parent.id });
+      assert.equal(ordinary.status, 409, ordinary.error);
+      assert.match(ordinary.error!, refusal === "harness" ? /child harness is fixed/ :
+        refusal === "capacity" ? /remaining live child slots/ : /Full Control children/);
+      const decision = h.request(child.id, "ui", [shot.item]);
+      assert.ok(decision.ok && decision.data, decision.error);
+      const prepared = prepareImageReview(h, child.id, decision.data.occurrenceId);
+      assert.ok(prepared.ok && prepared.data, refusal + ": " + prepared.error);
+      const reviewer = h.db.getSession(prepared.data.reviewerSessionId)!;
+      assert.equal(reviewer.driver, h.parent.driver);
+      assert.equal(reviewer.model, h.db.getSession(h.parent.id)!.model);
+      assert.equal(reviewer.maxChildSessions, 0);
+      assert.equal(reviewer.useWorktree, false);
+      assert.deepEqual(h.db.campaignDescendantIds(h.parent.id), [child.id]);
+      assert.equal(h.db.campaignProjection(h.parent.id)!.children.total, 1);
+      assert.equal(h.svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID },
+        undefined, undefined, false, false, false, { parentSessionId: reviewer.id }).status, 409);
+      assert.equal(h.db.childSessionAllocations(h.parent.id).liveCount, 1);
+      assert.equal(h.db.campaignProjection(h.parent.id)!.limits.occupied, 1);
+      assert.equal(h.db.listSessionSummaries().find((s) => s.id === h.parent.id)!.liveChildCapacity!.occupied, 1);
+      assert.equal(h.db.listSessions().find((s) => s.id === h.parent.id)!.liveChildCapacity!.occupied, 1);
+      reviewerLook(h, reviewer.id, shot.item.evidenceId);
+      assert.ok(reviewerVerdict(h, reviewer.id, passingVerdict([shot.item.evidenceId])).ok);
+      const view = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, prepared.data.reviewId, () => true);
+      assert.ok(view.data?.delegatedImageReview, JSON.stringify(view));
+      const approved = h.svc.resolveDescendantRequest(h.parent.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: [shot.item.evidenceId],
+          delegatedImageReview: view.data.delegatedImageReview }, () => true);
+      assert.ok(approved.ok, approved.error);
+    } finally { h.db.close(); }
+  });
+}
+
+test("#4245 an ineligible reviewer names the missing restricted harness and direct fallback", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    h.db.raw().prepare("UPDATE sessions SET driver='codex-app-server' WHERE id=?").run(h.parent.id);
+    const decision = h.request(child.id, "ui", [h.screenshot(child.id, "shot").item]).data!;
+    const refused = h.svc.prepareDescendantImageEvidenceReview(h.parent.id, child.id, decision.occurrenceId, "brief", () => true);
+    assert.equal(refused.status, 409);
+    assert.match(refused.error!, /native Claude Code harness/);
+    assert.match(refused.error!, /restricted two-tool reviewer/);
+    assert.match(refused.error!, /review_descendant_ui_evidence/);
+    assert.equal(h.db.delegatedImageReviews.activeForRoot(h.parent.id).length, 0);
+  } finally { h.db.close(); }
+});
+
+test("#4245 image reviewers retain managed campaign accounting and unpriced stop admission", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const shot = h.screenshot(child.id, "shot");
+    h.db.raw().prepare("UPDATE sessions SET driver='claude-code',model='vision' WHERE id IN (?,?)").run(h.parent.id, child.id);
+    const rates = new Map([["vision", { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001,
+      cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }]]);
+    h.db.setUsageRateTable(rates);
+    const policy = h.db.sessionOrchestratorPolicy(h.parent.id)!;
+    policy.issueScope = { repository: "team/repo", issueNumbers: [4245], revision: 1,
+      authorizedByUserId: h.db.localIdentityContext().userId, authorizedAt: 1 };
+    policy.issueNumbers = [4245];
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), h.parent.id);
+    const principal = { ...h.db.localIdentityContext(), kind: "human" as const, actorId: h.db.localIdentityContext().userId };
+    const enabled = h.svc.setCampaignControl(h.parent.id, { mode: "full_control", objective: "Review UI evidence",
+      operations: ["ui_evidence_approval"], delegatablePolicyIds: [], budgetAuthority: {
+        version: 1, accounting: "managed_workers_only", unpriced: "stop", concurrency: 1, toolCalls: 200, costUsd: 200,
+      } }, 1, principal);
+    assert.ok(enabled.ok, enabled.error);
+    const current = h.request(child.id, "current-ui", [shot.item]).data!;
+    h.db.setUsageRateTable(new Map());
+    const unpriced = prepareImageReview(h, child.id, current.occurrenceId);
+    assert.equal(unpriced.status, 409);
+    assert.match(unpriced.error!, /pric|accounting/i);
+    h.db.setUsageRateTable(rates);
+    const prepared = prepareImageReview(h, child.id, current.occurrenceId);
+    assert.ok(prepared.ok && prepared.data, prepared.error);
+    const budget = h.db.campaignBudgets.view(h.parent.id)!;
+    assert.ok(h.db.campaignBudgets.members(h.parent.id).includes(prepared.data.reviewerSessionId));
+    assert.ok(h.db.campaignBudgets.allocation(prepared.data.reviewerSessionId));
+    assert.equal(budget.authority.concurrency, 1);
+    assert.equal(h.db.childSessionAllocations(h.parent.id).liveCount, 1);
+  } finally { h.db.close(); }
+});
+
+test("#4245 image reviewers have a separate bounded slot and keep finite parent budget admission", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const shot = h.screenshot(child.id, "shot");
+    const first = h.request(child.id, "first", [shot.item]).data!;
+    h.db.updateSessionCostBudget(h.parent.id, 0.01, Date.now());
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=1 WHERE id=?").run(h.parent.id);
+    // The parent has exhausted its ceiling; reviewer capacity must not bypass that ceiling.
+    const exhausted = h.svc.prepareDescendantImageEvidenceReview(h.parent.id, child.id, first.occurrenceId, "brief", () => true);
+    assert.equal(exhausted.status, 409);
+    assert.match(exhausted.error!, /budget|remaining/);
+    h.db.updateSessionCostBudget(h.parent.id, null, Date.now());
+    const review = prepareImageReview(h, child.id, first.occurrenceId);
+    assert.ok(review.ok && review.data, review.error);
+    assert.equal(h.db.delegatedImageReviews.activeForRoot(h.parent.id).length, 1);
+    const second = h.request(child.id, "second", [shot.item]).data!;
+    const busy = () => h.svc.prepareDescendantImageEvidenceReview(h.parent.id, child.id, second.occurrenceId, "brief", () => true);
+    assert.match(busy().error!, /separate review limit is 1/);
+    assert.equal(prepareImageReview(h, child.id, first.occurrenceId).data?.reviewId, review.data.reviewId);
+    // Reviewers reserve dollars/tools but never an implementation slot.
+    const charged = h.db.childSessionAllocations(h.parent.id);
+    assert.ok(charged.costBudgetUsd >= 10);
+    assert.ok(charged.maxToolCalls >= 10);
+    h.db.updateSessionStatus(child.id, "stopped", Date.now());
+    h.createChild("Implementation Still Has Its Slot");
+    h.db.updateSessionStatus(child.id, "running", Date.now());
+    h.db.raw().prepare("UPDATE delegated_image_reviews SET created_at=? WHERE review_id=?")
+      .run(Date.now() - 16 * 60_000, review.data.reviewId);
+    const expired = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, review.data.reviewId, () => true);
+    assert.equal(expired.data?.endedReason, "reviewer_deadline_expired");
+    assert.equal(busy().status, 409, "deadline requests stop without admitting an overlapping worker");
+    assert.ok(h.db.sessionStopIntent(review.data.reviewerSessionId));
+    h.db.updateSessionStatus(review.data.reviewerSessionId, "stopped", Date.now());
+    assert.equal(busy().status, 409, "a provisional stop is not proof that the provider retired");
+    h.db.settleSessionStopIntent(review.data.reviewerSessionId, Date.now(), "runner_terminal");
+    const replacement = prepareImageReview(h, child.id, second.occurrenceId);
+    assert.ok(replacement.ok, replacement.error);
+  } finally { h.db.close(); }
+});
+
+test("#4245 an image reviewer leaves a fair share of finite parent budget for implementation", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    h.db.updateSessionCostBudget(h.parent.id, 8, Date.now());
+    const decision = h.request(child.id, "ui", [h.screenshot(child.id, "shot").item]).data!;
+    const review = prepareImageReview(h, child.id, decision.occurrenceId);
+    assert.ok(review.ok && review.data, review.error);
+    const reviewer = h.db.getSession(review.data.reviewerSessionId)!;
+    assert.ok(reviewer.costBudgetUsd! > 0 && reviewer.costBudgetUsd! < 8);
+    assert.ok(h.createChild("Implementation Still Has Budget"));
+  } finally { h.db.close(); }
+});
+
 /** #4074: hand a decision to a delegated image reviewer, approving the spawn the harness gates on. */
 function prepareImageReview(h: ReturnType<typeof uiEvidenceReviewHarness>, childId: string, occurrenceId: string,
   brief = "The settings panel shows the new Review Model field under Reviews.") {
+  // Fake runner lifecycle: finished/invalidated reviews have returned from their provider turn.
+  for (const review of h.db.delegatedImageReviews.activeForRoot(h.parent.id)) {
+    if (review.state !== "running") {
+      h.db.updateSessionStatus(review.reviewerSessionId, "stopped", Date.now());
+      h.db.confirmSessionStop(review.reviewerSessionId, "runner_terminal", Date.now());
+    }
+  }
   let prepared = h.svc.prepareDescendantImageEvidenceReview(h.parent.id, childId, occurrenceId, brief, () => true);
   if (prepared.status === 428) {
     assert.ok(h.svc.approve(h.parent.id, h.db.getSession(h.parent.id)!.pendingApproval!.requestId, "allow").ok);
@@ -26939,7 +28354,7 @@ test("an approved decision for a child whose worktree branch was switched is del
     assert.equal(holds?.length, 1);
     assert.equal(holds?.[0]?.kind, "worktree_recovery");
     assert.equal(holds?.[0]?.holdId, recovery.recoveryId);
-    assert.match(holds?.[0]?.recoveryAction ?? "", new RegExp(`git -C ${f.worktreePath} switch agent/${child.id}`, "u"));
+    assert.match(holds?.[0]?.recoveryAction ?? "", new RegExp(`Restore branch agent/${child.id} in ${f.worktreePath} and select`, "u"));
     assert.match(holds?.[0]?.recoveryAction ?? "", /select_worktree/u);
     assert.deepEqual(holds?.[0]?.heldResumes?.map((resume) => resume.occurrenceId), [merge.occurrenceId]);
     const descendants = svc.descendantRequests(root.id, () => true);
@@ -26959,7 +28374,7 @@ test("an approved decision for a child whose worktree branch was switched is del
     const refused = svc.prompt(child.id, "are you there?");
     assert.equal(refused.status, 409);
     assert.match(refused.error ?? "", /worktree recovery is required before sending another prompt/u);
-    assert.match(refused.error ?? "", new RegExp(`switch agent/${child.id}`, "u"));
+    assert.match(refused.error ?? "", new RegExp(`branch agent/${child.id} in ${f.worktreePath}`, "u"));
     assert.match(refused.error ?? "", /select_worktree/u);
     // A caller whose credential may not manage the child's worktrees is told who can, with the same
     // branch and path, instead of being handed tools its route refuses (#1863).
@@ -26967,12 +28382,12 @@ test("an approved decision for a child whose worktree branch was switched is del
     const refusedForReader = svc.prompt(child.id, "are you there?", [], undefined, undefined, undefined, "session",
       false, undefined, cannotManageWorktrees);
     assert.equal(refusedForReader.status, 409);
-    assert.match(refusedForReader.error ?? "", new RegExp(`switch agent/${child.id}`, "u"));
+    assert.match(refusedForReader.error ?? "", new RegExp(`branch agent/${child.id} in ${f.worktreePath}`, "u"));
     assert.doesNotMatch(refusedForReader.error ?? "", /select_worktree|create_worktree/u);
     assert.match(refusedForReader.error ?? "", /Only the session owner or its controlling Orchestrator can recover/u);
     const readerDescendants = svc.descendantRequests(root.id, () => true, "orchestrator", true, () => cannotManageWorktrees);
     const readerAdvice = readerDescendants.data?.blockedChildren?.[0]?.holds[0]?.recoveryAction ?? "";
-    assert.match(readerAdvice, new RegExp(`switch agent/${child.id}`, "u"));
+    assert.match(readerAdvice, new RegExp(`branch agent/${child.id} in ${f.worktreePath}`, "u"));
     assert.doesNotMatch(readerAdvice, /select_worktree|create_worktree/u);
     assert.equal(svc.descendantRequests(root.id, () => true, "orchestrator", true, () => ({
       ...cannotManageWorktrees, canManageWorktrees: true,
@@ -28853,12 +30268,12 @@ test("releaseQueueHold is refused for a runner older than v247 without contactin
 });
 
 test("issue closure requires an exact human decision and executes one durable action", async () => {
-  const successes = new Set(["success", "human_approve", "recovered", "unchanged_child", "multi_pending"]);
+  const successes = new Set(["success", "human_approve", "recovered", "unchanged_child", "multi_pending", "approved_rerequest", "pending_rerequest"]);
   const uncertain = new Set(["uncertain", "invalid_result"]);
   const refused = new Set(["runner_refused", "not_sent"]);
   for (const mode of ["success", "human_approve", "recovered", "unchanged_child", "multi_pending", "already_closed",
     "runner_refused", "not_sent", "deny", "expired", "changed_payload", "changed_policy", "new_child",
-    "changed_assignment", "history_reassignment", "superseded", "stopped", "uncertain", "invalid_result"]) {
+    "changed_assignment", "history_reassignment", "approved_rerequest", "pending_rerequest", "stopped", "uncertain", "invalid_result"]) {
     const { db, hub, svc } = makeHarness();
     try {
       const meta = runnerMeta();
@@ -28867,10 +30282,10 @@ test("issue closure requires an exact human decision and executes one durable ac
         permissionModes: ["default", "orchestrator"],
       };
       db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-      const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+      const created = await createWithIssueListReading(svc, db, hub, mode === "multi_pending" ? [123, 124] : [123], () => svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
         agentId: "test-orchestrator", config: { permissionMode: "orchestrator" },
         prompt: mode === "multi_pending" ? "Orchestrate issues 123 and 124." : "Orchestrate issues 123." },
-        undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
+        undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" }));
       assert.ok(created.ok && created.data, created.error);
       const id = created.data.id;
       db.updateSessionStatus(id, "running", Date.now());
@@ -28916,7 +30331,13 @@ test("issue closure requires an exact human decision and executes one durable ac
         continue;
       }
       assert.ok(requested.ok && requested.data?.decision, requested.error);
-      const decision = requested.data.decision;
+      let decision = requested.data.decision;
+      if (mode === "pending_rerequest") {
+        const next = await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "closure-pending-2" });
+        assert.ok(next.ok && next.data?.decision, next.error);
+        assert.equal(svc.workflowDecision(id, decision.occurrenceId).data?.status, "superseded");
+        decision = next.data.decision;
+      }
       assert.equal(decision.controllingSessionId, id);
       assert.equal(decision.authority, "human");
       assert.equal(db.getSession(id)?.pendingApproval?.title, "Issue Closure Approval Required");
@@ -28947,7 +30368,17 @@ test("issue closure requires an exact human decision and executes one durable ac
       if (mode === "changed_assignment" || mode === "history_reassignment") db.stageSessionPromptCommand({ commandId: "changed-assignment",
         sessionId: "closure-assigned-child", runnerId: RUNNER_ID, payloadJson: JSON.stringify({ text: "Keep working on issue 123." }),
         payloadSha256: "c".repeat(64), expiresAt: Date.now() + 60_000, now: Date.now() });
-      if (mode === "superseded") assert.ok((await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "closure-2", comment: "Changed comment." })).ok);
+      if (mode === "approved_rerequest") {
+        const approval = svc.workflowDecision(id, decision.occurrenceId).data!;
+        assert.deepEqual(approval.approval, { actor: { kind: "human", id: "reviewer" }, at: approval.resolvedAt });
+        const next = await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "closure-2", comment: "Changed comment." });
+        assert.equal(next.status, 409);
+        assert.deepEqual(next.errorDetails, { code: "issue_closure_approval_open", occurrenceId: decision.occurrenceId,
+          resourceDigest: decision.resourceDigest });
+        assert.match(next.error!, /Execute close_github_issue/u);
+        assert.equal(db.workflowDecisionByRequestId(id, "closure-2"), null);
+        assert.deepEqual(svc.workflowDecision(id, decision.occurrenceId).data, approval);
+      }
       if (mode === "stopped") svc.stop(id);
       const digest = mode === "changed_payload" ? "b".repeat(64) : decision.resourceDigest;
       const result = await svc.executeGithubIssueClosure(id, decision.occurrenceId, digest);
@@ -28968,6 +30399,13 @@ test("issue closure requires an exact human decision and executes one durable ac
       } else {
         assert.equal(result.ok, false, `${mode}: no execution`);
         assert.equal(executions, 0);
+        if (mode === "new_child" || mode === "expired") {
+          assert.equal(svc.workflowDecision(id, decision.occurrenceId).data?.status, "revoked");
+          const next = await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "renewed-closure" });
+          assert.ok(next.ok && next.data?.decision, next.error);
+          assert.notEqual(next.data.decision.occurrenceId, decision.occurrenceId);
+          assert.equal(next.data.decision.status, "pending", "renewal never inherits the old approval");
+        }
       }
     } finally { db.close(); }
   }
@@ -28999,9 +30437,9 @@ test("a refused issue closure records why, keeps the runner's sanitized message,
       meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = { models: [], effortLevels: [], slashCommands: [],
         supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"] };
       db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-      const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      const created = await createWithIssueListReading(svc, db, hub, [123], () => svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
         config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issues 123." },
-      undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
+      undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" }));
       assert.ok(created.ok && created.data, created.error);
       const id = created.data.id;
       db.updateSessionStatus(id, "running", Date.now());
@@ -29061,7 +30499,7 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
     "follow_up_prompt", "follow_up_decision", "transitive_follow_up_prompt", "upstream_follow_up_prompt",
     "sibling_follow_up_prompt", "linked_unrelated_prompt", "other_issue_follow_up_decision", "reassigned_into_lineage",
     "issue_toggled", "readjudicated"]) {
-    const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+    const { db, svc, hub, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
     try {
       const plan = svc.recordCampaignPlan(parent.id, { items: [
         { key: "issue", issue: { repository: "picoduck/wollipog", number: 1440 } },
@@ -29219,8 +30657,132 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
   }
 });
 
-test("child creation records the named campaign work item before the launch is sent (#3106)", () => {
-  const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("an issue closure records the children it excludes and why, outside its binding (#3237)", async () => {
+  // `excluded_only` changes only the excluded side after approval; the others move a child across.
+  for (const mode of ["excluded_only", "excluded_to_bound", "bound_to_excluded"] as const) {
+    const { db, svc, hub, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
+    try {
+      const plan = svc.recordCampaignPlan(parent.id, { items: [
+        { key: "issue", issue: { repository: "picoduck/wollipog", number: 1440 } },
+        { key: "other", issue: { repository: "picoduck/wollipog", number: 1441 } },
+        { key: "unrelated" },
+      ], planComplete: true });
+      assert.ok(plan.ok && plan.data, plan.error);
+      const [issueItem, otherItem, unrelatedItem] = plan.data.items.map((item) => item.workItemId);
+      const assign = (workItemId: string, childSessionId: string) =>
+        assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId, childSessionId }).ok);
+      const echo = (id: string, prompt: string) => db.appendEvent(id, { kind: "user_message", text: prompt }, Date.now());
+      const launch = (prompt: string, echoed = true) => {
+        const id = spawn(parent.id, prompt);
+        if (echoed) echo(id, prompt);
+        return id;
+      };
+      const related = launch("Deliver the first item");
+      assign(issueItem!, related);
+      const unrelated = launch("Deliver issue 1441.");
+      assign(otherItem!, unrelated);
+      // A child whose launch prompt is not yet recorded stays bound, however the ledger attributes it.
+      const unechoed = mode === "bound_to_excluded" ? launch("Deliver the unrelated item", false) : null;
+      if (unechoed) assign(unrelatedItem!, unechoed);
+      db.setSessionTitle(unrelated, "Fix <b>Other</b> Issue", Date.now(), "user");
+
+      const dispatched: Array<Record<string, unknown>> = [];
+      hub.requestHandler = (message) => {
+        if (message.type !== "github_issue_closure") throw new Error("unexpected runner command");
+        if (message.operation === "inspect") return { type: "github_issue_closure_result", requestId: message.requestId,
+          sessionId: parent.id, ok: true, inspection: { repository: "picoduck/wollipog", issue: message.issue, title: "Merged work",
+            url: `https://github.com/picoduck/wollipog/issues/${message.issue}`, state: "OPEN",
+            forgeDigest: "a".repeat(64), openPullRequests: [] } };
+        dispatched.push(message.snapshot as unknown as Record<string, unknown>);
+        return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: parent.id,
+          ok: true, result: { outcome: "closed", completedAt: Date.now() } };
+      };
+      const request = () => svc.requestGithubIssueClosure(parent.id, { requestId: "closure-1440", issue: 1440,
+        reason: "completed", explanation: "The work merged.", evidence: ["Merged in the campaign."] });
+      const requested = await request();
+      assert.ok(requested.ok && requested.data?.decision, `${mode}: ${requested.error}`);
+      const decision = requested.data.decision;
+      const snapshot = decision.resourceSnapshot;
+      assert.ok(snapshot.category === "issue_closure");
+      const ids = (children: Array<{ sessionId: string }>) => children.map((child) => child.sessionId).sort();
+      // One bound and one excluded child, each with its session id and title; the reason is ledger facts.
+      assert.deepEqual(ids(snapshot.activeChildren), (unechoed ? [related, unechoed] : [related]).sort());
+      assert.deepEqual(snapshot.excludedChildren, [{ sessionId: unrelated, title: "Fix <b>Other</b> Issue",
+        reason: { attemptedIssues: [{ repository: "picoduck/wollipog", number: 1441 }], attemptedIssueCount: 1,
+          attemptedWithoutIssue: 0, linkedWorkItems: 0 } }]);
+      assert.equal(issueClosureExclusionReasonText(snapshot.excludedChildren![0]!.reason, snapshot.repository),
+        "Every work-item attempt is on #1441, which has never tracked this issue and has no follow-up links.");
+      // The excluded list stays outside the resource digest: the digest is the snapshot without it.
+      const { excludedChildren: _excluded, ...binding } = snapshot;
+      assert.equal(decision.resourceDigest, createHash("sha256").update(JSON.stringify(binding)).digest("hex"));
+
+      if (mode === "excluded_only") {
+        // Another child the ledger proves unrelated joins the excluded side, and the excluded child
+        // works. Neither changes the binding: the same request replays the same occurrence.
+        const another = launch("Deliver the unrelated item");
+        assign(unrelatedItem!, another);
+        db.stageSessionPromptCommand({ commandId: `prompt-${unrelated}`, sessionId: unrelated, runnerId: RUNNER_ID,
+          payloadJson: JSON.stringify({ text: "Continue." }), payloadSha256: "c".repeat(64), expiresAt: Date.now() + 60_000, now: Date.now() });
+        const fresh = issueClosureChildren(db, parent.id, { repository: "picoduck/wollipog", number: 1440 });
+        assert.deepEqual(ids(fresh.excluded), [unrelated, another].sort());
+        assert.deepEqual(fresh.excluded.find((child) => child.sessionId === another)!.reason, { attemptedIssues: [], attemptedIssueCount: 0, attemptedWithoutIssue: 1, linkedWorkItems: 0 });
+        assert.deepEqual(fresh.active, snapshot.activeChildren);
+        const replay = await request();
+        assert.ok(replay.ok, replay.error);
+        assert.equal(replay.data?.decision?.occurrenceId, decision.occurrenceId);
+      }
+      assert.ok(svc.approve(parent.id, decision.occurrenceId, "approve", { kind: "human", id: "reviewer" }).ok);
+      if (mode === "excluded_to_bound") assign(issueItem!, unrelated);
+      if (mode === "bound_to_excluded") echo(unechoed!, "Deliver the unrelated item");
+      if (mode !== "excluded_only") {
+        // Crossing between the sets changes the bound list, so the approval can't hide the move.
+        const fresh = issueClosureChildren(db, parent.id, { repository: "picoduck/wollipog", number: 1440 });
+        assert.notDeepEqual(fresh.active, snapshot.activeChildren);
+        assert.deepEqual(ids(fresh.excluded), mode === "excluded_to_bound" ? [] : [unrelated, unechoed!].sort());
+      }
+
+      const result = await svc.executeGithubIssueClosure(parent.id, decision.occurrenceId, decision.resourceDigest);
+      if (mode === "excluded_only") {
+        assert.ok(result.ok && result.data, result.error);
+        assert.equal(result.data.issueClosureResult?.outcome, "closed");
+        // The runner receives only the binding.
+        assert.equal(dispatched.length, 1);
+        assert.ok(!("excludedChildren" in dispatched[0]!));
+        assert.deepEqual(dispatched[0]!.activeChildren, snapshot.activeChildren);
+      } else {
+        assert.equal(result.status, 409, `${mode}: a child crossed between the bound and excluded sets`);
+        assert.equal(db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "revoked");
+        assert.equal(dispatched.length, 0);
+      }
+    } finally { db.close(); }
+  }
+});
+
+test("an issue-closure snapshot keeps its excluded children canonical and old snapshots unchanged (#3237)", () => {
+  const base = { category: "issue_closure", repository: "picoduck/wollipog", issue: 1440, title: "Merged work",
+    url: "https://github.com/picoduck/wollipog/issues/1440", forgeDigest: "a".repeat(64), reason: "completed",
+    explanation: "The work merged.", evidence: ["Merged."], openPullRequests: [],
+    activeChildren: [{ sessionId: "bound", title: "Bound", assignmentDigest: "b".repeat(64) }] };
+  const reason = { attemptedIssues: [{ repository: "picoduck/wollipog", number: 1441 }], attemptedIssueCount: 1, attemptedWithoutIssue: 0, linkedWorkItems: 0 };
+  // An earlier release's snapshot has no field and keeps the digest it was approved under.
+  const old = normalizeIssueClosureSnapshot(structuredClone(base));
+  assert.ok(old && !("excludedChildren" in old));
+  assert.deepEqual(issueClosureBindingSnapshot(old), old);
+  const recorded = normalizeIssueClosureSnapshot({ ...structuredClone(base), excludedChildren: [{ sessionId: "excluded", title: "Other", reason, extra: 1 }] });
+  assert.deepEqual(recorded?.excludedChildren, [{ sessionId: "excluded", title: "Other", reason }]);
+  assert.deepEqual(issueClosureBindingSnapshot(recorded!), old);
+  for (const excludedChildren of [
+    [{ sessionId: "bound", title: "Bound", reason }],
+    [{ sessionId: "excluded", title: "Other", reason }, { sessionId: "excluded", title: "Again", reason }],
+    [{ sessionId: "excluded", title: "Other", reason: { ...reason, attemptedIssueCount: 0 } }],
+    [{ sessionId: "excluded", title: "Other", reason: { ...reason, linkedWorkItems: -1 } }],
+    [{ sessionId: "excluded", title: "Other" }],
+    "none",
+  ]) assert.equal(normalizeIssueClosureSnapshot({ ...structuredClone(base), excludedChildren }), null, JSON.stringify(excludedChildren));
+});
+
+test("child creation records the named campaign work item before the launch is sent (#3106)", async () => {
+  const { db, svc, hub, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "first" }, { key: "second" }, { key: "dropped" }],
       planComplete: true });
@@ -29334,7 +30896,7 @@ test("child creation records the named campaign work item before the launch is s
 });
 
 test("a child created with an unrelated work item never revokes an approved issue closure (#3106)", async () => {
-  const { db, svc, hub, parent } = stopAndArchiveCampaignFixture("retain");
+  const { db, svc, hub, parent } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [
       { key: "issue", issue: { repository: "picoduck/wollipog", number: 1440 } }, { key: "unrelated" },
@@ -29384,8 +30946,8 @@ test("a child created with an unrelated work item never revokes an approved issu
   } finally { db.close(); }
 });
 
-test("issue-closure attribution treats work recorded before its history as related (#3084)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("issue-closure attribution treats work recorded before its history as related (#3084)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     // Emulate a database from before attribution history: no triggers, marker, or history rows.
     db.db.exec(`DROP TRIGGER campaign_work_item_issue_recorded; DROP TRIGGER campaign_work_item_issue_changed;
@@ -29455,8 +31017,8 @@ function ledgerItem(svc: SessionsService, campaignId: string, key: string) {
   return detail.data.item;
 }
 
-test("campaign work ledger records plans, attempts, and delivery that survive reassignment and child deletion (#2417)", () => {
-  const { db, svc, hub, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+test("campaign work ledger records plans, attempts, and delivery that survive reassignment and child deletion (#2417)", async () => {
+  const { db, svc, hub, parent, spawn, report } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, {
       items: [
@@ -29557,8 +31119,8 @@ test("campaign work ledger records plans, attempts, and delivery that survive re
   }
 });
 
-test("work-item delivery requires an open attempt and leaves session verification untouched when refused (#2417)", () => {
-  const { db, svc, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+test("work-item delivery requires an open attempt and leaves session verification untouched when refused (#2417)", async () => {
+  const { db, svc, parent, spawn, report } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }, { key: "b" }], planComplete: true });
     const [a, b] = plan.data!.items;
@@ -29600,8 +31162,8 @@ test("work-item delivery requires an open attempt and leaves session verificatio
   }
 });
 
-test("recommendations record origins and dispositions without inflating committed work (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("recommendations record origins and dispositions without inflating committed work (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "origin" }], planComplete: true });
     const originId = plan.data!.items[0]!.workItemId;
@@ -29665,8 +31227,8 @@ test("recommendations record origins and dispositions without inflating committe
   }
 });
 
-test("campaign work ledger writes grant no dispatch, publication, merge, or decision authority (#2417)", () => {
-  const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("campaign work ledger writes grant no dispatch, publication, merge, or decision authority (#2417)", async () => {
+  const { db, svc, hub, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const child = spawn(parent.id, "Implement");
     const mergeSnapshot = {
@@ -29715,8 +31277,8 @@ test("campaign work ledger writes grant no dispatch, publication, merge, or deci
   }
 });
 
-test("campaign work ledger operations are Orchestrator-only, root-keyed, and bounded (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("campaign work ledger operations are Orchestrator-only, root-keyed, and bounded (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const child = spawn(parent.id, "Ordinary child");
     assert.equal(svc.recordCampaignPlan(child, { items: [{ key: "x" }], planComplete: true }).status, 404,
@@ -29762,8 +31324,8 @@ test("campaign work ledger operations are Orchestrator-only, root-keyed, and bou
   }
 });
 
-test("campaign work ledger accepts host-qualified GitLab issue and merge request refs in nested namespaces (#3539)", () => {
-  const { db, svc, parent } = stopAndArchiveCampaignFixture("retain");
+test("campaign work ledger accepts host-qualified GitLab issue and merge request refs in nested namespaces (#3539)", async () => {
+  const { db, svc, parent } = await stopAndArchiveCampaignFixture("retain");
   try {
     const project = "gitlab.example.com/group/subgroup/project";
     const plan = svc.recordCampaignPlan(parent.id, {
@@ -29799,8 +31361,8 @@ test("campaign work ledger accepts host-qualified GitLab issue and merge request
   }
 });
 
-test("campaign work ledger review regressions: no-op detection, linkage, dependency batches, cursors, and sorting (#2417)", () => {
-  const { db, svc, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+test("campaign work ledger review regressions: no-op detection, linkage, dependency batches, cursors, and sorting (#2417)", async () => {
+  const { db, svc, parent, spawn, report } = await stopAndArchiveCampaignFixture("retain");
   try {
     // A dependency batch is validated against its final graph, whatever order it lists items in.
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }, { key: "b", dependsOnKeys: ["a"] }], planComplete: false });
@@ -29883,8 +31445,8 @@ test("campaign work ledger review regressions: no-op detection, linkage, depende
   }
 });
 
-test("campaign work ledger retries match the exact report identity and normalized reasons (#2417)", () => {
-  const { db, svc, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+test("campaign work ledger retries match the exact report identity and normalized reasons (#2417)", async () => {
+  const { db, svc, parent, spawn, report } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }, { key: "b" }], planComplete: false });
     const [a, b] = plan.data!.items;
@@ -29924,8 +31486,8 @@ test("campaign work ledger retries match the exact report identity and normalize
   }
 });
 
-test("a nested Orchestrator's work-item verification lands in the root ledger and refreshes every campaign view (#2417, #1462)", () => {
-  const { db, svc, hub, parent, report } = stopAndArchiveCampaignFixture("retain");
+test("a nested Orchestrator's work-item verification lands in the root ledger and refreshes every campaign view (#2417, #1462)", async () => {
+  const { db, svc, hub, parent, report } = await stopAndArchiveCampaignFixture("retain");
   try {
     const nested = db.createSession({
       id: "nested-ledger-orchestrator", parentSessionId: parent.id, runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
@@ -29984,8 +31546,8 @@ function knownUsd(metric: { availability: string; value?: { usd: number } } | un
   return Math.round(metric.value!.usd * 1_000_000) / 1_000_000;
 }
 
-test("independent Codex child-thread usage is attributed to the attempt, while ordinary subagent usage stays out (#2417, #2455)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("independent Codex child-thread usage is attributed to the attempt, while ordinary subagent usage stays out (#2417, #2455)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "codex" }], planComplete: true });
     const child = spawn(parent.id, "Delegate to Codex threads");
@@ -30005,8 +31567,8 @@ test("independent Codex child-thread usage is attributed to the attempt, while o
   }
 });
 
-test("campaign usage reaches exactly one bucket per record and keeps its attempt through reassignment, replay, and deletion (#2417)", () => {
-  const { db, svc, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+test("campaign usage reaches exactly one bucket per record and keeps its attempt through reassignment, replay, and deletion (#2417)", async () => {
+  const { db, svc, parent, spawn, report } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }, { key: "b" }, { key: "nested" }], planComplete: true });
     const [a, b, nestedItem] = plan.data!.items;
@@ -30100,8 +31662,8 @@ test("campaign usage reaches exactly one bucket per record and keeps its attempt
   }
 });
 
-test("waiting before the first attempt counts toward Waiting Time but not Item Elapsed (#2417)", () => {
-  const { db, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("waiting before the first attempt counts toward Waiting Time but not Item Elapsed (#2417)", async () => {
+  const { db, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const ledger = db.campaignWorkLedger;
     const minute = 60_000;
@@ -30128,8 +31690,8 @@ test("waiting before the first attempt counts toward Waiting Time but not Item E
   }
 });
 
-test("campaign elapsed is wall-clock, not a sum of concurrent items, and item times replay durable intervals (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("campaign elapsed is wall-clock, not a sum of concurrent items, and item times replay durable intervals (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const ledger = db.campaignWorkLedger;
     const minute = 60_000;
@@ -30193,16 +31755,18 @@ test("campaign elapsed is wall-clock, not a sum of concurrent items, and item ti
   }
 });
 
-test("the campaign projection records completion when it first reaches verified_complete and clears it on reopening (#2417)", () => {
-  const { db, svc, parent, spawn, report, verify } = stopAndArchiveCampaignFixture("retain");
+test("the campaign projection records completion when it first reaches verified_complete and clears it on reopening (#2417)", async () => {
+  const { db, svc, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture("retain");
   try {
     const child = spawn(parent.id, "Only child");
     svc.onSessionStatus(child, "idle");
     assert.ok(verify(child, report(child, "done")).ok);
+    db.updateSessionStatus(parent.id, "idle", Date.now()); // The root's own turn is live work (#4146).
     assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
     const completedAt = db.campaignWorkLedger.accounting.completedAt(parent.id);
     assert.ok(completedAt !== null);
     assert.equal(svc.campaignWorkItems(parent.id, {}).data?.summary.elapsed.endedAt, completedAt);
+    db.updateSessionStatus(parent.id, "running", Date.now());
     spawn(parent.id, "More work");
     assert.notEqual(db.campaignProjection(parent.id)?.status, "verified_complete");
     assert.equal(db.campaignWorkLedger.accounting.completedAt(parent.id), null);
@@ -30212,8 +31776,8 @@ test("the campaign projection records completion when it first reaches verified_
   }
 });
 
-test("time and cost before recording began read as unavailable or partial, never zero, and unpriced usage is a lower bound (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("time and cost before recording began read as unavailable or partial, never zero, and unpriced usage is a lower bound (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a", dispatchState: "queued" }, { key: "idle" }], planComplete: true });
     const child = spawn(parent.id, "Deliver a");
@@ -30258,8 +31822,8 @@ test("time and cost before recording began read as unavailable or partial, never
   }
 });
 
-test("starting recording seeds existing items and open attempts once, so later intervals are measured (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("starting recording seeds existing items and open attempts once, so later intervals are measured (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, {
       items: [{ key: "a", dispatchState: "queued" }, { key: "orphaned", dispatchState: "queued" }], planComplete: true,
@@ -30291,8 +31855,8 @@ test("starting recording seeds existing items and open attempts once, so later i
   }
 });
 
-test("the summary embedded in the root's view hides cost from contributors its whole audience cannot read (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("the summary embedded in the root's view hides cost from contributors its whole audience cannot read (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }], planComplete: true });
     const child = spawn(parent.id, "Deliver a");
@@ -30312,8 +31876,8 @@ test("the summary embedded in the root's view hides cost from contributors its w
   }
 });
 
-test("campaign cost names Claude turns that billed a running total as uncertain (#4069)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("campaign cost names Claude turns that billed a running total as uncertain (#4069)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const itemId = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }], planComplete: true }).data!.items[0]!.workItemId;
     const child = spawn(parent.id, "Deliver a");
@@ -30338,8 +31902,8 @@ test("campaign cost names Claude turns that billed a running total as uncertain 
   }
 });
 
-test("campaign cost follows session access: a hidden contributor hides its bucket, attempt, and item (#2417)", () => {
-  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+test("campaign cost follows session access: a hidden contributor hides its bucket, attempt, and item (#2417)", async () => {
+  const { db, svc, parent, spawn } = await stopAndArchiveCampaignFixture("retain");
   try {
     const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }], planComplete: true });
     const itemId = plan.data!.items[0]!.workItemId;
@@ -30459,6 +32023,7 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"],
     };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    svc.setDecisionRuntime(epicSeedReading(db));
     const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" }, prompt: "Orchestrate epic #123." }, undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
     assert.ok(created.ok && created.data, created.error);
@@ -30477,7 +32042,10 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
       }
       throw new Error("unexpected fixture command");
     };
-    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeProposalEpic,123,"the proposal seed is stored before any runner echo");
+    // The seed is pending from creation, before any runner echo; the Orchestrator then proposes the epic, which the check admits (#4104, #4282).
+    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeSeed!.state,"pending","the seed is held before any runner echo");
+    await proposeSeedEpic(svc, db, hub, id, "Orchestrate epic #123.", 123);
+    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeProposalEpic,123);
     const beforeScopeChild = svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:AGENT_ID,prompt:"Fix issue 124.",config:{}},undefined,undefined,false,false,false,{parentSessionId:id});
     assert.equal(beforeScopeChild.ok,false,"epic delegation requires confirmed issue scope");
     assert.match(beforeScopeChild.error!,/Confirm the epic/);
@@ -30513,6 +32081,14 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
     assert.deepEqual(policy.issueNumbers,[123,124]);
     assert.equal(policy.issueScope!.revision,1);
     assert.equal(policy.issueScope!.authorizedByUserId,"owner");
+    // Custom holds the same repository-qualified scope (#4118). It stores no other repository yet,
+    // so a ref elsewhere is refused from the stored scope, before any runner call.
+    assert.deepEqual(policy.issueScope!.issues,[{repository:"team/repo",number:123},{repository:"team/repo",number:124}]);
+    const sentBefore = hub.sentToRunner.length;
+    const elsewhere = await svc.proposeCampaignIssueScope(id,{...proposal,requestId:"elsewhere",expectedRevision:1,additions:[{repository:"other/repo",number:5}]},()=>true,{kind:"human",actorId:"owner",userId:"owner",userName:"Owner",organizationId:"org_personal",organizationName:"Personal",role:"owner",deviceId:"test",localBootstrap:false});
+    assert.equal(elsewhere.ok,false);
+    assert.deepEqual(elsewhere.errorDetails,{code:"repository_outside_boundary",repository:"other/repo"});
+    assert.equal(hub.sentToRunner.length,sentBefore,"no runner call for a repository outside the campaign");
     hub.online = false;
     let offlineRequests = 0;
     const onlineHandler = hub.requestHandler;
@@ -30625,7 +32201,7 @@ test("scope approval cannot authorize a stopped Orchestrator in another reposito
     meta.workspaces.push({id:"other-workspace",name:"Other",path:"/repos/other"});
     meta.agents.find((a)=>a.id==="test-orchestrator")!.capabilities={models:[],effortLevels:[],slashCommands:[],supportsImages:false,supportsApprovals:true,permissionModes:["default","orchestrator"]};
     db.registerRunner(meta,Date.now(),PROTOCOL_VERSION);
-    const created=svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:"test-orchestrator",config:{permissionMode:"orchestrator"},prompt:"Orchestrate issues #12 and #13.",orchestrator:{execution:{strictProjectIsolation:false}}},undefined,undefined,false,false,false,{defaultOwnerUserId:"owner"});
+    const created=await createWithIssueListReading(svc,db,hub,[12,13],()=>svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:"test-orchestrator",config:{permissionMode:"orchestrator"},prompt:"Orchestrate issues #12 and #13.",orchestrator:{execution:{strictProjectIsolation:false}}},undefined,undefined,false,false,false,{defaultOwnerUserId:"owner"}));
     assert.ok(created.ok && created.data,created.error);
     const id=created.data.id;
     db.updateSessionStatus(id,"running",Date.now());
@@ -30647,7 +32223,7 @@ test("scope approval cannot authorize a stopped Orchestrator in another reposito
     assert.deepEqual(db.campaignIssueScopeRootsForRunner("unrelated-runner"),[]);
     const restarted=svc.restart(child.data.id);
     assert.equal(restarted.ok,false,"restart must retain the campaign repository boundary");
-    assert.match(restarted.error!,/campaign.*repository workspace/);
+    assert.match(restarted.error!,/restart in a Location of one of the campaign.s repositories/);
     await new Promise((resolve)=>setTimeout(resolve,0));
   } finally {db.close();}
 });
@@ -30659,6 +32235,7 @@ test("human-only campaigns can confirm scope and separately approve closure with
     meta.agents.find((a)=>a.id==="test-orchestrator")!.capabilities={models:[],effortLevels:[],slashCommands:[],supportsImages:false,supportsApprovals:true,permissionModes:["default","orchestrator"]};
     db.registerRunner(meta,Date.now(),PROTOCOL_VERSION);
     const decisions={implementation_question:"human",pr_merge:"human",merged_branch_deletion:"human",follow_up_issue_publication:"human",ui_evidence_approval:"human"} as const;
+    svc.setDecisionRuntime(epicSeedReading(db));
     const created=svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:"test-orchestrator",config:{permissionMode:"orchestrator"},prompt:"Orchestrate epic #123.",orchestrator:{delegation:{parentControl:"off",decisions}}},undefined,undefined,false,false,false,{defaultOwnerUserId:"owner"});
     assert.ok(created.ok && created.data,created.error);
     const id=created.data.id;
@@ -30666,10 +32243,11 @@ test("human-only campaigns can confirm scope and separately approve closure with
     assert.equal(created.data.parentControlPolicy!.revision,0,"human-only fallback is materialized by SessionView");
     db.updateSessionStatus(id,"running",Date.now());
     hub.requestHandler=(m)=> {
-      if(m.type==="campaign_issue_scope") return {type:"campaign_issue_scope_result",requestId:m.requestId,sessionId:m.sessionId,ok:true,repository:"team/repo",...(m.operation==="synchronize"?{revision:m.scope.revision}:{candidates:(m.issues??[123]).map((number)=>({issue:{repository:"team/repo",number},title:"Epic",source:"umbrella" as const}))})};
+      if(m.type==="campaign_issue_scope") return {type:"campaign_issue_scope_result",requestId:m.requestId,sessionId:m.sessionId,ok:true,repository:"team/repo",...(m.operation==="synchronize"?{revision:m.scope.revision}:{candidates:(m.issues??[123,124]).map((number)=>({issue:{repository:"team/repo",number},title:number===123?"Epic":"Member",source:number===123?"umbrella" as const:"sub_issue" as const}))})};
       if(m.type==="github_issue_closure") return {type:"github_issue_closure_result",requestId:m.requestId,sessionId:m.sessionId,ok:true,inspection:{repository:"team/repo",issue:123,title:"Epic",url:"https://github.com/team/repo/issues/123",state:"OPEN",forgeDigest:"a".repeat(64),openPullRequests:[]}};
       throw new Error("unexpected command");
     };
+    await proposeSeedEpic(svc, db, hub, id, "Orchestrate epic #123.", 123);
     const proposed=await svc.proposeCampaignIssueScope(id,{requestId:"confirm",expectedRevision:0,additions:[{repository:"team/repo",number:123}],removals:[],explanation:"Include epic"});
     assert.ok(proposed.ok && proposed.data,proposed.error);
     assert.equal(proposed.data.authority,"human");
@@ -30752,6 +32330,7 @@ test("GitLab campaign scope and issue closure require a v249 runner and then rea
     const register = (version: number) => db.registerRunner(meta, Date.now(), version);
     const previous = RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabCampaignIssues - 1;
     register(PROTOCOL_VERSION);
+    svc.setDecisionRuntime(epicSeedReading(db));
     const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" }, prompt: "Orchestrate epic #123." }, undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
     assert.ok(created.ok && created.data, created.error);
@@ -30764,7 +32343,7 @@ test("GitLab campaign scope and issue closure require a v249 runner and then rea
       requests.push(`${message.type}:${"operation" in message ? message.operation : ""}`);
       if (message.type === "campaign_issue_scope") return { type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId,
         ok: true, repository, ...(message.operation === "synchronize" ? { revision: message.scope.revision } :
-          { candidates: (message.issues ?? [123]).map((number) => ({ issue: { repository, number }, title: `Issue ${number}`, source: "member_checklist" as const })) }) };
+          { candidates: (message.issues ?? [123, 124]).map((number) => ({ issue: { repository, number }, title: `Issue ${number}`, source: "member_checklist" as const })) }) };
       if (message.type === "github_issue_closure" && message.operation === "inspect") {
         return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: id, ok: true,
           inspection: { repository: "gitlab.example.com/Platform/Backend/Service", issue: message.issue, title: "Member", url: `${web}/-/issues/${message.issue}`,
@@ -30772,6 +32351,7 @@ test("GitLab campaign scope and issue closure require a v249 runner and then rea
       }
       throw new Error("unexpected fixture command");
     };
+    await proposeSeedEpic(svc, db, hub, id, "Orchestrate epic #123.", 123, repository);
     const current = await svc.campaignIssueScope(id);
     assert.ok(current.ok && current.data, current.error);
     assert.equal(current.data.repository, repository);

@@ -1,6 +1,6 @@
 import { validReviewerBudgetAdmission, type EvidenceReviewerBudgetAdmission } from "./evidence-review-admission.js";
 import { createHash } from "node:crypto";
-import { campaignEvidenceAuthorityBound, validCampaignEvidenceAuthority, supportsPacedVideoReviewPeer,
+import { campaignBoundaryRepository, campaignEvidenceAuthorityBound, validCampaignEvidenceAuthority, supportsPacedVideoReviewPeer,
   type CampaignAuthorityBoundary, type CampaignEvidenceAuthority } from "@wollipog/protocol";
 import { PACED_VIDEO_REVIEW_PROFILE } from "./video-evidence-runtime.js";
 
@@ -158,7 +158,8 @@ export function reviewerAdmissionPrerequisites(context: ReviewerAdmissionContext
     !campaignEvidenceAuthorityBound(e, b) || e.campaignRootSessionId !== context.rootSessionId ||
     b.revision !== context.policyRevision || !b.operations.includes("ui_evidence_approval")) return refuse("boundary");
   if (!context.scopeCurrent || !context.taskEvidenceVerified || context.issueScopeRevision !== b.issueScopeRevision ||
-    context.repository.toLowerCase() !== b.repository.toLowerCase() || !Number.isSafeInteger(context.issue) || context.issue <= 0) return refuse("scope");
+    // #4119: the task may be in any of the boundary's repositories, each checked in its own entry.
+    !campaignBoundaryRepository(b, context.repository) || !Number.isSafeInteger(context.issue) || context.issue <= 0) return refuse("scope");
   if (!context.destinationPrivateVerified || context.destinationConfigurationId !== e.destination.configurationId ||
     context.organizationId !== e.destination.organizationId) return refuse("destination");
   if (!e.providers.some((p) => p.providerId === target.providerId && p.reviewers.some((r) =>

@@ -1628,6 +1628,12 @@ async function retiredWorktreeFixture(options: {
   /** Work in the legacy worktree beside a runner-created sibling that a real discard can retire:
    * it sits in the requested-worktree boundary and its head is on the remote default branch. */
   createdSibling?: boolean;
+  /** How each provider turn ends (#3542). `accept` is acknowledged and answered, as a delivered
+   * continuation needs; `fail_launch` fails before the provider accepts it, as a process whose
+   * isolation names a missing bind source does. Absent: the turn ends without either signal. */
+  turn?: (text: string, driver: number) => "accept" | "fail_launch";
+  /** Each process generation's `providerProcessLive` answer (#3542). Absent: the method is too. */
+  processLive?: (driver: number) => boolean;
 } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-managed-retired-worktree-")));
   const home = mkdtempSync(join(tmpdir(), "wollipog-managed-retired-home-"));
@@ -1662,13 +1668,28 @@ async function retiredWorktreeFixture(options: {
   const factory = (_driver: unknown, _launch: unknown, cb: DriverCallbacks) => {
     const driver = { prompts: [] as string[], disposed: false, endCalls: 0, cb };
     drivers.push(driver);
+    const index = drivers.length - 1;
+    let lastTurnError: string | null = null;
     return {
       pid: drivers.length, initialize: async () => {}, newSession: async () => "provider-1",
       prompt: async (text: string) => {
         driver.prompts.push(text);
         await options.onPrompt?.(text);
+        lastTurnError = null;
+        const outcome = options.turn?.(text, index);
+        if (outcome === "fail_launch") {
+          lastTurnError = `bwrap: Can't find source path ${sibling}: No such file or directory`;
+          cb.onEvent({ kind: "stderr", text: lastTurnError });
+          return "refusal" as const;
+        }
+        if (outcome === "accept") {
+          cb.onPromptAccepted?.();
+          cb.onEvent({ kind: "agent_message", text: `answer to: ${text.slice(0, 40)}`, final: true });
+        }
         return "end_turn" as const;
       },
+      ...(options.turn ? { lastTurnError: () => lastTurnError } : {}),
+      ...(options.processLive ? { providerProcessLive: () => options.processLive!(index) } : {}),
       cancel: () => {}, dispose: () => { driver.disposed = true; },
       setConfig: () => {}, resolvePermission: () => false,
       agentSessionId: () => options.noResume ? null : "provider-1",
@@ -1844,34 +1865,410 @@ for (const ask of [false, true]) {
   });
 }
 
-test("background work holding a retirement rebind is bounded like any worktree handoff (#3402)", async () => {
-  if (process.platform !== "linux") return;
-  const bound = 300;
-  const f = await retiredWorktreeFixture({ handoffWaitMaxMs: bound });
-  try {
-    const startedAt = Date.now();
-    f.live.set("monitor-1", { id: "monitor-1", launchType: "monitor", startedAt });
-    f.drivers[0]!.cb.onBackgroundWork?.({
-      state: "running", pendingTaskIds: ["monitor-1"],
-      jobs: [{ id: "monitor-1", launchType: "monitor", startedAt }], observedTaskIds: ["monitor-1"],
-    });
-    assert.equal(f.store.readMeta("s1")?.backgroundWorkState, "running");
-    await f.retire();
-    f.manager.prompt("s1", "continue");
-    const holds = () => f.sent.filter((message) => message.type === "session_runtime_updated")
-      .map((message) => (message as { snapshot: { queueHold?: SessionQueueHoldView | null } }).snapshot.queueHold);
-    await f.waitFor(() => holds().some((hold) => hold?.kind === "worktree_rebind" && hold.endsAt !== undefined),
-      "the waiting prompt got no bounded handoff hold");
-    const hold = holds().find((candidate) => candidate?.kind === "worktree_rebind")!;
-    assert.equal(hold.endsAt, hold.since + bound);
-    assert.equal(hold.target, f.second);
-    assert.equal(f.drivers.length, 1, "the rebind waits for the background work");
+type RetiredWorktreeFixture = Awaited<ReturnType<typeof retiredWorktreeFixture>>;
 
-    await f.waitFor(() => f.drivers[1]?.prompts.length === 1, "the bound did not release the queued prompt");
-    assert.equal(f.drivers[0]!.endCalls, 1, "the work is ended once, at the bound");
-    assert.deepEqual(f.drivers[0]!.prompts, []);
-    assert.equal(f.store.readMeta("s1")?.backgroundJobs?.find((job) => job.id === "monitor-1")?.terminalStatus, "killed");
+function startShellJob(f: RetiredWorktreeFixture, driver: number, id: string): void {
+  const job: DriverBackgroundJob = { id, launchType: "shell", startedAt: Date.now() };
+  f.live.set(id, job);
+  const jobs = [...f.live.values()];
+  const ids = jobs.map((item) => item.id).sort();
+  f.drivers[driver]!.cb.onBackgroundWork?.({ state: "running", pendingTaskIds: ids, jobs, observedTaskIds: ids });
+}
+
+function finishShellJob(f: RetiredWorktreeFixture, driver: number, id: string): void {
+  const job = f.live.get(id)!;
+  f.live.delete(id);
+  const jobs = [...f.live.values()];
+  const ids = jobs.map((item) => item.id).sort();
+  const terminalJobs: DriverBackgroundTerminalJob[] = [
+    { ...job, status: "completed", terminalAt: Date.now(), continuationRequired: false },
+  ];
+  f.drivers[driver]!.cb.onBackgroundWork?.(jobs.length
+    ? { state: "running", pendingTaskIds: ids, jobs, observedTaskIds: ids, terminalJobs }
+    : { state: null, pendingTaskIds: [], terminalJobs });
+}
+
+function worktreeRebindHolds(f: RetiredWorktreeFixture): SessionQueueHoldView[] {
+  return f.sent.flatMap((message) => {
+    if (message.type !== "session_runtime_updated") return [];
+    const hold = (message as { snapshot: { queueHold?: SessionQueueHoldView | null } }).snapshot.queueHold;
+    return hold?.kind === "worktree_rebind" ? [hold] : [];
+  });
+}
+
+/** The incident (#4210): the session moves to its second worktree, where that provider binds the
+ * first one as a sibling, and the job this returns is running when its first turn ends. */
+async function movedToSecondWorktree(
+  options: { handoffWaitMaxMs?: number; retire?: "before_job" | "after_job" } = {},
+): Promise<RetiredWorktreeFixture> {
+  let f: RetiredWorktreeFixture | undefined;
+  f = await retiredWorktreeFixture({
+    createdSibling: true,
+    turn: () => "accept",
+    ...(options.handoffWaitMaxMs ? { handoffWaitMaxMs: options.handoffWaitMaxMs } : {}),
+    onPrompt: async (text) => {
+      if (text !== WATCH_TURN) return;
+      if (options.retire === "before_job") await f!.retire();
+      startShellJob(f!, f!.drivers.length - 1, "ci-watcher-1");
+    },
+  });
+  await f.manager.selectWorktree("s1", f.second);
+  await f.waitFor(() => f!.internals.active.get("s1")?.client?.pid === 2, "the selection did not move the provider");
+  assert.equal(f.observed.at(-1)?.cwd, f.second);
+  assert.deepEqual(f.internals.active.get("s1").boundOwnedWorktrees, [f.first]);
+  f.manager.prompt("s1", WATCH_TURN);
+  await f.waitFor(() => f!.drivers[1]!.prompts.length === 1 && f!.store.readMeta("s1")?.status === "idle",
+    "the turn that starts the job did not finish");
+  if (options.retire === "after_job") await f.retire();
+  await f.settle();
+  return f;
+}
+
+test("a session working in its selected worktree is never held to move there, across turns that end with a job running (#4210)", async () => {
+  if (process.platform !== "linux") return;
+  const bound = 100;
+  const f = await movedToSecondWorktree({ handoffWaitMaxMs: bound, retire: "after_job" });
+  try {
+    f.manager.prompt("s1", "next turn");
+    await f.waitFor(() => f.drivers[1]!.prompts.length === 2, "the live provider did not take the prompt");
+    await f.waitFor(() => f.store.readMeta("s1")?.status === "idle", "the turn did not finish");
+    startShellJob(f, 1, "ci-watcher-2");
+    f.manager.prompt("s1", "another turn");
+    await f.waitFor(() => f.drivers[1]!.prompts.length === 3, "the next turn was held behind the second job");
+    await new Promise((done) => setTimeout(done, bound * 3));
+
+    assert.deepEqual(worktreeRebindHolds(f), [], "no hold names the worktree the provider runs in");
+    assert.equal(f.drivers.length, 2, "nothing relaunches while the process owns the work");
+    assert.equal(f.drivers[1]!.endCalls, 0, "the handoff bound has nothing to end");
+    assert.deepEqual([...f.live.keys()].sort(), ["ci-watcher-1", "ci-watcher-2"]);
+    assert.equal(f.internals.active.get("s1").pendingWorktreeRebind, undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a retired sibling is dropped by a relaunch once the live process's background work has ended (#4210)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await movedToSecondWorktree({ retire: "after_job" });
+  try {
+    assert.equal(f.drivers.length, 2);
+    finishShellJob(f, 1, "ci-watcher-1");
+    await f.waitFor(() => f.internals.active.get("s1")?.client?.pid === 3, "the ended work did not wake the relaunch");
+    assert.equal(f.observed.at(-1)?.cwd, f.second);
+    assert.equal(f.internals.active.get("s1").boundOwnedWorktrees, undefined, "the retired worktree is no longer bound");
+    assert.deepEqual(worktreeRebindHolds(f), []);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a relaunch requested before the turn started its job stands aside for that job (#4210)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await movedToSecondWorktree({ retire: "before_job" });
+  try {
+    f.manager.prompt("s1", "next turn");
+    await f.waitFor(() => f.drivers[1]!.prompts.length === 2, "the requested relaunch held the next turn");
+    assert.deepEqual(worktreeRebindHolds(f), []);
+    assert.equal(f.drivers.length, 2);
+    assert.equal(f.drivers[1]!.endCalls, 0);
+    const entry = f.internals.active.get("s1");
+    assert.equal(entry.pendingWorktreeRebind, undefined);
+
+    // A hold computed before a drain has stood the request down names nothing either.
+    await f.waitFor(() => f.store.readMeta("s1")?.status === "idle", "the turn did not finish");
+    entry.pendingWorktreeRebind = f.second;
+    entry.retiredWorktreeRebind = f.second;
+    entry.queue.push({ id: "waiting", text: "waiting", images: [] });
+    assert.equal(f.internals.queueHoldFor("s1", entry), null);
+    entry.queue.length = 0;
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a provider-initiated turn that starts a job after the retirement publishes no hold when it settles (#4210)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await retiredWorktreeFixture({ turn: () => "accept" });
+  try {
+    f.drivers[0]!.cb.onProviderInitiatedTurn?.("started", "provider-turn-1");
+    await f.retire();
+    assert.equal(f.internals.active.get("s1").pendingWorktreeRebind, f.second, "requested while no work was running");
+    startShellJob(f, 0, "ci-watcher-1");
+    f.manager.prompt("s1", "next turn");
+    f.drivers[0]!.cb.onProviderInitiatedTurn?.("settled", "provider-turn-1");
+    await f.waitFor(() => f.drivers[0]!.prompts.length === 1, "the live provider did not take the prompt");
+    assert.deepEqual(worktreeRebindHolds(f), []);
+    assert.equal(f.drivers.length, 1);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("releasing a stale hold on a session already in its worktree leaves its background job running (#4210)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await movedToSecondWorktree({ retire: "after_job" });
+  try {
+    // A prompt waits while the release arrives. The id is whatever hold the runner would name, if any.
+    const entry = f.internals.active.get("s1");
+    entry.queue.push({ id: "waiting", text: "waiting", images: [] });
+    const holdId = f.internals.queueHoldFor("s1", entry)?.holdId ?? "worktree-rebind:1";
+    const released = await f.manager.releaseQueueHold("s1", holdId, { kind: "runner" });
+    entry.queue.length = 0;
+    assert.deepEqual(released, { outcome: "refused", reason: "no_hold" });
+    assert.equal(f.drivers[1]!.endCalls, 0, "the provider process that owns the job was not retired");
+    assert.deepEqual([...f.live.keys()], ["ci-watcher-1"]);
+    assert.equal(f.store.readMeta("s1")?.backgroundJobs?.find((job) => job.id === "ci-watcher-1")?.terminalStatus, undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a provider that has not moved keeps one hold for its switch, which clears once it runs there (#4210)", async () => {
+  if (process.platform !== "linux") return;
+  // The session is in its first worktree, with the second bound, so the selection is writable at
+  // once and the session works there while the provider still has to move.
+  const f = await retiredWorktreeFixture({ createdSibling: true, turn: () => "accept" });
+  try {
+    startShellJob(f, 0, "ci-watcher-1");
+    await f.manager.selectWorktree("s1", f.second);
+    f.manager.prompt("s1", "next turn");
+    await f.waitFor(() => worktreeRebindHolds(f).length > 0, "the waiting prompt got no hold");
+    const [hold] = worktreeRebindHolds(f);
+    assert.equal(hold!.target, f.second);
+    assert.equal(f.internals.active.get("s1").cwd, f.first, "the provider really has not moved");
+    assert.deepEqual(f.drivers[0]!.prompts, [], "the prompt waits for the move");
+
+    finishShellJob(f, 0, "ci-watcher-1");
+    await f.waitFor(() => f.drivers[1]?.prompts.length === 1, "the prompt did not run after the move");
+    assert.equal(f.internals.active.get("s1").cwd, f.second);
+    startShellJob(f, 1, "ci-watcher-2");
+    f.manager.prompt("s1", "another turn");
+    await f.waitFor(() => f.drivers[1]!.prompts.length === 2, "the moved provider was held again");
+    assert.deepEqual([...new Set(worktreeRebindHolds(f).map((item) => item.holdId))], [hold!.holdId], "one hold, once");
+
+    // Standing aside covers exactly a live process already in its selection, with work it owns.
+    const moved = f.internals.active.get("s1");
+    assert.equal(f.internals.retiredBindWaitsForLiveWork("s1", moved), true);
+    assert.equal(f.internals.retiredBindWaitsForLiveWork("s1", { ...moved, cwd: f.first }), false,
+      "a relaunch that also moves the provider keeps its hold");
+    f.store.patchMeta("s1", { orphanedWork: { markedAt: Date.now(), reason: "process_exit", pendingTaskIds: ["ci-watcher-2"] } });
+    assert.equal(f.internals.retiredBindWaitsForLiveWork("s1", moved), false, "orphaned work has no live owner to protect");
+  } finally {
+    f.cleanup();
+  }
+});
+
+const CONTINUATION_PREFIX = "Managed background jobs reached their terminal barrier.";
+const WATCH_TURN = "watch CI and review";
+
+/** The incident's turn (#3542): it starts a monitor that never ends and a subagent. */
+function launchMonitorAndSubagent(f: RetiredWorktreeFixture, subagentOnly = false): void {
+  const startedAt = Date.now();
+  const jobs: DriverBackgroundJob[] = [
+    { id: "agent-1", launchType: "agent", startedAt },
+    ...(subagentOnly ? [] : [{ id: "monitor-1", launchType: "monitor" as const, startedAt }]),
+  ];
+  for (const job of jobs) f.live.set(job.id, job);
+  const ids = jobs.map((job) => job.id).sort();
+  f.drivers[0]!.cb.onBackgroundWork?.({ state: "running", pendingTaskIds: ids, jobs, observedTaskIds: ids });
+}
+
+/** The subagent finishes after its turn ended, so its result is owed a continuation. */
+function finishSubagent(f: RetiredWorktreeFixture): void {
+  const agent = f.live.get("agent-1")!;
+  f.live.delete("agent-1");
+  const jobs = [...f.live.values()];
+  const ids = jobs.map((job) => job.id).sort();
+  const terminalJobs: DriverBackgroundTerminalJob[] = [
+    { ...agent, status: "completed", terminalAt: Date.now(), continuationRequired: true },
+  ];
+  f.drivers[0]!.cb.onBackgroundWork?.(jobs.length
+    ? { state: "running", pendingTaskIds: ids, jobs, observedTaskIds: ids, terminalJobs }
+    : { state: null, pendingTaskIds: [], terminalJobs });
+}
+
+test("a continuation held behind a retirement rebind runs after it, in a launch without the retired bind (#3542)", async () => {
+  if (process.platform !== "linux") return;
+  let f: RetiredWorktreeFixture | undefined;
+  f = await retiredWorktreeFixture({
+    handoffWaitMaxMs: 60_000,
+    onPrompt: (text) => { if (text === WATCH_TURN) launchMonitorAndSubagent(f!); },
+    turn: () => "accept",
+    // Ending the jobs retires the process that owns them, as Claude's driver does.
+    processLive: (driver) => driver > 0 || !f || f.drivers[0]!.endCalls === 0,
+  });
+  try {
+    f.manager.prompt("s1", WATCH_TURN);
+    await f.waitFor(() => f!.drivers[0]!.prompts.length === 1 && f!.store.readMeta("s1")?.status === "idle",
+      "the launching turn did not finish");
+    finishSubagent(f);
+    await f.retire();
+    await f.settle();
+    assert.equal(f.drivers.length, 1, "the live process keeps its monitor after the retirement (#4210)");
+    await f.internals.endBackgroundJobs("s1", { actor: { kind: "runner" }, reason: "handoff_wait_bound" });
+    f.manager.prompt("s1", "continue");
+    await f.waitFor(() => f!.drivers[1]?.prompts.length === 2,
+      "the continuation and the queued prompt did not run after the rebind");
+
+    assert.equal(f.drivers[0]!.endCalls, 1, "the request ended the monitor once");
+    assert.deepEqual(f.drivers[0]!.prompts, [WATCH_TURN], "nothing launched from the retired generation's binds");
+    assert.ok(f.drivers[1]!.prompts[0]!.startsWith(CONTINUATION_PREFIX), "the continuation runs first");
+    assert.match(f.drivers[1]!.prompts[0]!, /"id":"monitor-1","launchType":"monitor","status":"killed"/);
+    assert.equal(f.drivers[1]!.prompts[1], "continue", "then the prompt that waited behind the rebind");
     f.assertRelaunched();
+    const meta = f.store.readMeta("s1")!;
+    assert.ok(meta.backgroundJobs?.find((job) => job.id === "agent-1")?.assistantResultPersistedAt,
+      "the subagent's result was delivered");
+    assert.equal(meta.backgroundWorkState, undefined);
+    assert.equal(f.internals.active.get("s1").pendingWorktreeRebind, undefined, "the retirement rebind completed");
+    assert.deepEqual(f.errors(), []);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a retirement rebind pending behind a continuation whose launch fails runs next and carries it (#3542)", async () => {
+  if (process.platform !== "linux") return;
+  let f: RetiredWorktreeFixture | undefined;
+  let launchFailed = false;
+  f = await retiredWorktreeFixture({
+    handoffWaitMaxMs: 300,
+    onPrompt: (text) => { if (text === WATCH_TURN) launchMonitorAndSubagent(f!, true); },
+    turn: (text, driver) => {
+      if (driver > 0 || !text.startsWith(CONTINUATION_PREFIX)) return "accept";
+      launchFailed = true;
+      return "fail_launch";
+    },
+    // The process looked live, so the continuation went first, until its launch proved otherwise.
+    processLive: (driver) => driver > 0 || !launchFailed,
+  });
+  try {
+    f.manager.prompt("s1", WATCH_TURN);
+    await f.waitFor(() => f!.drivers[0]!.prompts.length === 1 && f!.store.readMeta("s1")?.status === "idle",
+      "the launching turn did not finish");
+    await f.retire();
+    await f.settle();
+    assert.equal(f.drivers.length, 1, "the live process keeps its subagent after the retirement (#4210)");
+    finishSubagent(f);
+    await f.waitFor(() => f!.drivers[1]?.prompts.length === 1,
+      "the rebind did not run after the continuation's launch failed");
+    f.manager.prompt("s1", "continue");
+    await f.waitFor(() => f!.drivers[1]?.prompts.length === 2, "the prompt did not follow the carried continuation");
+
+    assert.equal(f.drivers[0]!.prompts.length, 2);
+    assert.ok(f.drivers[0]!.prompts[1]!.startsWith(CONTINUATION_PREFIX), "the continuation's one failed launch");
+    assert.ok(f.drivers[1]!.prompts[0]!.startsWith(CONTINUATION_PREFIX), "the rebind carried it first");
+    assert.equal(f.drivers[1]!.prompts[1], "continue");
+    f.assertRelaunched();
+    const agent = f.store.readMeta("s1")!.backgroundJobs?.find((job) => job.id === "agent-1");
+    assert.ok(agent?.assistantResultPersistedAt, "the result was delivered, not dropped");
+    assert.equal(agent?.continuationLaunchFailures, 1);
+    assert.equal(agent?.continuationLaunchHeldAt, undefined);
+    assert.equal(f.store.readMeta("s1")?.backgroundWorkState, undefined);
+    assert.equal(f.internals.active.get("s1").pendingWorktreeRebind, undefined, "the retirement rebind completed");
+    // The fallback timer armed while a continuation is in flight finds nothing owed when it fires.
+    if (f.internals.backgroundContinuationTimers.has("s1")) {
+      f.internals.cancelBackgroundContinuationTimer("s1");
+      f.internals.scheduleBackgroundContinuation("s1");
+    }
+    await f.settle();
+    assert.equal(f.drivers.length, 2);
+    assert.equal(f.drivers[1]!.prompts.length, 2, "nothing retries after delivery");
+    assert.equal(f.errors().some((message) => message.includes("failed to start")), false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a continuation that keeps failing before provider acceptance is held after bounded attempts, and a person's accepted turn delivers it (#3542)", async () => {
+  if (process.platform !== "linux") return;
+  let f: RetiredWorktreeFixture | undefined;
+  let failing = true;
+  f = await retiredWorktreeFixture({
+    onPrompt: (text) => { if (text === WATCH_TURN) launchMonitorAndSubagent(f!, true); },
+    turn: (text) => failing && text.startsWith(CONTINUATION_PREFIX) ? "fail_launch" : "accept",
+  });
+  const agent = () => f!.store.readMeta("s1")?.backgroundJobs?.find((job) => job.id === "agent-1");
+  const attempts = () => f!.drivers[0]!.prompts.filter((text) => text.startsWith(CONTINUATION_PREFIX)).length;
+  const statuses = () => f!.sent.filter((message) => message.type === "session_status")
+    .map((message) => message as { status: string; detail?: string });
+  /** Once the failed turn has unwound, the armed retry fires now instead of after its 30 seconds. */
+  const fireRetry = async () => {
+    await f!.waitFor(() => !f!.internals.active.get("s1")?.running, "the failed turn did not unwind");
+    assert.equal(f!.internals.backgroundContinuationTimers.get("s1")?.retry, true, "a delayed retry is armed");
+    f!.internals.cancelBackgroundContinuationTimer("s1");
+    f!.internals.scheduleBackgroundContinuation("s1");
+  };
+  try {
+    f.manager.prompt("s1", WATCH_TURN);
+    await f.waitFor(() => f!.drivers[0]!.prompts.length === 1 && f!.store.readMeta("s1")?.status === "idle",
+      "the launching turn did not finish");
+    finishSubagent(f);
+    await f.waitFor(() => agent()?.continuationLaunchFailures === 1, "the first launch failure was not counted");
+    await fireRetry();
+    await f.waitFor(() => agent()?.continuationLaunchFailures === 2, "the second launch failure was not counted");
+    await fireRetry();
+    await f.waitFor(() => agent()?.continuationLaunchHeldAt !== undefined, "the third failure did not hold it");
+    await f.waitFor(() => f!.store.readMeta("s1")?.status === "input_required", "the session does not show the hold");
+
+    assert.equal(attempts(), 3);
+    const holds = f.errors().filter((message) => message.includes("failed to start 3 times in a row"));
+    assert.equal(holds.length, 1, "the hold is reported once");
+    assert.equal(holds[0],
+      "The automatic turn that returns the result of 1 finished background job failed to start 3 times in a row, " +
+      `before the provider accepted it: bwrap: Can't find source path ${f.sibling}: No such file or directory. ` +
+      "Wollipog stopped retrying it and kept the result. Restart the session to deliver it in a fresh provider " +
+      "process; a message the provider accepts also retries it.");
+    assert.deepEqual(statuses().at(-1), { ...statuses().at(-1), status: "input_required", detail: holds[0] });
+    // Not retried, and not dropped: the result is still owed and unsubmitted.
+    assert.equal(f.internals.backgroundContinuationTimers.has("s1"), false, "no retry is armed");
+    const held = f.store.readMeta("s1")!;
+    assert.equal(held.backgroundWorkState, "continuation_pending");
+    assert.ok(agent()?.continuationQueuedAt);
+    assert.equal(agent()?.continuationSubmittedAt, undefined);
+    assert.equal(agent()?.assistantResultPersistedAt, undefined);
+    assert.equal(f.internals.hasAuthoritativeBackgroundWork(held), false, "a held continuation keeps no active-work slot");
+    // A job that runs beside the held result still holds the slot, until it ends.
+    const monitor: DriverBackgroundJob = { id: "monitor-2", launchType: "monitor", startedAt: Date.now() };
+    f.drivers[0]!.cb.onBackgroundWork?.({ state: "running", pendingTaskIds: ["monitor-2"], jobs: [monitor],
+      observedTaskIds: ["monitor-2"] });
+    assert.equal(f.store.readMeta("s1")?.backgroundWorkState, "continuation_pending");
+    assert.equal(f.internals.hasAuthoritativeBackgroundWork(f.store.readMeta("s1")), true,
+      "live detached work keeps its active-work slot beside a held result");
+    f.drivers[0]!.cb.onBackgroundWork?.({ state: null, pendingTaskIds: [],
+      terminalJobs: [{ ...monitor, status: "killed", terminalAt: Date.now(), continuationRequired: false }] });
+    assert.equal(f.internals.hasAuthoritativeBackgroundWork(f.store.readMeta("s1")), false);
+    // An orphaned job's id beside the held result is a diagnostic, not running work, once its one
+    // recovery was attempted; recovery observing it live again makes it running work.
+    const orphaned = {
+      ...f.store.readMeta("s1")!, pendingBackgroundTaskIds: ["monitor-3"],
+      orphanedWork: { markedAt: Date.now(), reason: "process_exit" as const, pendingTaskIds: ["monitor-3"],
+        recoveryAttemptedAt: Date.now() },
+    };
+    assert.equal(orphaned.backgroundWorkState, "continuation_pending");
+    assert.equal(f.internals.hasAuthoritativeBackgroundWork(orphaned), false,
+      "an orphaned id beside a held result keeps no active-work slot");
+    assert.equal(f.internals.hasAuthoritativeBackgroundWork({
+      ...orphaned, orphanedWork: { ...orphaned.orphanedWork, recoveryObservedTaskIds: ["monitor-3"] },
+    }), true, "a recovered job observed live does");
+    assert.equal(f.internals.backgroundFollowUp(held), null, "it is not presented as queued");
+    await f.settle();
+    assert.equal(attempts(), 3, "nothing retries on its own");
+    // An unrelated settle keeps the hold visible.
+    f.internals.emitStatus("s1", "idle");
+    assert.equal(statuses().at(-1)?.status, "input_required");
+    assert.match(statuses().at(-1)?.detail ?? "",
+      /^The automatic turn that returns the result of 1 finished background job failed to start 3 times in a row, before the provider accepted it\. Wollipog stopped retrying it .* Restart the session/u);
+
+    failing = false;
+    f.manager.prompt("s1", "hello");
+    await f.waitFor(() => !!agent()?.assistantResultPersistedAt, "a person's accepted turn did not retry the held result");
+    assert.deepEqual(f.drivers[0]!.prompts.slice(-2).map((text) => text.startsWith(CONTINUATION_PREFIX) ? "continuation" : text),
+      ["hello", "continuation"]);
+    assert.equal(agent()?.continuationLaunchHeldAt, undefined);
+    assert.equal(agent()?.continuationLaunchFailures, undefined);
+    await f.waitFor(() => f!.store.readMeta("s1")?.status === "idle", "the session did not return to idle");
+    assert.equal(f.store.readMeta("s1")?.backgroundWorkState, undefined);
   } finally {
     f.cleanup();
   }

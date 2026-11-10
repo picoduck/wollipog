@@ -330,6 +330,26 @@ test("the chosen option keeps its label while busy, and a failed decision is a d
   }
 });
 
+test("a read-only child question in the dock absorbs A and D instead of deciding a different request (#4359 review)", async () => {
+  const delegated: PendingApproval = { requestId: "delegated-question", occurrenceId: "delegated-question",
+    kind: "workflow_decision", title: "Question", options: [],
+    workflowDecision: { category: "implementation_question", authority: "orchestrator",
+      resourceSnapshot: { category: "implementation_question", kind: "question", question: "Which approach?", options: [] } } as never };
+  const human = permission();
+  const session = sessionWith({ ...human, additionalRequests: [delegated] });
+  const decisions: unknown[] = [];
+  const view = await render(<RequestDock session={session} requests={[human, delegated]} runnerOnline />,
+    { approve: async (_id, body) => { decisions.push(body); return sessionWith(null); } });
+  try {
+    await act(async () => { assert.equal(revealDockedRequest(session.id, delegated.requestId), true); });
+    assert.match(view.container.querySelector(".request-card")?.textContent ?? "", /The Orchestrator is handling this request\./u);
+    for (const intent of ["approve", "deny"] as const) {
+      await act(async () => { assert.equal(decideDockedRequest(session.id, intent), true, "the visible read-only card owns the shortcut"); await tick(); });
+    }
+    assert.deepEqual(decisions, []);
+  } finally { await view.unmount(); }
+});
+
 test("A and D act on the card and its keycaps show only where they would", async () => {
   const decisions: unknown[] = [];
   const request = permission();

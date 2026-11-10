@@ -20,7 +20,10 @@ import { type TurnUsage,
 import { Markdown } from "./Markdown.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import { AUTOMATIC_TURNS_HELD_SENTENCE, describeTurnError, isAutomaticTurnsHeld } from "../turn-error.js";
+import {
+  AUTOMATIC_TURNS_HELD_SENTENCE, BACKGROUND_RESULTS_HELD_SENTENCE, describeTurnError, isAutomaticTurnsHeld,
+  isBackgroundResultsHeld,
+} from "../turn-error.js";
 import {
   MeasuredVirtualList,
   type VirtualRevealOutcome,
@@ -43,7 +46,7 @@ import { markdownPlainText } from "./markdown-plain-text.js";
 import { TranscriptActionMenu, transcriptActionAvailable, type TranscriptAction } from "./TranscriptActions.js";
 import { useIsCoarsePointer } from "./useIsMobile.js";
 import { reportRenderProbe, TIMELINE_ROW_PROBE } from "./render-probe.js";
-import { formatClock, formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
+import { formatMessageTimestamp, formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import {
   activitySpanDescription,
   agentLogOnly,
@@ -2476,6 +2479,7 @@ function TimelineRowContent({
       return (
         <div className="tl-row user">
           <div className="tl-message-stack user">
+            <MessageTimestamp timestamp={item.createdAt} />
             <div className="tl-bubble">
               {item.images && item.images.length > 0 && (
                 <div className="bubble-images">
@@ -2510,12 +2514,13 @@ function TimelineRowContent({
         </div>
       );
     case "agent_message": {
-      // Codex-style: the model response is full-width document flow, not a chat bubble. Its time,
-      // usage and actions live once in the turn's footer. Side Chat adds Insert into Draft to every
+      // Codex-style: the model response is full-width document flow, not a chat bubble. Each message
+      // shows its recorded time; usage and actions live in the turn's footer. Side Chat adds Insert into Draft to every
       // top-level reply, so an earlier reply can come back as well as the latest (#2862).
       const insertable = onInsertReply !== undefined && !item.parentToolUseId && item.text.trim() !== "";
       return (
         <div className="tl-agent-msg">
+          <MessageTimestamp timestamp={item.createdAt} />
           <ReplyArtifactScope text={item.text} settled={mediaSettled} previews={replyArtifacts}>
             <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
           </ReplyArtifactScope>
@@ -2565,6 +2570,8 @@ function TimelineRowContent({
       if (item.nonFatal) return <TurnProblemNotice message={item.message} />;
       return isAutomaticTurnsHeld(item.message)
         ? <AutomaticTurnsHeldNotice message={item.message} />
+        : isBackgroundResultsHeld(item.message)
+        ? <BackgroundResultsHeldNotice message={item.message} />
         : <TurnFailedNotice message={item.message} prompt={failedTurnPrompt} />;
     case "turn_interrupted":
       // The row shows only its turn's footer ("Stopped at …"); EventTimelineBody renders that.
@@ -2911,6 +2918,12 @@ function AgentLogStep({ item, open, onToggle }: {
   );
 }
 
+function MessageTimestamp({ timestamp }: { timestamp?: number }) {
+  const formatted = formatMessageTimestamp(timestamp);
+  if (!formatted) return null;
+  return <time className="tl-message-timestamp" dateTime={formatted.dateTime} title={formatted.title}>{formatted.label}</time>;
+}
+
 function TimelineTimestamp({ label, timestamp }: { label: "Recorded" | "Started" | "Last Activity"; timestamp?: number }) {
   const now = useContext(TimelineClockContext);
   const sessionActive = useContext(TimelineActivityContext);
@@ -3160,6 +3173,21 @@ function AutomaticTurnsHeldNotice({ message }: { message: string }) {
   );
 }
 
+/** The runner stopped retrying the automatic turn that returns finished background results (#3542).
+ * No person's turn failed, so there is no Retry Turn; Restart or a person's accepted message delivers
+ * them. The runner's count of attempts and the provider's own words stay behind Show Details. */
+function BackgroundResultsHeldNotice({ message }: { message: string }) {
+  return (
+    <Notice
+      tone="warning"
+      title="Background Results Held"
+      details={<div className="code-well"><pre>{withoutPromptFailedPrefix(message)}</pre></div>}
+    >
+      <p>{BACKGROUND_RESULTS_HELD_SENTENCE}</p>
+    </Notice>
+  );
+}
+
 /** A problem the driver reported while the turn kept running (#3806), such as an async question it
  * could not show as a card. The turn did not fail, so there is no Retry Turn: re-running a turn that
  * completed would repeat its side effects. The runner writes this message as a plain sentence. */
@@ -3228,7 +3256,7 @@ export function turnActions({ responseText, forkAvailability, onFork, forkTurn, 
   return actions;
 }
 
-/** One footer per settled turn (§11.3): Turn N, its finishing clock time, tokens and cost, then the
+/** One footer per settled turn (§11.3): Turn N, its finishing date and time, tokens and cost, then the
  * turn's actions at the trailing end. More Turn Actions stays visible at rest on every pointer, so
  * every action, Rewind included, is found without hovering (#599); on a fine pointer, Copy Response
  * and a usable Fork After This Turn sit before it and show on hover or focus. */
@@ -3247,7 +3275,7 @@ function TurnFooter({ summary, onFork, forkAvailability, prompt, alone = false, 
   const { forkTurn, stopped } = summary;
   // A stopped turn names when it stopped in place of when it finished.
   const clockAt = stopped?.at ?? summary.finishedAt ?? summary.startedAt;
-  const clock = formatClock(clockAt);
+  const clock = formatMessageTimestamp(clockAt)?.label;
   const span = turnSpanDescription(summary);
   const usage = summary.usage ? turnUsageLabel(summary.usage, driver) : null;
   const responseText = useMemo(() => turnResponseText(summary), [summary.responseParts]);

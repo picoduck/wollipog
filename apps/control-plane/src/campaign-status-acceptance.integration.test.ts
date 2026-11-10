@@ -33,6 +33,8 @@ import { ControlPlaneDb } from "./db.js";
 import { Hub, type Socket } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
 import { SessionsService } from "./sessions.js";
+import type { DecisionRuntime } from "./decision-runtime.js";
+import { fakeScopeGrantRuntime } from "./scope-grant-test-fixture.js";
 
 const RUNNER_ID = "acceptance-runner";
 const WORKSPACE_ID = "acceptance-workspace";
@@ -94,7 +96,7 @@ type RunnerReply = (message: ControlPlaneToRunner, hub: Hub) => void;
  * One control plane: the real hub and service over an in-memory database, the observation wiring
  * from index.ts, the browser routes, a scripted runner socket, and a dashboard for the owner.
  */
-async function acceptanceStack(options: { completion?: "retain" | "stop_and_archive"; prompt?: string } = {}) {
+async function acceptanceStack(options: { completion?: "retain" | "stop_and_archive"; prompt?: string; issues?: number[] } = {}) {
   const completion = options.completion ?? "retain";
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
@@ -167,7 +169,42 @@ async function acceptanceStack(options: { completion?: "retain" | "stop_and_arch
     svc.onSessionStatus(created.data.id, "running");
     return created.data.id;
   };
+  // The root's first message names its issues; only the root's checked proposal grants them (#4259,
+  // #4282). The root proposes `options.issues`, the fake constraint check admits, and the runner
+  // reads each as an issue of REPO.
+  const internals = svc as unknown as { decisionRuntime: DecisionRuntime };
+  const defaultRuntime = internals.decisionRuntime;
+  const named = options.issues ?? [101, 102];
+  svc.setDecisionRuntime(fakeScopeGrantRuntime(db).runtime);
+  // The fake Decision Model's harness runner, which a typed check requires to be current (#4283).
+  db.registerRunner({ runnerId: "r", hostname: "decision", os: "linux", version: "1.0.0", workspaces: [], agents: [] }, Date.now(), PROTOCOL_VERSION);
+  reply =(message, replyHub) => {
+    if (message.type !== "campaign_issue_scope") return;
+    if (message.operation === "grant_issue_numbers") {
+      replyHub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId, ok: true,
+        issueNumbersGrant: "applied" }, RUNNER_ID);
+      return;
+    }
+    if (message.operation !== "inspect") return;
+    const issues = message.issues ?? [];
+    replyHub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId, ok: true,
+      repository: REPO, candidates: issues.map((number) => ({ issue: { repository: REPO, number }, title: `Issue ${number}`,
+        source: "member_checklist" as const })),
+      ...(message.facts ? { issueFacts: issues.map((number) => ({ number, kind: "issue" as const, state: "open" as const, labels: [], assignees: [],
+        title: `Issue ${number}`, bodyExcerpt: "" })) } : {}) }, RUNNER_ID);
+  };
   const root = createRoot("Acceptance Campaign");
+  const prompt = options.prompt ?? "Orchestrate issues 101 and 102.";
+  // The runner records the launch prompt as the root's first user message.
+  db.appendEvent(root, { kind: "user_message", text: prompt }, Date.now());
+  const proposed = await svc.proposeCampaignSeedScope(root, { requestId: "acceptance-seed", expectedRevision: 0, removals: [],
+    additions: named.map((number) => ({ repository: REPO, number })), explanation: "The issues the owner named.",
+    proposal: { issues: named.map((number) => ({ repository: REPO, number, origin: "owner_named" as const, rationale: "Named in the message." })),
+      requestedCount: null, constraints: [], withheldOperations: [] } });
+  assert.equal(proposed?.data?.seedProposal.outcome, "issues_granted", proposed?.error ?? "proposed");
+  assert.deepEqual(db.getSession(root)!.orchestratorPolicy!.issueNumbers, named, "the checked proposal granted the root's issues");
+  reply = null;
+  svc.setDecisionRuntime(defaultRuntime);
   controllerId = root;
 
   let sequence = 0;
@@ -527,7 +564,7 @@ test("AC5: archiving and deleting a child through the service preserves work-ite
 });
 
 test("AC6: delivery requires work-item verification; idleness, completion, a merged or merge-queued stage, an approved merge, and a closed issue never satisfy it", async () => {
-  const stack = await acceptanceStack({ prompt: "Orchestrate issue 101." });
+  const stack = await acceptanceStack({ prompt: "Orchestrate issue 101.", issues: [101] });
   const { db, svc, owner, root, child, report, byKey, setRunnerReply, close } = stack;
   try {
     const plan = svc.recordCampaignPlan(root, {
@@ -703,12 +740,20 @@ test("AC14 (#1352): a stalled continuation is reported at the root beside an unc
       runnerId: RUNNER_ID, eventFromSeq: event!.seq, eventThroughSeq: event!.seq, payloadJson: "{}",
       payloadSha256: "a".repeat(64), expiresAt: Date.now() + 60_000, attemptCount: 1, now: Date.now(),
     }));
+    // #4146: a running child is live work, so the campaign would read Active beside the stall; with
+    // nothing live, an unfinished campaign whose continuation stalled reads Campaign Stuck.
+    svc.onSessionStatus(worker, "idle");
+    svc.onSessionStatus(nested, "idle");
     const before = owner.work(root);
     db.updateCampaignContinuationForCommand("acceptance-continuation-cmd", "failed", Date.now(), "provider refused the turn");
     hub.sessionChangedById(root);
     const campaign = owner.session(root)!.orchestratorCampaign!;
-    assert.deepEqual([campaign.status, campaign.stalled], ["blocked", "continuation_failed"],
-      "the dashboard sees the stalled continuation at the root");
+    // This dashboard declares no protocol version, so it reads Campaign Stuck as the older `blocked`.
+    assert.deepEqual([campaign.status, campaign.stalled], ["blocked", "continuation_failed"]);
+    const projection = db.campaignProjection(root)!;
+    assert.equal(projection.status, "stuck");
+    assert.ok(projection.stuck?.items.some((item) => item.kind === "continuation" && item.state === "failed"),
+      "Campaign Status names the stalled continuation among what is stuck");
     assert.deepEqual([campaign.work?.counts, campaign.work?.revision], [before.counts, before.revision],
       "the stall is a campaign fact; it moves no work item");
     assert.equal(owner.session(nested)?.orchestratorCampaign?.stalled, undefined, "only the root's view carries the stall");

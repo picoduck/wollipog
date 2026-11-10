@@ -424,14 +424,16 @@ test("a pending Location switch says where the session moves, and a failed one w
     await pending.unmount();
   }
   const failed = await mount(sessionView({ locationSwitch: { ...base, state: "failed",
-    reason: "the target worktree could not be prepared: branch fix/link is checked out in another worktree" } }));
+    reason: "the target worktree could not be prepared: branch fix/link is checked out in worktree /work/docs-link, which " +
+      "session s_docs is using; continue the task in that session instead, so the work and its pull request stay with it" } }));
   try {
     const notice = failed.notices()[0]!;
     assert.ok(notice.classList.contains("t-warning"));
     assert.match(notice.textContent ?? "", /Location Switch Failed/u);
     assert.equal(notice.querySelector(".notice-body")?.textContent,
       "The switch to Location “Docs Site” (acme/docs) didn’t finish. " +
-      "The target worktree could not be prepared: branch fix/link is checked out in another worktree.");
+      "The target worktree could not be prepared: branch fix/link is checked out in worktree /work/docs-link, which " +
+      "session s_docs is using; continue the task in that session instead, so the work and its pull request stay with it.");
     const dismiss = notice.querySelector<HTMLButtonElement>('button[aria-label="Dismiss Notice"]')!;
     await act(async () => { dismiss.click(); });
     assert.equal(failed.notices().length, 0);

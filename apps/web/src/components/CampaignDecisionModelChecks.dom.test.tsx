@@ -3,11 +3,16 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { CampaignDecisionsResponse } from "@wollipog/protocol";
+import type { CampaignDecisionsResponse, DecisionKind } from "@wollipog/protocol";
 import { api } from "../api.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
+import { CampaignDecisions } from "./CampaignDecisions.js";
+import { TYPED_ADMITTED, TYPED_REFUSED, TYPED_UNCERTAIN } from "../e2e/decision-model-fixtures.js";
 
 const dom = new Window({ url: "http://localhost/" });
+// Campaign Status › Decision Model refreshes on a repeating timer.
+installDomTestCleanup(dom);
 for (const [name, value] of Object.entries({
   window: dom, document: dom.document, navigator: dom.navigator, localStorage: dom.localStorage,
   HTMLElement: dom.HTMLElement, HTMLButtonElement: dom.HTMLButtonElement, HTMLInputElement: dom.HTMLInputElement,
@@ -129,6 +134,177 @@ test("follow-up relatedness and closure-reason checks show their verdict beside 
   }
 });
 
+test("each selection proposal shows its outcome, issues, rationale and the Decision Model's reason in the same list (#4103)", async () => {
+  const read = api.campaignDecisions;
+  const proposal = (outcome: NonNullable<CampaignDecisionsResponse["decisions"][number]["selectionProposal"]>["outcome"], numbers: number[], explanation: string) =>
+    ({ outcome, explanation, issues: numbers.map((number) => ({ repository: "team/repo", number, title: `Issue ${number}` })) });
+  api.campaignDecisions = async () => ({ campaignSessionId: "root-1", decisions: [
+    decision("sel_admit", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, verdict: "admit",
+      reason: "Both are labeled priority/high.", selectionProposal: proposal("applied", [30, 31], "The two highest-priority open issues.") }),
+    decision("sel_refuse", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, verdict: "refuse",
+      reason: "Issue 40 is a typo fix, not a priority.", selectionProposal: proposal("refused", [40], "Next in the backlog.") }),
+    decision("sel_unsure", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, state: "uncertain", verdict: "uncertain",
+      reason: "The owner didn't say whether UI work counts.",
+      selectionProposal: { ...proposal("waiting_for_owner", [41], "A UI regression users report."), requestOccurrenceId: "wd_scope" } }),
+    decision("sel_failed", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, state: "failed", failureClass: "authentication",
+      selectionProposal: proposal("owner_declined", [42], "An old crash report.") }),
+  ], usage: { ...usage, calls: 4, unpricedCalls: 0 } });
+  const opened: string[] = [];
+  const requests: string[] = [];
+  const view = await render(<CampaignDecisionModelChecks sessionId="member-1" canClassify={false} refreshKey={1} onOpenSession={(id) => opened.push(id)}
+    findRequest={(target) => target.occurrenceId === "wd_scope" && target.sessionId === null ? "request:wd_scope" : null}
+    onOpenRequest={(key) => requests.push(key)} />);
+  try {
+    const items = [...view.container.querySelectorAll("li")];
+    assert.deepEqual(items.map(facts), [
+      { "Selection Proposal": "Admitted and added to the scope.", Issues: "#30 Issue 30; #31 Issue 31", Rationale: "The two highest-priority open issues.",
+        Verdict: "Fits Your Selection", Reason: "Both are labeled priority/high." },
+      { "Selection Proposal": "Refused back to the Orchestrator.", Issue: "#40 Issue 40", Rationale: "Next in the backlog.",
+        Verdict: "Doesn't Fit Your Selection", Reason: "Issue 40 is a typo fix, not a priority." },
+      { "Selection Proposal": "Waiting for your approval of the scope change.", Issue: "#41 Issue 41", Rationale: "A UI regression users report.",
+        Verdict: "Uncertain", Reason: "The owner didn't say whether UI work counts." },
+      { "Selection Proposal": "You declined the scope change.", Issue: "#42 Issue 42", Rationale: "An old crash report.", Verdict: "None",
+        Failure: "Sign-In Required" },
+    ]);
+    // Each item opens the campaign's Orchestrator session; the pending one also opens the owner's
+    // scope approval card. A selection is never classified here.
+    assert.deepEqual(items.map((item) => [...item.querySelectorAll("button")].map((node) => node.textContent)),
+      [["Open Session"], ["Open Session"], ["Open Request", "Open Session"], ["Open Session"]]);
+    await act(async () => { (items[2]!.querySelector("button") as HTMLButtonElement).click(); });
+    await act(async () => { ([...items[0]!.querySelectorAll("button")].at(-1) as HTMLButtonElement).click(); });
+    assert.deepEqual(requests, ["request:wd_scope"]);
+    assert.deepEqual(opened, ["root-1"], "the campaign root, not the member session showing the list");
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
+test("a Custom campaign's epic seed shows its reading beside the scope it affects; Full Control's scope grant stays in its own section (#4104)", async () => {
+  const read = api.campaignDecisions;
+  const seed = { sessionId: "root-1", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:abc" };
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [
+    decision("seed_read", { kind: "scope_grant", verdict: "grant", reason: "The person names epic #40 to orchestrate.", subject: { ...seed, seed: "seeded" } }),
+    decision("seed_none", { kind: "scope_grant", verdict: "grant", reason: "No issue is named.", subject: { ...seed, seed: "none" } }),
+    decision("seed_pending", { kind: "scope_grant", state: "pending", subject: { ...seed, seed: "pending" } }),
+    decision("seed_failed", { kind: "scope_grant", state: "failed", failureClass: "authentication", subject: { ...seed, seed: "owner" } }),
+    decision("seed_released", { kind: "scope_grant", state: "uncertain", verdict: "uncertain", reason: "Unclear.",
+      subject: { ...seed, seed: "none", classification: "orchestrator" } }),
+    decision("seed_scoped", { kind: "scope_grant", state: "failed", failureClass: "timed_out", subject: { ...seed, seed: "scoped" } }),
+    decision("grant_full_control", { kind: "scope_grant", verdict: "grant", reason: "Named issues." }),
+  ], usage: { ...usage, calls: 7, unpricedCalls: 0 } });
+  const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />);
+  try {
+    const items = [...view.container.querySelectorAll("li")];
+    assert.deepEqual(items.map((item) => [Object.keys(facts(item))[0], facts(item)["Epic Seed"], facts(item).Verdict]), [
+      ["Epic Seed", "It seeded the epic's issues; approve the issue scope before work is delegated.", "Message Read"],
+      ["Epic Seed", "It named no epic, so nothing waits.", "Message Read"],
+      ["Epic Seed", "Work waits to be delegated until the check finishes.", "Checking"],
+      ["Epic Seed", "Waiting for you: approve the campaign's issue scope, or continue without an epic.", "None"],
+      ["Epic Seed", "You let the Orchestrator delegate without an epic.", "Uncertain"],
+      ["Epic Seed", "You approved the campaign's issue scope, so nothing waits.", "None"],
+    ]);
+    assert.equal(facts(items[3]!).Failure, "Sign-In Required");
+    assert.deepEqual(items.map((item) => [...item.querySelectorAll("button")].map((node) => node.textContent)), [
+      ["Open Session"], ["Open Session"], ["Open Session"], ["Continue Without an Epic", "Open Session"], ["Open Session"], ["Open Session"],
+    ], "only a seed still left to the owner offers to continue without an epic");
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
+test("a Custom campaign's epic seed on the proposal check reads as the Epic Seed, and the owner may still continue without an epic (#4282)", async () => {
+  const read = api.campaignDecisions;
+  const classify = api.classifyCampaignDecision;
+  const classified: string[] = [];
+  const seed = { sessionId: "root-1", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:abc" };
+  const check = (occurrenceId: string, extra: Partial<CampaignDecisionsResponse["decisions"][number]>) =>
+    decision(occurrenceId, { kind: "scope_check", promptVersion: "scope_check.v1", ...extra });
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [
+    check("check_seeded", { verdict: "admit", typedAnswers: TYPED_ADMITTED, subject: { ...seed, seed: "seeded" } }),
+    check("check_refused", { verdict: "refuse", reason: "The message only mentions #12 as background.", typedAnswers: TYPED_REFUSED, subject: { ...seed } }),
+    check("check_pending", { state: "pending", subject: { ...seed } }),
+    check("check_uncertain", { state: "uncertain", verdict: "uncertain", typedAnswers: TYPED_UNCERTAIN, subject: { ...seed, seed: "owner" } }),
+    check("check_old_runner", { state: "failed", failureClass: "runner_incapable", subject: { ...seed, seed: "owner" } }),
+    check("check_granted", { verdict: "admit", typedAnswers: TYPED_ADMITTED, subject: { ...seed, seed: "none" } }),
+  ], usage: { ...usage, calls: 6, unpricedCalls: 0 } });
+  api.classifyCampaignDecision = async (_id, occurrenceId, classification) => {
+    classified.push(occurrenceId);
+    return { ...seed, classification };
+  };
+  const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />);
+  try {
+    const items = [...view.container.querySelectorAll("li.campaign-screen-item")];
+    assert.deepEqual(items.map((item) => [Object.keys(facts(item))[0], facts(item)["Epic Seed"], facts(item).Verdict]), [
+      ["Epic Seed", "It seeded the epic's issues; approve the issue scope before work is delegated.", "Within Your Message"],
+      ["Epic Seed", "Refused back to the Orchestrator, which revises it.", "Outside Your Message"],
+      ["Epic Seed", "Work waits to be delegated until the check finishes.", "Checking"],
+      ["Epic Seed", "Waiting for you: approve the campaign's issue scope, or continue without an epic.", "Uncertain"],
+      ["Epic Seed", "Waiting for you: approve the campaign's issue scope, or continue without an epic.", "None"],
+      ["Epic Seed", "It named no epic, so nothing waits.", "Within Your Message"],
+    ]);
+    assert.equal(facts(items[4]!).Failure, "Runner Can't Run It");
+    assert.ok(facts(items[1]!).Answers, "the typed answers show beside the seed");
+    assert.deepEqual(items.map((item) => [...item.querySelectorAll("button")].map((node) => node.textContent)), [
+      ["Open Session"], ["Open Session"], ["Open Session"], ["Continue Without an Epic", "Open Session"], ["Continue Without an Epic", "Open Session"],
+      ["Open Session"],
+    ], "a seed check left to the owner still offers to continue without an epic");
+    await act(async () => { [...items[3]!.querySelectorAll("button")].find((node) => node.textContent === "Continue Without an Epic")!.click(); });
+    assert.deepEqual(classified, ["check_uncertain"]);
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+    api.classifyCampaignDecision = classify;
+  }
+});
+
+test("Campaign Status lists each Decision Model call in exactly one section: checks beside their request, every other call in Decision Model (#4265)", async () => {
+  const read = api.campaignDecisions;
+  type Section = "Decision Model Checks" | "Decision Model";
+  // One decision of every kind, keyed by kind so a new kind fails to typecheck until its section is chosen here.
+  const byKind: Record<DecisionKind, [Section, CampaignDecisionsResponse["decisions"][number]]> = {
+    credential_screen: ["Decision Model Checks", decision("credential_screen", { verdict: "discusses", reason: "[credential_screen]" })],
+    follow_up_relatedness: ["Decision Model Checks", decision("follow_up_relatedness", { kind: "follow_up_relatedness", verdict: "related",
+      reason: "[follow_up_relatedness]", subject: { sessionId: "child-1", surface: "follow_up_publication", requestId: "rec_1" } })],
+    closure_reason: ["Decision Model Checks", decision("closure_reason", { kind: "closure_reason", verdict: "fits", reason: "[closure_reason]",
+      subject: { sessionId: "root-1", surface: "issue_closure", requestId: "team/repo#7" } })],
+    scope_review: ["Decision Model Checks", decision("scope_review", { kind: "scope_review", verdict: "admit", reason: "[scope_review]", subject: undefined })],
+    // An Orchestrator scope proposal's constraint check (#4282) is a check beside the proposal it affects.
+    scope_check: ["Decision Model Checks", decision("scope_check", { kind: "scope_check", verdict: "refuse", reason: "[scope_check]", subject: undefined })],
+    // Full Control's scope grant has no section of its own, so Decision Model lists it.
+    scope_grant: ["Decision Model", decision("scope_grant", { kind: "scope_grant", verdict: "grant", reason: "[scope_grant]", subject: undefined })],
+    probe: ["Decision Model", decision("probe", { kind: "probe", verdict: "confirm", reason: "[probe]", subject: undefined })],
+  };
+  const listed: Array<[Section, CampaignDecisionsResponse["decisions"][number]]> = [
+    ...Object.values(byKind),
+    // A Custom campaign's epic-seed reading is a scope grant too, but a check shown beside the scope it affects.
+    ["Decision Model Checks", decision("epic_seed", { kind: "scope_grant", verdict: "grant", reason: "[epic_seed]",
+      subject: { sessionId: "root-1", surface: "issue_scope_seed", requestId: "issue_scope_seed:abc", seed: "seeded" } })],
+  ];
+  const decisions = listed.map(([, item]) => item);
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: decisions.length, unpricedCalls: 0 } });
+  const view = await render(<>
+    <CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />
+    <CampaignDecisions campaignId="root-1" />
+  </>);
+  try {
+    const sections = [...view.container.querySelectorAll("section")].map((node) => ({
+      title: node.querySelector("h3")?.textContent ?? "",
+      items: [...node.querySelectorAll("li")].map((item) => item.textContent ?? ""),
+    }));
+    assert.deepEqual(sections.map(({ title }) => title), ["Decision Model Checks", "Decision Model"]);
+    assert.equal(sections.reduce((total, { items }) => total + items.length, 0), decisions.length, "one list item per decision across both sections");
+    for (const [expected, item] of listed) {
+      const listedIn = sections.flatMap(({ title, items }) => items.filter((text) => text.includes(item.reason!)).map(() => title));
+      assert.deepEqual(listedIn, [expected], `${item.occurrenceId} is listed once, in ${expected}`);
+    }
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
 test("a member session sees the checks but never the classification buttons", async () => {
   const read = api.campaignDecisions;
   api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [decision("dec_failed", { state: "uncertain", verdict: "uncertain", reason: "Unclear." })],
@@ -138,6 +314,79 @@ test("a member session sees the checks but never the classification buttons", as
     const item = view.container.querySelector("li")!;
     assert.equal(facts(item).Verdict, "Uncertain");
     assert.deepEqual([...item.querySelectorAll("button")].map((node) => node.textContent), ["Open Session"]);
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
+test("a typed check shows its answers as a short checklist beside the server's verdict and reason (#4283)", async () => {
+  const read = api.campaignDecisions;
+  const decisions = [
+    decision("sel_refused", { kind: "scope_review", promptVersion: "scope_review.v2", verdict: "refuse", subject: undefined,
+      reason: "Issue 140 violates 'Skip Security'.", typedAnswers: TYPED_REFUSED,
+      selectionProposal: { outcome: "refused", explanation: "Next in the backlog.",
+        issues: [{ repository: "team/repo", number: 140, title: "Reword the Settings footer" }] } }),
+    decision("sel_uncertain", { kind: "scope_review", promptVersion: "scope_review.v2", state: "uncertain", verdict: "uncertain", subject: undefined,
+      reason: "Issue 141 on 'UI Only' is below the 80% confidence threshold.", typedAnswers: TYPED_UNCERTAIN }),
+    decision("dec_typed_call", { kind: "probe", verdict: "confirm", subject: undefined,
+      reason: "Every answer is satisfied with at least 80% confidence.", typedAnswers: TYPED_ADMITTED }),
+    decision("dec_legacy", { kind: "probe", verdict: "confirm", subject: undefined, reason: "Listed in the boundary." }),
+  ];
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: decisions.length, unpricedCalls: 0 } });
+  const view = await render(<>
+    <CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />
+    <CampaignDecisions campaignId="root-1" />
+  </>);
+  try {
+    const lists = [...view.container.querySelectorAll("ul[aria-label='Answers']")];
+    assert.equal(lists.length, 3, "only typed decisions show answers; a single-verdict decision keeps its form");
+    const lines = (list: Element) => [...list.querySelectorAll("li")].map((item) => ({
+      standing: item.getAttribute("data-standing"),
+      claim: item.querySelector(".decision-answer-claim")?.textContent,
+      detail: item.querySelector(".campaign-status-meta")?.textContent,
+    }));
+    assert.deepEqual(lines(lists[0]!), [
+      { standing: "satisfies", claim: "Satisfies 'Count Matches'",
+        detail: "Yes (96% confidence). The owner asked for one more; one is proposed." },
+      { standing: "satisfies", claim: "Issue 140 Satisfies 'UI Only'", detail: "Satisfies (90% confidence). It rewords the Settings footer." },
+      { standing: "violates", claim: "Issue 140 Violates 'Skip Security'",
+        detail: "Violates (92% confidence); this answer decided the verdict. It is labeled security." },
+    ]);
+    // An answer below the threshold reads as unsure, whatever its value.
+    assert.deepEqual(lines(lists[1]!)[1], { standing: "unsure", claim: "Issue 141 Unsure About 'UI Only'",
+      detail: "Satisfies (55% confidence); this answer decided the verdict. A layout bug, but the label is area/sidebar, not area/ui." });
+    assert.ok(lines(lists[2]!).every((line) => line.standing === "satisfies"));
+    const refused = lists[0]!.closest("li.campaign-screen-item")!;
+    assert.equal(facts(refused).Verdict, "Doesn't Fit Your Selection");
+    assert.equal(facts(refused).Reason, "Issue 140 violates 'Skip Security'.");
+    assert.ok(facts(refused).Answers?.startsWith("Answers count at 80% confidence or more."));
+    // Every icon is decorative; the claim carries the standing in words.
+    assert.ok([...view.container.querySelectorAll(".decision-answer-icon")].every((icon) => icon.getAttribute("aria-hidden") === "true"));
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
+test("a typed check names a parameterized question by its complete parameter, never only its shortened label (#4283)", async () => {
+  const read = api.campaignDecisions;
+  const shared = "Only issues in the web dashboard that change no stored data and touch none of the session, runner or account paths, and ";
+  const parameter = `${shared}only if no reviewer has marked them security-sensitive.`;
+  const question = TYPED_REFUSED.questions.find((candidate) => candidate.items)!;
+  const typed = {
+    ...TYPED_REFUSED,
+    questions: TYPED_REFUSED.questions.map((candidate) => candidate === question
+      ? { ...candidate, label: `${shared.slice(0, 119)}…`, parameter } : candidate),
+  };
+  const decisions = [decision("dec_long", { kind: "probe", verdict: "confirm", subject: undefined, reason: "Checked.", typedAnswers: typed })];
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: 1, unpricedCalls: 0 } });
+  const view = await render(<CampaignDecisions campaignId="root-1" />);
+  try {
+    const claims = [...view.container.querySelectorAll("ul[aria-label='Answers'] .decision-answer-claim")].map((claim) => claim.textContent);
+    const item = question.items![0]!.label;
+    assert.ok(claims.includes(`${item} Satisfies '${parameter}'`), `claims: ${JSON.stringify(claims)}`);
+    assert.ok(claims.every((claim) => !claim?.includes("…")), "no claim falls back to the shortened label");
   } finally {
     view.unmount();
     api.campaignDecisions = read;

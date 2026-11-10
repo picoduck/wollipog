@@ -49,6 +49,11 @@ export interface CampaignItemTimelineInput {
   transitions: readonly CampaignItemTransition[];
   attempts: readonly CampaignAttemptTimeline[];
   dependsOn: readonly string[];
+  /** #4120: the item is verified but its own pull requests haven't merged, so its merge still waits
+   * on a prerequisite (`unmerged`) or never will (`failed`). It applies from its verification on. */
+  heldAfterDelivery?: "unmerged" | "failed";
+  /** When a hold that has ended ended, from the forge's merge times. Omitted while it lasts. */
+  heldUntil?: number;
 }
 
 /** The item's state from `from` until the next segment. `null` is a span with no recorded history. */
@@ -96,16 +101,20 @@ function itemStateAt(
   const status = open ? latestAt(latest!.statuses, at) : undefined;
   // An attempt opened before recording began has no observed status until its first transition.
   if (open && !status) return null;
+  const delivered = latest !== undefined && latest.deliveredAt !== null && latest.deliveredAt <= at;
+  // #4120: the current hold belongs to the item's last attempt, from its verification on: it never
+  // reaches back into that attempt's work, nor into an earlier attempt's delivered span.
+  const held = delivered && item.heldAfterDelivery !== undefined &&
+    (item.heldUntil === undefined || at < item.heldUntil) &&
+    item.attempts.every((attempt) => attempt.ordinal <= latest!.ordinal);
   return deriveCampaignWorkItemState({
+    ...(held ? { mergeDependencies: [item.heldAfterDelivery!], ownPullRequestsMerged: false } : {}),
     id: item.id,
     commitment: record.commitment,
     dispatchState: record.dispatchState,
     hasBlocker: record.blocked,
     dependsOn: item.dependsOn,
-    latestAttempt: latest ? {
-      open,
-      delivered: latest.deliveredAt !== null && latest.deliveredAt <= at,
-    } : null,
+    latestAttempt: latest ? { open, delivered } : null,
     // Holds and pending decisions are not part of the recorded intervals. Both only distinguish
     // `waiting` from `blocked`, which Waiting Time counts together.
     openAttemptSession: status?.status ? { status: status.status, archived: status.archived, held: false, pendingRequests: 0 } : null,
@@ -133,6 +142,7 @@ export function campaignItemTimelines(
     visiting.delete(id);
     const points = new Set<number>([item.createdAt]);
     for (const transition of item.transitions) points.add(transition.at);
+    if (item.heldUntil !== undefined) points.add(item.heldUntil);
     for (const attempt of item.attempts) {
       points.add(attempt.startedAt);
       if (attempt.endedAt !== null) points.add(attempt.endedAt);

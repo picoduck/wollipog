@@ -16,9 +16,9 @@ import type {
   CampaignPullRequestRef,
 } from "@wollipog/protocol";
 import { CAMPAIGN_FORGE_OBSERVATION, campaignRepositoryLocation, forgeActionBranchName } from "@wollipog/protocol";
-import { observeGitLabMergeRequests, type GlabRunner } from "./campaign-gitlab-status.js";
+import { forgeMergedAt, observeGitLabMergeRequests, type GlabRunner } from "./campaign-gitlab-status.js";
 import { runContextCommand } from "./context-command.js";
-import { summarizeCheckRollup } from "./git-ops.js";
+import { countCheckContexts, latestCheckContexts, summarizeCheckRollup } from "./git-ops.js";
 
 /** Contexts read per pull request. More than this leaves the required rollup `unknown`. */
 const CONTEXTS_PER_PULL_REQUEST = 100;
@@ -85,13 +85,13 @@ export function forgeStatusQuery(refs: ReadonlyArray<{ owner: string; name: stri
     pullRequest(number:${ref.number}){
       state isDraft headRefOid baseRefName reviewDecision mergeStateStatus
       headRefName isCrossRepository headRef{target{oid}}
-      mergeCommit{oid}
+      mergeCommit{oid} mergedAt
       mergeQueueEntry{position state}
       commits(last:1){nodes{commit{statusCheckRollup{state
         contexts(first:${CONTEXTS_PER_PULL_REQUEST}){pageInfo{hasNextPage} nodes{
           __typename
-          ... on CheckRun{name status conclusion isRequired(pullRequestNumber:${ref.number})}
-          ... on StatusContext{context state isRequired(pullRequestNumber:${ref.number})}
+          ... on CheckRun{databaseId name status conclusion startedAt checkSuite{workflowRun{workflow{name}}} isRequired(pullRequestNumber:${ref.number})}
+          ... on StatusContext{context state createdAt isRequired(pullRequestNumber:${ref.number})}
         }}
       }}}}
     }
@@ -159,14 +159,32 @@ export function checkRollups(
   const pageInfo = record(contexts?.pageInfo);
   if (!value || !Array.isArray(nodes) || typeof pageInfo?.hasNextPage !== "boolean") return null;
   const complete = pageInfo.hasNextPage === false;
-  const all = summarizeCheckRollup(nodes);
-  const required = summarizeCheckRollup(nodes.filter((node) => record(node)?.isRequired === true));
-  // GitHub's own rollup state covers every check, even past the bounded page.
+  // Only each check's latest run counts: a newer run supersedes a cancelled or failed one (#4263).
+  // A check run's workflow keeps same-named jobs of two workflows apart. GitHub leaves it null for
+  // another app's run, and for an Actions run when the login cannot read workflow runs; those runs
+  // are told apart by name alone.
+  const runs = nodes.map((node) => {
+    const workflowName = record(record(record(record(node)?.checkSuite)?.workflowRun)?.workflow)?.name;
+    return typeof workflowName === "string" && workflowName ? { ...record(node), workflowName } : node;
+  });
+  const latest = latestCheckContexts(runs);
+  const all = summarizeCheckRollup(latest);
+  const required = summarizeCheckRollup(latest.filter((node) => record(node)?.isRequired === true));
+  // GitHub's own rollup state covers every check, even past the bounded page, but it also counts
+  // superseded runs. With every context seen, a failing state that superseded failures explain is
+  // set aside, but only when each of them is certainly an earlier run of the check that replaced
+  // it: a status context, or a check run whose workflow is known. Past a truncated page, an unseen
+  // check could be the failure, and a run told apart by name alone could be another workflow's
+  // job, so GitHub's state stands.
   const github = value.state;
+  const kept = new Set(latest);
+  const supersededFailures = runs.filter((node) => !kept.has(node) && countCheckContexts([node]).failing > 0);
+  const explainedFailure = (github === "FAILURE" || github === "ERROR") && complete && supersededFailures.length > 0 &&
+    supersededFailures.every((node) => typeof record(node)?.state === "string" || typeof record(node)?.workflowName === "string");
   let overall: CampaignForgeCheckRollup["state"];
-  if (all.failing > 0 || github === "FAILURE" || github === "ERROR") overall = "failing";
+  if (all.failing > 0 || (github === "FAILURE" || github === "ERROR") && !explainedFailure) overall = "failing";
   else if (all.pending > 0 || github === "PENDING" || github === "EXPECTED") overall = "pending";
-  else if (github === "SUCCESS") overall = "passing";
+  else if (github === "SUCCESS" || explainedFailure && all.passing > 0) overall = "passing";
   else overall = "unknown";
   return {
     checks: { state: overall, passing: all.passing, failing: all.failing, pending: all.pending },
@@ -205,6 +223,7 @@ export function pullRequestObservation(node: unknown, defaultBranch?: unknown): 
   const rollups = checkRollups(commit ? commit.statusCheckRollup ?? null : null, REQUIREMENTS_MET.has(pr.mergeStateStatus as string));
   if (!rollups) return null;
   const headBranch = observedHeadBranch(pr);
+  const mergedAt = state === "merged" ? forgeMergedAt(pr.mergedAt) : undefined;
   return {
     state,
     draft: pr.isDraft,
@@ -214,6 +233,7 @@ export function pullRequestObservation(node: unknown, defaultBranch?: unknown): 
     ...rollups,
     mergeQueue,
     mergeCommitSha: mergeCommit ? mergeCommit.oid as string : null,
+    ...(mergedAt !== undefined ? { mergedAt } : {}),
     ...(typeof defaultBranch === "string" && defaultBranch.length > 0 && defaultBranch.length <= 256 ? { defaultBranch } : {}),
     ...(headBranch ? { headBranch } : {}),
     ...(typeof pr.isCrossRepository === "boolean" ? { crossRepository: pr.isCrossRepository } : {}),

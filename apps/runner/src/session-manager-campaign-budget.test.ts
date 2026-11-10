@@ -54,7 +54,8 @@ test("mid-turn stop waits for exact provider retirement and retains late durable
   try {
     let retired!:()=>void;
     const closing=new Promise<void>((resolve)=>{retired=resolve;});
-    const entry:any={sessionId:"worker",client:{close:()=>closing,dispose:()=>{},cancel:()=>{}},repoPath:"/repo",cwd:"/repo",
+    // The driver proves its whole process tree gone once disposed (#4257).
+    const entry:any={sessionId:"worker",client:{close:()=>closing,dispose:()=>{},cancel:()=>{},proveProcessTreeExit:async()=>true},repoPath:"/repo",cwd:"/repo",
       worktree:null,context:{kind:"native"},status:"running",running:true,providerInitiatedTurnActive:true,queue:[],
       policyHookToolCallIds:new Set(),policyHookDecisionEvents:new Map()};
     (h.manager as any).active.set("worker",entry);
@@ -141,7 +142,9 @@ test("a Stop keeps the campaign slot until the provider retires, then frees it w
   },()=>{},store,"r");
   let retire!:()=>void;
   const closing=new Promise<void>((resolve)=>{retire=resolve;});
-  (manager as any).active.set("worker",{sessionId:"worker",client:{close:()=>closing,dispose(){},cancel(){}},repoPath:dir,cwd:dir,
+  let treeGone!:(proven:boolean)=>void;
+  const tree=new Promise<boolean>((resolve)=>{treeGone=resolve;});
+  (manager as any).active.set("worker",{sessionId:"worker",client:{close:()=>closing,dispose(){},cancel(){},proveProcessTreeExit:()=>tree},repoPath:dir,cwd:dir,
     worktree:null,context:{kind:"native"},status:"running",running:true,providerInitiatedTurnActive:true,queue:[],
     policyHookToolCallIds:new Set(),policyHookDecisionEvents:new Map()});
   try {
@@ -156,7 +159,10 @@ test("a Stop keeps the campaign slot until the provider retires, then frees it w
     retire();
     await new Promise((resolve)=>setImmediate(resolve));
     assert.equal((manager as any).closing.has("worker"),false);
-    assert.equal(db.campaignBudgets.view("root")!.occupied,0,"retirement frees the slot without a history reload");
+    assert.equal(db.campaignBudgets.view("root")!.occupied,1,"a descendant of the disposed provider may still run (#4257)");
+    treeGone(true);
+    await new Promise((resolve)=>setImmediate(resolve));
+    assert.equal(db.campaignBudgets.view("root")!.occupied,0,"the tree proof frees the slot without a history reload");
     assert.equal(db.campaignBudgets.active("worker"),true,"its final usage stays pending until its history settles");
     child("next");
     assert.equal(db.campaignBudgets.view("root")!.occupied,1);

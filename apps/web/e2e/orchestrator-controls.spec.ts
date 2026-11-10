@@ -40,11 +40,15 @@ for (const viewport of [
         await openFixture(page, viewport.width, viewport.height, `&fullControlFixture=1&${fixture}`);
         await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
         const dialog = await openControls(page);
+        const rules = fixture.includes("humanRules=1");
         // The boundary owns every gate (#2940): no Custom owner, request choice or evidence note. Campaign
-        // Behavior stays, since it governs every child Full Control creates (#3580).
+        // Behavior stays, since it governs every child Full Control creates (#3580). A person-marked
+        // Human Required rule qualifies the line, which names where it is listed, never "end to end" alone.
         await expect(dialog.locator(".section-title")).toHaveText(["Orchestrator Control", "Campaign Behavior"]);
         await expect(dialog).toContainText("Effective Mode: Full Control.");
-        await expect(dialog).toContainText("The Orchestrator runs this campaign end to end.");
+        await expect(dialog.getByText(rules
+          ? "The Orchestrator runs this campaign end to end, except the decisions Campaign Status lists under Human Required."
+          : "The Orchestrator runs this campaign end to end.", { exact: true })).toBeVisible();
         await expect(dialog.getByRole("button", { name: "Revoke Full Control", exact: true })).toBeVisible();
         await expect(dialog.locator(".orchestrator-gate-helper")).toHaveCount(0);
         await expect(dialog.getByRole("radiogroup")).toHaveCount(0);

@@ -21,6 +21,12 @@ fetched remote default branch before releasing implementation. A bootstrap promp
 recorded work-item assignment.
 Do not claim atomic creation, omit required protected admission, or update the hosting stack to
 make an unavailable interface appear. Report an unsupported mandatory path during preflight.
+Full Control launches with no preflight form or question (#2940), so the root Orchestrator posts
+this preflight as its first report, after `get_campaign` and before its first child: objective and
+issue scope, permitted follow-ups and operations, limits, evidence destination and reviewer
+provider, Human Required exceptions, unsupported or degraded capabilities, and each unresolved
+mandatory human rule with its exact source and typed route to the owner. It asks nothing and waits
+for nobody; the shipped authority reference lists what it names.
 
 Installed or user-authored workflows are independent instructions. Name any unresolved mandatory
 human rule with its exact file, quoted requirement and affected action before proceeding to that
@@ -30,6 +36,28 @@ require user payload review. Those instructions are not changed by this reposito
 policy. Do not edit installed skills or live provider configuration to remove the conflict.
 Explicitly authorized repository policy alignment must itself pass normal review and merge gates.
 Committed wording never overrides the current session's higher-priority instructions.
+
+When such a rule keeps a gate for a person, the gate reaches the owner as a typed request, never
+only as prose (#4137):
+
+- The child still files the exact typed decision, such as `pr_merge`, with
+  `request_workflow_decision` and names the rule in `ownerRule` (`source`: the file; `quote`: the
+  requirement, on one line), or with `wollipog decision request ... --owner-rule-source <path>
+  --owner-rule-quote <text>`. The occurrence is created human-owned (`owner_kept`) under any mode
+  or grant, reaches the owner's Inbox and Campaign Status under Waiting for You with the rule, and
+  later requests for the same resource stay the owner's. The rule only narrows authority.
+- The root hands any occurrence already filed without the rule to the owner with
+  `hand_workflow_decision_to_owner`.
+- For a gate with no typed category, the root uses `request_owner_decision` with `kind: "approval"`.
+- For a design choice, clarification or preference, the root asks an Owner Question:
+  `request_owner_decision` with `kind: "question"`, answered in the owner's own words.
+- Nobody ends a turn with such a gate only in prose.
+
+Child clarifications use `implementation_question` with `kind: "question"` (protocol v332).
+They accept suggested options and free text through the ordinary question interface and preserve
+the occurrence's current owner and credential screen. Their answers grant nothing; do not consume
+them as action approvals. Missing `kind` preserves legacy approval behavior, not a compatibility
+fallback for unsupported peers.
 
 ## Worktree Bases and Checkout Maintenance
 
@@ -53,6 +81,23 @@ For reviews, maintenance sweeps, or tools that read the primary checkout directl
 required baseline explicitly. Fetch the remote default branch and inspect its files, or run code
 in a separate worktree pinned to the required commit. Record that commit and do not assume the
 primary checkout is current or change it merely to obtain fresh input.
+
+## Protocol Version Claims
+
+Parallel campaigns often claim protocol versions at the same time. `PROTOCOL_VERSION` is the
+highest entry of the ledger in `packages/protocol/src/protocol-version.ts`, and each version has
+its own `// vN slot` anchor (#975). Claim a version by inserting its entry directly below that
+anchor; see the Protocol Version section of `AGENTS.md`. Claims of different versions merge
+without a conflict, and a claim of a version someone else already took conflicts immediately.
+
+Versions must still land in increasing order, because a runner at version N is assumed to
+support everything up to N. Before choosing a number, check main and every open pull request's
+claim. Before requesting a merge and again before enqueueing, run `pnpm check:protocol-version`
+against freshly fetched main. CI runs the same check on the pull request's merge commit and on
+each merge-group commit. If the claim is no longer greater than the commit it lands on, renumber
+to the version the check names. A pull request that claims no version is never affected. A renumber
+changes the pull request's own diff, so its next review round counts against the epoch's budget,
+even when it arrives inside a merge of main. A merge that keeps a claim above main needs no renumber.
 
 ## Decisions and Delivery
 
@@ -104,17 +149,26 @@ close, fix or resolve (any tense, even negated as in "does not close" or hyphena
 "auto-close") directly before an issue reference that must stay open, in a PR description, title or
 commit message. Code spans do not close an issue, but paraphrase rather than rely on them. Check a
 draft with `wollipog pr closures --file <draft>` and an open PR with `wollipog pr closures <url>`. A
-GitHub `pr_merge` decision is refused unless its `intendedClosures` lists exactly what the merge
-would close (#3713). Delivery comments compare every
+`pr_merge` decision is refused unless its `intendedClosures` lists exactly what the merge would close
+(#3713). The rule covers GitLab merge requests too (#3762), whose closing pattern is wider: it also
+accepts implement and "-ing" forms ("closing", "implements"), closes every reference in a list after
+one keyword, reads code and the title, and may differ per instance, so GitLab's own list of the issues
+a merge request closes decides where it disagrees with Wollipog's match. Delivery comments compare every
 acceptance criterion and cite the actual merge commit; report remaining original work candidly.
 
 Use `wollipog review session run` (MCP `request_review_session`) for your own pushed PR's required
 cross-model review, including from an isolated campaign child. Follow the shipped `using-wollipog`
 skill: provide the brief, let the completion continuation arrive when idle, read the full verdict
 and report, adjudicate findings, and push fixes before delta rounds. A rewritten head starts a new
-review epoch. A head that only merges the moved base branch gets a round that does not use the
-epoch's budget, or none at all when the pull request's own diff is unchanged since an upvote
-(protocol 277, #4075). Exhausted rounds require the exact `review_round_extension` decision; its
+review epoch. One plain merge of the moved base branch directly on the last valid head, changing
+nothing outside its conflict blocks, gets a reviewed round that does not use the epoch's budget. If
+that head was upvoted and the merge leaves the pull request's own diff byte-identical, the run records
+an equivalence and no reviewer runs (protocol 277, #4075; the proof is in `docs/agent-control.md`).
+Anything the runner cannot prove counts against the budget: a second merge before the first one's
+review, any commit after the merge, and any edit outside a conflict block, including a protocol
+renumber's changes to the ledger, capability floors, comments or docs. Those change the pull
+request's own diff, so a review has to cover them. Exhausted rounds require the exact
+`review_round_extension` decision; its
 default owner is human. Full Control owns it only within a server-enforced cap per pull request of
 the run's configured round budget once more (the owner approved this change to the #3369 decision);
 past the cap it is the person's. With protocol 232 or later, campaign review

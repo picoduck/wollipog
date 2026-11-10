@@ -8,7 +8,10 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { providerAccountDescription, providerAccountExpectationSentence, providerAccountPreviewPlacement, providerAccountSelectionRefreshKey, providerAccountSkipLabel, useProviderAccountSelection } from "./ProviderAccountSelection.js";
 import {
+  PROVIDER_ACCOUNT_CHOICE_REQUIRED,
+  providerAccountPolicyMode,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
   advertisesOrchestratorAdditiveRole,
@@ -75,9 +78,8 @@ import { folderName } from "../run-dialog-choices.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { FieldError } from "./FieldError.js";
 import { FieldWarning } from "./FieldWarning.js";
-import { statusMeta } from "../status-meta.js";
 import { Notice } from "./Notice.js";
-import { FullControlBlockedError, launchFullControlCampaign } from "./FullControlPreparation.js";
+import { checkFullControlLocations, FullControlBlockedError, FullControlFirstMessageNotice, FullControlLocationNotices, FullControlLocationsToReview, launchFullControlCampaign, type FullControlLocationReport } from "./FullControlPreparation.js";
 import {
   evaluateOrchestratorPolicy,
   policyDraftFromDefaults,
@@ -108,14 +110,6 @@ import {
 function usd(amount: number): string {
   return `$${Number.isInteger(amount) ? amount
     : amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 20, useGrouping: false })}`;
-}
-
-/** An account's sign-in in the words Switch Account and Choose Another Account use (§11.2). */
-function providerAccountDescription(authStatus: "authenticated" | "unauthenticated" | "unknown" | undefined): string {
-  const status = authStatus === "authenticated" ? "signed_in"
-    : authStatus === "unauthenticated" ? "sign_in_required" : "status_unknown";
-  const { label } = statusMeta("provider_account", status);
-  return status === "sign_in_required" ? `${label} · Sign in again before using it.` : label;
 }
 
 /** Why a chosen location cannot host the session, and what to do about it (§8.5). */
@@ -320,6 +314,7 @@ export function NewSessionDialog({
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId], runner?.agents);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
   const [providerAccountId, setProviderAccountId] = useState("");
+  const [accountSelectionRefresh, setAccountSelectionRefresh] = useState(0);
   // `undefined` until the user chooses: a saved Orchestrator harness default then selects the role
   // on the user's behalf, exactly as the saved preset did before the role became independent.
   const [roleOverride, setRoleOverride] = useState<"normal" | "orchestrator" | undefined>(undefined);
@@ -402,6 +397,8 @@ export function NewSessionDialog({
     field: ProblemField; message: string; control?: ProblemControl;
   } | null>(null);
   const [requestFailure, setRequestFailure] = useState<{ sentence: string; detail: string } | null>(null);
+  const [locationReport, setLocationReport] = useState<FullControlLocationReport | null>(null);
+  const locationNoticesRef = useRef<HTMLDivElement | null>(null);
   const [retainedSessionId, setRetainedSessionId] = useState<string | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const projectChoiceRef = useRef<HTMLDivElement>(null);
@@ -549,6 +546,14 @@ export function NewSessionDialog({
     : undefined;
   const savedProviderAccountMissing = !!savedProviderAccount?.accountId &&
     !providerAccounts.some((account) => account.id === savedProviderAccount.accountId);
+  // What this launch would use if nobody chooses, from the launch's own resolver (#4353). Project
+  // sessions can differ, because a policy won't move a project's account-held memory.
+  const accountSelection = useProviderAccountSelection(runnerId || undefined,
+    provider && agentId ? { agentId, ...providerAccountPreviewPlacement({ projectsSupported, projectId: selectedProjectId,
+      workspaceId: browsedPath ? undefined : workspaceId || undefined }) } : null,
+    `${providerAccountSelectionRefreshKey(runner, true)}\0${accountSelectionRefresh}`);
+  const policyMode = providerAccountPolicyMode(savedProviderAccount);
+  const policyChoiceRequired = policyMode !== "fixed" && accountSelection?.status === "choice_required";
   const providerAccountTitles = maskedAccountTitles(providerAccounts.map((account) => account.label));
   // Bound to this exact account list: another Machine or Agent offers other accounts, hidden again.
   const [accountIdentifiersRevealed, toggleAccountIdentifiers] = useAccountIdentifierReveal(
@@ -563,13 +568,20 @@ export function NewSessionDialog({
     if (selectionChanged) accountChosenByUser.current = false;
     if (accountChosenByUser.current && providerAccounts.some((account) => account.id === providerAccountId)) return;
     accountChosenByUser.current = false;
+    // Under a policy that chooses among accounts, show its expected account, and nothing until a
+    // choice exists: the control plane decides at launch, and the first-listed account would mislead.
+    if (policyMode !== "fixed") {
+      setProviderAccountId(accountSelection?.status === "selected" ? accountSelection.accountId ?? "" : "");
+      return;
+    }
     const preferred = savedProviderAccount?.accountId ?? agent?.defaultProviderAccountId;
     // Like the control plane's implicit choice, never a profile only other control planes may use (#3240).
     setProviderAccountId(savedProviderAccountMissing ? "" :
       providerAccounts.find((account) => account.id === preferred)?.id ??
       providerAccounts.find((account) => account.profile?.access !== "not_granted")?.id ?? "");
   }, [accountSelectionKey, agent?.defaultProviderAccountId, savedProviderAccount?.accountId,
-    savedProviderAccountMissing, providerAccountId, providerAccounts.map((account) => account.id).join("\0")]);
+    savedProviderAccountMissing, providerAccountId, providerAccounts.map((account) => account.id).join("\0"),
+    policyMode, accountSelection?.status, accountSelection?.accountId]);
   const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
   const savedPiModeUnavailableForTarget = agent?.driver === "pi" && executionTarget !== undefined &&
     executionTarget.adapter !== "host" && savedPermissionMode !== undefined &&
@@ -583,7 +595,7 @@ export function NewSessionDialog({
     runnerSupportsProtocol(runner?.protocolVersion, "wslSafeLauncher") &&
     runner?.runtime?.executionIsolation?.mode === "bwrap";
   const hostExecutionTarget = !executionTarget || executionTarget.adapter === "host";
-  const missingRequiredAccountChoice = hostExecutionTarget && savedProviderAccountMissing && !providerAccountId;
+  const missingRequiredAccountChoice = hostExecutionTarget && (savedProviderAccountMissing || policyChoiceRequired) && !providerAccountId;
   // Availability is DERIVED from the sentence that explains it, so the two cannot disagree. The
   // preset card is rendered either way now — §11.3 — and a disabled card whose reason contradicted
   // why it was disabled would be worse than the omission it replaced.
@@ -1069,6 +1081,23 @@ export function NewSessionDialog({
     return "create";
   };
 
+  // The person sees which Locations Full Control would leave out before Start (#4319), from the same
+  // server check Start runs. A Project with one Location has nothing to leave out, so nothing is asked.
+  const locationCheckPlace = fullControlLaunch && selectedProject && selectedProject.locations.length > 1 && projectLocationId
+    ? `${selectedProject.id}/${projectLocationId}/${agentId}` : null;
+  const locationCheckRequest = useRef<() => CreateSessionRequest>(() => { throw new Error("no request yet"); });
+  useEffect(() => {
+    setLocationReport(null);
+    if (!locationCheckPlace) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void checkFullControlLocations(api, locationCheckRequest.current(), controller.signal)
+        .then((report) => { if (!controller.signal.aborted) setLocationReport(report); })
+        .catch(() => undefined);
+    }, 300);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [api, locationCheckPlace]);
+
   const buildSessionRequest = (): CreateSessionRequest => {
     const placement = projectSessionPlacement(
       projectsSupported,
@@ -1136,6 +1165,7 @@ export function NewSessionDialog({
       ...(launchSurface === "native_tui" ? { launchSurface: "native_tui" as const } : {}),
     };
   };
+  locationCheckRequest.current = buildSessionRequest;
 
   const submit = async () => {
     // Re-entrancy guard: the Enter path bypasses the footer button's disabled attribute, and a
@@ -1222,12 +1252,18 @@ export function NewSessionDialog({
     setBusy(true);
     try {
       const session = fullControlLaunch
-        ? await launchFullControlCampaign(api, buildSessionRequest())
+        ? await launchFullControlCampaign(api, buildSessionRequest(), locationReport)
         : await api.createSession(buildSessionRequest());
       navigate({ name: "session", id: session.id });
       if (launchSurface === "native_tui") onOpenTerminal?.();
       onClose();
     } catch (e) {
+      if (e instanceof FullControlLocationsToReview) {
+        // Not a failure: the person sees what this start leaves out, and Create Session again proceeds.
+        flushSync(() => setLocationReport(e.report));
+        locationNoticesRef.current?.firstElementChild?.scrollIntoView?.({ block: "nearest" });
+        return;
+      }
       const keptSessionId = e instanceof ApiError &&
           (e.code === "NATIVE_TUI_LAUNCH_AMBIGUOUS" ||
             e.code === "NATIVE_TUI_COMPENSATION_FAILED") &&
@@ -1235,6 +1271,8 @@ export function NewSessionDialog({
         ? e.details.sessionId
         : null;
       if (keptSessionId) setRetainedSessionId(keptSessionId);
+      // The launch's own answer may be newer than the preview: read again, so the choice it asks for appears.
+      if (e instanceof ApiError && e.code === PROVIDER_ACCOUNT_CHOICE_REQUIRED) setAccountSelectionRefresh((value) => value + 1);
       setRequestFailure({
         // Only a genuine impossibility stops Full Control, and its reason is the sentence (#2940).
         sentence: e instanceof FullControlBlockedError ? e.message : createFailureSentence(e, keptSessionId !== null),
@@ -1643,7 +1681,7 @@ export function NewSessionDialog({
               ))}
           </div>
 
-          {hostExecutionTarget && (providerAccounts.length > 1 || savedProviderAccountMissing) && (
+          {hostExecutionTarget && (providerAccounts.length > 1 || savedProviderAccountMissing || policyChoiceRequired) && (
             <div className="field">
               <div className="pid-field-head">
                 <label className="new-session-field-label">Account</label>
@@ -1664,7 +1702,9 @@ export function NewSessionDialog({
                 options={providerAccounts.map((account, index) => ({
                   value: account.id,
                   label: accountIdentifiersRevealed ? account.label : providerAccountTitles[index]!,
-                  description: providerAccountDescription(account.authStatus),
+                  description: accountSelection?.candidates.find((candidate) => candidate.accountId === account.id)?.reason && policyMode === "priority"
+                    ? providerAccountSkipLabel(accountSelection.candidates.find((candidate) => candidate.accountId === account.id)!) ?? providerAccountDescription(account.authStatus)
+                    : providerAccountDescription(account.authStatus),
                 }))}
                 placeholder="Choose an Account…"
                 invalid={missingRequiredAccountChoice}
@@ -1672,8 +1712,13 @@ export function NewSessionDialog({
               />
               {missingRequiredAccountChoice && (
                 <FieldError id={accountReasonId}>
-                  The saved default account isn't on this machine anymore. Choose an account, or change the default in Machine Settings.
+                  {policyChoiceRequired && accountSelection
+                    ? providerAccountExpectationSentence(accountSelection)
+                    : "The saved default account isn't on this machine anymore. Choose an account, or change the default in this machine's Provider Accounts."}
                 </FieldError>
+              )}
+              {!missingRequiredAccountChoice && !accountChosenByUser.current && accountSelection?.status === "selected" && (
+                <p className="field-helper">{providerAccountExpectationSentence(accountSelection)}</p>
               )}
             </div>
           )}
@@ -1867,6 +1912,10 @@ export function NewSessionDialog({
           </SessionOptions>
 
           {problemFor("form")}
+          {/* Full Control takes its issues from the first message, so the launch says how to name them. */}
+          {fullControlLaunch && <FullControlFirstMessageNotice />}
+          {/* `contents`: each notice takes the form's own spacing; the wrapper only holds the scroll target. */}
+          {fullControlLaunch && <div ref={locationNoticesRef} style={{ display: "contents" }}><FullControlLocationNotices report={locationReport} /></div>}
           {/* A request failure sits at the body's end, directly above the footer (§7.3, §13.2). */}
           {requestFailure && (
             <Notice

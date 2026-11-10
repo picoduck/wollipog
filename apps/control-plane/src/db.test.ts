@@ -407,6 +407,52 @@ test("a durable steered user message resolves a lost accepted receipt", () => {
   assert.equal(db.resolveSteeringAttemptFromUserMessage("sess-1", "unknown", "turn-1", 5), false);
 });
 
+test("durable steering evidence strengthens runner uncertainty but never rejection or recovery decisions", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  for (const disposition of ["uncertain", "rejected"] as const) {
+    db.createSteeringAttempt({ requestId: disposition, sessionId: "sess-1", submissionId: disposition,
+      turnId: "turn-1", source: "direct", requestSha256: "d".repeat(64), text: "continue", now: 1 });
+    db.recordSteeringResult("runner-1", { type: "steer_session_result", requestId: disposition,
+      sessionId: "sess-1", submissionId: disposition, turnId: "turn-1", disposition,
+      reason: disposition === "uncertain" ? "transport_uncertain" : "provider_rejected" }, 2);
+    assert.equal(db.resolveSteeringAttemptFromUserMessage("sess-1", disposition, "wrong-turn", 3), false);
+    assert.equal(db.resolveSteeringAttemptFromUserMessage("sess-1", disposition, "turn-1", 4), disposition === "uncertain");
+    assert.equal(db.getSteeringAttemptByRequestId(disposition)?.state, disposition === "uncertain" ? "accepted" : "rejected");
+  }
+  db.createSteeringAttempt({ requestId: "recovered", sessionId: "sess-1", submissionId: "recovered",
+    turnId: "turn-1", source: "direct", requestSha256: "e".repeat(64), text: "continue", now: 1 });
+  db.markSteeringAttemptUncertain("recovered", 2);
+  db.resolveUncertainSteeringAttempt("sess-1", "recovered", 3);
+  assert.equal(db.resolveSteeringAttemptFromUserMessage("sess-1", "recovered", "turn-1", 4), false);
+  db.close();
+});
+
+test("a refused Queue Again reconciles exact durable acceptance that raced its staged request", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  for (const evidenceTurn of ["wrong-turn", "turn-1"]) {
+    db.createSteeringAttempt({ requestId: evidenceTurn, sessionId: "sess-1", submissionId: evidenceTurn,
+      turnId: "turn-1", source: "direct", requestSha256: "f".repeat(64), text: "continue", now: 1 });
+    db.recordSteeringResult("runner-1", { type: "steer_session_result", requestId: evidenceTurn,
+      sessionId: "sess-1", submissionId: evidenceTurn, turnId: "turn-1", disposition: "uncertain",
+      reason: "transport_uncertain" }, 2);
+    const resolutionId = `resolve-${evidenceTurn}`;
+    assert.equal(db.stageSteeringResolution("sess-1", evidenceTurn, "queue_again", resolutionId, 3).kind, "staged");
+    db.appendEvent("sess-1", { kind: "user_message", text: "continue", turnId: evidenceTurn,
+      submissionId: evidenceTurn, deliveryIntent: "steer" }, 4);
+    assert.equal(db.resolveSteeringAttemptFromUserMessage("sess-1", evidenceTurn, evidenceTurn, 4), false);
+    db.recordSteeringResolutionResult("runner-1", { type: "resolve_steering_attempt_result",
+      requestId: resolutionId, sessionId: "sess-1", submissionId: evidenceTurn, action: "queue_again",
+      applied: false, reason: "attempt_not_uncertain" }, 5);
+    assert.equal(db.clearRejectedSteeringResolution(resolutionId), true);
+    assert.equal(db.getSteeringAttemptByRequestId(evidenceTurn)?.state,
+      evidenceTurn === "turn-1" ? "accepted" : "uncertain");
+    assert.equal(db.getSteeringAttemptByRequestId(evidenceTurn)?.resolution, undefined);
+  }
+  db.close();
+});
+
 /** The synchronous level in force at each COMMIT the database issues: 1 is NORMAL, 2 is FULL. */
 function recordCommitSynchronousLevels(db: ControlPlaneDb): number[] {
   const raw = db.raw();
@@ -1883,6 +1929,87 @@ test("provider account defaults persist per Machine and provider across reconnec
   }
 });
 
+test("a Machine's account policy migrates, persists across restarts and detects conflicting edits (#4353)", () => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-account-policy-"));
+  const location = join(temp, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  const accountMeta = meta({ providerAccounts: [
+    { id: "claude-work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    { id: "claude-personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+  ] });
+  try {
+    db = ControlPlaneDb.open(location);
+    db.registerRunner(accountMeta, 100, PROTOCOL_VERSION);
+    db.close();
+    db = undefined;
+    // A database from before versioned policies, holding a default and a cleared preference.
+    const legacy = new DatabaseSync(location);
+    legacy.exec("DROP TABLE machine_provider_account_defaults");
+    legacy.exec(`CREATE TABLE machine_provider_account_defaults (
+      runner_id TEXT NOT NULL, provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex')), account_id TEXT,
+      revision INTEGER NOT NULL CHECK (revision > 0), updated_at INTEGER NOT NULL,
+      PRIMARY KEY (runner_id, provider), FOREIGN KEY (runner_id) REFERENCES runners(runner_id) ON DELETE CASCADE)`);
+    legacy.exec(`INSERT INTO machine_provider_account_defaults VALUES ('runner-1', 'claude', 'claude-work', 4, 90), ('runner-1', 'codex', NULL, 2, 91)`);
+    legacy.close();
+
+    db = ControlPlaneDb.open(location);
+    db.registerRunner(accountMeta, 200, PROTOCOL_VERSION);
+    assert.deepEqual(db.getRunner("runner-1")?.providerAccountDefaults, [
+      { provider: "claude", accountId: "claude-work", revision: 4 },
+      { provider: "codex", accountId: null, revision: 2 },
+    ], "a migrated default keeps its account and revision, and a cleared one its legacy fallback");
+
+    const order = ["claude-personal", "claude-work"];
+    assert.deepEqual(db.setMachineProviderAccountPolicy("runner-1", "claude",
+      { mode: "priority", fixedAccountId: "claude-work", priorityAccountIds: order }, 3, 201), {
+      ok: false, policy: { provider: "claude", accountId: "claude-work", revision: 4 },
+    }, "a stale revision writes nothing and shows what is saved");
+    const saved = db.setMachineProviderAccountPolicy("runner-1", "claude",
+      { mode: "priority", fixedAccountId: "claude-work", priorityAccountIds: order }, 4, 202);
+    const expected = { provider: "claude" as const, accountId: null, revision: 5, mode: "priority" as const, schemaVersion: 1,
+      fixedAccountId: "claude-work", priorityAccountIds: order };
+    assert.deepEqual(saved, { ok: true, policy: expected });
+
+    assert.deepEqual(db.setMachineProviderAccountDefault("runner-1", "claude", "claude-personal", 5, 203), {
+      ok: false, choice: expected, notFixed: true,
+    }, "an older client can't overwrite a policy it can't show, even at the current revision");
+
+    db.close();
+    db = ControlPlaneDb.open(location);
+    db.registerRunner(accountMeta, 300, PROTOCOL_VERSION);
+    assert.deepEqual(db.machineProviderAccountDefault("runner-1", "claude"), expected, "the policy survives a restart");
+    db.updateRunnerAgents("runner-1", accountMeta.agents, 301, undefined, []);
+    assert.deepEqual(db.machineProviderAccountDefault("runner-1", "claude")?.priorityAccountIds, order,
+      "removed accounts stay ranked until a person removes them");
+
+    const restored = db.setMachineProviderAccountPolicy("runner-1", "claude",
+      { mode: "fixed", fixedAccountId: "claude-work", priorityAccountIds: order }, 5, 302);
+    assert.ok(restored.ok);
+    assert.equal(restored.policy.accountId, "claude-work", "returning to Default Account restores the default");
+    assert.deepEqual(restored.policy.priorityAccountIds, order, "and keeps the order for next time");
+    const overwritten = db.setMachineProviderAccountDefault("runner-1", "claude", "claude-personal", 6, 303);
+    assert.ok(overwritten.ok, "a fixed policy still accepts the older route");
+    assert.deepEqual(overwritten.choice.priorityAccountIds, order);
+  } finally {
+    db?.close();
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("account usage reaches selection only for accounts, whatever the reading's age (#4353)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(meta({}), 100, PROTOCOL_VERSION);
+    const base = { runnerId: "runner-1", agentId: "agent-1", provider: "claude" as const, state: "available" as const, buckets: [] };
+    db.upsertSubscriptionUsageSnapshot({ ...base, sourceId: "s-account", providerAccountId: "work", fetchedAt: 1 }, 2);
+    db.upsertSubscriptionUsageSnapshot({ ...base, sourceId: "s-legacy", fetchedAt: 1 }, 2);
+    assert.deepEqual(db.providerAccountUsageSnapshots("runner-1").map((snapshot) => snapshot.providerAccountId), ["work"]);
+    assert.deepEqual(db.providerAccountUsageSnapshots("another-runner"), []);
+  } finally {
+    db.close();
+  }
+});
+
 test("capacity dimensions and overflow diagnostics are accepted only from protocol-v135 runners", () => {
   const db = ControlPlaneDb.open(":memory:");
   const runtime = {
@@ -3162,6 +3289,38 @@ test("typed workflow decisions preserve their exact approval snapshot across a d
   }
 });
 
+test("#4301 superseded closure approvals retain their actor and approval time across restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-closure-approval-"));
+  const file = join(root, "control-plane.db");
+  try {
+    const db = ControlPlaneDb.open(file);
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    db.createSession(newSession({ id: "parent" }));
+    const snapshot: WorkflowDecisionView["resourceSnapshot"] = { category: "issue_closure", repository: "team/repo", issue: 100,
+      title: "Task", url: "https://github.com/team/repo/issues/100", forgeDigest: "a".repeat(64), openPullRequests: [],
+      reason: "completed", explanation: "Delivered", evidence: ["Merged"], activeChildren: [], excludedChildren: [] };
+    const create = (n: number) => db.createWorkflowDecision({ requestId: `closure-${n}`, occurrenceId: `closure-${n}`,
+      sessionId: "parent", controllingSessionId: "parent", category: "issue_closure", resourceKey: "issue_closure:team/repo#100",
+      resourceSnapshot: snapshot, resourceDigest: "b".repeat(64), policyRevision: 1, authority: "human", createdAt: n * 1000 });
+    assert.ok(create(1));
+    const actor = { kind: "human" as const, id: "owner" };
+    assert.ok(db.resolveWorkflowDecision("closure-1", "human", "approved", 1500,
+      undefined, undefined, undefined, undefined, false, undefined, undefined, actor));
+    // Exercise the storage supersession path directly, including legacy/internal callers. The
+    // public service refuses an approved re-request instead of reaching this path.
+    assert.ok(create(2));
+    db.close();
+    const reopened = ControlPlaneDb.open(file);
+    try {
+      const old = reopened.workflowDecisionByOccurrence("closure-1")!;
+      assert.equal(old.status, "superseded");
+      assert.equal(old.supersededBy, "closure-2");
+      assert.equal(old.resolvedAt, 1500);
+      assert.deepEqual(old.approval, { actor, at: 1500 });
+    } finally { reopened.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("resolving a decision records its resume as owed in the same write only when asked (#1759)", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {
@@ -3354,6 +3513,7 @@ test("campaign report verification and normalized follow-up deduplication surviv
     initial.createSession(newSession({ id: "campaign", config: { permissionMode: "orchestrator" } }));
     initial.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
     initial.updateSessionStatus("child", "idle", 999);
+    initial.updateSessionStatus("campaign", "idle", 999); // A queued root is live work (#4146).
     const report = initial.appendEvent("child", {
       kind: "agent_message", text: "Final report", final: true,
     }, 1_000);
@@ -3382,7 +3542,7 @@ test("campaign report verification and normalized follow-up deduplication surviv
     reopened.updateSessionStatus("child", "stopped", 2_001);
     assert.equal(reopened.campaignChildReportVerified("campaign", "child"), false,
       "ending resumed work without a new report cannot resurrect an old verification");
-    assert.equal(reopened.campaignProjection("campaign")?.status, "blocked");
+    assert.equal(reopened.campaignProjection("campaign")?.status, "stuck");
     reopened.updateSessionStatus("child", "idle", 2_002);
     const newerReport = reopened.appendEvent("child", {
       kind: "agent_message", text: "New final report", final: true,
@@ -3500,6 +3660,7 @@ test("verified campaign children survive an event cache reset without a history 
     }));
     db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
     db.updateSessionStatus("child", "idle", 999);
+    db.updateSessionStatus("campaign", "idle", 999); // A queued root is live work (#4146).
     db.reconcileRunnerHistory("child", 1, 1);
     const report = db.appendEvent("child", {
       kind: "agent_message", text: "Final report", final: true,
@@ -3532,6 +3693,7 @@ test("a Full Control root's summary carries its campaign status, identical to th
       operations: ["implementation_question"], delegatablePolicyIds: [] } }, 1, 2), true);
     db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
     db.updateSessionStatus("child", "idle", 999);
+    db.updateSessionStatus("campaign", "idle", 999); // A queued root is live work (#4146).
     const report = db.appendEvent("child", { kind: "agent_message", text: "Final report", final: true }, 1_000);
     db.verifyCampaignChildReport("campaign", "child", report.seq, 1_001);
 
@@ -3594,17 +3756,23 @@ test("a failed or result-less campaign continuation is visible at the projection
     db.updateCampaignContinuationForCommand("cmd-first", "failed", 1_004, "provider refused the turn");
     let projection = db.campaignProjection("campaign")!;
     assert.equal(projection.continuation?.state, "failed");
-    assert.equal(projection.children.active, 2, "the children alone would still read as active");
-    assert.equal(projection.status, "blocked", "a failed continuation no longer reports the campaign active");
+    assert.equal(projection.children.active, 2);
+    // #4146: running children are live work, so the campaign is Active beside the stall.
+    assert.equal(projection.status, "active", "the running children keep the campaign active");
     assert.equal(projection.stalled, "continuation_failed");
+    db.updateSessionStatus("child", "idle", 1_004);
+    db.updateSessionStatus("nested", "idle", 1_004);
+    projection = db.campaignProjection("campaign")!;
+    assert.equal(projection.status, "stuck", "with nothing live, a stalled continuation leaves the campaign stuck");
+    assert.ok(projection.stuck?.items.some((item) => item.kind === "continuation" && item.state === "failed"));
 
     db.updateCampaignContinuationForCommand("cmd-first", "missing_result", 1_005, "no terminal result");
     projection = db.campaignProjection("campaign")!;
-    assert.equal(projection.status, "blocked");
+    assert.equal(projection.status, "stuck");
     assert.equal(projection.stalled, "continuation_missing_result");
     assert.equal(db.campaignProjection("nested")?.stalled, undefined,
       "like continuation, the stall belongs to the root campaign's own view");
-    assert.equal(db.campaignProjection("nested")?.status, "active");
+    assert.equal(db.campaignProjection("nested")?.status, "stuck", "a nested view reads the same campaign status");
 
     assert.ok(db.createWorkflowDecision({
       requestId: "human-merge", occurrenceId: "workflow-human-merge", sessionId: "child",
@@ -3621,7 +3789,7 @@ test("a failed or result-less campaign continuation is visible at the projection
     db.updateCampaignContinuationForCommand("cmd-first", "acknowledged", 1_008);
     projection = db.campaignProjection("campaign")!;
     assert.equal(projection.stalled, undefined, "acknowledgement clears the stall");
-    assert.equal(projection.status, "active");
+    assert.equal(projection.status, "stuck", "the children's reports still wait for verification, and nothing is live");
   } finally {
     db.close();
   }

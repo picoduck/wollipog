@@ -159,8 +159,9 @@ async function mount(runner: RunnerView | undefined, {
     mountPoint.remove();
   };
   unmounts.add(unmount);
+  const title = "Machine Settings";
   const dialog = () => [...body.querySelectorAll<HTMLElement>('[role="dialog"]')]
-    .find((element) => element.querySelector(".modal-title")?.textContent === "Machine Settings") ?? null;
+    .find((element) => element.querySelector(".modal-title")?.textContent === title) ?? null;
   return {
     calls,
     closed: () => closed,
@@ -196,7 +197,7 @@ async function press(button: HTMLButtonElement | null) {
   await act(async () => { button.click(); });
   await settle();
 }
-const save = (dialog: HTMLElement) => press(buttonNamed(dialog.closest(".modal-panel")!, "Save Changes"));
+const save = (dialog: HTMLElement) => press(buttonNamed(dialog.closest(".modal-panel")!, "Save Changes") ?? buttonNamed(dialog.closest(".modal-panel")!, "Save"));
 
 test("Machine Settings is one form: its name as the description, Delete Machine…, Cancel and Save Changes, and no other save", async () => {
   const view = await mount(machine({ status: "offline" }));
@@ -218,7 +219,7 @@ test("Machine Settings is one form: its name as the description, Delete Machine�
   }
   // An offline machine still saves every field now; the runner takes its settings on reconnect.
   assert.equal(dialog.querySelector(".notice")?.textContent,
-    "Studio Mac is offline. Changes save now; Capacity Limit and automatic switching take effect when it reconnects.");
+    "Studio Mac is offline. Changes save now; Capacity Limit and reviewer executable policy take effect when it reconnects.");
 });
 
 test("Save Changes sends exactly the changed fields with their revisions, then closes with a toast; an unchanged form sends nothing", async () => {
@@ -295,48 +296,13 @@ test("Capacity Limit is a 96px field whose error sits under its helper, both des
   assert.equal(input.hasAttribute("aria-invalid"), false, "a valid value clears the error");
 });
 
-test("on an older runner Capacity Limit and the switch are disabled with the capability sentence", async () => {
+test("on an older runner Capacity Limit is disabled and account settings are absent", async () => {
   const view = await mount(machine({ protocolVersion: 1 }));
   const dialog = view.dialog()!;
   const input = inputLabelled(dialog, "Capacity Limit")!;
   assert.equal(input.disabled, true);
   assert.match(describedText(input)[0] ?? "", /runner capacity changes/u);
-  const toggle = dialog.querySelector<HTMLButtonElement>('[role="switch"]')!;
-  assert.equal(toggle.disabled, true);
-  assert.match(describedText(toggle).join(" "), /automatic account switching changes/u);
-});
-
-test("turning switching on asks first with a primary Turn On Automatic Switching; cancelling saves nothing, and turning it off does not ask", async () => {
-  const view = await mount(machine());
-  const dialog = view.dialog()!;
-  const toggle = dialog.querySelector<HTMLButtonElement>('[role="switch"]')!;
-  assert.match(toggle.textContent ?? "", /^Switch Accounts Automatically/u);
-  await press(toggle);
-  assert.equal(toggle.getAttribute("aria-checked"), "true");
-  await save(dialog);
-  const confirmation = [...body.querySelectorAll<HTMLElement>('[role="dialog"]')]
-    .find((element) => element.querySelector(".modal-title")?.textContent === "Turn On Automatic Switching")!;
-  assert.ok(confirmation, "the confirmation stacks on Machine Settings");
-  const confirmButton = buttonNamed(confirmation, "Turn On Automatic Switching")!;
-  assert.ok(confirmButton.classList.contains("primary") && !confirmButton.classList.contains("danger"), "a primary button");
-  assertNoDomNode(confirmation.querySelector(".modal-tone-icon"), "no danger icon");
-  assert.ok(confirmation.querySelector(".notice.t-warning")?.textContent?.includes("Provider terms"), "the terms are a warning notice");
-  await press(buttonNamed(confirmation, "Cancel"));
-  assert.deepEqual(view.calls, [], "cancelling saves nothing");
-  assert.equal(view.closed(), 0);
-
-  await save(dialog);
-  const again = [...body.querySelectorAll<HTMLElement>('[role="dialog"]')]
-    .find((element) => element.querySelector(".modal-title")?.textContent === "Turn On Automatic Switching")!;
-  await press(buttonNamed(again, "Turn On Automatic Switching"));
-  assert.deepEqual(view.calls, [["updateMachineAutomaticAccountSwitching", "studio", { enabled: true, expectedRevision: 4 }]]);
-  await view.unmount();
-
-  const on = await mount(machine({ automaticAccountSwitching: { enabled: true, revision: 5 } }));
-  await press(on.dialog()!.querySelector<HTMLButtonElement>('[role="switch"]'));
-  await save(on.dialog()!);
-  assert.deepEqual(on.calls, [["updateMachineAutomaticAccountSwitching", "studio", { enabled: false, expectedRevision: 5 }]],
-    "turning it off needs no confirmation");
+  assertNoDomNode(dialog.querySelector('[role="switch"]'));
 });
 
 test("two installations of one harness are one radio group, and a missing saved choice is a disabled row", async () => {
@@ -369,61 +335,6 @@ test("two installations of one harness are one radio group, and a missing saved 
   assert.match(row.textContent ?? "", /Saved choice not found\. Choose another installation\./u);
 });
 
-test("Default Accounts read Signed In, Sign-In Required or Status Unknown, and No Default; never Logged In", async () => {
-  const view = await mount(machine());
-  const dialog = view.dialog()!;
-  assert.equal(dialog.querySelector("fieldset legend")?.textContent, "Default Accounts");
-  const claude = dialog.querySelector<HTMLButtonElement>('[aria-label^="Default Claude Account"]')!;
-  assert.ok(claude, "a Select per provider");
-  assert.ok(dialog.querySelector('[aria-label^="Default Codex Account"]'));
-  assert.match(describedText(claude).join(" "), /Used by new sessions on this machine that don't choose an account\./u);
-  await press(claude);
-  const options = [...body.querySelectorAll<HTMLElement>('[role="listbox"] [role="option"]')].map((option) => option.textContent);
-  assert.deepEqual(options, [
-    "No DefaultUses the agent's configured account, or the first one available.",
-    "WorkSigned In",
-    "PersonalSign-In Required",
-  ]);
-  assert.doesNotMatch(body.textContent ?? "", /Logged In|Login Required|Login Unknown/u);
-});
-
-test("Default Accounts leave out a profile only other control planes may use, unless it is the saved one (#3240)", async () => {
-  const theirs = { id: "theirs", label: "Theirs", provider: "claude" as const, authStatus: "authenticated" as const,
-    profile: { id: "p-theirs", access: "not_granted" as const } };
-  const accounts = [
-    { id: "work", label: "Work", provider: "claude" as const, authStatus: "authenticated" as const },
-    theirs,
-  ];
-  const offered = async (overrides: Parameters<typeof machine>[0]) => {
-    const view = await mount(machine(overrides));
-    await press(view.dialog()!.querySelector<HTMLButtonElement>('[aria-label^="Default Claude Account"]')!);
-    const options = [...body.querySelectorAll<HTMLElement>('[role="listbox"] [role="option"]')].map((option) => option.textContent);
-    await view.unmount();
-    return options;
-  };
-  assert.deepEqual(await offered({ providerAccounts: accounts }), [
-    "No DefaultUses the agent's configured account, or the first one available.",
-    "WorkSigned In",
-  ]);
-  assert.deepEqual(await offered({ providerAccounts: accounts,
-    providerAccountDefaults: [{ provider: "claude", accountId: "theirs", revision: 2 }] }), [
-    "No DefaultUses the agent's configured account, or the first one available.",
-    "WorkSigned In",
-    "TheirsIts provider profile isn't granted to this control plane.",
-  ]);
-});
-
-test("a saved default account the machine no longer lists keeps its not-found option", async () => {
-  const view = await mount(machine({ providerAccountDefaults: [{ provider: "claude", accountId: "removed", revision: 3 }] }));
-  const claude = view.dialog()!.querySelector<HTMLButtonElement>('[aria-label^="Default Claude Account"]')!;
-  assert.match(claude.getAttribute("aria-label") ?? "", /Saved Account Not Found/u);
-  await press(claude);
-  await press([...body.querySelectorAll<HTMLButtonElement>('[role="listbox"] [role="option"]')]
-    .find((option) => option.textContent?.startsWith("Work"))!);
-  await save(view.dialog()!);
-  assert.deepEqual(view.calls, [["updateMachineProviderAccountDefault", "studio", "claude", { accountId: "work", expectedRevision: 3 }]]);
-});
-
 test("an online native runner's Delete Machine… is disabled with its reason as visible text", async () => {
   const view = await mount(machine());
   const dialog = view.dialog()!;
@@ -439,14 +350,14 @@ test("an online native runner's Delete Machine… is disabled with its reason as
   assertNoDomNode(offline.dialog()!.querySelector(".machine-settings-delete-note"), "no reason once it can be deleted");
 });
 
-test("a machine's own manager sees only Capacity Limit, the switch and Default Accounts", async () => {
+test("a machine's own manager sees Capacity Limit with account choices moved to Provider Accounts", async () => {
   const view = await mount(machine({
     agents: [codex("codex", "system", "/usr/bin/codex"), codex("codex-local", "local", "/home/me/.local/bin/codex")],
   }), { canManageMachines: false });
   const dialog = view.dialog()!;
   const labels = [...dialog.querySelectorAll("label, legend, .setting-row-title")].map((element) => element.textContent);
   assert.deepEqual(labels.filter((label) => !/^(No Default|Work|Personal|Spare)$/u.test(label ?? "")),
-    ["Capacity Limit", "Switch Accounts Automatically", "Default Accounts"]);
+    ["Capacity Limit"]);
   assertNoDomNode(inputLabelled(dialog, "Machine Name"), "no Machine Name");
   assertNoDomNode(dialog.querySelector('[role="radiogroup"]'), "no Agent Installations");
   assertNoDomNode(buttonNamed(dialog, "Delete Machine…"), "no Delete Machine…");
@@ -480,54 +391,25 @@ test("a machine that reports new facts while the dialog is open keeps the person
   assert.deepEqual(view.calls, [["updateMachineCapacity", "studio", { configuredUnits: 24, expectedRevision: 2 }]]);
 });
 
-test("a provider that appears after opening keeps the revision it was edited at, so another client's change conflicts (CR-1.1)", async () => {
-  const claudeOnly = machine({ providerAccounts: [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }] });
-  const view = await mount(claudeOnly);
-  const dialog = view.dialog()!;
-  assertNoDomNode(dialog.querySelector('[aria-label^="Default Codex Account"]'), "no Codex accounts yet");
-  const withCodex = machine({ providerAccounts: [
-    { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
-    { id: "solo", label: "Codex Solo", provider: "codex", authStatus: "authenticated" },
-    { id: "team", label: "Codex Team", provider: "codex", authStatus: "authenticated" },
-  ] });
-  await view.rerender(withCodex);
-  await press(dialog.querySelector<HTMLButtonElement>('[aria-label^="Default Codex Account"]'));
-  await press([...body.querySelectorAll<HTMLButtonElement>('[role="listbox"] [role="option"]')]
-    .find((option) => option.textContent?.startsWith("Codex Solo"))!);
-  // Another client saves Codex Team as the default while this one is still editing.
-  await view.rerender({ ...withCodex, providerAccountDefaults: [
-    { provider: "claude", accountId: null, revision: 3 },
-    { provider: "codex", accountId: "team", revision: 1 },
-  ] });
-  await save(dialog);
-  assert.deepEqual(view.calls, [["updateMachineProviderAccountDefault", "studio", "codex", { accountId: "solo", expectedRevision: 0 }]],
-    "the write carries the revision the person edited, so the server refuses it as a conflict");
-});
-
-test("a capacity typed as 024 saves as 24 and is not resent after a later field fails (CR-1.2)", async () => {
-  let failDefault = true;
-  const view = await mount(machine(), {
-    client: {
-      updateMachineProviderAccountDefault: (async (runnerId: string, provider: string, input: { accountId: string | null; expectedRevision: number }) => {
-        view.calls.push(["updateMachineProviderAccountDefault", runnerId, provider, input]);
-        if (failDefault) throw new Error("Default Provider Account changed in another client");
-        return { providerAccountDefault: { provider, accountId: input.accountId, revision: input.expectedRevision + 1 } };
-      }) as ApiClient["updateMachineProviderAccountDefault"],
+test("a capacity typed as 024 is not resent after the reviewer-policy save fails", async () => {
+  let fail = true;
+  const view = await mount(machine({ reviewerSecurity: { policy: "strict", revision: 1 } }), { client: {
+    updateMachineReviewerSecurity: async (id, input) => {
+      view.calls.push(["reviewer", id, input]);
+      if (fail) throw new Error("Policy changed");
+      return { reviewerSecurity: { policy: input.policy, revision: input.expectedRevision + 1 } };
     },
-  });
+  } });
   const dialog = view.dialog()!;
   await type(inputLabelled(dialog, "Capacity Limit")!, "024");
-  await press(dialog.querySelector<HTMLButtonElement>('[aria-label^="Default Claude Account"]'));
-  await press([...body.querySelectorAll<HTMLButtonElement>('[role="listbox"] [role="option"]')]
-    .find((option) => option.textContent?.startsWith("Work"))!);
+  await press(dialog.querySelector<HTMLButtonElement>('[aria-label^="Reviewer Executable Policy"]'));
+  await press([...body.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(option => option.textContent?.startsWith("Personal Machine"))!);
   await save(dialog);
-  assert.deepEqual(view.calls.map(([name]) => name), ["updateMachineCapacity", "updateMachineProviderAccountDefault"]);
+  assert.deepEqual(view.calls.map(([name]) => name), ["updateMachineCapacity", "reviewer"]);
   assert.deepEqual(view.calls[0], ["updateMachineCapacity", "studio", { configuredUnits: 24, expectedRevision: 2 }]);
-  view.calls.length = 0;
-  failDefault = false;
+  view.calls.length = 0; fail = false;
   await save(dialog);
-  assert.deepEqual(view.calls, [["updateMachineProviderAccountDefault", "studio", "claude", { accountId: "work", expectedRevision: 3 }]],
-    "only the default account is still changed");
+  assert.deepEqual(view.calls.map(([name]) => name), ["reviewer"]);
 });
 
 test("an SSH machine whose runner has not arrived shows only Machine Name", async () => {
@@ -537,4 +419,32 @@ test("an SSH machine whose runner has not arrived shows only Machine Name", asyn
   assert.equal(dialog.querySelector(".modal-desc")?.textContent, "Golf Simulator");
   assert.deepEqual([...dialog.querySelectorAll("label")].map((label) => label.textContent), ["Machine Name"]);
   assert.equal(buttonNamed(dialog, "Delete Machine…")!.disabled, false, "an SSH machine is deleted through its box");
+});
+
+test("reviewer policy saves the selected mode and revision, and older or read-only machines cannot change it", async () => {
+  const view = await mount(machine({ reviewerSecurity: { policy: "strict", revision: 7 } }), {
+    client: { updateMachineReviewerSecurity: async (runnerId, input) => {
+      view.calls.push(["reviewerSecurity", runnerId, input]);
+      return { reviewerSecurity: { policy: input.policy, revision: input.expectedRevision + 1 } };
+    } },
+  });
+  const control = [...view.dialog()!.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="listbox"]')]
+    .find(button => button.getAttribute("aria-label")?.includes("Reviewer Executable Policy"));
+  assert.ok(control);
+  await press(control);
+  const option = [...body.querySelectorAll<HTMLElement>('[role="option"]')]
+    .find(element => element.textContent?.includes("Personal Machine"));
+  assert.ok(option);
+  await act(async () => { option.click(); });
+  await settle();
+  await save(view.dialog()!);
+  assert.deepEqual(view.calls, [["reviewerSecurity", "studio", { policy: "personal_machine", expectedRevision: 7 }]]);
+  await view.unmount();
+  for (const overrides of [{ protocolVersion: 324 }, { canManage: false }]) {
+    const readOnly = await mount(machine(overrides));
+    const button = [...readOnly.dialog()!.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="listbox"]')]
+      .find(element => element.getAttribute("aria-label")?.includes("Reviewer Executable Policy"));
+    assert.equal(button?.getAttribute("aria-disabled"), "true");
+    await readOnly.unmount();
+  }
 });

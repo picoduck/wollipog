@@ -33,6 +33,7 @@ import type {
   GitHubReviewThread,
   GitPrInfo,
   GitPrSummary,
+  GitRequestDiffInfo,
   GitRepositoryFacts,
   GitStatusInfo,
   GitSummaryInfo,
@@ -1403,38 +1404,147 @@ export async function gitStatus(cwd: string): Promise<GitStatusInfo> {
 
 /* ------------------------- git summary (pinned card) ---------------------- */
 
+// GitHub's CheckConclusionState vocabulary as of 2026: SUCCESS, FAILURE, NEUTRAL, CANCELLED,
+// SKIPPED, TIMED_OUT, ACTION_REQUIRED, STALE, STARTUP_FAILURE.
+const PASS_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+
+type CheckContextNode = {
+  name?: unknown; context?: unknown; status?: unknown; conclusion?: unknown; state?: unknown;
+  workflowName?: unknown; databaseId?: unknown; detailsUrl?: unknown; startedAt?: unknown; createdAt?: unknown;
+};
+
+/** One rollup node's result. A StatusContext carries `state`; a CheckRun carries `status` and,
+ * once COMPLETED, `conclusion`. A COMPLETED check run with an unrecognized conclusion fails
+ * closed; only genuinely in-flight states (and unknown node shapes) are pending. */
+function checkContextResult(raw: unknown): "passing" | "failing" | "pending" {
+  const n = (raw ?? {}) as CheckContextNode;
+  if (typeof n.state === "string") {
+    if (n.state === "SUCCESS") return "passing";
+    return n.state === "FAILURE" || n.state === "ERROR" ? "failing" : "pending"; // PENDING / EXPECTED
+  }
+  if (n.status === "COMPLETED") return PASS_CONCLUSIONS.has(n.conclusion as string) ? "passing" : "failing";
+  return "pending"; // QUEUED / IN_PROGRESS / unknown shape
+}
+
+const RESULT_SEVERITY = { passing: 0, pending: 1, failing: 2 } as const;
+
+/** An Actions job's details URL names its job id, which is its check run's id. */
+const ACTIONS_JOB_URL = /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/\d+\/job\/(\d+)(?:[/?#]|$)/u;
+
+/** A check run's id, assigned in creation order: the campaign query reads it directly, and
+ * `gh pr view` exposes it only inside an Actions job's details URL. Null when neither says. */
+function checkRunId(n: CheckContextNode): number | null {
+  if (Number.isSafeInteger(n.databaseId) && (n.databaseId as number) > 0) return n.databaseId as number;
+  const job = typeof n.detailsUrl === "string" ? ACTIONS_JOB_URL.exec(n.detailsUrl)?.[1] : undefined;
+  const id = job === undefined ? NaN : Number(job);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/** Before any check could have run: `gh` prints Go's zero time (0001-01-01) for a run that has
+ * not started, which is unknown, not old. */
+const EARLIEST_CHECK_TIME = Date.UTC(2000, 0, 1);
+
+/** When a check run started or a status was created (`gh pr view` calls both `startedAt`). */
+function checkContextTime(n: CheckContextNode): number | null {
+  const value = typeof n.startedAt === "string" ? n.startedAt : n.createdAt;
+  const time = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(time) && time >= EARLIEST_CHECK_TIME ? time : null;
+}
+
+/** Whether `node` is provably newer than `other`, an entry for the same check. Check run ids grow
+ * in creation order, so a re-run, even one not started yet, has the larger id; otherwise the later
+ * known time is newer. A missing time or the same second proves nothing. */
+function provablyNewerCheckContext(node: CheckContextNode, other: CheckContextNode): boolean {
+  const id = checkRunId(node);
+  const otherId = checkRunId(other);
+  if (id !== null && otherId !== null && id !== otherId) return id > otherId;
+  const time = checkContextTime(node);
+  const otherTime = checkContextTime(other);
+  return time !== null && otherTime !== null && time > otherTime;
+}
+
+/** The entry that counts for one check: of the entries no other entry is provably newer than, the
+ * worst result (the first of equals). Entries that cannot be ordered against each other all stay
+ * candidates, so a failure is never hidden by a run that cannot be shown to be newer than it. If
+ * mixed id and time comparisons leave no candidate, every entry is one. */
+function latestOfCheck(entries: readonly unknown[]): unknown {
+  const unbeaten = entries.filter((entry) =>
+    !entries.some((other) => other !== entry && provablyNewerCheckContext(other as CheckContextNode, entry as CheckContextNode)));
+  const candidates = unbeaten.length > 0 ? unbeaten : entries;
+  return candidates.reduce((worst, entry) =>
+    RESULT_SEVERITY[checkContextResult(entry)] > RESULT_SEVERITY[checkContextResult(worst)] ? entry : worst);
+}
+
 /**
- * Collapse a `gh pr view` statusCheckRollup into counts + failing names. The rollup mixes two
- * node shapes: CheckRun ({name, status, conclusion}) and StatusContext ({context, state}).
- * Exported for unit tests. Failure stance: a COMPLETED check run with an unrecognized
- * conclusion counts as FAILING (fail closed) — labeling a terminal non-pass state as
- * "running" would hide it and suppress the Fix affordance if GitHub adds new vocabulary.
- * Only genuinely in-flight states (and unknown node shapes) count as pending.
+ * The latest entry of each check in a rollup, in GitHub's order (#4263). A head commit can carry
+ * several runs of one check, for example a cancelled run from a closed pull request and the
+ * replacement pull request's passing run; only the most recent counts, as in `gh pr checks`.
+ * Check runs and status contexts are separate checks even when they share a name. A check run is
+ * identified by its name and, where the source reports it, its workflow, so same-named jobs in two
+ * workflows stay two checks. Nodes of an unknown shape are kept as they are.
  */
-export function summarizeCheckRollup(nodes: unknown): Omit<GitChecksSummary, "url"> {
+export function latestCheckContexts(nodes: unknown): unknown[] {
+  // Each slot is an unknown-shape node kept as it is, or the entries of one check, placed where
+  // that check first appears.
+  const slots: Array<{ entries: unknown[] }> = [];
+  const checks = new Map<string, { entries: unknown[] }>();
+  for (const raw of Array.isArray(nodes) ? nodes : []) {
+    const n = (raw ?? {}) as CheckContextNode;
+    const key = typeof n.state === "string" && typeof n.context === "string" ? `status\0${n.context}`
+      : typeof n.state !== "string" && typeof n.name === "string"
+        ? `run\0${typeof n.workflowName === "string" ? n.workflowName : ""}\0${n.name}`
+        : null;
+    const check = key === null ? undefined : checks.get(key);
+    if (check) {
+      check.entries.push(raw);
+      continue;
+    }
+    const slot = { entries: [raw] };
+    slots.push(slot);
+    if (key !== null) checks.set(key, slot);
+  }
+  return slots.map((slot) => slot.entries.length === 1 ? slot.entries[0] : latestOfCheck(slot.entries));
+}
+
+/** Count every node in a rollup as it stands, superseded runs included. */
+export function countCheckContexts(nodes: unknown): Omit<GitChecksSummary, "url"> {
   const failing: string[] = [];
   let pending = 0;
   let passing = 0;
-  // GitHub's CheckConclusionState vocabulary as of 2026: SUCCESS, FAILURE, NEUTRAL, CANCELLED,
-  // SKIPPED, TIMED_OUT, ACTION_REQUIRED, STALE, STARTUP_FAILURE.
-  const PASS_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
   for (const raw of Array.isArray(nodes) ? nodes : []) {
-    const n = raw as { name?: string; context?: string; status?: string; conclusion?: string; state?: string };
-    const name = n.name ?? n.context ?? "check";
-    if (typeof n.state === "string") {
-      // StatusContext
-      if (n.state === "SUCCESS") passing++;
-      else if (n.state === "FAILURE" || n.state === "ERROR") failing.push(name);
-      else pending++; // PENDING / EXPECTED
-    } else if (n.status === "COMPLETED") {
-      // CheckRun, finished: pass on the known-good conclusions, fail on everything else.
-      if (PASS_CONCLUSIONS.has(n.conclusion ?? "")) passing++;
-      else failing.push(name);
-    } else {
-      pending++; // QUEUED / IN_PROGRESS / unknown shape
+    const result = checkContextResult(raw);
+    if (result === "passing") passing++;
+    else if (result === "pending") pending++;
+    else {
+      const n = (raw ?? {}) as CheckContextNode;
+      failing.push(typeof n.name === "string" ? n.name : typeof n.context === "string" ? n.context : "check");
     }
   }
   return { failing: failing.length, pending, passing, failingNames: failing.slice(0, 8) };
+}
+
+/**
+ * Collapse a `gh pr view` statusCheckRollup into counts + failing names. The rollup mixes two
+ * node shapes: CheckRun ({name, status, conclusion}) and StatusContext ({context, state}).
+ * Only each check's latest entry counts (#4263). Exported for unit tests. Failure stance: a
+ * COMPLETED check run with an unrecognized conclusion counts as FAILING (fail closed) — labeling
+ * a terminal non-pass state as "running" would hide it and suppress the Fix affordance if GitHub
+ * adds new vocabulary. Only genuinely in-flight states (and unknown node shapes) count as pending.
+ */
+export function summarizeCheckRollup(nodes: unknown): Omit<GitChecksSummary, "url"> {
+  return countCheckContexts(latestCheckContexts(nodes));
+}
+
+/** Named checks use exactly the rollup's latest-run selection. */
+export function namedCheckContexts(nodes: unknown): NonNullable<GitChecksSummary["jobs"]> {
+  return latestCheckContexts(nodes).slice(0, 100).map((raw) => {
+    const n = (raw ?? {}) as CheckContextNode & { targetUrl?: unknown };
+    return {
+      name: (typeof n.name === "string" ? n.name : typeof n.context === "string" ? n.context : "Check").slice(0, 256),
+      state: checkContextResult(raw),
+      url: safeHttpUrl(n.detailsUrl ?? n.targetUrl),
+    };
+  });
 }
 
 /** TTL cache for the gh PR lookup — the pinned summary refreshes on every turn flip, and a
@@ -1669,6 +1779,9 @@ interface GitLabMergeRequest {
   headOid: string;
   baseOid: string;
   pipeline: JsonObject | null;
+  baseRef?: string;
+  headRef?: string;
+  mergeability?: string;
 }
 
 function sanitizedForgeError(error: unknown): string {
@@ -1717,7 +1830,12 @@ export function parseGitLabMergeRequest(value: unknown, remote: ForgeRemote): Gi
       (object?.head_pipeline != null && !pipeline)) {
     throw new Error("GitLab returned invalid merge-request metadata");
   }
-  return { iid, title, webUrl, state, headOid, baseOid, pipeline };
+  return {
+    iid, title, webUrl, state, headOid, baseOid, pipeline,
+    ...(jsonString(object?.target_branch) ? { baseRef: jsonString(object?.target_branch)!.slice(0, 256) } : {}),
+    ...(jsonString(object?.source_branch) ? { headRef: jsonString(object?.source_branch)!.slice(0, 256) } : {}),
+    ...(jsonString(object?.detailed_merge_status) ? { mergeability: jsonString(object?.detailed_merge_status)!.slice(0, 128) } : {}),
+  };
 }
 
 /** Collapse GitLab's bounded head-pipeline object into the existing provider-neutral check rollup. */
@@ -1736,6 +1854,35 @@ export function summarizeGitLabPipeline(pipeline: unknown, remote: ForgeRemote):
     return { failing: 0, pending: 1, passing: 0, failingNames: [], url };
   }
   return { failing: 1, pending: 0, passing: 0, failingNames: [name], url };
+}
+
+/** A failed job read preserves the authoritative pipeline rollup. No mutations are made. */
+export async function gitlabNamedChecks(cwd: string, remote: ForgeRemote, pipeline: unknown, read: typeof runGlab = runGlab): Promise<GitChecksSummary | null> {
+  const summary = summarizeGitLabPipeline(pipeline, remote);
+  if (!summary) return null;
+  const id = jsonInt(jsonObject(pipeline)?.id);
+  if (id == null || id < 1) return { ...summary, jobsIncomplete: true };
+  try {
+    const raw = await read(cwd, remote.host, ["api", `projects/${encodeURIComponent(remote.project)}/pipelines/${id}/jobs?per_page=100&include_retried=false`]);
+    return { ...summary, ...parseGitLabJobs(JSON.parse(raw), remote) };
+  } catch {
+    return { ...summary, jobsIncomplete: true };
+  }
+}
+
+export function parseGitLabJobs(value: unknown, remote: ForgeRemote): Pick<GitChecksSummary, "jobs" | "jobsIncomplete"> {
+  if (!Array.isArray(value) || value.length > 100) throw new Error("GitLab returned invalid jobs");
+  const jobs = value.map((raw) => {
+    const job = jsonObject(raw);
+    const name = jsonString(job?.name);
+    const status = jsonString(job?.status);
+    const url = gitlabUrl(job?.web_url, remote);
+    if (!name || !status || !url) throw new Error("GitLab returned invalid job metadata");
+    const state = status === "success" || status === "skipped" ? "passing" as const
+      : status === "failed" || status === "canceled" ? "failing" as const : "pending" as const;
+    return { name: name.slice(0, 256), state, url };
+  });
+  return { jobs, jobsIncomplete: value.length === 100 };
 }
 
 async function runGlab(cwd: string, host: string, args: string[]): Promise<string> {
@@ -2003,9 +2150,114 @@ async function forgeReviewSync(cwd: string): Promise<ForgeReviewSyncInfo> {
   return gitlabReviewSync(cwd, readiness.remote);
 }
 
+/** Read only the origin's exact request. URLs never select another host or repository. */
+export async function loadRequestDiff(
+  remote: ForgeRemote,
+  requestUrl: string,
+  read: (args: string[]) => Promise<string>,
+): Promise<GitRequestDiffInfo> {
+  const github = remote.provider === "github";
+  const url = new URL(requestUrl);
+  const expectedPath = `/${remote.project}/${github ? "pull" : "-/merge_requests"}/`;
+  const path = github ? url.pathname.toLowerCase() : url.pathname;
+  const prefix = github ? expectedPath.toLowerCase() : expectedPath;
+  const suffix = path.startsWith(prefix) ? path.slice(prefix.length) : "";
+  if (url.host.toLowerCase() !== remote.host.toLowerCase() || !["http:", "https:"].includes(url.protocol) ||
+      url.username || url.password || url.search || url.hash || !/^[1-9][0-9]*$/.test(suffix)) {
+    throw new Error("the request does not belong to the origin repository");
+  }
+  const endpoint = github ? `repos/${remote.project}/pulls/${suffix}`
+    : `projects/${encodeURIComponent(remote.project)}/merge_requests/${suffix}`;
+  const metadata = (raw: string) => {
+    const value = jsonObject(JSON.parse(raw));
+    const refs = jsonObject(value?.diff_refs);
+    const base = jsonObject(value?.base);
+    const head = jsonObject(value?.head);
+    const headOid = gitlabOid(github ? head?.sha : refs?.head_sha);
+    const baseOid = gitlabOid(github ? base?.sha : refs?.base_sha);
+    const targetOid = gitlabOid(github ? base?.sha : refs?.start_sha);
+    const baseRef = jsonString(github ? base?.ref : value?.target_branch);
+    const headRef = jsonString(github ? head?.ref : value?.source_branch);
+    if ((github ? value?.html_url : value?.web_url) !== requestUrl ||
+        (github ? value?.number : value?.iid) !== Number(suffix) ||
+        !headOid || !baseOid || !targetOid || !baseRef || !headRef) {
+      throw new Error("the forge returned invalid request revisions");
+    }
+    return { headOid, baseOid, targetOid, baseRef, headRef, state: value?.state,
+      files: value?.changed_files, additions: value?.additions, deletions: value?.deletions };
+  };
+  const before = metadata(await read(["api", endpoint]));
+  let diffBaseOid = before.baseOid;
+  let raw: string;
+  let incomplete = false;
+  let expectedFiles: unknown = before.files;
+  if (github) {
+    const comparison = jsonObject(JSON.parse(await read(["api", `repos/${remote.project}/compare/${before.targetOid}...${before.headOid}`])));
+    const mergeBase = gitlabOid(jsonObject(comparison?.merge_base_commit)?.sha);
+    if (!mergeBase) throw new Error("GitHub did not return the request's diff base revision");
+    diffBaseOid = mergeBase;
+    raw = await read(["api", endpoint, "-H", "Accept: application/vnd.github.diff"]);
+  } else {
+    // /changes carries diff_refs and overflow on supported GitLab API v4 servers. Failure on
+    // a future API does not fall back to a local comparison or unvalidated raw patch.
+    const response = await read(["api", `${endpoint}/changes`]);
+    const changesMeta = metadata(response);
+    if (JSON.stringify(changesMeta) !== JSON.stringify(before)) throw new Error("the request changed while its diff was loading — reload");
+    const value = jsonObject(JSON.parse(response))!;
+    if (!Array.isArray(value.changes) || typeof value.overflow !== "boolean") throw new Error("GitLab returned incomplete diff metadata");
+    incomplete = value.overflow;
+    expectedFiles = /^\d+$/.test(String(value.changes_count)) ? Number(value.changes_count) : null;
+    raw = value.changes.map((entry) => {
+      const change = jsonObject(entry);
+      const path = githubReviewPath(change?.new_path);
+      const oldPath = githubReviewPath(change?.old_path);
+      if (!path || !oldPath || /[\x00-\x1f\x7f]/.test(path + oldPath) || typeof change?.diff !== "string") throw new Error("GitLab returned invalid diff paths");
+      if (change.collapsed || change.too_large) incomplete = true;
+      if (!change.diff && !change.renamed_file) incomplete = true;
+      return `diff --git a/${oldPath} b/${path}\n`
+        + (change.new_file ? "new file mode 100644\n" : change.deleted_file ? "deleted file mode 100644\n" : "")
+        + (change.renamed_file ? `rename from ${oldPath}\nrename to ${path}\n` : "")
+        + `--- ${change.new_file ? "/dev/null" : `a/${oldPath}`}\n+++ ${change.deleted_file ? "/dev/null" : `b/${path}`}\n`
+        + change.diff + "\n";
+    }).join("");
+  }
+  if (Buffer.byteLength(raw) > FORGE_MAX_BUFFER) throw new Error("the request diff exceeds this machine's display limit — open the forge");
+  const files = parseDiff(raw);
+  const stats = diffStats(files);
+  if (expectedFiles !== files.length || (raw.trim() && files.length === 0)) incomplete = true;
+  if (github && (before.additions !== stats.insertions || before.deletions !== stats.deletions)) incomplete = true;
+  for (const file of files) {
+    if (!githubReviewPath(file.path) || (file.oldPath && !githubReviewPath(file.oldPath))) throw new Error("the forge returned an unsafe diff path");
+    for (const hunk of file.hunks) {
+      if (hunk.lines.filter((line) => line.status !== "+").length !== hunk.oldCount ||
+          hunk.lines.filter((line) => line.status !== "-").length !== hunk.newCount) incomplete = true;
+    }
+  }
+  const after = metadata(await read(["api", endpoint]));
+  if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error("the request changed while its diff was loading — reload");
+  return { requestUrl, headOid: before.headOid, baseOid: diffBaseOid, targetOid: before.targetOid,
+    baseRef: before.baseRef, headRef: before.headRef, readAt: Date.now(), incomplete,
+    diff: { scope: "all_branch", files, stats, diffHash: computeDiffHash(raw) } };
+}
+
+async function requestDiff(cwd: string, requestUrl: string): Promise<GitRequestDiffInfo> {
+  const remoteUrl = (await git(cwd, ["remote", "get-url", "origin"])).trim();
+  const remote = parseForgeRemote(remoteUrl) ?? credentialFreeGitHubRemote(remoteUrl);
+  if (!remote) throw new Error("the origin remote is not a supported forge repository");
+  if (remote.provider !== "github") {
+    const readiness = await gitlabReadiness(cwd, remote);
+    if (!readiness?.forge.authenticated) throw new Error("authenticated GitLab integration is unavailable on this machine");
+    return loadRequestDiff(readiness.remote, requestUrl, (args) => runGlab(cwd, remote.host, args));
+  }
+  const context = executionContext.getStore() ?? { kind: "native" as const };
+  return loadRequestDiff(remote, requestUrl, async (args) => (await runContextCommand(context, "gh", args, {
+    cwd, timeoutMs: GH_TIMEOUT_MS, maxBuffer: FORGE_MAX_BUFFER,
+  })).stdout);
+}
+
 /** The PR + checks for the branch checked out in `cwd`, via gh. Null when gh is missing,
  * unauthenticated, the repo isn't on GitHub, or the branch has no PR — never a throw. */
-async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; checks: GitChecksSummary | null }> {
+export async function ghPrSummary(cwd: string, runCommand: typeof runContextCommand = runContextCommand): Promise<{ pr: GitPrSummary | null; checks: GitChecksSummary | null }> {
   const context = executionContext.getStore() ?? { kind: "native" as const };
   const cacheKey = `${context.kind === "wsl" ? `wsl:${context.distro}` : "native"}:${cwd}`;
   const hit = ghPrCache.get(cacheKey);
@@ -2013,7 +2265,7 @@ async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; chec
   let pr: GitPrSummary | null = null;
   let checks: GitChecksSummary | null = null;
   try {
-    const { stdout } = await runContextCommand(context, "gh", ["pr", "view", "--json", "number,title,url,state,statusCheckRollup"], {
+    const { stdout } = await runCommand(context, "gh", ["pr", "view", "--json", "number,title,url,state,statusCheckRollup,baseRefName,headRefName,mergeable"], {
       cwd,
       timeoutMs: GH_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
@@ -2024,6 +2276,9 @@ async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; chec
       url?: string;
       state?: string;
       statusCheckRollup?: unknown;
+      baseRefName?: string;
+      headRefName?: string;
+      mergeable?: string;
     };
     const url = safeHttpUrl(d.url);
     if (typeof d.number === "number" && url) {
@@ -2034,10 +2289,17 @@ async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; chec
         state: d.state ?? "OPEN",
         provider: "github",
         kind: "pull_request",
+        baseRef: d.baseRefName,
+        headRef: d.headRefName,
+        mergeability: d.mergeable,
       };
       const rollup = summarizeCheckRollup(d.statusCheckRollup);
       // No checks configured at all → omit the section rather than showing 0/0/0.
-      checks = rollup.failing + rollup.pending + rollup.passing > 0 ? { ...rollup, url: `${url.replace(/\/$/, "")}/checks` } : null;
+      checks = rollup.failing + rollup.pending + rollup.passing > 0 ? {
+        ...rollup, jobs: namedCheckContexts(d.statusCheckRollup),
+        jobsIncomplete: latestCheckContexts(d.statusCheckRollup).length > 100,
+        url: `${url.replace(/\/$/, "")}/checks`,
+      } : null;
     }
   } catch {
     // gh absent/unauth/no PR — the card simply hides the PR/checks rows.
@@ -2098,8 +2360,11 @@ export async function forgeSummary(
         state: mr.state.toUpperCase(),
         provider: "gitlab" as const,
         kind: "merge_request" as const,
+        baseRef: mr.baseRef,
+        headRef: mr.headRef,
+        mergeability: mr.mergeability,
       } : null,
-      checks: mr ? summarizeGitLabPipeline(mr.pipeline, readiness.remote) : null,
+      checks: mr ? await gitlabNamedChecks(cwd, readiness.remote, mr.pipeline) : null,
       forge: readiness.forge,
     };
     forgeSummaryCache.set(key, { at: Date.now(), value });
@@ -2987,6 +3252,8 @@ export async function runGitAction(cwd: string, action: GitAction, ctx: GitActio
       return { forgeReview: await forgeReviewSync(cwd) };
     case "diff":
       return { diff: await gitDiff(cwd, action.scope, ctx) };
+    case "request_diff":
+      return { requestDiff: await requestDiff(cwd, action.requestUrl) };
     case "commit": {
       // The button's meaning depends on whether anything is staged ("Commit Staged" vs commit-
       // everything). If the index moved since the panel read it (agent's own git add, another

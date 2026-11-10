@@ -145,7 +145,74 @@ export type CampaignWorkItemStateCause =
   | "attempt_session_unavailable"
   | "attempt_session_input_required"
   | "attempt_session_pending_decision"
-  | "attempt_awaiting_verification";
+  | "attempt_awaiting_verification"
+  /** #4120: the item's child is idle while a merge dependency (a prerequisite in another
+   * repository) has a pull request not yet observed MERGED. Its merge is held until then. */
+  | "dependency_unmerged";
+
+/** #4120: whether a merge dependency is met. `merged`: every pull request the prerequisite names
+ * reads MERGED. `failed`: one was closed without merging, or the prerequisite was cancelled or
+ * removed, so the dependent's merge is never attempted. `unmerged`: anything else, including a
+ * prerequisite that names no pull request yet and one whose pull requests can't be read. */
+export type CampaignMergeDependencyStatus = "merged" | "unmerged" | "failed";
+
+/** What a reader is shown: also `unknown` when the reader may not see the forge facts that decide
+ * the status (#4119's per-runner visibility). */
+export type CampaignMergeDependencyShownStatus = CampaignMergeDependencyStatus | "unknown";
+
+/** #4120: one prerequisite in another repository, as a dependent item shows it. A dependency within
+ * one repository is not a merge dependency and is not listed here. */
+export interface CampaignMergeDependencyView {
+  id: string;
+  key: string;
+  title: string | null;
+  /** The prerequisite's repository, lower-cased; null when none is known yet (#4120 then holds the
+   * dependent's merge in a campaign of several repositories). */
+  repository: string | null;
+  status: CampaignMergeDependencyShownStatus;
+  /** The pull requests the prerequisite names, each with its last observed state (`unknown` when
+   * none can be shown). */
+  pullRequests: Array<{ ref: CampaignPullRequestRef; state: "open" | "closed" | "merged" | "unknown" }>;
+}
+
+/** #4120: why a merge is held. `outside`: the prerequisite names a pull request in no repository of
+ * the campaign, which no Location can read. */
+export type CampaignMergeHoldState = "open" | "closed" | "unobserved" | "none" | "cancelled" | "outside";
+
+/** #4120: the way out of an armed merge held for good. An armed merge can't be withdrawn, and the CLI
+ * form needs the shell its hold denies, so this names the MCP tool. */
+const HELD_FOR_GOOD_EXIT = "If you already armed this merge, it stays held and your command tools stay blocked; " +
+  "request a new pr_merge decision for the same pull request with the request_workflow_decision tool, which replaces the armed one.";
+
+/** #4120: the fixed reason a merge is held on, naming the prerequisite and its pull request. The
+ * approval stays valid; the requester consumes it again once the prerequisite merges. */
+export function campaignMergeHoldReason(hold: {
+  prerequisite: { key: string; repository: string | null };
+  pullRequest: CampaignPullRequestRef | null;
+  state: CampaignMergeHoldState;
+}): string {
+  const item = `${hold.prerequisite.key} in ${hold.prerequisite.repository ?? "an unknown repository"}`;
+  const pr = hold.pullRequest ? `${hold.pullRequest.repository}#${hold.pullRequest.number}` : null;
+  switch (hold.state) {
+    case "outside":
+      return `Merge held: prerequisite pull request ${pr} (${item}) is in a repository outside this campaign's ` +
+        "repositories, so no Location of the campaign can observe it MERGED. The approval stays valid; report the hold " +
+        `to your Orchestrator, who can ask the owner to add that repository. ${HELD_FOR_GOOD_EXIT}`;
+    case "cancelled":
+      return `Merge held: its prerequisite ${item} was cancelled or removed, so this merge is not attempted. ` +
+        `The approval stays valid, but the work item is blocked; report it to your Orchestrator. ${HELD_FOR_GOOD_EXIT}`;
+    case "closed":
+      return `Merge held: prerequisite pull request ${pr} (${item}) was closed without merging, so this merge is not ` +
+        `attempted. The approval stays valid, but the work item is blocked; report it to your Orchestrator. ${HELD_FOR_GOOD_EXIT}`;
+    case "none":
+      return `Merge held: prerequisite ${item} names no pull request yet, so it can't be observed MERGED. The approval ` +
+        "stays valid; report the hold to your Orchestrator and consume it again once the prerequisite merges.";
+    default:
+      return `Merge held until prerequisite pull request ${pr} (${item}) is observed MERGED; it is ` +
+        `${hold.state === "open" ? "not merged yet" : "not freshly observed"}. The approval stays valid. Wollipog wakes ` +
+        "this session when it merges: end your turn now, then consume the same approval again.";
+  }
+}
 
 export type CampaignResponsibleActor = "human" | "orchestrator" | "child" | "external";
 
@@ -160,8 +227,9 @@ export interface CampaignWorkItemBlocker {
 }
 
 /** v275 (#4070): the Orchestrator's record that the agent work on an item is done and its next step
- * belongs to `responsibleActor`. Only a `human` or `external` handoff lets a campaign finish as
- * `complete_with_handoffs`; one to `orchestrator` or `child` still blocks it. Assigning the item
+ * belongs to `responsibleActor`. Only a `human` or `external` handoff lets a campaign finish, as
+ * `complete_needs_cleanup` listing it under `cleanup` (v297, #4146; `complete_with_handoffs` from
+ * older control planes); one to `orchestrator` or `child` still blocks it. Assigning the item
  * again clears it. It describes; it never closes an issue, merges, or publishes. */
 export interface CampaignWorkItemHandoff {
   responsibleActor: CampaignResponsibleActor;
@@ -289,6 +357,9 @@ export interface CampaignForgePullRequestObservation {
   /** The pull request's merge-queue entry, or null when it is not queued. */
   mergeQueue: { state: CampaignForgeMergeQueueState; position: number | null } | null;
   mergeCommitSha: string | null;
+  /** When the forge says it merged, in epoch milliseconds. Only for Waiting Time: no gate reads it.
+   * Absent while unmerged, from older runners, and from a fact stored before they reported it. */
+  mergedAt?: number;
   /** v275: the repository's default branch. Absent from older runners, which cannot prove that a
    * merge landed on it. */
   defaultBranch?: string;
@@ -332,6 +403,8 @@ export interface CampaignForgeGitLabMergeRequestObservation {
   mergeTrain: { status: CampaignGitLabMergeTrainStatus; position: number | null } | null;
   /** The merge commit, or the squash commit of a squash merge without one. */
   mergeCommitSha: string | null;
+  /** See `CampaignForgePullRequestObservation.mergedAt`. */
+  mergedAt?: number;
 }
 
 /** A pull request or merge request observation. A GitHub one carries no `forge`, as before #3600. */
@@ -622,6 +695,13 @@ export interface CampaignWorkItemSummary {
   blocker: CampaignWorkItemBlocker | null;
   /** v275 (#4070). Omitted by older control planes. */
   handoff?: CampaignWorkItemHandoff | null;
+  /** #4120: the repository the item works in, lower-cased: where its latest attempt's child is
+   * placed, else the repository of the first pull request it names, else its issue's. Null when
+   * none is known. Omitted by older control planes. */
+  repository?: string | null;
+  /** #4120: its prerequisites in other repositories, in dependency order. Omitted by older control
+   * planes and when there are none. */
+  mergeDependencies?: CampaignMergeDependencyView[];
   createdAt: number;
   updatedAt: number;
   /** Last ledger or observed-status change; drives the `activity` sort. */
@@ -672,6 +752,17 @@ export interface CampaignWorkItemsQuery {
   origin?: CampaignWorkItemOrigin;
   state?: CampaignWorkItemStateFilter;
   sort?: CampaignWorkItemSort;
+  /** #4120: only items whose `repository` is this one (compared case-insensitively). */
+  repository?: string;
+}
+
+/** #4120: one repository's work-item counts, for Campaign Status's group headers. */
+export interface CampaignWorkRepositoryCounts {
+  /** Lower-cased, or null for items whose repository is unknown. */
+  repository: string | null;
+  /** Items recorded for it, by derived state, whatever the list's filters. */
+  byState: Record<CampaignWorkItemPrimaryState, number>;
+  total: number;
 }
 
 export interface CampaignWorkItemsPage {
@@ -681,6 +772,9 @@ export interface CampaignWorkItemsPage {
   nextCursor: string | null;
   /** Items matching the filter at this revision. */
   total: number;
+  /** #4120: every repository the campaign's items work in, in the order its first item was recorded,
+   * with an unknown repository last. Omitted by older control planes. */
+  repositories?: CampaignWorkRepositoryCounts[];
 }
 
 /** Error code returned with HTTP 409 when a cursor was minted at an older revision. */

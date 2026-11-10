@@ -724,9 +724,11 @@ for (const viewport of [
     await expect(link).toBeVisible();
     await expect(recovery).toContainText("Worktree Recovery");
     await expect(recovery).toContainText("is on branch main, not fix/issue-1650-decision-resume.");
-    await expect(recovery.locator("dd code").first())
-      .toHaveText("git -C /home/dev/worktrees/issue-1650 switch fix/issue-1650-decision-resume");
-    await expect(recovery).toContainText("select or create another worktree for this session with select_worktree or create_worktree.");
+    await expect(recovery).toContainText("Restore branch fix/issue-1650-decision-resume in /home/dev/worktrees/issue-1650 and " +
+      "select that worktree again with select_worktree, or select or create another worktree for this session with " +
+      "select_worktree or create_worktree.");
+    await expect(recovery).not.toContainText("git -C");
+    await expect(recovery.locator("dd code")).toHaveText(["wd_occ_merge_1752"]);
     await expect(recovery.locator("dt")).toHaveText(["Hold", "Reason", "Recovery Action", "Held Decision Resumes"]);
     await expect(recovery).toContainText("wd_occ_merge_1752");
     await expect(entries.nth(1)).toContainText("Handoff Barrier");
@@ -861,13 +863,35 @@ for (const viewport of [
       .toBeVisible();
     await expect(recovery).toContainText(
       "Only the session owner or its controlling Orchestrator can recover this session's worktree: ask them to restore " +
-      "branch fix/issue-1650-decision-resume in /home/dev/worktrees/issue-1650");
-    await expect(recovery.locator("dd code").first())
-      .toHaveText("git -C /home/dev/worktrees/issue-1650 switch fix/issue-1650-decision-resume");
+      "branch fix/issue-1650-decision-resume in /home/dev/worktrees/issue-1650 and select that worktree again");
+    await expect(recovery).not.toContainText("git -C");
     await expect(recovery).not.toContainText("select_worktree");
     await expect(recovery).not.toContainText("create_worktree");
     await assertNoHorizontalOverflow(page, ".campaign-notices");
   });
+}
+
+// UI evidence: set HELD_RECOVERY_EVIDENCE_DIR to capture the worktree-recovery hold. The capture comes
+// before the assertions, so the same run against the old panel records "before".
+for (const theme of ["dark", "light"] as const) {
+  for (const [device, viewport] of [["desktop", { width: 1280, height: 800 }], ["phone", { width: 390, height: 844 }]] as const) {
+    test(`a worktree-recovery hold names its step without a command on a ${device} ${theme} viewport`, async ({ page }) => {
+      await page.clock.setFixedTime(new Date("2026-11-06T12:00:00Z"));
+      await page.setViewportSize(viewport);
+      await page.goto(`/request-surfaces-e2e.html?scenario=held&theme=${theme}`);
+      const held = page.getByRole("region", { name: "Held Children" });
+      await expect(held).toBeVisible();
+      const recovery = held.locator(".held-children > li").nth(0);
+      // Bring the Recovery Action into the list's capped scroll area before capturing.
+      await recovery.locator("dd").nth(2).scrollIntoViewIfNeeded();
+      if (process.env.HELD_RECOVERY_EVIDENCE_DIR) await held.screenshot({
+        path: `${process.env.HELD_RECOVERY_EVIDENCE_DIR}/held-recovery-${device}-${theme}.png`,
+      });
+      await expect(recovery).toContainText("Restore branch fix/issue-1650-decision-resume in /home/dev/worktrees/issue-1650 and select");
+      await expect(recovery).not.toContainText("git -C");
+      await assertNoHorizontalOverflow(page, ".campaign-notices");
+    });
+  }
 }
 
 for (const viewport of [
@@ -974,6 +998,23 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     }
   });
 
+  test(`a GitLab merge card shows what merging closes at width ${viewport.width} (#3762)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    for (const [closures, expected] of [
+      ["checked", /Closes on Merge\s*gitlab\.example\.com\/platform\/wollipog#2178: “?Implements #2178: the request dock keeps its card above the keyboard\.”?\s*gitlab\.example\.com\/platform\/wollipog#2180 \(reported by GitLab\)/u],
+      ["none", /Closes on Merge\s*None/u],
+      ["declared", /Closes on Merge\s*Not checked: the runner predates this check\. Declared: gitlab\.example\.com\/platform\/wollipog#2178, gitlab\.example\.com\/platform\/wollipog#2180\./u],
+    ] as const) {
+      await page.goto(`/request-surfaces-e2e.html?scenario=workflow&forge=gitlab&closures=${closures}`);
+      await expect(card(page)).toContainText("PR Merge Approval Required");
+      if (process.env.MERGE_CLOSURES_EVIDENCE_DIR) {
+        await card(page).screenshot({ path: `${process.env.MERGE_CLOSURES_EVIDENCE_DIR}/gitlab-merge-closures-${closures}-${viewport.width}.png` });
+      }
+      await expect(card(page)).toContainText(expected);
+      await assertNoHorizontalOverflow(page, ".request-card");
+    }
+  });
+
   test(`a post-upvote extension shows both bound heads at width ${viewport.width}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/request-surfaces-e2e.html?scenario=review-extension");
@@ -986,5 +1027,17 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     if (process.env.REVIEW_EXTENSION_EVIDENCE_DIR) {
       await page.screenshot({ path: `${process.env.REVIEW_EXTENSION_EVIDENCE_DIR}/extension-${viewport.width}.png`, fullPage: true });
     }
+  });
+}
+
+for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "phone", width: 390, height: 844 }]) {
+  test(`lineage requiring owner review (#4333), ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=issue-scope&ownerReview=1&lineageReview=1");
+    await expect(page.getByText("publication_authority_changed", { exact: true })).toBeVisible();
+    await expect(page.getByText(/authority differs from the current boundary/)).toBeVisible();
+    await expect(page.getByText(/counts it once/)).toBeVisible();
+    await assertNoHorizontalOverflow(page, ".request-card");
+    if (process.env.CAMPAIGN_SCOPE_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.CAMPAIGN_SCOPE_EVIDENCE_DIR}/request-${viewport.name}.png`, fullPage: true });
   });
 }

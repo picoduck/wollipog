@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, SESSION_EVENT_WIRE_PROJECTION_VARIANTS, validCampaignBudgetAuthority,
+import { CAMPAIGN_SLOT_RELEASES_LIMIT, RUNNER_CAPABILITY_MIN_PROTOCOL, SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, SESSION_EVENT_WIRE_PROJECTION_VARIANTS, validCampaignBudgetAuthority,
   type CampaignBudgetAllocation, type CampaignBudgetAuthority, type CampaignBudgetView,
   type CampaignFollowUpSubject, type CampaignIssueRef } from "@wollipog/protocol";
 
@@ -22,16 +22,44 @@ const LIVE_COST = "CASE WHEN s.live_settling=0 AND s.live_cost_usd>0 THEN s.live
  * confirmation). Until then, and while a stop is pending or provisional, the session keeps its
  * slot. A member without a session row, a native review job or a deleted session whose runner may
  * not have removed it yet, holds one until its usage settles. Reviewer sessions never hold one.
+ * A generation that a runner too old to prove retirement served (`unprovable_generation`, #3788)
+ * keeps its slot whatever checkpoint or absence arrives: none of them is proof for it.
  * Every comparison is NULL-safe, and an indeterminate result still holds the slot. */
 const OCCUPYING = `(m.active=1 AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=m.session_id)
   AND NOT EXISTS (SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=m.session_id) AND CASE
     WHEN s.id IS NULL THEN 1
     ELSE COALESCE(NOT (s.status IN ('completed','failed','stopped')
       AND NOT EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=m.session_id)
+      AND m.unprovable_generation IS NOT m.generation
       AND (s.status IS NOT 'stopped' OR s.stop_confirmation IS NOT NULL)
       AND (s.stop_confirmation IS 'runner_absent' OR m.absent_generation IS m.generation
         OR EXISTS (SELECT 1 FROM campaign_budget_checkpoints c
           WHERE c.session_id=m.session_id AND json_extract(c.checkpoint,'$.generation') IS m.generation))), 1) END)`;
+
+/** Why member `m`'s held slot no automatic proof can ever free (#4331), or NULL. */
+const HELD_REASON = `(CASE WHEN m.unprovable_generation IS m.generation THEN 'older_runner'
+  WHEN m.held_generation IS m.generation THEN m.held_reason END)`;
+/** A worker whose slot only its campaign's owner can release (#4331): it holds one, its session
+ * ended with any stop confirmed and none pending, and the slot is held for a reason above. A running
+ * worker, a pending stop, or a proof a runner may still send keeps it out. */
+const RELEASABLE = `(m.session_id IS NOT m.root_id AND s.id IS NOT NULL AND ${OCCUPYING}
+  AND s.status IN ('completed','failed','stopped')
+  AND NOT EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=m.session_id)
+  AND (s.status IS NOT 'stopped' OR s.stop_confirmation IS NOT NULL) AND ${HELD_REASON} IS NOT NULL)`;
+
+type SlotReleaseRow = { session_id: string; generation: string; root_id: string; released_by: string; released_at: number;
+  reason: string; held_reason: import("@wollipog/protocol").CampaignHeldSlotReason; cost: number; tools: number;
+  source: "checkpoint" | "recorded_usage"; title: string | null; display_name: string | null };
+
+function slotReleaseView(row: SlotReleaseRow): import("@wollipog/protocol").CampaignSlotRelease {
+  return { sessionId: row.session_id, title: row.title || null, generation: row.generation, releasedByUserId: row.released_by,
+    releasedByName: row.display_name ?? null, releasedAt: row.released_at, reason: row.reason, heldReason: row.held_reason,
+    settlement: { costUsd: row.cost, toolCalls: row.tools, source: row.source } };
+}
+
+export type CampaignSlotReleaseResult =
+  | { ok: true; release: import("@wollipog/protocol").CampaignSlotRelease; replayed: boolean }
+  | { ok: false; status: 404 | 409; error: string };
 
 /** Whether a runner's final checkpoint, in its local history coordinates, names the history the
  * control plane hydrated, which it stores in the wire coordinates that runner projected for it.
@@ -150,6 +178,30 @@ export class CampaignBudgetLedger {
     if (!(sql.prepare("PRAGMA table_info(campaign_budget_members)").all() as Array<{name:string}>).some((c) => c.name === "absent_generation")) {
       sql.exec("ALTER TABLE campaign_budget_members ADD COLUMN absent_generation TEXT");
     }
+    // The generation a runner too old to prove provider retirement served (#3788). Its checkpoint
+    // and reconnect absence are attestations, not proof, so they free neither its slot nor its
+    // reservation. Members live when this column first appears were last served by the runner
+    // version recorded for their session's runner, so an older or unknown one marks them now.
+    if (!(sql.prepare("PRAGMA table_info(campaign_budget_members)").all() as Array<{name:string}>).some((c) => c.name === "unprovable_generation")) {
+      sql.exec("ALTER TABLE campaign_budget_members ADD COLUMN unprovable_generation TEXT");
+      sql.prepare(`UPDATE campaign_budget_members SET unprovable_generation=generation WHERE active=1 AND session_id IN
+        (SELECT s.id FROM sessions s LEFT JOIN runners r ON r.runner_id=s.runner_id
+          WHERE r.protocol_version IS NULL OR r.protocol_version < ?)`)
+        .run(RUNNER_CAPABILITY_MIN_PROTOCOL.campaignProviderRetirementProof);
+    }
+    // The generation whose retirement fence its runner reported can never be lifted, and why (#4331).
+    for (const column of ["held_generation", "held_reason"]) {
+      if (!(sql.prepare("PRAGMA table_info(campaign_budget_members)").all() as Array<{name:string}>).some((c) => c.name === column)) {
+        sql.exec(`ALTER TABLE campaign_budget_members ADD COLUMN ${column} TEXT`);
+      }
+    }
+    // A person's release of one generation's held slot (#4331): who, when, why, and what it settled at.
+    sql.exec(`CREATE TABLE IF NOT EXISTS campaign_slot_releases (
+      session_id TEXT NOT NULL, generation TEXT NOT NULL, root_id TEXT NOT NULL, released_by TEXT NOT NULL,
+      released_at INTEGER NOT NULL, reason TEXT NOT NULL, held_reason TEXT NOT NULL, cost REAL NOT NULL,
+      tools INTEGER NOT NULL, source TEXT NOT NULL, PRIMARY KEY(session_id, generation)
+    );
+    CREATE INDEX IF NOT EXISTS campaign_slot_releases_root ON campaign_slot_releases(root_id, released_at)`);
     // Cost availability outlives the usage rows that showed it: deleting an unpriced member drops
     // its usage state, but its cost stays unknown. The marker is set once and never cleared (#2940).
     // It is written from code, on every read and before any session deletion, rather than by
@@ -255,7 +307,9 @@ export class CampaignBudgetLedger {
       reachedCheckpointsUsd: authority.checkpointsUsd?.filter((v) => actual.costUsd >= v) ?? [],
       enforcement: "admission_and_best_effort_cancellation", externalWorkers: "unsupported",
       sessionLimits: this.userLimits(rootId), rootAllocation: this.allocation(rootId) ?? undefined,
-      costAccounting: unpriced || header.state==="accounting_unavailable" ? "unavailable" : "priced" };
+      costAccounting: unpriced || header.state==="accounting_unavailable" ? "unavailable" : "priced",
+      ...((held) => held.length ? { heldSlots: held } : {})(this.heldSlots(rootId)),
+      ...((released) => released.length ? { slotReleases: released } : {})(this.slotReleases(rootId)) };
   }
 
   authorize(rootId: string, authority: CampaignBudgetAuthority): void {
@@ -389,15 +443,33 @@ export class CampaignBudgetLedger {
     return row ? { costBudgetUsd: row.user_cost_limit, maxToolCalls: row.user_tool_limit } : undefined;
   }
 
-  prepare(rootId: string, sessionId: string, requested: { costUsd?: number; toolCalls?: number }): CampaignBudgetAllocation {
+  /** Whether a session reviews for a campaign member rather than working in one of its slots. Its
+   * review record is written before its session row, so this holds from the start of admission. */
+  private reviewer(sessionId: string): boolean {
+    return Boolean(this.sql.prepare("SELECT 1 FROM review_sessions WHERE review_session_id=?").get(sessionId) ??
+      this.sql.prepare("SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=?").get(sessionId));
+  }
+
+  /** A worker's default reservation divides the unreserved allowance among the free slots. A
+   * reviewer takes no slot, so at one free slot or none that division would hand it the whole
+   * remainder and refuse every concurrent review until it settled (#3618). It is instead one more
+   * claimant beside the free slots, counting at least two claimants: it leaves each free slot a share
+   * as large as its own, and at least half of what it found for whoever comes next. A reviewer's own
+   * ceiling only lowers that share. `admit` still checks the result against the unreserved allowance
+   * inside the insertion transaction, so reservations never exceed the allowance. */
+  prepare(rootId: string, sessionId: string, requested: { costUsd?: number; toolCalls?: number },
+    reviewer = this.reviewer(sessionId)): CampaignBudgetAllocation {
     const view = this.view(rootId); if (!view || view.state !== "active") throw new Error(view?.reason ?? "campaign allowance unavailable");
-    const slots = Math.max(1, (view.authority.concurrency ?? 1) - view.occupied);
+    const free = Math.max(0, (view.authority.concurrency ?? 1) - view.occupied);
+    const slots = reviewer ? Math.max(2, free + 1) : Math.max(1, free);
     const prior = this.allocation(sessionId);
+    const cost = (view.remaining.costUsd ?? 0) / slots, tools = Math.floor((view.remaining.toolCalls ?? 0) / slots);
+    const bounded = (own: number | undefined, share: number) => reviewer && own !== undefined ? Math.min(own, share) : own;
     return { sessionId,
       ...(view.authority.costUsd === undefined ? requested.costUsd === undefined ? {} : { costUsd: requested.costUsd } :
-        { costUsd: requested.costUsd ?? prior?.costUsd ?? (view.remaining.costUsd ?? 0) / slots }),
+        { costUsd: bounded(requested.costUsd, cost) ?? prior?.costUsd ?? cost }),
       ...(view.authority.toolCalls === undefined ? requested.toolCalls === undefined ? {} : { toolCalls: requested.toolCalls } :
-        { toolCalls: requested.toolCalls ?? prior?.toolCalls ?? Math.floor((view.remaining.toolCalls ?? 0) / slots) }) };
+        { toolCalls: bounded(requested.toolCalls, tools) ?? prior?.toolCalls ?? tools }) };
   }
 
   members(rootId: string): string[] {
@@ -500,15 +572,19 @@ export class CampaignBudgetLedger {
       WHERE s.runner_id=? AND m.active=1`).all(runnerId) as Array<{session_id:string}>).map((r)=>r.session_id);
   }
 
-  dispatchState(sessionId:string):{active:boolean;generation:string;checkpoint:string|null} {
+  dispatchState(sessionId:string):{active:boolean;generation:string;checkpoint:string|null;unprovableGeneration:string|null} {
     const checkpoint=this.sql.prepare("SELECT checkpoint FROM campaign_budget_checkpoints WHERE session_id=?").get(sessionId) as {checkpoint:string}|undefined;
-    return {active:this.active(sessionId),generation:this.dispatch(sessionId)!.generation,checkpoint:checkpoint?.checkpoint??null};
+    const generation=this.dispatch(sessionId)!.generation;
+    const marker=this.sql.prepare("SELECT unprovable_generation AS g FROM campaign_budget_members WHERE session_id=?").get(sessionId) as {g:string|null}|undefined;
+    return {active:this.active(sessionId),generation,checkpoint:checkpoint?.checkpoint??null,unprovableGeneration:marker?.g??null};
   }
 
   /** Only for a runner send that proved no command was enqueued; preserve old final evidence. */
   restoreUnsentDispatch(sessionId: string, state: ReturnType<CampaignBudgetLedger["dispatchState"]>): void {
     this.atomic(()=>{
-      this.sql.prepare("UPDATE campaign_budget_members SET active=?,generation=? WHERE session_id=?").run(state.active?1:0,state.generation,sessionId);
+      // The prior generation keeps the mark it had (#3788); the unsent one never reached a runner.
+      this.sql.prepare("UPDATE campaign_budget_members SET active=?,generation=?,unprovable_generation=? WHERE session_id=?")
+        .run(state.active?1:0,state.generation,state.unprovableGeneration,sessionId);
       this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(sessionId);
       if(state.checkpoint) this.sql.prepare("INSERT INTO campaign_budget_checkpoints VALUES (?,?)").run(sessionId,state.checkpoint);
     });
@@ -526,6 +602,129 @@ export class CampaignBudgetLedger {
       .run(dispatch.generation, sessionId, dispatch.generation);
   }
 
+  /** Record that `runnerId`, the session's owner, served the member's current generation. When
+   * that runner is too old to prove provider retirement (#3788), or its protocol is unknown, the
+   * generation's checkpoint and reconnect absence then free neither its slot nor its reservation,
+   * even when a later runner relays them. Only a new generation, which needs its own proof, ends
+   * the mark. Only an authenticated runner path may call it. */
+  noteServingRunner(sessionId: string, runnerId: string): void {
+    this.sql.prepare(`UPDATE campaign_budget_members SET unprovable_generation=generation
+      WHERE session_id=? AND active=1 AND generation<>'' AND unprovable_generation IS NOT generation
+        AND EXISTS (SELECT 1 FROM sessions s LEFT JOIN runners r ON r.runner_id=s.runner_id
+          WHERE s.id=campaign_budget_members.session_id AND s.runner_id=?
+            AND (r.protocol_version IS NULL OR r.protocol_version < ?))`)
+      .run(sessionId, runnerId, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignProviderRetirementProof);
+  }
+
+  /** The generation to send to the session's runner. Sending it to a runner too old to prove
+   * retirement, or one whose protocol is unknown, marks it as `noteServingRunner` would, before the
+   * command leaves: that runner may run it even if none of its reports ever arrives (#3788). */
+  dispatchTo(sessionId: string): import("@wollipog/protocol").CampaignBudgetDispatch | undefined {
+    const dispatch = this.dispatch(sessionId);
+    if (dispatch) {
+      this.sql.prepare(`UPDATE campaign_budget_members SET unprovable_generation=generation
+        WHERE session_id=? AND active=1 AND unprovable_generation IS NOT generation
+          AND EXISTS (SELECT 1 FROM sessions s LEFT JOIN runners r ON r.runner_id=s.runner_id
+            WHERE s.id=campaign_budget_members.session_id AND (r.protocol_version IS NULL OR r.protocol_version < ?))`)
+        .run(sessionId, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignProviderRetirementProof);
+    }
+    return dispatch;
+  }
+
+  /** `noteServingRunner` for every live member a registering runner too old to prove retirement owns. */
+  noteRunnerRetirementUnprovable(runnerId: string): void {
+    this.sql.prepare(`UPDATE campaign_budget_members SET unprovable_generation=generation
+      WHERE active=1 AND generation<>'' AND unprovable_generation IS NOT generation
+        AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)`).run(runnerId);
+  }
+
+  /** Whether the member's current generation was served by a runner that cannot prove retirement. */
+  retirementUnprovable(sessionId: string): boolean {
+    return this.sql.prepare("SELECT 1 FROM campaign_budget_members WHERE session_id=? AND active=1 AND unprovable_generation IS generation")
+      .get(sessionId) !== undefined;
+  }
+
+  /** Record the owning runner's report that the member's current generation has a retirement fence
+   * no runner process can lift (#4331). It changes no slot or reservation: it only lets the campaign's
+   * owner release the slot. A report for another generation is ignored. Only the authenticated owning
+   * runner's snapshot may supply it. */
+  noteRetirementHold(sessionId: string, runnerId: string, hold: import("@wollipog/protocol").CampaignRetirementHold | undefined): void {
+    if (!hold || typeof hold.generation !== "string" ||
+        (hold.reason !== "fence_without_evidence" && hold.reason !== "unsupported_location")) return;
+    this.sql.prepare(`UPDATE campaign_budget_members SET held_generation=?, held_reason=?
+      WHERE session_id=? AND active=1 AND generation=? AND (held_generation IS NOT ? OR held_reason IS NOT ?)
+        AND EXISTS (SELECT 1 FROM sessions s WHERE s.id=campaign_budget_members.session_id AND s.runner_id=?)`)
+      .run(hold.generation, hold.reason, sessionId, hold.generation, hold.generation, hold.reason, runnerId);
+  }
+
+  /** Ended workers whose slot only the campaign's owner can release (#4331), oldest first. */
+  heldSlots(rootId: string): import("@wollipog/protocol").CampaignHeldSlot[] {
+    return (this.sql.prepare(`SELECT m.session_id, m.generation, s.title, s.status, ${HELD_REASON} AS reason
+      FROM campaign_budget_members m JOIN sessions s ON s.id=m.session_id
+      WHERE m.root_id=? AND ${RELEASABLE} ORDER BY s.created_at, m.session_id`).all(rootId) as Array<{
+        session_id: string; generation: string; title: string; status: "completed" | "failed" | "stopped";
+        reason: import("@wollipog/protocol").CampaignHeldSlotReason }>)
+      .map((row) => ({ sessionId: row.session_id, title: row.title || null, generation: row.generation,
+        reason: row.reason, status: row.status }));
+  }
+
+  /** The campaign's recorded slot releases, newest first (#4331). */
+  slotReleases(rootId: string, limit = CAMPAIGN_SLOT_RELEASES_LIMIT): import("@wollipog/protocol").CampaignSlotRelease[] {
+    return (this.sql.prepare(`SELECT r.*, s.title, u.display_name FROM campaign_slot_releases r
+      LEFT JOIN sessions s ON s.id=r.session_id LEFT JOIN identity_users u ON u.user_id=r.released_by
+      WHERE r.root_id=? ORDER BY r.released_at DESC, r.session_id LIMIT ?`).all(rootId, limit) as Array<SlotReleaseRow>)
+      .map(slotReleaseView);
+  }
+
+  /** A person's release of one ended worker's held slot (#4331). The caller has authenticated the
+   * campaign's owner; no agent path may reach it. It names the generation, so it can't free a relaunch.
+   * In one transaction it records the release and settles the reservation exactly once: from the
+   * runner's final checkpoint for that generation where one arrived, otherwise at the recorded usage,
+   * never below a recorded charge. A repeat of the same release returns the record and changes nothing. */
+  releaseSlot(rootId: string, request: { sessionId: string; generation: string }, releasedBy: string, reason: string,
+    now: number): CampaignSlotReleaseResult {
+    return this.atomic((): CampaignSlotReleaseResult => {
+      const existing = this.slotRelease(request.sessionId, request.generation);
+      if (existing) {
+        return existing.root_id === rootId ? { ok: true, release: slotReleaseView(existing), replayed: true }
+          : { ok: false, status: 404, error: "That worker is not in this campaign." };
+      }
+      const member = this.sql.prepare(`SELECT m.*, ${RELEASABLE} AS releasable, ${HELD_REASON} AS held FROM campaign_budget_members m
+        LEFT JOIN sessions s ON s.id=m.session_id WHERE m.session_id=? AND m.root_id=?`).get(request.sessionId, rootId) as
+        (Member & { generation: string; releasable: number | null; held: import("@wollipog/protocol").CampaignHeldSlotReason | null }) | undefined;
+      if (!member || member.session_id === rootId) return { ok: false, status: 404, error: "That worker is not in this campaign." };
+      if (member.generation !== request.generation) {
+        return { ok: false, status: 409, error: "The worker was relaunched since this slot was shown. Review the campaign again." };
+      }
+      if (!member.active) return { ok: false, status: 409, error: "This worker's slot is already free and its usage settled." };
+      if (member.releasable !== 1) {
+        return { ok: false, status: 409, error: "This slot can't be released by a person: the worker is still running or stopping, " +
+          "its slot is already free, or its runner may still prove that its provider is gone." };
+      }
+      const record = this.sql.prepare("SELECT checkpoint FROM campaign_budget_checkpoints WHERE session_id=?").get(request.sessionId) as
+        { checkpoint: string } | undefined;
+      const checkpoint = record ? JSON.parse(record.checkpoint) as import("@wollipog/protocol").CampaignBudgetUsageCheckpoint : null;
+      const final = checkpoint?.generation === member.generation ? checkpoint : null;
+      // Runner cost can lag control-plane pricing; neither coordinate may lower the charge.
+      const cost = Math.max(member.cost, final?.costUsd ?? 0);
+      const settledFrom = final ? record!.checkpoint : JSON.stringify({ release: member.generation });
+      this.sql.prepare("INSERT OR IGNORE INTO campaign_budget_settlements VALUES (?,?,?,?)").run(request.sessionId, settledFrom, cost, member.tools);
+      this.sql.prepare("UPDATE campaign_budget_members SET cost=?,active=0 WHERE session_id=? AND generation=? AND active=1")
+        .run(cost, request.sessionId, member.generation);
+      this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(request.sessionId);
+      this.sql.prepare(`INSERT INTO campaign_slot_releases(session_id,generation,root_id,released_by,released_at,reason,held_reason,cost,tools,source)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).run(request.sessionId, member.generation, rootId, releasedBy, now, reason, member.held!, cost,
+        member.tools, final ? "checkpoint" : "recorded_usage");
+      return { ok: true, release: slotReleaseView(this.slotRelease(request.sessionId, member.generation)!), replayed: false };
+    });
+  }
+
+  private slotRelease(sessionId: string, generation: string): SlotReleaseRow | undefined {
+    return this.sql.prepare(`SELECT r.*, s.title, u.display_name FROM campaign_slot_releases r
+      LEFT JOIN sessions s ON s.id=r.session_id LEFT JOIN identity_users u ON u.user_id=r.released_by
+      WHERE r.session_id=? AND r.generation=?`).get(sessionId, generation) as SlotReleaseRow | undefined;
+  }
+
   /** Only the authenticated owning runner may supply a checkpoint. Do not accept agent JSON. */
   recordCheckpoint(sessionId: string, checkpoint: import("@wollipog/protocol").CampaignBudgetUsageCheckpoint): void {
     if (!this.root(sessionId) || !checkpoint || !Number.isSafeInteger(checkpoint.historyEpoch) || checkpoint.historyEpoch < 0 ||
@@ -540,6 +739,11 @@ export class CampaignBudgetLedger {
     return this.atomic(() => {
       const record = this.sql.prepare("SELECT checkpoint FROM campaign_budget_checkpoints WHERE session_id=?").get(sessionId) as { checkpoint: string } | undefined;
       if (!record || this.sql.prepare("SELECT 1 FROM session_stop_intents WHERE session_id=?").get(sessionId)) return false;
+      // Settling ends the member and with it the slot; an unprovable retirement keeps both (#3788).
+      if (this.retirementUnprovable(sessionId)) return false;
+      // A person released this generation's slot and settled it then; a later proof settles nothing (#4331).
+      if (this.sql.prepare(`SELECT 1 FROM campaign_slot_releases r JOIN campaign_budget_members m ON m.session_id=r.session_id
+        AND m.generation=r.generation WHERE r.session_id=?`).get(sessionId)) return false;
       const checkpoint = JSON.parse(record.checkpoint) as import("@wollipog/protocol").CampaignBudgetUsageCheckpoint;
       if (checkpoint.generation !== this.dispatch(sessionId)?.generation) return false;
       const session = this.sql.prepare("SELECT status FROM sessions WHERE id=?").get(sessionId) as { status: string } | undefined;
@@ -587,12 +791,13 @@ export class CampaignBudgetLedger {
     }
     return { rootSessionId: row.root_id, generation: row.generation };
   }
-
+  /** Each replacement invalidates old terminal receipts before any runner dispatch, and is marked
+   * before it leaves for a runner too old to prove its retirement (#3788). */
   /** Each replacement invalidates old terminal receipts before any runner dispatch. */
   replaceDispatch(sessionId: string): import("@wollipog/protocol").CampaignBudgetDispatch {
     this.sql.prepare("UPDATE campaign_budget_members SET generation=? WHERE session_id=?").run(randomUUID(),sessionId);
     this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(sessionId);
-    return this.dispatch(sessionId)!;
+    return this.dispatchTo(sessionId)!;
   }
 
   completedAttestation(sessionId:string):{rootSessionId:string;sessionId:string;checkpoint:import("@wollipog/protocol").CampaignBudgetUsageCheckpoint;
@@ -634,9 +839,7 @@ export class CampaignBudgetLedger {
       const spentCost = old ? old.live_cost > 0 ? roundUsdMicros(old.cost + old.live_cost) : old.cost : 0;
       if (old) allocation = { ...allocation, costUsd: allocation.costUsd ?? old.cost_limit ?? undefined, toolCalls: allocation.toolCalls ?? old.tool_limit ?? undefined };
       if (old && old.root_id !== rootId) throw new Error("session belongs to another allowance");
-      const review = this.sql.prepare("SELECT 1 FROM review_sessions WHERE review_session_id=?").get(allocation.sessionId) ??
-        this.sql.prepare("SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=?").get(allocation.sessionId);
-      if (!review && launch && !old?.occupying && allocation.sessionId !== rootId && v.authority.concurrency !== undefined && v.occupied >= v.authority.concurrency) throw new Error("campaign concurrency allowance reached");
+      if (!this.reviewer(allocation.sessionId) && launch && !old?.occupying && allocation.sessionId !== rootId && v.authority.concurrency !== undefined && v.occupied >= v.authority.concurrency) throw new Error("campaign concurrency allowance reached");
       for (const [requested, spent, ceiling, userCeiling, remaining, prior] of [
         [allocation.costUsd, spentCost, v.authority.costUsd, old ? old.user_cost_limit : userLimits.costUsd, v.remaining.costUsd, old?.active ? Math.max(0,(old.cost_limit ?? 0)-spentCost) : 0],
         [allocation.toolCalls, old?.tools ?? 0, v.authority.toolCalls, old ? old.user_tool_limit : userLimits.toolCalls, v.remaining.toolCalls, old?.active ? Math.max(0,(old.tool_limit ?? 0)-old.tools) : 0],

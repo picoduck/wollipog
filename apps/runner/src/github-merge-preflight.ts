@@ -10,7 +10,7 @@
  * The title and commit messages are not: GitHub never links from a title, and a squash merge
  * through the merge queue left #3705 open although its squash commit said `Closes #3705`.
  */
-import type { PullRequestClosingReferenceCheck, PullRequestClosure } from "@wollipog/protocol";
+import type { PullRequestChecksRead, PullRequestClosingReferenceCheck, PullRequestClosure } from "@wollipog/protocol";
 import { compareIssueReferences, findClosingReferences } from "@wollipog/protocol";
 import { classifyGhFailure, type GhRunner } from "./campaign-forge-status.js";
 
@@ -32,17 +32,19 @@ export type PullRequestClosureInspection =
   | { ok: false; reason: string };
 
 export type GithubMergePreflight =
-  | { ok: true; check: PullRequestClosingReferenceCheck }
+  | { ok: true; check: PullRequestClosingReferenceCheck; checks?: PullRequestChecksRead }
   | { ok: false; refusal: "stale_head" | "unavailable"; reason: string };
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-/** The issues a description and GitHub's links would close, one entry per issue, in issue order. */
-export function pullRequestClosures(description: string, repository: string, linked: readonly string[]): PullRequestClosure[] {
+/** The issues a description and the forge's own list would close, one entry per issue, in issue
+ * order. `find` reads the description: GitHub's keywords, or GitLab's closing pattern (#3762). */
+export function pullRequestClosures(description: string, repository: string, linked: readonly string[],
+  find: typeof findClosingReferences = findClosingReferences): PullRequestClosure[] {
   const closures = new Map<string, PullRequestClosure>();
-  for (const found of findClosingReferences(description, repository)) {
+  for (const found of find(description, repository)) {
     if (!closures.has(found.issue)) closures.set(found.issue, { issue: found.issue, sources: ["description"], excerpt: found.excerpt });
   }
   for (const issue of linked) {
@@ -106,8 +108,78 @@ export async function inspectPullRequestClosures(
   return { ok: true, state: pr.state as "OPEN" | "CLOSED" | "MERGED", headSha: pr.headRefOid, closures };
 }
 
+/** Checks one read reports at most; a head with more is not checked. */
+export const PULL_REQUEST_CHECKS_LIMIT = 100;
+
+const CHECKS_QUERY = `query($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){ nameWithOwner
+    pullRequest(number:$number){ number headRefOid mergeStateStatus
+      commits(last:1){ nodes{ commit{ oid statusCheckRollup{
+        contexts(first:${PULL_REQUEST_CHECKS_LIMIT}){ pageInfo{ hasNextPage } nodes{ __typename
+          ... on CheckRun{ name status conclusion isRequired(pullRequestNumber:$number) }
+          ... on StatusContext{ context state isRequired(pullRequestNumber:$number) }
+        } }
+      } } } }
+    }
+  }
+}`;
+
+// GitHub's CheckConclusionState values that count as passing, as `summarizeCheckRollup` reads them.
+const PASSING_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+
+/** v315 (#4119): read every check reported for the pull request's head, how many of them GitHub
+ * marks required, and whether its merge state is clean. Fails closed: an unexpected answer, another
+ * head, or more checks than one page holds proves nothing. */
+export async function inspectPullRequestChecks(
+  repository: string, pullRequest: number, headSha: string, gh: GhRunner, signal?: AbortSignal,
+): Promise<{ ok: true; checks: PullRequestChecksRead } | { ok: false; reason: string }> {
+  if (!REPOSITORY.test(repository) || !Number.isSafeInteger(pullRequest) || pullRequest < 1) {
+    return { ok: false, reason: "The decision does not name a GitHub pull request this runner can check." };
+  }
+  const [owner, name] = repository.split("/");
+  const outcome = await gh(["api", "graphql", "--hostname", "github.com", "-f", `query=${CHECKS_QUERY}`,
+    "-f", `owner=${owner}`, "-f", `name=${name}`, "-F", `number=${pullRequest}`], signal);
+  if (outcome.code !== null) return { ok: false, reason: "GitHub could not be read for the pull request's checks." };
+  const unexpected = { ok: false as const, reason: "GitHub returned an unexpected answer for the pull request's checks." };
+  let data: Record<string, unknown> | null;
+  try {
+    const response = record(JSON.parse(outcome.stdout));
+    data = response && !response.errors ? record(record(response.data)?.repository) : null;
+  } catch {
+    return unexpected;
+  }
+  const pr = record(data?.pullRequest);
+  if (!data || typeof data.nameWithOwner !== "string" || data.nameWithOwner.toLowerCase() !== repository.toLowerCase() ||
+      !pr || pr.number !== pullRequest || typeof pr.mergeStateStatus !== "string") return unexpected;
+  if (pr.headRefOid !== headSha) return { ok: false, reason: "The pull request's head is no longer the decision's head." };
+  const commits = record(pr.commits)?.nodes;
+  const commit = Array.isArray(commits) && commits.length === 1 ? record(record(commits[0])?.commit) : null;
+  if (!commit || commit.oid !== headSha) return unexpected;
+  const rollup = commit.statusCheckRollup === null ? null : record(commit.statusCheckRollup);
+  if (commit.statusCheckRollup !== null && !rollup) return unexpected;
+  const contexts = rollup ? record(rollup.contexts) : null;
+  const nodes = rollup ? contexts?.nodes : [];
+  if (!Array.isArray(nodes) || (rollup && typeof record(contexts?.pageInfo)?.hasNextPage !== "boolean")) return unexpected;
+  if (rollup && record(contexts!.pageInfo)!.hasNextPage !== false) {
+    return { ok: false, reason: `The pull request's head reports more than ${PULL_REQUEST_CHECKS_LIMIT} checks, more than this runner checks.` };
+  }
+  const reported: PullRequestChecksRead["reported"] = [];
+  let required = 0;
+  for (const raw of nodes) {
+    const node = record(raw);
+    const checkName = node?.__typename === "CheckRun" ? node.name : node?.__typename === "StatusContext" ? node.context : undefined;
+    if (!node || typeof checkName !== "string" || checkName.length < 1 || checkName.length > 256 || typeof node.isRequired !== "boolean") return unexpected;
+    if (node.isRequired) required += 1;
+    const state = node.__typename === "StatusContext"
+      ? node.state === "SUCCESS" ? "passed" : node.state === "FAILURE" || node.state === "ERROR" ? "failing" : "pending"
+      : node.status !== "COMPLETED" ? "pending" : PASSING_CONCLUSIONS.has(node.conclusion as string) ? "passed" : "failing";
+    reported.push({ name: checkName, state });
+  }
+  return { ok: true, checks: { required, reported, clean: pr.mergeStateStatus === "CLEAN" } };
+}
+
 export async function githubMergePreflight(
-  request: { repository: string; pullRequest: number; headSha: string },
+  request: { repository: string; pullRequest: number; headSha: string; checks?: true },
   gh: GhRunner,
   now: () => number = Date.now,
 ): Promise<GithubMergePreflight> {
@@ -122,5 +194,8 @@ export async function githubMergePreflight(
   if (inspected.headSha !== request.headSha) {
     return { ok: false, refusal: "stale_head", reason: "The pull request's head is no longer the decision's head." };
   }
-  return { ok: true, check: { checkedAt: now(), closures: inspected.closures } };
+  const check = { checkedAt: now(), closures: inspected.closures };
+  if (request.checks !== true) return { ok: true, check };
+  const checks = await inspectPullRequestChecks(request.repository, request.pullRequest, request.headSha, gh);
+  return checks.ok ? { ok: true, check, checks: checks.checks } : { ok: false, refusal: "unavailable", reason: checks.reason };
 }

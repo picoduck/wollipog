@@ -31,6 +31,8 @@ const TABLE: readonly Row[] = [
   ["session", "ready_for_review", "Ready for Review", "review"],
   ["session", "campaign_complete", "Campaign Complete", "success"],
   ["session", "campaign_active", "Campaign Active", "info"],
+  ["session", "campaign_needs_cleanup", "Complete, Needs Cleanup", "info"],
+  ["session", "campaign_stuck", "Campaign Stuck", "warning"],
   ["session", "failed", "Failed", "danger"],
   ["session", "stop_failed", "Stop Failed", "danger"],
   ["session", "stopped", "Stopped", "neutral"],
@@ -90,7 +92,6 @@ const TABLE: readonly Row[] = [
   ["job", "queued", "Queued", "neutral"],
   ["job", "canceled", "Canceled", "neutral"],
   ["job", "running", "Running", "info"],
-  ["job", "stalled", "Stalled", "warning"],
   ["job", "completed", "Completed", "success"],
   ["job", "failed", "Failed", "danger"],
   ["job", "unverified", "Unverified", "neutral"],
@@ -250,7 +251,6 @@ test("only actively progressing work pulses, and an unverified source draws a ho
   assert.deepEqual(pulsing("messageReceipt"), []);
   assert.deepEqual(pulsing("reviewRun"), ["running"]);
   assert.deepEqual(pulsing("reviewPhase"), ["reviewing", "re_reviewing"]);
-  assert.equal(statusMeta("job", "stalled").pulse, false);
   assert.equal(statusMeta("machine", "offline").hollow, true);
   assert.equal(statusMeta("job", "unverified").hollow, true);
   // An agent not on the machine, or one whose machine is not online, is not a current fact (#2990).

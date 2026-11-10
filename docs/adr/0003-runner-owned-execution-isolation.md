@@ -135,7 +135,7 @@ A configured grant that contains a reviewer's resolution path, such as a workspa
 HOME above `~/.local/bin/claude`, refuses that reviewer for every project rather than gaining an
 exception; the refusal names each configured grant containing the path and how to withdraw it.
 
-A group-write bit is safe only for a proven user-private group: system passwd/group lookups must
+The default Strict reviewer executable policy accepts a group-write bit only for a proven user-private group: system passwd/group lookups must
 show the owner's primary gid, no other supplementary member and no other primary-group user.
 All same-gid group entries and any separate `initgroups` NSS source participate in this proof.
 Unknown or configured remote NSS sources fail closed. Listed but provably unconfigured and
@@ -245,3 +245,13 @@ plus Seatbelt allow/deny write probes on macOS. Nested provider-sandbox conforma
 macOS transcript compatibility remain separate credentialed host tests. In particular, deny mode
 withholds all Mach lookup to close proxy egress and may fail a provider that requires a system service;
 that is a fail-closed compatibility result until a minimal non-network service allowlist is proven.
+
+Machine Settings also offers a human-controlled Personal Machine reviewer executable policy
+(protocol 325). It trusts group-writable paths owned by the runner user without enumerating group
+membership, accepting the risk from other members of that group. The machine owner or an
+organization admin selects it through the human API; session credentials, project settings, and
+environment variables cannot change it. The control plane persists and revisions the setting and
+replays it on registration. It covers reviewer commands, symlink containers, script interpreters,
+and Git/forge/SSH tools. Both modes retain ownership, world-write, and session-writable-root checks
+and the launch-time installation protections above. Strict remains the default on new and upgraded
+machines. Neither policy can make a session-writable installation safe to execute on the host.

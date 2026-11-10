@@ -63,6 +63,92 @@ for (const width of [1440, 390]) {
       }
     });
 
+    test("a chosen agent shows the account Priority Order expects and why (#4353)", async ({ page }) => {
+      await open(page, "account-priority");
+      await dialog(page).getByRole("textbox", { name: "Task" }).fill("Compare the account setup");
+      await chooseProject(page, "Wollipog");
+      await expect(dialog(page).getByRole("checkbox", { name: /^Claude/ })).toBeChecked();
+      const codex = dialog(page).getByRole("checkbox", { name: /^Codex/ });
+      if (!await codex.isChecked()) await codex.check();
+      await expect(dialog(page).getByText(/sessions use Personal\. This is the first eligible account/u)).toBeVisible();
+      await expect(dialog(page).getByText(/sessions use Codex Solo\. This is the machine's Default Account\./u)).toBeVisible();
+      await expect(dialog(page).getByRole("button", { name: "Run 2 Agents", exact: true })).toBeEnabled();
+      await page.waitForTimeout(600); // Evidence only: let the button's settled state finish painting.
+      await page.screenshot({ path: `playwright-report/provider-accounts/new-run-expected-${width}.png`, fullPage: true });
+    });
+
+    test("a member with no eligible account asks for one, and the run waits for it (#4353)", async ({ page }) => {
+      await open(page, "account-priority-choice");
+      await dialog(page).getByRole("textbox", { name: "Task" }).fill("Compare the account setup");
+      await chooseProject(page, "Wollipog");
+      const codex = dialog(page).getByRole("checkbox", { name: /^Codex/ });
+      if (!await codex.isChecked()) await codex.check();
+      await expect(reason(page)).toHaveText("Choose an account for Claude to continue.");
+      await expect(reason(page)).toBeInViewport();
+      await expect(dialog(page).getByText(/No Claude account in this machine's Priority Order can start this session/u)).toBeVisible();
+      await expect(dialog(page).getByText(/sessions use Codex Solo/u), "a member whose account is fine asks for nothing").toBeVisible();
+      const start = dialog(page).getByRole("button", { name: "Run 2 Agents", exact: true });
+      await expect(start).toBeDisabled();
+      await page.waitForTimeout(600); // Evidence only: let the button's settled state finish painting.
+      await page.screenshot({ path: `playwright-report/provider-accounts/new-run-account-required-${width}.png`, fullPage: true });
+
+      await dialog(page).getByRole("button", { name: /^Account for Claude/u }).focus();
+      await page.keyboard.press("Enter");
+      const options = page.getByRole("option");
+      await expect(options.filter({ hasText: "Work" })).toHaveAttribute("aria-disabled", "true");
+      await expect(options.filter({ hasText: "Personal" })).toContainText(/at a usage limit \(Weekly\)/u);
+      await page.waitForTimeout(600);
+      await page.screenshot({ path: `playwright-report/provider-accounts/new-run-account-options-${width}.png`, fullPage: true });
+      await options.filter({ hasText: "Personal" }).click();
+
+      await expect(reason(page)).toHaveCount(0);
+      await expect(start).toBeEnabled();
+      await expect(dialog(page).getByText(/No Claude account in this machine's Priority Order/u)).toHaveCount(0);
+      await page.waitForTimeout(600);
+      await page.screenshot({ path: `playwright-report/provider-accounts/new-run-account-chosen-${width}.png`, fullPage: true });
+      await start.click();
+      await expect.poll(() => page.evaluate(() => JSON.parse(document.body.dataset.request ?? "{}").providerAccountIds)).toEqual({ claude: "b" });
+    });
+
+    test("the required account reads the same in the light theme (#4353)", async ({ page }) => {
+      await open(page, "account-priority-choice&theme=light");
+      await dialog(page).getByRole("textbox", { name: "Task" }).fill("Compare the account setup");
+      await chooseProject(page, "Wollipog");
+      await expect(reason(page)).toHaveText("Choose an account for Claude to continue.");
+      await expect(dialog(page).getByText(/No Claude account in this machine's Priority Order can start this session/u)).toBeVisible();
+      await page.waitForTimeout(600); // Evidence only: let the button's settled state finish painting.
+      await page.screenshot({ path: `playwright-report/provider-accounts/new-run-account-required-light-${width}.png`, fullPage: true });
+    });
+
+    test("a workflow role with no eligible account asks by its role (#4353)", async ({ page }) => {
+      await open(page, "account-priority-choice");
+      await dialog(page).getByRole("radio", { name: "Run a Workflow" }).click();
+      await dialog(page).getByRole("textbox", { name: "Task" }).fill("Build and review the account setup");
+      await chooseProject(page, "Wollipog");
+      await expect(reason(page)).toHaveText("Choose an account for Builder and Remediator Agent to continue.");
+      // A long role name wraps the reason. It must not push the buttons apart.
+      const cancel = await dialog(page).getByRole("button", { name: "Cancel", exact: true }).boundingBox();
+      const primary = await dialog(page).getByRole("button", { name: "Start Workflow", exact: true }).boundingBox();
+      expect(primary!.y, "Cancel and Start Workflow share one row").toBe(cancel!.y);
+      expect(primary!.height).toBe(cancel!.height);
+      await expect(reason(page)).toBeInViewport();
+      await page.waitForTimeout(600);
+      await page.screenshot({ path: `playwright-report/provider-accounts/new-run-workflow-account-${width}.png`, fullPage: true });
+      await dialog(page).getByRole("button", { name: /^Account for /u }).click();
+      await page.getByRole("option").filter({ hasText: "Personal" }).click();
+      await expect(reason(page)).toHaveCount(0);
+      await dialog(page).getByRole("button", { name: "Start Workflow", exact: true }).click();
+      await expect.poll(() => page.evaluate(() => JSON.parse(document.body.dataset.request ?? "{}").providerAccountBindings)).toEqual({ claude: "b" });
+    });
+
+    test("a project whose memory is held by the account says so instead of promising an account (#4353)", async ({ page }) => {
+      await open(page, "account-priority-memory");
+      await dialog(page).getByRole("textbox", { name: "Task" }).fill("Compare the account setup");
+      await chooseProject(page, "Wollipog");
+      await expect(dialog(page).getByText(/memory is stored with each Claude account/u)).toBeVisible();
+      await expect(dialog(page).getByText(/sessions use Personal/u)).toHaveCount(0);
+    });
+
     test("the primary's reason is in the footer, in view, and follows the fields", async ({ page }) => {
       await open(page);
       const run = dialog(page).getByRole("button", { name: /^Run (\d )?Agents?$/ });

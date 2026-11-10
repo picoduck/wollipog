@@ -26,6 +26,7 @@ import {
   type StopOperationView,
 } from "@wollipog/protocol";
 import { ACKNOWLEDGE_BLOCKED_RESULT_EFFECT, BACKGROUND_DELIVERY_STATUS, backgroundDeliveryNeedsYou, shownWatchdogDelivery } from "./background-delivery-status.js";
+import { sessionWaitConditions, type SessionWaitCondition } from "./session-wait-status.js";
 
 export type StatusTone = "info" | "success" | "warning" | "danger" | "neutral" | "review";
 
@@ -74,6 +75,12 @@ const VOCABULARY = {
     /** An at-rest Full Control root whose campaign continues automatically: informational, not
      * review work or a prompt the person owes (#2938). No pulse, so it never reads as Running. */
     campaign_active: info("Campaign Active"),
+    /** A finished campaign with housekeeping left, such as a merged branch still on the remote
+     * (#4146): it reads as complete, with an informational tone. Campaign Status lists each item. */
+    campaign_needs_cleanup: info("Complete, Needs Cleanup"),
+    /** An idle campaign with undelivered work and nothing scheduled to wake anyone (#4146). Derived
+     * from facts, unlike the time-based Stalled warning; it needs a person. */
+    campaign_stuck: warning("Campaign Stuck"),
     failed: danger("Failed"),
     completed: success("Completed"),
     stopped: neutral("Stopped"),
@@ -193,7 +200,6 @@ const VOCABULARY = {
     queued: neutral("Queued"),
     starting: info("Starting", { pulse: true }),
     running: info("Running", { pulse: true }),
-    stalled: warning("Stalled"),
     completed: success("Completed"),
     failed: danger("Failed"),
     canceled: neutral("Canceled"),
@@ -568,6 +574,13 @@ export type SessionConditionKind =
   | "queue_reason"
   /** The runner is relaunching the session in the worktree it switched to (#3810). */
   | "worktree_switch"
+  /** A wait the session is deliberately in (#1280, #4249): a wait_session or wait_pull_request
+   * call, healthy or Stalled by its liveness contract, or a parked merge-queue watch. */
+  | "session_wait"
+  /** An at-rest Full Control root's campaign state in its session header (#2938): Campaign Active,
+   * Campaign Complete, Complete, Needs Cleanup or Campaign Stuck. Its own kind, so it never shares a
+   * popover row's identity with the lifecycle beside it. */
+  | "campaign"
   /** The session lifecycle, including Stop Pending and Stop Failed. */
   | "follow_up"
   | "lifecycle";
@@ -621,7 +634,7 @@ export type SessionStatusSource = Pick<SessionView, "status" | "pendingApproval"
     "fullControlCampaignStatus" | "campaignRequests" | "pendingRequestOwners" | "archived" |
     "archiveStatus" | "archiveOperation" | "stopOperation" | "historyQuarantine" | "capacityWait" |
     "queueHold" | "holds" | "backgroundWorkState" | "backgroundFollowUp" | "backgroundDeliveries" |
-    "providerHomeWait" | "worktreeSwitch">>;
+    "providerHomeWait" | "worktreeSwitch" | "waits" | "pullRequestWatch">>;
 
 const FOLLOW_UP_BLOCKERS: Record<NonNullable<NonNullable<SessionView["backgroundFollowUp"]>["blocker"]>, string> = {
   governance: "The session is paused by a governance limit. Review the session's pending action to continue.",
@@ -740,6 +753,10 @@ function worktreeSwitchCondition(session: SessionStatusSource): SessionCondition
   };
 }
 
+function sessionWaitCondition(wait: SessionWaitCondition): SessionCondition {
+  return { kind: "session_wait", meta: wait.meta, description: wait.description, needsYou: false };
+}
+
 export function sessionStatusSummary(
   session: SessionStatusSource,
   context: SessionStatusContext = {},
@@ -818,14 +835,19 @@ export function sessionStatusSummary(
   const awaitingPrompt = lifecycle.label === statusMeta("session", "idle").label;
   const waiting = !lost && !background?.needsYou && awaitingPrompt ? background : null;
 
+  // A broken wait ranks with the other recovery conditions, ahead of passive context; a healthy one
+  // is the lifecycle's own context, ahead of background work (#1280, #4249).
+  const waits = sessionWaitConditions(session);
   const conditions: SessionCondition[] = [...needs];
   if (lost) conditions.push(lost);
   if (disconnected) conditions.push(disconnected);
+  for (const wait of waits) if (wait.broken) conditions.push(sessionWaitCondition(wait));
   if (waiting) conditions.push(waiting);
   const switching = worktreeSwitchCondition(session);
   if (switching) conditions.push(switching);
   // Listed even under a request, so the popover still says the agent is Running (#3073).
   conditions.push({ kind: "lifecycle", meta: lifecycle, description: session.stopOperation?.failure?.message ?? session.archiveOperation?.failure?.message ?? lifecycleDescription(lifecycle), needsYou: false });
+  for (const wait of waits) if (!wait.broken) conditions.push(sessionWaitCondition(wait));
   if (background && !background.needsYou && background !== lost && background !== waiting) conditions.push(background);
   if (delivery && !delivery.needsYou) conditions.push(delivery);
   const workers = context.activeWorkers ?? 0;
@@ -868,7 +890,7 @@ export function sessionStatusSummary(
       fact: true,
     });
   }
-  if (session.attention && !switching && !session.stopOperation && lifecycle.tone !== "danger" && runnerOnline && !background && sessionFollowUp(session as SessionView, { familyWorking: context.familyWorking || (context.activeWorkers ?? 0) > 0 }).group === "ready_for_review") {
+  if (session.attention && !switching && !session.stopOperation && lifecycle.tone !== "danger" && runnerOnline && !background && waits.length === 0 && sessionFollowUp(session as SessionView, { familyWorking: context.familyWorking || (context.activeWorkers ?? 0) > 0 }).group === "ready_for_review") {
     conditions.push({ kind: "follow_up", meta: statusMeta("session", "ready_for_review"),
       description: "A new result is waiting for your assessment or next instructions.", needsYou: true });
   }

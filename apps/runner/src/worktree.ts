@@ -4,13 +4,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, posix, resolve, sep, win32 } from "node:path";
 import { mkdir, rm, rmdir, statfs } from "node:fs/promises";
 import {
   closeSync,
   constants,
   fsyncSync,
   lstatSync,
+  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -33,6 +34,7 @@ import type {
 } from "@wollipog/protocol";
 import type { WorktreeHookSnapshot } from "./worktree-setup.js";
 import { runContextCommand } from "./context-command.js";
+import { oversizedTurnDiffSummary } from "./history-event-bound.js";
 import {
   captureWorktreeTree,
   isMissingGitRepositoryError,
@@ -43,6 +45,8 @@ import {
 import { canIgnoreRunnerDataDirDirectorySyncError } from "./runner-data-dir.js";
 
 const MIN_FREE_BYTES = 512 * 1024 * 1024;
+/** The most a per-turn diff read may buffer. A larger diff is summarized without being read. */
+const TURN_DIFF_READ_MAX_BYTES = 64 * 1024 * 1024;
 const nativeContext: AgentContext = { kind: "native" };
 type StatfsResult = Awaited<ReturnType<typeof statfs>>;
 let statfsRunner: (path: string) => Promise<StatfsResult> = statfs;
@@ -98,6 +102,12 @@ export interface WorktreeHandle {
   /** True only when this create call materialized the linked worktree. A healthy registered
    * worktree is returned with false so a losing launch cannot reap durable user changes. */
   created?: boolean;
+  /** (#4209) The worktree is new but its branch is not: it holds commits from before this call, so
+   * undoing this call removes the worktree and never the branch. */
+  branchPreexisted?: boolean;
+  /** The ref a newly created worktree started from when it was not the primary checkout's HEAD:
+   * the fetched remote default branch, because HEAD was strictly behind it (#4288). */
+  baseRef?: string;
 }
 
 /** A session-requested worktree keeps its user-selected Git identity instead of deriving either
@@ -114,6 +124,13 @@ export interface RequestedWorktreeOptions extends WorktreeOptions {
    * these roots contains the repository that registers it, when the worktree itself sits inside
    * one of them, or when it sits inside the runner-owned worktree root. */
   allowedProjectPaths?: string[];
+  /** Called with no await before it, just before Git makes a NEW worktree, and never for one that
+   * already exists, so a caller can claim and journal it first (#4209). A throw creates nothing.
+   * `createsBranchAt` is the commit a branch this very call proved absent is about to be made at. */
+  reserveWorktree?: (path: string, branch: string, createsBranchAt?: string) => void;
+  /** Awaited once Git has registered the worktree `reserveWorktree` announced, before it holds any
+   * file, so what the caller reserved is tied to what resulted before there is anything to lose. */
+  materializedWorktree?: (path: string) => Promise<void>;
 }
 
 export interface WorktreeCleanupRecord {
@@ -171,6 +188,28 @@ export interface WorktreeCleanupRecord {
   processesTerminatedAt?: number;
   /** Durable proof that removal completed even if port/history finalization must retry. */
   worktreeRemovedAt?: number;
+  /** (#4209) The token stamped in the worktree an auxiliary creation rollback made. Absent until Git
+   * has registered it: a rollback whose proof does not hold at its path never removes anything there. */
+  rollbackProof?: string;
+  /** (#4209) The commit a branch this attempt itself made started at. Given back only while it is
+   * still there. Absent for a branch that existed first, which is never this rollback's to delete. */
+  rollbackBranchBase?: string;
+  /** (#4209) What the runner last left in the worktree, from captureRollbackSnapshot. A forced removal
+   * happens only while it still matches; with none recorded, it never does. */
+  rollbackSnapshot?: string;
+  /** (#4209) Failed attempts at an auxiliary creation rollback, when the schedule next tries it, and
+   * when the schedule gave up. A restart or a new request for the worktree still tries it. */
+  rollbackAttempts?: number;
+  rollbackRetryAt?: number;
+  rollbackGaveUpAt?: number;
+  /** (#4209) When an auxiliary creation rollback decided to keep its worktree. Its later retries only
+   * stop its processes and give back its ports, and never tell the session again. */
+  rollbackKeptAt?: number;
+  /** (#4209) A session deletion's record for a worktree the runner kept for a person's work. It stops
+   * the worktree's processes and gives back its ports, and leaves the worktree and its branch alone.
+   * Such a record also carries `preserveBranch`, so a runner that predates this field removes the
+   * worktree only if nothing in it changed. */
+  keepWorktree?: boolean;
   createdAt?: number;
   completedAt?: number;
   /** Forge-verified head used only for safe cleanup when the branch upstream disappeared. */
@@ -765,8 +804,18 @@ export async function isAutomaticSessionWorktree(
     await sessionPath(repoPath, sessionId, options, false));
 }
 
-function requestedSlot(value: string): string {
+/** The last path segment of a requested worktree: a hash of its branch name. Exported for tests. It is
+ * the same in every repository, so it is never a worktree's identity: see `worktreeIdForPath`. */
+export function requestedSlot(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+/** The identity a session gives a worktree it makes or attaches: a hash of its whole path. A path names
+ * one repository's worktree, since each repository's requested worktrees sit under their own root,
+ * so the same branch name in two Locations gets two identities. Hooks, process markers, port owners
+ * and cleanup records are keyed by it. Rows already stored keep the id they were given. */
+export function worktreeIdForPath(path: string): string {
+  return createHash("sha256").update(path).digest("hex").slice(0, 16);
 }
 
 function validateSessionId(sessionId: string): void {
@@ -885,7 +934,7 @@ export async function createRequestedWorktree(
   // canonicalized a symlinked path differently from the runner; a branch/registration collision is
   // therefore ambiguity, not proof that the leaf is an abandoned session directory.
   if (parseWorktreePorcelain(listed).some((entry) => entry.branch === branch)) {
-    throw new Error("requested worktree branch is already registered at a different path");
+    throw new Error("requested worktree branch is already registered at a different path; move that worktree back or remove it, then try again");
   }
   const branchRef = `refs/heads/${branch}`;
   options.onProgress?.("validating");
@@ -894,25 +943,142 @@ export async function createRequestedWorktree(
     repoPath,
     ["for-each-ref", "--format=%(refname)", branchRef],
   )).trim();
-  if (existingBranch === branchRef) throw new Error("requested worktree branch already exists");
+  if (existingBranch === branchRef) {
+    throw new Error(`requested worktree branch already exists with no worktree here: ${branch}. It may hold commits, so it was left as it is. ` +
+      "Continue on it by naming it as the branch to recover in a Location switch, or delete the branch if nothing needs it, then try again");
+  }
   options.onProgress?.("materializing");
+  options.reserveWorktree?.(path, branch, baseCommit);
   await removeExternalDirectory(context, repoPath, path, options);
-  await command(context, repoPath, ["worktree", "add", "-b", branch, path, baseCommit], 120_000);
+  await materializeWorktree(context, repoPath, path, ["-b", branch, path, baseCommit], options);
   return { path, branch, baseRef, baseCommit, attached: false, created: true };
 }
 
-/** Create a session-owned worktree on an EXISTING branch, so work that already exists (a pushed
- * pull request's head branch, or a local branch) continues without being recreated (#4138). The
- * branch is checked out as it is, never reset or rebased. A branch checked out in any other
- * worktree is refused rather than moved, so changes there stay where they are. A branch only the
- * remote has is fetched and tracked under the same name. */
+/** Make a new worktree in the three steps that let a rollback tell what it is looking at (#4209):
+ * Git registers it with no files, the caller records its proof, and only then does any file appear.
+ * So a checkout that fails or is killed leaves a proved worktree, never an unproved partial one. Each
+ * step has its own time limit, and `post-checkout` runs at the last one as it does for a plain add. */
+async function materializeWorktree(
+  context: AgentContext,
+  repoPath: string,
+  path: string,
+  addArguments: string[],
+  options: RequestedWorktreeOptions,
+): Promise<void> {
+  await command(context, repoPath, ["worktree", "add", "--no-checkout", ...addArguments], 120_000);
+  await options.materializedWorktree?.(path);
+  await command(context, path, ["checkout", "--force", "HEAD"], 120_000);
+}
+
+/** Who on this runner still has a claim on a worktree path (#4138): a session that records it as
+ * its own (now or in an earlier Location), or a pending cleanup that will remove it. A runner fact,
+ * read from its own session store and cleanup journal; never what an agent says. */
+export interface WorktreeHolder {
+  sessionId: string;
+  /** The holder is the session asking to recover the branch, from one of its earlier Locations. */
+  self?: boolean;
+  /** The holder's provider is running or about to, so the worktree is in use right now. */
+  live?: boolean;
+  /** A recorded cleanup is going to remove the worktree. */
+  removalPending?: boolean;
+  /** The holder records the worktree only from a Location it has since left. */
+  earlierLocation?: boolean;
+}
+
+/** Where a recovered branch continues (#4138):
+ * - `slot`: this session's own recovery worktree already has it;
+ * - `new`: no worktree has it, so the runner checks it out in a new one;
+ * - `reuse`: a linked worktree nothing on this runner holds already has it, and the session
+ *   continues there in place, so its files, uncommitted changes included, stay exactly as they are;
+ * - `refuse`: it is checked out somewhere the session may not take over, with what to do instead. */
+export type RecoveredBranchPlacement =
+  | { kind: "slot"; entry: ListedWorktree }
+  | { kind: "new" }
+  | { kind: "reuse"; entry: ListedWorktree }
+  | { kind: "refuse"; reason: string };
+
+/** How to continue in the session that holds a worktree, said the same way by every refusal that
+ * finds one (#4209): that session itself is the way on, and nothing about it changes. */
+export function heldWorktreeWayOn(holder: WorktreeHolder): string {
+  return `To continue the task there, send session ${holder.sessionId} a message ` +
+    (holder.earlierLocation ? "and have it switch back to this Location" : "so it resumes in its own worktree") +
+    "; its work and pull request stay with it. Nothing about that session or its worktree has changed";
+}
+
+/** Why a Location switch cannot continue on `branch` in the worktree at `path`, which `holder` has,
+ * and the way on. Every holder check a switch makes says it this way. */
+export function heldWorktreeRefusal(branch: string, path: string, holder: WorktreeHolder): string {
+  const at = `branch ${branch} is checked out in worktree ${path}, which`;
+  if (holder.removalPending) return `${at} the runner is removing for session ${holder.sessionId}; ask again once that finishes`;
+  if (holder.self) return `${at} this session still owns from an earlier Location; switch that worktree to another branch, then ask again`;
+  if (holder.live && holder.earlierLocation) {
+    return `${at} session ${holder.sessionId} has from an earlier Location and is running in another Location now. To continue ` +
+      `the task there, have session ${holder.sessionId} switch back to this Location; its work and pull request stay with it. ` +
+      "Nothing about that session or its worktree has changed";
+  }
+  if (holder.live) {
+    return `${at} session ${holder.sessionId} is using; continue the task in that session instead, so the work and its pull ` +
+      "request stay with it";
+  }
+  // A stopped holder keeps its worktree (#4209): handing it over is a decision no switch makes. The
+  // way on is that session itself, which still has everything it had.
+  return holder.earlierLocation
+    ? `${at} session ${holder.sessionId} kept from an earlier Location and is not running. ${heldWorktreeWayOn(holder)}`
+    : `${at} session ${holder.sessionId} still owns although it is not running. ${heldWorktreeWayOn(holder)}`;
+}
+
+/** Decide where a recovered branch continues from the repository's own worktree list. Paths are
+ * compared in the session's execution context, so a Direct WSL distro path is matched as the POSIX
+ * path it is and a Windows path case-insensitively, exactly as every other worktree identity check. */
+export function recoveredBranchPlacement(
+  context: AgentContext,
+  listed: readonly ListedWorktree[],
+  branch: string,
+  slotPath: string,
+  holderOf: (path: string) => WorktreeHolder | undefined,
+): RecoveredBranchPlacement {
+  const slot = listed.find((entry) => sameWorktreePath(context, entry.path, slotPath));
+  if (slot) {
+    return slot.branch === branch && slot.head
+      ? { kind: "slot", entry: slot }
+      : { kind: "refuse", reason: "the recovery worktree slot is already registered with different Git coordinates" };
+  }
+  const elsewhere = listed.find((entry) => entry.branch === branch);
+  if (!elsewhere) return { kind: "new" };
+  const where = `branch ${branch} is checked out in`;
+  if (elsewhere.primary) {
+    // A session never works in a Location's own checkout; that would hand it the Location itself.
+    return { kind: "refuse", reason: `${where} the Location's primary checkout (${elsewhere.path}); a session never works ` +
+      "there, so switch that checkout to another branch, then ask again" };
+  }
+  const holder = holderOf(elsewhere.path);
+  if (holder) return { kind: "refuse", reason: heldWorktreeRefusal(branch, elsewhere.path, holder) };
+  if (elsewhere.locked) {
+    return { kind: "refuse", reason: `${where} worktree ${elsewhere.path}, which is locked; unlock it (git worktree unlock) ` +
+      "once nothing uses it, then ask again" };
+  }
+  return { kind: "reuse", entry: elsewhere };
+}
+
+/** A recovered branch's worktree. `reusedInPlace` marks one that already existed and is continued as
+ * it was, with the number of uncommitted changes it held (unknown when Git could not say). */
+export type RecoveredBranchWorktree = SessionWorktreeHandle & { reusedInPlace?: { uncommittedChanges?: number } };
+
+/** Find or create the worktree a recovered, EXISTING branch continues in, so work that already
+ * exists (a pushed pull request's head branch, or a local branch) continues without being recreated
+ * (#4138). The branch is checked out as it is, never reset or rebased. When a linked worktree that
+ * nothing on this runner holds already has it checked out, that worktree is reused in place:
+ * nothing in it is moved, stashed, reset or deleted. It is reused only after the same proof a
+ * session's own attach needs (registered by this repository, not its primary checkout, on a branch,
+ * healthy, and sharing this repository's Git directory). A branch only the remote has is fetched and
+ * tracked under the same name. */
 export async function createRecoveredBranchWorktree(
   repoPath: string,
   sessionId: string,
   branchName: string,
-  options: RequestedWorktreeOptions = {},
+  options: RequestedWorktreeOptions & { holderOf: (path: string) => WorktreeHolder | undefined },
   remote = "origin",
-): Promise<SessionWorktreeHandle> {
+): Promise<RecoveredBranchWorktree> {
   const context = options.context ?? nativeContext;
   const branch = await validateBranch(context, repoPath, branchName);
   safeGitArgument(remote, "Git remote");
@@ -921,33 +1087,113 @@ export async function createRecoveredBranchWorktree(
     ? `${boundary}/${requestedSlot(branch)}`
     : join(boundary, requestedSlot(branch));
   const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
-  const matching = listed.find((entry) => sameWorktreePath(context, entry.path, path));
-  if (matching) {
-    if (matching.branch === branch && matching.head) {
-      return { path: matching.path, branch, baseRef: branch, baseCommit: matching.head, attached: false, created: false };
-    }
-    throw new Error("the recovery worktree slot is already registered with different Git coordinates");
+  const placement = recoveredBranchPlacement(context, listed, branch, path, options.holderOf);
+  if (placement.kind === "refuse") throw new Error(placement.reason);
+  if (placement.kind === "slot") {
+    return { path: placement.entry.path, branch, baseRef: branch, baseCommit: placement.entry.head!, attached: false, created: false };
   }
-  const elsewhere = listed.find((entry) => entry.branch === branch);
-  if (elsewhere) {
-    throw new Error(`branch ${branch} is checked out in another worktree (${elsewhere.path}); ` +
-      "commit or move that work, switch that worktree to another branch, then ask again");
-  }
+  if (placement.kind === "reuse") return reuseRecoveredBranchWorktree(repoPath, placement.entry.path, branch, options);
   const branchRef = `refs/heads/${branch}`;
   const local = (await command(context, repoPath, ["for-each-ref", "--format=%(refname)", branchRef])).trim() === branchRef;
+  options.reserveWorktree?.(path, branch);
   await removeExternalDirectory(context, repoPath, path, options);
   if (local) {
-    await command(context, repoPath, ["worktree", "add", path, branch], 120_000);
+    await materializeWorktree(context, repoPath, path, [path, branch], options);
   } else {
     const advertised = (await command(context, repoPath, ["ls-remote", "--heads", remote, branchRef], 120_000)).trim();
     if (!advertised) throw new Error(`branch ${branch} exists neither in this repository nor on its remote`);
     const trackingRef = `refs/remotes/${remote}/${branch}`;
     await command(context, repoPath, ["fetch", "--no-tags", remote, `+${branchRef}:${trackingRef}`], 120_000);
-    await command(context, repoPath, ["worktree", "add", "--track", "-b", branch, path, trackingRef], 120_000);
+    await materializeWorktree(context, repoPath, path, ["--track", "-b", branch, path, trackingRef], options);
   }
   const head = (await command(context, path, ["rev-parse", "HEAD"])).trim();
   if (!/^[a-f0-9]{40,64}$/u.test(head)) throw new Error("the recovered branch did not resolve to a commit");
   return { path, branch, baseRef: branch, baseCommit: head, attached: false, created: true };
+}
+
+/** One spelling of a native absolute path, without touching the filesystem: Git for Windows lists
+ * worktrees as `C:/repos/docs` where the real path reads `C:\repos\docs`, and Windows paths compare
+ * case-insensitively. Exported for tests, which pass the platform. */
+export function nativePathSpelling(value: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? win32.resolve(value).replace(/\\/gu, "/").toLowerCase() : posix.resolve(value);
+}
+
+/** How many uncommitted changes a worktree holds, read without touching even its index. Undefined
+ * when Git cannot say: only reported to a person, so an unreadable status is never zero. */
+export async function worktreeUncommittedChanges(path: string, options: WorktreeOptions = {}): Promise<number | undefined> {
+  try {
+    const porcelain = await command(options.context ?? nativeContext, path,
+      ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+    const records = porcelain.split("\0");
+    let changes = 0;
+    for (let i = 0; i < records.length; i++) {
+      if (!records[i]) continue;
+      changes++;
+      // Porcelain -z rename/copy entries have a second, NUL-separated source path.
+      if (/[RC]/u.test(records[i]!.slice(0, 2))) i++;
+    }
+    return changes;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Prove an existing worktree that has the recovered branch checked out, and hand it back as it is.
+ * Read-only: Git is asked only questions, and the status read takes no optional lock, so not even
+ * the worktree's index is rewritten. */
+async function reuseRecoveredBranchWorktree(
+  repoPath: string,
+  path: string,
+  branch: string,
+  options: WorktreeOptions,
+): Promise<RecoveredBranchWorktree> {
+  const context = options.context ?? nativeContext;
+  const unverified = (reason: string) => new Error(`branch ${branch} is checked out in worktree ${path}, which could not be ` +
+    `verified as this Location's repository: ${reason}`);
+  // The path that was checked is the path that is used. A registered path reached through a symbolic
+  // link could otherwise pass every check below in one directory and hand the session another (the
+  // primary checkout, or a worktree someone else holds under its real name).
+  if (context.kind === "native") {
+    let real: string | null;
+    try {
+      real = lstatSync(path).isSymbolicLink() ? null : realpathSync.native(path);
+    } catch (error) {
+      throw unverified((error as Error).message);
+    }
+    if (real === null || nativePathSpelling(real) !== nativePathSpelling(path)) {
+      throw unverified("its registered path is not its real path");
+    }
+  }
+  let verified: SessionWorktreeHandle;
+  try {
+    verified = await registeredSessionWorktree(repoPath, path, options);
+  } catch (error) {
+    throw unverified((error as Error).message);
+  }
+  if (verified.branch !== branch) {
+    throw new Error(`worktree ${path} moved off branch ${branch} while it was being verified; ask again`);
+  }
+  // Registration describes the repository's record of the worktree; the directory itself must agree.
+  // Its `.git` link could name another worktree's admin directory of the same repository, which
+  // shares the Git directory checked above but has a different branch and index.
+  const [toplevel, gitDir, head] = (await command(context, path,
+    ["rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--symbolic-full-name", "HEAD"]))
+    .trim().split("\n");
+  if (!toplevel || !sameWorktreePath(context, toplevel, path) || head !== `refs/heads/${branch}`) {
+    throw unverified("the directory does not have that branch checked out as its own worktree");
+  }
+  if (context.kind === "native") {
+    let backPointer = "";
+    try {
+      backPointer = readFileSync(join(gitDir!, "gitdir"), "utf8").replace(/\r?\n$/u, "");
+    } catch { /* a missing back-pointer is refused below */ }
+    if (!backPointer || !sameWorktreePath(context, resolve(gitDir!, backPointer), join(path, ".git"))) {
+      throw unverified("its Git admin directory belongs to another worktree");
+    }
+  }
+  const uncommittedChanges = await worktreeUncommittedChanges(verified.path, options);
+  return { ...verified, baseRef: branch, attached: true, created: false,
+    reusedInPlace: uncommittedChanges === undefined ? {} : { uncommittedChanges } };
 }
 
 /** Resolve and fetch the remote's advertised default branch. No primary-checkout HEAD or current
@@ -956,13 +1202,14 @@ export async function fetchRemoteDefaultBase(
   repoPath: string,
   options: WorktreeOptions = {},
   remote = "origin",
+  budget: { attempts: number; stepMs: number } = { attempts: 3, stepMs: 120_000 },
 ): Promise<{ ref: string; branch: string }> {
   const context = options.context ?? nativeContext;
   safeGitArgument(remote, "Git remote");
   // Preserve each step's existing 120-second allowance, shared across up to three attempts and
   // 500/1,000 ms backoff. Both steps together stay within a 240-second configured budget.
   async function retryStep<T>(phase: SessionWorktreeProgressPhase, step: string, run: (timeoutMs: number) => Promise<T>): Promise<T> {
-    const deadline = performance.now() + 120_000;
+    const deadline = performance.now() + budget.stepMs;
     let lastError: unknown;
     for (let attempt = 0; ; attempt++) {
       options.onProgress?.(phase);
@@ -973,7 +1220,7 @@ export async function fetchRemoteDefaultBase(
       } catch (error) {
         lastError = error;
         const backoffMs = 500 * (attempt + 1);
-        if (attempt === 2 || deadline - performance.now() <= backoffMs) {
+        if (attempt >= budget.attempts - 1 || deadline - performance.now() <= backoffMs) {
           const detail = error instanceof Error ? error.message : String(error);
           throw new Error(`Failed ${step} after ${attempt + 1} attempt${attempt === 0 ? "" : "s"}. Retry, or pass an explicit base ref to skip remote default-branch lookup and fetch. Git error: ${detail}`, { cause: error });
         }
@@ -1045,13 +1292,15 @@ export async function readRepositoryDefaultBranch(
   return branch;
 }
 
-interface ListedWorktree {
+export interface ListedWorktree {
   path: string;
   head: string | null;
   branch: string | null;
   /** Git documents the main worktree as the first porcelain record, including for bare repos. */
   primary: boolean;
   bare: boolean;
+  /** `git worktree lock` marked it: someone asked Git to leave it alone. */
+  locked?: boolean;
 }
 
 export function parseWorktreePorcelain(value: string): ListedWorktree[] {
@@ -1062,12 +1311,14 @@ export function parseWorktreePorcelain(value: string): ListedWorktree[] {
     const branchRef = fields.find((field) => field.startsWith("branch "))?.slice(7);
     if (!path) return [];
     const bare = fields.includes("bare");
+    const locked = fields.some((field) => field === "locked" || field.startsWith("locked "));
     return [{
       path,
       head,
       branch: branchRef?.startsWith("refs/heads/") ? branchRef.slice(11) : null,
       primary: index === 0 || bare,
       bare,
+      ...(locked ? { locked } : {}),
     }];
   });
 }
@@ -1215,7 +1466,8 @@ function nativeRegisteredWorktreeGitDir(commonDir: string, worktreePath: string)
   try {
     entries = readdirSync(adminRoot, { withFileTypes: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    // Missing, or something that is not a directory: either way Git keeps no registration there.
+    if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return null;
     throw error;
   }
   const matches = entries.flatMap((entry) => {
@@ -1258,6 +1510,28 @@ async function registeredWorktreeGitDir(
     { cwd: "/", timeoutMs: 8_000 },
   );
   return result.stdout.trim() || null;
+}
+
+/** Drop one worktree's registration once its directory has gone, as `git worktree prune` would for it
+ * alone. Prune itself drops every worktree whose directory is away, even for a moment, as on an
+ * unmounted volume, and with each its index, HEAD and reflog and private refs. A locked registration,
+ * or a path that is there again, is left as it is. */
+async function pruneOwnRegistration(context: AgentContext, repoPath: string, path: string): Promise<void> {
+  const commonDir = (await command(context, repoPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]))
+    .trim().replace(/[\\/]$/u, "");
+  const gitDir = await registeredWorktreeGitDir(context, commonDir, path);
+  if (!gitDir) return;
+  try {
+    if (await removalPathIdentity(context, path) !== null) return;
+  } catch {
+    return;
+  }
+  if (context.kind === "wsl") {
+    await runContextCommand(context, "sh", ["-c", 'test -e "$1/locked" || rm -rf -- "$1"', "sh", gitDir], { cwd: "/", timeoutMs: 30_000 });
+    return;
+  }
+  if (existsSync(join(gitDir, "locked"))) return;
+  await rm(gitDir, { recursive: true, force: true });
 }
 
 async function registeredWorktreeForRemoval(
@@ -1416,20 +1690,79 @@ export async function createWorktree(repoPath: string, sessionId: string, option
     .filter((candidate): candidate is string => !!candidate)
     .some((candidate) => sameWorktreePath(context, candidate, path));
   if (registered) {
-    try {
-      if ((await command(context, path, ["rev-parse", "--is-inside-work-tree"])).trim() === "true") {
-        return { path, branch, created: false };
+    // A registration whose directory has gone holds no file, so only it goes. A directory that is
+    // there but does not answer as a worktree may still hold work: its configuration no longer
+    // parses, say, or Git failed just this once. Git's own forced removal would take it regardless,
+    // so it is left for a person to look at (#4209).
+    if (await removalPathIdentity(context, path).catch(() => undefined) === null) {
+      await pruneOwnRegistration(context, repoPath, path);
+    } else {
+      let failure = "Git says it is not a work tree";
+      try {
+        if ((await command(context, path, ["rev-parse", "--is-inside-work-tree"])).trim() === "true") {
+          return { path, branch, created: false };
+        }
+      } catch (error) {
+        const detail = String((error as { stderr?: string }).stderr ?? "").trim().split("\n")[0];
+        failure = (detail || (error as Error).message).slice(0, 200);
       }
-    } catch { /* stale registration: remove below */ }
-    await command(context, repoPath, ["worktree", "remove", "--force", path], 120_000).catch(() => {});
-    await command(context, repoPath, ["worktree", "prune"]).catch(() => {});
+      // The path and the instruction come first, since a failure reason is bounded.
+      throw new Error(`this session's worktree at ${path} was left as it is, in case it holds work: it is registered with Git ` +
+        "but does not answer as a worktree. Repair it, or move anything you want to keep out of it and remove it with " +
+        `git worktree remove --force, then try again (${failure})`);
+    }
   } else {
     // A crash can leave an unregistered directory at the deterministic path. It is owned by this
     // exact session root, so clear it before `git worktree add` rather than failing every restart.
     await removeExternalDirectory(context, repoPath, path, options);
   }
-  await command(context, repoPath, ["worktree", "add", "-B", branch, path, "HEAD"], 120_000);
-  return { path, branch, created: true };
+  const fresher = await staleHeadRemoteBase(repoPath, options);
+  const target = fresher?.commit ?? "HEAD";
+  // `-B` moves an existing branch. That loses nothing only when the branch's commits are all in what
+  // it moves to. Otherwise this session's earlier commits are on it, reachable after a reset only
+  // through the reflog, so the worktree goes on that branch as it stands (#4209).
+  const branchRef = `refs/heads/${branch}`;
+  const holdsOwnCommits = (await command(context, repoPath, ["for-each-ref", "--format=%(refname)", branchRef])).trim() === branchRef &&
+    !await command(context, repoPath, ["merge-base", "--is-ancestor", branchRef, target]).then(() => true, () => false);
+  if (holdsOwnCommits) {
+    await command(context, repoPath, ["worktree", "add", path, branch], 120_000);
+    return { path, branch, created: true, branchPreexisted: true };
+  }
+  await command(context, repoPath, ["worktree", "add", "-B", branch, path, target], 120_000);
+  return { path, branch, created: true, ...(fresher ? { baseRef: fresher.ref } : {}) };
+}
+
+/**
+ * The freshly fetched remote default branch, but only when the primary checkout's HEAD is strictly
+ * behind it (#4288). A session worktree started from a stale local default branch makes its first
+ * turn's diff carry every upstream change the agent then pulls in. Starting at the remote tip
+ * instead loses nothing: HEAD is an ancestor of it. Any other HEAD (local commits, a diverged or
+ * unrelated branch) is the person's deliberate starting point and is kept, as is HEAD whenever the
+ * remote cannot be resolved or fetched quickly; this never makes worktree creation fail.
+ */
+async function staleHeadRemoteBase(
+  repoPath: string,
+  options: WorktreeOptions,
+): Promise<{ ref: string; commit: string } | null> {
+  const context = options.context ?? nativeContext;
+  try {
+    // A repository without an origin knows of nothing fresher; skip the network entirely.
+    await command(context, repoPath, ["remote", "get-url", "origin"]);
+  } catch {
+    return null;
+  }
+  try {
+    const remote = await fetchRemoteDefaultBase(repoPath, options, "origin", { attempts: 2, stepMs: 30_000 });
+    const head = (await command(context, repoPath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
+    const tip = (await command(context, repoPath,
+      ["rev-parse", "--verify", "--end-of-options", `refs/remotes/${remote.ref}^{commit}`])).trim();
+    if (!/^[a-f0-9]{40,64}$/u.test(head) || !/^[a-f0-9]{40,64}$/u.test(tip) || head === tip) return null;
+    // Exits non-zero (and so falls back to HEAD) unless HEAD is an ancestor of the remote tip.
+    await command(context, repoPath, ["merge-base", "--is-ancestor", head, tip]);
+    return { ref: remote.ref, commit: tip };
+  } catch {
+    return null;
+  }
 }
 
 export function sameWorktreePath(context: AgentContext, left: string, right: string): boolean {
@@ -1861,6 +2194,93 @@ export async function mergedWorktreePullRequestForBranch(
     // the reconciliation backoff.
     return null;
   }
+}
+
+/** The pull request an attached worktree's branch already has, for its record only (#4209). */
+export type DiscoveredBranchPullRequest =
+  | { url: string; state: "open"; provider: "github"; kind: "pull_request" }
+  | DiscoveredMergedPullRequest;
+
+/** Find the pull request an existing branch already has, for an attached worktree: one a person or
+ * an agent attached, or one a Location switch reused in place, typically the head branch of a pull
+ * request someone pushed, recovered to continue it. The link is only shown and kept current. Such a
+ * worktree stays its owner's, so nothing about the pull request ever removes it.
+ *
+ * GitHub only, and only from the repository the branch's remote names, rebuilt from that URL so
+ * gh's own choice of repository plays no part. A candidate must come from that same repository
+ * (not a fork) and from the branch's upstream branch, or the branch itself when it has none. One
+ * open pull request is linked as open. With none open, a merged one is linked only when its head
+ * is exactly the local tip, the same proof discovery asks of any merged link. Several open ones, a
+ * closed one, or a merged one with an earlier head link nothing. Every failure links nothing. */
+export async function branchPullRequestForAttachedWorktree(
+  worktreePath: string,
+  branch: string,
+  options: WorktreeOptions & {
+    /** Test-only subprocess seam for the forge CLI. Git always runs for real. */
+    runForgeCommand?: typeof runContextCommand;
+    preflightTimeoutMs?: number;
+    /** Admission hook, after every local check passes, keyed by what the forge is asked about. */
+    onForgeAttempt?: (identity: string) => boolean;
+    /** Transport, auth or tool failure, as against an answer that lists nothing. */
+    onForgeUnavailable?: () => void;
+  } = {},
+): Promise<DiscoveredBranchPullRequest | null> {
+  const context = options.context ?? nativeContext;
+  const timeout = options.preflightTimeoutMs ?? 30_000;
+  let project: string;
+  let headBranch: string;
+  let head: string;
+  try {
+    const remote = (await command(context, worktreePath, ["config", "--get", "--default", "", `branch.${branch}.remote`], timeout)).trim();
+    const merge = (await command(context, worktreePath, ["config", "--get", "--default", "", `branch.${branch}.merge`], timeout)).trim();
+    if ((remote || merge) && (!remote || remote === "." || !/^refs\/heads\/./u.test(merge))) return null;
+    headBranch = merge ? merge.slice("refs/heads/".length) : branch;
+    const remoteUrl = (await command(
+      context, worktreePath, ["config", "--get", "--default", "", `remote.${remote || "origin"}.url`], timeout,
+    )).trim();
+    const parsed = parseForgeRemote(remoteUrl);
+    if (parsed?.provider !== "github" || parsed.host !== "github.com" ||
+        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(parsed.project) || parsed.project.startsWith("-")) return null;
+    project = parsed.project;
+    head = (await command(context, worktreePath, ["rev-parse", "--verify", "HEAD"], timeout)).trim().toLowerCase();
+    if (!/^[a-f0-9]{40,64}$/u.test(head)) return null;
+  } catch {
+    return null;
+  }
+  if (options.onForgeAttempt && !options.onForgeAttempt(JSON.stringify([project, headBranch, head]))) return null;
+  let listed: unknown;
+  try {
+    const result = await (options.runForgeCommand ?? runContextCommand)(
+      context,
+      "gh",
+      [
+        "pr", "list", "--repo", `github.com/${project}`, "--head", headBranch, "--state", "all", "--limit", "20",
+        "--json", "url,state,headRefOid,headRefName,isCrossRepository",
+      ],
+      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
+    );
+    listed = JSON.parse(result.stdout) as unknown;
+  } catch {
+    options.onForgeUnavailable?.();
+    return null;
+  }
+  if (!Array.isArray(listed)) {
+    options.onForgeUnavailable?.();
+    return null;
+  }
+  const own = listed.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const item = value as Record<string, unknown>;
+    if (typeof item.url !== "string" || item.isCrossRepository !== false || item.headRefName !== headBranch) return [];
+    const request = linkedChangeRequest(item.url);
+    if (request?.provider !== "github" || request.project.toLowerCase() !== project.toLowerCase()) return [];
+    return [{ url: item.url, state: item.state, headOid: typeof item.headRefOid === "string" ? item.headRefOid.toLowerCase() : "" }];
+  });
+  const open = own.filter((item) => item.state === "OPEN");
+  if (open.length === 1) return { url: open[0]!.url, state: "open", provider: "github", kind: "pull_request" };
+  if (open.length > 1) return null;
+  const merged = own.find((item) => item.state === "MERGED" && item.headOid === head);
+  return merged ? { url: merged.url, state: "merged", headOid: merged.headOid, provider: "github", kind: "pull_request" } : null;
 }
 
 /** Candidate merged pull requests checked per containment proof; each one costs a forge fetch. */
@@ -2598,7 +3018,7 @@ export async function discardWorktreeIfSafe(
         updatedAt: Date.now(),
       }, { context });
     }
-    await command(context, repoPath, ["worktree", "prune"]);
+    await pruneOwnRegistration(context, repoPath, handle.path);
     return { removed: true };
   } catch {
     return { removed: false, reason: "unavailable" };
@@ -2606,10 +3026,31 @@ export async function discardWorktreeIfSafe(
 }
 
 /** Remove a worktree this runner just checked out on an existing branch, keeping the branch. Git
- * refuses (and the worktree stays) if anything in it changed. */
-export async function releaseRecoveredWorktree(repoPath: string, path: string, options: WorktreeOptions = {}): Promise<void> {
+ * refuses (and the worktree stays) if anything in it changed, unless `force` says those changes are
+ * the runner's own: a setup that ran there before the worktree was given back (#4209). Either way
+ * the path is first proved again to be the worktree its repository registered there, as
+ * `removeWorktree` proves it: Git removes a worktree it cannot answer from inside, a configuration
+ * that no longer parses say, and that may be anyone's. A release may be replaying a reservation
+ * whose checkout never happened, so an absent path only needs its own registration dropped. */
+export async function releaseRecoveredWorktree(
+  repoPath: string,
+  path: string,
+  options: WorktreeOptions = {},
+  { force = false }: { force?: boolean } = {},
+): Promise<void> {
   const context = options.context ?? nativeContext;
-  await command(context, repoPath, ["worktree", "remove", safeGitArgument(path, "worktree path")], 120_000);
+  let identity: WorktreeRemovalIdentity | null;
+  try {
+    identity = await revalidateWorktreeRemovalIdentity(repoPath, path, options);
+  } catch (error) {
+    throw new Error(`worktree cleanup identity could not be revalidated: ${(error as Error).message}`);
+  }
+  if (!identity) {
+    await pruneOwnRegistration(context, repoPath, path);
+    return;
+  }
+  await command(context, repoPath,
+    ["worktree", "remove", ...(force ? ["--force"] : []), safeGitArgument(path, "worktree path")], 120_000);
 }
 
 /** Remove the linked worktree, its branch, and stale administrative records. */
@@ -2637,7 +3078,7 @@ export async function removeWorktree(repoPath: string, handle: WorktreeHandle, o
         // Git can fail after removing either the directory or its registration. Accept only a
         // genuinely absent path; a present unregistered path has lost the identity just proved and
         // must be retained for a later retry or operator inspection.
-        await command(context, repoPath, ["worktree", "prune"]).catch(() => {});
+        await pruneOwnRegistration(context, repoPath, handle.path).catch(() => {});
         try {
           const listed = parseWorktreePorcelain(
             await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
@@ -2656,7 +3097,7 @@ export async function removeWorktree(repoPath: string, handle: WorktreeHandle, o
     // remove` with a missing pathname: another process could recreate it between this proof and
     // Git's recursive removal.
     try {
-      await command(context, repoPath, ["worktree", "prune"]);
+      await pruneOwnRegistration(context, repoPath, handle.path);
       const listed = parseWorktreePorcelain(
         await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
       );
@@ -2675,10 +3116,245 @@ export async function removeWorktree(repoPath: string, handle: WorktreeHandle, o
   if (removalConfirmed && !repositoryUnavailable) {
     try { await command(context, repoPath, ["branch", "-D", handle.branch]); }
     catch { /* branch may already be absent */ }
-    try { await command(context, repoPath, ["worktree", "prune"]); }
+    try { await pruneOwnRegistration(context, repoPath, handle.path); }
     catch (error) { failures.push(`prune: ${(error as Error).message}`); }
   }
   if (failures.length) throw new Error(`worktree cleanup incomplete (${failures.join("; ")})`);
+}
+
+const ROLLBACK_PROOF_REF_PREFIX = "refs/worktree/wollipog-rollback";
+
+/** Tie a creation rollback to the exact worktree it made (#4209), in that worktree's own Git admin
+ * directory: a per-worktree ref exists only there, and goes with the registration. A worktree made
+ * later on the same path is a new registration without it, whatever its branch or inode. */
+export async function stampWorktreeRollbackProof(path: string, proof: string, options: WorktreeOptions = {}): Promise<void> {
+  await command(options.context ?? nativeContext, path, ["update-ref", `${ROLLBACK_PROOF_REF_PREFIX}/${proof}`, "HEAD"]);
+}
+
+/** Best effort: a proof left behind names a rollback that no longer exists, so it proves nothing. */
+export async function clearWorktreeRollbackProof(path: string, proof: string, options: WorktreeOptions = {}): Promise<void> {
+  await command(options.context ?? nativeContext, path, ["update-ref", "-d", `${ROLLBACK_PROOF_REF_PREFIX}/${proof}`]);
+}
+
+/** What a creation rollback finds at its path:
+ * - `proved`: the worktree it made;
+ * - `absent`: nothing;
+ * - `unpopulated`: no proof, but the branch it reserved registered here with no file at all, which
+ *   is what an attempt leaves when it stops before its proof. There is nothing in it to lose;
+ * - `mismatch`: something it did not make, on the repository's own word. Never removed;
+ * - `unregistered`: a directory the repository does not list as a worktree at all. Never removed
+ *   either, and the next attempt at that path refuses it, saying what to do, until it is gone;
+ * - `unavailable`: nothing can be concluded yet. */
+export type WorktreeRollbackProofState = "proved" | "absent" | "unpopulated" | "mismatch" | "unregistered" | "unavailable";
+
+export async function worktreeRollbackProofState(
+  repoPath: string,
+  path: string,
+  proof: string | undefined,
+  options: WorktreeOptions = {},
+  reservedBranch?: string,
+): Promise<WorktreeRollbackProofState> {
+  const context = options.context ?? nativeContext;
+  try {
+    if (await removalPathIdentity(context, path) === null) return "absent";
+  } catch {
+    return "unavailable";
+  }
+  if (nativeRepositoryPathIsUnavailable(context, repoPath)) return "unavailable";
+  // A read that fails is no answer, and neither is one through a refs directory Git could not read:
+  // Git then reports no ref, and succeeds. Either way the proof may well be there.
+  let proofUnread = false;
+  if (proof) {
+    const ref = `${ROLLBACK_PROOF_REF_PREFIX}/${proof}`;
+    const found = await command(context, path, ["for-each-ref", "--format=%(refname)", ref]).then((value) => value, () => {
+      proofUnread = true;
+      return "";
+    });
+    if (found.trim() === ref) return "proved";
+  }
+  // No proof here. That alone means little: a refusal may be a passing failure in a worktree setup
+  // ran in, and with its `.git` gone a directory inside another repository answers for that one,
+  // with nothing. The repository has to say what this path is before a rollback can end on it.
+  try {
+    const entry = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]))
+      .find((item) => sameWorktreePath(context, item.path, path));
+    if (!entry) return "unregistered";
+    const toplevel = (await command(context, path, ["rev-parse", "--path-format=absolute", "--show-toplevel"])).trim();
+    if (!sameWorktreePath(context, toplevel, path)) return "unavailable";
+    if (proof && (proofUnread || !await worktreeRefsReadable(context, path))) return "unavailable";
+    if (!proof && reservedBranch && entry.branch === reservedBranch && await worktreeHoldsNoFiles(path, options)) return "unpopulated";
+    return "mismatch";
+  } catch {
+    return "unavailable";
+  }
+}
+
+/** Whether every directory under a worktree's own refs can be read, so that Git saying it holds no ref
+ * means it holds none. A refs directory that is missing altogether is readable: it holds none. */
+async function worktreeRefsReadable(context: AgentContext, path: string): Promise<boolean> {
+  const gitDir = (await command(context, path, ["rev-parse", "--absolute-git-dir"])).trim();
+  if (context.kind === "wsl") {
+    return runContextCommand(context, "sh", ["-c", 'test ! -e "$1/refs" || find "$1/refs" >/dev/null', "sh", gitDir],
+      { cwd: "/", timeoutMs: 8_000 }).then(() => true, () => false);
+  }
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) walk(join(directory, entry.name));
+    }
+  };
+  try {
+    walk(join(gitDir, "refs"));
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" && !existsSync(join(gitDir, "refs"));
+  }
+}
+
+/** Whether a worktree holds no file at all, tracked, untracked or ignored, which is what a checkout
+ * that never began leaves. */
+export async function worktreeHoldsNoFiles(path: string, options: WorktreeOptions = {}): Promise<boolean> {
+  const context = options.context ?? nativeContext;
+  return (await command(context, path, ["ls-files", "--cached", "--others"])).trim() === "";
+}
+
+/** Whether a commit with files in it has an index that was never written: a checkout that never
+ * finished. Such a tree is partial, and looks like every file being deleted. */
+export async function worktreeCheckoutNeverFinished(path: string, options: WorktreeOptions = {}): Promise<boolean> {
+  const context = options.context ?? nativeContext;
+  return (await command(context, path, ["ls-files", "--cached"])).trim() === "" &&
+    (await command(context, path, ["ls-tree", "--name-only", "HEAD"])).trim() !== "";
+}
+
+/** For a context with no Node of its own. Each `find` exits non-zero if it cannot read a directory or
+ * a file, so nothing is ever left out of the listing unnoticed. Exported for tests. */
+export const ADMIN_DIGEST_LISTING = 'cd "$1" && find . -type f -exec sha256sum -- {} + && find . ! -type f ! -type d -printf "other %p\\n"';
+
+/** Exported for tests. */
+export function digestAdminListing(listing: string): string {
+  const lines = listing.split("\n").filter(Boolean).sort();
+  if (lines.some((line) => line.startsWith("other "))) throw new Error("the admin directory holds something that cannot be read as a file");
+  return createHash("sha256").update(lines.join("\n")).digest("hex");
+}
+
+/** A digest of everything in a worktree's own Git admin directory: each file's path and its own hash,
+ * so one file's bytes cannot stand in for another's name. Throws if any of it cannot be read, or is
+ * anything but a file or directory, like a link. Git puts none there, and describing one exactly is
+ * more rule than it is worth: part of a directory proves nothing about the whole, so that worktree is
+ * kept. */
+async function adminDirectoryDigest(context: AgentContext, gitDir: string): Promise<string> {
+  if (context.kind === "wsl") {
+    return digestAdminListing((await runContextCommand(context, "sh", ["-c", ADMIN_DIGEST_LISTING, "sh", gitDir], { cwd: "/", timeoutMs: 30_000 })).stdout);
+  }
+  const hash = createHash("sha256");
+  const walk = (directory: string, prefix: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      const relative = `${prefix}${entry.name}`;
+      const full = join(directory, entry.name);
+      if (entry.isDirectory()) walk(full, `${relative}/`);
+      else if (entry.isFile()) hash.update(`${relative}\0${createHash("sha256").update(readFileSync(full)).digest("hex")}\0`);
+      else throw new Error("the admin directory holds something that cannot be read as a file");
+    }
+  };
+  walk(gitDir, "");
+  return hash.digest("hex");
+}
+
+/** One value for everything in a worktree that a forced removal would destroy, apart from what Git
+ * ignores: its commit, the tree of its working files, and every file in its own Git admin directory.
+ * That directory holds the index and its flags, HEAD and its reflog, private refs and any operation
+ * in progress, so none of them has to be named here (#4209). The rule that uses this has no cases: a
+ * rollback force-removes a worktree only while this still equals what it recorded when the runner
+ * finished with it. Anything else, including no record at all, keeps the worktree. A leaked worktree
+ * with a notice is an acceptable cost, and a rule with cases has been wrong once per case.
+ *
+ * Null when contents cannot be proved at all: an index flag makes Git take a file's contents on trust,
+ * so the tree below would not see an edit to it. */
+export async function captureRollbackSnapshot(path: string, options: WorktreeOptions = {}): Promise<string | null> {
+  const context = options.context ?? nativeContext;
+  const flagged = (await command(context, path, ["ls-files", "-v"])).split("\n").some((line) => /^[a-zS]/u.test(line));
+  if (flagged) return null;
+  const head = (await command(context, path, ["rev-parse", "HEAD"])).trim();
+  const gitDir = (await command(context, path, ["rev-parse", "--absolute-git-dir"])).trim();
+  // Reads the working files through a temporary index, so it writes nothing to the admin directory.
+  const tree = await withGitExecutionContext(context, () => captureWorktreeTree(path));
+  return `${head}:${tree}:${await adminDirectoryDigest(context, gitDir)}`;
+}
+
+/** Whether a worktree may hold work that exists nowhere else: anything Git sees as changed or
+ * untracked, or a commit since `baseCommit` that no remote branch has. With no base, every commit no
+ * remote has counts. An answer Git cannot give counts as yes, and a directory that has gone as no.
+ * Ignored files are not looked at. */
+export async function worktreeHoldsUnsharedWork(
+  path: string,
+  baseCommit: string | undefined,
+  options: WorktreeOptions = {},
+): Promise<boolean> {
+  const context = options.context ?? nativeContext;
+  try {
+    if (await removalPathIdentity(context, path) === null) return false;
+  } catch {
+    return true;
+  }
+  try {
+    if ((await command(context, path, ["status", "--porcelain=v1", "--untracked-files=all"])).trim()) return true;
+    const unshared = await command(context, path,
+      ["rev-list", "--count", "HEAD", "--not", "--remotes", ...(baseCommit ? [safeGitArgument(baseCommit, "base commit")] : [])]);
+    return Number(unshared.trim()) !== 0;
+  } catch {
+    return true;
+  }
+}
+
+export type WorktreeRollbackWork = { state: "unchanged" } | { state: "changed"; reason: string } | { state: "unavailable" };
+
+/** Whether a proved worktree is still exactly what the runner left. The proof says which worktree
+ * this is, not what has happened in it since. No answer is not a change, so a passing Git failure
+ * leaves the rollback waiting rather than ending it. */
+export async function worktreeRollbackWork(
+  path: string,
+  recorded: string | undefined,
+  options: WorktreeOptions = {},
+): Promise<WorktreeRollbackWork> {
+  if (!recorded) return { state: "changed", reason: "nothing proves what is in it is only what the runner left" };
+  try {
+    return await captureRollbackSnapshot(path, options) === recorded
+      ? { state: "unchanged" }
+      : { state: "changed", reason: "it is no longer exactly what the runner left" };
+  } catch {
+    return { state: "unavailable" };
+  }
+}
+
+/** Give back a branch an attempt made, only while it is still exactly where the attempt made it, no
+ * worktree has it, and its reflog holds nothing beyond its creation, since deleting a branch deletes
+ * that too. The delete itself compares the tip, so a commit landing first keeps the branch. Returns
+ * whether the branch is gone. */
+export async function releaseUnchangedBranch(
+  repoPath: string,
+  branch: string,
+  expectedCommit: string,
+  options: WorktreeOptions = {},
+): Promise<boolean> {
+  const context = options.context ?? nativeContext;
+  try {
+    // No prune: that would also drop other worktrees whose directories are only away for now. A stale
+    // registration that still names this branch just keeps the branch.
+    const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
+    if (listed.some((entry) => entry.branch === branch)) return false;
+    const history = (await command(context, repoPath, ["reflog", "show", "--format=%H", `refs/heads/${branch}`])).split("\n").filter(Boolean);
+    if (history.length > 1) return false;
+    await command(context, repoPath, ["update-ref", "-d", `refs/heads/${branch}`, expectedCommit]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A linked worktree's directory outlived its Git registration: `git worktree prune` ran while a
+ * volume was away, say. Nothing distinguishes what is in it from a person's uncommitted work. */
+function staleWorktreeRefusal(path: string): Error {
+  return new Error("a Git worktree that is no longer registered, perhaps with uncommitted work, was left as it is. Move anything you " +
+    `want to keep out of it, delete the directory, then try again: ${path}`);
 }
 
 async function removeExternalDirectory(
@@ -2706,7 +3382,8 @@ async function removeExternalDirectory(
           'elif [ -f "$marker" ]; then gitdir=$(sed -n "s/^gitdir: //p" "$marker"); ' +
           'if [ -z "$gitdir" ]; then printf registered; else case "$gitdir" in /*) ;; *) gitdir="$1/$gitdir" ;; esac; ' +
           'if [ -e "$gitdir" ] || [ -L "$gitdir" ]; then printf registered; ' +
-          'else case "$gitdir" in "$2"/worktrees/*) printf stale ;; *) printf registered ;; esac; fi; fi; fi',
+          'else case "$gitdir" in "$2"/worktrees/*) if [ "$(ls -A "$1")" = ".git" ]; then printf stale; else printf stale-content; fi ;; ' +
+          '*) printf registered ;; esac; fi; fi; fi',
         "sh",
         path,
         commonDir,
@@ -2717,6 +3394,7 @@ async function removeExternalDirectory(
       throw new Error("refusing to recursively remove a path that may still be a registered worktree");
     }
     if (marker.stdout === "absent") return;
+    if (marker.stdout === "stale-content") throw staleWorktreeRefusal(path);
     if (marker.stdout === "stale") {
       await runContextCommand(context, "rm", ["-rf", "--", path], { cwd: "/", timeoutMs: 120_000 });
     } else {
@@ -2760,6 +3438,9 @@ async function removeExternalDirectory(
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   if (staleMarker) {
+    // Only the marker itself is proof of nothing to lose. Anything beside it may be someone's work,
+    // whichever caller asked and whether or not its branch still exists (#4209).
+    if (readdirSync(absolutePath).some((name) => name !== ".git")) throw staleWorktreeRefusal(path);
     await rm(absolutePath, { recursive: true, force: true });
     return;
   }
@@ -2768,7 +3449,9 @@ async function removeExternalDirectory(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       throw new Error(
-        `refusing to recursively remove an unproved runner-owned path: ${(error as Error).message}`,
+        // The error names the path. The instruction comes first, since a failure reason is bounded.
+        "refusing to recursively remove an unproved runner-owned path. Move or delete it if it is not needed, " +
+        `then try again: ${(error as Error).message}`,
       );
     }
   }
@@ -2788,11 +3471,31 @@ export async function captureTurnDiff(
   worktreePath: string,
   baseTree: string,
   options: WorktreeOptions = {},
+  readMaxBytes = TURN_DIFF_READ_MAX_BYTES,
 ): Promise<{ diff: string; tree: string } | null> {
   const context = options.context ?? nativeContext;
+  let tree: string;
   try {
-    const tree = await withGitExecutionContext(context, () => captureWorktreeTree(worktreePath));
-    return { diff: await command(context, worktreePath, ["diff", baseTree, tree, "--"]), tree };
+    tree = await withGitExecutionContext(context, () => captureWorktreeTree(worktreePath));
+  } catch {
+    return null;
+  }
+  try {
+    const diff = await runContextCommand(context, "git", ["diff", baseTree, tree, "--"],
+      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: readMaxBytes });
+    return { diff: diff.stdout, tree };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return null;
+  }
+  // Too large to read at all (#4288). The turn still advances to this tree, so the next turn's diff
+  // does not repeat the same range; history keeps a summary naming the size and file count.
+  try {
+    const names = await command(context, worktreePath, ["diff", "--name-only", "-z", baseTree, tree, "--"]);
+    const files = names.split("\0").filter(Boolean).length;
+    return {
+      diff: oversizedTurnDiffSummary({ bytes: readMaxBytes, atLeast: true, files, shownFiles: 0 }),
+      tree,
+    };
   } catch {
     return null;
   }

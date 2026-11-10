@@ -1,5 +1,7 @@
 import type {
+  CampaignDecisionSubject,
   DecisionErrorClass,
+  DecisionKind,
   DecisionModelResolvedTarget,
   DecisionModelSettingsView,
   DecisionModelTestResult,
@@ -84,6 +86,15 @@ export function decisionModelName(target: Pick<DecisionModelResolvedTarget, "mod
   return target.modelName ?? target.model;
 }
 
+/**
+ * The models the provider reported answering a decision, as their exact ids and without repeats, so
+ * a record can't read as if its target answered when another model did (#4367). Attempts that
+ * reported none, such as one that never reached a provider, add nothing.
+ */
+export function decisionAnsweredBy(decision: Pick<DecisionOccurrenceView, "attempts">): string {
+  return [...new Set(decision.attempts.flatMap((attempt) => attempt.model ? [attempt.model] : []))].join(", ");
+}
+
 function seconds(ms: number): string {
   return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
 }
@@ -102,11 +113,31 @@ export function decisionTestSummary(result: DecisionModelTestResult): string {
   const where = occurrence.target
     ? ` on ${occurrence.target.harnessName} (${decisionModelName(occurrence.target)}, ${effortLabel(occurrence.target.effort)} effort)`
     : "";
-  const facts = `${seconds(result.latencyMs)}, ${attempts(occurrence.attempts.length)}${where}.`;
+  const answeredBy = decisionAnsweredBy(occurrence);
+  const facts = `${seconds(result.latencyMs)}, ${attempts(occurrence.attempts.length)}${where}${answeredBy ? `, answered by ${answeredBy}` : ""}.`;
   if (occurrence.state === "decided" || occurrence.state === "uncertain") {
     return `Verdict: ${verdictLabel(occurrence.verdict ?? "")}. ${facts}`;
   }
   return `No verdict: ${decisionFailureText(occurrence.failureClass)}. A campaign would ask its owner instead. ${facts}`;
+}
+
+/** Kinds Campaign Status lists in Decision Model Checks, beside the request each one affected: the
+ * question screen, follow-up relatedness and closure-reason choice (#4104), and the review of each
+ * selection proposal (#4103), and the constraint check of each Orchestrator scope proposal (#4282). */
+const DECISION_MODEL_CHECK_KINDS: ReadonlySet<DecisionKind> = new Set<DecisionKind>([
+  "credential_screen", "follow_up_relatedness", "closure_reason", "scope_review", "scope_check",
+]);
+
+/**
+ * Whether Campaign Status lists a decision in Decision Model Checks: one of the kinds above, or a
+ * Custom campaign's retired epic-seed reading, a scope grant on the `issue_scope_seed` surface (since
+ * #4282 the seed is the scope check of the Orchestrator's first-message proposal, listed above). The
+ * Decision Model section lists every other decision, such as Full Control's scope grant, so each
+ * decision appears in exactly one list (#4265).
+ */
+export function isDecisionModelCheck(decision: { kind: DecisionKind; subject?: Pick<CampaignDecisionSubject, "surface"> }): boolean {
+  return DECISION_MODEL_CHECK_KINDS.has(decision.kind) ||
+    (decision.kind === "scope_grant" && decision.subject?.surface === "issue_scope_seed");
 }
 
 /** Campaign Status: one decision's outcome in plain words. */

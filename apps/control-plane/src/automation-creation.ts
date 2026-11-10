@@ -9,6 +9,7 @@ import { automationCapabilityError, pinAutomationSpec, validateAutomationSpec } 
 import { nextCronFire } from "@wollipog/protocol/cron-schedule";
 import { auditDigest, capabilityConfigError, claudeModelConfigForValidation, defaultPermissionModeForNewSession, resolveEffectiveModelEffort, type ServiceResult, type SessionsService } from "./sessions.js";
 import { AUTOMATION_PROPOSAL_TTL_MS, AUTOMATION_APPROVAL_TTL_MS } from "./automation-creation-lifecycle.js";
+import type { ScheduledCampaignRuntime } from "./scheduled-campaigns.js";
 
 const fail = <T>(error: string, status = 409): ServiceResult<T> => ({ ok: false, status, error });
 const ok = <T>(data: T, status = 200): ServiceResult<T> => ({ ok: true, status, data });
@@ -18,7 +19,8 @@ const identifier = (v: unknown, max: number): v is string => typeof v === "strin
 /** Session credentials propose, humans resolve, and only this service consumes the exact grant.
  * No provider/runner round trip occurs between revalidation and the local atomic commit. */
 export class AutomationCreationService {
-  constructor(private db: ControlPlaneDb, private sessions: SessionsService, private hub: Hub) {}
+  constructor(private db: ControlPlaneDb, private sessions: SessionsService, private hub: Hub,
+    private campaigns?: ScheduledCampaignRuntime) {}
 
   private requester(principal: AgentPrincipal, sessionId: string): string | null {
     if (principal.credentialSessionId !== sessionId || !this.db.canAccessSession(principal, sessionId)) return "session not found";
@@ -121,6 +123,14 @@ export class AutomationCreationService {
     }
     const capabilityError = automationCapabilityError(this.db, this.sessions, spec);
     if (capabilityError) return fail(capabilityError);
+    if (spec.action.kind === "create_session" && spec.action.request.campaign) {
+      const scope = this.db.sessionScope(requesterId);
+      const ownerId = principal.kind === "human" ? principal.userId
+        : this.db.sessionLauncherUserId(requesterId) ?? (scope?.owner.kind === "user" ? scope.owner.userId : undefined);
+      const error = this.campaigns?.validate(spec, { kind: "human", id: ownerId }) ??
+        (!this.campaigns ? "Scheduled campaigns are unavailable on this server" : null);
+      if (error) return fail(error);
+    }
     const normalizedSpec = validateAutomationSpec(spec);
     if (!normalizedSpec.ok) return fail(normalizedSpec.error ?? "Prepared automation configuration is invalid", 400);
     return ok({ spec, targetDigest: auditDigest(states)!, effectiveTargets });

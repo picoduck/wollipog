@@ -1,8 +1,10 @@
+import { PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_MODEL_UNKNOWN_SENTENCE, PROVIDER_ACCOUNT_SKIP_TEXT } from "@wollipog/protocol";
 import { RETIRED_REVIEW_TOOL_NAMES, REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
+import { normalizeWorkflowDecisionOwnerRule, WORKFLOW_DECISION_OWNER_RULE_QUOTE_MAX_CHARS, WORKFLOW_DECISION_OWNER_RULE_SOURCE_MAX_CHARS } from "@wollipog/protocol";
 import { sessionCredentialRefusal } from "./session-credential-error.js";
 /** Shared session-management tools for the session-scoped CLI and MCP server. */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import {
@@ -22,7 +24,12 @@ import {
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
+  WORKFLOW_QUESTION_ANSWER_MAX_CHARS,
   OWNER_DECISION_LIMITS,
+  SESSION_WAIT_PROGRESS_REPORT_MS,
+  type SessionWaitKind,
+  type SessionWaitReport,
+  type SessionWaitReportTarget,
   type SessionStatus,
   type UiEvidenceReviewDelivery,
 } from "@wollipog/protocol";
@@ -36,6 +43,7 @@ import {
   PULL_REQUEST_WAIT_MAX_INTERVAL_MS,
   PULL_REQUEST_WAIT_MAX_TIMEOUT_MS,
   PULL_REQUEST_WAIT_MIN_INTERVAL_MS,
+  PULL_REQUEST_WAIT_READ_GRACE_MS,
   waitForPullRequest,
 } from "./pull-request-wait.js";
 import { readMediaFileForAttach } from "./session-artifact-file.js";
@@ -271,9 +279,132 @@ async function cpFetch(
     if (res.status === 401 && deps.selfSessionId && actorHeader === WOLLIPOG_AGENT_ACTOR_SESSION_HEADER) {
       detail = sessionCredentialRefusal(detail);
     }
+    detail += providerAccountChoiceSuffix(data);
     return { ok: false, message: `HTTP ${res.status}: ${detail}`, status: res.status };
   }
   return { ok: true, data };
+}
+
+/** What an unattended caller can do about a launch with no eligible account (#4353). Candidates stay
+ * out of the model's context: account ids are derived from account labels. */
+function providerAccountChoiceSuffix(data: Json): string {
+  const selection = data?.providerAccountSelection;
+  if (data?.code !== PROVIDER_ACCOUNT_CHOICE_REQUIRED || !selection || typeof selection !== "object") return "";
+  const actions = Array.isArray(selection.actions) ? selection.actions.filter((action: unknown) => typeof action === "string").join(", ") : "";
+  const retryAt = typeof selection.retryAt === "number" ? ` retryAt=${new Date(selection.retryAt).toISOString()}` : "";
+  return ` [${PROVIDER_ACCOUNT_CHOICE_REQUIRED} refusal=${String(selection.refusal)} actions=${actions}${retryAt}] ` +
+    "choose_account: read get_provider_account_selection (wollipog session accounts) and pass an accountRef whose canName is true " +
+    "as create_session providerAccountId (wollipog session create --provider-account), create_run providerAccountIds or create_workflow_run providerAccountBindings.";
+}
+
+/** A control plane below v337 can't read an account reference. Sending one would be refused as an
+ * unknown account at best, so say what actually stands in the way. */
+async function providerAccountChoiceCompatibilityError(deps: McpDeps, capability: "providerAccountAgentChoice" | "memberProviderAccountChoice" = "providerAccountAgentChoice"): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL[capability];
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) return controlPlaneUpdateRequired(wollipogSupportUnverified("provider account choice", result.message), required);
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Choosing a provider account from an agent needs",
+      "No session was started. Update Wollipog, or start it without naming an account."), required, actual);
+}
+
+/** What a launch would use and which accounts could be named, for the model's context: account
+ * references and reason codes, never the ids or labels beside them in the control plane's reply. */
+function mapProviderAccountSelection(preview: Json): Json {
+  const choices = capArray(preview?.choices).map((choice) => ({
+    accountRef: choice?.accountRef,
+    position: choice?.position ?? null,
+    ...(choice?.expected === true ? { expected: true } : {}),
+    canName: choice?.canName === true,
+    ...(typeof choice?.reason === "string" ? { reason: choice.reason, because: providerAccountSkipFragment(choice.reason) } : {}),
+    ...(typeof choice?.retryAt === "number" ? { retryAt: new Date(choice.retryAt).toISOString() } : {}),
+    ...(typeof choice?.limitLabel === "string" ? { limitLabel: choice.limitLabel } : {}),
+  }));
+  return {
+    provider: preview?.provider,
+    mode: preview?.mode,
+    policyRevision: preview?.policyRevision,
+    status: preview?.status,
+    source: preview?.source,
+    ...(typeof preview?.refusal === "string" ? { refusal: preview.refusal } : {}),
+    enforcement: preview?.enforcement,
+    accounts: choices,
+    ...(preview?.modelCompatibility === "unknown" ? { modelCompatibility: "unknown", modelNote: PROVIDER_ACCOUNT_MODEL_UNKNOWN_SENTENCE } : {}),
+  };
+}
+
+function providerAccountSkipFragment(reason: string): string | undefined {
+  return Object.hasOwn(PROVIDER_ACCOUNT_SKIP_TEXT, reason)
+    ? PROVIDER_ACCOUNT_SKIP_TEXT[reason as keyof typeof PROVIDER_ACCOUNT_SKIP_TEXT]
+    : undefined;
+}
+
+/** How long one wait report may take: a slow control plane never holds the wait itself. */
+const WAIT_REPORT_TIMEOUT_MS = 5_000;
+
+/** One wait call's progress reports (#1280, #4249). */
+export interface WaitProgressReporter {
+  /** A successful poll. Sends at most one report per SESSION_WAIT_PROGRESS_REPORT_MS, the first
+   * only once the call has waited that long, so a short wait is never reported at all. */
+  poll(): void;
+  /** The call returned, failed or was cancelled: remove the wait if anything was reported. */
+  end(): Promise<void>;
+}
+
+/**
+ * Report a `wait_session` or `wait_pull_request` call to the control plane, so the waiting session
+ * reads Waiting rather than only Running, and a wait whose polls stop reads Stalled. Best effort: a
+ * failed report never changes the wait's own result. A control plane that refuses the report (an
+ * older one has no route; a session outside a turn cannot report) stops reports for that call.
+ * Durations, never timestamps, cross the wire, so the runner's clock offset does not matter.
+ */
+export function waitProgressReporter(deps: McpDeps, kind: SessionWaitKind, target: SessionWaitReportTarget,
+  timeoutMs: number, intervalMs: number): WaitProgressReporter {
+  // A device-token CLI call has no session to show the wait on.
+  if (!deps.selfSessionId || deps.actorHeader === null) return { poll() {}, async end() {} };
+  const now = deps.now ?? Date.now;
+  const waitId = `wait_${randomUUID().replaceAll("-", "")}`;
+  const startedAt = now();
+  // The wait's own cancellation must not cancel the report of its end.
+  const reportDeps: McpDeps = { ...deps, signal: undefined };
+  let lastSentAt: number | null = null;
+  let refused = false;
+  let inFlight: Promise<void> | null = null;
+  const send = (state: SessionWaitReport["state"]) => {
+    const at = now();
+    const report: SessionWaitReport = {
+      waitId, kind, state, target,
+      elapsedMs: Math.max(0, at - startedAt),
+      remainingMs: Math.max(0, startedAt + timeoutMs - at),
+      intervalMs,
+    };
+    return cpFetch(reportDeps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/waits`, report,
+      WAIT_REPORT_TIMEOUT_MS);
+  };
+  return {
+    poll() {
+      if (refused || inFlight) return;
+      const at = now();
+      if (at - startedAt < SESSION_WAIT_PROGRESS_REPORT_MS) return;
+      if (lastSentAt !== null && at - lastSentAt < SESSION_WAIT_PROGRESS_REPORT_MS) return;
+      lastSentAt = at;
+      inFlight = send("active").then((result) => {
+        // A 4xx is a refusal that repeating cannot change; a transport failure may pass.
+        if (!result.ok && result.status !== undefined && result.status >= 400 && result.status < 500) refused = true;
+      }, () => undefined).finally(() => { inFlight = null; });
+    },
+    async end() {
+      if (inFlight) await inFlight;
+      if (lastSentAt === null || refused) return;
+      refused = true;
+      await send("ended").catch(() => undefined);
+    },
+  };
 }
 
 async function cancellableSleep(deps: McpDeps, milliseconds: number): Promise<boolean> {
@@ -372,7 +503,7 @@ async function pullRequestWatchCompatibilityError(deps: McpDeps): Promise<ToolRe
     : controlPlaneUpdateRequired(needsNewerWollipog("Merge-queue watches need"), required, actual);
 }
 
-async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+async function issueClosureCompatibilityError(deps: McpDeps, repository?: unknown): Promise<ToolResult | null> {
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
@@ -380,8 +511,12 @@ async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult
     actual = compatibility.data?.protocolVersion;
   }
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure;
-  return Number.isInteger(actual) && actual! >= required
-    ? null : controlPlaneUpdateRequired(needsNewerWollipog("Human-approved issue closure needs"), required, actual);
+  if (!Number.isInteger(actual) || actual! < required) return controlPlaneUpdateRequired(needsNewerWollipog("Human-approved issue closure needs"), required, actual);
+  // #4119: an older control plane would ignore `repository` and inspect the launch repository's
+  // issue with the same number, so the request would be about the wrong issue. Refuse by name.
+  const location = RUNNER_CAPABILITY_MIN_PROTOCOL.locationIssueClosure;
+  return repository !== undefined && actual! < location
+    ? controlPlaneUpdateRequired(needsNewerWollipog("Closing an issue in another campaign repository needs"), location, actual) : null;
 }
 
 /** A pre-v220 control plane would ignore `campaignWorkItemId` and start the child unattributed,
@@ -565,9 +700,10 @@ async function mergeReviewEvidenceCompatibilityError(args: Json, deps: McpDeps):
       "Update Wollipog before citing a review session; this citation was not submitted."), required, actual);
 }
 
-/** A pre-v242 control plane drops intendedClosures without checking GitHub (#3713). */
-async function intendedClosuresCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeClosingReferences;
+/** A pre-v242 control plane drops intendedClosures without checking GitHub (#3713), and a pre-v295
+ * one refuses them on a GitLab merge, which it does not check (#3762). */
+async function intendedClosuresCompatibilityError(deps: McpDeps, gitlab = false): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL[gitlab ? "gitlabMergeClosingReferences" : "githubMergeClosingReferences"];
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
@@ -668,8 +804,8 @@ function forgeActionFallback(occurrenceId: string, resourceDigest: unknown, kind
 
 /** One sentence naming the decision, what Wollipog did, and what to do next. */
 function forgeActionSummary(decision: unknown): string {
-  const view = decision as { occurrenceId?: string; status?: string; forgeAction?: {
-    kind?: string; outcome?: string; refusal?: { reason?: string; summary?: string } } } | null;
+  const view = decision as { occurrenceId?: string; status?: string; resourceSnapshot?: { repository?: string }; forgeAction?: {
+    kind?: string; outcome?: string; publishedIssue?: number; performedByRunnerId?: string; refusal?: { reason?: string; summary?: string } } } | null;
   const action = view?.forgeAction;
   const name = `Decision ${view?.occurrenceId ?? "(unknown)"}`;
   if (!action) return `${name}: no forge action was recorded; read get_workflow_decision.`;
@@ -679,31 +815,70 @@ function forgeActionSummary(decision: unknown): string {
     case "enqueued": return `${name}: Wollipog enqueued the approved head. Park on the pull request until it merges.`;
     case "already_queued": return `${name}: the approved head was already in the merge queue. Park on the pull request until it merges.`;
     case "already_merged": return `${name}: the approved head was already merged.`;
+    case "published":
+    case "already_published": return `${name}: a Location of ${view?.resourceSnapshot?.repository ?? "the repository"} on runner ${action.performedByRunnerId ?? "(unknown)"} ` +
+      `${action.outcome === "published" ? "created" : "had already created"} issue #${action.publishedIssue ?? "(unknown)"} with that runner's login. Read it back and record it on the recommendation.`;
     case "uncertain": return action.kind === "pr_merge_enqueue"
       ? `${name}: the enqueue may have run. Do not replay it; reconcile_workflow_decision once the pull request reads MERGED, or report it to your Orchestrator.`
-      : `${name}: the deletion may have run. Call execute_workflow_decision again; a compare-and-delete is safe to repeat.`;
+      : action.kind === "issue_publication"
+        ? `${name}: the issue may have been created. Do not create it yourself. Call execute_workflow_decision again, which only looks for it and never creates a second one; if it stays uncertain, report it to your Orchestrator.`
+        : `${name}: the deletion may have run. Call execute_workflow_decision again; a compare-and-delete is safe to repeat.`;
     default: return view?.status === "revoked"
       ? `${name}: refused (${action.refusal?.reason ?? "unspecified"}): ${action.refusal?.summary ?? ""} The approval was revoked; request a new decision with fresh evidence, or report the branch to your Orchestrator.`
       : `${name}: refused (${action.refusal?.reason ?? "unspecified"}): ${action.refusal?.summary ?? ""} Nothing changed and the approval still stands; fix the cause and call execute_workflow_decision again, or report it to your Orchestrator.`;
   }
 }
 
+/** The operations a scope proposal may withhold (#4282): a Full Control boundary's own. */
+const CAMPAIGN_SCOPE_PROPOSAL_OPERATIONS = ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication",
+  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"] as const;
+
+/** Whether the control plane reports at least `required`; an unreadable version counts as no. */
+async function controlPlaneSupports(deps: McpDeps, required: number): Promise<boolean> {
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    actual = result.ok ? result.data?.protocolVersion : undefined;
+  }
+  return Number.isInteger(actual) && actual! >= required;
+}
+
 /** A pre-v281 control plane has no owner-decision routes (#4064). Refuse by name: nothing reached
- * the owner, and the decision keeps the owner it had. */
-async function ownerDecisionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
+ * the owner, and the decision keeps the owner it had. A pre-v303 control plane would ignore an Owner
+ * Question's `kind` (#4270) and ask it as an approval, so a question needs v303. */
+async function ownerDecisionCompatibilityError(deps: McpDeps, question = false): Promise<ToolResult | null> {
+  const required = question ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions : RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
+  const noun = question ? "owner questions" : "owner decisions";
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
     if (!result.ok) {
-      return controlPlaneUpdateRequired(wollipogSupportUnverified("owner decisions", result.message), required);
+      return controlPlaneUpdateRequired(wollipogSupportUnverified(noun, result.message), required);
     }
     actual = result.data?.protocolVersion;
   }
   return Number.isInteger(actual) && actual! >= required
     ? null
-    : controlPlaneUpdateRequired(needsNewerWollipog("Owner decisions need",
+    : controlPlaneUpdateRequired(needsNewerWollipog(question ? "Owner questions need" : "Owner decisions need",
       "Update Wollipog; nothing reached the owner."), required, actual);
+}
+
+/** A pre-v296 control plane ignores `ownerRule` (#4137), so the decision would keep the owner its
+ * policy names and the Orchestrator could decide a gate its owner kept. Refuse before sending. */
+async function ownerRuleCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("owner rules", result.message), required);
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Owner rules (ownerRule) need",
+      "Nothing was requested. Tell your Orchestrator which gate the rule keeps for a person, so it can hand the decision to the owner, or update Wollipog."), required, actual);
 }
 
 /** Bounds the fence probe so it cannot push a create call toward the harness's tool timeout. */
@@ -1129,8 +1304,9 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
       type: "object",
       properties: {
         category: { const: "implementation_question" },
+        kind: { const: "question", description: "Required for clarifications, preferences and design choices. A normal question with free text; its answer grants no action authority. Omit only for legacy exact-action approvals." },
         question: { type: "string" },
-        options: { type: "array", minItems: 2, maxItems: 12, items: {
+        options: { type: "array", minItems: 0, maxItems: 12, items: {
           type: "object",
           properties: { optionId: { type: "string" }, label: { type: "string" }, description: { type: "string" } },
           required: ["optionId", "label"], additionalProperties: false,
@@ -1150,21 +1326,29 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
         requiredChecks: { type: "object", properties: {
           headSha: { type: "string", pattern: "^[0-9a-f]{40}$" }, status: { const: "passed" },
           checkedAt: { type: "integer", minimum: 1 },
-          checks: { type: "array", minItems: 1, items: { type: "object", properties: {
+          checks: { type: "array", items: { type: "object", properties: {
             name: { type: "string" }, state: { const: "passed" }, url: { type: "string" },
           }, required: ["name", "state"], additionalProperties: false } },
         }, required: ["headSha", "status", "checkedAt", "checks"], additionalProperties: false },
+        // GitHub only (#4119): the repository requires no checks, so checks lists every reported check.
+        checksBasis: { const: "all_reported",
+          description: "GitHub only, when GitHub reports no required checks for the pull request: requiredChecks.checks then lists " +
+            "every check reported for the head, each passing, with the merge state clean; the runner verifies it. A head with no " +
+            "checks at all lists none, and its merge is the person's. Omit it whenever required checks exist." },
         // GitLab only, and then required (#3602): repository is <gitlab-host>/group/project, pullRequest the IID.
         mergeMethod: { type: "string", enum: ["merge_train", "merge"] },
         squash: { type: "boolean" },
         removeSourceBranch: { type: "boolean" },
-        // GitHub only (#3713): the issues this merge should close; omit it when it must close none.
+        // The issues this merge should close (#3713; GitLab since #3762); omit it when it must close none.
         intendedClosures: {
           type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 512 },
-          description: "GitHub only: every issue this merge is meant to close, as #N, owner/repo#N, or an issue URL. " +
+          description: "Every issue this merge is meant to close: on GitHub as #N, owner/repo#N, or an issue URL; on GitLab " +
+            "as #N, group/project#N, <host>/group/project#N, or an issue URL on that instance. " +
             "Omit it when the merge must close no issue. Before the decision is created and again before it is armed, " +
-            "the runner reads what GitHub would close (closing keywords in the description, even negated as in " +
-            "\"does not close #N\", and issues linked by hand); any difference is refused with each reference and its line.",
+            "the runner reads what the forge would close: on GitHub, closing keywords in the description, even negated as in " +
+            "\"does not close #N\", and issues linked by hand; on GitLab, its closing pattern on the description (also " +
+            "\"closing\", \"implements\" and every reference in a list such as \"Closes #1, #2 and #3\") and GitLab's own " +
+            "list, which covers the title and commits. Any difference is refused with each reference and its line.",
         },
       },
       required: ["category", "repository", "pullRequest", "headSha", "reviewResult", "requiredChecks"],
@@ -1234,7 +1418,7 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
 
 const CAMPAIGN_WORK_LEDGER_TOOLS = ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
   "record_campaign_work_item_delivery", "adjudicate_campaign_recommendation", "get_campaign_work_items"];
-const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
+const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "get_provider_account_selection", "list_sessions", "get_session", "get_session_events",
   "request_automation_creation", "get_automation_creation", "execute_automation_creation",
   "allocate_campaign_budget",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
@@ -1246,12 +1430,14 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "prepare_descendant_ui_evidence_review", "get_descendant_ui_evidence_review",
   "reconcile_workflow_decision", "execute_workflow_decision", "withdraw_workflow_decision", "list_workflow_decisions",
   "request_owner_decision", "hand_workflow_decision_to_owner",
+  "request_campaign_repository_addition", "get_campaign_repository_addition", "execute_campaign_repository_addition",
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
   "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "unarchive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree", "delete_worktree_refs"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
   "request_owner_decision", "hand_workflow_decision_to_owner",
+  "request_campaign_repository_addition", "get_campaign_repository_addition", "execute_campaign_repository_addition",
   "allocate_campaign_budget",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
@@ -1314,7 +1500,59 @@ async function locationSwitchCall(deps: McpDeps, method: "GET" | "POST", suffix:
   return response.ok ? textResult(response.data) : errorResult(response.message);
 }
 
+/** A campaign root's request to add a Project repository, and carrying out its owner's approval (#4117). */
+async function repositoryAdditionCall(deps: McpDeps, method: "GET" | "POST", suffix: string, body?: Json): Promise<ToolResult> {
+  if (!deps.selfSessionId) return errorResult("A repository addition requires a Wollipog session identity");
+  const compatibility = deps.controlPlaneProtocolVersion === undefined ? await cpFetch(deps, "GET", "/api/compatibility") : null;
+  const version = deps.controlPlaneProtocolVersion ?? (compatibility?.ok ? compatibility.data?.protocolVersion : undefined);
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition;
+  if (!Number.isSafeInteger(version) || version < required) {
+    return controlPlaneUpdateRequired("Adding a repository to a campaign needs a newer version of Wollipog. Update Wollipog; until then, " +
+      "record the work that needs it as blocked on the campaign's owner.", required, version);
+  }
+  const response = await cpFetch(deps, method,
+    `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/repository-additions${suffix}`,
+    body, method === "POST" ? deps.requestTimeoutMs ?? 90_000 : undefined);
+  return response.ok ? textResult(response.data) : errorResult(response.message);
+}
+
 export const TOOLS: McpTool[] = [
+  {
+    name: "request_campaign_repository_addition",
+    description: "Ask your campaign's owner to add one Location of the campaign's Project, and so its repository, to the campaign, " +
+      "when recorded work needs a Project repository the campaign does not cover (most often a follow-up in another repository), " +
+      "or its launch repository after the owner's first message limited the campaign to others (name one of its Locations, even a listed one). " +
+      "Name the Location by id (list it with get_campaign or the Project), a one-line reason, and the recorded follow-up or work item " +
+      "that needs it. The control plane inspects that Location first; one outside the Project or failing inspection is refused before " +
+      "the owner sees it. The decision is always the owner's, in Full Control and Custom: nobody acting for the campaign can approve it. " +
+      "A pending request for the same repository is reused, and a declined one is not asked again for the same work. You cannot create " +
+      "a Location: when no Location of the repository exists, report that instead. Then end your turn; the owner's answer resumes you.",
+    inputSchema: { type: "object", properties: {
+      requestId: { type: "string", minLength: 1, maxLength: 256 },
+      locationId: { type: "string", minLength: 1, maxLength: 256, description: "The Project Location to add, by id." },
+      reason: { type: "string", minLength: 1, maxLength: 1000, description: "One line the owner reads, quoted as your words: why the campaign needs this repository." },
+      work: { type: "object", properties: {
+        kind: { type: "string", enum: ["follow_up", "work_item"] },
+        id: { type: "string", minLength: 1, maxLength: 256, description: "The recorded follow-up's id or the work item's id." },
+      }, required: ["kind", "id"], additionalProperties: false },
+    }, required: ["requestId", "locationId", "reason", "work"], additionalProperties: false },
+    handler: async (args, deps) => repositoryAdditionCall(deps, "POST", "", args),
+  },
+  {
+    name: "get_campaign_repository_addition",
+    description: "Read one of your campaign's repository-addition requests: the Location, the repository it verified as, the owner's " +
+      "answer and, once carried out, the boundary revision it joined at. Nothing is approved or added.",
+    inputSchema: { type: "object", properties: { occurrenceId: { type: "string", minLength: 1, maxLength: 256 } }, required: ["occurrenceId"], additionalProperties: false },
+    handler: async (args, deps) => repositoryAdditionCall(deps, "GET", `/${encodeURIComponent(args.occurrenceId)}`),
+  },
+  {
+    name: "execute_campaign_repository_addition",
+    description: "Carry out a repository addition your campaign's owner approved: the control plane inspects the exact approved Location " +
+      "again and adds its repository to the campaign at a new boundary revision. Supply the occurrenceId and resourceDigest of the " +
+      "request; no Location can be supplied. Read get_campaign afterwards for the new boundary.",
+    inputSchema: { type: "object", properties: { occurrenceId: { type: "string", minLength: 1, maxLength: 256 }, resourceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" } }, required: ["occurrenceId", "resourceDigest"], additionalProperties: false },
+    handler: async (args, deps) => repositoryAdditionCall(deps, "POST", `/${encodeURIComponent(args.occurrenceId)}/execute`, { resourceDigest: args.resourceDigest }),
+  },
   {
     name: "request_location_switch",
     description: "Ask your person to continue this task in another Location of the same Project when the task belongs to another " +
@@ -1334,7 +1572,8 @@ export const TOOLS: McpTool[] = [
       trigger: { type: "string", enum: ["early", "worktree_attach", "review"] },
       recoverBranch: { type: "string", minLength: 1, maxLength: 255, description: "An existing branch of the target repository that " +
         "already holds this task's work, such as an open pull request's head branch. Switch and Continue continues on it, " +
-        "never resetting it, instead of starting a new branch." },
+        "never resetting it, instead of starting a new branch. A worktree that already has it checked out and that no " +
+        "session holds is continued in place, uncommitted changes included." },
     }, required: ["requestId", "repository", "reason", "handoff"], additionalProperties: false },
     handler: async (args, deps) => locationSwitchCall(deps, "POST", "", args),
   },
@@ -1378,40 +1617,79 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_campaign_issue_scope",
-    description: "Inspect the root campaign's authorized repository-qualified issue scope, revision, outside-scope work, and optional epic membership candidates. Native sub-issues and leading checklist entries in member sections are proposals only; dependencies and incidental references grant no authority. GitLab issues are supported from runner protocol v249: a GitLab epic is an ordinary issue of the same project whose member checklist (#N or same-project issue URLs) names its members; GitLab epics and issue links are not read. Use before delegating an epic and after any human scope change.",
-    inputSchema: { type: "object", properties: { epic: { type: "integer", minimum: 1 } }, additionalProperties: false },
+    description: "Inspect the root campaign's authorized repository-qualified issue scope, grouped by repository under `repositories` (every campaign repository, the launch repository first, with whether one of its Locations is online), its revision, outside-scope work, and optional epic membership candidates. Native sub-issues and leading checklist entries in member sections are proposals only; dependencies and incidental references grant no authority. GitLab issues are supported from runner protocol v249: a GitLab epic is an ordinary issue of the same project whose member checklist (#N or same-project issue URLs) names its members; GitLab epics and issue links are not read. Use before delegating an epic and after any human scope change.",
+    inputSchema: { type: "object", properties: { epic: { type: "integer", minimum: 1 },
+      repository: { type: "string", minLength: 1, maxLength: 256, description: "The epic's repository, owner/name, in any of the campaign's repositories; defaults to the launch repository. Requires epic. Its members are read through a Location of that repository." } }, additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
       const compatibility = await campaignIssueScopeCompatibilityError(deps);
       if (compatibility) return compatibility;
-      const result = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/campaign/issue-scope${typeof args.epic === "number" ? `?epic=${args.epic}` : ""}`, undefined, deps.requestTimeoutMs ?? 75_000);
+      if (typeof args.repository === "string" && typeof args.epic !== "number") return errorResult("repository names an epic's repository, so it requires epic.");
+      // Left out, an epic would be read in the launch repository: the same number, another issue.
+      if (typeof args.repository === "string" && !await controlPlaneSupports(deps, RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedEpics)) {
+        return errorResult("This campaign's control plane can't read an epic in another repository yet. Update the control plane.");
+      }
+      const query = typeof args.epic === "number" ? `?epic=${args.epic}${typeof args.repository === "string" ? `&repository=${encodeURIComponent(args.repository)}` : ""}` : "";
+      const result = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/campaign/issue-scope${query}`, undefined, deps.requestTimeoutMs ?? 75_000);
       return result.ok ? textResult(result.data) : errorResult(result.message);
     },
   },
   {
     name: "request_campaign_issue_scope_change",
-    description: "Propose exact repository-qualified issue additions/removals at the current scope revision. Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. When the owner's first message asked the campaign to choose issues (a selection grant), propose the issues you chose with lineage {kind:\"selection\"} and your ranking as the explanation, additions only: the server refuses, with a fixed code and no model call, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope, one in another active campaign's scope, one past the selection count or Maximum Issues, and one with a Human Required label; otherwise the owner decides. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
+    description: "Propose exact repository-qualified issue additions/removals at the current scope revision, in any of the campaign's repositories; the same number in two repositories is two issues. Each repository is verified through one of its own online Locations. A repository outside the campaign is refused with repository_outside_boundary before any runner call. Under Full Control whose owner's first message started the campaign, you read that message and propose its scope (#4282): your first campaign action is the initial proposal, and nothing is dispatched until it is admitted. A proposal may add issues in any of the campaign's repositories: a bare #N in the message means the launch repository, so an issue in another repository counts as owner-named only when the message writes owner/repo#N or its URL. When the message limits the work to some of the campaign's repositories, send its words for each as `repositoryNames`. Send the issues as additions with `proposal`: for each issue whether the owner named it (owner_named: its number is in the owner's message) or you chose it (orchestrator_chosen), with a one-line rationale; `requestedCount`, the number the owner asked for or null; `constraints`, each checkable limit you read (\"open\", \"UI only\", \"skip anything labeled security\"), never ranking criteria such as priority, which are your call; and `withheldOperations`, operations the message rules out (\"don't merge\" withholds pr_merge). A task that needs no issues proposes no additions. Deterministic floors refuse, naming the issue: an owner-named number the message doesn't write, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope or held by another campaign, one past an explicit Maximum Issues, and one with a Human Required label; revise and propose again. A proposal of only owner-named issues the message writes as issue references (#12, owner/repo#12 or a URL), with nothing else to check, returns an Orchestrator-owned change: resolve it with resolve_descendant_workflow_decision and your own session ID. Anything else goes to the Decision Model's constraint check, which checks only what the owner's words allow, never priority: its admit returns an Orchestrator-owned change, its refusal (constraint_check_refused) names the question and issue so you revise, and when it is uncertain or fails the proposal becomes the owner's one approval, asked as an Owner Question; proposing the same issues again returns the recorded outcome. A stated count must be written in the message, and chosen issues stay within it (3 when none is stated; later additions within the admitted count). Custom requires a human, except a Custom root's first-message proposal (#4282): when create_session refuses with seed_proposal_required, propose exactly the issues the person's first message asks for, each owner_named, or none; the server checks it against their words, and an admit seeds the epic the person approves (one issue with members) or makes the issues the campaign's issue numbers with no person step, while an uncertain or failed check leaves the scope to the person. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. When the owner's first message asked the campaign to choose issues (a selection grant), propose the issues you chose with lineage {kind:\"selection\"} and your ranking as the explanation, additions only: the server refuses, with a fixed code and no model call, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope, one in another active campaign's scope, one past the selection count or Maximum Issues, and one with a Human Required label; otherwise the owner decides. Under Full Control, additions without lineage that no grant admits become the owner's one typed approval, stating any Maximum Issues increase they need; tell the owner to approve it, and a repeat while it is pending returns the same request. Lineage that needs a person becomes the same single, person-owned Scope Approval: epic_not_authorized, follow_ups_not_authorized, publication_unapproved, publication_authority_changed, publication_approved_under_earlier_boundary, publication_approver_not_owner and selection_not_granted. The server derives the cause, explains it in plain words and states any Maximum Issues increase. Keep published follow-up lineage: only server-verified consumed payloads settle their reserved slots on approval, so Maximum Issues counts the issue once. Denial changes nothing. Fixable errors (for example follow_up_not_single, publication_not_consumed, publication_already_admitted, payload_mismatch and epic_members_unverified) remain refusals; correct them and retry. Never supply an owner-review cause or a settled publication yourself. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, expectedRevision: { type: "integer", minimum: 0 }, explanation: { type: "string", minLength: 1, maxLength: 4000 },
       additions: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
       removals: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
-      lineage: { oneOf: [ { type: "object", properties: { kind: { const: "epic" }, epic: { type: "integer", minimum: 1 } }, required: ["kind", "epic"], additionalProperties: false },
+      lineage: { oneOf: [ { type: "object", properties: { kind: { const: "epic" }, epic: { type: "integer", minimum: 1 },
+        repository: { type: "string", minLength: 1, maxLength: 256, description: "The epic's repository, defaulting to the launch repository. Its members must all be in it." } }, required: ["kind", "epic"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "follow_up" }, publicationOccurrenceId: { type: "string" } }, required: ["kind", "publicationOccurrenceId"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "selection" } }, required: ["kind"], additionalProperties: false } ] },
+      proposal: { type: "object", description: "Under Full Control (#4282): how you read the owner's message. Its issues are exactly the additions.",
+        properties: {
+          issues: { type: "array", maxItems: 100, items: { type: "object", properties: {
+            repository: { type: "string" }, number: { type: "integer", minimum: 1 },
+            origin: { type: "string", enum: ["owner_named", "orchestrator_chosen"] },
+            rationale: { type: "string", minLength: 1, maxLength: 500 } }, required: ["repository", "number", "origin", "rationale"], additionalProperties: false } },
+          requestedCount: { type: ["integer", "null"], minimum: 1, maximum: 100 },
+          constraints: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 } },
+          withheldOperations: { type: "array", items: { type: "string", enum: [...CAMPAIGN_SCOPE_PROPOSAL_OPERATIONS] } },
+          repositoryNames: { type: "array", minItems: 1, maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 }, description: "Every repository the owner's message limits the work to, each in the message's own words (\"the api repo\"). The server resolves each and the constraint check judges whether the message really limits the work to them. Admission removes every other repository from the campaign. Leave it out when the message sets no such limit." },
+        }, required: ["issues", "requestedCount", "constraints", "withheldOperations"], additionalProperties: false },
     }, required: ["requestId", "expectedRevision", "explanation", "additions", "removals"], additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
       const compatibility = await campaignIssueScopeCompatibilityError(deps);
       if (compatibility) return compatibility;
-      const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/campaign/issue-scope/proposals`, args, deps.requestTimeoutMs ?? 150_000);
+      // A repository name left out would silently widen what the owner limited, so it is refused.
+      // A v318 control plane reads one name, in the field it knows.
+      const names = (args.proposal as { repositoryNames?: unknown } | undefined)?.repositoryNames;
+      let sent = args;
+      if (names !== undefined && !await controlPlaneSupports(deps, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryLimits)) {
+        if (!Array.isArray(names) || names.length !== 1 || !await controlPlaneSupports(deps, RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedProposals)) {
+          return errorResult("This campaign's control plane can't read proposal.repositoryNames yet. Update the control plane, or state the repositories in proposal.constraints instead.");
+        }
+        const { repositoryNames: _names, ...proposal } = args.proposal as Record<string, unknown>;
+        sent = { ...args, proposal: { ...proposal, repositoryName: names[0] } };
+      }
+      if ((args.lineage as { repository?: unknown } | undefined)?.repository !== undefined &&
+          !await controlPlaneSupports(deps, RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedEpics)) {
+        return errorResult("This campaign's control plane can't read an epic in another repository yet. Update the control plane.");
+      }
+      // A pre-v308 control plane reads no proposal (#4282); it keeps its own first-message grant, so
+      // the proposal is left out rather than sent to be ignored.
+      const body = args.proposal !== undefined && !await controlPlaneSupports(deps, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals)
+        ? Object.fromEntries(Object.entries(sent).filter(([key]) => key !== "proposal")) : sent;
+      const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/campaign/issue-scope/proposals`, body, deps.requestTimeoutMs ?? 150_000);
       return result.ok ? textResult({ decision: result.data }) : errorResult(result.message);
     },
   },
   {
     name: "request_github_issue_closure",
-    description: "Propose closing one authorized campaign issue with fresh forge/conflict evidence. Custom requires a human; bounded Full Control additionally requires verified delivery and actual default-branch merges, or a recorded supported not-planned disposition. An in-scope Full Control closure that fails that proof stays a person's, with reason closure_proof_incomplete and proofGaps naming each gap, its work item and pull requests, and the action that would let a new request become Orchestrator-owned and supersede it. An already-closed issue is reported without posting a comment. GitLab issues are supported from runner protocol v249 through the session's glab login: not_planned closes the issue after a note stating 'Closed as not planned: <explanation>' (then the comment), and completed posts the comment as a note only when one is supplied.",
+    description: "Propose closing one authorized campaign issue with fresh forge/conflict evidence. Custom requires a human; bounded Full Control additionally requires verified delivery and actual default-branch merges, or a recorded supported not-planned disposition. An in-scope Full Control closure that fails that proof stays a person's, with reason closure_proof_incomplete and proofGaps naming each gap, its work item and pull requests, and the action that would let a new request become Orchestrator-owned and supersede it while pending. An approved, unconsumed closure is preserved: a re-request refuses with its occurrenceId and resourceDigest so it can be executed. Execution checks the original snapshot; a stale approval is retired explicitly before requesting again. An already-closed issue is reported without posting a comment. GitLab issues are supported from runner protocol v249 through the session's glab login: not_planned closes the issue after a note stating 'Closed as not planned: <explanation>' (then the comment), and completed posts the comment as a note only when one is supplied. repository names the campaign repository the issue belongs to and defaults to the launch repository; the issue is then inspected and closed through a Location of that repository, with that runner's own forge login. A repository that is not one of the campaign's is refused, and an owner's approved addition is the way in.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, issue: { type: "integer", minimum: 1 },
+      repository: { type: "string", minLength: 1, maxLength: 256 },
       reason: { type: "string", enum: ["completed", "not_planned"] },
       explanation: { type: "string", minLength: 1, maxLength: 4000 },
       evidence: { type: "array", minItems: 1, maxItems: 32, items: { type: "string", minLength: 1, maxLength: 4000 } },
@@ -1420,7 +1698,7 @@ export const TOOLS: McpTool[] = [
     }, required: ["requestId", "issue", "reason", "explanation", "evidence"], additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
-      const compatibility = await issueClosureCompatibilityError(deps);
+      const compatibility = await issueClosureCompatibilityError(deps, args?.repository);
       if (compatibility) return compatibility;
       const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/github-issue-closures`, args, deps.requestTimeoutMs ?? 75_000);
       return result.ok ? textResult(result.data) : errorResult(result.message);
@@ -1467,6 +1745,35 @@ export const TOOLS: McpTool[] = [
         workspaces: capArray(run?.workspaces).map((w) => ({ id: w?.id, name: w?.name, path: w?.path })),
       }));
       return textResult({ runners });
+    },
+  },
+  {
+    name: "get_provider_account_selection",
+    description:
+      "Read which provider account a new session of this agent would use and which accounts you could name instead, without launching anything. Accounts appear only as opaque accountRef values, never as names. canName says whether create_session accepts one in providerAccountId; reason says why not, or which usage limit naming it would override. A reading promises nothing: every launch resolves again.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runnerId: { type: "string" },
+        agentId: { type: "string" },
+        workspaceId: { type: "string", description: "The workspace the session would run in, for the project it would join" },
+        model: { type: "string", minLength: 1, description: "The model the session would name, if any" },
+      },
+      required: ["runnerId", "agentId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.runnerId !== "string" || typeof args?.agentId !== "string") {
+        return errorResult("runnerId and agentId are required");
+      }
+      const compatibilityError = await providerAccountChoiceCompatibilityError(deps);
+      if (compatibilityError) return compatibilityError;
+      const query = new URLSearchParams({ agentId: args.agentId,
+        ...(typeof args.workspaceId === "string" ? { workspaceId: args.workspaceId } : {}),
+        ...(typeof args.model === "string" ? { model: args.model } : {}) });
+      const r = await cpFetch(deps, "GET", `/api/runners/${encodeURIComponent(args.runnerId)}/provider-account-selection?${query.toString()}`);
+      if (!r.ok) return errorResult(r.message);
+      return textResult(mapProviderAccountSelection(r.data));
     },
   },
   {
@@ -1653,7 +1960,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_campaign",
-    description: "Read this Orchestrator's effective campaign behavior, current typed-decision owners and policy revision, applicable limits (limits.costBudgetUsd is this Orchestrator session's own budget, never a campaign-wide one), follow-up counts, child completion state, and credential-free compatibility information. Status complete_with_handoffs is terminal like verified_complete: the agent work is done and every unfinished item is handed to a person or an outside party, listed in handoffs. Under Stop and Archive, cleanupWorktrees names each retained child worktree and its pending, deferred, or safety-refused reason; older runners still require explicit cleanup.",
+    description: "Read this Orchestrator's effective campaign behavior, current typed-decision owners and policy revision, applicable limits (limits.costBudgetUsd is this Orchestrator session's own budget, never a campaign-wide one), follow-up counts, child completion state, and credential-free compatibility information. Status active means work is actually running (activity.live). An idle campaign reads complete_needs_cleanup (terminal like verified_complete: delivered, with housekeeping such as a merged branch on the remote or an item handed to a person, each listed in cleanup with its exact action) or stuck (unfinished work, nothing scheduled; listed in stuck). Older hosts report complete_with_handoffs and blocked instead. Under Stop and Archive, cleanupWorktrees names each retained child worktree and its pending, deferred, or safety-refused reason; older runners still require explicit cleanup.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async (_args, deps) => {
       if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
@@ -1799,7 +2106,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "update_campaign_work_item",
-    description: "Update one work item in the campaign ledger: title, issue, dispatch state, queue position, dependencies (work item ids), commitment (committed, cancelled, or scope_removed with a reason), reported stage, blocker, next action, handoff, or endAttempt (abandoned or failed). null clears a field. Reported stages are claims, not observations: merged does not mark the item delivered (record_campaign_work_item_delivery does, from checked evidence). A handoff says the agent work is done and names who acts next, why, and the next action: once every unfinished item is handed to human or external and nothing else is pending, the campaign finishes as complete_with_handoffs and lists them for the owner. A handoff to orchestrator or child still blocks that; assigning the item again clears it. Grants no authority.",
+    description: "Update one work item in the campaign ledger: title, issue, dispatch state, queue position, dependencies (work item ids), commitment (committed, cancelled, or scope_removed with a reason), reported stage, blocker, next action, handoff, or endAttempt (abandoned or failed). null clears a field. Reported stages are claims, not observations: merged does not mark the item delivered (record_campaign_work_item_delivery does, from checked evidence). A handoff says the agent work is done and names who acts next, why, and the next action: once every unfinished item is handed to human or external and nothing else is pending, the campaign finishes as complete_needs_cleanup (complete_with_handoffs on older hosts) and lists them for the owner. A handoff to orchestrator or child still blocks that; assigning the item again clears it. Grants no authority.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2117,7 +2424,7 @@ export const TOOLS: McpTool[] = [
         sessionId: { type: "string" },
         occurrenceId: { type: "string" },
         outcome: { type: "string", enum: ["approve", "deny"] },
-        selectedOptionId: { type: "string", description: "Required approved option for implementation questions only" },
+        selectedOptionId: { type: "string", description: "A suggested choice for kind:question, optional with a free-text childMessage. Legacy implementation approvals require one offered option." },
         evidenceReviewed: { type: "array", items: { type: "string" }, description: "Every evidence id directly inspected by this owner; excludes original videos covered by admitted managed-media proof. Omit when denying or for another category" },
         delegatedVideoEvidence: { type: "array", minItems: 1, maxItems: 32, items: {
           type: "object", properties: { evidenceId: { type: "string", maxLength: 256 }, reviewId: { type: "string", maxLength: 256 },
@@ -2135,8 +2442,8 @@ export const TOOLS: McpTool[] = [
         childMessage: {
           type: "string",
           minLength: 1,
-          maxLength: WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
-          description: "Optional message for the child: shown in its get_workflow_decision view and delivered as the prompt that resumes it. Say what to change after a denial.",
+          maxLength: WORKFLOW_QUESTION_ANSWER_MAX_CHARS,
+          description: "For kind:question, the free-text answer or note (up to 8002 characters); outcome approve delivers it without action authority. For action approvals or denials, an optional message of at most 2000 characters. Shown in get_workflow_decision and the child's resume prompt.",
         },
       },
       required: ["sessionId", "occurrenceId", "outcome"],
@@ -2209,6 +2516,7 @@ export const TOOLS: McpTool[] = [
           occurrenceId: args.occurrenceId,
           outcome: args.outcome,
           ...(typeof args.selectedOptionId === "string" ? { selectedOptionId: args.selectedOptionId } : {}),
+          ...(r.data?.approvedAction ? { approvedAction: r.data.approvedAction } : {}),
         },
         session: mapSession(r.data),
       });
@@ -2426,21 +2734,44 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_workflow_decision",
-    description: "Create an explicit typed workflow gate bound to this session, its controlling Orchestrator, the current human-owned policy revision, and an exact resource snapshot. Generic questions and approvals cannot satisfy this gate. A GitHub pr_merge is created only when the issues GitHub would close on merge are exactly its intendedClosures; reference an issue that must stay open as \"Refs #N\".",
+    description: "Request a typed action approval, or a child clarification with category implementation_question and kind question (v332). Clarifications appear as normal questions with free-text answers and grant no action authority; never consume them. Action approvals remain bound to the exact resource and current owner. A pr_merge is created only when the issues the forge would close on merge are exactly its intendedClosures; reference an issue that must stay open as \"Refs #N\".",
     inputSchema: {
       type: "object",
       properties: {
         requestId: { type: "string", description: "Caller-owned idempotency key" },
         resourceKey: { type: "string", description: "Stable action target; a new occurrence supersedes older unconsumed occurrences, except a person-owned follow-up publication, which is never replaced: wait for it, consume it, or withdraw it first" },
         resourceSnapshot: WORKFLOW_DECISION_RESOURCE_SCHEMA,
+        ownerRule: {
+          type: "object",
+          description: "When an installed skill or user-authored instruction keeps this gate for a person, name it here: the decision is created human-owned under any mode or grant, so only the owner decides it, and its card shows the rule. It can never give the Orchestrator a decision. Requires control plane v296.",
+          properties: {
+            source: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_OWNER_RULE_SOURCE_MAX_CHARS,
+              description: "The file that keeps the gate, such as ~/.claude/skills/issue-workflow/SKILL.md; letters, digits and ._~/\\@+:- without spaces" },
+            quote: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_OWNER_RULE_QUOTE_MAX_CHARS,
+              description: "The requirement quoted from that file, on one line" },
+          },
+          required: ["source", "quote"],
+          additionalProperties: false,
+        },
       },
       required: ["requestId", "resourceKey", "resourceSnapshot"],
       additionalProperties: false,
     },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (args?.resourceSnapshot?.category === "implementation_question" && args.resourceSnapshot.kind === "question" &&
+          !await controlPlaneSupports(deps, RUNNER_CAPABILITY_MIN_PROTOCOL.childQuestions)) {
+        return controlPlaneUpdateRequired("Child questions need a newer Wollipog. Update Wollipog; nothing was requested. Do not retry as an approval.",
+          RUNNER_CAPABILITY_MIN_PROTOCOL.childQuestions, deps.controlPlaneProtocolVersion);
+      }
+      if (args?.ownerRule !== undefined) {
+        const rule = normalizeWorkflowDecisionOwnerRule(args.ownerRule);
+        if (!rule.ok) return errorResult(rule.message);
+        const compatibilityError = await ownerRuleCompatibilityError(deps);
+        if (compatibilityError) return compatibilityError;
+      }
       if (args?.resourceSnapshot?.category === "pr_merge" && args.resourceSnapshot.intendedClosures !== undefined) {
-        const compatibilityError = await intendedClosuresCompatibilityError(deps);
+        const compatibilityError = await intendedClosuresCompatibilityError(deps, args.resourceSnapshot.mergeMethod !== undefined);
         if (compatibilityError) return compatibilityError;
       }
       const evidenceCompatibilityError = await mergeReviewEvidenceCompatibilityError(args, deps);
@@ -2449,7 +2780,8 @@ export const TOOLS: McpTool[] = [
         deps,
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions`,
-        { requestId: args?.requestId, resourceKey: args?.resourceKey, resourceSnapshot: args?.resourceSnapshot },
+        { requestId: args?.requestId, resourceKey: args?.resourceKey, resourceSnapshot: args?.resourceSnapshot,
+          ...(args?.ownerRule !== undefined ? { ownerRule: args.ownerRule } : {}) },
         // A merge is created only after the control plane reads the pull request through this runner.
         args?.resourceSnapshot?.category === "pr_merge" ? Math.max(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, MERGE_DECISION_TIMEOUT_MS) : undefined,
       );
@@ -2517,7 +2849,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "consume_workflow_decision",
-    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned to the approved head (gh pr merge with --match-head-commit, after the runner reads again which issues GitHub would close: any the snapshot's intendedClosures does not list revoke the approval; for a GitLab merge request, one exact glab api call naming the host — a train merge is `glab api --method POST projects/<percent-encoded-project-path>/merge_trains/merge_requests/<iid> --hostname <host> -f sha=<approved-head> -F squash=<bool>` and a direct merge is `glab api --method PUT projects/<percent-encoded-project-path>/merge_requests/<iid>/merge --hostname <host> -f sha=<approved-head> -F squash=<bool> -F should_remove_source_branch=<bool>` — which the runner first checks against GitLab: a stale head, or a direct merge where the project runs merge trains, is refused; a refused enqueue names the approved command) and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
+    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned to the approved head (gh pr merge with --match-head-commit, after the runner reads again which issues GitHub would close: any the snapshot's intendedClosures does not list revoke the approval; for a GitLab merge request, one exact glab api call naming the host — a train merge is `glab api --method POST projects/<percent-encoded-project-path>/merge_trains/merge_requests/<iid> --hostname <host> -f sha=<approved-head> -F squash=<bool>` and a direct merge is `glab api --method PUT projects/<percent-encoded-project-path>/merge_requests/<iid>/merge --hostname <host> -f sha=<approved-head> -F squash=<bool> -F should_remove_source_branch=<bool>` — which the runner first checks against GitLab: a stale head, or a direct merge where the project runs merge trains, is refused, and, as on GitHub, a closure the snapshot's intendedClosures does not list revokes the approval; a refused enqueue names the approved command) and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2571,7 +2903,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "execute_workflow_decision",
-    description: "Have Wollipog itself perform one approved forge action, bound to its exact snapshot, through this session's own forge login: an approved merged_branch_deletion that names pullRequest and headSha (deleted by compare-and-delete only while the remote tip is still the approved merged head and no open pull request targets the branch), or an approved and already armed GitHub pr_merge (the canonical gh pr merge --squash --match-head-commit enqueue, never --delete-branch, after GitHub's closing references are re-read). Use it when your provider refuses the approved command, or instead of running it. Pass occurrenceId and resourceDigest from get_workflow_decision. Read decision.forgeAction: a success consumes the approval once; a refusal that changed nothing leaves it approved for a retry; a stale snapshot (tip moved, dependent pull request opened, head or closures changed) revokes it and needs a new decision; an uncertain enqueue is never replayed (reconcile it once the PR reads MERGED). Never retry a refused command through another shell, wrapper or permission change. Requires control plane and runner protocol v284.",
+    description: "Have Wollipog itself perform one approved forge action, bound to its exact snapshot, through this session's own forge login: an approved merged_branch_deletion that names pullRequest and headSha (deleted by compare-and-delete only while the remote tip is still the approved merged head and no open pull request targets the branch), or an approved and already armed GitHub pr_merge (the canonical gh pr merge --squash --match-head-commit enqueue, never --delete-branch, after GitHub's closing references are re-read). Use it when your provider refuses the approved command, or instead of running it. An approved follow_up_issue_publication in another of the campaign's repositories than the one you work in must use this instead of being consumed: a Location of that repository creates the issue with that runner's login, never yours, and decision.forgeAction names the issue and runner (v327). Pass occurrenceId and resourceDigest from get_workflow_decision. Read decision.forgeAction: a success consumes the approval once; a refusal that changed nothing leaves it approved for a retry; a stale snapshot (tip moved, dependent pull request opened, head or closures changed) revokes it and needs a new decision; an uncertain enqueue is never replayed (reconcile it once the PR reads MERGED), and after an uncertain publication another call only looks for the issue. Never retry a refused command through another shell, wrapper or permission change. Requires control plane and runner protocol v284.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2672,16 +3004,20 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_owner_decision",
-    description: "Full Control root Orchestrator only: give your campaign's owner a decision they kept for themselves (for example a credential design, risk consent to merge a pull request, publishing follow-ups, or closing an epic), as a typed request with explicit options. Put everything the owner needs in material: links, the exact head SHA, check state and what each option does. It waits in the owner's Inbox and Campaign Status without stopping your turn or any other work; only the owner can answer it, never you or a child. Their chosen option (or Do Not Proceed) comes back to you as a Wollipog Workflow Decision prompt, and get_workflow_decision reads it at any time. A newer request under the same resourceKey replaces an unanswered one; withdraw_workflow_decision withdraws it. Full Control never asks anyone for credentials or sign-in, so a request for a value is refused. Requires control plane v281.",
+    description: "Full Control root Orchestrator only: ask your campaign's owner something only they can decide. " +
+      "Use kind \"question\" (an Owner Question) for a design choice, clarification or preference: the owner sees it as a normal question, with your 0 to 12 suggested options (mark one with recommendedOptionId) plus a free-text answer, and can answer in their own words. It grants nothing, and scope, boundary or policy changes never revoke it. " +
+      "Use kind \"approval\" (the default, an Owner Approval) only for an exact action the owner kept that has no typed category, with 2 to 12 explicit options; for a gate that has one (a child's pr_merge, an issue closure, a publication) use the typed decision or hand_workflow_decision_to_owner instead. " +
+      "Put everything the owner needs in material, as Markdown: links, the exact head SHA, check state and what each option does. It waits in the owner's Inbox and Campaign Status without stopping your turn or any other work; only the owner can answer it, never you or a child. A question's answer (the option chosen, their own words, or both) comes back as a Wollipog Owner Answer prompt; an approval's chosen option (or Do Not Proceed) as a Wollipog Workflow Decision prompt; get_workflow_decision reads either at any time. A newer request under the same resourceKey replaces an unanswered one; withdraw_workflow_decision withdraws it. Full Control never asks anyone for credentials or sign-in, so a request for a value is refused. Requires control plane v281, and v303 for kind \"question\".",
     inputSchema: {
       type: "object",
       properties: {
         requestId: { type: "string", minLength: 1, maxLength: 256 },
         resourceKey: { type: "string", minLength: 1, maxLength: 512 },
+        kind: { type: "string", enum: ["question", "approval"] },
         question: { type: "string", minLength: 1, maxLength: OWNER_DECISION_LIMITS.question },
         options: {
           type: "array",
-          minItems: OWNER_DECISION_LIMITS.minOptions,
+          minItems: OWNER_DECISION_LIMITS.minQuestionOptions,
           maxItems: OWNER_DECISION_LIMITS.maxOptions,
           items: {
             type: "object",
@@ -2703,12 +3039,19 @@ export const TOOLS: McpTool[] = [
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("a session identity is required");
       if (args?.sessionId !== undefined) return errorResult("an owner decision is self-scoped and does not accept sessionId");
-      const compatibilityError = await ownerDecisionCompatibilityError(deps);
+      const { requestId, resourceKey, question, options, recommendedOptionId, material, kind } = args ?? {};
+      if (kind !== undefined && kind !== "question" && kind !== "approval") return errorResult("kind must be question or approval");
+      // An approval offers the owner an exact choice; only a question (#4270) may suggest fewer than two.
+      if (kind !== "question" && (!Array.isArray(options) || options.length < OWNER_DECISION_LIMITS.minOptions)) {
+        return errorResult(`an Owner Approval needs ${OWNER_DECISION_LIMITS.minOptions} to ${OWNER_DECISION_LIMITS.maxOptions} options; ` +
+          "ask a design or clarification question with kind \"question\" instead");
+      }
+      const compatibilityError = await ownerDecisionCompatibilityError(deps, kind === "question");
       if (compatibilityError) return compatibilityError;
-      const { requestId, resourceKey, question, options, recommendedOptionId, material } = args ?? {};
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/owner-decisions`, {
         requestId, resourceKey, question, options,
         ...(recommendedOptionId !== undefined ? { recommendedOptionId } : {}), ...(material !== undefined ? { material } : {}),
+        ...(kind === "question" ? { kind } : {}),
       });
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },
@@ -2830,27 +3173,35 @@ export const TOOLS: McpTool[] = [
         Math.max(50, Number.isFinite(args.intervalMs) ? Math.floor(args.intervalMs) : 500));
       const now = deps.now ?? Date.now;
       const deadline = now() + timeoutMs;
+      // Polls back off to MAX_WAIT_SESSION_INTERVAL_MS, the interval progress is bounded by (#1280).
+      const reporter = waitProgressReporter(deps, "wait_session",
+        { kind: "session", sessionId: args.sessionId, states: [...wanted] }, timeoutMs, MAX_WAIT_SESSION_INTERVAL_MS);
       let session: Json;
-      do {
-        const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}`);
-        if (!r.ok) return errorResult(r.message);
-        // cpFetch reports a 2xx whose body could not be read as ok with no data; that read, like
-        // one cancelled mid-body, is a failure and must never become a timeout result.
-        if (deps.signal?.aborted) return errorResult("request cancelled");
-        session = r.data?.session;
-        if (typeof session?.status !== "string") {
-          return errorResult(`control plane returned no session status for ${args.sessionId}`);
-        }
-        if (wanted.has(session.status)) {
-          return textResult({ outcome: "reached", reached: session.status, session: mapSession(session) });
-        }
-        const remaining = deadline - now();
-        if (remaining <= 0) break;
-        if (!await cancellableSleep(deps, Math.min(intervalMs, remaining))) {
-          return errorResult("request cancelled");
-        }
-        intervalMs = nextWaitSessionIntervalMs(intervalMs);
-      } while (now() <= deadline);
+      try {
+        do {
+          const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}`);
+          if (!r.ok) return errorResult(r.message);
+          // cpFetch reports a 2xx whose body could not be read as ok with no data; that read, like
+          // one cancelled mid-body, is a failure and must never become a timeout result.
+          if (deps.signal?.aborted) return errorResult("request cancelled");
+          session = r.data?.session;
+          if (typeof session?.status !== "string") {
+            return errorResult(`control plane returned no session status for ${args.sessionId}`);
+          }
+          if (wanted.has(session.status)) {
+            return textResult({ outcome: "reached", reached: session.status, session: mapSession(session) });
+          }
+          reporter.poll();
+          const remaining = deadline - now();
+          if (remaining <= 0) break;
+          if (!await cancellableSleep(deps, Math.min(intervalMs, remaining))) {
+            return errorResult("request cancelled");
+          }
+          intervalMs = nextWaitSessionIntervalMs(intervalMs);
+        } while (now() <= deadline);
+      } finally {
+        await reporter.end();
+      }
       // An elapsed timeout is the expected end of a bounded wait, not a failed call (#3269).
       return textResult({
         outcome: "timeout",
@@ -2892,35 +3243,51 @@ export const TOOLS: McpTool[] = [
       const ref = parsePullRequestRef(args?.pullRequest, args?.repository);
       if ("error" in ref) return errorResult(ref.error);
       if (args?.headSha !== undefined && typeof args.headSha !== "string") return errorResult("headSha must be a string");
-      if (campaignRepositoryLocation(ref.repository)?.forge === "gitlab") {
-        const waited = await waitForMergeRequest({
+      // The waiter's own clamps, so the reported deadline and progress bound match the call (#1280).
+      const integer = (value: unknown, fallback: number, min: number, max: number) =>
+        Math.min(max, Math.max(min, typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback));
+      const reporter = waitProgressReporter(deps, "wait_pull_request",
+        { kind: "pull_request", repository: ref.repository, number: ref.number },
+        integer(args?.timeoutMs, PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, 1, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS) +
+          (deps.pullRequestReadGraceMs ?? PULL_REQUEST_WAIT_READ_GRACE_MS),
+        integer(args?.intervalMs, PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS, PULL_REQUEST_WAIT_MIN_INTERVAL_MS,
+          PULL_REQUEST_WAIT_MAX_INTERVAL_MS));
+      const onObservation = () => reporter.poll();
+      try {
+        if (campaignRepositoryLocation(ref.repository)?.forge === "gitlab") {
+          const waited = await waitForMergeRequest({
+            ...ref,
+            ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
+            ...(Number.isFinite(args?.timeoutMs) ? { timeoutMs: args.timeoutMs } : {}),
+            ...(Number.isFinite(args?.intervalMs) ? { intervalMs: args.intervalMs } : {}),
+          }, {
+            glab: deps.glab ?? contextGlabRunner({ kind: "native" }, process.cwd()),
+            ...(deps.now ? { now: deps.now } : {}),
+            ...(deps.sleep ? { sleep: deps.sleep } : {}),
+            ...(deps.signal ? { signal: deps.signal } : {}),
+            ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
+            onObservation,
+          });
+          return waited.ok ? textResult(waited.summary) : errorResult(waited.error);
+        }
+        const result = await waitForPullRequest({
           ...ref,
           ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
           ...(Number.isFinite(args?.timeoutMs) ? { timeoutMs: args.timeoutMs } : {}),
           ...(Number.isFinite(args?.intervalMs) ? { intervalMs: args.intervalMs } : {}),
+          returnOnAnyFailure: args?.returnOnAnyFailure === true,
         }, {
-          glab: deps.glab ?? contextGlabRunner({ kind: "native" }, process.cwd()),
+          gh: deps.gh ?? contextGhRunner({ kind: "native" }, process.cwd()),
           ...(deps.now ? { now: deps.now } : {}),
           ...(deps.sleep ? { sleep: deps.sleep } : {}),
           ...(deps.signal ? { signal: deps.signal } : {}),
           ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
+          onObservation,
         });
-        return waited.ok ? textResult(waited.summary) : errorResult(waited.error);
+        return result.ok ? textResult(result.summary) : errorResult(result.error);
+      } finally {
+        await reporter.end();
       }
-      const result = await waitForPullRequest({
-        ...ref,
-        ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
-        ...(Number.isFinite(args?.timeoutMs) ? { timeoutMs: args.timeoutMs } : {}),
-        ...(Number.isFinite(args?.intervalMs) ? { intervalMs: args.intervalMs } : {}),
-        returnOnAnyFailure: args?.returnOnAnyFailure === true,
-      }, {
-        gh: deps.gh ?? contextGhRunner({ kind: "native" }, process.cwd()),
-        ...(deps.now ? { now: deps.now } : {}),
-        ...(deps.sleep ? { sleep: deps.sleep } : {}),
-        ...(deps.signal ? { signal: deps.signal } : {}),
-        ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
-      });
-      return result.ok ? textResult(result.summary) : errorResult(result.error);
     },
   },
   {
@@ -2955,7 +3322,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_review_session",
-    description: "Start a review session for this session's own open pull request at its pushed head (#561). The reviewer is the other model family (Codex for a Claude Code session, Claude Code for a Codex session), launched by your runner as its own read-only session outside your sandbox, against the runner's checkout of exactly that head: it never touches your worktree and loads none of the repository's settings, hooks, skills or MCP servers. Push first: headSha must be the pull request's current head, and the pull request must be open, from this repository, on this session's managed worktree branch. A GitLab merge request works the same way (v244): repository is the project named by its host and full namespace, number is its IID, and the runner reads it with a trusted glab. The brief (intent, acceptance criteria, verification already run) is the reviewer's only context. A review session takes no session slot or child capacity; this session may have one active review. Reviews of a pull request form a run: the first round reviews it in full; later rounds review only the changes since the last valid round, with its open findings, unless fullReason asks for a full review; a rebased or force-pushed head starts a new epoch that reviews the range-diff. Each epoch allows 4 valid rounds and each round 2 counted attempts; an upvoted or unchanged head is refused. Returns reviewSessionId at once: you can watch it with get_session_events, and poll get_review_session until terminal is true. The runner and control plane check the report against the review contract (verdict); only a valid report's vote and findings count, and you still adjudicate every finding yourself. Campaign members request their own review sessions through this tool; the server reserves allowance before launch and records actual session usage against the campaign allowance.",
+    description: "Start a review session for this session's own open pull request at its pushed head (#561). The reviewer is the other model family (Codex for a Claude Code session, Claude Code for a Codex session), launched by your runner as its own read-only session outside your sandbox, against the runner's checkout of exactly that head: it never touches your worktree and loads none of the repository's settings, hooks, skills or MCP servers. Push first: headSha must be the pull request's current head, and the pull request must be open, from this repository, on any of this session's own linked managed worktree branches (protocol 335+), without selecting it. A GitLab merge request works the same way (v244): repository is the project named by its host and full namespace, number is its IID, and the runner reads it with a trusted glab. The brief (intent, acceptance criteria, verification already run) is the reviewer's only context. A review session takes no session slot or child capacity; on protocol 335+ this session may have one active review per pull request, with different pull requests reviewed concurrently; older runners require selecting the worktree and serializing reviews. Reviews of a pull request form a run: the first round reviews it in full; later rounds review only the changes since the last valid round, with its open findings, unless fullReason asks for a full review; a rebased or force-pushed head starts a new epoch that reviews the range-diff. Each epoch allows 4 valid rounds and each round 2 counted attempts; an upvoted or unchanged head is refused. Returns reviewSessionId at once: you can watch it with get_session_events, and poll get_review_session until terminal is true. The runner and control plane check the report against the review contract (verdict); only a valid report's vote and findings count, and you still adjudicate every finding yourself. Campaign members request their own review sessions through this tool; the server reserves allowance before launch and records actual session usage against the campaign allowance.",
     inputSchema: { type: "object", properties: {
       repository: { type: "string", description: "The pull request's GitHub repository, owner/name, or a GitLab merge request's project, <host>/group[/subgroup…]/project." },
       number: { type: "integer", minimum: 1 },
@@ -3253,6 +3620,7 @@ export const TOOLS: McpTool[] = [
         title: { type: "string" },
         useWorktree: { type: "boolean" },
         agentBindings: { type: "object", additionalProperties: { type: "string" } },
+        providerAccountBindings: { type: "object", additionalProperties: { type: "string" }, description: "An accountRef from get_provider_account_selection whose canName is true, by the role's key in agentBindings. Overrides the Machine's account policy for that role; omit a role to let the policy choose" },
         costBudgetUsd: { type: "number", minimum: 0 },
         maxToolCalls: { type: "number", minimum: 0 },
       },
@@ -3270,8 +3638,12 @@ export const TOOLS: McpTool[] = [
         workflowId: args.workflowId,
         task: args.task,
       };
-      for (const key of ["workflowVersion", "title", "useWorktree", "agentBindings", "costBudgetUsd", "maxToolCalls"]) {
+      for (const key of ["workflowVersion", "title", "useWorktree", "agentBindings", "providerAccountBindings", "costBudgetUsd", "maxToolCalls"]) {
         if (args[key] !== undefined) body[key] = args[key];
+      }
+      if (args.providerAccountBindings !== undefined) {
+        const compatibilityError = await providerAccountChoiceCompatibilityError(deps, "memberProviderAccountChoice");
+        if (compatibilityError) return compatibilityError;
       }
       const r = await createWithSpawnApproval(deps, "the same create_workflow_run call", "/api/workflow-runs", body);
       if (!r.ok) return errorResult(r.message);
@@ -3633,6 +4005,7 @@ export const TOOLS: McpTool[] = [
         maxToolCalls: { type: "number" },
         maxChildSessions: { type: "integer", minimum: 0, maximum: 64 },
         campaignWorkItemId: { type: "string", minLength: 1, maxLength: 256, description: "Campaign work item (cwi_…) the child works on; same assignment rules as assign_campaign_work_item" },
+        providerAccountId: { type: "string", minLength: 1, maxLength: 128, description: "An accountRef from get_provider_account_selection whose canName is true. Overrides the Machine's account policy for this session; omit it to let the policy choose" },
       },
       required: ["runnerId", "agentId"],
       additionalProperties: false,
@@ -3657,8 +4030,15 @@ export const TOOLS: McpTool[] = [
           (typeof args.campaignWorkItemId !== "string" || !args.campaignWorkItemId.trim())) {
         return errorResult("campaignWorkItemId must be a non-empty campaign work item ID");
       }
+      if (args.providerAccountId !== undefined && (typeof args.providerAccountId !== "string" || !args.providerAccountId.trim())) {
+        return errorResult("providerAccountId must be an accountRef from get_provider_account_selection");
+      }
       if (typeof args.effort === "string") {
         const compatibilityError = await explicitEffortCompatibilityError(deps);
+        if (compatibilityError) return compatibilityError;
+      }
+      if (typeof args.providerAccountId === "string") {
+        const compatibilityError = await providerAccountChoiceCompatibilityError(deps);
         if (compatibilityError) return compatibilityError;
       }
       if (typeof args.campaignWorkItemId === "string") {
@@ -3678,6 +4058,7 @@ export const TOOLS: McpTool[] = [
       if (typeof args.title === "string") body.title = args.title;
       if (typeof args.prompt === "string") body.prompt = args.prompt;
       if (typeof args.campaignWorkItemId === "string") body.campaignWorkItemId = args.campaignWorkItemId;
+      if (typeof args.providerAccountId === "string") body.providerAccountId = args.providerAccountId;
       // A child that starts in the primary checkout has no branch, so diff, checkpoint, review,
       // and PR surfaces are blind to it. An agent asks for a worktree by default; only an explicit
       // `useWorktree: false` keeps the in-place behavior. Human/UI-created sessions are unaffected
@@ -3693,6 +4074,8 @@ export const TOOLS: McpTool[] = [
           ...mapSession(view),
           model: view?.model ?? null,
           effort: view?.effort ?? null,
+          ...(view?.providerAccountSelection?.modelCompatibility === "unknown"
+            ? { modelCompatibility: "unknown", modelNote: PROVIDER_ACCOUNT_MODEL_UNKNOWN_SENTENCE } : {}),
         },
       });
     },
@@ -3973,6 +4356,7 @@ export const TOOLS: McpTool[] = [
         title: { type: "string" },
         costBudgetUsd: { type: "number" },
         maxToolCalls: { type: "number" },
+        providerAccountIds: { type: "object", additionalProperties: { type: "string" }, description: "An accountRef from get_provider_account_selection whose canName is true, by agent id. Overrides the Machine's account policy for that member; omit a member to let the policy choose" },
       },
       required: ["runnerId", "workspaceId", "agentIds", "task"],
       additionalProperties: false,
@@ -3997,6 +4381,11 @@ export const TOOLS: McpTool[] = [
       if (typeof args.title === "string") body.title = args.title;
       if (typeof args.costBudgetUsd === "number") body.costBudgetUsd = args.costBudgetUsd;
       if (typeof args.maxToolCalls === "number") body.maxToolCalls = args.maxToolCalls;
+      if (args.providerAccountIds !== undefined) {
+        const compatibilityError = await providerAccountChoiceCompatibilityError(deps, "memberProviderAccountChoice");
+        if (compatibilityError) return compatibilityError;
+        body.providerAccountIds = args.providerAccountIds;
+      }
       const r = await createWithSpawnApproval(deps, "the same create_run call", "/api/runs", body);
       if (!r.ok) return errorResult(r.message);
       return textResult({

@@ -285,6 +285,36 @@ const subscription: SubscriptionUsageResponse = {
   staleAfterMs: 600_000,
   generatedAt: END,
 };
+// `?sharedSubscription=1`: one Claude subscription on three machines, one offline and one waiting.
+// `?claudeRefreshable=1`: a control plane at protocol 342 says the Claude Work account can be read on
+// request. Without it the fixture speaks as an older one, which says nothing about refresh.
+if (params.get("claudeRefreshable") === "1") {
+  subscription.sources = subscription.sources.map((source) =>
+    source.providerAccountId === "claude-work" ? { ...source, refreshable: true } : source);
+}
+if (params.get("sharedSubscription") === "1") {
+  const shared = { provider: "claude" as const, agentId: "claude", agentName: "Claude Code", plan: "max",
+    accountLabel: "primary@example.com", subscriptionKey: "shared-claude-max" };
+  subscription.sources = [
+    { ...shared, runnerId: "r-laptop", runnerName: "laptop", runnerStatus: "online", freshness: "fresh",
+      sourceId: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", state: "available", fetchedAt: SUBSCRIPTION_NOW - 3 * 60_000,
+      buckets: [
+        { id: "five_hour", label: "Five-Hour Window", usedPercent: 52, remainingPercent: 48,
+          resetsAt: SUBSCRIPTION_NOW + 2 * 3_600_000, status: "available" },
+        { id: "seven_day", label: "Weekly — All Models", usedPercent: 19, remainingPercent: 81,
+          resetsAt: SUBSCRIPTION_NOW + 6 * DAY, status: "available" },
+      ] },
+    { ...shared, runnerId: "r-box", runnerName: "build-box", runnerStatus: "online", freshness: "fresh",
+      sourceId: "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", state: "unavailable", fetchedAt: SUBSCRIPTION_NOW,
+      detail: "Claude subscription usage is available after the first provider response in a session.", buckets: [] },
+    { ...shared, runnerId: "r-studio", runnerName: "studio", runnerStatus: "offline", freshness: "stale",
+      sourceId: "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3", state: "available", fetchedAt: SUBSCRIPTION_NOW - 26 * 3_600_000,
+      buckets: [
+        { id: "five_hour", label: "Five-Hour Window", usedPercent: 90, remainingPercent: 10,
+          resetsAt: SUBSCRIPTION_NOW - 20 * 3_600_000, status: "warning" },
+      ] },
+  ];
+}
 if (params.get("selectedUnavailable") === "1" && subscription.sources[0]) {
   const { credits: _credits, plan: _plan, ...source } = subscription.sources[0];
   subscription.sources[0] = {
@@ -358,7 +388,7 @@ const client = {
 
 /** The tab is `?tab=subscriptions`, pushed like the shell's route so Back returns to the last tab. */
 function currentTab(): UsageTab | undefined {
-  return new URLSearchParams(window.location.search).get("tab") === "subscriptions" ? "subscriptions" : undefined;
+  return new URLSearchParams(window.location.search).get("tab") === "subscriptions" ? undefined : "api";
 }
 
 function UsageRoute() {
@@ -373,8 +403,8 @@ function UsageRoute() {
       tab={tab}
       onSelectTab={(next) => {
         const url = new URL(window.location.href);
-        if (next) url.searchParams.set("tab", next);
-        else url.searchParams.delete("tab");
+        if (next === "api") url.searchParams.delete("tab");
+        else url.searchParams.set("tab", "subscriptions");
         window.history.pushState(null, "", url);
         setTab(next);
       }}
@@ -429,7 +459,7 @@ const connection: UiConnectionRuntime = {
   instanceId: "usage-view-e2e", runtimeKey: "usage-view-e2e", createSocket: () => new FixtureSocket(), close() {},
 };
 // The harness owns its URL (`?tab=`); the store reads a fixed view and never navigates.
-const navigation: ViewNavigation = { current: () => ({ name: "usage" }), push() {}, listen: () => () => {} };
+const navigation: ViewNavigation = { current: () => ({ name: "usage", tab: "api" }), push() {}, listen: () => () => {} };
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

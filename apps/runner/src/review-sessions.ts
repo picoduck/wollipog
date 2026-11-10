@@ -48,6 +48,9 @@ const execFileAsync = promisify(execFile);
 
 /** The pinned patch is inlined up to this size; a larger change is reviewed from the checkout. */
 export const REVIEW_PATCH_LIMIT_BYTES = 400 * 1024;
+/** How far `boundedFileDiffs` goes file by file before it names the rest as left out. */
+const REVIEW_INDIVIDUAL_DIFFS_LIMIT = 256;
+const REVIEW_INDIVIDUAL_DIFFS_BUDGET_MS = 2 * 60_000;
 const REVIEW_DIFF_TIMEOUT_MS = 120_000;
 /** How long a pre-launch outcome is still re-sent after it was first sent at a registration. */
 const OUTCOME_RETENTION_MS = 7 * 24 * 60 * 60_000;
@@ -93,6 +96,7 @@ export function defaultReviewSessionDependencies(
   agents: () => readonly AgentDefinition[] = () => [],
   agentPath: ReviewSessionDependencies["agentPath"] = () => process.env.PATH,
   codexProtection: () => CodexReviewerProtection | undefined = () => undefined,
+  securityPolicy: () => import("@wollipog/protocol").ReviewerSecurityPolicy = () => "strict",
 ): ReviewSessionDependencies {
   const uid = process.getuid?.() ?? -1;
   const hostProviderHomes = () =>
@@ -131,11 +135,11 @@ export function defaultReviewSessionDependencies(
       return gitlabMergeRequestFacts(JSON.parse(raw), `${host}/${project}`, iid);
     },
     gitlabHostConfigured: (glab, host, env) => gitlabHostConfigured(glab, host, env),
-    tools: () => discoverReviewTools({ home: homedir(), dataDir, uid, pathEnv: process.env.PATH, extraRoots: extraRoots() }),
+    tools: () => discoverReviewTools({ home: homedir(), dataDir, uid, pathEnv: process.env.PATH, extraRoots: extraRoots(), securityPolicy: securityPolicy() }),
     verifyCommand: (command, pathEnv = process.env.PATH) => {
       const grants = sessionWritableGrants();
       try {
-        verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots(grants)), uid, undefined, codexProtection());
+        verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots(grants)), uid, undefined, codexProtection(), securityPolicy());
       } catch (error) {
         // Name the grant that makes the reviewer session-writable and how to withdraw it (#4122).
         // Roots no configured grant names can only be avoided by moving the reviewer.
@@ -200,7 +204,7 @@ export function gitlabMergeRequestFacts(value: unknown, repository: string, iid:
  * a refusal, not something to skip: it is exactly what would run.
  */
 export function verifySpawnedCommand(command: string, pathEnv: string | undefined, roots: readonly string[], uid: number,
-  rootUid?: number, codex?: CodexReviewerProtection): string {
+  rootUid?: number, codex?: CodexReviewerProtection, policy: import("@wollipog/protocol").ReviewerSecurityPolicy = "strict"): string {
   let candidate: string | undefined;
   if (isAbsolute(command)) {
     candidate = command;
@@ -217,10 +221,10 @@ export function verifySpawnedCommand(command: string, pathEnv: string | undefine
     }
   }
   if (!candidate) throw new Error(`${command} is not installed`);
-  const resolved = trustedPath(candidate, roots, uid, rootUid, codex);
-  const interpreter = reviewerInterpreter(resolved, pathEnv, roots, uid, rootUid);
+  const resolved = trustedPath(candidate, roots, uid, rootUid, codex, undefined, policy);
+  const interpreter = reviewerInterpreter(resolved, pathEnv, roots, uid, rootUid, policy);
   // An `env <program>` interpreter is found on PATH at spawn too: its first match must be trusted.
-  if (interpreter) verifySpawnedCommand(interpreter.name, pathEnv, roots, uid, rootUid);
+  if (interpreter) verifySpawnedCommand(interpreter.name, pathEnv, roots, uid, rootUid, undefined, policy);
   return resolved;
 }
 
@@ -308,12 +312,62 @@ export interface ReviewPromptInput {
   /** A delta over a merge of the moved base branch: the patch is the pull request's own diff of
    * the scoped files, not every change since `since`. */
   mergedBase?: boolean;
+  /** With `mergedBase`: scoped files whose diff in `patch` could not be inlined. */
+  patchOmitted?: string[];
+  /** With `mergedBase`: the same files' diff at `since`, before the merge, so the reviewer can see a
+   * change the merge dropped. `reviewedOmitted` names the files it could not show. */
+  reviewedPatch?: string;
+  reviewedOmitted?: string[];
   rebasedFrom?: { baseSha: string; headSha: string };
   fullReason?: string;
   /** Other files the pull request changes, for context only. */
   contextFiles?: string[];
   /** Findings from the last valid round, to report again if still present. */
   openFindings?: ReviewReportFinding[];
+}
+
+/**
+ * A diff of `paths` within the patch limit. When the whole diff does not fit or cannot be read, each
+ * file is read alone and the smallest are kept, so one oversized file cannot hide the others. The
+ * fallback holds at most `limit` bytes and stops at `maxFiles` reads or `budgetMs`. A binary diff
+ * shows nothing, so it counts as left out too. `omitted` names every file left out, for any reason.
+ */
+export async function boundedFileDiffs(read: (paths: string[]) => Promise<string>, paths: string[], options: {
+  limit?: number; maxFiles?: number; budgetMs?: number; now?: () => number;
+} = {}): Promise<{ patch: string; omitted: string[] }> {
+  const { limit = REVIEW_PATCH_LIMIT_BYTES, maxFiles = REVIEW_INDIVIDUAL_DIFFS_LIMIT, budgetMs = REVIEW_INDIVIDUAL_DIFFS_BUDGET_MS, now = Date.now } = options;
+  const whole = await read(paths).catch(() => null);
+  // A hunk's lines all start with a marker, so only Git's own notice can start a line with these
+  // words. Lines end only at \n: the m flag would also split at \r and the Unicode line separators,
+  // which a pull request's author could use to get a text file's diff left out.
+  const binary = (text: string) => /(?:^|\n)Binary files [^\n]* differ(?:\n|$)/u.test(text);
+  if (whole !== null && Buffer.byteLength(whole) <= limit && !binary(whole)) return { patch: whole, omitted: [] };
+  const kept = new Map<string, { text: string; bytes: number }>();
+  let used = 0;
+  const deadline = now() + budgetMs;
+  for (const path of paths.slice(0, maxFiles)) {
+    if (now() >= deadline) break;
+    const text = await read([path]).catch(() => null);
+    if (text === null || binary(text)) continue;
+    const bytes = Buffer.byteLength(text);
+    kept.set(path, { text, bytes });
+    used += bytes;
+    // Past the limit, the largest diff held so far goes, so what is held never grows past it.
+    while (used > limit) {
+      const [largest, { bytes: size }] = [...kept].reduce((a, b) => b[1].bytes > a[1].bytes ? b : a);
+      kept.delete(largest);
+      used -= size;
+    }
+  }
+  return { patch: paths.flatMap((path) => kept.get(path)?.text ?? []).join(""), omitted: paths.filter((path) => !kept.has(path)) };
+}
+
+/** A path as a review prompt lists it. A pull request's author chooses its paths, so a name with a
+ * control character or backtick is encoded and cannot break out of its list item. */
+export function reviewPromptPath(path: string): string {
+  if (!/[\p{Cc}\p{Zl}\p{Zp}`]/u.test(path)) return `- \`${path}\``;
+  // JSON escapes C0 controls but leaves C1 controls and the Unicode line separators as they are.
+  return `- ${JSON.stringify(path).replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, (char) => `\\u${char.codePointAt(0)!.toString(16).padStart(4, "0")}`)}`;
 }
 
 /** The mode line of a review prompt. */
@@ -355,23 +409,44 @@ export function reviewPrompt(input: ReviewPromptInput): string {
       : "- The working directory is a checkout of the reviewed head.",
     "",
     "Changed files to classify (each exactly once):",
-    ...(input.changedFiles.length ? input.changedFiles.map((path) => `- \`${path}\``) : ["- (none)"]),
+    ...(input.changedFiles.length ? input.changedFiles.map(reviewPromptPath) : ["- (none)"]),
     "",
   ];
   if (input.contextFiles?.length) {
     lines.push("Other files changed by the pull request (context only; do not classify):",
-      ...input.contextFiles.map((path) => `- \`${path}\``), "");
+      ...input.contextFiles.map(reviewPromptPath), "");
   }
   if (input.openFindings?.length) {
     lines.push("Open findings from earlier rounds:", ...input.openFindings.map(compactReviewFinding), "");
   }
+  const fenced = (patch: string, language: string) => {
+    const longest = Math.max(2, ...[...patch.matchAll(/`+/gu)].map((match) => match[0].length));
+    const fence = "`".repeat(longest + 1);
+    return [`${fence}${language}`, patch.replace(/\n$/u, ""), fence, ""];
+  };
   const title = input.mode === "rebase" ? "Range-Diff" : "Pinned Patch";
   if (input.patch === null) {
     lines.push(`## ${title}`, "", "The patch is too large to inline; read the changed files from the checkout.", "");
   } else {
-    const longest = Math.max(2, ...[...input.patch.matchAll(/`+/gu)].map((match) => match[0].length));
-    const fence = "`".repeat(longest + 1);
-    lines.push(`## ${title}`, "", `${fence}${input.mode === "rebase" ? "text" : "diff"}`, input.patch.replace(/\n$/u, ""), fence, "");
+    lines.push(`## ${title}`, "", ...fenced(input.patch, input.mode === "rebase" ? "text" : "diff"));
+  }
+  if (input.mergedBase) {
+    if (input.patchOmitted?.length) {
+      lines.push("These files' diff is binary, too large to inline or could not be read, so the patch above leaves them out. Read them from the checkout:",
+        ...input.patchOmitted.map(reviewPromptPath), "");
+    }
+    const omitted = input.reviewedOmitted ?? [];
+    lines.push("## Pull Request's Diff at the Reviewed Head", "");
+    if (input.reviewedPatch) {
+      lines.push(`The diff of these files at ${input.since}, before the merge. A change here that the pinned patch no longer has was dropped by the merge: check that dropping it was intended, and report it if it was not.`, "",
+        ...fenced(input.reviewedPatch, "diff"));
+    } else if (!omitted.length) {
+      lines.push(`The pull request changed none of these files at ${input.since}.`, "");
+    }
+    if (omitted.length) {
+      lines.push(`These files' diff at ${input.since} is binary, too large to inline or could not be read, and the checkout does not hold it, so this round cannot show what the merge dropped from them. Say so in your report:`,
+        ...omitted.map(reviewPromptPath), "");
+    }
   }
   return lines.join("\n");
 }
@@ -422,6 +497,25 @@ function reviewerAgent(agents: readonly AgentDefinition[], harness: SessionRevie
   return agents.find((candidate) => candidate.driver === REVIEWER_DRIVERS[harness] &&
     (candidate.context ?? { kind: "native" }).kind === "native" && agentAvailableForImplicitLaunch(candidate) &&
     candidate.installation?.selection !== "other" && candidate.harnessSelectionBlocked !== true);
+}
+
+/** Use the selected installation's diagnosis instead of conflating discovery with sign-in. */
+function missingReviewerReason(agents: readonly AgentDefinition[], harness: SessionReviewHarness): string {
+  const candidate = agents.find((agent) => agent.driver === REVIEWER_DRIVERS[harness] &&
+    (agent.context?.kind ?? "native") === "native" && agent.installation?.selection !== "other");
+  if (!candidate) return "no available native agent uses this harness";
+  if (candidate.harnessSelectionBlocked) return "Select a verified harness installation in machine settings before requesting a review.";
+  const readiness = candidate.providerAccountReadiness;
+  if (readiness && (readiness.defaultAuthStatus !== "authenticated" ||
+      !readiness.defaultAccountId || !readiness.readyAccountIds.includes(readiness.defaultAccountId))) {
+    return readiness.defaultAuthStatus === "unauthenticated"
+      ? "The selected provider account is not signed in. Sign in to that account before retrying the review."
+      : "The selected provider account is not ready for automatic launch. Review its setup and ownership details.";
+  }
+  const failure = candidate.claudeCode?.failure;
+  if (failure) return reviewSessionDiscoveryReason(`${failure.message}${failure.retryable
+    ? " Discovery retries automatically; retry this review request without starting another session." : ""}`);
+  return reviewSessionDiscoveryReason(candidate.unavailableReason ?? "no available native agent uses this harness");
 }
 
 /** What the session manager needs to launch and retire a review session. */
@@ -504,7 +598,7 @@ export class ReviewSessionLauncher {
       const agent = reviewerAgent(agents, harness);
       if (!agent) {
         this.discoveryFailures.delete(harness);
-        unavailable[harness] = "no available native agent uses this harness";
+        unavailable[harness] = missingReviewerReason(agents, harness);
         continue;
       }
       try {
@@ -620,6 +714,10 @@ export class ReviewSessionLauncher {
       const prFiles = await names(`${baseSha}...${policy.headSha}`);
       let scopeFiles = prFiles;
       let patch: string | null;
+      let patchOmitted: string[] = [];
+      let reviewedPatch = "";
+      let reviewedOmitted: string[] = [];
+      let evidenceComplete = true;
       let mergedBase = false;
       if (mode === "delta") {
         const since = planned.since!;
@@ -646,9 +744,18 @@ export class ReviewSessionLauncher {
           scopeFiles = [...own].filter((path) => changed.has(path)).sort();
           if (!scopeFiles.length) refuseReview(REVIEW_ROUND_REFUSALS.unchanged);
           mergedBase = true;
+          const ownDiff = (from: string, to: string) => (files: string[]) =>
+            git(["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--end-of-options", from, to, "--", ...files]);
           // The pull request's own diff of those files, without the base branch's changes.
-          patch = await git(["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv",
-            "--end-of-options", headBase, policy.headSha, "--", ...scopeFiles]).catch(() => null);
+          const after = await boundedFileDiffs(ownDiff(headBase, policy.headSha), scopeFiles);
+          patch = after.patch;
+          patchOmitted = after.omitted;
+          // The same files' diff before the merge. A change a conflict resolution dropped is missing
+          // from the patch above and has no other trace, because the checkout holds only the head.
+          const before = await boundedFileDiffs(ownDiff(sinceBase, since), scopeFiles);
+          reviewedPatch = before.patch;
+          reviewedOmitted = before.omitted;
+          evidenceComplete = !after.omitted.length && !before.omitted.length;
         }
       } else if (mode === "rebase") {
         const touched = new Set(await names(planned.rebasedFrom!.headSha, policy.headSha));
@@ -660,13 +767,18 @@ export class ReviewSessionLauncher {
         patch = await diff([], `${baseSha}...${policy.headSha}`).catch(() => null);
       }
       if (patch !== null && Buffer.byteLength(patch) > REVIEW_PATCH_LIMIT_BYTES) patch = null;
+      // The planner admitted a base merge without budget. A round that cannot show its whole effect,
+      // or turned out not to be scoped as one, is charged, so it needs budget like any other. A retry
+      // of a charged attempt still has its budget: an invalid attempt uses none.
+      const uncharged = planned.baseMerge === true && mergedBase && evidenceComplete;
+      if (planned.baseMerge && !uncharged && history.validRounds >= history.roundBudget) refuseReview(REVIEW_ROUND_REFUSALS.roundLimit);
       const tracked = new Set((await git(["ls-tree", "-r", "--name-only", "-z", "--end-of-options", policy.headSha])).split("\0").filter(Boolean));
       const round: ReviewAttemptRound = {
         epoch: planned.epoch, round: planned.round, attempt: planned.attempt, mode, baseSha, scopeFiles,
         ...(mode === "delta" ? { since: planned.since! } : {}),
         ...(mode === "rebase" ? { rebasedFrom: planned.rebasedFrom! } : {}),
         // A base-merge round reviews only the merge's effect on the pull request's own diff.
-        ...(planned.baseMerge && mergedBase ? { baseMerge: true as const } : {}),
+        ...(uncharged ? { baseMerge: true as const } : {}),
       };
       const inScope = new Set(scopeFiles);
       const contextFiles = mode === "full" ? [] : prFiles.filter((path) => !inScope.has(path));
@@ -675,7 +787,7 @@ export class ReviewSessionLauncher {
         brief, repository: policy.pullRequest.repository, number: policy.pullRequest.number,
         baseSha, headSha: policy.headSha, changedFiles: scopeFiles, patch, mode,
         ...(round.since ? { since: round.since } : {}),
-        ...(mergedBase ? { mergedBase } : {}),
+        ...(mergedBase ? { mergedBase, patchOmitted, reviewedPatch, reviewedOmitted } : {}),
         ...(round.rebasedFrom ? { rebasedFrom: round.rebasedFrom } : {}),
         ...(mode === "full" && policy.fullReason ? { fullReason: policy.fullReason } : {}),
         contextFiles,

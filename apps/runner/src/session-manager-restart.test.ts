@@ -337,6 +337,38 @@ test("a restart never repeats a continuation already submitted to the replaced c
   }
 });
 
+test("a restart delivers a continuation held after bounded launch failures, with a fresh bound (#3542)", { skip: !haveGit() }, async () => {
+  const f = fixture("launch-held");
+  let manager: SessionManager | undefined;
+  try {
+    const spec = claudeSpec("s_restart_launch_held", f.repo);
+    f.store.create(storedClaudeSession(spec.sessionId, f.repo, {
+      backgroundWorkState: "continuation_pending",
+      backgroundJobs: [storedJob("shell-1", {
+        terminalStatus: "completed", terminalObservedAt: 3_000, continuationRequired: true,
+        continuationId: "bgcont_old", continuationQueuedAt: 3_000,
+        continuationLaunchFailures: 3, continuationLaunchHeldAt: 3_500,
+      })],
+    }));
+    const fake = fakeProvider();
+    manager = new SessionManager((message) => { f.sent.push(message); }, () => {}, f.store, "runner", undefined,
+      fake.factory as never, f.dataDir, 1);
+    assert.equal(await manager.start(spec), true);
+    await waitFor(() => !!f.store.readMeta(spec.sessionId)?.backgroundJobs?.[0]?.assistantResultPersistedAt,
+      "the held result was not delivered after the restart");
+
+    assert.equal(fake.prompts.length, 1);
+    assert.ok(fake.prompts[0]!.text.startsWith(RESTART_CONTINUATION_PREFIX), "the restart reports the held result once");
+    const job = f.store.readMeta(spec.sessionId)?.backgroundJobs?.[0];
+    assert.equal(job?.continuationLaunchHeldAt, undefined, "the restart is the recovery the hold named");
+    assert.equal(job?.continuationLaunchFailures, undefined, "the fresh process gets a fresh bound");
+    assert.equal(f.store.readMeta(spec.sessionId)?.backgroundWorkState, undefined);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test("a restart that only ended unfinished work reports it as unrecoverable without a delivery turn (#1779)", { skip: !haveGit() }, async () => {
   const f = fixture("killed");
   let manager: SessionManager | undefined;

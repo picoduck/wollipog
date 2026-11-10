@@ -7,9 +7,10 @@ import { test } from "node:test";
 import type { CampaignAuthorityBoundary } from "@wollipog/protocol";
 import { DECISION_KINDS, decisionOutputSchema, renderDecisionInput, validateDecisionOutput } from "./decision-kinds.js";
 import {
-  boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, onlyOtherRepositories, resolveGrantRepository,
-  scopeGrantCandidates, writtenAsCount, writtenAsDigits, writtenAsRange, type ScopeGrantFields,
+  boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, messageNamesRepository, onlyOtherRepositories, repositoryNameInMessage, resolveGrantRepository, resolveRepositoryName,
+  scopeGrantCandidates, writtenAsCount, writtenAsDigits, writtenAsRange, writtenForRepository, type ScopeGrantFields,
 } from "./scope-grant.js";
+import { issueReferencesAcrossRepositories } from "./campaign-launch-admission.js";
 import { EMPTY_GRANT, issues } from "./scope-grant-test-fixture.js";
 
 const BOUNDARY = { repository: "Owner/Repo" };
@@ -30,6 +31,56 @@ test("the repository floor resolves against every repository in the campaign's b
   // With several boundary repositories (#4118), an unqualified name is ambiguous and grants nothing.
   assert.equal(resolveGrantRepository("", ["owner/repo", "owner/web"]), null);
   assert.equal(resolveGrantRepository("owner/web", ["owner/repo", "owner/web"]), "owner/web");
+});
+
+test("a repository name means one boundary repository, or nothing (#4118)", () => {
+  const entries = [{ repository: "owner/app", locationNames: ["Web Client"] }, { repository: "Owner/API", locationNames: ["Backend", "Shared"] },
+    { repository: "other/tools", locationNames: ["Shared"] }, { repository: "fork/tools" }];
+  for (const name of ["owner/api", "OWNER/API", "api", "the api repo", "The API repository", "Backend", "the backend repo"]) assert.equal(resolveRepositoryName(name, entries), "owner/api", name);
+  assert.equal(resolveRepositoryName("web client", entries), "owner/app");
+  // Several matches, by short name or Location name, or none: nothing.
+  for (const name of ["tools", "the tools repo", "shared", "billing", "repo", "the", " "]) assert.equal(resolveRepositoryName(name, entries), null, name);
+  assert.equal(repositoryNameInMessage("Fix bugs in  The API\nrepo please.", "the api repo"), true);
+  assert.equal(repositoryNameInMessage("Fix bugs please.", "the api repo"), false);
+  // Whole words only: a name inside a longer word was never written.
+  assert.equal(repositoryNameInMessage("Fix this rapidly.", "api"), false);
+  assert.equal(repositoryNameInMessage("Fix the api-gateway first.", "api"), false);
+  assert.equal(repositoryNameInMessage("Fix the top bug in api.", "api"), true);
+  assert.equal(repositoryNameInMessage("Fix owner/api (the top bug).", "owner/api"), true);
+  assert.equal(repositoryNameInMessage("Fix my-org/my.repo first.", "my-org/my.repo"), true);
+  assert.equal(repositoryNameInMessage("Fix my-org/myxrepo first.", "my-org/my.repo"), false, "the name is literal text");
+  assert.equal(repositoryNameInMessage("Fix it.", " "), false);
+  // A repository's name as words of the message's own, never inside an issue reference (#4117).
+  const named = [{ repository: "owner/api", locationNames: ["Docs Folder"] }, { repository: "owner/web" }];
+  assert.equal(messageNamesRepository("Fix bugs in owner/api.", named), true);
+  assert.equal(messageNamesRepository("Fix bugs in the web repo.", named), true);
+  assert.equal(messageNamesRepository("Fix bugs in docs folder.", named), true);
+  assert.equal(messageNamesRepository("Fix owner/api#12 and owner/web#3.", named), false);
+  assert.equal(messageNamesRepository("Fix https://github.com/owner/web/issues/3 rapidly.", named), false);
+  assert.equal(messageNamesRepository("Fix owner/web#3, then the api.", named), true);
+  assert.equal(messageNamesRepository("Fix everything.", named), false);
+  // Every Location name the resolver accepts counts, whichever way the message writes it.
+  const alias = [{ repository: "owner/backend", locationNames: ["The API Repository"] }, { repository: "owner/web" }];
+  assert.equal(resolveRepositoryName("api", alias), "owner/backend");
+  for (const message of ["Fix #12 in api only.", "Fix #12 in the api repo only.", "Fix #12 in The API Repository only."]) {
+    assert.equal(messageNamesRepository(message, alias), true, message);
+  }
+  assert.equal(messageNamesRepository("Fix #12 rapidly.", alias), false);
+});
+
+test("a number is written for a repository only where the message qualifies it so; a bare one is the launch repository's (#4118)", () => {
+  const text = "Fix #12, owner/api#40, https://github.com/owner/api/issues/41 and owner/app#7. Also other/repo#9.";
+  assert.equal(writtenForRepository(text, 12, "owner/app", "owner/app"), true);
+  assert.equal(writtenForRepository(text, 12, "owner/api", "owner/app"), false, "a bare number names nothing in another repository");
+  assert.equal(writtenForRepository(text, 40, "OWNER/API", "owner/app"), true);
+  assert.equal(writtenForRepository(text, 40, "owner/app", "owner/app"), false, "qualified by another repository, it is that repository's");
+  assert.equal(writtenForRepository(text, 41, "owner/api", "owner/app"), true);
+  assert.equal(writtenForRepository(text, 7, "owner/app", "owner/app"), true);
+  assert.equal(writtenForRepository(text, 9, "owner/app", "owner/app"), false);
+  assert.deepEqual(issueReferencesAcrossRepositories(text, "owner/app", ["owner/app", "owner/api"]), [{ repository: "owner/app", number: 7 },
+    { repository: "owner/app", number: 12 }, { repository: "owner/api", number: 40 }, { repository: "owner/api", number: 41 }]);
+  assert.deepEqual(boundaryRepositories({ repository: "Owner/App", repositories: [{ repository: "owner/app", locationIds: ["l"] }, { repository: "Owner/API", locationIds: ["m"] }] }),
+    ["owner/app", "owner/api"]);
 });
 
 test("a number counts only where the message writes it as a whole digit string", () => {
@@ -134,6 +185,47 @@ test("an owner's approval of a failed grant's proposal grows only a derived limi
   assert.equal(grantReviewMaxIssues({ firstMessageScope: unrecorded }, review, boundary(2, 1), 5), undefined);
   assert.equal(grantReviewMaxIssues(failed, { grantReview: { ...review.grantReview, cause: "selection" } }, boundary(2, 1), 5), undefined);
   assert.equal(grantReviewMaxIssues(failed, {}, boundary(2, 1), 5), undefined);
+});
+
+test("the #3920 and #4061 regression cases pass through the scope grant: the reading decides intent, the floors only remove (#4104)", () => {
+  const cases: Array<{ text: string; reading: Partial<ScopeGrantFields>; explicit: number[]; context: number[] }> = [
+    // #3920: the observed launch names its targets and mentions two more issues as background.
+    { text: "Deliver #11, #12, #13 and #14 (members of the epic), then close #15 and #16. In passing, this run serves as a live " +
+        "acceptance test for #20, and #21, a test flake, is a known cause of failures.",
+      reading: { explicit: issues(11, 12, 13, 14, 15, 16), context: issues(20, 21) }, explicit: [11, 12, 13, 14, 15, 16], context: [20, 21] },
+    // #3920: targets after "fix …:", one issue only in a parenthetical citation.
+    { text: "Use the orchestrate-issues skill to fix the decision-lifecycle findings in owner/repo: #101, #102, #103, #104, #105, #106 " +
+        "and #107. Order: 1. #105 and #106 together. 2. #103 before #102. Commands: the guard refuses heredocs (#900).",
+      reading: { explicit: issues(101, 102, 103, 104, 105, 106, 107), context: issues(900) },
+      explicit: [101, 102, 103, 104, 105, 106, 107], context: [900] },
+    // #3920: refusals, rejected alternatives and work handled elsewhere grant nothing.
+    { text: "Implement #5, not #6.", reading: { explicit: issues(5), context: issues(6) }, explicit: [5], context: [6] },
+    { text: "Don't touch #3.", reading: { context: issues(3) }, explicit: [], context: [3] },
+    { text: "Fix #1 and #2 is handled elsewhere.", reading: { explicit: issues(1), context: issues(2) }, explicit: [1], context: [2] },
+    // A reading that lists a number both as named and as context leaves it context.
+    { text: "Fix #1 and #2. Don't close #2 yet.", reading: { explicit: issues(1, 2), context: issues(2) }, explicit: [1], context: [2] },
+    // #4061: the epic and every unit in its range.
+    { text: "Implement epic #3032 in owner/repo: units #2997–#3005. Close #3032 when all its units have merged.",
+      reading: { explicit: issues(3032), ranges: [{ repository: "", first: 2997, last: 3005 }] },
+      explicit: [2997, 2998, 2999, 3000, 3001, 3002, 3003, 3004, 3005, 3032], context: [] },
+    // #4061: a range with one issue withheld; a range read the way the old classifier could not ("issues 10 through 14").
+    { text: "Fix #10–#13. Don't close #12.", reading: { ranges: [{ repository: "", first: 10, last: 13 }], context: issues(12) },
+      explicit: [10, 11, 13], context: [12] },
+    { text: "Fix issues 10 through 14.", reading: { ranges: [{ repository: "", first: 10, last: 14 }] }, explicit: [10, 11, 12, 13, 14], context: [] },
+    // #4061: an oversized range expands nothing, however the reading names it.
+    { text: "Fix #1–#101.", reading: { ranges: [{ repository: "", first: 1, last: 101 }] }, explicit: [], context: [] },
+  ];
+  for (const { text, reading, explicit, context } of cases) {
+    const result = scopeGrantCandidates(text, fields(reading), BOUNDARY);
+    assert.deepEqual([result.explicit, result.context], [explicit, context], text);
+  }
+  // A misreading the floors catch: an invented number, another repository's issue, and a range joined
+  // from two numbers the message writes apart are all dropped, never granted.
+  const misread = scopeGrantCandidates("Fix #5 and other/repo#6. See #10 and, later, #14.", fields({
+    explicit: [...issues(5, 6, 7)], ranges: [{ repository: "", first: 10, last: 14 }] }), BOUNDARY);
+  assert.deepEqual(misread.explicit, [5]);
+  assert.deepEqual(misread.dropped.map((d) => `${d.number}:${d.reason}`), ["6:other_repository", "7:not_in_message",
+    "10:range_not_in_message", "14:range_not_in_message"]);
 });
 
 test("the scope_grant kind reads only the owner's message and validates its typed output strictly", () => {

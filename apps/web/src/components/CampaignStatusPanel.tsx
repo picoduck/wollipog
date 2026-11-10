@@ -30,11 +30,19 @@ import {
   RESPONSIBLE_ACTOR_LABELS,
   UNAVAILABLE,
   campaignCostView,
+  campaignRecoveryAutomationNotice,
   campaignSummaryView,
   costWithProvenance,
   causeNeedsRequests,
   durationMetricView,
   filtersAreDefault,
+  campaignRepositoryFilterOptions,
+  groupCampaignWorkByRepository,
+  heldOnPullRequest,
+  mergeDependencyLine,
+  repositoryCountsLabel,
+  WAITING_FOR_PREREQUISITE_MERGE,
+  type CampaignWorkRepositoryGroup,
   issueRefHref,
   forgePullRequestView,
   issueRefLabel,
@@ -57,9 +65,14 @@ import { sessionAgentLabel } from "./agent-options.js";
 import { DetailSkeleton, Skeleton } from "./common.js";
 import { ChevronLeftIcon } from "./Icons.js";
 import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
+import { CampaignAuthoritySummary } from "./CampaignAuthoritySummary.js";
 import { CampaignFollowUpLimit } from "./CampaignFollowUpLimit.js";
+import { CampaignCleanup, CampaignStuck } from "./CampaignCleanup.js";
+import { CampaignHeldSlots } from "./CampaignHeldSlots.js";
+import { useStoreSelector } from "../store.js";
 import { CampaignDecisions } from "./CampaignDecisions.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
+import { OwnerRuleFactRows } from "./requests/WorkflowDecisionSummary.js";
 import { CampaignRepositories } from "./CampaignRepositories.js";
 import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { Notice } from "./Notice.js";
@@ -112,6 +125,7 @@ export function CampaignStatusPanel({
   onOpenSession,
   findRequest,
   onOpenRequest,
+  onOpenSessionRequest,
 }: {
   session: SessionView;
   availability: Exclude<CampaignStatusAvailability, { kind: "hidden" }>;
@@ -119,6 +133,8 @@ export function CampaignStatusPanel({
   /** The Requests key of the item's request when this session lists it, else null. */
   findRequest: (target: CampaignRequestTarget) => string | null;
   onOpenRequest: (requestKey: string) => void;
+  /** Opens another session at one of its own requests (#4337), for a decision this session does not list. */
+  onOpenSessionRequest?: (sessionId: string, requestId: string) => void;
 }) {
   if (availability.kind === "unavailable") {
     return (
@@ -137,6 +153,7 @@ export function CampaignStatusPanel({
       onOpenSession={onOpenSession}
       findRequest={findRequest}
       onOpenRequest={onOpenRequest}
+      onOpenSessionRequest={onOpenSessionRequest}
     />
   );
 }
@@ -147,12 +164,14 @@ function AvailableCampaignStatus({
   onOpenSession,
   findRequest,
   onOpenRequest,
+  onOpenSessionRequest,
 }: {
   session: SessionView;
   availability: AvailableCampaign;
   onOpenSession: (sessionId: string) => void;
   findRequest: (target: CampaignRequestTarget) => string | null;
   onOpenRequest: (requestKey: string) => void;
+  onOpenSessionRequest?: (sessionId: string, requestId: string) => void;
 }) {
   const [memory, setMemoryState] = useState<CampaignListMemory>(() => listMemory.get(session.id) ?? {
     filters: DEFAULT_CAMPAIGN_WORK_FILTERS,
@@ -220,6 +239,8 @@ function AvailableCampaignStatus({
   }, [memory.selectedItemId, shownRows, listSettled]);
 
   const heldChildren = data.summary.campaign?.heldChildren ?? [];
+  // A child named by Cleanup or Campaign Stuck, as a link to its session.
+  const sessionLink = (sessionId: string) => <CampaignChildLink sessionId={sessionId} onOpen={onOpenSession} />;
   return (
     <div className="campaign-status" ref={scrollRef}>
       {memory.selectedItemId ? (
@@ -253,10 +274,12 @@ function AvailableCampaignStatus({
               <CampaignSummarySection data={data} now={now} />
               {data.summary.campaign?.ownerDecisions && (
                 <CampaignOwnerDecisions
+                  sessionId={session.id}
                   ownerDecisions={data.summary.campaign.ownerDecisions}
                   now={now}
                   findRequest={findRequest}
                   onOpenRequest={onOpenRequest}
+                  onOpenSessionRequest={onOpenSessionRequest}
                 />
               )}
               <CampaignDecisionModelChecks
@@ -264,7 +287,24 @@ function AvailableCampaignStatus({
                 canClassify={availability.role === "campaign"}
                 refreshKey={data.summary.campaign}
                 onOpenSession={onOpenSession}
+                findRequest={findRequest}
+                onOpenRequest={onOpenRequest}
               />
+              {data.summary.campaign?.status === "stuck" && data.summary.campaign.stuck && (
+                <CampaignStuck
+                  stuck={data.summary.campaign.stuck}
+                  repair={data.summary.campaign.activity?.repair}
+                  onOpenSession={sessionLink}
+                />
+              )}
+              {data.summary.campaign?.cleanup && (
+                <CampaignCleanup
+                  campaignId={availability.campaignSessionId}
+                  cleanup={data.summary.campaign.cleanup}
+                  canAct={availability.role === "campaign"}
+                  onOpenSession={sessionLink}
+                />
+              )}
               {data.summary.campaign?.handoffs && (
                 <CampaignHandoffs
                   handoffs={data.summary.campaign.handoffs}
@@ -273,11 +313,16 @@ function AvailableCampaignStatus({
                     scrollTop: scrollRef.current?.scrollTop ?? memory.scrollTop })}
                 />
               )}
-              {data.summary.campaign?.recovery?.automation?.reason && (
-                <Notice tone="warning" title="Authorized Recovery Unavailable">
-                  {data.summary.campaign.recovery.automation.reason}
-                </Notice>
+              {data.summary.campaign?.budget && (
+                <CampaignHeldSlots
+                  campaignId={availability.campaignSessionId}
+                  budget={data.summary.campaign.budget}
+                  canAct={availability.role === "campaign"}
+                  now={now}
+                  onOpenSession={sessionLink}
+                />
               )}
+              <CampaignRecoveryAutomation campaign={data.summary.campaign} />
               {data.summary.campaign?.recovery?.records.map(record => (
                 <CampaignRecoveryNotice key={record.id} record={record} />
               ))}
@@ -292,6 +337,11 @@ function AvailableCampaignStatus({
                   onOpenRequest={onOpenRequest}
                 />
               )}
+              {data.summary.campaign?.control?.mode === "full_control" && data.summary.campaign.decisionOwners &&
+                data.summary.campaign.uiEvidenceReview && (
+                <CampaignAuthoritySummary campaign={{ ...data.summary.campaign, control: data.summary.campaign.control,
+                  decisionOwners: data.summary.campaign.decisionOwners, uiEvidenceReview: data.summary.campaign.uiEvidenceReview }} />
+              )}
               {data.summary.campaign?.repositoryBoundary && (
                 <CampaignRepositories
                   campaignId={availability.campaignSessionId}
@@ -300,7 +350,8 @@ function AvailableCampaignStatus({
                 />
               )}
               <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId}
-                policyRevision={availability.role === "campaign" ? data.summary.campaign?.policyRevision : undefined} />
+                policyRevision={availability.role === "campaign" ? data.summary.campaign?.policyRevision : undefined}
+                boundaryShown={data.summary.campaign?.control?.mode === "full_control"} />
               <CampaignDecisions campaignId={availability.campaignSessionId} />
               <CampaignWorkList
                 data={data}
@@ -321,46 +372,78 @@ function AvailableCampaignStatus({
   );
 }
 
+/** The recovery automation's hold (#3361): nothing for a finished campaign, neutral when nothing is
+ * left to recover, and a warning only for a hold that keeps work from continuing. */
+function CampaignRecoveryAutomation({ campaign }: { campaign: CampaignStatusData["summary"]["campaign"] }) {
+  const notice = campaignRecoveryAutomationNotice(campaign?.status, campaign?.recovery?.automation);
+  if (!notice) return null;
+  return (
+    <Notice tone={notice.tone} title={notice.title} role={notice.tone === "neutral" ? "status" : undefined}>
+      {notice.body}
+    </Notice>
+  );
+}
+
 /* ------------------------------------------------------------------------------------------------
  * Handed Off (#4070)
  * ---------------------------------------------------------------------------------------------- */
 
 /** Decisions the campaign's owner kept (#4064), which wait for that person while the campaign keeps
  * working: the Orchestrator's questions for them and the decisions it handed to them. */
-function CampaignOwnerDecisions({ ownerDecisions, now, findRequest, onOpenRequest }: {
+function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, onOpenRequest, onOpenSessionRequest }: {
+  sessionId: string;
   ownerDecisions: NonNullable<NonNullable<CampaignStatusData["summary"]["campaign"]>["ownerDecisions"]>;
   now: number;
   findRequest: (target: CampaignRequestTarget) => string | null;
   onOpenRequest: (requestKey: string) => void;
+  onOpenSessionRequest?: (sessionId: string, requestId: string) => void;
 }) {
   const headingId = useId();
   const hidden = ownerDecisions.total - ownerDecisions.items.length;
+  // A scope proposal the server routed to the owner waits for them without the owner keeping it: for
+  // want of lineage (#4267), after a grant review (#4102, #4103) or a proposal check (#4282), all #4334.
+  const scopeApproval = (item: (typeof ownerDecisions.items)[number]) => item.category === "campaign_issue_scope" && !item.ownerRule && !item.handedOff;
+  // So does its request to add a repository (#4117): the owner never kept it, it is always theirs.
+  const repositoryAddition = (item: (typeof ownerDecisions.items)[number]) => item.category === "campaign_repository_addition" && !item.ownerRule && !item.handedOff;
+  const one = ownerDecisions.total === 1;
   return (
     <section className="campaign-status-handoffs" aria-labelledby={headingId}>
       <h3 id={headingId} className="section-title">Waiting for You</h3>
       <p className="section-note">
-        You kept {ownerDecisions.total === 1 ? "this decision" : "these decisions"}, so only you can make{" "}
-        {ownerDecisions.total === 1 ? "it" : "them"}. The Orchestrator keeps working on everything else meanwhile.
+        {ownerDecisions.items.some((item) => scopeApproval(item) || repositoryAddition(item))
+          ? `Only you can make ${one ? "this decision" : "these decisions"}.`
+          : `You kept ${one ? "this decision" : "these decisions"}, so only you can make ${one ? "it" : "them"}.`}{" "}
+        The Orchestrator keeps working on everything else meanwhile.
       </p>
       <ul className="campaign-detail-list">
         {ownerDecisions.items.map((item) => {
-          const requestKey = findRequest({ occurrenceId: item.occurrenceId, sessionId: item.sessionId });
+          // Only the exact occurrence, wherever this session lists it: no session fallback, which
+          // would open this session's first request instead (#4334). Another session's decision this
+          // session does not list (a nested Orchestrator controls it, #4337) opens in its own
+          // session at that request, never at another request of the same session.
+          const requestKey = findRequest({ occurrenceId: item.occurrenceId, sessionId: null });
+          const openElsewhere = !requestKey && item.sessionId !== sessionId && onOpenSessionRequest
+            ? () => onOpenSessionRequest(item.sessionId, item.occurrenceId) : null;
+          const open = requestKey ? () => onOpenRequest(requestKey) : openElsewhere;
           return (
             <li key={item.occurrenceId}>
               <dl className="facts">
                 <div>
-                  <dt>{item.handedOff ? "Handed to You" : "Owner Decision"}</dt>
+                  <dt>{item.kind === "question" ? "Question" : item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval"
+                    : repositoryAddition(item) ? "Add Repository" : "Owner Decision"}</dt>
                   <dd>
                     {item.summary}
                     <span className="campaign-status-meta">
-                      {item.handedOff ? "Handed over by the Orchestrator" : "Asked by the Orchestrator"}{" "}
+                      {item.ownerRule ? "Requested under a rule" : item.handedOff ? "Handed over by the Orchestrator"
+                        : scopeApproval(item) ? "Proposed by the Orchestrator" : "Asked by the Orchestrator"}{" "}
                       <RecordedTime at={item.createdAt} now={now} />
                     </span>
                   </dd>
                 </div>
+                {item.ownerRule && <OwnerRuleFactRows rule={item.ownerRule} />}
               </dl>
-              {requestKey && <button type="button" className="btn sm" aria-label={`Open Request: ${item.summary}`}
-                onClick={() => onOpenRequest(requestKey)}>Open Request</button>}
+              {open && <button type="button" className="btn sm" aria-label={`Open Request: ${item.summary}`}
+                onClick={open}>Open Request</button>}
             </li>
           );
         })}
@@ -561,7 +644,11 @@ function CampaignWorkList({
 }) {
   const headingId = useId();
   const { list } = data;
-  const items = list.items;
+  // #4120: grouped by repository when the campaign works in more than one; keyboard order follows
+  // what is shown.
+  const groups = groupCampaignWorkByRepository(list.items, list.repositories);
+  const items = groups ? groups.flatMap((group) => group.items) : list.items;
+  const repositoryOptions = campaignRepositoryFilterOptions(list.repositories, filters.repository ?? "all");
   // One tab stop for the list: the remembered row when it is still listed, otherwise the first.
   const stopId = items.some((item) => item.id === focusItemId) ? focusItemId : items[0]?.id ?? null;
 
@@ -576,6 +663,20 @@ function CampaignWorkList({
     onFocusItem(next.id);
     rowRefs.current.get(next.id)?.focus();
   };
+
+  const row = (item: CampaignWorkItemSummary) => (
+    <li key={item.id}>
+      <CampaignWorkRow
+        item={item}
+        now={now}
+        assignment={item.id === currentWorkItemId}
+        tabStop={item.id === stopId}
+        rowRef={(node) => { rowRefs.current.set(item.id, node); }}
+        onFocus={() => { if (item.id !== stopId) onFocusItem(item.id); }}
+        onOpen={() => onOpen(item)}
+      />
+    </li>
+  );
 
   let body: ReactNode;
   if (list.status === "loading" && items.length === 0) {
@@ -609,19 +710,11 @@ function CampaignWorkList({
           </Notice>
         )}
         <ul className="campaign-work-list" aria-labelledby={headingId} onKeyDown={onKeyDown}>
-          {items.map((item) => (
-            <li key={item.id}>
-              <CampaignWorkRow
-                item={item}
-                now={now}
-                assignment={item.id === currentWorkItemId}
-                tabStop={item.id === stopId}
-                rowRef={(node) => { rowRefs.current.set(item.id, node); }}
-                onFocus={() => { if (item.id !== stopId) onFocusItem(item.id); }}
-                onOpen={() => onOpen(item)}
-              />
-            </li>
-          ))}
+          {groups ? groups.map((group) => (
+            <CampaignWorkGroup key={group.repository ?? ""} group={group}>
+              {group.items.map(row)}
+            </CampaignWorkGroup>
+          )) : items.map(row)}
         </ul>
         {list.hasMore && (
           <BusyButton className="btn ghost sm campaign-work-more" busy={list.loadingMore} progress="Loading more work items…"
@@ -645,9 +738,27 @@ function CampaignWorkList({
           onChange={(origin) => onFiltersChange({ ...filters, origin })} />
         <Select label="State" value={filters.state} options={CAMPAIGN_STATE_FILTER_OPTIONS}
           onChange={(state) => onFiltersChange({ ...filters, state })} />
+        {repositoryOptions.length > 0 && (
+          <Select label="Repository" value={filters.repository ?? "all"} options={repositoryOptions}
+            onChange={(repository) => onFiltersChange({ ...filters, repository })} />
+        )}
       </div>
       {body}
     </section>
+  );
+}
+
+/** #4120: one repository's rows under a header with that repository's counts. */
+function CampaignWorkGroup({ group, children }: { group: CampaignWorkRepositoryGroup; children: ReactNode }) {
+  const headingId = useId();
+  return (
+    <li className="campaign-work-group">
+      <h4 id={headingId} className="campaign-work-group-head">
+        <span className="campaign-work-group-name">{group.label}</span>
+        <span className="campaign-work-group-counts">{repositoryCountsLabel(group.counts, group.items.length)}</span>
+      </h4>
+      <ul className="campaign-work-list" aria-labelledby={headingId}>{children}</ul>
+    </li>
   );
 }
 
@@ -670,6 +781,7 @@ function CampaignWorkRow({
 }) {
   const time = workItemTimeView(item, now);
   const cost = campaignCostView(item.cost);
+  const held = heldOnPullRequest(item);
   return (
     <button
       ref={rowRef}
@@ -693,6 +805,23 @@ function CampaignWorkRow({
           {cost.priced && <span title={cost.provenance ?? "Cost"}>{cost.text}</span>}
         </span>
       </span>
+      {/* #4120: prerequisites in other repositories, and the merge an item is held on. */}
+      {item.mergeDependencies?.map((dependency) => {
+        const line = mergeDependencyLine(dependency);
+        return (
+          <span key={dependency.id} className="campaign-work-row-line campaign-work-row-dependency">
+            <span className="campaign-work-row-dependency-label">Depends On</span>
+            <span>{line.label}</span>
+            <span className="campaign-status-meta">{line.status}</span>
+          </span>
+        );
+      })}
+      {held && (
+        <span className="campaign-work-row-line campaign-work-row-held">
+          <span className="campaign-work-row-dependency-label">{WAITING_FOR_PREREQUISITE_MERGE}</span>
+          <span>{held}</span>
+        </span>
+      )}
     </button>
   );
 }
@@ -723,6 +852,12 @@ function SessionLink({ sessionId, onOpen, children }: { sessionId: string; onOpe
       {children}
     </a>
   );
+}
+
+/** A campaign child by its title from the store, as a link to its session (#4146). */
+function CampaignChildLink({ sessionId, onOpen }: { sessionId: string; onOpen: (sessionId: string) => void }) {
+  const title = useStoreSelector((s) => s.sessions.get(sessionId)?.title ?? "");
+  return <SessionLink sessionId={sessionId} onOpen={onOpen}>{title || "Open Child Session"}</SessionLink>;
 }
 
 function RecordedTime({ at, now, prefix }: { at: number | null; now: number; prefix?: string }) {
@@ -972,12 +1107,18 @@ function CampaignWorkItemDetailView({
               <dt>Depends On</dt>
               <dd>{detail.dependsOn.length === 0 ? "None" : (
                 <ul className="campaign-detail-list">
-                  {detail.dependsOn.map((dependency) => (
-                    <li key={dependency.id}>
-                      {workItemTitle(dependency)}
-                      <span className="campaign-status-meta">{CAMPAIGN_WORK_STATE_LABELS[dependency.primaryState]}</span>
-                    </li>
-                  ))}
+                  {detail.dependsOn.map((dependency) => {
+                    // #4120: a prerequisite in another repository names it, and whether it merged.
+                    const merge = detail.mergeDependencies?.find((candidate) => candidate.id === dependency.id);
+                    const line = merge ? mergeDependencyLine(merge) : null;
+                    return (
+                      <li key={dependency.id}>
+                        {line ? line.label : workItemTitle(dependency)}
+                        <span className="campaign-status-meta">{CAMPAIGN_WORK_STATE_LABELS[dependency.primaryState]}</span>
+                        {line && <span className="campaign-status-meta">{line.status}</span>}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}</dd>
             </div>
@@ -989,7 +1130,8 @@ function CampaignWorkItemDetailView({
           <DetailSection title="Progress">
             <div><dt>Queue Position</dt><dd>{detail.queuePosition === null ? "Not Queued" : detail.queuePosition}</dd></div>
             {detail.stateCauses.length > 0 && (
-              <div><dt>Reason</dt><dd>{detail.stateCauses.map(stateCauseText).join(" ")}</dd></div>
+              <div><dt>Reason</dt><dd>{detail.stateCauses.map(stateCauseText).join(" ")}
+                {heldOnPullRequest(detail) && <> Waiting for {heldOnPullRequest(detail)}.</>}</dd></div>
             )}
             <div>
               <dt>Blocker</dt>

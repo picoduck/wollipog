@@ -37,9 +37,13 @@ test("a refused home lease reaches failed status and the visible conversation er
     await manager.releaseProviderHomeLeasesAfterShutdown(true);
   });
   const internals = manager as unknown as {
+    runnerEnvironment: NodeJS.ProcessEnv;
     acquireAdmission: (sessionId: string) => Promise<boolean>;
     launch: (meta: SessionMeta) => Promise<boolean>;
   };
+  // Native providers inherit the runner's provider home beneath meta.env. Keep this
+  // fixture on its malformed temporary HOME, independent of the invoking agent's account.
+  internals.runnerEnvironment = { HOME: home };
   assert.equal(await internals.acquireAdmission(meta.sessionId), true);
   assert.equal(await internals.launch(store.readMeta(meta.sessionId)!), false);
   assert.equal(driversCreated, 0);

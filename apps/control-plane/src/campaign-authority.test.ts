@@ -58,9 +58,14 @@ function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", dri
   const screen = fakeScreenRuntime(db, (request) =>
     [...asking].some((text) => JSON.stringify(request).includes(JSON.stringify(text).slice(1, -1))) ? { verdict: "ask" } : { verdict: "discusses" });
   svc.setDecisionRuntime(screen.runtime);
-  const enable =(delegatablePolicyIds: string[] = []) => svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2934",
-    operations: ["implementation_question", "question", "tool_approval", "policy_ask", "pr_merge", "merged_branch_deletion"],
-    delegatablePolicyIds }, 1, principal);
+  const enable =(delegatablePolicyIds: string[] = []) => {
+    const result = svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2934",
+      operations: ["implementation_question", "question", "tool_approval", "policy_ask", "pr_merge", "merged_branch_deletion"],
+      delegatablePolicyIds }, 1, principal);
+    // The control change's own scope synchronization (#3363) is not what these tests count.
+    sent.splice(0, sent.length, ...sent.filter((message) => (message as { type: string }).type !== "campaign_issue_scope"));
+    return result;
+  };
   const snapshot: WorkflowDecisionResourceSnapshot = { category: "implementation_question", question: "Which authentication library should we implement?",
     options: [{ optionId: "a", label: "Library A" }, { optionId: "b", label: "Library B" }] };
   // The typed route's own entry point, which screens the question before it is admitted.
@@ -97,7 +102,7 @@ test("#4062 a Full Control merge is the Orchestrator's only while every issue it
     assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#2934"] }), 241), unverified);
     assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#3903"] }), 241),
       { owner: "human", reason: "outside_issue_scope", unscopedClosures: ["picoduck/wollipog#3903"] });
-    // Nothing reads a GitLab merge's closures.
+    // A v295 runner reads a GitLab merge's closures (#3762), so it is owned exactly like a GitHub one.
     const gitlab = "gitlab.example.com/platform/wollipog";
     const control = structuredClone(root.orchestratorPolicy!.control!);
     assert.ok(control.mode === "full_control");
@@ -105,7 +110,19 @@ test("#4062 a Full Control merge is the Orchestrator's only while every issue it
     const onGitlab = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, control,
       issueScope: { ...root.orchestratorPolicy!.issueScope!, repository: gitlab } } };
     assert.equal(campaignBoundaryCurrent(onGitlab), true);
-    assert.deepEqual(evaluate(onGitlab, merge({ repository: gitlab, mergeMethod: "merge_train", squash: false, removeSourceBranch: false })), unverified);
+    const gitlabMerge = (extra: Record<string, unknown> = {}) =>
+      merge({ repository: gitlab, mergeMethod: "merge_train", squash: false, removeSourceBranch: false, ...extra });
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge()), delegated, "a Refs-only GitLab merge closes nothing");
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge({ intendedClosures: [`${gitlab}#2934`] })), delegated);
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge({ intendedClosures: [`${gitlab}#2934`, `${gitlab}#3903`, "gitlab.example.com/other/project#2934"] })),
+      { owner: "human", reason: "outside_issue_scope", unscopedClosures: [`${gitlab}#3903`, "gitlab.example.com/other/project#2934"] });
+    // A runner older than that read (v294) proves nothing, whatever the merge declares.
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge(), 294), unverified);
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge({ intendedClosures: [`${gitlab}#2934`] }), 294), unverified);
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge({ intendedClosures: [`${gitlab}#3903`] }), 294),
+      { owner: "human", reason: "outside_issue_scope", unscopedClosures: [`${gitlab}#3903`] });
+    // A GitHub read never stands in for a GitLab one: a v242 runner's GitLab merge is unread.
+    assert.deepEqual(evaluate(onGitlab, gitlabMerge(), 242), unverified);
     // A scope that no longer names a closing issue takes the merge back from the Orchestrator.
     const narrowed = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, issueNumbers: [],
       issueScope: { ...root.orchestratorPolicy!.issueScope!, issueNumbers: [] } } };
@@ -115,6 +132,12 @@ test("#4062 a Full Control merge is the Orchestrator's only while every issue it
     const custom = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, control: undefined },
       parentControlPolicy: { revision: 1, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, pr_merge: "orchestrator" as const } } };
     assert.deepEqual(evaluate(custom, merge({ intendedClosures: ["picoduck/wollipog#3903"] }), 241), { owner: "orchestrator", reason: "custom_owner" });
+    // #4119: every reported check stands in for required ones; no checks at all is the person's in both modes.
+    const reported = merge({ checksBasis: "all_reported" });
+    const unchecked = merge({ checksBasis: "all_reported", requiredChecks: { headSha: head, status: "passed", checkedAt: 1, checks: [] } });
+    assert.deepEqual(evaluate(root, reported), delegated);
+    assert.deepEqual(evaluate(root, unchecked), { owner: "human", reason: "no_checks" });
+    assert.deepEqual(evaluate(custom, unchecked), { owner: "human", reason: "no_checks" });
   } finally { h.db.close(); }
 });
 

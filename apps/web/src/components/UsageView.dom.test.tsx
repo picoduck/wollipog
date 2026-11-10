@@ -200,7 +200,7 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
   const root = createRoot(container);
 
   await act(async () => {
-    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+    root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>);
   });
   await act(async () => {
     await settleLoad();
@@ -253,7 +253,7 @@ test("with 14 days of hourly retention, Group By omits Hour past 14 days and the
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>));
   await act(async () => { await settleLoad(); await Promise.resolve(); });
   // No Hour option is ever drawn disabled: it is there or it is not.
   const disabledHour = () => [...container.querySelectorAll('[role="radio"][aria-disabled="true"]')]
@@ -299,7 +299,7 @@ test("a plane without weekly support has no Week, and the Range menu ends with w
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>));
   await act(async () => { await settleLoad(); await Promise.resolve(); });
 
   assert.deepEqual(optionLabels(container, "Group By"), ["Hour", "Day"]);
@@ -330,7 +330,7 @@ test("About These Numbers holds the caveats: estimate, rate source, coverage dat
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>));
   await act(async () => { await settleLoad(); await Promise.resolve(); });
   assert.doesNotMatch(container.textContent ?? "", /published API rates|Recording started|Only totals/,
     "no caveat is on screen until About These Numbers opens");
@@ -372,7 +372,7 @@ test("Group By is the one aggregation control: it renames the time tab, and a Br
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>));
   await act(async () => { await settleLoad(); await Promise.resolve(); });
 
   const group = (label: string) => container.querySelector(`[role="radiogroup"][aria-label="${label}"]`)!;
@@ -458,7 +458,7 @@ test("an Hour request that discovers rolled data switches to Day and disables Ho
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>));
   await act(async () => { await settleLoad(); await Promise.resolve(); });
 
   const group = (label: string) => container.querySelector(`[role="radiogroup"][aria-label="${label}"]`)!;
@@ -517,7 +517,7 @@ test("an older plane's implicit Day fallback disables Hour without showing an er
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>));
   await act(async () => { await settleLoad(); });
   const group = (label: string) => container.querySelector(`[role="radiogroup"][aria-label="${label}"]`)!;
   const option = (label: string, value: string) => [...group(label).querySelectorAll("[role=radio]")]
@@ -556,7 +556,7 @@ test("Week names Wollipog while its availability is still being checked", async 
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>));
   await act(async () => { await settleLoad(); });
 
   const week = [...container.querySelectorAll('[role="radiogroup"][aria-label="Group By"] [role="radio"]')]
@@ -587,7 +587,7 @@ test("an initial usage failure gives unavailable Week an actionable retry explan
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>));
   await act(async () => { await settleLoad(); await Promise.resolve(); });
 
   const week = [...container.querySelectorAll('[role="radiogroup"][aria-label="Group By"] [role="radio"]')]
@@ -627,7 +627,7 @@ test("an unavailable Hour response cannot replace a newer Week selection during 
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>));
   await act(async () => { await settleLoad(); });
   const group = (label: string) => container.querySelector(`[role="radiogroup"][aria-label="${label}"]`)!;
   const option = (label: string, value: string) => [...group(label).querySelectorAll("[role=radio]")]
@@ -696,7 +696,7 @@ const renderBudgetHistory = async ({
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><FeedbackProvider><UsageView /></FeedbackProvider></ApiProvider>));
+  await act(async () => root.render(<ApiProvider client={client}><FeedbackProvider><UsageView tab="api" /></FeedbackProvider></ApiProvider>));
   await act(async () => { await settleLoad(); await Promise.resolve(); });
   const body = domWindow.document.body as unknown as HTMLElement;
   const dialogs = () => [...body.querySelectorAll<HTMLElement>('[role="dialog"]')];
@@ -1006,7 +1006,7 @@ test("aggregation switches ignore stale responses and show request failures with
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>));
   await act(async () => { await settleLoad(); await Promise.resolve(); });
   const aggregation = () => container.querySelector('[role="radiogroup"][aria-label="Group By"]')!;
   const option = (label: string) => [...aggregation().querySelectorAll("[role=radio]")]
@@ -1065,7 +1065,7 @@ test("a late failed request cannot overwrite the newer selection's loading state
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>));
   await act(async () => { await settleLoad(); });
   const aggregation = () => container.querySelector('[role="radiogroup"][aria-label="Group By"]')!;
   const option = (label: string) => [...aggregation().querySelectorAll("[role=radio]")]
@@ -1127,7 +1127,7 @@ test("an unsplit response from an older plane is shown honestly and the window c
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+    root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>);
   });
   await act(async () => {
     await settleLoad();
@@ -1208,7 +1208,7 @@ test("a pre-v103 response without seriesByDriver still renders", async () => {
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+    root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>);
   });
   await act(async () => {
     await settleLoad();
@@ -1279,7 +1279,7 @@ async function renderWithFleet(client: ApiClient, runners: readonly RunnerView[]
   await act(async () => {
     root.render(
       <ApiProvider client={client}>
-        <StoreProvider connection={connection} navigation={navigation}><UsageView /></StoreProvider>
+        <StoreProvider connection={connection} navigation={navigation}><UsageView tab="api" /></StoreProvider>
       </ApiProvider>,
     );
   });
@@ -1376,7 +1376,7 @@ test("the time table shows the newest 7 periods and Show All, which shows the re
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+    await act(async () => root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>));
     await act(async () => { await settleLoad(); await Promise.resolve(); });
     assert.deepEqual(periodLabels(container), series.slice(0, 7).map((row) => periodLabel(row.bucketTs, "day")));
     assertNoDomNode(container.querySelector('#usage-breakdown-panel [role="region"]'), "the table is not a scroll region");
@@ -1422,7 +1422,7 @@ test("a person at the daily budget, settled plus running turns, shows one Budget
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(<ApiProvider client={usageClient(response([]), people, 25)}><UsageView /></ApiProvider>));
+    await act(async () => root.render(<ApiProvider client={usageClient(response([]), people, 25)}><UsageView tab="api" /></ApiProvider>));
     await act(async () => { await settleLoad(); await Promise.resolve(); });
     await chooseBreakdown(container, "By Person");
     const panel = container.querySelector("#usage-breakdown-panel")!;
@@ -1460,7 +1460,7 @@ test("without a daily budget By Person says so and draws no meter or badge (#301
     const people: UserCostWindows[] = [
       { userId: "u-ada", userName: "Ada", todayUsd: 26.4, last7DaysUsd: 112.2, last30DaysUsd: 401.7, dailyBudgetUsd: null },
     ];
-    await act(async () => root.render(<ApiProvider client={usageClient(response([]), people)}><UsageView /></ApiProvider>));
+    await act(async () => root.render(<ApiProvider client={usageClient(response([]), people)}><UsageView tab="api" /></ApiProvider>));
     await act(async () => { await settleLoad(); await Promise.resolve(); });
     await chooseBreakdown(container, "By Person");
     const panel = container.querySelector("#usage-breakdown-panel")!;
@@ -1487,7 +1487,7 @@ const renderOverview = async (data: UsageAggregationResponse) => {
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+    root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>);
   });
   await act(async () => {
     await settleLoad();
@@ -1621,7 +1621,7 @@ const renderStandalone = async (client: ApiClient) => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => root.render(<ApiProvider client={client}><UsageView tab="api" /></ApiProvider>));
   await act(async () => { await settleLoad(); await Promise.resolve(); });
   return { container, unmount: async () => { await act(async () => root.unmount()); container.remove(); } };
 };

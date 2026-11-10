@@ -126,6 +126,22 @@ export function claudeMediaReviewerInitRefusal(event: unknown, expected: { model
   return null;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+const PRE_INIT_NOTICE_KEYS = JSON.stringify(["event", "session_id", "subtype", "type", "uuid"]);
+
+/** The one event the pinned CLI emits before its startup init. Under `--bare`, 2.1.296 (and
+ * 2.1.314) first announce a UI render notice (#3849). It is a fixed five-field record — no tool,
+ * model, permission, auth, usage or text — so it is accepted only in exactly that shape. Init
+ * remains the startup proof: nothing is counted or trusted until it arrives, and it must
+ * name the session the notice announced. */
+export function claudeMediaReviewerPreInitNotice(event: unknown): string | null {
+  const e = event as Record<string, unknown> | null;
+  if (!e || typeof e !== "object" || Array.isArray(e) || JSON.stringify(Object.keys(e).sort()) !== PRE_INIT_NOTICE_KEYS) return null;
+  return e.type === "system" && e.subtype === "ui_invalidate" && e.event === "ui.render" &&
+    typeof e.uuid === "string" && UUID.test(e.uuid) && typeof e.session_id === "string" && UUID.test(e.session_id)
+    ? e.session_id : null;
+}
+
 export interface ClaudeMediaReviewerWindowResult {
   initialized: boolean;
   refusal?: string;
@@ -142,6 +158,8 @@ export interface ClaudeMediaReviewerWindowResult {
 export class ClaudeMediaReviewerStream {
   private buffer = "";
   private sessionId: string | undefined;
+  /** Session announced by the tolerated pre-init notice; at most one notice is ever accepted. */
+  private preInitSessionId: string | undefined;
   private readonly toolIds = new Set<string>();
   readonly result: ClaudeMediaReviewerWindowResult = { initialized: false, toolCalls: 0, priced: false, turns: 0 };
   constructor(private readonly expected: { model: string }) {}
@@ -164,8 +182,15 @@ export class ClaudeMediaReviewerStream {
   private refuse(reason: string): string { this.result.refusal = reason; return reason; }
   private event(event: Record<string, unknown>): string | null {
     if (!this.result.initialized) {
+      if (this.preInitSessionId === undefined) {
+        const announced = claudeMediaReviewerPreInitNotice(event);
+        if (announced) { this.preInitSessionId = announced; return null; }
+      }
       const refusal = claudeMediaReviewerInitRefusal(event, this.expected);
       if (refusal) return refusal;
+      if (this.preInitSessionId !== undefined && event.session_id !== this.preInitSessionId) {
+        return "startup init names another session than its pre-init notice";
+      }
       this.result.initialized = true; this.sessionId = event.session_id as string;
       return null;
     }

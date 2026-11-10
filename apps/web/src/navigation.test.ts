@@ -47,7 +47,7 @@ const routes: Array<[View, string]> = [
   [{ name: "skills", pane: "orphans" }, "/skills/orphans"],
   [{ name: "skills", pane: "overview" }, "/skills/overview"],
   [{ name: "usage" }, "/usage"],
-  [{ name: "usage", tab: "subscriptions" }, "/usage/subscriptions"],
+  [{ name: "usage", tab: "api" }, "/usage/api"],
   [{ name: "projects" }, "/projects"],
   [{ name: "projects", pane: "overview" }, "/projects/overview"],
   [{ name: "projects", id: "project / unicode ✅" }, `/projects/~${encodeResourceId("project / unicode ✅")}`],
@@ -57,6 +57,12 @@ const routes: Array<[View, string]> = [
   [{ name: "run", id: "run_abc" }, `/runs/~${encodeResourceId("run_abc")}`],
   [{ name: "pod", id: "pod_abc" }, `/pods/~${encodeResourceId("pod_abc")}`],
 ];
+
+test("Usage opens on Subscriptions, and a link saved from when it had its own path still lands there", () => {
+  assert.deepEqual(viewFromPath("/usage", ""), { name: "usage" });
+  assert.deepEqual(viewFromPath("/usage/subscriptions", ""), { name: "usage" });
+  assert.equal(viewPath({ name: "usage" }), "/usage");
+});
 
 test("attention routes retain exact opaque request identity and epoch through reload", () => {
   for (const requestId of [undefined, "child / ..? # % ✅", "\u0000request"]) {
@@ -90,6 +96,15 @@ test("an artifact link names its session's Browser tab and, optionally, one arti
   assert.equal(viewFromPath(path, "?epoch=1"), null);
   assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/artifacts/~!`), null);
   assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/artifacts/`)?.name, "session");
+});
+
+test("a campaign link preserves its root and opens Campaign Status", () => {
+  const view: View = { name: "session", id: "campaign / ✅", campaign: true };
+  const path = viewPath(view);
+  assert.deepEqual(viewFromPath(path), view);
+  assert.equal(sameView(view, { name: "session", id: view.id }), false);
+  assert.equal(viewFromPath(path, "?unexpected=1"), null);
+  assert.equal(viewFromPath("/sessions/~!/campaign"), null);
 });
 
 test("a run's phone member is in its URL, so a reload and a shared link keep it (#2975)", () => {

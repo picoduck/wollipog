@@ -168,6 +168,8 @@ test("only a legacy run that was delivered reads as sent without receipts, never
 test("a run opens its workflow run, else its session, else nothing", () => {
   assert.deepEqual(runOpenTarget(run({ runId: "run-1", sessionId: "s-1" })), { label: "Open Run", view: { name: "run", id: "run-1" } });
   assert.deepEqual(runOpenTarget(run({ sessionId: "s-1" })), { label: "Open Session", view: { name: "session", id: "s-1" } });
+  assert.deepEqual(runOpenTarget(run({ sessionId: "s-1", campaignSessionId: "s-1" })),
+    { label: "Open Campaign", view: { name: "session", id: "s-1", campaign: true } });
   assert.equal(runOpenTarget(run()), null);
 });
 

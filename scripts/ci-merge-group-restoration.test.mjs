@@ -25,7 +25,7 @@ function fullRun(id, createdAt = "2026-10-27T13:00:00Z", headSha = "d".repeat(40
     job("PR Suite Routing", [], "skipped"),
     job("Typecheck & Bundles", CHECK_STEPS.map((name) => step(name))),
     ...[1, 2, 3].map((shard) => job(`Unit Tests (${shard})`, [step("Unit Tests")])),
-    ...[1, 2, 3, 4, 5].map((shard) => job(`Browser End-to-End Tests (${shard})`, [step("Remote-Instance Browser End-to-End Tests"),
+    ...Array.from({ length: 10 }, (_, i) => i + 1).map((shard) => job(`Browser End-to-End Tests (${shard})`, [step("Remote-Instance Browser End-to-End Tests"),
       step("Rendered Production Browser Smoke", shard === 1 ? "success" : "skipped")])),
     job("WebKit End-to-End Tests", [step("WebKit Browser End-to-End Tests")]),
     job("Settings-Rows win32 Baselines / Detect Settings-Rows Changes", [step("Compare the Diff Against the Settings-Rows Paths")]),
@@ -46,7 +46,7 @@ const edit = (fixture, change) => {
 const named = (fixture, name) => fixture.listing.jobs.find((job) => job.name === name);
 
 test("the verifier's job inventory is the rolling full inventory and its steps exist in ci.yml", () => {
-  assert.equal(FULL_JOBS.length, 14);
+  assert.equal(FULL_JOBS.length, 19);
   assert.deepEqual(FULL_JOBS.filter((name) => name.startsWith("Unit Tests")), ["Unit Tests (1)", "Unit Tests (2)", "Unit Tests (3)"]);
   assert.ok(FULL_JOBS.includes("Delegated Pipeline Recovery"));
   assert.ok(FULL_JOBS.includes(REQUIRED_CONTEXT));
@@ -75,9 +75,9 @@ test("reduced, partial, unfinished, gate-active or mis-identified runs are never
     const copy = edit(fixture, change);
     assert.ok(certifyRun(repository, copy.run, copy.listing, provenance).includes(reason), reason);
   };
-  // A reduced group runs one browser leg; an extra or renamed leg is not the five-shard envelope either.
+  // A reduced group runs one browser leg; an extra or renamed leg is not the full shard envelope either.
   refuse((copy) => { copy.listing.jobs = copy.listing.jobs.filter((job) => !/\([2-5]\)$/.test(job.name)); }, "browser-shards-incomplete");
-  refuse((copy) => copy.listing.jobs.push({ ...named(copy, "Browser End-to-End Tests (5)"), name: "Browser End-to-End Tests (6)" }), "browser-shards-incomplete");
+  refuse((copy) => copy.listing.jobs.push({ ...named(copy, "Browser End-to-End Tests (5)"), name: "Browser End-to-End Tests (11)" }), "browser-shards-incomplete");
   refuse((copy) => { named(copy, "Browser End-to-End Tests (3)").conclusion = "cancelled"; }, "job-not-successful:Browser End-to-End Tests (3)");
   refuse((copy) => { named(copy, "WebKit End-to-End Tests").status = "in_progress"; }, "job-not-successful:WebKit End-to-End Tests");
   refuse((copy) => { copy.listing.jobs = copy.listing.jobs.filter((job) => job.name !== "WebKit End-to-End Tests"); }, "job-missing:WebKit End-to-End Tests");

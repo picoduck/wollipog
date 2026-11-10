@@ -357,7 +357,7 @@ are not migrated automatically:
 
 | `permissionMode` | extra argv | prompt delivery |
 |---|---|---|
-| `default` (ask everything) | `--input-format stream-json --permission-prompt-tool stdio` (**no** `--permission-mode`) | stream-json user message on stdin; stdin stays open for approvals |
+| `default` (ask everything) | `--input-format stream-json --permission-prompt-tool stdio --permission-mode default` (named explicitly: left flagless, 2.1.296 starts an auto-capable model in `auto`, #3849) | stream-json user message on stdin; stdin stays open for approvals |
 | `auto` | `--input-format stream-json --permission-prompt-tool stdio --permission-mode auto` | same — mode rules classify first; the stdio channel catches escalations so a blocked headless turn settles gracefully |
 | `acceptEdits` / `plan` / `bypassPermissions` | `--permission-mode <mode>` | plain-text stdin; with images: + `--input-format stream-json` (prompt as a stream-json message, stdin closed immediately — no approvals) |
 | the same fixed rules, **structured Orchestrator** | `--input-format stream-json --permission-prompt-tool stdio --permission-mode <mode>` | same as the channel modes — the fixed rule still decides everything it can decide itself, and the channel catches only what a headless fixed-rule turn would otherwise refuse ("This command requires approval") |

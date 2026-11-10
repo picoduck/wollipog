@@ -1,5 +1,5 @@
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
-import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
+import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
 import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js";
 import { DELEGATED_IMAGE_REVIEWER_ERROR, delegatedImageReviewerMutationAllowed } from "./delegated-image-reviews.js";
@@ -15,7 +15,7 @@ import { AutomationCreationService } from "./automation-creation.js";
  */
 
 import os from "node:os";
-import { handoffDestinationError, locationSwitchRole, sessionRole, withRepositoryMismatchGuidance, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest, type SetCampaignFollowUpLimitRequest, type SetScopeGrantSelectionCountRequest } from "@wollipog/protocol";
+import { handoffDestinationError, locationSwitchRole, sessionRole, withRepositoryMismatchGuidance, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest, type ReleaseCampaignSlotRequest, type SetCampaignFollowUpLimitRequest, type SetScopeGrantSelectionCountRequest } from "@wollipog/protocol";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -24,6 +24,7 @@ import websocket from "@fastify/websocket";
 import { isSqliteBusy, withRunnerPersistenceRetry } from "./runner-persistence.js";
 import cors from "@fastify/cors";
 import { canMutateQuestionPolicy } from "./question-policy.js";
+import { registerReviewerSecurityRoutes } from "./reviewer-security-route.js";
 import { automaticAccountSwitchForRunner } from "./automatic-account-switch-compatibility.js";
 import {
   archiveSessionPage,
@@ -63,6 +64,8 @@ import {
   CONTROL_PLANE_SERVICE,
   providerSupportsConversationFork,
   runnerCapabilityRequirementError,
+  parseProviderAccountPolicyWrite,
+  PROVIDER_ACCOUNT_POLICY_NOT_FIXED,
   runnerCapabilityRequirementWithAlternative,
   type RunnerCapabilityRequirementDetails,
   type ProviderHomeLaunchRefusalView,
@@ -114,6 +117,9 @@ import {
   type CreateWorkspaceReferenceRequest,
   type CreateProjectRequest,
   type UpdateProjectRequest,
+  providerAccountChoiceRequiredForAgent,
+  providerAccountSelectionPreviewForAgent,
+  runnerViewForAgent,
   type AddProjectLocationRequest,
   type ProjectLocationView,
   type CreateProjectLocationRequest,
@@ -217,10 +223,11 @@ import {
 import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
 import { CampaignWorkObservations } from "./campaign-work-observation.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
+import { MergeClosureWatcher } from "./merge-closure-watch.js";
 import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
 import { ProviderPublicationUnavailable, type PublicationObservation } from "./provider-profile-publication-store.js";
 import { readSshConfigHosts } from "./ssh-config.js";
-import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS, TeamMemberContainmentError } from "./db.js";
+import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS, OccupiedUnreadLocationError, TeamMemberContainmentError } from "./db.js";
 import { registerIdentityTeamRoutes, TEAM_NAME_TAKEN } from "./identity-team-route.js";
 import { logWalCheckpointerEvent } from "./wal-checkpointer.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
@@ -256,7 +263,9 @@ import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-rout
 import { registerReviewSettingsRoutes } from "./review-settings-route.js";
 import { ReviewSettingsService } from "./review-settings.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
+import { ScheduledCampaignRuntime } from "./scheduled-campaigns.js";
 import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
+import { CampaignRepositoryAdditions, registerCampaignRepositoryAdditionRoutes } from "./campaign-repository-additions.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import { composeHostingVideoEvidence, registerHostingVideoEvidenceRoutes } from "./hosting-video-evidence.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
@@ -1093,6 +1102,7 @@ registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchest
   videoCertification: (runnerId) => videoEvidence.launchCertification(runnerId) });
 const campaignLocations = new CampaignLocations({ db, hub, synchronize: (rootId) => svc.synchronizeCampaignIssueScope(rootId),
   settle: (before, revoked, owner, now) => svc.settleCampaignBoundaryChange(before, revoked, owner, now),
+  reestablish: (rootId) => svc.establishCustomCampaignRepositories(rootId),
   log: { warn: (message) => app.log.warn(message) } });
 registerCampaignLocationRoutes(app, { campaignLocations, requestPrincipal });
 registerHostingVideoEvidenceRoutes(app, { video: videoEvidence, requestPrincipal });
@@ -1109,23 +1119,30 @@ const campaignWorkObservations = new CampaignWorkObservations({
 // embedded summary and the Campaign Status panel follow it.
 db.campaignWorkLedger.accounting.observeUsage((campaignSessionId) => campaignWorkObservations.usageChanged(campaignSessionId));
 
-// Slice 8 of #2417: GitHub status of the pull requests campaign work items name, read on the
-// runner hosting the root campaign through its own `gh` login, on demand and in a bounded
-// background pass. Changes ride the same coalesced revision as observed session changes.
+// Slice 8 of #2417: forge status of the pull requests campaign work items name, on demand and in
+// a bounded background pass. Each is read through one runner's own login: the root campaign's for
+// the launch repository, a Location's for another campaign repository (#4119). Changes ride the same coalesced revision as observed session changes.
 const campaignForgeObserver = new CampaignForgeObserver({
-  observingRunner: (campaignId) => {
-    const runner = db.campaignForgeObservingRunner(campaignId);
-    return runner ? { ...runner, online: runner.online && hub.isRunnerOnline(runner.runnerId) } : null;
-  },
+  observingRunner: (campaignId, repository) => db.campaignForgeObservingRunner(campaignId, repository, (runnerId) => hub.isRunnerOnline(runnerId)),
   requestFromRunner: (runnerId, requestId, message, timeoutMs) => hub.requestFromRunner(runnerId, requestId, message, timeoutMs),
   store: db.campaignForgeObservations,
-  // Unfinished items' pull requests, and merged campaign pull requests whose branch is pending (#4067).
-  backgroundTargets: (include) => [...db.campaignWorkLedger.forgeBackgroundTargets(include), ...db.campaignMergedBranchTargets(include)],
+  // Unfinished items' pull requests, merged campaign pull requests whose branch is pending (#4067), and the
+  // prerequisites held merges are parked on (#4120).
+  backgroundTargets: (include) => db.campaignForgeBackgroundTargets(include),
   changed: (campaignId) => campaignWorkObservations.forgeChanged(campaignId),
   warn: (message) => app.log.warn(message),
   newRequestId: () => `campaign_forge_${randomUUID()}`,
 });
 campaignForgeObserver.start();
+// #4323: a consumed merge is read through its child's runner until it lands, so a closure changed
+// while it waits in the merge queue or train is dequeued, or reported to the campaign's owner.
+const mergeClosureWatcher = new MergeClosureWatcher({
+  ...svc.mergeClosureWatcherDeps(),
+  requestFromRunner: (runnerId, requestId, message, timeoutMs) => hub.requestFromRunner(runnerId, requestId, message, timeoutMs),
+  warn: (message) => app.log.warn(message),
+  newRequestId: () => `merge_closure_watch_${randomUUID()}`,
+});
+mergeClosureWatcher.start();
 /** An on-demand read waits at most this long before the route answers with what is stored. */
 const CAMPAIGN_FORGE_REFRESH_WAIT_MS = 20_000;
 const refreshCampaignForge = (campaignId: string, refs: readonly CampaignPullRequestRef[]) => new Promise<void>((resolve) => {
@@ -1147,6 +1164,11 @@ hub.observeSessions({
   changed: (sessionId) => campaignWorkObservations.sessionChanged(sessionId),
   removed: (sessionId) => campaignWorkObservations.sessionRemoved(sessionId),
 });
+// A turn that ends takes its tracked waits along (#1280).
+hub.observeSessions({
+  changed: (sessionId) => svc.sessionWaitLifecycleChanged(sessionId),
+  removed: (sessionId) => { db.sessionWaits.clear(sessionId); },
+});
 
 registerPromptImageRoutes(app, {
   db,
@@ -1155,6 +1177,7 @@ registerPromptImageRoutes(app, {
   actor: workflowActor,
 });
 
+const scheduledCampaigns = new ScheduledCampaignRuntime(db, hub, svc, orchestratorSettings, evidenceAuthorityDisclosures);
 const automations = new AutomationsService(
   db,
   hub,
@@ -1169,6 +1192,7 @@ const automations = new AutomationsService(
       { kind: "organization_admin", organizationId: db.localIdentityContext().organizationId },
     );
   },
+  scheduledCampaigns,
 );
 automations.recover(Date.now());
 
@@ -1261,7 +1285,7 @@ app.addHook("preSerialization", (req, _reply, payload, done) => {
   const protocol = parseUiProtocolVersion(req.query) ?? parseUiProtocolVersion({
     protocolVersion: req.headers["x-wollipog-ui-protocol"],
   });
-  done(null, projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(payload, protocol), protocol));
+  done(null, projectCampaignStatusForUi(projectBackgroundRetryExhaustionForUi(payload, protocol), protocol));
 });
 // @fastify/websocket installs one `upgrade` listener on the underlying HTTP server. Register it
 // exactly once: sibling registrations make both listeners claim every socket and eventually turn
@@ -1457,6 +1481,8 @@ app.register(async (instance) => {
           ...(runnerSupportsProtocol(msg.protocolVersion, "machineRunnerCapacity")
             ? { runnerCapacity: db.machineRunnerCapacityConfiguration(runnerId) ?? undefined }
             : {}),
+          ...(runnerSupportsProtocol(msg.protocolVersion, "reviewerSecurityPolicy")
+            ? { reviewerSecurity: db.machineReviewerSecurity(runnerId) } : {}),
           automaticAccountSwitching: automaticAccountSwitchForRunner(
             db.machineAutomaticAccountSwitchConfiguration(runnerId),
             msg.protocolVersion,
@@ -1607,7 +1633,9 @@ app.register(async (instance) => {
       case "campaign_launch_inspection_result":
       case "gitlab_merge_preflight_result":
       case "github_merge_preflight_result":
+      case "gitlab_merge_closures_result":
       case "forge_decision_action_result":
+      case "merge_closure_watch_result":
         if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
         break;
       case "github_issue_closure_result":
@@ -2345,7 +2373,11 @@ app.get("/index.html", serveShell);
 
 app.get("/api/runners", async (req) => {
   const principal = requestPrincipal(req);
-  return { runners: principal ? db.listRunnersForPrincipal(principal) : [] };
+  if (!principal) return { runners: [] };
+  const runners = db.listRunnersForPrincipal(principal);
+  // At this route, not in the list: get_campaign's Child Model check reads an agent's readiness and the
+  // saved policy from that same list, and never returns them.
+  return { runners: principal.kind === "agent" ? runners.map(runnerViewForAgent) : runners };
 });
 
 /* ------------------------------- Projects -------------------------------- */
@@ -2594,7 +2626,15 @@ app.delete("/api/projects/:id", async (req, reply) => {
   if (!canManageAffectedSessions(principal, (session) => session.projectId === id)) {
     return reply.code(409).send({ error: "project contains sessions you cannot manage" });
   }
-  const deleted = db.deleteProject(id);
+  // What deleting it ends of an unread Location's refusal leaves its pauses like any revocation, and
+  // names who deleted it, whose action led to it (#4319, #3916).
+  let deleted: ReturnType<typeof db.deleteProject>;
+  try {
+    deleted = db.deleteProject(id, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
+  } catch (error) {
+    // Only the sessions this person can see are named (#4319).
+    return reply.code(409).send({ error: error instanceof OccupiedUnreadLocationError ? error.describe((sessionId) => db.canAccessSession(principal, sessionId)) : (error as Error).message });
+  }
   if (!deleted) return reply.code(404).send({ error: "project not found" });
   hub.projectRemoved(id);
   for (const sessionId of deleted.sessionIds) hub.sessionChangedById(sessionId);
@@ -2692,7 +2732,10 @@ app.post("/api/projects/:id/locations/move", async (req, reply) => {
     .map((session) => session.id);
   let moved: ProjectLocationView | null;
   try {
-    moved = db.moveProjectLocation(location.id, id, Date.now(), principal.userId);
+    // What a move ends of an unread Location's refusal leaves its pauses like any revocation, and
+    // names who moved it, whose action led to it (#4319, #3916).
+    moved = db.moveProjectLocation(location.id, id, Date.now(), principal.userId,
+      (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
   } catch (error) {
     return reply.code(400).send({ error: (error as Error).message });
   }
@@ -2715,7 +2758,15 @@ app.delete("/api/projects/:id/locations/:locationId", async (req, reply) => {
   if (!canManageAffectedSessions(principal, (session) => session.projectLocationId === locationId)) {
     return reply.code(409).send({ error: "project location contains sessions you cannot manage" });
   }
-  db.removeProjectLocation(locationId);
+  // What removing it ends of an unread Location's refusal leaves its pauses like any revocation, and
+  // names who removed it, whose action led to it (#4319, #3916).
+  // A campaign session running on an unread Location keeps it in place, so a read can still end its
+  // refusal; the refusal says so (#4319).
+  try {
+    db.removeProjectLocation(locationId, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
+  } catch (error) {
+    return reply.code(409).send({ error: error instanceof OccupiedUnreadLocationError ? error.describe((sessionId) => db.canAccessSession(principal, sessionId)) : (error as Error).message });
+  }
   const project = db.getProject(id)!;
   hub.projectChanged(project);
   for (const session of db.listSessions({ includeArchived: true })) {
@@ -3641,6 +3692,8 @@ app.put("/api/runners/:id/capacity", async (req, reply) => {
   return { capacity: changed.configuration };
 });
 
+registerReviewerSecurityRoutes(app, db, hub, requestPrincipal);
+
 app.put("/api/runners/:id/automatic-account-switching", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = requestPrincipal(req);
@@ -3730,12 +3783,106 @@ app.put("/api/runners/:id/provider-account-defaults/:provider", async (req, repl
   const changed = db.setMachineProviderAccountDefault(
     id, provider, body.accountId as string | null, body.expectedRevision as number, Date.now(),
   );
+  // An older client can't show this policy, so it can't replace it, and it sees why. No `current`:
+  // its conflict handling would read that as an ordinary lost race and invite another attempt.
+  if (!changed.ok && changed.notFixed) return reply.code(409).send({
+    error: "This machine uses another account selection mode for this provider. Update this client to change it.",
+    code: PROVIDER_ACCOUNT_POLICY_NOT_FIXED,
+  });
   if (!changed.ok) return reply.code(409).send({
     error: "Default Provider Account changed in another client",
     current: changed.choice,
   });
   hub.runnerChanged(id);
   return { providerAccountDefault: changed.choice };
+});
+
+// Versioned account selection policy (#4353). An offline Machine saves it, and a preview says it isn't
+// enforced until the Machine reconnects; one whose last-known runner can't enforce it refuses.
+app.put("/api/runners/:id/provider-account-policies/:provider", async (req, reply) => {
+  const { id, provider } = req.params as { id: string; provider: string };
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  if (provider !== "claude" && provider !== "codex") {
+    return reply.code(400).send({ error: "provider must be Claude or Codex" });
+  }
+  const runner = db.getRunner(id);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  const current = db.machineProviderAccountDefault(id, provider);
+  const write = parseProviderAccountPolicyWrite(req.body, current);
+  if (!write.ok) return reply.code(400).send({ error: write.error });
+  const capability = write.mode === "fixed" ? "providerAccounts" as const : "providerAccountSelectionPolicy" as const;
+  if (!runnerSupportsProtocol(runner.protocolVersion, capability)) {
+    return reply.code(409).send(runnerCapabilityRequirementError(
+      runner.protocolVersion, capability, write.mode === "fixed" ? "default provider account changes" : "priority order",
+    ));
+  }
+  // A newly named account must exist here and be usable here. One the record already names may be
+  // missing or lose access later: it stays visible until a person removes it, and doesn't block a reorder.
+  const accounts = (runner.providerAccounts ?? []).filter((account) => account.provider === provider);
+  const known = new Set([...(current?.priorityAccountIds ?? []), ...(current?.fixedAccountId ? [current.fixedAccountId] : [])]);
+  for (const accountId of [...write.priorityAccountIds, ...(write.fixedAccountId ? [write.fixedAccountId] : [])]) {
+    if (known.has(accountId)) continue;
+    const account = accounts.find((candidate) => candidate.id === accountId);
+    if (!account) return reply.code(409).send({ error: "The provider account is not available on this Machine." });
+    if (account.profile?.access === "not_granted") {
+      return reply.code(409).send({
+        error: "This account's provider profile isn't granted to this control plane. Adopt it as a profile first.",
+        code: "PROVIDER_PROFILE_NOT_GRANTED",
+      });
+    }
+  }
+  const changed = db.setMachineProviderAccountPolicy(id, provider, {
+    mode: write.mode, fixedAccountId: write.fixedAccountId, priorityAccountIds: write.priorityAccountIds,
+  }, write.expectedRevision, Date.now());
+  if (!changed.ok) return reply.code(409).send({
+    error: "This provider's account selection changed in another client",
+    current: changed.policy,
+  });
+  hub.runnerChanged(id);
+  return { providerAccountPolicy: changed.policy };
+});
+
+app.get("/api/runners/:id/provider-account-selection", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canAccessRunner(principal, id)) return reply.code(404).send({ error: "runner not found" });
+  const query = req.query as { agentId?: string; provider?: string; projectId?: string; workspaceId?: string; noProject?: string; model?: string };
+  if (query.provider !== undefined && query.provider !== "claude" && query.provider !== "codex") {
+    return reply.code(400).send({ error: "provider must be Claude or Codex" });
+  }
+  if (!query.agentId && !query.provider) return reply.code(400).send({ error: "agentId or provider is required" });
+  if (query.workspaceId && !db.canAccessWorkspace(principal, id, query.workspaceId)) {
+    return reply.code(404).send({ error: "workspace not found" });
+  }
+  // The project this caller's own launch would have. An agent's child follows its parent, as a human's
+  // session follows its choice or, when it names none, the workspace's Location.
+  const parentSessionId = principal.kind === "agent" ? principal.credentialSessionId : undefined;
+  let project: { projectId?: string | null; scope?: ResourceScope } = {};
+  if (principal.kind === "human") {
+    const named = query.noProject ? { projectId: null } : query.projectId ? { projectId: query.projectId } : {};
+    const ownership = query.workspaceId || "projectId" in named
+      ? resolveSessionCreationOwnership(db, principal, { runnerId: id, workspaceId: query.workspaceId ?? "", agentId: query.agentId ?? "", ...named })
+      : null;
+    if (ownership && !ownership.ok) return reply.code(ownership.status).send({ error: ownership.error });
+    if (ownership?.ok) {
+      project = { ...(ownership.body.projectId !== undefined ? { projectId: ownership.body.projectId } : {}),
+        ...(ownership.scope ? { scope: ownership.scope } : {}) };
+    }
+  }
+  const preview = svc.providerAccountSelectionPreview(id, {
+    ...(query.agentId ? { agentId: query.agentId } : {}),
+    ...(query.provider ? { provider: query.provider as "claude" | "codex" } : {}),
+    ...(query.workspaceId ? { workspaceId: query.workspaceId } : {}),
+    ...(parentSessionId ? { parentSessionId } : {}),
+    ...(query.model ? { model: query.model } : {}),
+    ...project,
+  });
+  return respond(reply, principal.kind === "agent" && preview.ok && preview.data
+    ? { ...preview, data: providerAccountSelectionPreviewForAgent(preview.data) }
+    : preview);
 });
 
 app.delete("/api/runners/:id", async (req, reply) => {
@@ -3813,14 +3960,17 @@ app.get("/api/sessions/:id/file", async (req, reply) => {
 
 app.get("/api/sessions/:id/workspace-references/search", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const q = req.query as { q?: unknown; match?: unknown };
+  const q = req.query as { q?: unknown; match?: unknown; fuzzyWithDirectories?: unknown };
   if (typeof q.q !== "string" || !q.q.trim() || q.q.length > 256) {
     return reply.code(400).send({ error: "q must contain 1-256 characters" });
   }
   if (q.match !== undefined && q.match !== "fuzzy") {
     return reply.code(400).send({ error: "match must be fuzzy when given" });
   }
-  const r = await svc.searchWorkspaceReferences(id, q.q, q.match);
+  if (q.fuzzyWithDirectories !== undefined && q.fuzzyWithDirectories !== "true") {
+    return reply.code(400).send({ error: "fuzzyWithDirectories must be true when given" });
+  }
+  const r = await svc.searchWorkspaceReferences(id, q.q, q.match, q.fuzzyWithDirectories === "true");
   if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return r.data;
 });
@@ -4340,9 +4490,10 @@ app.get("/api/sessions", async (req,reply) => {
     protocolVersion: req.headers["x-wollipog-ui-protocol"],
   });
   const supportsRetryExhaustion = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "backgroundRetryExhaustion");
-  const supportsHandoffs = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "campaignHandoffs");
+  // Agent principals read every campaign status (#4146); a dashboard reads the ones it knows.
+  const campaignStatusProtocol = principal?.kind === "agent" ? PROTOCOL_VERSION : uiProtocol;
   return reply.type("application/json").send(principal
-    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion,supportsHandoffs)
+    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion,campaignStatusProtocol)
     : '{"sessions":[]}');
 });
 
@@ -4440,6 +4591,18 @@ app.post("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) 
   if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
   return respond(reply, svc.setCampaignBehavior(id, req.body, { kind: "human", id: humanActorId(req) },
     (behavior, exactRow) => orchestratorSettings.campaignBehaviorError(human, behavior, exactRow)));
+});
+
+// #4146: Campaign Status's **Delete Merged Branches**. Wollipog performs the campaign's approved
+// merged_branch_deletion decisions it still can, through the existing forge action and its checks;
+// a person who can read the root and each requester asks. It approves nothing, so a branch without
+// an approved deletion keeps its exact command. No agent allowlist entry exists for this endpoint.
+app.post("/api/sessions/:id/orchestrator-campaign/cleanup/delete-merged-branches", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "only an authenticated human may ask Wollipog to delete merged branches" });
+  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
+  return respond(reply, await svc.deleteApprovedMergedBranches(id, (sessionId) => db.canAccessSession(human, sessionId)));
 });
 
 app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
@@ -4610,6 +4773,13 @@ app.post("/api/sessions/:id/pull-request-watch", async (req, reply) => {
   if (!principal) return reply;
   return respond(reply, svc.requestPullRequestWatch(id, req.body, (sessionId) => db.canAccessSession(principal, sessionId)));
 });
+// Tracked waits (#1280, #4249): only the session's own credential reports its wait calls.
+app.post("/api/sessions/:id/waits", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = sessionReviewRequester(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.reportSessionWait(id, req.body, (sessionId) => db.canAccessSession(principal, sessionId)));
+});
 app.get("/api/sessions/:id/review-sessions", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
@@ -4650,6 +4820,16 @@ app.post("/api/sessions/:id/orchestrator-campaign/follow-up-limit", async (req, 
   const principal = requestPrincipal(req);
   if (principal?.kind !== "human") return reply.code(403).send({ error: "authenticated human authorization is required" });
   return respond(reply, svc.setCampaignFollowUpLimit(id, req.body as SetCampaignFollowUpLimitRequest, principal));
+});
+
+// A person's release of a campaign slot no automatic proof can free (#4331). Person-only by design:
+// no agent, an Orchestrator under Full Control included, may take it, so no agent allowlist entry,
+// tool, CLI command or workflow decision exists for this endpoint.
+app.post("/api/sessions/:id/orchestrator-campaign/slots/release", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "human") return reply.code(403).send({ error: "authenticated human authorization is required" });
+  return respond(reply, svc.releaseCampaignSlot(id, req.body as ReleaseCampaignSlotRequest, principal));
 });
 
 // The scope grant's selection count (#4102): the same human-only compare-and-set, re-minting the
@@ -4732,7 +4912,11 @@ app.post("/api/sessions/:id/orchestrator-campaign/recommendations/:recommendatio
 });
 
 registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
-registerAutomationCreationRoutes(app, { service: new AutomationCreationService(db, svc, hub), requestPrincipal });
+registerAutomationCreationRoutes(app, { service: new AutomationCreationService(db, svc, hub, scheduledCampaigns), requestPrincipal });
+registerCampaignRepositoryAdditionRoutes(app, { requestPrincipal, additions: new CampaignRepositoryAdditions({ db, hub, sessions: svc,
+  // The same verified-Location inspection as a launch (#4117), on a runner that can hold the boundary.
+  inspect: (locationId, options) => inspectProjectLocation({ db, hub }, locationId, { ...options, requireProtocol: "campaignRepositoryBoundary" }),
+  synchronize: (rootId) => svc.synchronizeCampaignIssueScope(rootId) }) });
 registerLocationSwitchRoutes(app, { requestPrincipal, service: new LocationSwitchService(db, svc, hub, {
   // The shared verified-Location inspection (#4117): by Location id, in the Location's own path.
   inspect: (locationId, options) => inspectProjectLocation({ db, hub }, locationId, options),
@@ -5664,12 +5848,19 @@ app.post("/api/sessions/:id/project", async (req, reply) => {
       error: "Project management permission or personal session ownership is required",
     });
   }
-  return respond(reply, svc.setProject(
+  // Active only: linking a detached Location revives it under the same id, and that is an addition.
+  const existingLocations = new Set(body.linkLocation && typeof body.projectId === "string"
+    ? (db.getProject(body.projectId)?.locations ?? []).filter((location) => location.availability !== "runner_removed").map((location) => location.id) : []);
+  const moved = svc.setProject(
     id,
     body.projectId as string | null,
     principal.userId,
     { linkLocation: body.linkLocation },
-  ));
+  );
+  // A Location this move added is a Location added to the Project, as Add Location's are (#4117).
+  const linkedLocationId = body.linkLocation && moved.ok ? moved.data?.projectLocationId : null;
+  if (linkedLocationId && !existingLocations.has(linkedLocationId)) void campaignLocations.locationAdded(linkedLocationId, principal);
+  return respond(reply, moved);
 });
 
 app.post("/api/sessions/:id/stop", async (req, reply) =>
@@ -6406,10 +6597,12 @@ app.post("/api/sessions/:id/answer", async (req, reply) => {
     return reply.code(400).send({ error: "requestId and answers are required; action must be submit or dismiss" });
   }
   const action = body.action ?? (Object.keys(body.answers).length > 0 ? "submit" : "dismiss");
+  const human = requestHuman(req);
   return respond(reply, svc.answerQuestion(id, body.requestId, body.answers, {
     kind: "human",
     id: humanActorId(req),
-  }, action, undefined, body.occurrenceId));
+  }, action, undefined, body.occurrenceId, undefined,
+  (sessionId) => human ? db.canAccessSession(human, sessionId) : false));
 });
 
 // Git/PR workflow: run a git action (status/commit/open_pr) in the session's
@@ -6451,14 +6644,15 @@ app.post("/api/sessions/:id/git", async (req, reply) => {
   // capture a partial snapshot and can race the post-turn diff capture.
   const gate = gitActionAllowed(action, session.status);
   if (!gate.ok) return reply.code(409).send({ error: gate.error });
-  if (!["status", "summary", "diff", "github_review_sync", "forge_review_sync"].includes(action.kind)) {
+  if (!["status", "summary", "diff", "request_diff", "github_review_sync", "forge_review_sync"].includes(action.kind)) {
     const reconciliationBlock = svc.podReconciliationMutationError(id);
     if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   }
 
   const requestId = randomUUID();
   // Pushing + calling gh takes longer than a quick status read.
-  const timeoutMs = action.kind === "open_pr" || action.kind === "github_review_sync" || action.kind === "forge_review_sync"
+  const timeoutMs = action.kind === "request_diff" ? 180_000
+    : action.kind === "open_pr" || action.kind === "github_review_sync" || action.kind === "forge_review_sync"
     ? 60_000
     : 30_000;
   try {
@@ -7375,6 +7569,15 @@ const heldResultTimer = setInterval(() => {
   }
 }, 5_000);
 heldResultTimer.unref();
+// Tracked waits are classified on the control plane's clock and published when that changes (#1280).
+const sessionWaitTimer = setInterval(() => {
+  try {
+    svc.maintainSessionWaits(Date.now());
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "tracked wait sweep deferred");
+  }
+}, 5_000);
+sessionWaitTimer.unref();
 const sessionCommandRetryTimer = setInterval(() => {
   try {
     svc.retryDueSessionCommands(Date.now());
@@ -7481,6 +7684,7 @@ const runnerLivenessTimer = setInterval(() => {
 runnerLivenessTimer.unref();
 app.addHook("onClose", async () => {
   campaignForgeObserver.dispose();
+  mergeClosureWatcher.dispose();
   clearInterval(workflowRecoveryTimer);
   clearInterval(automationTimer);
   clearInterval(outboundEventTimer);
@@ -7489,6 +7693,7 @@ app.addHook("onClose", async () => {
   clearInterval(usagePricingTimer);
   clearInterval(sessionReminderTimer);
   clearInterval(heldResultTimer);
+  clearInterval(sessionWaitTimer);
   clearInterval(sessionCommandRetryTimer);
   clearInterval(sessionStopMaintenanceTimer);
   clearInterval(backgroundPushRetryTimer);
@@ -7599,12 +7804,20 @@ function lanIpv4(): string[] {
   return out;
 }
 
+/** Sends a service result. Takes Fastify's reply, whose request says who is asking. */
 function respond(
-  reply: { code: (n: number) => { send: (b: unknown) => unknown } },
+  reply: { code: (n: number) => { send: (b: unknown) => unknown }; request?: FastifyRequest },
   result: {
     ok: boolean; status: number; data?: unknown; error?: string;
     capabilityRequirement?: RunnerCapabilityRequirementDetails; errorDetails?: Record<string, string | number>;
+    providerAccountSelection?: import("@wollipog/protocol").ProviderAccountChoiceRequired;
   },
 ) {
-  return reply.code(result.status).send(result.ok ? result.data : failureBody(result));
+  if (result.ok) return reply.code(result.status).send(result.data);
+  // Every launch route's account refusal passes here, so an agent's credential never gets its candidates.
+  const { providerAccountSelection: selection, ...refusal } = result;
+  const agentCaller = reply.request && requestPrincipals.get(reply.request)?.kind === "agent";
+  return reply.code(result.status).send(selection && agentCaller
+    ? { ...failureBody(refusal), providerAccountSelection: providerAccountChoiceRequiredForAgent(selection) }
+    : failureBody(result));
 }

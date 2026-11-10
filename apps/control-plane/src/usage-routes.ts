@@ -2,13 +2,14 @@ import { acknowledgementRepairFrame, exportClaudeRepairCheckpoint, previewClaude
 import { randomUUID } from "node:crypto";
 import { applyClaudeReconciliation, previewClaudeReconciliation, correctionFrame, reconciliationRevision, exportClaudeReconciliations, previewClaudeReconciliationRecovery, applyClaudeReconciliationRecovery } from "./claude-cost-reconciliation.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
+import { runnerSupportsProtocol, type AgentDefinition } from "@wollipog/protocol";
 import { HourlyUsageUnavailableError, type ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import type { AuthPrincipal } from "./identity.js";
 import { canAdministerIdentity } from "./identity.js";
 import {
   SUBSCRIPTION_USAGE_STALE_AFTER_MS,
+  claudeUsageProbeable,
   subscriptionUsageRefreshTimeoutMs,
 } from "./subscription-usage.js";
 import { parseUsageAggregationQuery, parseUsageRetentionInput } from "./usage-aggregation.js";
@@ -200,16 +201,19 @@ export function registerUsageRoutes(
         !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(body.providerAccountId))) {
       return reply.code(400).send({ error: "runnerId and providerAccountId are required for an account refresh" });
     }
+    // A Claude source reads its identity and then its usage, each bounded like one Codex probe.
+    const CLAUDE_PROBE_BUDGETS = 2;
+    let targetBudgets = 1;
     if (targeted) {
       const visibleSources = db.subscriptionUsageForPrincipal(
         principal,
         Date.now(),
         SUBSCRIPTION_USAGE_STALE_AFTER_MS,
       ).sources;
-      if (!visibleSources.some((source) => source.runnerId === body!.runnerId &&
-          source.providerAccountId === body!.providerAccountId)) {
-        return reply.code(404).send({ error: "subscription account source not found" });
-      }
+      const target = visibleSources.find((source) => source.runnerId === body!.runnerId &&
+          source.providerAccountId === body!.providerAccountId);
+      if (!target) return reply.code(404).send({ error: "subscription account source not found" });
+      if (target.provider === "claude" && target.refreshable) targetBudgets = CLAUDE_PROBE_BUDGETS;
     }
     const runners = db.listRunnersForPrincipal(principal).filter((runner) =>
       runner.status === "online" &&
@@ -219,14 +223,23 @@ export function registerUsageRoutes(
         runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers")) &&
       runner.agents.some((agent) => agent.driver === "codex-app-server" || agent.driver === "claude-code"));
     const results = await Promise.allSettled(runners.map(async (runner) => {
-      const codexAccounts = runner.providerAccounts
-        ?.filter((account) => account.provider === "codex") ?? [];
-      const unmappedLegacyCodexCount = runner.agents.filter((agent) =>
-        agent.driver === "codex-app-server" &&
-        !codexAccounts.some((account) =>
-          (agent.context?.kind ?? "native") === "native" ||
-          agent.defaultProviderAccountId === account.id)).length;
-      const codexSourceCount = codexAccounts.length + unmappedLegacyCodexCount;
+      // The runner reads its sources one after another: each gets its probe budgets.
+      const probedSources = (provider: "codex" | "claude", readable: (agent: AgentDefinition) => boolean) => {
+        const accounts = runner.providerAccounts?.filter((account) => account.provider === provider) ?? [];
+        const driver = provider === "codex" ? "codex-app-server" : "claude-code";
+        const agents = runner.agents.filter((agent) => agent.driver === driver);
+        // The runner reads a Claude account only through an installation it can lock down.
+        if (provider === "claude" && !agents.some(readable)) return 0;
+        const unmappedLegacy = agents.filter((agent) => readable(agent) &&
+          !accounts.some((account) =>
+            (agent.context?.kind ?? "native") === "native" ||
+            agent.defaultProviderAccountId === account.id)).length;
+        return accounts.length + unmappedLegacy;
+      };
+      const probeCount = probedSources("codex", () => true) +
+        (runnerSupportsProtocol(runner.protocolVersion, "claudeSubscriptionUsageRefresh")
+          ? CLAUDE_PROBE_BUDGETS * probedSources("claude", claudeUsageProbeable)
+          : 0);
       const requestId = randomUUID();
       const result = await hub.requestFromRunner(
         runner.runnerId,
@@ -235,8 +248,8 @@ export function registerUsageRoutes(
           ...(targeted ? { providerAccountId: body!.providerAccountId as string } : {}) },
         subscriptionUsageRefreshTimeoutMs(
           targeted
-            ? 1
-            : codexSourceCount,
+            ? targetBudgets
+            : probeCount,
         ),
       );
       if (result.type !== "subscription_usage_refresh_result" || !result.ok) {

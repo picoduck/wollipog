@@ -2573,8 +2573,10 @@ test("ending background work retires the process and reports each unfinished job
     } as any,
   );
   assert.deepEqual(await driver.endBackgroundWork(), { status: "none" }, "nothing to end before any work");
+  assert.equal(driver.providerProcessLive(), false, "no process before the first turn (#3542)");
   const turn = driver.prompt("watch CI");
   await nextTask();
+  assert.equal(driver.providerProcessLive(), true);
   first.stdout.write(JSON.stringify({ type: "system", subtype: "task_started", task_id: "monitor-9" }) + "\n");
   await nextTask();
   assert.deepEqual(await driver.endBackgroundWork(), { status: "refused", reason: "turn_active" },
@@ -2583,12 +2585,16 @@ test("ending background work retires the process and reports each unfinished job
   await turn;
   assert.equal(background.at(-1)?.state, "running");
 
+  assert.equal(driver.providerProcessLive(), true, "the idle process takes the next prompt without a launch");
   const ending = driver.endBackgroundWork();
   await nextTask();
   assert.equal(first.stdin.writableEnded, true, "the owning process is retired");
+  assert.equal(driver.providerProcessLive(), false, "a retiring process takes no further prompt");
   first.emit("close", 0);
   const result = await ending;
   assert.equal(result.status, "ended");
+  // The next turn launches a process (#3542), so a pending retirement rebind may run first.
+  assert.equal(driver.providerProcessLive(), false);
   const jobs = result.status === "ended" ? result.jobs : [];
   assert.deepEqual(jobs.map((job) => ({
     id: job.id, status: job.status, continuationRequired: job.continuationRequired, endedByRunner: job.endedByRunner,
@@ -3497,8 +3503,9 @@ test("only a structured Orchestrator's fixed-rule launch carries the runner cont
     config: { permissionMode: "orchestrator" },
     orchestrator: { strictProjectIsolation: true },
   });
-  assert.equal(strict.includes("--permission-mode"), false);
-  assert.deepEqual(strict.slice(-4), ["--input-format", "stream-json", "--permission-prompt-tool", "stdio"]);
+  assert.equal(strict.includes("dontAsk"), false);
+  assert.deepEqual(strict.slice(-6),
+    ["--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--permission-mode", "default"]);
 });
 
 test("agent session id is exposed only after Claude establishes a fresh conversation", () => {
@@ -4530,6 +4537,31 @@ test("provider-mode Claude Orchestrator auto-allows the observed issue-claiming 
   assert.equal(JSON.parse(writes[0]!).response.response.behavior, "allow");
 });
 
+test("a running Claude Orchestrator classifies issue writes against issue numbers granted after launch (#4269)", () => {
+  // The runner hands the driver its live launch policy and fills an empty grant in place once a
+  // Custom campaign's first-message reading settles; the classifier must read it on each ask.
+  const orchestrator: NonNullable<DriverOptions["orchestrator"]> = { strictProjectIsolation: false };
+  const h = makeHarness({ config: { permissionMode: "orchestrator" }, orchestrator });
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (value: string) => writes.push(value) } };
+  const ask = (requestId: string) => h.feed({
+    type: "control_request",
+    request_id: requestId,
+    request: { subtype: "can_use_tool", tool_name: "Bash", description: "Claim the issue", input: { command: "gh issue edit 1209 --add-assignee @me" } },
+  });
+
+  ask("before-grant");
+  assert.equal(writes.length, 0, "before the grant, the write is not routine");
+  assert.equal(h.events.length, 1, "it takes the person's approval path");
+  orchestrator.issueNumbers = [1209];
+  ask("after-grant");
+  assert.equal(h.events.length, 1, "no second approval card");
+  assert.deepEqual(JSON.parse(writes[0]!).response, {
+    subtype: "success", request_id: "after-grant", response: { behavior: "allow", updatedInput: { command: "gh issue edit 1209 --add-assignee @me" } },
+  });
+});
+
 test("provider-mode Claude Orchestrator returns non-canonical routine attempts to Claude", () => {
   const h = makeHarness({
     config: { permissionMode: "orchestrator" },
@@ -5075,11 +5107,81 @@ test("resolvePermission returns false when the stdin write throws (dead pipe), s
   assert.equal(h.driver.resolvePermission("req-1", "allow"), false);
 });
 
-test("claudePermissionArgs: 'default' uses the stdio prompt tool (interactive, no --permission-mode)", () => {
+test("claudePermissionArgs: 'default' uses the stdio prompt tool and names the mode explicitly (#3849)", () => {
   const { interactive, args } = claudePermissionArgs("default");
   assert.equal(interactive, true);
-  assert.deepEqual(args, ["--input-format", "stream-json", "--permission-prompt-tool", "stdio"]);
-  assert.equal(args.includes("--permission-mode"), false);
+  assert.deepEqual(args, ["--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--permission-mode", "default"]);
+  // Left to itself, Claude Code 2.1.296 starts an auto-capable model in `auto`: an Ask session must
+  // never depend on the CLI's own starting mode.
+  assert.equal(args.filter((arg) => arg === "--permission-mode").length, 1);
+});
+
+test("an Ask session's new, resumed and mode-switched spawns all pass --permission-mode default (#3849)", { timeout: 20_000 }, async () => {
+  const modesOf = (launch: any) => {
+    const args = launch.args as string[];
+    return args.flatMap((arg, index) => arg === "--permission-mode" ? [args[index + 1]] : []);
+  };
+  const harness = (persistent: "0" | "1", permissionMode: string) => {
+    const children: any[] = [];
+    const launches: any[] = [];
+    const driver = new ClaudeCodeDriver(
+      { ...baseOpts, env: { [CLAUDE_PERSISTENT_FLAG]: persistent }, config: { permissionMode } },
+      noopCb,
+      {
+        spawn: (opts: any) => { launches.push(opts); const child = fakeProcess(); children.push(child); return child; },
+        kill: () => {},
+      } as any,
+    );
+    return { driver, children, launches };
+  };
+  const finish = async (child: any, turn: Promise<unknown>, close: boolean) => {
+    child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+    if (close) child.emit("close", 0);
+    assert.equal(await turn, "end_turn");
+  };
+
+  // One-shot: a new session, then a resumed turn, each a fresh spawn.
+  const oneShot = harness("0", "default");
+  for (const text of ["first", "second"]) {
+    const turn = oneShot.driver.prompt(text);
+    await nextTask();
+    await finish(oneShot.children.at(-1), turn, true);
+  }
+  oneShot.driver.dispose();
+  assert.equal(oneShot.launches.length, 2);
+  assert.ok((oneShot.launches[0].args as string[]).includes("--session-id"));
+  assert.ok((oneShot.launches[1].args as string[]).includes("--resume"));
+  for (const launch of oneShot.launches) assert.deepEqual(modesOf(launch), ["default"]);
+
+  // Persistent: a switch to Ask restarts the transport with --resume, which must name the mode too.
+  const persistent = harness("1", "acceptEdits");
+  const first = persistent.driver.prompt("one");
+  await nextTask();
+  await finish(persistent.children[0], first, false);
+  persistent.driver.setConfig({ permissionMode: "default" });
+  const second = persistent.driver.prompt("two");
+  await nextTask();
+  persistent.children[0].emit("close", 0);
+  await nextTask();
+  assert.equal(persistent.launches.length, 2);
+  assert.deepEqual(modesOf(persistent.launches[0]), ["acceptEdits"]);
+  assert.ok((persistent.launches[1].args as string[]).includes("--resume"));
+  assert.deepEqual(modesOf(persistent.launches[1]), ["default"]);
+  await finish(persistent.children[1], second, false);
+  persistent.driver.dispose();
+});
+
+test("every interactive and fixed-rule launch names its permission mode, so none inherits the CLI's own (#3849)", () => {
+  for (const mode of ["default", "auto", "acceptEdits", "plan", "bypassPermissions", "dontAsk"]) {
+    for (const hasImages of [false, true]) {
+      for (const routine of [false, true]) {
+        const { args } = claudePermissionArgs(mode, hasImages, routine);
+        const index = args.indexOf("--permission-mode");
+        assert.ok(index >= 0, `${mode} (images=${hasImages}, routine=${routine}) passes --permission-mode`);
+        assert.equal(args[index + 1], mode);
+      }
+    }
+  }
 });
 
 test("a managed worktree WITHOUT the guard still narrows every non-plan mode to runner review", () => {

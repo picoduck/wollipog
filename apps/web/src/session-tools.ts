@@ -195,7 +195,7 @@ export function backgroundInventoryGap(
 
 /**
  * Background Work: of the jobs the session lists, those the Background Work panel shows as Running
- * (`backgroundJobCurrentState`), so an unverified, lost or stalled job is never counted as running.
+ * (`backgroundJobCurrentState`), so an unverified or lost job is never counted as running.
  */
 export function backgroundFact(states: readonly string[] | BackgroundInventoryGap, truncated = false): string {
   switch (states) {
@@ -214,7 +214,7 @@ export function backgroundFact(states: readonly string[] | BackgroundInventoryGa
   // A capped list (the panel shows only the most relevant jobs) reads "50+".
   const total = truncated ? `${states.length}+ jobs` : count(states.length, "job", "jobs");
   // Current jobs the panel cannot call running are named, so none of them reads as finished.
-  const others = (["stalled", "unverified", "lost"] as const)
+  const others = (["unverified", "lost"] as const)
     .map((state) => [state, tally(state)] as const)
     .filter(([, n]) => n > 0)
     .map(([state, n]) => `${n} ${state}`);
@@ -243,6 +243,7 @@ export function requestKindPhrase(request: Pick<PendingApproval, "kind" | "workf
       case "owner_decision": return "a decision you kept";
       case "review_round_extension": return "more review rounds";
       case "location_switch": return "a Location switch";
+      case "campaign_repository_addition": return "adding a repository to the campaign";
       default: return "a workflow decision";
     }
   }

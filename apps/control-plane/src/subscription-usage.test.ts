@@ -112,6 +112,169 @@ test("snapshot validation binds runner, advertised source, bounded display label
   db.close();
 });
 
+const IDENTITY = "c".repeat(64);
+const OWNED_BY_ALICE = { organizationId: "org_personal", owner: { kind: "user" as const, userId: "alice" } };
+
+test("snapshot validation keeps a well-formed subscription identity and refuses any other value", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("runner-1"), now, PROTOCOL_VERSION);
+  const value = { ...snapshot("runner-1", now), subscriptionIdentity: IDENTITY };
+  assert.equal(validateSubscriptionUsageSnapshot(value, "runner-1", db, now).subscriptionIdentity, IDENTITY);
+  for (const subscriptionIdentity of ["person@example.com", "C".repeat(64), "c".repeat(63), 7]) {
+    assert.throws(
+      () => validateSubscriptionUsageSnapshot({ ...value, subscriptionIdentity }, "runner-1", db, now),
+      /subscriptionIdentity/,
+    );
+  }
+  db.close();
+});
+
+test("snapshot validation keeps a window's reading time and refuses an impossible one", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("runner-1"), now, PROTOCOL_VERSION);
+  const base = snapshot("runner-1", now);
+  const withTime = (observedAt: unknown) => ({ ...base, buckets: [{ ...base.buckets[0], observedAt }] });
+  assert.equal(validateSubscriptionUsageSnapshot(withTime(now - 5), "runner-1", db, now).buckets[0]?.observedAt, now - 5);
+  assert.equal(validateSubscriptionUsageSnapshot(base, "runner-1", db, now).buckets[0]?.observedAt, undefined);
+  for (const observedAt of [0, now + 24 * 3_600_000, "soon"]) {
+    assert.throws(() => validateSubscriptionUsageSnapshot(withTime(observedAt), "runner-1", db, now), /observedAt/);
+  }
+  db.close();
+});
+
+test("runners sharing a subscription identity get one opaque key, and the identity itself never reaches a viewer", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  for (const runnerId of ["runner-1", "runner-2", "runner-3", "runner-4"]) {
+    db.registerRunner(meta(runnerId), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  }
+  db.upsertSubscriptionUsageSnapshot({ ...snapshot("runner-1", now), subscriptionIdentity: IDENTITY }, now);
+  db.upsertSubscriptionUsageSnapshot({ ...snapshot("runner-2", now), subscriptionIdentity: IDENTITY }, now);
+  db.upsertSubscriptionUsageSnapshot({ ...snapshot("runner-3", now), subscriptionIdentity: "d".repeat(64) }, now);
+  db.upsertSubscriptionUsageSnapshot(snapshot("runner-4", now), now);
+
+  const { sources } = db.subscriptionUsageForPrincipal(human(), now);
+  const keyOf = (runnerId: string) => sources.find((source) => source.runnerId === runnerId)?.subscriptionKey;
+  assert.ok(keyOf("runner-1"));
+  assert.equal(keyOf("runner-1"), keyOf("runner-2"));
+  assert.notEqual(keyOf("runner-1"), keyOf("runner-3"));
+  assert.equal(keyOf("runner-4"), undefined, "a source with no identity is never groupable");
+  const body = JSON.stringify(sources);
+  assert.doesNotMatch(body, /subscriptionIdentity/);
+  assert.equal(body.includes(IDENTITY), false);
+  db.close();
+});
+
+test("a subscription key differs between organizations, so viewers cannot correlate accounts", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("runner-1"), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  db.registerRunner(meta("runner-2"), now, PROTOCOL_VERSION, {
+    organizationId: "org_other", owner: { kind: "user", userId: "bob" },
+  });
+  db.upsertSubscriptionUsageSnapshot({ ...snapshot("runner-1", now), subscriptionIdentity: IDENTITY }, now);
+  db.upsertSubscriptionUsageSnapshot({ ...snapshot("runner-2", now), subscriptionIdentity: IDENTITY }, now);
+  const alice = db.subscriptionUsageForPrincipal(human("alice", "org_personal"), now).sources[0]?.subscriptionKey;
+  const bob = db.subscriptionUsageForPrincipal(human("bob", "org_other"), now).sources[0]?.subscriptionKey;
+  assert.ok(alice);
+  assert.ok(bob);
+  assert.notEqual(alice, bob);
+  db.close();
+});
+
+test("an unavailable refresh keeps last-known windows only while the subscription identity is unchanged", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("runner-1"), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  const read = () => db.subscriptionUsageForPrincipal(human(), now).sources[0]!;
+  const unavailable = { ...snapshot("runner-1", now), state: "unavailable" as const, buckets: [] };
+  db.upsertSubscriptionUsageSnapshot({ ...snapshot("runner-1", now), subscriptionIdentity: IDENTITY }, now);
+  const key = read().subscriptionKey;
+
+  db.upsertSubscriptionUsageSnapshot({ ...unavailable, subscriptionIdentity: IDENTITY }, now);
+  assert.equal(read().buckets.length, 1, "same subscription: last-known windows stay");
+  assert.equal(read().subscriptionKey, key);
+
+  db.upsertSubscriptionUsageSnapshot({ ...unavailable, subscriptionIdentity: "d".repeat(64) }, now);
+  assert.equal(read().buckets.length, 0, "another subscription's windows never carry over");
+  assert.notEqual(read().subscriptionKey, key);
+  db.close();
+});
+
+test("across a gap with no identity, last-known windows stay with their own subscription and never pass to the next", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("runner-1"), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  const read = () => db.subscriptionUsageForPrincipal(human(), now).sources[0]!;
+  const unavailable = { ...snapshot("runner-1", now), state: "unavailable" as const, buckets: [] };
+  db.upsertSubscriptionUsageSnapshot({ ...snapshot("runner-1", now), subscriptionIdentity: IDENTITY }, now);
+  const first = read().subscriptionKey;
+
+  db.upsertSubscriptionUsageSnapshot(unavailable, now);
+  assert.equal(read().buckets.length, 1);
+  assert.equal(read().subscriptionKey, first, "the kept windows still name the subscription they came from");
+
+  db.upsertSubscriptionUsageSnapshot({ ...unavailable, subscriptionIdentity: "d".repeat(64) }, now);
+  assert.equal(read().buckets.length, 0);
+  assert.notEqual(read().subscriptionKey, first);
+  db.close();
+});
+
+test("an identity learned during an unavailable refresh is kept alongside last-known windows", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("runner-1"), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  db.upsertSubscriptionUsageSnapshot(snapshot("runner-1", now), now);
+  db.upsertSubscriptionUsageSnapshot(
+    { ...snapshot("runner-1", now), state: "unavailable", buckets: [], subscriptionIdentity: IDENTITY },
+    now,
+  );
+  const source = db.subscriptionUsageForPrincipal(human(), now).sources[0]!;
+  assert.equal(source.buckets.length, 1);
+  assert.ok(source.subscriptionKey);
+  db.close();
+});
+
+test("a source says it can be refreshed alone only when its runner can read that provider on request", () => {
+  const lockedDown: AgentDefinition = {
+    ...claudeAgent(),
+    claudeCode: {
+      status: "ready", effortLevels: [], permissionModes: [], streamJsonInput: true, streamJsonImages: true,
+      controlProtocol: true, forkSession: true, replayUserMessages: true, sessionNaming: true,
+      auth: { status: "authenticated", billingSource: "subscription" },
+    },
+  };
+  const owner = { organizationId: "org_personal", owner: { kind: "user" as const, userId: "alice" } };
+  const refreshable = (protocolVersion: number, agents: AgentDefinition[]) => {
+    const db = ControlPlaneDb.open(":memory:");
+    db.registerRunner({
+      ...meta("runner-1", agents),
+      providerAccounts: [
+        { id: "claude-personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+        { id: "codex-work", label: "Work", provider: "codex", authStatus: "authenticated" },
+      ],
+    }, 1_000_000, protocolVersion, owner);
+    const result = Object.fromEntries(db.subscriptionUsageForPrincipal(human(), 1_000_000).sources
+      .map((source) => [source.providerAccountId ?? `${source.provider}:${source.agentId}`, source.refreshable]));
+    db.close();
+    return result;
+  };
+  assert.deepEqual(refreshable(PROTOCOL_VERSION, [lockedDown, codexAgent()]),
+    { "claude-personal": true, "codex-work": true });
+  assert.deepEqual(refreshable(341, [lockedDown, codexAgent()]),
+    { "claude-personal": false, "codex-work": true }, "an older runner reads Claude only from sessions");
+  assert.deepEqual(refreshable(PROTOCOL_VERSION, [claudeAgent(), codexAgent()]),
+    { "claude-personal": false, "codex-work": true }, "a Claude Code that can't be locked down is not probed");
+
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(meta("runner-1", [lockedDown]), 1_000_000, PROTOCOL_VERSION, owner);
+  assert.equal(db.subscriptionUsageForPrincipal(human(), 1_000_000).sources[0]?.refreshable, false,
+    "a source with no provider account is refreshed only by Refresh All");
+  db.close();
+});
+
 test("a stale unselected usage result cannot repopulate a cleared selected source", () => {
   const db = ControlPlaneDb.open(":memory:");
   const system = { ...codexAgent("system"), available: true,

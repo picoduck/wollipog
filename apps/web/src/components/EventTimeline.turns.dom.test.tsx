@@ -100,7 +100,7 @@ test("rows inside a turn are 12px apart and each new turn opens 32px below the p
     assert.equal(owner, rows[index * 3 + 2], "the footer closes its turn's last row");
     assert.equal(owner.lastElementChild, footer, "nothing in the row follows the footer");
     assert.equal(footer.querySelector(".tl-turn-label")?.textContent, `Turn ${index + 1}`);
-    assert.match(footer.querySelector("time")?.textContent ?? "", /^\d{1,2}:\d{2}\s?[AP]M$/, "a clock time without seconds");
+    assert.match(footer.querySelector("time")?.textContent ?? "", /2026.*\d{1,2}:\d{2}:\d{2}\s?[AP]M$/, "a full date and time");
     assert.match(footer.querySelector("[role='tooltip']")?.textContent ?? "",
       /^Started \d{1,2}:\d{2}:00\s?[AP]M, finished \d{1,2}:\d{2}:26\s?[AP]M \(26s\)$/);
     assert.ok(footer.querySelector("[aria-label='Copy Response']"));

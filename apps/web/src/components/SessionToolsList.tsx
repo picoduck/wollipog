@@ -305,7 +305,7 @@ function SessionToolsListView({
         // The Background Work panel's own job states, so only a verified job counts as running.
         const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
         const states = (session.backgroundJobs ?? []).map((job) => backgroundJobCurrentState(
-          job, session.backgroundWorkState, runnerOnline, inventorySupported, Date.now()));
+          job, session.backgroundWorkState, runnerOnline, inventorySupported));
         return { text: backgroundFact(states, session.backgroundJobsTruncated === true) };
       }
       case "campaign": return { text: campaignFact(campaignWork) };

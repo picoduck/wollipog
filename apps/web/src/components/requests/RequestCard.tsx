@@ -10,6 +10,7 @@ import React, {
   type Ref,
 } from "react";
 import type { GovernancePolicy, PendingApproval, PermissionOption, SessionView } from "@wollipog/protocol";
+import { isChildQuestionSnapshot } from "@wollipog/protocol";
 import { useApi } from "../../api-context.js";
 import type { ApiClient } from "../../api.js";
 import { titleCaseLabel } from "../../format.js";
@@ -39,7 +40,7 @@ import {
 } from "../AuthenticationRecoveryPanel.js";
 import { CHOOSE_ACCOUNT_COPY, ChooseAccountDialog, type ChooseAccountResult } from "./ChooseAccountDialog.js";
 import { EvidenceReviewBody, useEvidenceReview } from "./EvidenceReview.js";
-import { WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
+import { OwnerRuleSummary, WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
 import { LocationSwitchSummary, locationSwitchCardActions, locationSwitchChoices, locationSwitchOptions } from "./LocationSwitchSummary.js";
 import { claimDecision, decisionKey, useDecisionFailure, useDecisionInFlight } from "./request-reveal.js";
 import {
@@ -114,7 +115,7 @@ export function RequestCard({
   headingRef,
   concealed = false,
   onReadingChange,
-  readOnlyNotice,
+  readOnlyNotice: suppliedReadOnlyNotice,
   accountUnknown = false,
 }: RequestCardProps) {
   const api = useApi();
@@ -127,6 +128,9 @@ export function RequestCard({
   );
   const evidence = useEvidenceReview(session.id, request);
   const workflowDecision = request.kind === "workflow_decision" ? request.workflowDecision : undefined;
+  const childQuestion = isChildQuestionSnapshot(workflowDecision?.resourceSnapshot);
+  const readOnlyNotice = suppliedReadOnlyNotice ??
+    (childQuestion && workflowDecision?.authority === "orchestrator" ? "The Orchestrator is handling this request." : undefined);
   // A Location switch (#4138) asks the person to choose one Location; every control then acts on it.
   const locationSwitch = workflowDecision?.resourceSnapshot.category === "location_switch" ? workflowDecision.resourceSnapshot : null;
   const [chosenLocation, setChosenLocation] = useState<string | null>(null);
@@ -202,8 +206,9 @@ export function RequestCard({
   const decideRef = useRef(decide);
   decideRef.current = decide;
   useEffect(() => {
-    if (!intentRef || readOnlyNotice) return;
+    if (!intentRef) return;
     const handler: RequestIntentHandler = (intent) => {
+      if (readOnlyNotice) return true;
       const option = requestOptionForIntent(cardOptions, intent);
       if (option) void decideRef.current(option);
       // The expanded request owns A and D even when it cannot act on them, so the key never falls
@@ -322,9 +327,9 @@ export function RequestCard({
   const decisionCategory = workflowDecision?.resourceSnapshot.category;
   const decisionDetails = workflowDecision && decisionCategory !== "issue_closure" &&
     decisionCategory !== "campaign_issue_scope" && decisionCategory !== "automation_creation" &&
-    decisionCategory !== "location_switch" && decisionCategory !== "ui_evidence_approval" ? request.context?.input : undefined;
+    decisionCategory !== "location_switch" && decisionCategory !== "ui_evidence_approval" && !childQuestion ? request.context?.input : undefined;
   const facts = [
-    { label: "Tool", value: request.context?.toolName },
+    { label: "Tool", value: childQuestion ? undefined : request.context?.toolName },
     { label: "Path", value: request.context?.path },
     { label: "Network", value: request.context?.network },
     { label: "Branch", value: request.context?.branch },
@@ -337,7 +342,9 @@ export function RequestCard({
   const body: ReactNode[] = readOnly ? [
     // Facts only: what is being decided, never a control that would act on it.
     workflowDecision ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot}
+      {...(request.scopeMaxIssuesIncrease ? { scopeMaxIssuesIncrease: request.scopeMaxIssuesIncrease } : {})}
       {...(workflowDecision.closingReferenceCheck ? { closingReferenceCheck: workflowDecision.closingReferenceCheck } : {})} /> : null,
+    workflowDecision?.ownerRule ? <OwnerRuleSummary key="owner-rule" rule={workflowDecision.ownerRule} /> : null,
     request.kind === "question" && request.questions?.length ? (
       <ol key="questions" className="request-card-questions">
         {request.questions.map((question) => (
@@ -402,7 +409,9 @@ export function RequestCard({
     locationSwitch ? <LocationSwitchSummary key="decision" snapshot={locationSwitch} chosenLocationId={chosenLocationId}
       onChoose={setChosenLocation} /> : null,
     workflowDecision && !evidence && !locationSwitch ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot}
+      {...(request.scopeMaxIssuesIncrease ? { scopeMaxIssuesIncrease: request.scopeMaxIssuesIncrease } : {})}
       {...(workflowDecision.closingReferenceCheck ? { closingReferenceCheck: workflowDecision.closingReferenceCheck } : {})} /> : null,
+    workflowDecision?.ownerRule ? <OwnerRuleSummary key="owner-rule" rule={workflowDecision.ownerRule} /> : null,
     decisionDetails ? (
       <details key="details" className="disclosure">
         <summary><ChevronRightIcon className="disclosure-chevron" />{REQUEST_CARD_COPY.requestDetails}</summary>

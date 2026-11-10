@@ -139,7 +139,7 @@ export interface NewReviewSession {
  * Review sessions (#3368). A row exists exactly for a session the control plane created as a
  * review: that is what makes the session's kind "review", and it never changes. The row records
  * whom the review is for and its one outcome. Only the runner that owns the review session may
- * report it, and a terminal state is final. A requester has at most one active review.
+ * report it, and a terminal state is final. A requester has at most one active review per pull request.
  */
 export class ReviewSessions {
   constructor(private readonly sql: DatabaseSync) {}
@@ -156,7 +156,8 @@ export class ReviewSessions {
     );
     CREATE INDEX IF NOT EXISTS review_sessions_requester ON review_sessions(requester_session_id);
     CREATE INDEX IF NOT EXISTS review_sessions_runner ON review_sessions(runner_id,state);
-    CREATE UNIQUE INDEX IF NOT EXISTS review_sessions_one_active ON review_sessions(requester_session_id)
+    DROP INDEX IF EXISTS review_sessions_one_active;
+    CREATE UNIQUE INDEX IF NOT EXISTS review_sessions_one_active_pr ON review_sessions(requester_session_id,repository COLLATE NOCASE,pr_number)
       WHERE state IN ${ACTIVE};`);
     // v228 (#3369): each attempt's planned round, its contract verdict and a valid report's findings.
     const columns = new Set((sql.prepare("PRAGMA table_info(review_sessions)").all() as Array<{ name: string }>).map((c) => c.name));
@@ -190,9 +191,10 @@ export class ReviewSessions {
   }
 
   /** The requester's active review session, if any. */
-  activeFor(requesterSessionId: string): string | null {
-    const row = this.sql.prepare(`SELECT review_session_id FROM review_sessions WHERE requester_session_id=? AND state IN ${ACTIVE}`)
-      .get(requesterSessionId) as { review_session_id: string } | undefined;
+  activeFor(requesterSessionId: string, pullRequest?: { repository: string; number: number }): string | null {
+    const row = this.sql.prepare(`SELECT review_session_id FROM review_sessions WHERE requester_session_id=? AND state IN ${ACTIVE}
+      ${pullRequest ? "AND repository=? COLLATE NOCASE AND pr_number=?" : ""}`)
+      .get(requesterSessionId, ...(pullRequest ? [pullRequest.repository, pullRequest.number] : [])) as { review_session_id: string } | undefined;
     return row?.review_session_id ?? null;
   }
 
@@ -211,6 +213,14 @@ export class ReviewSessions {
     const row = this.sql.prepare(`SELECT COALESCE(SUM(s.cost_usd), 0) AS spent FROM review_sessions r
       JOIN sessions s ON s.id = r.review_session_id WHERE r.requester_session_id=?`).get(requesterSessionId) as { spent: number };
     return row.spent;
+  }
+
+  /** Unspent portions of active reviews' ceilings remain reserved until terminal. */
+  reservedFor(requesterSessionId: string): number {
+    const row = this.sql.prepare(`SELECT COALESCE(SUM(MAX(0, s.cost_budget_usd - COALESCE(s.cost_usd, 0))), 0) AS reserved
+      FROM review_sessions r JOIN sessions s ON s.id=r.review_session_id
+      WHERE r.requester_session_id=? AND r.state IN ${ACTIVE}`).get(requesterSessionId) as { reserved: number };
+    return row.reserved;
   }
 
   /** The requester's reviews summarized for its own view, or null when it has none. */

@@ -46,7 +46,7 @@ for (const width of WIDTHS) {
           const section = page.getByRole("region", { name: /^Provider Accounts/ });
           await expect(section).toBeVisible();
           if (width !== 1440) await page.setViewportSize({ width, height: 844 });
-          await expect(section.locator(".surface > .row .row-title", { hasText: ROW[state][emails] }).first()).toBeVisible();
+          await expect(section.locator(".provider-accounts-list > .row .row-title", { hasText: ROW[state][emails] }).first()).toBeVisible();
           if (state === "rejected") {
             await section.getByLabel("Paste the Code It Shows").fill("not-the-code");
             await section.getByRole("button", { name: "Submit Code" }).click();

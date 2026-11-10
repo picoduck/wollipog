@@ -1,28 +1,20 @@
 import React, { useId, useRef, useState } from "react";
 import { runnerCapabilityRequirement, runnerSupportsProtocol, type BoxView, type RunnerView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
 import {
-  accountStatusLabel,
   capacityError,
   CAPACITY_HELPER,
-  defaultAccountLabel,
-  defaultAccountProviders,
-  DEFAULT_ACCOUNTS_HELPER,
   DELETE_BLOCKED,
   fieldChanged,
   fieldLabel,
   fieldOrder,
   installationGroups,
   machineSettingsSnapshot,
-  missingDefaultAccount,
   nameError,
   offlineSentence,
   SAVED_TOAST,
-  SWITCHING_DESCRIPTION,
   unsavedSentence,
   withField,
-  type DefaultAccountProvider,
   type InstallationGroup,
   type MachineSettingsField,
   type MachineSettingsSnapshot,
@@ -30,7 +22,6 @@ import {
   type MachineSettingsValues,
 } from "../machine-settings.js";
 import { machineSettingsMutationError, runnerDisplay } from "../runners.js";
-import { AccountIdentifierRevealButton, useAccountIdentifierReveal } from "./AccountIdentifier.js";
 import { Modal } from "./common.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { FieldError } from "./FieldError.js";
@@ -38,10 +29,8 @@ import { confirmDeleteMachine } from "./MachineDetail.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { ChoiceRows, Select } from "./ui/ChoiceControls.js";
-import { SwitchRow } from "./ui/SettingsRows.js";
 
 const READ_ONLY = "Only this machine's owner or an organization admin can change these settings.";
-const TERMS = "Provider terms assume ordinary individual usage and prohibit circumventing rate limits, so automatically rotating between your own subscriptions can be a gray area. You are responsible for ensuring this use complies with each provider's terms.";
 
 interface SaveFailure {
   sentence: string;
@@ -54,19 +43,15 @@ function mergedSnapshot(live: MachineSettingsSnapshot, saved: MachineSettingsSna
   return {
     values: {
       ...saved.values,
-      defaultAccounts: { ...live.values.defaultAccounts, ...saved.values.defaultAccounts },
       installations: { ...live.values.installations, ...saved.values.installations },
     },
-    revisions: {
-      ...saved.revisions,
-      defaultAccounts: { ...live.revisions.defaultAccounts, ...saved.revisions.defaultAccounts },
-    },
+    revisions: saved.revisions,
   };
 }
 
 /**
  * Machine Settings (#2991): one `<form>` with one Save Changes (§8.6, Dialog). Owners and admins
- * see every field; a machine's own manager sees Capacity Limit, the switch and Default Accounts.
+ * see every field; a machine's own manager sees Capacity Limit. Account settings live in Provider Accounts.
  *
  * Save Changes sends only the fields that differ from the last saved snapshot, each through its
  * existing endpoint and revision, in `fieldOrder`. A field that saved becomes the new baseline even
@@ -112,35 +97,23 @@ export function MachineSettingsDialog({
   const baseline = mergedSnapshot(machineSettingsSnapshot(runner, box), saved);
   const form: MachineSettingsValues = {
     ...draft,
-    defaultAccounts: { ...baseline.values.defaultAccounts, ...draft.defaultAccounts },
     installations: { ...baseline.values.installations, ...draft.installations },
   };
 
   const canManageRunner = runner?.canManage === true;
   const capacitySupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "machineRunnerCapacity");
-  const switchSupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "automaticProviderAccountSwitch");
+  const reviewerSecuritySupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "reviewerSecurityPolicy");
   const installationSupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations");
   const targetInstallationSupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations");
-  const accounts = runner?.providerAccounts ?? [];
-  const providers = runner && runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")
-    ? defaultAccountProviders(runner) : [];
   const groups: InstallationGroup[] = canManageMachines && runner ? installationGroups(runner) : [];
   const fields = fieldOrder({
     name: canManageMachines,
     capacity: !!runner,
-    switching: !!runner,
-    defaultAccounts: providers,
+    reviewerSecurity: reviewerSecuritySupported,
     installations: groups.map((group) => group.key),
   });
   const offline = !!runner && runner.status !== "online";
   const deleteBlocked = !box && runner?.status === "online";
-
-  const [revealed, toggleReveal] = useAccountIdentifierReveal(JSON.stringify([
-    runnerId,
-    providers.map((provider) => [provider, form.defaultAccounts[provider]]),
-    accounts.map((account) => [account.id, account.label]),
-  ]));
-  const titles = maskedAccountTitles(accounts.map((account) => account.label));
 
   const update = (next: Partial<MachineSettingsValues>) => {
     if (savingRef.current) return;
@@ -148,22 +121,11 @@ export function MachineSettingsDialog({
     setDraft((current) => ({ ...current, ...next }));
   };
 
-  /** A provider or installation group that appeared after the dialog opened follows the machine
+  /** An installation group that appeared after the dialog opened follows the machine
    * until it is first edited; then its value and revision as shown are frozen into the saved
    * snapshot, so a later change from another client is a conflict rather than an overwrite. */
-  const freeze = (entry: { provider: DefaultAccountProvider } | { group: string }) => {
-    setSaved((current) => {
-      if ("provider" in entry) {
-        if (entry.provider in current.values.defaultAccounts) return current;
-        return {
-          values: { ...current.values, defaultAccounts: {
-            ...current.values.defaultAccounts, [entry.provider]: baseline.values.defaultAccounts[entry.provider] ?? "",
-          } },
-          revisions: { ...current.revisions, defaultAccounts: {
-            ...current.revisions.defaultAccounts, [entry.provider]: baseline.revisions.defaultAccounts[entry.provider] ?? 0,
-          } },
-        };
-      }
+  const freeze = (entry: { group: string }) => {
+    setSaved(current => {
       if (entry.group in current.values.installations) return current;
       return { ...current, values: { ...current.values, installations: {
         ...current.values.installations, [entry.group]: baseline.values.installations[entry.group] ?? null,
@@ -191,24 +153,13 @@ export function MachineSettingsDialog({
           revisions: { ...from.revisions, capacity: capacity.revision },
         };
       }
-      case "switching": {
-        const { automaticAccountSwitching } = await api.updateMachineAutomaticAccountSwitching(runnerId, {
-          enabled: form.switching,
-          expectedRevision: from.revisions.switching,
+      case "reviewerSecurity": {
+        const { reviewerSecurity } = await api.updateMachineReviewerSecurity(runnerId, {
+          policy: form.reviewerSecurity, expectedRevision: from.revisions.reviewerSecurity,
         });
         return {
-          values: { ...from.values, switching: automaticAccountSwitching.enabled },
-          revisions: { ...from.revisions, switching: automaticAccountSwitching.revision },
-        };
-      }
-      case "defaultAccount": {
-        const { providerAccountDefault } = await api.updateMachineProviderAccountDefault(runnerId, field.provider, {
-          accountId: form.defaultAccounts[field.provider] || null,
-          expectedRevision: from.revisions.defaultAccounts[field.provider] ?? 0,
-        });
-        return {
-          values: { ...from.values, defaultAccounts: { ...from.values.defaultAccounts, [field.provider]: providerAccountDefault.accountId ?? "" } },
-          revisions: { ...from.revisions, defaultAccounts: { ...from.revisions.defaultAccounts, [field.provider]: providerAccountDefault.revision } },
+          values: { ...from.values, reviewerSecurity: reviewerSecurity.policy },
+          revisions: { ...from.revisions, reviewerSecurity: reviewerSecurity.revision },
         };
       }
       case "installation": {
@@ -239,16 +190,6 @@ export function MachineSettingsDialog({
     if (changed.length === 0) {
       onClose();
       return;
-    }
-    // Turning switching on is an opt-in to the provider-terms warning; turning it off is not.
-    if (changed.some((field) => field.kind === "switching") && form.switching && !baseline.values.switching) {
-      const approved = await confirm({
-        title: "Turn On Automatic Switching",
-        message: `When an account on ${display.name} reaches its usage limit, the next turn moves to another account from the same provider.`,
-        details: <Notice tone="warning" compact>{TERMS}</Notice>,
-        confirmLabel: "Turn On Automatic Switching",
-      });
-      if (!approved) return;
     }
     savingRef.current = true;
     setSaving(true);
@@ -289,34 +230,11 @@ export function MachineSettingsDialog({
 
   const nameIds = { input: `${ids}-name`, error: `${ids}-name-error` };
   const capacityIds = { input: `${ids}-capacity`, helper: `${ids}-capacity-helper`, error: `${ids}-capacity-error` };
-  const accountsHelperId = `${ids}-accounts-helper`;
   const installationsHelperId = `${ids}-installations-helper`;
   const deleteNoteId = `${ids}-delete-note`;
   const capacityEditable = capacitySupported && canManageRunner;
   const initialFocusRef = at === "capacity" && capacityEditable ? capacityRef
     : at === "installations" && groups.length > 0 ? installationsRef : undefined;
-
-  const accountOptions = (provider: DefaultAccountProvider) => {
-    const savedId = baseline.values.defaultAccounts[provider] ?? "";
-    const candidates = accounts.filter((account) => account.provider === provider);
-    return [
-      { value: "", label: "No Default", description: "Uses the agent's configured account, or the first one available." },
-      ...(runner && missingDefaultAccount(runner, provider, savedId) ? [{
-        value: savedId,
-        label: "Saved Account Not Found",
-        description: "It's no longer on this machine. Choose another account.",
-      }] : []),
-      // A profile only other control planes may use can't be saved as the default (#3240); one
-      // saved before stays listed, saying why.
-      ...candidates.filter((account) => account.profile?.access !== "not_granted" || account.id === savedId).map((account) => ({
-        value: account.id,
-        label: revealed ? account.label : titles[accounts.indexOf(account)]!,
-        description: account.profile?.access === "not_granted"
-          ? "Its provider profile isn't granted to this control plane."
-          : accountStatusLabel(account.authStatus),
-      })),
-    ];
-  };
 
   const installationGroupDisabled = (group: InstallationGroup) => !canManageRunner ||
     (group.kind === "target" ? !targetInstallationSupported : !installationSupported);
@@ -423,49 +341,23 @@ export function MachineSettingsDialog({
         )}
 
         {runner && (
-          <div className="machine-settings-switch">
-            <SwitchRow
-              title="Switch Accounts Automatically"
-              description={SWITCHING_DESCRIPTION}
-              checked={form.switching}
-              disabled={!switchSupported || !canManageRunner}
-              {...(!switchSupported ? {
-                disabledReason: runnerCapabilityRequirement(runner.protocolVersion, "automaticProviderAccountSwitch",
-                  "automatic account switching changes"),
-              } : {})}
-              onClick={() => update({ switching: !form.switching })}
+          <div className="field">
+            <div className="field-head"><span>Reviewer Executable Policy</span></div>
+            <Select<import("@wollipog/protocol").ReviewerSecurityPolicy>
+              label="Reviewer Executable Policy"
+              describedBy={`${ids}-reviewer-security-help`}
+              value={form.reviewerSecurity}
+              disabled={saving || !canManageRunner || !reviewerSecuritySupported}
+              options={[
+                { value: "strict", label: "Strict", description: "Verify ownership, write permissions, and private group membership." },
+                { value: "personal_machine", label: "Personal Machine", description: "Trust group-writable paths owned by your account without checking group membership. Use when you trust other local accounts." },
+              ]}
+              onChange={(reviewerSecurity) => update({ reviewerSecurity })}
             />
+            <p className="field-helper" id={`${ids}-reviewer-security-help`}>{reviewerSecuritySupported
+              ? "Applies to reviewers and their Git, forge, and interpreter tools. Both policies reject world-writable paths and locations agents can write. Changes apply to the next review; running reviews continue."
+              : runnerCapabilityRequirement(runner.protocolVersion, "reviewerSecurityPolicy", "reviewer executable policy changes")}</p>
           </div>
-        )}
-
-        {providers.length > 0 && (
-          <fieldset className="machine-settings-fieldset">
-            <legend>Default Accounts</legend>
-            {accounts.some((account) => isPersonalIdentifier(account.label)) && (
-              <AccountIdentifierRevealButton label="Emails" revealed={revealed} onToggle={toggleReveal} withText />
-            )}
-            {providers.map((provider) => {
-              const label = defaultAccountLabel(provider);
-              return (
-                <div className="field" key={provider}>
-                  <span>{label}</span>
-                  <Select<string>
-                    label={label}
-                    value={form.defaultAccounts[provider] ?? ""}
-                    disabled={!canManageRunner}
-                    describedBy={accountsHelperId}
-                    options={accountOptions(provider)}
-                    onChange={(accountId) => {
-                      if (savingRef.current) return;
-                      freeze({ provider });
-                      update({ defaultAccounts: { ...draft.defaultAccounts, [provider]: accountId } });
-                    }}
-                  />
-                </div>
-              );
-            })}
-            <p className="field-helper" id={accountsHelperId}>{DEFAULT_ACCOUNTS_HELPER}</p>
-          </fieldset>
         )}
 
         {groups.length > 0 && (

@@ -10,6 +10,7 @@ import {
   type PendingApproval,
   type SessionView,
   type AutomationCreationSnapshot,
+  type CampaignRepositoryAdditionSnapshot,
   type LocationSwitchSnapshot,
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
@@ -70,6 +71,8 @@ const scenario = new URLSearchParams(window.location.search).get("scenario") ?? 
 // `notices=1` (two session notices behind the card's "+N More"), `tall=1` (a body taller than the
 // dock's cap) and `keyboard=1` (the software keyboard is open).
 const query = new URLSearchParams(window.location.search);
+// `theme=light` switches the palette, for UI evidence.
+if (query.get("theme") === "light") document.documentElement.dataset.theme = "light";
 const runnerOnline = query.get("runner") !== "offline";
 const respondAs = query.get("respond");
 const withNotices = query.get("notices") === "1";
@@ -268,10 +271,26 @@ function evidenceSession(): SessionView {
 
 function issueScopeSession(): SessionView {
   const base=evidenceSession();
-  const snapshot={category:"campaign_issue_scope" as const,repository:"team/repo",expectedRevision:1,before:[123,124],additions:[125],removals:[124],
+  // `ownerReview=1` (#4267): the Orchestrator's proposal without lineage, with the Maximum Issues increase it needs.
+  const snapshot = query.get("ownerReview") === "1" ? { category: "campaign_issue_scope" as const, repository: "team/repo", expectedRevision: 3,
+    before: [130, 131, 132, 133, 134], removals: [],
+    affectedAssignments: [], affectedDecisions: ["merge-4141"], activeChildren: [],
+    ...(new URLSearchParams(window.location.search).get("lineageReview") === "1" ? {
+      additions: [141],
+      explanation: "Adopt the verified published follow-up under the current campaign boundary.",
+      lineage: { kind: "follow_up" as const, publicationOccurrenceId: "published-repair" },
+      verifiedPublications: [{ publicationOccurrenceId: "published-repair", issue: 141 }],
+      ownerReview: { cause: "publication_authority_changed" as const },
+    } : { additions: [141, 142],
+      explanation: "You asked me to start #141 and #142 after launch. Neither is an epic member or a published follow-up.",
+      ownerReview: { cause: "lineage_missing" as const, maxIssuesIncrease: { from: 6, increase: 1 } } }) }
+    : {category:"campaign_issue_scope" as const,repository:"team/repo",expectedRevision:1,before:[123,124],additions:[125],removals:[124],
     explanation: tallBody ? Array.from({ length: 12 }, (_, index) =>
       `Review scope item ${index + 1}: confirm the requested work, dependencies, and affected assignments before approving this campaign change.`).join("\n\n")
-      : "Update the intended epic members.",affectedAssignments:[{sessionId:"child",issue:124}],affectedDecisions:["closure-member-124"],activeChildren:[{sessionId:"child",title:"Implement Member Work",assignmentDigest:"a".repeat(64)}]};
+      : "Update the intended epic members.",affectedAssignments:[{sessionId:"child",issue:124}],affectedDecisions:["closure-member-124"],activeChildren:[{sessionId:"child",title:"Implement Member Work",assignmentDigest:"a".repeat(64)}],
+    // `repositories=1`: the same change also adds and removes issues in a second campaign repository (#4118).
+    ...(query.get("repositories") === "1" ? { otherRepositories: [{ repository: "team/api", before: [5, 124], additions: [40], removals: [5] }],
+      affectedAssignments: [{ sessionId: "child", issue: 124 }, { sessionId: "api-child", issue: 5, repository: "team/api" }] } : {})};
   return {...base,title:"Campaign Issue Scope",pendingApproval:{...base.pendingApproval!,title:"Campaign Issue Scope Approval Required",context:{input:JSON.stringify(snapshot)},
     workflowDecision:{...base.pendingApproval!.workflowDecision!,category:"campaign_issue_scope",resourceSnapshot:snapshot,controllingSessionId:base.id,authority:"human"}}};
 }
@@ -295,15 +314,21 @@ function followUpAdmissionSession(rebinding = false): SessionView {
   } };
 }
 
-/** `refused`: the last approved closure was refused, so this request shows why (#4059). */
+/** `refused`: the last approved closure was refused, so this request shows why (#4059). The
+ * `excluded` query parameter picks the excluded children (#3237): one by default, `none` for an
+ * empty list, or `old` for a snapshot from a release that did not record them. */
 function issueClosureSession(refused = false): SessionView {
   const base = evidenceSession();
+  const excluded = query.get("excluded");
+  const excludedChildren = excluded === "old" ? {} : { excludedChildren: excluded === "none" ? [] : [{ sessionId: "other-child",
+    title: "Fix the <b>Settings</b> Sync Race", reason: { attemptedIssues: [{ repository: "team/repo", number: 131 }],
+      attemptedIssueCount: 1, attemptedWithoutIssue: 0, linkedWorkItems: 0 } }] };
   const snapshot = { category: "issue_closure" as const, repository: "team/repo", issue: 123,
     title: "Obsolete Task", url: "https://github.com/team/repo/issues/123", forgeDigest: "a".repeat(64),
     reason: "not_planned" as const, explanation: "The replacement design makes this task obsolete.",
     evidence: ["Replacement issue #124 covers the current design."], comment: "Retired in favor of #124.",
     openPullRequests: [{ number: 77, title: "Earlier Implementation", url: "https://github.com/team/repo/pull/77", headSha: "b".repeat(40) }],
-    activeChildren: [{ sessionId: "child", title: "Implement Issue 123", assignmentDigest: "c".repeat(64) }],
+    activeChildren: [{ sessionId: "child", title: "Implement Issue 123", assignmentDigest: "c".repeat(64) }], ...excludedChildren,
     ...(refused ? { previousRefusal: { occurrenceId: "wd_occ_closure_1", completedAt: Date.UTC(2026, 10, 1, 17, 32),
       refusal: githubIssueClosureRefusal("closing_reference_changed", { pullRequests: [77] }) } } : {}),
   };
@@ -339,6 +364,20 @@ function automationCreationSession(): SessionView {
   return { ...base, title: "Automation Creation", pendingApproval: { ...base.pendingApproval!, title: "Create Automation Approval Required",
     context: { input: JSON.stringify(snapshot) }, workflowDecision: { ...base.pendingApproval!.workflowDecision!,
       category: "automation_creation", resourceSnapshot: snapshot, controllingSessionId: base.id, authority: "human" } } };
+}
+
+/** `scenario=repository-addition` (#4117): a campaign root asks its owner to add one inspected
+ * Project Location's repository for a recorded follow-up. */
+function repositoryAdditionSession(): SessionView {
+  const base = evidenceSession();
+  const snapshot: CampaignRepositoryAdditionSnapshot = { category: "campaign_repository_addition", locationId: "loc-docs",
+    locationName: "Docs Site", repository: "acme/docs", reason: "The follow-up fixes the install link in the documentation repository.",
+    work: { kind: "follow_up", id: "fu-docs", title: "Fix the Broken Install Link" } };
+  return { ...base, title: "Release Campaign", pendingApproval: { ...base.pendingApproval!, title: "Add Repository to Campaign Approval Required",
+    context: { toolName: "Typed Workflow Decision", input: JSON.stringify(snapshot) },
+    workflowDecision: { ...base.pendingApproval!.workflowDecision!, category: "campaign_repository_addition",
+      resourceKey: "campaign_repository_addition:acme/docs", resourceSnapshot: snapshot, controllingSessionId: base.id, sessionId: base.id,
+      authority: "human" } } };
 }
 
 /** `scenario=location-switch` (#4138): a regular session's repository mismatch, with `locations=2`
@@ -740,12 +779,37 @@ function toolCallsRequest(): PendingApproval {
 
 // `closures=checked` gives the `workflow` merge a runner's closing-reference read with one declared
 // closure, `closures=none` a read that found none, and `closures=declared` a declaration from a
-// runner that predates the check (#3713). Without it, the merge has neither.
+// runner that predates the check (#3713). Without it, the merge has neither. `forge=gitlab` makes it
+// a GitLab merge request with the same variants, read by GitLab's closing pattern (#3762).
 const closuresParam = query.get("closures");
+const gitlabMerge = query.get("forge") === "gitlab";
+const GITLAB_PROJECT = "gitlab.example.com/platform/wollipog";
 
 function workflowRequest(): PendingApproval {
   const extension = scenario === "review-extension";
   const declared = closuresParam === "checked" || closuresParam === "declared";
+  if (!extension && gitlabMerge) {
+    const issue = (n: number) => `${GITLAB_PROJECT}#${n}`;
+    return {
+      requestId: "merge-occurrence", occurrenceId: "merge-occurrence", kind: "workflow_decision", title: "PR Merge Approval Required",
+      options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+      workflowDecision: {
+        requestId: "merge-request", occurrenceId: "merge-occurrence", sessionId: "dock-session", controllingSessionId: "parent",
+        category: "pr_merge", resourceKey: `${GITLAB_PROJECT}!2179`,
+        resourceSnapshot: {
+          category: "pr_merge", repository: GITLAB_PROJECT, pullRequest: 2179, headSha: "c0ffee".repeat(6) + "c0ff", reviewResult: "merge",
+          requiredChecks: { headSha: "c0ffee".repeat(6) + "c0ff", status: "passed", checkedAt: 1, checks: [] },
+          mergeMethod: "merge_train", squash: true, removeSourceBranch: true,
+          ...(declared ? { intendedClosures: [issue(2178), issue(2180)] } : {}),
+        },
+        ...(closuresParam === "checked" ? { closingReferenceCheck: { checkedAt: 1, closures: [
+          { issue: issue(2178), sources: ["description", "linked"], excerpt: "Implements #2178: the request dock keeps its card above the keyboard." },
+          { issue: issue(2180), sources: ["linked"] },
+        ] } } : closuresParam === "none" ? { closingReferenceCheck: { checkedAt: 1, closures: [] } } : {}),
+        resourceDigest: "d".repeat(64), policyRevision: 1, authority: "human", status: "pending", createdAt: Date.now() - 3 * 60_000,
+      },
+    };
+  }
   return {
     requestId: "merge-occurrence",
     occurrenceId: "merge-occurrence",
@@ -900,7 +964,7 @@ function ReadingKeys({ scrollRef }: {
 function Fixture() {
   const [keyboard, updateKeyboard] = useState(keyboardOpen);
   setKeyboard = updateKeyboard;
-  const [session, setSession] = useState(() => scenario === "automation-creation" ? automationCreationSession() : scenario === "location-switch" ? locationSwitchSession() :scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure-refused" ? issueClosureSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
+  const [session, setSession] = useState(() => scenario === "automation-creation" ? automationCreationSession() : scenario === "location-switch" ? locationSwitchSession() : scenario === "repository-addition" ? repositoryAdditionSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure-refused" ? issueClosureSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
     : scenario === "held" || scenario === "both"
     ? heldCampaignSession()

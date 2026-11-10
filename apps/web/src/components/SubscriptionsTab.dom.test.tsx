@@ -77,7 +77,7 @@ const THREE_WINDOWS = [
 
 interface Toast { message: string; tone?: string }
 
-async function renderTab(client: Partial<ApiClient>, tab: "subscriptions" | undefined = "subscriptions") {
+async function renderTab(client: Partial<ApiClient>, tab?: "api") {
   const toasts: Toast[] = [];
   const feedback = {
     confirm: async () => false,
@@ -116,6 +116,27 @@ async function renderTab(client: Partial<ApiClient>, tab: "subscriptions" | unde
   };
 }
 
+test("Subscriptions is the first tab and Usage opens on it", async () => {
+  const view = await renderTab({ subscriptionUsage: async () => response([source({ buckets: THREE_WINDOWS })]) });
+  try {
+    assert.deepEqual(
+      [...view.container.querySelectorAll('[role="tab"]')].map((tab) => tab.id),
+      ["usage-subscriptions-tab", "usage-api-tab"],
+    );
+    assert.equal(view.tab("subscriptions").getAttribute("aria-selected"), "true");
+    assert.equal(view.tab("subscriptions").tabIndex, 0);
+    assert.equal(view.tab("api").getAttribute("aria-selected"), "false");
+    assert.ok(view.panel()?.querySelector(".subscription-plan"));
+    assert.equal(view.button("Budget and History…"), undefined, "API Usage's action stays on its tab");
+
+    await act(async () => { view.tab("api").click(); });
+    assert.equal(view.tab("api").getAttribute("aria-selected"), "true");
+    assertNoDomNode(view.panel());
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("an account with three windows is one surface with a meter, \"N% left\" and a reset per window", async () => {
   const view = await renderTab({ subscriptionUsage: async () => response([source({ buckets: THREE_WINDOWS })]) });
   try {
@@ -139,6 +160,168 @@ test("an account with three windows is one surface with a meter, \"N% left\" and
     assert.equal(title, subscriptionFullTime(THREE_WINDOWS[0]!.resetsAt!));
     const everyTime = [view.panel()!.textContent ?? "", ...[...view.panel()!.querySelectorAll("[title]")].map((node) => node.getAttribute("title") ?? "")];
     for (const text of everyTime) assert.doesNotMatch(text, /\d:\d\d:\d\d/, `no seconds in "${text}"`);
+  } finally {
+    await view.unmount();
+  }
+});
+
+const shared = (runnerId: string, runnerName: string, over: Partial<SubscriptionUsageSourceView> = {}) => source({
+  sourceId: runnerId.padEnd(32, "0"), runnerId, runnerName, subscriptionKey: "shared-subscription", ...over,
+});
+
+test("one subscription on two machines is one account with merged meters and a machine list", async () => {
+  const view = await renderTab({ subscriptionUsage: async () => response([
+    shared("laptop", "Laptop", { fetchedAt: NOW - HOUR, buckets: [window_("weekly", "Weekly", 90)] }),
+    shared("box", "Box", { fetchedAt: NOW, buckets: [window_("weekly", "Weekly", 40), window_("five_hour", "Five-Hour Window", 70)] }),
+  ]) });
+  try {
+    const surfaces = view.panel()!.querySelectorAll(".subscription-plan");
+    assert.equal(surfaces.length, 1);
+    assert.match(view.panel()!.querySelector(".section-title")?.textContent ?? "", /^1 Account$/);
+    const surface = surfaces[0]!;
+    assert.deepEqual(
+      [...surface.querySelectorAll(".subscription-window")].map((row) => row.querySelector(".subscription-window-left")?.textContent),
+      ["40% left", "70% left"],
+      "the newest reading of each window",
+    );
+    assert.equal(surface.querySelector(".subscription-plan-machine")?.textContent, "On 2 Machines");
+    assert.equal(surface.querySelector("details summary")?.textContent, "On 2 Machines");
+    assert.deepEqual(
+      [...surface.querySelectorAll("details .subscription-unavailable-name")].map((name) => name.textContent),
+      ["Codex App Server on Laptop", "Codex App Server on Box"],
+    );
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an offline machine is named in the list while the account stays healthy", async () => {
+  const view = await renderTab({ subscriptionUsage: async () => response([
+    shared("laptop", "Laptop", { buckets: [window_("weekly", "Weekly", 90)] }),
+    shared("studio", "Studio", { fetchedAt: NOW - HOUR, runnerStatus: "offline", freshness: "stale", buckets: [window_("weekly", "Weekly", 95)] }),
+  ]) });
+  try {
+    const surface = view.panel()!.querySelector(".subscription-plan")!;
+    assertNoDomNode(surface.querySelector(".subscription-plan-head .status"), "another machine still reports this account");
+    const rows = [...surface.querySelectorAll("details .subscription-unavailable-row")];
+    assertNoDomNode(rows[0]!.querySelector(".status"), "a healthy machine has no badge");
+    assert.equal(rows[1]!.querySelector(".status")?.textContent, "Offline");
+    assert.match(rows[1]!.querySelector(".subscription-unavailable-reason")?.textContent ?? "", /The machine is offline\. Last update /);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a signed-in machine with no reading yet joins the account instead of Sources Unavailable", async () => {
+  const view = await renderTab({ subscriptionUsage: async () => response([
+    shared("laptop", "Laptop", { buckets: [window_("weekly", "Weekly", 90)] }),
+    shared("box", "Box", { state: "unavailable", detail: "Codex subscription usage has not been fetched yet." }),
+  ]) });
+  try {
+    assert.doesNotMatch(view.panel()!.textContent ?? "", /Sources? Unavailable/);
+    const rows = [...view.panel()!.querySelectorAll("details .subscription-unavailable-row")];
+    assert.equal(rows.length, 2);
+    assert.equal(rows[1]!.querySelector(".status")?.textContent, "Unavailable");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Refresh Account asks every machine on the subscription, and shows the last answer", async () => {
+  const requests: unknown[] = [];
+  const stale = [
+    shared("laptop", "Laptop", { providerAccountId: "work", buckets: [window_("weekly", "Weekly", 90)] }),
+    shared("box", "Box", { providerAccountId: "work-copy", buckets: [window_("weekly", "Weekly", 90)] }),
+  ];
+  const view = await renderTab({
+    subscriptionUsage: async () => response(stale),
+    refreshSubscriptionUsage: async (target: unknown) => {
+      requests.push(target);
+      return {
+        ...response([stale[0]!, { ...stale[1]!, buckets: [window_("weekly", "Weekly", requests.length === 1 ? 80 : 10)] }], { attempted: 1, failed: 0 }),
+        generatedAt: NOW + requests.length,
+      };
+    },
+  });
+  try {
+    await act(async () => { view.button("Refresh Account")!.click(); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(requests, [
+      { runnerId: "laptop", providerAccountId: "work" },
+      { runnerId: "box", providerAccountId: "work-copy" },
+    ]);
+    assert.equal(view.toasts.at(-1)?.message, "Account refreshed.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a Claude account its machine can read on request has Refresh Account", async () => {
+  const requests: unknown[] = [];
+  const claude = source({
+    provider: "claude", agentId: "claude", agentName: "Claude Code", plan: "max", providerAccountId: "personal",
+    refreshable: true, buckets: [window_("seven_day", "Weekly — All Models", 40)],
+  });
+  const view = await renderTab({
+    subscriptionUsage: async () => response([claude]),
+    refreshSubscriptionUsage: async (target: unknown) => {
+      requests.push(target);
+      return response([claude], { attempted: 1, failed: 0 });
+    },
+  });
+  try {
+    await act(async () => { view.button("Refresh Account")!.click(); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(requests, [{ runnerId: "runner-1", providerAccountId: "personal" }]);
+    assert.equal(view.toasts.at(-1)?.message, "Account refreshed.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a Claude account its machine can't read on request has no Refresh Account", async () => {
+  const view = await renderTab({ subscriptionUsage: async () => response([source({
+    provider: "claude", agentId: "claude", agentName: "Claude Code", providerAccountId: "personal",
+    refreshable: false, buckets: [window_("seven_day", "Weekly — All Models", 40)],
+  })]) });
+  try {
+    assert.equal(view.button("Refresh Account"), undefined);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("one machine failing a shared refresh is reported, and the others still count", async () => {
+  const sources = [
+    shared("laptop", "Laptop", { providerAccountId: "work", buckets: [window_("weekly", "Weekly", 90)] }),
+    shared("box", "Box", { providerAccountId: "work-copy", buckets: [window_("weekly", "Weekly", 90)] }),
+  ];
+  const view = await renderTab({
+    subscriptionUsage: async () => response(sources),
+    refreshSubscriptionUsage: async (target?: { runnerId: string }) => {
+      if (target?.runnerId === "box") throw new Error("unreachable");
+      return response(sources, { attempted: 1, failed: 0 });
+    },
+  });
+  try {
+    await act(async () => { view.button("Refresh Account")!.click(); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    assert.equal(view.toasts.at(-1)?.message, "1 of 2 machines couldn't refresh. The last known values are still shown.");
+    assert.equal(view.toasts.at(-1)?.tone, "warning");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("the tab's attention count reads each subscription once, not once per machine", async () => {
+  const view = await renderTab({ subscriptionUsage: async () => response([
+    shared("laptop", "Laptop", { buckets: [window_("five_hour", "Five-Hour Window", 20)] }),
+    shared("box", "Box", { buckets: [window_("five_hour", "Five-Hour Window", 20)] }),
+  ]) });
+  try {
+    const badges = [...view.panel()!.querySelectorAll(".subscription-window .status")];
+    assert.equal(badges.length, 1);
+    assert.equal(view.tab("subscriptions").querySelector(".count-badge")?.textContent, "1");
   } finally {
     await view.unmount();
   }
@@ -286,7 +469,7 @@ test("with no sources the tab is No Subscriptions Connected with Open Connection
     usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }), usageUsers: async () => ({ users: [] }) } as unknown as ApiClient;
   try {
     await act(async () => {
-      root.render(<ApiProvider client={client}><UsageView tab="subscriptions" onOpenConnections={() => opened++} /></ApiProvider>);
+      root.render(<ApiProvider client={client}><UsageView onOpenConnections={() => opened++} /></ApiProvider>);
     });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     const panel = container.querySelector("#usage-subscriptions-panel")!;

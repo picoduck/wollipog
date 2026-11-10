@@ -290,6 +290,8 @@ test("a stale boundary no Human scope approval explains refuses a person's messa
     // An issue the approval never named makes the stored scope unexplained by its record.
     const stored = h.db.sessionOrchestratorPolicy("root")!;
     stored.issueScope!.issueNumbers = [100, 101, 999];
+    // The repository-qualified list (#4118) carries the same unexplained issue.
+    stored.issueScope!.issues = [100, 101, 999].map((number) => ({ repository: stored.issueScope!.repository, number }));
     stored.issueNumbers = [100, 101, 999];
     h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(stored));
     for (const attempt of ["message", "restart"] as const) {

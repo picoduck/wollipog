@@ -44,6 +44,26 @@
   the retired `stylesheet-debt.json`), drop that side's inventory changes, run
   `pnpm regenerate:stylesheet-debt` on the resolved tree, and commit what it writes.
 
+## Protocol Version
+
+- `PROTOCOL_VERSION` is derived from the ledger in `packages/protocol/src/protocol-version.ts`: the
+  highest version recorded there. Never write it as a literal and never add history to `index.ts`.
+- To claim a version, insert the entry (a `// N: ...` comment, then the line `N,`) directly below
+  the `// vN slot` anchor for the next free version, and leave everything else in the file alone.
+  Pull requests that claim different versions then merge without a text conflict; two that claim
+  the same version conflict at once.
+- Before choosing a number, check main and every open pull request's claim, and re-check before
+  enqueueing. `pnpm check:protocol-version` compares your branch with `origin/main`. CI runs the same
+  check on every pull request, merge group and main commit against the commit it lands on: it fails
+  when a version the branch adds is not greater than that commit's, naming both values and the
+  version to claim instead. Move the entry under that anchor and update any capability floor in
+  `RUNNER_CAPABILITY_MIN_PROTOCOL` that used the old number.
+- A branch written before the ledger edits the history comment and the `PROTOCOL_VERSION` line in
+  `index.ts`. When merging main, keep main's `index.ts` lines and move the branch's entry into the
+  ledger under its slot anchor.
+- When the check reports few unclaimed anchors, append more in a separate pull request with
+  `node scripts/protocol-version-ledger.mjs --extend 200`.
+
 ## GitHub Issues
 
 - When asked to draft, report, log, file, or create a GitHub issue, read and follow

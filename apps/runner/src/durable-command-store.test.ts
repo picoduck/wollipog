@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -58,6 +59,7 @@ for (const rejected of [false, true]) {
       claimed.handle.beginSteering();
       assert.equal(store.read("cmd_test")?.state, "started");
       assert.equal(store.recentUpdates()[0]?.state, "queued", "reconnect cannot advance the CP delivery receipt");
+      assert.equal(store.recentUpdate("cmd_test")?.state, "queued", "paced replay preserves the delivery fence");
       if (rejected) assert.equal(claimed.handle.steeringRejected().state, "queued");
       now = 20;
       const restarted = new DurableCommandStore(root, { ownerId: "owner-b", now: () => now, ownerStaleMs: 10 });
@@ -671,3 +673,31 @@ for (const staleCallback of ["completed", "failed", "uncertain", "queued", "star
     }
   });
 }
+
+test("paced reconnect receipts re-read revisions and expiry without executing work", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-paced-receipts-"));
+  let now = 1;
+  try {
+    const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => now });
+    const claimed = store.claim(message());
+    assert.equal(claimed.kind, "new");
+    if (claimed.kind !== "new") return;
+    const [id] = store.recentUpdateIds();
+    assert.ok(id);
+    assert.deepEqual(store.recentUpdate(id), store.recentUpdates()[0]);
+    claimed.handle.queued();
+    assert.equal(store.recentUpdate(id)?.state, "queued");
+    const live = claimed.handle.completed();
+    assert.equal(store.recentUpdate(id)?.revision, live.revision);
+    assert.equal(store.recentUpdate(id)?.state, "completed");
+    assert.equal(store.claim(message()).kind, "duplicate", "reading never executes the command");
+    now = 10_000;
+    assert.equal(store.recentUpdate(id)?.state, "completed", "inclusive dedupe horizon");
+    now++;
+    assert.equal(store.recentUpdate(id), null, "expiry during an ACK wait is rechecked");
+    assert.deepEqual(store.recentUpdateIds(), []);
+    assert.equal(store.recentUpdate("missing"), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

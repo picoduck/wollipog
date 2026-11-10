@@ -1,29 +1,50 @@
 import React from "react";
 import { CampaignIssueScopeSummary } from "../CampaignIssueScopePanel.js";
-import type { PullRequestClosingReferenceCheck, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
+import type { PendingApproval, PullRequestClosingReferenceCheck, WorkflowDecisionOwnerRule, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { IssueClosureSummary } from "../IssueClosureSummary.js";
 import { AutomationCreationSummary } from "../AutomationCreationSummary.js";
 import { LocationSwitchSummary } from "./LocationSwitchSummary.js";
 import { followUpLimitText } from "../../follow-up-limit.js";
 import { issueRefLabel } from "../../campaign-status.js";
+import { StructuredQuestionText } from "../StructuredQuestionText.js";
 
-/** The issues a GitHub merge would close (#3713). The control plane creates the decision only when
- * they are exactly the snapshot's declared ones, so with a check this is what GitHub reported; a
- * runner that predates the check reports nothing, and then only the declaration is known. */
-function MergeClosures({ declared, check }: { declared: string[]; check?: PullRequestClosingReferenceCheck }) {
+/** The issues a merge would close (#3713; GitLab since #3762). The control plane creates the
+ * decision only when they are exactly the snapshot's declared ones, so with a check this is what the
+ * forge reported; a runner that predates the check reports nothing, and then only the declaration
+ * is known. */
+function MergeClosures({ declared, check, gitlab }: { declared: string[]; check?: PullRequestClosingReferenceCheck; gitlab: boolean }) {
   if (!check) {
     return <>Not checked: the runner predates this check.{declared.length ? ` Declared: ${declared.join(", ")}.` : ""}</>;
   }
   if (!check.closures.length) return <>None</>;
   return <ul>{check.closures.map((closure) => <li key={closure.issue}>
-    {closure.issue}{closure.excerpt ? <>: <q>{closure.excerpt}</q></> : " (linked on GitHub)"}
+    {closure.issue}{closure.excerpt ? <>: <q>{closure.excerpt}</q></> : gitlab ? " (reported by GitLab)" : " (linked on GitHub)"}
   </li>)}</ul>;
+}
+
+/** The installed or user-authored rule that keeps a decision for its owner (#4137), as facts rows
+ * for a `.facts` list. The requester supplied both values, so they render only as plain text. */
+export function OwnerRuleFactRows({ rule }: { rule: WorkflowDecisionOwnerRule }) {
+  return <>
+    <div><dt>Rule Source</dt><dd><code>{rule.source}</code></dd></div>
+    <div><dt>Rule</dt><dd><q>{rule.quote}</q></dd></div>
+  </>;
+}
+
+/** Why only the owner can make a decision a rule kept for them (#4137), and which rule it is. */
+export function OwnerRuleSummary({ rule }: { rule: WorkflowDecisionOwnerRule }) {
+  return <>
+    <p>An installed or user-authored rule keeps this decision for a person, so no agent can make it.</p>
+    <dl className="facts"><OwnerRuleFactRows rule={rule} /></dl>
+  </>;
 }
 
 /** What a workflow decision decides, as facts (§5.4): the Request Card's body for the kinds without
  * a review of their own, and the read-only summary of a decision the Orchestrator owns. */
-export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck }: {
+export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scopeMaxIssuesIncrease }: {
   snapshot: WorkflowDecisionResourceSnapshot;
+  /** The card's server-derived Maximum Issues increase, for a scope request (#4334). */
+  scopeMaxIssuesIncrease?: PendingApproval["scopeMaxIssuesIncrease"];
   /** The server-recorded closing-reference read of a GitHub merge, when there was one. */
   closingReferenceCheck?: PullRequestClosingReferenceCheck;
 }) {
@@ -32,6 +53,19 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck }: {
       return <AutomationCreationSummary snapshot={snapshot} />;
     case "location_switch":
       return <LocationSwitchSummary snapshot={snapshot} />;
+    case "campaign_repository_addition":
+      // A repository addition (#4117): the Location and the repository it verified as come from the
+      // server's inspection; the reason is the Orchestrator's own words, shown as such.
+      return <section aria-label="Add Repository Details">
+        <dl className="facts">
+          <div><dt>Location</dt><dd>{snapshot.locationName}</dd></div>
+          <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
+          <div><dt>{snapshot.work.kind === "follow_up" ? "Follow-Up" : "Work Item"}</dt><dd>{snapshot.work.title}</dd></div>
+          <div><dt>Orchestrator's Reason</dt><dd><q>{snapshot.reason}</q></dd></div>
+        </dl>
+        <p>Approving adds this repository to the campaign, so the Orchestrator can work in it like its other repositories.
+          Declining changes nothing, and the work that needs it stays blocked on you.</p>
+      </section>;
     case "implementation_question":
       return <>
         <p>{snapshot.question}</p>
@@ -40,17 +74,21 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck }: {
     case "owner_decision":
       // A decision the campaign's owner kept (#4064): the root's question, what it rests on, and
       // the options, of which only the owner chooses one.
+      // Its material is the root's Markdown, links included (#4270), never a monospace block. An
+      // Owner Question (#4270) is normally answered as a question; this summary is its read-only form.
       return <>
         <p>{snapshot.question}</p>
-        {snapshot.material && <div className="code-well"><pre>{snapshot.material}</pre></div>}
-        <ul>{snapshot.options.map((option) => <li key={option.optionId}>
+        {snapshot.material && <div><StructuredQuestionText>{snapshot.material}</StructuredQuestionText></div>}
+        {snapshot.options.length > 0 && <ul>{snapshot.options.map((option) => <li key={option.optionId}>
           {option.label}{option.optionId === snapshot.recommendedOptionId ? " (Recommended)" : ""}
           {option.description ? <>: {option.description}</> : null}
-        </li>)}</ul>
-        <p>You kept this decision, so only you can make it. The Orchestrator keeps working while it waits.</p>
+        </li>)}</ul>}
+        <p>{snapshot.kind === "question"
+          ? "The Orchestrator asked you this question. Only you can answer it, in your own words, and it keeps working while it waits."
+          : "You kept this decision, so only you can make it. The Orchestrator keeps working while it waits."}</p>
       </>;
     case "campaign_issue_scope":
-      return <CampaignIssueScopeSummary snapshot={snapshot} />;
+      return <CampaignIssueScopeSummary snapshot={snapshot} {...(scopeMaxIssuesIncrease ? { derivedIncrease: scopeMaxIssuesIncrease } : {})} />;
     case "issue_closure":
       return <IssueClosureSummary snapshot={snapshot} />;
     case "campaign_follow_up_admission":
@@ -78,9 +116,10 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck }: {
         <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
         <div><dt>Pull Request</dt><dd>#{snapshot.pullRequest}</dd></div>
         <div><dt>Head Commit</dt><dd><code>{snapshot.headSha.slice(0, 12)}</code></dd></div>
-        {snapshot.mergeMethod === undefined && <div><dt>Closes on Merge</dt><dd>
-          <MergeClosures declared={snapshot.intendedClosures ?? []} {...(closingReferenceCheck ? { check: closingReferenceCheck } : {})} />
-        </dd></div>}
+        <div><dt>Closes on Merge</dt><dd>
+          <MergeClosures declared={snapshot.intendedClosures ?? []} gitlab={snapshot.mergeMethod !== undefined}
+            {...(closingReferenceCheck ? { check: closingReferenceCheck } : {})} />
+        </dd></div>
       </dl>;
     case "review_round_extension":
       // What the person is asked to grant: more cross-model review rounds, and why (#3369).

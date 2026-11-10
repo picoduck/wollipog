@@ -12,6 +12,16 @@ test("parseGitAction: status", () => {
   assert.deepEqual(parseGitAction({ action: "status" }), { action: { kind: "status" } });
 });
 
+test("request diff is a capability-gated isolated read, including during a running turn", () => {
+  const action = { kind: "request_diff", requestUrl: "https://github.com/owner/repo/pull/1" } as const;
+  assert.deepEqual(parseGitAction({ action: "request_diff", requestUrl: action.requestUrl }), { action });
+  assert.ok("error" in parseGitAction({ action: "request_diff" }));
+  assert.ok("error" in parseGitAction({ action: "request_diff", requestUrl: 4 } as unknown as GitActionRequest));
+  assert.deepEqual(gitActionAllowed(action, "running"), { ok: true });
+  assert.equal(gitActionRequiresLinkedWorktree(action), true);
+  assert.deepEqual(gitActionCapability(action), { capability: "requestDiff", label: "forge request diff loading" });
+});
+
 test("parseGitAction: summary", () => {
   assert.deepEqual(parseGitAction({ action: "summary" }), { action: { kind: "summary" } });
 });

@@ -25,7 +25,8 @@ app.get("/api/sessions/:id/campaign/issue-scope", async (req, reply) => {
   }
   const epicRaw = (req.query as { epic?: string }).epic;
   const epic = epicRaw === undefined ? undefined : /^[1-9][0-9]*$/u.test(epicRaw) ? Number(epicRaw) : Number.NaN;
-  const result = await svc.campaignIssueScope(id, epic, (sessionId) => db.canAccessSession(principal, sessionId));
+  const repository = (req.query as { repository?: string }).repository;
+  const result = await svc.campaignIssueScope(id, epic, (sessionId) => db.canAccessSession(principal, sessionId), true, repository);
   if (result.ok && result.data) result.data.canPropose = principal.kind !== "agent" && principal.role !== "viewer" && db.isSessionOwner(principal, rootId);
   return respond(reply, result);
 });
@@ -37,6 +38,9 @@ app.post("/api/sessions/:id/campaign/issue-scope/proposals", async (req, reply) 
   if (principal.kind === "agent" ? principal.credentialSessionId !== id || !principal.orchestrator : principal.role === "viewer" || !db.isSessionOwner(principal, id) || !db.canAccessRunner(principal, db.getSession(id)!.runnerId)) {
     return reply.code(403).send({ error: "only the campaign owner or its root Orchestrator may propose a scope change" });
   }
+  // A Custom root's first-message proposal (#4282) takes the seed's propose-then-check route.
+  const seeded = principal.kind === "agent" ? await svc.proposeCampaignSeedScope(id, req.body as import("@wollipog/protocol").CampaignIssueScopeRequest) : null;
+  if (seeded) return respond(reply, seeded);
   return respond(reply, await svc.proposeCampaignIssueScope(id, req.body as import("@wollipog/protocol").CampaignIssueScopeRequest,
     (sessionId) => db.canAccessSession(principal, sessionId), principal.kind === "human" ? principal : undefined));
 });

@@ -11,6 +11,7 @@ import { subscriptionResetLabel } from "../account-unavailable-reasons.js";
 import { viewPath } from "../navigation.js";
 import { isPersonalIdentifier, redactPersonalIdentifiers } from "../personal-identifiers.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
+import { subscriptionAccountGroups, type SubscriptionAccountGroup } from "../subscription-account-groups.js";
 import { subscriptionPlanLabel } from "../usage-view-model.js";
 import { usageLeftPercent, usageMeterClass, usageWindowAttention } from "./AccountChoice.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -20,12 +21,41 @@ import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
-/** What Refresh All refreshes, as the in-flight key; an account's key is `runnerId:providerAccountId`. */
+/** What Refresh All refreshes, as the in-flight key; an account's key is its group's. */
 const ALL = "*";
 
 export interface SubscriptionRefreshTarget {
   runnerId: string;
   providerAccountId: string;
+}
+
+export interface SubscriptionRefreshAccount {
+  key: string;
+  targets: readonly SubscriptionRefreshTarget[];
+}
+
+/**
+ * Asks each machine on one subscription for its usage. The answer generated last holds every
+ * machine's stored readings, and a machine that could not be reached counts as a failed refresh, so
+ * the rest still show. Only when none answered does the refresh itself fail.
+ */
+async function refreshEveryMachine(
+  targets: readonly SubscriptionRefreshTarget[],
+  request: (target: SubscriptionRefreshTarget) => Promise<SubscriptionUsageResponse>,
+): Promise<SubscriptionUsageResponse> {
+  const results = await Promise.allSettled(targets.map((target) => request(target)));
+  const answers = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+  const latest = answers.reduce<SubscriptionUsageResponse | null>((newest, answer) =>
+    !newest || answer.generatedAt >= newest.generatedAt ? answer : newest, null);
+  if (!latest) throw (results[0] as PromiseRejectedResult).reason;
+  const unreachable = results.length - answers.length;
+  return {
+    ...latest,
+    refresh: {
+      attempted: answers.reduce((sum, answer) => sum + (answer.refresh?.attempted ?? 0), unreachable),
+      failed: answers.reduce((sum, answer) => sum + (answer.refresh?.failed ?? 0), unreachable),
+    },
+  };
 }
 
 /**
@@ -59,12 +89,14 @@ export function useSubscriptionUsage() {
     void load();
   }, [load]);
 
-  const refresh = useCallback(async (target?: SubscriptionRefreshTarget) => {
+  const refresh = useCallback(async (account?: SubscriptionRefreshAccount) => {
     if (inFlight.current) return;
     inFlight.current = true;
-    setRefreshing(target ? `${target.runnerId}:${target.providerAccountId}` : ALL);
+    setRefreshing(account?.key ?? ALL);
     try {
-      const refreshed = await api.refreshSubscriptionUsage(target);
+      const refreshed = account
+        ? await refreshEveryMachine(account.targets, api.refreshSubscriptionUsage)
+        : await api.refreshSubscriptionUsage(undefined);
       setData(refreshed);
       setError(null);
       const result = refreshed.refresh;
@@ -76,10 +108,10 @@ export function useSubscriptionUsage() {
           : `${result.failed} of ${result.attempted} machines couldn't refresh. The last known values are still shown.`,
         { tone: "warning" });
       } else {
-        showToast(target ? "Account refreshed." : "Subscriptions refreshed.", { tone: "success" });
+        showToast(account ? "Account refreshed." : "Subscriptions refreshed.", { tone: "success" });
       }
     } catch (cause) {
-      showToast(target ? "Couldn't refresh the account." : "Couldn't refresh subscriptions.", {
+      showToast(account ? "Couldn't refresh the account." : "Couldn't refresh subscriptions.", {
         tone: "error",
         detail: cause instanceof Error ? cause.message : undefined,
       });
@@ -89,13 +121,14 @@ export function useSubscriptionUsage() {
     }
   }, [api, showToast]);
 
+  const groups = useMemo(() => subscriptionAccountGroups(data?.sources ?? []), [data]);
   // The tab's count is exactly the Approaching Limit and Exhausted badges the tab shows.
   const attention = useMemo(
-    () => (data?.sources ?? []).flatMap((source) => source.buckets.map(usageWindowAttention)).filter((badge) => badge !== null),
-    [data],
+    () => groups.flatMap((group) => group.account.buckets.map(usageWindowAttention)).filter((badge) => badge !== null),
+    [groups],
   );
 
-  return { data, loading, error, reload: load, refreshing, refresh, attention };
+  return { data, groups, loading, error, reload: load, refreshing, refresh, attention };
 }
 
 export type SubscriptionUsageState = ReturnType<typeof useSubscriptionUsage>;
@@ -238,20 +271,40 @@ function useAccountText(source: SubscriptionUsageSourceView) {
   };
 }
 
-function SubscriptionAccount({ source, now, refreshing, onRefresh }: {
-  source: SubscriptionUsageSourceView;
+/** One machine on a shared subscription: whether it is reporting, and when it last did. */
+function SubscriptionMachine({ source, hide }: { source: SubscriptionUsageSourceView; hide: boolean }) {
+  const reporting = source.buckets.length > 0;
+  const offline = source.runnerStatus === "offline";
+  return (
+    <li className="subscription-unavailable-row">
+      <span className="subscription-unavailable-text">
+        <span className="subscription-unavailable-name">{source.agentName} on {source.runnerName}</span>
+        <span className="subscription-unavailable-reason">
+          {reporting && !offline ? `Last update ${shortTime(source.fetchedAt)}.` : unavailableReason(source, hide)}
+        </span>
+      </span>
+      {!reporting || offline
+        ? <StatusBadge tone="neutral" label={unavailableLabel(source)} />
+        : source.freshness === "stale" && <StatusBadge meta={statusMeta("usage", "stale")} />}
+    </li>
+  );
+}
+
+function SubscriptionAccount({ group, now, refreshing, onRefresh }: {
+  group: SubscriptionAccountGroup;
   now: number;
   refreshing: string | null;
-  onRefresh: (target: SubscriptionRefreshTarget) => void;
+  onRefresh: (account: SubscriptionRefreshAccount) => void;
 }) {
+  const source = group.account;
   const titleId = `subscription-${useId().replace(/:/g, "")}`;
   const privacy = useAccountEmailPrivacy();
   const account = useAccountText(source);
   const badge = accountBadge(source);
-  const target = source.provider === "codex" && source.providerAccountId
-    ? { runnerId: source.runnerId, providerAccountId: source.providerAccountId }
-    : null;
-  const busy = target !== null && (refreshing === ALL || refreshing === `${target.runnerId}:${target.providerAccountId}`);
+  const canRefresh = group.refreshTargets.length > 0;
+  const busy = canRefresh && (refreshing === ALL || refreshing === group.key);
+  const shared = group.members.length > 1;
+  const machines = `On ${group.machineCount} ${group.machineCount === 1 ? "Machine" : "Machines"}`;
   const extras = [
     ...(source.credits ? [`Credits: ${source.credits.unlimited ? "Unlimited"
       : source.credits.balance ?? (source.credits.hasCredits ? "Available" : "None")}`] : []),
@@ -275,14 +328,14 @@ function SubscriptionAccount({ source, now, refreshing, onRefresh }: {
         <p className="subscription-plan-meta">
           <span className="subscription-plan-machine">
             <ComputerIcon size={14} />
-            <span>{source.agentName} on {source.runnerName}</span>
+            <span>{shared ? machines : `${source.agentName} on ${source.runnerName}`}</span>
           </span>
           {account.text}
         </p>
-        {(account.reveal || target) && (
+        {(account.reveal || canRefresh) && (
           <div className="subscription-plan-actions">
             {account.reveal}
-            {target && (
+            {canRefresh && (
               <BusyButton
                 className="icon-btn sm"
                 busy={busy}
@@ -291,7 +344,7 @@ function SubscriptionAccount({ source, now, refreshing, onRefresh }: {
                 title="Refresh Account"
                 aria-disabled={refreshing !== null && !busy ? true : undefined}
                 icon={<RefreshIcon size={14} />}
-                onClick={() => onRefresh(target)}
+                onClick={() => onRefresh({ key: group.key, targets: group.refreshTargets })}
               >
                 {null}
               </BusyButton>
@@ -307,6 +360,21 @@ function SubscriptionAccount({ source, now, refreshing, onRefresh }: {
       )}
       {extras.length > 0 && (
         <p className="subscription-plan-extras">{extras.map((text) => <span key={text}>{text}</span>)}</p>
+      )}
+      {shared && (
+        <details className="disclosure subscription-plan-machines">
+          <summary>
+            <ChevronRightIcon size={14} className="disclosure-chevron" />
+            {machines}
+          </summary>
+          <div className="disclosure-body">
+            <ul className="subscription-unavailable-list" aria-label="Machines">
+              {group.members.map((member) => (
+                <SubscriptionMachine key={`${member.runnerId}:${member.sourceId}`} source={member} hide={privacy.hide} />
+              ))}
+            </ul>
+          </div>
+        </details>
       )}
     </section>
   );
@@ -339,16 +407,17 @@ function UnavailableSources({ sources }: { sources: readonly SubscriptionUsageSo
 
 /**
  * The Subscriptions tab (#3014, docs/design-system.md §5.1, §5.5, §11.6, §12): "{N} Accounts" with
- * when it last updated and Refresh All, one surface per account with a row per usage window, the
- * sources that report no windows folded into one disclosure, and the loading, error and empty
- * states. On phones Refresh All is the app bar's Refresh Subscriptions instead (`UsageView`).
+ * when it last updated and Refresh All, one surface per subscription with a row per usage window
+ * and, when it is on several machines, a disclosure listing them, the sources that report no
+ * windows folded into one disclosure, and the loading, error and empty states. On phones Refresh
+ * All is the app bar's Refresh Subscriptions instead (`UsageView`).
  */
 export function SubscriptionsTab({ usage, phone, onOpenConnections }: {
   usage: SubscriptionUsageState;
   phone: boolean;
   onOpenConnections?: () => void;
 }) {
-  const { data, loading, error, reload, refreshing, refresh } = usage;
+  const { data, groups, loading, error, reload, refreshing, refresh } = usage;
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
@@ -409,8 +478,8 @@ export function SubscriptionsTab({ usage, phone, onOpenConnections }: {
     );
   }
 
-  const accounts = data.sources.filter((source) => source.buckets.length > 0);
-  const unavailable = data.sources.filter((source) => source.buckets.length === 0);
+  const accounts = groups.filter((group) => group.hasWindows);
+  const unavailable = groups.filter((group) => !group.hasWindows).flatMap((group) => group.members);
   const updatedAt = Math.max(...data.sources.map((source) => source.fetchedAt));
   return (
     <>
@@ -434,13 +503,13 @@ export function SubscriptionsTab({ usage, phone, onOpenConnections }: {
       </div>
       {accounts.length > 0 && (
         <div className="subscription-plans">
-          {accounts.map((source) => (
+          {accounts.map((group) => (
             <SubscriptionAccount
-              key={`${source.runnerId}:${source.sourceId}`}
-              source={source}
+              key={group.key}
+              group={group}
               now={now}
               refreshing={refreshing}
-              onRefresh={(target) => void refresh(target)}
+              onRefresh={(account) => void refresh(account)}
             />
           ))}
         </div>

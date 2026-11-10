@@ -107,8 +107,12 @@ export function LocationSwitchSummary({ snapshot, chosenLocationId, onChoose }: 
       {chosen.actions.includes("switch")
         ? "Switch and Continue moves this session to that Location: it keeps its conversation and continues the task in a " +
           (snapshot.recoverBranch ? "worktree of the existing branch above" : "new worktree there") +
-          ", under that repository's instructions and permissions. Start a New Session leaves this session here and " +
-          "starts another there with the handoff below."
+          ", under that repository's instructions and permissions. " +
+          (snapshot.recoverBranch
+            ? "If a worktree that no session uses already has that branch checked out, the session continues there as it " +
+              "is, with any uncommitted changes in it. "
+            : "") +
+          "Start a New Session leaves this session here and starts another there with the handoff below."
         : chosen.sameRunner
         ? "Start a New Session continues this task in that Location with the handoff below. This session stays where it is."
         : "That Location is on another machine, so the task continues in a new session there with the handoff below. " +

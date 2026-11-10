@@ -214,7 +214,7 @@ export async function probeProviderAccountsForDiscovery(input: {
   agents: AgentDefinition[];
   usable(account: RunnerProviderAccount): boolean;
   environment(agent: AgentDefinition): Record<string, string>;
-  probe(agent: AgentDefinition, env: Record<string, string>): Promise<ProviderAccountDefinition["authStatus"]>;
+  probe(agent: AgentDefinition, env: Record<string, string>, account: RunnerProviderAccount): Promise<ProviderAccountDefinition["authStatus"]>;
   failed?(account: RunnerProviderAccount): void;
 }): Promise<Map<string, ProviderAccountDefinition["authStatus"]>> {
   const statuses = new Map<string, ProviderAccountDefinition["authStatus"]>();
@@ -225,7 +225,7 @@ export async function probeProviderAccountsForDiscovery(input: {
     if (!agent) { statuses.set(account.id, "unknown"); return; }
     try {
       const env = { ...input.environment(agent), ...providerAccountEnvironment({ provider: account.provider, credentialHome: account.directory }) };
-      statuses.set(account.id, mergeProviderAccountAuthStatus(account, await input.probe(agent, env)));
+      statuses.set(account.id, mergeProviderAccountAuthStatus(account, await input.probe(agent, env, account)));
     } catch {
       statuses.set(account.id, mergeProviderAccountAuthStatus(account, "unknown"));
       input.failed?.(account);
@@ -321,6 +321,17 @@ export function mergeProviderAccountAuthStatus(
 ): ProviderAccountDefinition["authStatus"] {
   const markerStatus = providerAccountDefinition(account).authStatus;
   return observed === "unknown" && markerStatus === "unauthenticated" ? markerStatus : observed;
+}
+
+/** The latest time any session's automatic switch left this account at a usage limit, while that
+ * is still ahead. A switch's cooldown keeps one session off the account; new sessions honor it too. */
+export function providerAccountCooldownUntil(
+  sessions: ReadonlyArray<Pick<SessionMeta, "automaticProviderAccountCooldowns">>,
+  accountId: string,
+  now: number,
+): number | undefined {
+  const latest = Math.max(0, ...sessions.map((meta) => meta.automaticProviderAccountCooldowns?.[accountId] ?? 0));
+  return latest > now ? latest : undefined;
 }
 
 export function agentWithDefaultProviderAccount(

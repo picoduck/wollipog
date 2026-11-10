@@ -1,4 +1,7 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
   AgentContext,
   AgentDefinition,
@@ -17,6 +20,7 @@ import type { DriverSubscriptionUsageUpdate } from "./drivers/driver.js";
 import { agentForProviderAccount, providerForDriver } from "./provider-accounts.js";
 import { harnessChoiceFor, selectedHarnessAgent } from "./harness-selection.js";
 import { launchTargetStillMatches } from "./discovery/resolve.js";
+import { claudeStatusIdentity, codexCredentialIdentity } from "./provider-login.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -26,6 +30,7 @@ const MAX_PROVIDER_BUCKETS = 64;
 const MAX_WINDOW_DURATION_MINUTES = 2 * 365 * 24 * 60;
 const MAX_RESET_AHEAD_MS = 2 * 365 * 24 * 60 * 60_000;
 const MAX_ACCOUNT_LABEL_LENGTH = 160;
+const MAX_AUTH_STATUS_OUTPUT = 64 * 1024;
 
 function record(value: unknown): JsonRecord | null {
   return value != null && typeof value === "object" && !Array.isArray(value)
@@ -109,6 +114,17 @@ export function subscriptionUsageSourceId(
       : { runnerId, agentId, provider, context: contextKey(context) }))
     .digest("hex")
     .slice(0, 32);
+}
+
+/** A one-way fingerprint of a provider identity (`claudeStatusIdentity`, `codexCredentialIdentity`),
+ * alike on every machine signed in to one subscription. Every part must be known: an organization
+ * alone can be several members' seats, and an email alone can span organizations, so an incomplete
+ * identity is not evidence of sameness and yields no fingerprint. */
+export function subscriptionIdentityFingerprint(identity: string | undefined): string | undefined {
+  if (!identity) return undefined;
+  const parts = JSON.parse(identity) as unknown[];
+  if (!Array.isArray(parts) || parts.some((part) => typeof part !== "string" || !part)) return undefined;
+  return createHash("sha256").update(`wollipog-subscription-identity:v1\0${identity}`).digest("hex");
 }
 
 function titleWords(value: string): string {
@@ -394,6 +410,145 @@ export function normalizeClaudeRateLimits(
   };
 }
 
+/** Plan windows Claude Code's `get_usage` reply names: the five-hour and weekly windows, and the
+ * weekly ones scoped to a model. Its other keys are server meters with codenames, never windows. */
+const CLAUDE_USAGE_WINDOW = /^(five_hour|seven_day|seven_day_[a-z0-9_]+)$/;
+const CLAUDE_USAGE_NOT_WINDOWS = new Set(["seven_day_breakdown"]);
+
+function claudeUsageLabel(id: string, modelName?: string): string {
+  const known = subscriptionUsageBucketLabel(id);
+  if (known !== titleWords(id)) return known;
+  if (modelName) return `Weekly — ${modelName}`;
+  return id.startsWith("seven_day_") ? `Weekly — ${titleWords(id.slice("seven_day_".length))}` : known;
+}
+
+/** The nearest whole second, as session events report a reset: a window's reset must compare equal
+ * across the two, or the merge would take the event for an earlier window and drop it. The reply's
+ * reset lands either side of the boundary by a fraction of a second, so it rounds rather than
+ * truncates. */
+function isoResetAt(value: unknown, observedAt: number): number | undefined {
+  if (typeof value !== "string") return undefined;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > observedAt + MAX_RESET_AHEAD_MS) return undefined;
+  return Math.round(parsed / 1_000) * 1_000;
+}
+
+function claudeUsageWindow(
+  id: string,
+  input: JsonRecord,
+  observedAt: number,
+  modelName?: string,
+): SubscriptionUsageBucket | null {
+  const usedPercent = percent(input.utilization);
+  const resetsAt = isoResetAt(input.resets_at, observedAt);
+  if (usedPercent === undefined && resetsAt === undefined) return null;
+  return {
+    id,
+    label: stringValue(claudeUsageLabel(id, modelName), 160)!,
+    ...(usedPercent === undefined ? {} : {
+      usedPercent,
+      remainingPercent: Math.max(0, 100 - usedPercent),
+      status: usedPercent >= 100 ? "exhausted" as const : usedPercent >= 80 ? "warning" as const : "available" as const,
+    }),
+    ...(resetsAt === undefined ? {} : { resetsAt }),
+  };
+}
+
+function minorUnits(amount: unknown, currency: unknown, decimals: number): string | undefined {
+  const value = finite(amount);
+  if (value === undefined) return undefined;
+  const major = value / 10 ** decimals;
+  if (typeof currency === "string" && /^[A-Z]{3}$/.test(currency)) {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency", currency, minimumFractionDigits: decimals, maximumFractionDigits: decimals,
+    }).format(major);
+  }
+  return major.toFixed(decimals);
+}
+
+/** Extra usage as the spend control Codex already uses. Off means no spend can be drawn on it. */
+function claudeExtraUsage(input: unknown): SubscriptionUsageSpendControl | null {
+  const extra = record(input);
+  if (!extra || extra.is_enabled !== true) return null;
+  const places = finite(extra.decimal_places);
+  const decimals = places !== undefined && Number.isInteger(places) && places >= 0 && places <= 4 ? places : 2;
+  const used = minorUnits(extra.used_credits, extra.currency, decimals);
+  const limit = minorUnits(extra.monthly_limit, extra.currency, decimals);
+  const usedPercent = percent(extra.utilization);
+  return {
+    id: "extra_usage",
+    label: "Extra Usage",
+    ...(used ? { used } : {}),
+    ...(limit ? { limit } : {}),
+    ...(usedPercent === undefined ? {} : { remainingPercent: Math.round((100 - usedPercent) * 100) / 100 }),
+    ...(typeof extra.spend_limit_reached === "boolean" ? { reached: extra.spend_limit_reached } : {}),
+  };
+}
+
+export interface ClaudeUsageReading {
+  state: "available" | "not_applicable";
+  plan?: string;
+  buckets: SubscriptionUsageBucket[];
+  /** Windows the reply names with no reading: the provider holds nothing for them now. */
+  cleared: string[];
+  spendControls: SubscriptionUsageSpendControl[];
+}
+
+/** Claude Code's `get_usage` reply, which it marks experimental, as the windows its sessions report.
+ * Anything unrecognized is skipped; null means the reply carried no plan readings at all. */
+export function normalizeClaudeUsageReply(reply: unknown, observedAt: number): ClaudeUsageReading | null {
+  const root = record(reply);
+  if (!root) return null;
+  const plan = stringValue(root.subscription_type, 80);
+  if (root.rate_limits_available === false) {
+    return { state: "not_applicable", ...(plan ? { plan } : {}), buckets: [], cleared: [], spendControls: [] };
+  }
+  const limits = record(root.rate_limits);
+  if (!limits) return null;
+  const buckets: SubscriptionUsageBucket[] = [];
+  const cleared: string[] = [];
+  const named = new Set<string>();
+  const add = (id: string, value: unknown, modelName?: string) => {
+    if (named.has(id) || buckets.length >= MAX_PROVIDER_BUCKETS) return;
+    named.add(id);
+    const window = record(value);
+    const bucket = window ? claudeUsageWindow(id, window, observedAt, modelName) : null;
+    if (bucket) buckets.push(bucket);
+    else if (value === null || (window && window.utilization == null && window.resets_at == null)) cleared.push(id);
+  };
+  for (const [key, value] of Object.entries(limits)) {
+    if (!CLAUDE_USAGE_WINDOW.test(key) || CLAUDE_USAGE_NOT_WINDOWS.has(key)) continue;
+    const window = record(value);
+    // A non-window object under a window-shaped key carries neither field; leave it alone.
+    if (window && !("utilization" in window) && !("resets_at" in window)) continue;
+    add(key, value);
+  }
+  if (Array.isArray(limits.model_scoped)) {
+    for (const entry of limits.model_scoped) {
+      const scoped = record(entry);
+      const name = stringValue(scoped?.display_name, 60);
+      const slug = name?.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+      if (scoped && name && slug) add(`seven_day_${slug}`, scoped, name);
+    }
+  }
+  const extra = claudeExtraUsage(limits.extra_usage);
+  return { state: "available", ...(plan ? { plan } : {}), buckets, cleared, spendControls: extra ? [extra] : [] };
+}
+
+/** Dates each percentage this update reports. A window it leaves out, or reports without a
+ * percentage, then keeps its earlier time through the merge, because `fetchedAt` moves on regardless
+ * and would make a retained reading look current. Applied after the event signature is taken, since
+ * a receipt time would make every repeated event look new. */
+function withReadingTimes(snapshot: SubscriptionUsageSnapshot): SubscriptionUsageSnapshot {
+  return {
+    ...snapshot,
+    buckets: snapshot.buckets.map((bucket) =>
+      bucket.usedPercent === undefined && bucket.remainingPercent === undefined
+        ? bucket
+        : { ...bucket, observedAt: snapshot.fetchedAt }),
+  };
+}
+
 /** True when a source has usable allowance numbers, as opposed to reset times alone. */
 export function hasSubscriptionUtilization(snapshot: SubscriptionUsageSnapshot): boolean {
   return snapshot.buckets.some((bucket) =>
@@ -601,6 +756,197 @@ export async function probeCodexSubscriptionUsage(
   }
 }
 
+/** Only a first-party claude.ai sign-in draws on a subscription: API, Bedrock and Vertex billing
+ * can report an email too, but they share no allowance. */
+function claudeSubscriptionIdentity(stdout: string): string | undefined {
+  const status = JSON.parse(stdout) as Record<string, unknown>;
+  if (status?.loggedIn !== true || status.authMethod !== "claude.ai") return undefined;
+  if (status.apiProvider !== undefined && status.apiProvider !== "firstParty") return undefined;
+  return claudeStatusIdentity(stdout);
+}
+
+/** Reads the account behind a Claude source from `claude auth status`, under the probe's own
+ * authorization. Rejects when the status cannot be read, which proves nothing about the sign-in. */
+export async function probeClaudeSubscriptionIdentity(
+  agent: AgentDefinition,
+  env: Record<string, string>,
+  authorization: SubscriptionUsageProbeAuthorization,
+  dependencies: Partial<Pick<CodexProbeDeps, "spawn" | "kill" | "onSpawn" | "onFinish">> = {},
+  timeoutMs = SUBSCRIPTION_USAGE_PROBE_TIMEOUT_MS,
+): Promise<string | undefined> {
+  const kill = dependencies.kill ?? killTree;
+  const child = (dependencies.spawn ?? spawnAgent)({
+    command: agent.command,
+    args: [...agent.args, "auth", "status"],
+    cwd: authorization.cwd,
+    env,
+    context: agent.context,
+    isolation: authorization.isolation,
+  });
+  dependencies.onSpawn?.(child);
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    child.stderr.resume();
+    // A status command that already closed its input fails this end with EPIPE. That is no read
+    // error, since the status it prints decides, and unheard it would crash the runner.
+    child.stdin.on("error", () => {});
+    child.stdin.end();
+    const stdout = await new Promise<string>((resolve, reject) => {
+      let output = "";
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        output += chunk;
+        if (output.length > MAX_AUTH_STATUS_OUTPUT) reject(new Error("claude auth status output is too large"));
+      });
+      // Claude can print its structured status before a non-zero exit, so the payload decides.
+      child.on("close", () => resolve(output));
+      child.on("error", reject);
+      timer = setTimeout(() => reject(new Error("claude auth status timed out")), timeoutMs);
+    });
+    return claudeSubscriptionIdentity(stdout);
+  } finally {
+    clearTimeout(timer);
+    kill(child);
+    dependencies.onFinish?.(child);
+  }
+}
+
+/** Reads the account behind a Codex source from its ChatGPT credential file. No file means no
+ * ChatGPT sign-in here; a WSL home is not a host path, so that source reports no identity. Only
+ * `codexCredentialIdentity`'s claims are read, and no token is retained. */
+export async function readCodexSubscriptionIdentity(
+  agent: AgentDefinition,
+  env: Record<string, string>,
+  read: (path: string) => Promise<string> = (path) => readFile(path, "utf8"),
+): Promise<string | undefined> {
+  if (agent.context?.kind === "wsl") return undefined;
+  const home = env.CODEX_HOME ?? join(env.HOME ?? homedir(), ".codex");
+  let content: string;
+  try {
+    content = await read(join(home, "auth.json"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  return codexCredentialIdentity(content);
+}
+
+/** Claude Code with nothing of the user's loaded: no settings, hooks, plugins, MCP servers, tools,
+ * slash commands or saved session. Discovery reports `sessionNaming` only when every flag exists. */
+export const CLAUDE_USAGE_PROBE_ARGS: readonly string[] = [
+  "-p",
+  "--input-format", "stream-json",
+  "--output-format", "stream-json",
+  "--verbose",
+  "--setting-sources", "",
+  "--safe-mode",
+  "--strict-mcp-config",
+  "--mcp-config", '{"mcpServers":{}}',
+  "--tools", "",
+  "--disable-slash-commands",
+  "--no-session-persistence",
+  "--no-chrome",
+];
+const MAX_USAGE_PROBE_OUTPUT = 1024 * 1024;
+
+/** The installed Claude Code predates `get_usage`; its sessions still report usage. */
+export class ClaudeUsageUnsupportedError extends Error {
+  constructor() {
+    super("This Claude Code version does not answer get_usage.");
+  }
+}
+
+/** Asks a locked-down Claude Code for its plan usage with the `get_usage` control request, which it
+ * answers from claude.ai itself. No user message is sent, so no turn can start, and Wollipog never
+ * reads the credentials. Resolves to the reply body; the process is always reaped. */
+export async function probeClaudeSubscriptionUsage(
+  agent: AgentDefinition,
+  env: Record<string, string>,
+  authorization: SubscriptionUsageProbeAuthorization,
+  dependencies: Partial<Pick<CodexProbeDeps, "spawn" | "kill" | "onSpawn" | "onFinish">> = {},
+  timeoutMs = SUBSCRIPTION_USAGE_PROBE_TIMEOUT_MS,
+): Promise<unknown> {
+  const kill = dependencies.kill ?? killTree;
+  const child = (dependencies.spawn ?? spawnAgent)({
+    command: agent.command,
+    args: [...agent.args, ...CLAUDE_USAGE_PROBE_ARGS],
+    cwd: authorization.cwd,
+    env,
+    context: agent.context,
+    isolation: authorization.isolation,
+  });
+  dependencies.onSpawn?.(child);
+  const requestId = `wollipog-usage-${randomUUID()}`;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    child.stderr.resume();
+    return await new Promise<unknown>((resolve, reject) => {
+      let buffer = "";
+      let total = 0;
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        total += chunk.length;
+        if (total > MAX_USAGE_PROBE_OUTPUT) {
+          reject(new Error("claude get_usage output is too large"));
+          return;
+        }
+        buffer += chunk;
+        for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          let message: JsonRecord | null;
+          try {
+            message = record(JSON.parse(line));
+          } catch {
+            continue;
+          }
+          const response = record(message?.response);
+          if (message?.type !== "control_response" || response?.request_id !== requestId) continue;
+          if (response.subtype === "success") {
+            resolve(response.response ?? {});
+          } else {
+            const error = stringValue(response.error, 300) ?? "get_usage failed";
+            reject(/unsupported control request/i.test(error) ? new ClaudeUsageUnsupportedError() : new Error(error));
+          }
+        }
+      });
+      child.on("close", () => reject(new Error("Claude Code exited before answering get_usage")));
+      child.on("error", reject);
+      // A Claude Code that closed its input fails the request's write with EPIPE on stdin itself,
+      // which the process's own error event never carries; unheard it would crash the runner.
+      child.stdin.on("error", reject);
+      timer = setTimeout(() => reject(new Error("claude get_usage timed out")), timeoutMs);
+      child.stdin.write(`${JSON.stringify({
+        type: "control_request",
+        request_id: requestId,
+        request: { subtype: "get_usage", skip_behaviors: true },
+      })}\n`);
+    });
+  } finally {
+    clearTimeout(timer);
+    kill(child);
+    dependencies.onFinish?.(child);
+  }
+}
+
+export interface SubscriptionIdentityRequest {
+  agent: AgentDefinition;
+  provider: SubscriptionUsageProvider;
+  env: Record<string, string>;
+  /** Takes the provider HOME's probe authorization, which the manager settles after the read. */
+  authorize: () => Promise<SubscriptionUsageProbeAuthorization>;
+  processes: Pick<CodexProbeDeps, "kill" | "onSpawn" | "onFinish">;
+}
+
+/** Resolves to a source's raw provider identity, or to nothing when it provably has none. Rejects
+ * when the read failed, which keeps the identity already known. */
+export async function readSubscriptionIdentity(request: SubscriptionIdentityRequest): Promise<string | undefined> {
+  if (request.provider === "codex") {
+    return request.env.OPENAI_API_KEY ? undefined : readCodexSubscriptionIdentity(request.agent, request.env);
+  }
+  return probeClaudeSubscriptionIdentity(request.agent, request.env, await request.authorize(), request.processes);
+}
+
 interface SubscriptionSource {
   agent: AgentDefinition;
   provider: SubscriptionUsageProvider;
@@ -640,6 +986,12 @@ export interface SubscriptionUsageManagerOptions {
   probeCodex?: typeof probeCodexSubscriptionUsage;
   killProbe?: typeof killTree;
   onTargetChanged?: () => void;
+  /** Learns which subscription a source draws on. Without it, sources report no identity. */
+  resolveSubscriptionIdentity?: (request: SubscriptionIdentityRequest) => Promise<string | undefined>;
+  probeClaude?: typeof probeClaudeSubscriptionUsage;
+  /** Whether a refresh may also read Claude usage. An older control plane's refresh deadline counts
+   * only Codex sources, so Claude reads would run it out. Defaults to true. */
+  claudeRefreshEnabled?: () => boolean;
 }
 
 export class SubscriptionUsageManager {
@@ -657,6 +1009,11 @@ export class SubscriptionUsageManager {
    * run from one whose provider reports no allowances, which read identically before. */
   private readonly responded = new Set<string>();
   private readonly activeProbeChildren = new Set<AgentProcess>();
+  /** Per source, the fingerprint of its provider identity. Stamped onto what leaves this manager,
+   * never onto stored snapshots, so no merge or replacement path can carry a stale one. */
+  private readonly identities = new Map<string, string>();
+  private readonly lastIdentityReadAt = new Map<string, number>();
+  private identityRefresh: Promise<void> = Promise.resolve();
   private refreshPromise: Promise<SubscriptionUsageSnapshot[]> | null = null;
   private shuttingDown = false;
   private selectionGeneration = 0;
@@ -675,7 +1032,123 @@ export class SubscriptionUsageManager {
     this.lastEvent.clear();
     this.pendingDecreases.clear();
     this.responded.clear();
+    this.lastIdentityReadAt.clear();
     return this.syncSources();
+  }
+
+  private stamped(snapshot: SubscriptionUsageSnapshot): SubscriptionUsageSnapshot {
+    const identity = this.identities.get(snapshot.sourceId);
+    return identity ? { ...snapshot, subscriptionIdentity: identity } : snapshot;
+  }
+
+  private publish(snapshot: SubscriptionUsageSnapshot): void {
+    this.options.publish(this.stamped(snapshot));
+  }
+
+  /** Reads each matching source's identity in turn and publishes what changed. */
+  refreshIdentities(matches: (source: SubscriptionSource) => boolean = () => true): Promise<void> {
+    this.identityRefresh = this.identityRefresh.then(async () => {
+      if (this.shuttingDown || !this.options.resolveSubscriptionIdentity) return;
+      this.syncSources();
+      const selectionGeneration = this.selectionGeneration;
+      for (const source of this.sources().filter(matches)) {
+        await this.refreshIdentity(source, selectionGeneration);
+      }
+    }).catch((error) => this.options.log?.(`subscription identity refresh failed: ${errorText(error)}`));
+    return this.identityRefresh;
+  }
+
+  /** A source whose usage a refresh reads: every Codex source, and a Claude source whose installation
+   * can be locked down to answer `get_usage` alone, while the control plane counts it. */
+  private probed(source: SubscriptionSource): boolean {
+    if (source.provider === "codex") return true;
+    const claude = source.agent.claudeCode;
+    return (this.options.claudeRefreshEnabled?.() ?? true) && !source.unsupportedDetail &&
+      claude?.streamJsonInput === true && claude.controlProtocol === true && claude.sessionNaming === true;
+  }
+
+  /** A probed source reads its identity first, inside its refresh. A Claude source that is not probed
+   * learns it beside the refresh instead: its status command must not spend the control plane's
+   * deadline, which counts only probed sources. */
+  private startClaudeIdentityRefresh(providerAccountId?: string): void {
+    void this.refreshIdentities((source) => source.provider === "claude" && !this.probed(source) &&
+      (providerAccountId === undefined || source.providerAccountId === providerAccountId));
+  }
+
+  private async refreshIdentity(source: SubscriptionSource, selectionGeneration: number): Promise<void> {
+    const resolve = this.options.resolveSubscriptionIdentity;
+    if (!resolve || this.shuttingDown || selectionGeneration !== this.selectionGeneration) return;
+    const state = this.initialSnapshot(source).state;
+    if (source.agent.available !== true || state === "unsupported" || state === "unauthenticated" || state === "not_applicable") {
+      this.applyIdentity(source, undefined);
+      return;
+    }
+    const now = this.now();
+    if (now - (this.lastIdentityReadAt.get(source.sourceId) ?? -Infinity) < SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS) return;
+    this.lastIdentityReadAt.set(source.sourceId, now);
+    const kill = this.options.killProbe ?? killTree;
+    let authorization: SubscriptionUsageProbeAuthorization | undefined;
+    const children: AgentProcess[] = [];
+    const isCurrent = () => !this.shuttingDown && selectionGeneration === this.selectionGeneration &&
+      this.isCurrentSource(source);
+    try {
+      const env = this.options.resolveEnv(
+        source.agent.id,
+        source.agent.driver,
+        source.agent.context ?? { kind: "native" },
+        source.providerAccountId,
+      );
+      const identity = await resolve({
+        agent: source.agent,
+        provider: source.provider,
+        env,
+        authorize: async () => {
+          authorization = await this.options.authorizeProbe?.(source.agent, env, source.sourceId);
+          if (!authorization) throw new Error("subscription usage probe authorization is unavailable");
+          // The wait can outlast the selection, and the caller starts the harness as soon as this
+          // returns. Refusing here keeps the old one from running; `finally` releases the grant.
+          if (!isCurrent()) throw new Error("subscription identity read was superseded");
+          return authorization;
+        },
+        processes: {
+          kill,
+          onSpawn: (child) => {
+            children.push(child);
+            this.activeProbeChildren.add(child);
+            if (this.shuttingDown) kill(child);
+          },
+          onFinish: (child) => this.activeProbeChildren.delete(child),
+        },
+      });
+      if (isCurrent()) this.applyIdentity(source, subscriptionIdentityFingerprint(identity));
+    } catch (error) {
+      if (isCurrent()) {
+        this.options.log?.(`subscription identity read failed for ${source.agent.id}: ${errorText(error)}`);
+      }
+    } finally {
+      try {
+        await authorization?.settle?.(children);
+      } catch (error) {
+        this.options.log?.(`subscription identity probe ownership settlement failed: ${errorText(error)}`);
+      }
+    }
+  }
+
+  private applyIdentity(source: SubscriptionSource, identity: string | undefined): void {
+    const prior = this.identities.get(source.sourceId);
+    if (prior === identity) return;
+    if (identity) this.identities.set(source.sourceId, identity);
+    else this.identities.delete(source.sourceId);
+    // The windows on record belong to the identity just lost. Clearing them now, not only when the
+    // next one arrives, is what stops a later sign-in from inheriting them across a gap with none.
+    if (prior) {
+      this.pendingDecreases.delete(source.sourceId);
+      this.lastEvent.delete(source.sourceId);
+      this.lastProbeAt.delete(source.sourceId);
+      this.snapshots.set(source.sourceId, this.initialSnapshot(source));
+    }
+    const snapshot = this.snapshots.get(source.sourceId);
+    if (snapshot) this.publish(snapshot);
   }
 
   private isCurrentSource(source: SubscriptionSource): boolean {
@@ -853,6 +1326,8 @@ export class SubscriptionUsageManager {
       if (!live.has(sourceId)) {
         this.snapshots.delete(sourceId);
         this.pendingDecreases.delete(sourceId);
+        this.identities.delete(sourceId);
+        this.lastIdentityReadAt.delete(sourceId);
       }
     }
     for (const source of sources) {
@@ -877,7 +1352,7 @@ export class SubscriptionUsageManager {
   }
 
   inventory(): SubscriptionUsageSnapshot[] {
-    return [...this.snapshots.values()].sort((left, right) =>
+    return [...this.snapshots.values()].map((snapshot) => this.stamped(snapshot)).sort((left, right) =>
       left.provider.localeCompare(right.provider) || left.agentId.localeCompare(right.agentId));
   }
 
@@ -930,7 +1405,7 @@ export class SubscriptionUsageManager {
     const heldBefore = new Map(pendingDecreases);
     const explained = this.explainMissingUtilization(mergeSnapshot(
       prior,
-      normalized,
+      withReadingTimes(normalized),
       provider === "claude" ? "claude-notification" : "plain",
       pendingDecreases,
     ));
@@ -938,7 +1413,7 @@ export class SubscriptionUsageManager {
     this.lastEvent.set(sourceId, { signature, observedAt: normalized.fetchedAt, heldDecrease });
     if (explained === prior) return prior;
     this.snapshots.set(sourceId, explained);
-    this.options.publish(explained);
+    this.publish(explained);
     return explained;
   }
 
@@ -967,7 +1442,7 @@ export class SubscriptionUsageManager {
     const updated = this.initialSnapshot(source);
     if (updated.state !== "unavailable" || updated.detail === prior.detail) return prior;
     this.snapshots.set(sourceId, updated);
-    this.options.publish(updated);
+    this.publish(updated);
     return updated;
   }
 
@@ -986,34 +1461,184 @@ export class SubscriptionUsageManager {
     const selectionGeneration = this.selectionGeneration;
     const sources = this.sources().filter((source) => source.providerAccountId === providerAccountId);
     if (sources.length === 0) throw new Error("provider account is not configured");
-    for (const source of sources) {
-      if (source.provider === "codex") await this.refreshCodex(source, selectionGeneration);
-    }
+    this.startClaudeIdentityRefresh(providerAccountId);
+    for (const source of sources) await this.refreshSource(source, selectionGeneration);
     return this.inventory();
   }
 
   private async refreshAllNow(): Promise<SubscriptionUsageSnapshot[]> {
     this.syncSources();
     const selectionGeneration = this.selectionGeneration;
-    const codexSources = this.sources().filter((source) => source.provider === "codex");
+    this.startClaudeIdentityRefresh();
     // A runner may advertise several contexts. Probe sequentially to avoid concurrent mutation of
     // one provider HOME; the control plane derives a bounded deadline from this source count.
     // Duplicate manual requests share refreshPromise and each source has its own minimum interval.
-    for (const source of codexSources) await this.refreshCodex(source, selectionGeneration);
+    for (const source of this.sources()) await this.refreshSource(source, selectionGeneration);
     return this.inventory();
+  }
+
+  private async refreshSource(source: SubscriptionSource, selectionGeneration: number): Promise<void> {
+    if (!this.probed(source)) return;
+    if (source.provider === "codex") await this.refreshCodex(source, selectionGeneration);
+    else await this.refreshClaude(source, selectionGeneration);
+  }
+
+  /** The probe's launch target moved since discovery: report it and ask for rediscovery. */
+  private launchTargetChanged(source: SubscriptionSource, initial: SubscriptionUsageSnapshot): boolean {
+    const target = source.agent.installation?.targetIdentity;
+    if (!target || launchTargetStillMatches(
+      { command: source.agent.command, args: source.agent.args ?? [] },
+      source.agent.context ?? { kind: "native" },
+      target,
+    )) return false;
+    this.options.onTargetChanged?.();
+    const unavailable: SubscriptionUsageSnapshot = {
+      ...initial,
+      state: "unavailable",
+      detail: "The harness installation changed; retry after Machine rediscovery.",
+      fetchedAt: this.now(),
+    };
+    this.snapshots.set(source.sourceId, unavailable);
+    this.publish(unavailable);
+    return true;
+  }
+
+  private async refreshClaude(source: SubscriptionSource, selectionGeneration: number): Promise<void> {
+    const isCurrent = () => !this.shuttingDown && selectionGeneration === this.selectionGeneration &&
+      this.isCurrentSource(source);
+    if (!isCurrent()) return;
+    if (this.options.resolveSubscriptionIdentity) {
+      // First, so a sign-in that changed the subscription clears the old windows before the new ones.
+      await this.refreshIdentity(source, selectionGeneration);
+      if (!isCurrent()) return;
+    }
+    const initial = this.initialSnapshot(source);
+    // Source sync already shows these states, and a session may still report into an unavailable one.
+    if (source.agent.available !== true || initial.state === "unsupported" ||
+        initial.state === "unauthenticated" || initial.state === "not_applicable") return;
+    const now = this.now();
+    if (now - (this.lastProbeAt.get(source.sourceId) ?? 0) < SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS) return;
+    this.lastProbeAt.set(source.sourceId, now);
+    const kill = this.options.killProbe ?? killTree;
+    let authorization: SubscriptionUsageProbeAuthorization | undefined;
+    const probeChildren: AgentProcess[] = [];
+    try {
+      const env = this.options.resolveEnv(
+        source.agent.id,
+        source.agent.driver,
+        source.agent.context ?? { kind: "native" },
+        source.providerAccountId,
+      );
+      authorization = await this.options.authorizeProbe?.(source.agent, env, source.sourceId);
+      if (!authorization) throw new Error("subscription usage probe authorization is unavailable");
+      if (!isCurrent() || this.launchTargetChanged(source, initial)) return;
+      const reply = await (this.options.probeClaude ?? probeClaudeSubscriptionUsage)(source.agent, env, authorization, {
+        kill,
+        onSpawn: (child) => {
+          probeChildren.push(child);
+          this.activeProbeChildren.add(child);
+          if (this.shuttingDown) kill(child);
+        },
+        onFinish: (child) => this.activeProbeChildren.delete(child),
+      });
+      if (!isCurrent()) return;
+      const fetchedAt = this.now();
+      const reading = normalizeClaudeUsageReply(reply, fetchedAt);
+      if (!reading) throw new Error("Claude Code answered get_usage without plan readings");
+      const base = {
+        sourceId: source.sourceId,
+        runnerId: this.options.runnerId,
+        agentId: source.agent.id,
+        provider: "claude" as const,
+        fetchedAt,
+        ...(reading.plan ? { plan: reading.plan } : {}),
+        ...(source.accountLabel ? { accountLabel: source.accountLabel } : {}),
+        ...(source.providerAccountId ? { providerAccountId: source.providerAccountId } : {}),
+      };
+      if (reading.state === "not_applicable") {
+        const notApplicable: SubscriptionUsageSnapshot = {
+          ...base,
+          state: "not_applicable",
+          detail: "Claude Code is not using Claude.ai subscription billing for this source.",
+          buckets: [],
+        };
+        this.snapshots.set(source.sourceId, notApplicable);
+        this.publish(notApplicable);
+        return;
+      }
+      // An authoritative read is current whatever it says: it takes over each window it reports,
+      // drops each it names as empty, and leaves alone the windows only sessions report.
+      const prior = this.snapshots.get(source.sourceId);
+      const update = withReadingTimes({ ...base, state: "available", buckets: reading.buckets });
+      const merged = mergeSnapshot(prior, update, "plain");
+      const cleared = new Set(reading.cleared);
+      const spendControls = [
+        ...(merged.spendControls ?? []).filter((control) => control.id !== "extra_usage"),
+        ...reading.spendControls,
+      ];
+      const { spendControls: _merged, ...withoutSpend } = merged;
+      const current: SubscriptionUsageSnapshot = {
+        ...withoutSpend,
+        buckets: merged.buckets.filter((bucket) => !cleared.has(bucket.id)),
+        ...(spendControls.length > 0 ? { spendControls } : {}),
+      };
+      const pending = this.pendingDecreases.get(source.sourceId);
+      for (const id of [...reading.buckets.map((bucket) => bucket.id), ...cleared]) pending?.delete(id);
+      this.snapshots.set(source.sourceId, current);
+      this.publish(current);
+    } catch (error) {
+      if (!isCurrent()) return;
+      const prior = this.snapshots.get(source.sourceId);
+      if (error instanceof ClaudeUsageUnsupportedError) {
+        // What sessions reported stands; only an empty source needs the reason.
+        if (prior?.buckets.length) return;
+        const unsupported: SubscriptionUsageSnapshot = {
+          ...initial,
+          state: "unavailable",
+          detail: "This Claude Code version can't report usage on request. " +
+            "Usage appears after the first provider response in a session.",
+          fetchedAt: this.now(),
+        };
+        this.snapshots.set(source.sourceId, unsupported);
+        this.publish(unsupported);
+        return;
+      }
+      this.options.log?.(`subscription usage probe failed for ${source.agent.id}: ${errorText(error)}`);
+      const failed: SubscriptionUsageSnapshot = prior?.buckets.length
+        ? { ...prior, detail: "The latest Claude refresh failed; showing the last provider snapshot." }
+        : {
+            ...initial,
+            state: "unavailable",
+            detail: "Claude subscription usage could not be refreshed. Try again.",
+            fetchedAt: this.now(),
+          };
+      this.snapshots.set(source.sourceId, failed);
+      this.publish(failed);
+    } finally {
+      try {
+        await authorization?.settle?.(probeChildren);
+      } catch (error) {
+        this.options.log?.(`subscription usage probe ownership settlement failed: ${errorText(error)}`);
+      }
+    }
   }
 
   private async refreshCodex(source: SubscriptionSource, selectionGeneration: number): Promise<void> {
     if (this.shuttingDown || selectionGeneration !== this.selectionGeneration ||
         !this.sources().some((current) => current.sourceId === source.sourceId &&
           current.agent.id === source.agent.id)) return;
+    if (this.options.resolveSubscriptionIdentity) {
+      // First, so a sign-in that changed the subscription clears the old windows before the new ones.
+      await this.refreshIdentity(source, selectionGeneration);
+      if (this.shuttingDown || selectionGeneration !== this.selectionGeneration) return;
+    }
     const initial = this.initialSnapshot(source);
     if (initial.state === "unsupported" ||
         initial.state === "unauthenticated" ||
         initial.state === "not_applicable" ||
         (initial.state === "unavailable" && source.agent.available !== true)) {
       this.snapshots.set(source.sourceId, initial);
-      this.options.publish(initial);
+      this.publish(initial);
       return;
     }
     const now = this.now();
@@ -1037,29 +1662,13 @@ export class SubscriptionUsageManager {
           fetchedAt: now,
         };
         this.snapshots.set(source.sourceId, notApplicable);
-        this.options.publish(notApplicable);
+        this.publish(notApplicable);
         return;
       }
       authorization = await this.options.authorizeProbe?.(source.agent, env, source.sourceId);
       if (!authorization) throw new Error("subscription usage probe authorization is unavailable");
       if (this.shuttingDown || selectionGeneration !== this.selectionGeneration || !this.isCurrentSource(source)) return;
-      const target = source.agent.installation?.targetIdentity;
-      if (target && !launchTargetStillMatches(
-        { command: source.agent.command, args: source.agent.args ?? [] },
-        source.agent.context ?? { kind: "native" },
-        target,
-      )) {
-        this.options.onTargetChanged?.();
-        const unavailable: SubscriptionUsageSnapshot = {
-          ...initial,
-          state: "unavailable",
-          detail: "The harness installation changed; retry after Machine rediscovery.",
-          fetchedAt: this.now(),
-        };
-        this.snapshots.set(source.sourceId, unavailable);
-        this.options.publish(unavailable);
-        return;
-      }
+      if (this.launchTargetChanged(source, initial)) return;
       const result = await (this.options.probeCodex ?? probeCodexSubscriptionUsage)(
         source.agent,
         env,
@@ -1090,7 +1699,7 @@ export class SubscriptionUsageManager {
         if (!normalized) throw new Error("Codex returned no recognizable rate-limit fields");
         const prior = this.snapshots.get(source.sourceId);
         const update = {
-          ...normalized,
+          ...withReadingTimes(normalized),
           ...(result.plan && !normalized.plan ? { plan: result.plan } : {}),
           ...(source.accountLabel ? { accountLabel: source.accountLabel } :
             result.accountLabel ? { accountLabel: result.accountLabel } : {}),
@@ -1102,7 +1711,7 @@ export class SubscriptionUsageManager {
           ? update
           : mergeSnapshot(prior, update, "plain");
         this.snapshots.set(source.sourceId, merged);
-        this.options.publish(merged);
+        this.publish(merged);
         return;
       }
       const unavailable: SubscriptionUsageSnapshot = {
@@ -1115,7 +1724,7 @@ export class SubscriptionUsageManager {
           result.accountLabel ? { accountLabel: result.accountLabel } : {}),
       };
       this.snapshots.set(source.sourceId, unavailable);
-      this.options.publish(unavailable);
+      this.publish(unavailable);
     } catch (error) {
       if (this.shuttingDown || selectionGeneration !== this.selectionGeneration || !this.isCurrentSource(source)) return;
       this.options.log?.(`subscription usage probe failed for ${source.agent.id}: ${errorText(error)}`);
@@ -1132,7 +1741,7 @@ export class SubscriptionUsageManager {
             fetchedAt: this.now(),
           };
       this.snapshots.set(source.sourceId, failed);
-      this.options.publish(failed);
+      this.publish(failed);
     } finally {
       try {
         await authorization?.settle?.(probeChildren);

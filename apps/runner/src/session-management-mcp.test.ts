@@ -20,6 +20,7 @@ import {
   TOOLS,
   type McpDeps,
   type McpFetch,
+  waitProgressReporter,
 } from "./session-management-mcp.js";
 
 /* -------------------------------------------------------------------------- */
@@ -296,6 +297,33 @@ test("withdraw_workflow_decision posts to the caller's own path and refuses an o
   }
 });
 
+test("repository-addition tools are the campaign root's, post to its own paths and refuse an older peer (#4117)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } }));
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition;
+  const ask = { requestId: "add-1", locationId: "loc_third", reason: "The follow-up lives in team/third.", work: { kind: "follow_up", id: "fu_1" } };
+  const asked = await callTool(deps, "request_campaign_repository_addition", ask);
+  assert.equal(asked.isError, undefined, resultText(asked));
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/orchestrator-campaign/repository-additions`);
+  assert.deepEqual(calls.at(-1)?.body, ask);
+  const read = await callTool(deps, "get_campaign_repository_addition", { occurrenceId: "workflow_1" });
+  assert.equal(read.isError, undefined, resultText(read));
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/orchestrator-campaign/repository-additions/workflow_1`);
+  const executed = await callTool(deps, "execute_campaign_repository_addition", { occurrenceId: "workflow_1", resourceDigest: "a".repeat(64) });
+  assert.equal(executed.isError, undefined, resultText(executed));
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/orchestrator-campaign/repository-additions/workflow_1/execute`);
+  assert.deepEqual(calls.at(-1)?.body, { resourceDigest: "a".repeat(64) });
+  const count = calls.length;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition - 1;
+  const old = await callTool(deps, "request_campaign_repository_addition", ask);
+  assert.equal(old.isError, true);
+  assert.match(resultText(old), new RegExp(`"requiredControlPlaneProtocolVersion":${RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition}`, "u"));
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition;
+  deps.orchestrator = false;
+  assert.equal((await callTool(deps, "request_campaign_repository_addition", ask)).isError, true, "a child never has the tool");
+  assert.equal(calls.length, count, "nothing reaches the control plane");
+});
+
 test("owner-decision tools are the root Orchestrator's, post to its own paths and refuse an older peer (#4064)", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } }));
   deps.orchestrator = true;
@@ -326,6 +354,29 @@ test("owner-decision tools are the root Orchestrator's, post to its own paths an
   deps.orchestrator = false;
   assert.equal((await callTool(deps, "request_owner_decision", ask)).isError, true, "a child never has the tool");
   assert.equal((await callTool(deps, "hand_workflow_decision_to_owner", { occurrenceId: "workflow_2", reason: "Kept." })).isError, true);
+  assert.equal(calls.length, count, "nothing reaches the control plane");
+});
+
+test("an Owner Question posts its kind with 0 to 12 suggestions and needs a v303 control plane (#4270)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } }));
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions;
+  const ask = { requestId: "q-1", resourceKey: "naming", kind: "question", question: "What should the bridge be called?",
+    options: [], material: "See [the note](https://example.com/note)." };
+  const asked = await callTool(deps, "request_owner_decision", ask);
+  assert.equal(asked.isError, undefined, resultText(asked));
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/owner-decisions`);
+  assert.deepEqual(calls.at(-1)?.body, ask);
+  const count = calls.length;
+  // An approval still offers an exact choice, and an unknown kind is refused before sending.
+  assert.equal((await callTool(deps, "request_owner_decision", { ...ask, kind: "approval" })).isError, true);
+  assert.equal((await callTool(deps, "request_owner_decision", { ...ask, kind: undefined })).isError, true);
+  assert.equal((await callTool(deps, "request_owner_decision", { ...ask, kind: "other" })).isError, true);
+  // An older control plane would ask it as an approval, so nothing is sent.
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions - 1;
+  const old = await callTool(deps, "request_owner_decision", { ...ask, options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] });
+  assert.equal(old.isError, true);
+  assert.match(resultText(old), /"requiredControlPlaneProtocolVersion":303/u);
   assert.equal(calls.length, count, "nothing reaches the control plane");
 });
 
@@ -390,6 +441,19 @@ test("typed workflow decision tools preserve exact request, resolution, and cons
       evidenceReviewed: ["desktop"], rationale: "Inspected the exact evidence." },
   });
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/resolve`);
+});
+
+test("descendant merge resolution returns the server action before consumption (#4242)", async () => {
+  const approvedAction = { kind: "pr_merge_enqueue", command:
+    `glab api --method POST projects/group%2Fsubgroup%2Fproject/merge_trains/merge_requests/7 --hostname gitlab.example.com -f sha=${"c".repeat(40)} -F squash=false` };
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { id: "child", approvedAction } }));
+  deps.orchestrator = true;
+  const result = resultJson(await callTool(deps, "resolve_descendant_workflow_decision", {
+    sessionId: "child", occurrenceId: "workflow_1", outcome: "approve",
+  }));
+  assert.deepEqual(result.decision.approvedAction, approvedAction);
+  assert.equal(result.session.approvedAction, undefined, "action metadata belongs to the decision, not the compact session");
+  assert.equal(calls.length, 1, "the resolution response suffices; no inferred or separately reconstructed command");
 });
 
 test("descendant decision resolution and child verification return a compact child, not its full session view", async () => {
@@ -678,6 +742,58 @@ test("declared merge closures fail closed against a control plane that would dro
   assert.equal(calls.length, 0, "an old control plane never receives a declaration it would drop");
   await callTool(deps, "request_workflow_decision", { requestId: "m", resourceKey: "m", resourceSnapshot: snapshot });
   assert.equal(calls.length, 1, "a merge that declares no closure is still requested");
+
+  // A GitLab declaration needs a control plane that reads GitLab's closures (#3762).
+  const gitlab = { ...snapshot, repository: "gitlab.example.com/group/project", mergeMethod: "merge_train", squash: false, removeSourceBranch: false };
+  const current = makeDeps();
+  current.deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabMergeClosingReferences - 1;
+  const refused = await callTool(current.deps, "request_workflow_decision", { requestId: "g", resourceKey: "g",
+    resourceSnapshot: { ...gitlab, intendedClosures: ["#7"] } });
+  assert.equal(refused.isError, true);
+  assert.equal(resultJson(refused).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabMergeClosingReferences);
+  assert.equal(current.calls.length, 0);
+  await callTool(current.deps, "request_workflow_decision", { requestId: "g", resourceKey: "g", resourceSnapshot: gitlab });
+  assert.equal(current.calls.length, 1, "a GitLab merge that declares no closure is still requested");
+});
+
+test("child questions never reach a control plane that would discard their question kind (#4359)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { status: "pending", authority: "human" } }));
+  const resourceSnapshot = { category: "implementation_question", kind: "question", question: "Which approach?", options: [] };
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.childQuestions - 1;
+  const old = await callTool(deps, "request_workflow_decision", { requestId: "q", resourceKey: "q", resourceSnapshot });
+  assert.equal(old.isError, true);
+  assert.equal(calls.length, 0);
+  assert.match(resultJson(old).error, /Do not retry as an approval/u);
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.childQuestions;
+  const current = await callTool(deps, "request_workflow_decision", { requestId: "q", resourceKey: "q", resourceSnapshot });
+  assert.equal(current.isError, undefined);
+  assert.deepEqual((calls[0]!.body as { resourceSnapshot: unknown }).resourceSnapshot, resourceSnapshot);
+});
+
+test("an owner rule is forwarded, and fails closed against a control plane that would drop it (#4137)", async () => {
+  const rule = { source: "~/.claude/skills/issue-workflow/SKILL.md", quote: "Ask the user before merging." };
+  const snapshot = { category: "implementation_question", question: "Which?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] };
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { status: "pending", authority: "human" } }));
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule;
+  const sent = await callTool(deps, "request_workflow_decision", { requestId: "q", resourceKey: "q", resourceSnapshot: snapshot, ownerRule: rule });
+  assert.equal(sent.isError, undefined, JSON.stringify(sent));
+  assert.deepEqual((calls.at(-1)!.body as { ownerRule?: unknown }).ownerRule, rule);
+  // A malformed rule never leaves the runner.
+  calls.length = 0;
+  const malformed = await callTool(deps, "request_workflow_decision", { requestId: "q2", resourceKey: "q", resourceSnapshot: snapshot,
+    ownerRule: { ...rule, quote: "q".repeat(1001) } });
+  assert.equal(malformed.isError, true);
+  assert.equal(calls.length, 0);
+  // An older control plane would ignore the rule and leave the Orchestrator owning the gate.
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule - 1;
+  const old = await callTool(deps, "request_workflow_decision", { requestId: "q3", resourceKey: "q", resourceSnapshot: snapshot, ownerRule: rule });
+  assert.equal(old.isError, true);
+  assert.equal(resultJson(old).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule);
+  assert.match(resultJson(old).error, /Nothing was requested/u);
+  assert.equal(calls.length, 0, "an old control plane never receives a rule it would drop");
+  await callTool(deps, "request_workflow_decision", { requestId: "q4", resourceKey: "q", resourceSnapshot: snapshot });
+  assert.equal(calls.length, 1, "a request without a rule is still sent");
+  assert.equal((calls[0]!.body as { ownerRule?: unknown }).ownerRule, undefined);
 });
 
 test("merge review citations are refused before submission to an older or unknown control plane", async () => {
@@ -794,6 +910,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "get_automation_creation",
       "execute_automation_creation",
       "list_runners",
+      "get_provider_account_selection",
       "get_agent_capabilities",
       "list_sessions",
       "get_session",
@@ -1053,6 +1170,89 @@ test("wait_session keeps a missing session and a control-plane failure as errors
     assert.doesNotMatch(resultText(result), /timeout/);
     assert.equal(calls.length, 1, `${status} ends the wait at the first read`);
   }
+});
+
+test("a long wait_session on a running child reports its progress and its end to the control plane (#1280)", async () => {
+  const { deps, calls } = makeDeps((call) => call.method === "POST"
+    ? { status: 200, body: { waits: [] } }
+    : { status: 200, body: { session: { id: "child", status: "running", runnerId: "r1" } } });
+  let now = 0;
+  deps.now = () => now;
+  deps.sleep = async (milliseconds) => { now += milliseconds; };
+
+  const result = await callTool(deps, "wait_session", { sessionId: "child", states: ["idle", "completed"], timeoutMs: 20 * 60_000 });
+
+  assert.equal(resultJson(result).outcome, "timeout");
+  const reads = calls.filter((call) => call.method === "GET");
+  const reports = calls.filter((call) => call.method === "POST");
+  assert.ok(reads.length > 100, "the wait itself polls exactly as before");
+  assert.ok(reports.every((call) => call.url === `${CP_URL}/api/sessions/${SELF_ID}/waits`));
+  assert.ok(reports.every((call) => call.headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER] === SELF_ID), "the session's own credential");
+  const bodies = reports.map((call) => call.body as Record<string, unknown>);
+  const active = bodies.filter((body) => body.state === "active");
+  // At most one report per 15 seconds, after a successful poll: with polls backed off to 10 seconds
+  // that is every second poll, 60 in 20 minutes, well inside the 75-second progress bound.
+  assert.ok(active.length >= 55 && active.length <= 65, `${active.length} progress reports`);
+  assert.deepEqual(bodies.at(-1)!.state, "ended", "the end is reported last");
+  assert.ok(new Set(bodies.map((body) => body.waitId)).size === 1);
+  assert.match(String(bodies[0]!.waitId), /^wait_[a-f0-9]{32}$/u);
+  assert.deepEqual(bodies[0]!.target, { kind: "session", sessionId: "child", states: ["idle", "completed"] });
+  assert.equal(bodies[0]!.kind, "wait_session");
+  assert.equal(bodies[0]!.intervalMs, 10_000, "the bound covers polls backed off to 10 seconds");
+  assert.ok((bodies[0]!.elapsedMs as number) >= 15_000);
+  assert.equal((bodies[0]!.elapsedMs as number) + (bodies[0]!.remainingMs as number), 20 * 60_000, "durations, not timestamps");
+});
+
+test("wait progress reports are throttled, skip short waits, stop when refused, and survive the call's cancellation", async () => {
+  let now = 0;
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: {} }));
+  deps.now = () => now;
+  const target = { kind: "pull_request" as const, repository: "picoduck/wollipog", number: 1280 };
+  const short = waitProgressReporter(deps, "wait_pull_request", target, 60_000, 30_000);
+  short.poll();
+  now = 14_999;
+  short.poll();
+  await short.end();
+  assert.equal(calls.length, 0, "a wait shorter than one report interval is never reported");
+
+  now = 0;
+  const controller = new AbortController();
+  const reporter = waitProgressReporter({ ...deps, signal: controller.signal }, "wait_pull_request", target, 3_600_000, 30_000);
+  now = 15_000;
+  reporter.poll();
+  now = 20_000;
+  reporter.poll();
+  await new Promise((resolve) => setImmediate(resolve));
+  now = 30_000;
+  reporter.poll();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.map((call) => (call.body as { state: string }).state), ["active", "active"], "at most one report per 15 seconds");
+  controller.abort();
+  await reporter.end();
+  assert.deepEqual(calls.map((call) => (call.body as { state: string }).state), ["active", "active", "ended"]);
+  assert.equal(calls.at(-1)!.signal?.aborted, false, "the call's own cancellation never cancels the report of its end");
+
+  // An older control plane has no route: one refusal stops reports for that call, and no end is sent.
+  const old = makeDeps(() => ({ status: 404, body: { error: "Route POST:/api/sessions/s_self/waits not found" } }));
+  now = 0;
+  old.deps.now = () => now;
+  const refused = waitProgressReporter(old.deps, "wait_pull_request", target, 3_600_000, 30_000);
+  now = 15_000;
+  refused.poll();
+  await new Promise((resolve) => setImmediate(resolve));
+  now = 60_000;
+  refused.poll();
+  await refused.end();
+  assert.equal(old.calls.length, 1);
+
+  // A device-token CLI call has no session to show the wait on.
+  const cli = makeDeps();
+  now = 0;
+  const device = waitProgressReporter({ ...cli.deps, now: () => now, actorHeader: null }, "wait_pull_request", target, 3_600_000, 30_000);
+  now = 60_000;
+  device.poll();
+  await device.end();
+  assert.equal(cli.calls.length, 0);
 });
 
 test("wait_session never turns an unreadable or cancelled session read into a timeout result", async () => {
@@ -1565,6 +1765,109 @@ test("child creation revalidates a pair after advisory capability discovery", as
     ["GET", `${CP_URL}/api/runners`],
     ["POST", `${CP_URL}/api/sessions`],
   ]);
+});
+
+test("a launch with no eligible account tells the agent what it can do, without naming accounts (#4353)", async () => {
+  const { deps } = makeDeps(() => ({ status: 409, body: {
+    error: "No Claude account in this machine's Priority Order can start this session.",
+    code: "PROVIDER_ACCOUNT_CHOICE_REQUIRED",
+    providerAccountSelection: {
+      provider: "claude", mode: "priority", policyRevision: 2, refusal: "no_eligible_account",
+      actions: ["choose_account", "wait"], retryAt: 1_800_000_000_000,
+      candidates: [{ accountId: "person-example-com-1234", position: 1, eligible: false, reason: "usage_exhausted" }],
+    },
+  } }));
+  const created = await callTool(deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws" });
+  assert.equal(created.isError, true);
+  const text = resultText(created);
+  assert.match(text, /No Claude account/u);
+  assert.match(text, /PROVIDER_ACCOUNT_CHOICE_REQUIRED refusal=no_eligible_account actions=choose_account, wait retryAt=2027-/u);
+  assert.match(text, /get_provider_account_selection .*create_session providerAccountId .*--provider-account.*create_run providerAccountIds.*create_workflow_run providerAccountBindings/u);
+  assert.ok(!text.includes("person-example-com"), text);
+});
+
+test("an agent reads the accounts it could name as references, never as identifiers (#4353)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: {
+    provider: "claude", mode: "priority", policyRevision: 2, status: "selected", source: "priority",
+    accountId: "person-example-com-1234", enforcement: "enforced", generatedAt: 1,
+    candidates: [{ accountId: "person-example-com-1234", position: 1, eligible: true, selected: true }],
+    choices: [
+      { accountRef: "acct:aaaaaaaaaaaaaaaa", position: 1, expected: true, canName: true },
+      { accountRef: "acct:bbbbbbbbbbbbbbbb", position: 2, canName: false, reason: "signed_out" },
+      { accountRef: "acct:cccccccccccccccc", position: null, canName: true, reason: "usage_exhausted", retryAt: 1_800_000_000_000, limitLabel: "Weekly" },
+    ],
+  } }));
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const read = await callTool(deps, "get_provider_account_selection", { runnerId: "r 1", agentId: "claude", workspaceId: "ws" });
+  assert.equal(read.isError, undefined);
+  assert.equal(calls[0]?.url, `${CP_URL}/api/runners/r%201/provider-account-selection?agentId=claude&workspaceId=ws`);
+  const text = resultText(read);
+  assert.ok(!text.includes("person-example-com"), text);
+  const body = JSON.parse(text);
+  assert.deepEqual(body.accounts, [
+    { accountRef: "acct:aaaaaaaaaaaaaaaa", position: 1, expected: true, canName: true },
+    { accountRef: "acct:bbbbbbbbbbbbbbbb", position: 2, canName: false, reason: "signed_out", because: "needs sign-in" },
+    { accountRef: "acct:cccccccccccccccc", position: null, canName: true, reason: "usage_exhausted", because: "is at a usage limit",
+      retryAt: new Date(1_800_000_000_000).toISOString(), limitLabel: "Weekly" },
+  ]);
+});
+
+test("create_session carries a named account, and refuses it before sending to an older control plane (#4353)", async () => {
+  const current = makeDeps(() => ({ status: 200, body: { id: "s_child", status: "queued", runnerId: "r1" } }));
+  current.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const created = await callTool(current.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws", providerAccountId: "acct:aaaaaaaaaaaaaaaa" });
+  assert.equal(created.isError, undefined, resultText(created));
+  assert.equal((current.calls[0]?.body as { providerAccountId?: string })?.providerAccountId, "acct:aaaaaaaaaaaaaaaa");
+
+  const older = makeDeps(() => ({ status: 200, body: {} }));
+  older.deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountAgentChoice - 1;
+  const refused = await callTool(older.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws", providerAccountId: "acct:aaaaaaaaaaaaaaaa" });
+  assert.equal(refused.isError, true);
+  assert.match(resultText(refused), /Choosing a provider account from an agent needs/u);
+  assert.deepEqual(older.calls, [], "an older control plane can't silently ignore the choice, because it never receives it");
+
+  const blank = await callTool(current.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws", providerAccountId: "  " });
+  assert.equal(blank.isError, true);
+});
+
+test("create_run and create_workflow_run carry named accounts, and refuse them before an older control plane (#4353)", async () => {
+  const current = makeDeps(() => ({ status: 200, body: { run: { id: "r_1" }, sessions: [], instance: {} } }));
+  current.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const run = { runnerId: "r1", workspaceId: "ws", agentIds: ["claude"], task: "Do it" };
+  const workflow = { runnerId: "r1", workspaceId: "ws", workflowId: "builtin:build-review", task: "Do it" };
+  const accepted = await callTool(current.deps, "create_run", { ...run, providerAccountIds: { claude: "acct:aaaaaaaaaaaaaaaa" } });
+  assert.equal(accepted.isError, undefined, resultText(accepted));
+  assert.deepEqual((current.calls[0]?.body as { providerAccountIds?: unknown }).providerAccountIds, { claude: "acct:aaaaaaaaaaaaaaaa" });
+  const bound = await callTool(current.deps, "create_workflow_run", { ...workflow, providerAccountBindings: { claude: "acct:aaaaaaaaaaaaaaaa" } });
+  assert.equal(bound.isError, undefined, resultText(bound));
+  assert.deepEqual((current.calls[1]?.body as { providerAccountBindings?: unknown }).providerAccountBindings, { claude: "acct:aaaaaaaaaaaaaaaa" });
+
+  // v337 reads a session's reference, but its run ignores this field, so the choice would silently vanish.
+  const older = makeDeps(() => ({ status: 200, body: {} }));
+  older.deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.memberProviderAccountChoice - 1;
+  const refusedRun = await callTool(older.deps, "create_run", { ...run, providerAccountIds: { claude: "acct:aaaaaaaaaaaaaaaa" } });
+  assert.equal(refusedRun.isError, true);
+  assert.match(resultText(refusedRun), /Choosing a provider account from an agent needs/u);
+  const refusedWorkflow = await callTool(older.deps, "create_workflow_run", { ...workflow, providerAccountBindings: { claude: "acct:aaaaaaaaaaaaaaaa" } });
+  assert.equal(refusedWorkflow.isError, true);
+  assert.deepEqual(older.calls, [], "it never receives the choice");
+  const plain = await callTool(older.deps, "create_run", run);
+  assert.equal(plain.isError, undefined, "a run naming nothing still reaches it");
+});
+
+test("an agent hears that a plan wasn't checked only when it named a model under a policy (#4353)", async () => {
+  const plain = makeDeps(() => ({ status: 200, body: { id: "s_child", status: "queued", runnerId: "r1", providerAccountSelection: { source: "priority" } } }));
+  plain.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const silent = resultText(await callTool(plain.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws" }));
+  assert.ok(!silent.includes("modelCompatibility"), silent);
+
+  const named = makeDeps(() => ({ status: 200, body: { id: "s_child", status: "queued", runnerId: "r1", model: "m",
+    providerAccountSelection: { source: "priority", modelCompatibility: "unknown" } } }));
+  named.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const told = resultJson(await callTool(named.deps, "create_session", { runnerId: "r1", agentId: "claude", workspaceId: "ws", model: "m" }));
+  assert.equal(told.session.modelCompatibility, "unknown");
+  assert.match(told.session.modelNote, /isn't known/u);
+  assert.ok(!/checked|verified|compatible/u.test(told.session.modelNote), "the note doesn't imply a check happened");
 });
 
 test("list_sessions -> GET /api/sessions (+?archived=true), mapped with pendingApproval title only", async () => {
@@ -3387,6 +3690,8 @@ const NEWER_WOLLIPOG_REFUSALS: ReadonlyArray<{
     error: "Campaign allocations need a newer version of Wollipog. Update Wollipog and try again." },
   { tool: "request_github_issue_closure", args: {}, floor: "orchestratorIssueClosure",
     error: "Human-approved issue closure needs a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "request_github_issue_closure", args: { repository: "other/repo" }, floor: "locationIssueClosure",
+    error: "Closing an issue in another campaign repository needs a newer version of Wollipog. Update Wollipog and try again." },
   { tool: "record_campaign_plan", args: { items: [] }, floor: "campaignWorkLedger",
     error: "The campaign work ledger needs a newer version of Wollipog. Update Wollipog and try again." },
   { tool: "create_session", args: { runnerId: "r1", agentId: "claude-code", workspaceId: "ws", campaignWorkItemId: "cwi_1" },
@@ -3534,4 +3839,63 @@ test("wait_pull_request reads a GitLab merge request through glab, never gh or t
   assert.ok(glabCalls.length > 0 && glabCalls.every((args) => args[0] === "api" && args.at(-1) === "gitlab.example.com"));
   const bare = await callTool(deps, "wait_pull_request", { pullRequest: "group/sub/project!7" });
   assert.equal(bare.isError, true, "a GitLab project without its host is refused");
+});
+
+test("request_campaign_issue_scope_change sends a structured proposal only to a v308 control plane (#4282)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { occurrenceId: "scope_1", authority: "orchestrator" } }));
+  deps.orchestrator = true;
+  const proposal = { issues: [{ repository: "owner/repo", number: 12, origin: "owner_named", rationale: "The owner names #12." }],
+    requestedCount: null, constraints: [], withheldOperations: [] };
+  const args = { requestId: "scope-1", expectedRevision: 2, explanation: "Fix what the owner named.",
+    additions: [{ repository: "owner/repo", number: 12 }], removals: [], proposal };
+  const listed = await dispatch({ jsonrpc: "2.0", id: 3, method: "tools/list" }, deps);
+  const tool = (listed!.result.tools as Array<{ name: string; inputSchema: { properties: Record<string, { required?: string[] }> } }>)
+    .find((candidate) => candidate.name === "request_campaign_issue_scope_change")!;
+  assert.deepEqual(tool.inputSchema.properties.proposal!.required, ["issues", "requestedCount", "constraints", "withheldOperations"]);
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals;
+  assert.equal((await callTool(deps, "request_campaign_issue_scope_change", args)).isError, undefined);
+  assert.equal(calls.at(-1)!.url, `${CP_URL}/api/sessions/${SELF_ID}/campaign/issue-scope/proposals`);
+  assert.deepEqual(calls.at(-1)!.body, args);
+  // An older control plane reads no proposal: it is left out, and the change is still proposed.
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals - 1;
+  assert.equal((await callTool(deps, "request_campaign_issue_scope_change", args)).isError, undefined);
+  const { proposal: _omitted, ...withoutProposal } = args;
+  assert.deepEqual(calls.at(-1)!.body, withoutProposal);
+  // A repository name is never dropped: leaving it out would widen what the owner limited (#4118).
+  const named = { ...args, proposal: { ...proposal, repositoryNames: ["the api repo"] } };
+  const before = calls.length;
+  for (const version of [RUNNER_CAPABILITY_MIN_PROTOCOL.campaignScopeProposals - 1, RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedProposals - 1]) {
+    deps.controlPlaneProtocolVersion = version;
+    const refused = await callTool(deps, "request_campaign_issue_scope_change", named);
+    assert.equal(refused.isError, true);
+    assert.match(JSON.stringify(refused), /repositoryNames/u);
+  }
+  assert.equal(calls.filter((call) => call.url.endsWith("/campaign/issue-scope/proposals")).length, calls.slice(0, before).filter((call) => call.url.endsWith("/campaign/issue-scope/proposals")).length);
+  // A v318 control plane reads one name, in the field it knows, and several can't be sent (#4117).
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedProposals;
+  assert.equal((await callTool(deps, "request_campaign_issue_scope_change", named)).isError, undefined);
+  assert.deepEqual(calls.at(-1)!.body, { ...args, proposal: { ...proposal, repositoryName: "the api repo" } });
+  const several = { ...args, proposal: { ...proposal, repositoryNames: ["the api repo", "web"] } };
+  const sent = calls.length;
+  const refused = await callTool(deps, "request_campaign_issue_scope_change", several);
+  assert.equal(refused.isError, true);
+  assert.match(JSON.stringify(refused), /repositoryNames/u);
+  assert.equal(calls.filter((call, index) => index >= sent && call.url.endsWith("/campaign/issue-scope/proposals")).length, 0, "no part of a limit is sent");
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryLimits;
+  assert.equal((await callTool(deps, "request_campaign_issue_scope_change", several)).isError, undefined);
+  assert.deepEqual(calls.at(-1)!.body, several);
+  // Nor is an epic's repository: left out, the same number would be read in the launch repository.
+  const lineage = { ...args, lineage: { kind: "epic", epic: 40, repository: "owner/api" } };
+  const issueScope = `${CP_URL}/api/sessions/${SELF_ID}/campaign/issue-scope`;
+  const reads = calls.length;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedEpics - 1;
+  assert.match(JSON.stringify(await callTool(deps, "request_campaign_issue_scope_change", lineage)), /an epic in another repository/u);
+  assert.match(JSON.stringify(await callTool(deps, "get_campaign_issue_scope", { epic: 40, repository: "owner/api" })), /an epic in another repository/u);
+  assert.equal(calls.slice(reads).filter((call) => call.url.startsWith(issueScope)).length, 0);
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedEpics;
+  assert.match(JSON.stringify(await callTool(deps, "get_campaign_issue_scope", { repository: "owner/api" })), /requires epic/u);
+  assert.equal((await callTool(deps, "get_campaign_issue_scope", { epic: 40, repository: "owner/api" })).isError, undefined);
+  assert.equal(calls.at(-1)!.url, `${issueScope}?epic=40&repository=owner%2Fapi`);
+  assert.equal((await callTool(deps, "request_campaign_issue_scope_change", lineage)).isError, undefined);
+  assert.deepEqual(calls.at(-1)!.body, lineage);
 });

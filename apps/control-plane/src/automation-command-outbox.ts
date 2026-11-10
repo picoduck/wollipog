@@ -180,8 +180,14 @@ export class AutomationCommandOutbox {
    */
   private retryProviderFailure(runnerId: string, message: Receipt, now: number): boolean {
     if (!isTransientProviderError(message.error)) return false;
+    // A validated campaign allocation pause cancelled this exact command. Its root remains
+    // resumable through the owner's card; a new launch must not replace its campaign identity.
+    if (this.db.automationCampaignCommandPaused(message.commandId)) return false;
     const command = this.db.getAutomationCommand(message.commandId);
     if (!command || command.kind !== "start_session") return false;
+    const execution = this.db.getAutomationExecution(command.executionId);
+    if (execution?.specSnapshot?.action.kind === "create_session" && execution.specSnapshot.action.request.campaign &&
+        (command.startedAt !== undefined || this.db.campaignDescendantIds(command.sessionId).length > 0)) return false;
     const attempt = this.db.listAutomationCommands(command.executionId)
       .filter((sibling) => sibling.supersededBy !== undefined).length + 1;
     if (attempt > MAX_PROVIDER_RETRIES) return false;

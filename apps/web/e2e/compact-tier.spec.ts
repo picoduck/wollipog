@@ -158,7 +158,7 @@ async function checkPageContent(page: Page, where: string) {
   await open(page, "path=%2Farchived", "Archived Sessions");
   await checkArchivedTable(page, where, { folded: true, minSession: 200 });
 
-  await open(page, "path=%2Fusage", "Usage and Cost");
+  await open(page, "path=%2Fusage%2Fapi", "Usage and Cost");
   // API Usage's one toolbar (#3010): Metric, Range, Group By and About These Numbers on one row. A
   // main column no wider than a phone (the 761px window less its rail) would clip those labels, so
   // there Range and Group By are one button and About is its icon (#4029).

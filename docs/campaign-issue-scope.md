@@ -1,9 +1,107 @@
 # Campaign Issue Scope
 
-Campaign issue authority is independent of the campaign work ledger. Initial explicit issue lists retain
-their existing finite authorization. Epic wording and requests for an issue's children seed membership
-proposals, never automatic authorization. An epic campaign cannot create delegated sessions until
-its issue scope is authorized. Custom campaigns require the existing human approval.
+Campaign issue authority is independent of the campaign work ledger. The issues a Custom campaign's
+first message names keep their finite authorization (`issueNumbers`), but only the Custom
+Orchestrator's checked proposal grants them (#4259, #4282). An epic a Custom campaign's first message
+names seeds membership proposals, never automatic authorization. An epic campaign cannot create
+delegated sessions until its issue scope is authorized. Custom campaigns require the existing human
+approval.
+
+Neither comes from a regular expression, a grammar or a server reading of the text (#4104, #4259,
+#4282, see [Custom Epic Seed](decision-model.md#custom-epic-seed-issue_scope_seed-4104)). A first
+message that writes a digit string gets a pending seed (`issueScopeSeed`) awaiting the Orchestrator's
+proposal, and delegation waits while it is pending (`seed_proposal_required`). The first message is
+the launch prompt or, for a campaign launched without one, the person's first prompt; any other first
+message is recorded as `none`, so no later message counts as the first. The Orchestrator proposes the
+issues the message asks for, deterministic floors bind them to the message, and the typed constraint
+check (`scope_check`) against the person's own words then decides it:
+
+| Checked Proposal | Seed | Issue Numbers | Delegation |
+|---|---|---|---|
+| Admitted: one issue the runner reads members for | `seeded`: the issue is `issueScopeProposalEpic`, and the scope inspection starts from its members | None | Waits for the person's scope approval |
+| Admitted: issues (one issue without members included), each one the runner reads as an issue of the campaign repository, from a message the owner wrote | `none` | The proposed issues | Proceeds |
+| Admitted: issues with any in another repository of the campaign's list | `owner`, with one scope change of the whole proposal for the person to approve | None until they approve | Waits for that approval |
+| Admitted: no issues (the message names none to work on) | `none` | None | Proceeds |
+| Refused by a floor or the check | Still `pending`: the Orchestrator revises | None | Waits |
+| Uncertain or failed, a fourth distinct check, an older root runner, or issues from a message the owner didn't write | `owner`: no seed | None | Waits for the person's scope approval |
+
+The model may only narrow or confirm. The floors run first, with no model call: a number the message
+doesn't write (as digits, inside a `#`-written range, or inside a bare-digit range right after "issue"
+or "issues"), a number written only for another repository, an issue in a repository the campaign
+doesn't hold, a pull request or an issue the Orchestrator chose is refused, granting no part of the
+proposal. The check always runs, so an empty proposal or one that adds every referenced issue can't
+skip it.
+
+A message may also name issues in another repository of the campaign's list, such as
+`Fix owner/app#12 and owner/api#40`. Each such number must be written qualified by its repository, and
+is read through a Location of that repository, never the root's runner. Once admitted, the whole
+proposal, its launch-repository issues included, becomes one scope change for the person to approve:
+a first-message grant holds only launch-repository numbers, and a person approves every other change to
+a Custom scope. The seed is `owner`, so delegation waits for that approval, and **Continue Without an
+Epic** stays available. One issue in another repository that has members is an epic, so nothing is
+created for it and its scope is the person's. If no Location of a named repository is online, the
+proposal is refused by name, nothing changes, and the seed stays `pending`.
+
+`createSession` is synchronous and the proposal comes later, so a campaign is created with no issue
+numbers. Until the proposal is admitted, delegation waits and every GitHub write on an issue takes the
+person's ordinary approval path. Enabling Full Control waits for a pending seed.
+
+Once an admitted proposal grants issue numbers, the control plane stores them and delivers them to the live
+Orchestrator (#4269): it sends the campaign's runner a `campaign_issue_scope` `grant_issue_numbers`
+operation naming the campaign session and the granted numbers. The runner sets them on the live
+launch policy, which the Claude Code routine-write classifier reads on each ask, and on the stored
+launch metadata, which its issue-closure checks read, so neither needs a relaunch. A provider still
+launching adopts them before it starts, including a restart (of a stopped session, too) whose spec
+predates the grant: the runner remembers a grant only for the launch that was already under way when
+it arrived, and only that launch re-applies it when it rebuilds its metadata, and only to a policy
+holding no issue numbers, no issue scope and no Full Control. The runner forgets it once that launch
+has taken it, when a new launch begins, on any scope synchronization, and when the session stops or
+is deleted. Every later launch takes its issue numbers from its own spec: a newer spec without them
+(numbers narrowed or revoked, Full Control taking over) is never overridden by an earlier grant.
+Only Claude Code classifies issue writes this way; other harnesses ask for each write.
+
+The delivery can only fill an empty grant with numbers this control plane already granted:
+
+- The control plane sends it only to the campaign's own root Orchestrator, only while that session
+  holds exactly the granted numbers and no `issueScope`, and never to a stopped, failed, completed or
+  archived session, to a member, or to another campaign's session.
+- The runner refuses it again (`grantRefusal`) for a session already holding other issue numbers or
+  any `issueScope`, a session under Full Control (`issue_scope_held`: its numbers come only from its
+  scope), one with no live or launching provider, a grant naming another campaign than the
+  addressed session, or malformed numbers. A delivery of the numbers the session already holds is a
+  no-op (`unchanged`).
+- It names no repository, revision, scope or operation, so it can't widen a scope, raise a ceiling,
+  change a repository or grant an operation. An authoritative scope keeps the `synchronize` path.
+- Only a v302 runner (`campaignIssueNumberGrant`) is sent it. An older runner, a disconnected one, or
+  a failed delivery keeps the earlier behavior: the stored numbers reach the provider at its next
+  launch, and its routine writes on them take the person's approval path until then.
+
+Only a message the server knows the campaign's owner wrote grants issues: the owner's create request,
+whose issues carry the launch provenance (`issueNumbersSource: "human_launch_request"`) that Full
+Control enable trusts, or the owner's first prompt after an empty launch, whose issues don't. Any other
+first message is left with the owner when its admitted proposal names issues: a first prompt from
+someone else, a staged automation launch, or a recorded transcript message whose author was never
+stored (a restart or a pre-upgrade campaign). A proposal for one of those can still seed an epic,
+which waits for the owner's scope approval anyway.
+
+A seed awaiting the Orchestrator's proposal survives a control-plane restart: the restarted
+Orchestrator proposes as before. Only a pre-#4282 reading left pending with no reading in flight
+settles as `owner`, with its reading recorded as failed. A message without digits needs no proposal,
+makes no Decision call and grants nothing. Existing campaigns keep the issue numbers they already hold.
+
+A Custom campaign whose first message was recorded before the seed existed has no seed: the build
+before #4216 held it by matching that message against a regular expression on every check, and stored
+nothing. So that it doesn't lose its hold on upgrade (#4258), its recorded first message gets the seed
+it would get now. That happens the first time it tries to delegate, its issue scope is read, or it is
+restarted (#4259, in place of the restart's old issue-list backfill), through the same proposal, check
+and table. Nothing is matched against the text. A later message never counts as the first.
+
+Approving a scope needs at least one issue, and a campaign whose message names none would otherwise
+wait forever. So the owner may also release an `owner` seed: **Continue Without an Epic** on its
+Epic Seed row in Campaign Status (the classification route, `orchestrator`). The seed becomes `none`.
+Releasing seeds, scopes and grants nothing, and a `seeded` epic cannot be released. Once a scope is
+approved, the seed holds nothing: its row reads as approved (`scoped` in the decisions response) and
+offers no release.
 
 Campaign Status exposes Authorized Issue Scope, revision, and recorded work outside authority. A campaign
 owner can inspect an epic's umbrella and members, select candidates, and request exact additions/removals.
@@ -52,14 +150,241 @@ occurrence, under the same policy revision; exactly one revision bump since; and
 boundary still current and still giving the Orchestrator the merge. Any later policy change, any
 other revocation, or an approval that was never armed stays terminal.
 
-Protocol v208 capability-gates the complete operation before any update. Active Orchestrator participants
-must share the campaign runner and repository workspace; finish or move incompatible participants first.
-The control plane persists the authoritative policy on matching Orchestrator members and records an empty scope at the same revision on retired participants in another repository workspace. Restarts and provider launches independently preserve the repository boundary. The runner stores the
+That request's list of outstanding decisions is what it showed when it was made; the approval revokes
+whatever is outstanding when it happens, including decisions filed after the request, except Owner
+Questions, which are never listed or revoked. The approved decision's `scopeRevokedDecisions`, and the
+audit record consuming it (`workflowDecision.revokedDecisions`), list exactly what it revoked, whoever
+approved the change; reconciliation reads that record. So under Full Control a person's request (an
+owner request without lineage, a grant or selection review, a first-message proposal routed to the
+owner, or the owner's own Campaign Status change) stays approvable while decisions come and go (#4332).
+What still refuses it as stale, applying nothing:
+
+- a changed scope revision, boundary, or Maximum Issues limit behind a stated increase;
+- changed additions or removals, or a changed assignment of a removed issue;
+- any change to a live child the work ledger can't prove unrelated to every added and removed issue,
+  including a decision it files or settles, since `activeChildren` binds each child's unconsumed
+  decisions;
+- a closure of an added or removed issue being filed or settled;
+- any other decision of the root being filed or settled, other than a closure of another issue or a
+  follow-up publication or admission, whose slot the approval counts again: nothing proves the root's
+  own work unrelated to the change.
+
+Protocol v208 capability-gates the complete operation before any update. Every active Orchestrator
+participant must run in a Location of one of the campaign's repositories (#4118); finish or move
+incompatible participants first. A participant outside the launch repository needs a v313 runner.
+
+## Repository-Qualified Scope
+
+The scope holds `{ repository, number }` pairs (`issues`) across the campaign's repositories: a Full
+Control boundary's entries, or for Custom its list. A Custom campaign starts with every verified Location
+of its Project that its owner added and can reach, each inspected in its own path when the campaign is
+created, and any of those that fails is excluded with its reason. As with an enable, nobody sees this
+survey, so another person's Location stays out, and an enable can't carry it in as one the campaign holds.
+A Project with one such repository records no list, unless a Location was left out for its runner's
+version, when a one-entry list shows that exclusion and lets a reconnect retry it. The list grants nothing:
+a person still approves every Custom scope change, and any other Location joins only through an approved
+repository addition, which a one-entry list still takes for its own repository. A campaign
+created before this list keeps its launch repository and any its owner approved adding. A first-message
+limit outlives Full Control: back in Custom, a gate of a repository it leaves out is the person's, and no
+child is placed in such a repository, as far as the campaign knows the Location's repository.
+
+A Location joins only on a runner that can perform the campaign's gates there (#4319): protocol v327,
+the highest floor of closing an issue, reading forge facts and publishing a follow-up through a
+Location. An older runner that can still read a Location (v288+) is asked only which repository it is.
+Its Location is excluded with a reason naming the version, in the launch or enable preflight, in Campaign
+Status, and in the refusal of a repository addition. The person sees it before authorizing: New Session
+reads the check ahead of Create Session when the Project has several Locations, and Create Session or
+Enable Full Control stops once to show anything the person wasn't yet shown, then proceeds on the next
+click. A campaign whose runners are all current sees none of this. Registering again is the only way a
+runner's version changes, so each reconnect retries the exclusion: the owner's own Location joins at a
+new boundary revision, or stays available under a first-message limit, and someone else's waits for
+Include in Campaign once its runner is current. A Custom list retries this exclusion too, for the
+owner's own Location. An offline runner reads as offline, whatever version it last reported.
+
+A repository whose only Location is excluded has no entry until that Location joins, and it is not treated
+like a repository the campaign never knew of. Once a read has named it, the campaign keeps it refused in a
+record of its own (`refusedRepositories`) until the repository holds an entry: a Location of it joining,
+or the owner's approved addition. Nothing else ends it: not a later read that fails, a move to waiting, a
+re-authorization, a revoke to Custom, nor the Location leaving the Project. A follow-up, merge, branch
+deletion or closure naming it is refused by the Location's name and version, at request and again at
+consume, arming and execute. Nothing reads its forge, since its Location isn't in the boundary, so no other
+login stands in. An exclusion recorded mid-action stops it too. An armed merge is refused where its command
+can be seen, and as with a merge hold Claude's policy hook denies the session's shell commands while it
+stands, since it can't tell them apart. The approval stays armed, because its command may already have
+run. Reconciling it, a new request for the same pull request, or the join that ends the refusal lifts that.
+That join revokes the armed approval, in Full Control and in Custom, so the block never lifts with it still
+armed; a revoke to Custom revokes it too. A requester running in that very Location still acts in its own
+repository. The record keeps one repository per Location, the latest a read named, so a runner naming a
+new one each time can't grow it.
+
+While the owner's first message limits the campaign's repositories, a join leaves a repository with no
+entry available instead, so the refusal says only an approved repository addition brings it in.
+
+A Location the campaign holds by consent (the owner's own, one the owner included, or one the person saw
+excluded before Start, whoever added it), excluded with no repository named on a runner that, when it
+was excluded, was below the gates' floor or had no known version, may hold any repository. That covers a
+runner too old to read a Location (below v288), a read that failed (a timeout, say), an offline machine,
+a missing folder, and the owner's exclusion #4372 recorded with no repository. The campaign keeps each
+such Location in a record of its own (`unreadLocations`). While one is still in the Project, every
+repository without an entry is refused the same way, including one the campaign never had, and none of
+them has a forge reader. Only three things end it: a read that resolves it (it names the repository,
+which is then refused by name, or the Location joins, or a read succeeds on a current runner), the
+Location leaving the Project (its removal, its move, or the Project's deletion), or, for someone else's
+Location, a revoke, which withdraws the consent the authorization gave (`unreadByConsent`). A runner's
+update before its read, a failed read, a move to waiting, a re-authorization and a revival never do, nor
+does a revoke for the owner's own Location. **Every lift that isn't a Full Control join revokes what the
+refusal covered:** the root's follow-ups, merges and branch deletions in each repository that had no
+entry, except one a read's name still refuses, whose own stay blocked until a join revokes them. A Full
+Control join revokes every decision already. The outermost Orchestrator controls every member's gates, a
+nested Orchestrator's included, so this reaches the whole campaign, and it reaches a stopped, failed,
+completed or archived root's campaign too, since its children can outlive it. Each revocation names the
+person whose action led to it, such as whoever removed, moved or deleted something. The refusal names the Location and
+its ways out. A requester in that Location isn't exempt, nor is one in a Location refused by name, since
+nothing shows which repository it acts in. Someone else's Location, waiting or excluded mid-campaign,
+counts only once the owner includes it, which reads it. A reconnect reads such a Location again, a
+missing folder included, and its runner's registration also reads again an unread Location whose
+exclusion a revoke, a re-authorization or a revival dropped, or a stale record a rollback left: that read
+only names the repository, or ends the record on a current runner, and never joins. A Custom campaign
+records one even beside a single repository, including its own Location when that can't be read at
+creation, and reads one that was offline or missing at creation only to name its repository: it never
+joins on a reconnect, as such a Location never has, and the repository a read names stays refused until
+an approved addition. Otherwise an unknown repository keeps its rule: a person's approval lets the
+requester act with its own login.
+
+This narrows only what joins. A Location the campaign already holds keeps its place on any runner, so a
+re-authorization or enable never drops a repository, and each gate still refuses a runner below its own
+floor by name, with no other login standing in. A revoke to Custom ends the boundary and its exclusions,
+though not the repositories they refused, children stay live across it, and an enable after one surveys the Project again: a Location on an old
+runner is then excluded rather than carried. If a live child runs in it, the preflight reports that by
+the child's and Location's names and the version, and the enable is refused in the same words.
+
+The launch Location is never excluded, because the root runs there and its repository's closures, forge
+reads and own publications run in the root's own checkout. One gate does need the floor: a follow-up
+routed to its repository from another of the campaign's. With a root below v327 and no other Location of
+that repository on a current runner, that follow-up is refused, so the Location is reported as limited,
+by name and version, in the same preflight and under its row in Campaign Status, live until the root
+updates.
+
+`owner/app#5` and `owner/api#5` are separate entries with separate authority. `repository` and
+`issueNumbers` stay as the launch repository's part for older clients and runners. A scope saved before
+#4118 reads as its numbers in its repository, at the same revision; nothing is rewritten and no
+approval is invalidated. A legacy campaign with no saved repository stays unverified (#2664).
+
+- **Changes.** `request_campaign_issue_scope_change` accepts refs in any campaign repository. A ref in
+  any other repository is refused with the fixed code `repository_outside_boundary`, decided from the
+  stored boundary before any runner call, whatever the lineage and for a Custom seed too. The one
+  exception is a Custom campaign that has recorded no repository yet, such as one in a one-repository
+  Project: there's nothing stored to refuse from, so it first asks its own runner which repository it's
+  in. That read names no proposed issue. The sentence tells the Orchestrator to ask the owner to
+  include a Project Location of that repository, then retry; otherwise to report that the work needs a
+  repository with no Location in the Project. The launch repository's part is verified through the
+  campaign runner as before. Each other repository's part is verified through the first online Location
+  in its boundary entry, never through the root's runner, and the Location must still answer as that
+  repository. If any repository has no Location online, the whole request is refused naming it and
+  nothing changes. The approval snapshot keeps the launch repository's numbers at the top level and
+  lists every other repository the scope holds or the change touches under `otherRepositories`.
+- **Which runner a scope change needs.** Every scope change needs the root's runner online, even one
+  touching only another repository whose Location is online. The change reads the root's checkout to
+  confirm it's still the campaign's repository, and the root's session is what holds the scope. While
+  that runner is disconnected, the request is refused naming the launch repository, and nothing changes.
+  Campaign Status shows the saved scope meanwhile. Another Location of the launch repository can't stand
+  in, because it can't confirm the root's own checkout.
+- **Stored selection grants.** A selection grant stored before #4282 still fills from the launch
+  repository only (`selection_launch_repository_only`), and no new one is written. The check that
+  admitted it read one repository, so filling it from another would grant more than the owner's words
+  were checked for. The owner can add such an issue from Campaign Status, and an Orchestrator's proposal
+  has no such floor.
+- **Orchestrator proposals.** An Orchestrator's scope proposal (#4282) may add issues in any campaign
+  repository. Each other repository's issues are read through its first online Location with their
+  state, labels and title (a v318 runner; an older one is refused by name), and each floor answers for
+  the issue's own repository: already in scope, held by another campaign, a pull request, closed, a
+  Human Required label. An owner-named issue must be written for its own repository: a bare `#12` means
+  the launch repository only, so another repository's needs `owner/repo#12` or its URL. The same number
+  in two repositories is two issues everywhere, including the constraint check's questions.
+- **The repositories the owner names (#4117).** `proposal.repositoryNames` carries the message's own
+  words for each repository the Orchestrator says the work is limited to. The words must appear in the
+  owner's message as whole words (`repository_name_not_in_message`): "api" is not written in "rapidly".
+  The server, not a model, resolves each against the boundary: the full name, the name without the owner,
+  or a Location's name, ignoring case, a leading "the" and a trailing "repo" or "repository". When every
+  name matches one repository, every issue must be in one of them (`repository_constraint_mismatch`). That
+  proves what the names are, not what the owner meant by them, so they are still the Orchestrator's claim:
+  a `repository_limit` question for each name asks the Decision Model whether the message limits the work
+  to it, rather than excluding or only mentioning it, and named repositories never take the no-model path.
+  Any name that matches none or several grants nothing, for the whole list: the proposal becomes the
+  owner's one approval (`repository_name_unresolved`) with no model call, and approving it applies no part
+  of the limit. A name only ever resolves against the boundary, so a limit can't add a repository.
+- **A limit left out.** The `repository_limits_complete` question asks whether the message limits the work
+  to a repository the proposal doesn't name. `omits_limit` is neither a refusal nor an admission: the
+  proposal goes to the owner's one approval. A message that writes a campaign repository's name beside an
+  initial proposal with no limit (`repository_mentioned`) always reaches this check; `owner/repo#12` and an
+  issue's URL point at an issue and don't count.
+- **Narrowing the boundary (#4117).** Admitting a limited initial scope, by the check or by the owner,
+  re-mints the boundary without the other repositories at a new revision, and revokes what was bound to
+  the old one. It happens before anything is dispatched. The admitted scope records `repositoryLimits`, and
+  a later addition outside them is refused, whether it names a repository or not.
+- **A limit naming only other repositories.** The launch entry stays first, because the root runs there
+  and the boundary requires it, so the boundary lists it beside them. It grants no work: no child is placed
+  in it, none of its gates (a merge, a branch deletion, an issue closure, a follow-up publication) is the
+  Orchestrator's to decide, no campaign review runs on it, and no agent adds its issues. What remains is
+  the root's own process, which keeps running in that checkout under its provider's permissions, and the
+  owner's own decisions, which stay the owner's. The owner brings it back the same way as any other
+  repository: an approved `campaign_repository_addition` naming one of its Locations, even one already
+  listed, adds it to the limit. Nothing joins, because its Locations are already listed. The boundary
+  still takes a new revision, as a join does, because who decides that repository's gates changes: every
+  unconsumed decision is revoked, so a gate the limit routed to the owner is asked again, never left to
+  fail when answered. In Custom, which has no revision, it records no list and no join, and revokes that
+  repository's gates instead, as any Custom addition the limit left out does. The request is refused
+  when that Location now reads as another repository, or when the limit took the repository in while the
+  Location was being inspected.
+- **Repositories the limit left out.** Their Locations show in Campaign Status as Available but Not in
+  This Campaign. A Location of a repository with no entry never joins while a limit stands, whether the
+  owner added it, its runner reconnected, the owner used Include in Campaign, or an enable found it.
+  A re-authorization and an enable keep the limit. Only `campaign_repository_addition`, which the owner
+  approves, gives that repository an entry, and its issues then pass the limit. Its other available
+  Locations then wait for Include in Campaign, because the approval named one Location.
+- **Admission.** Maximum Issues counts issues across all repositories. Follow-up lineage admits a
+  publication in any boundary repository (#4119), and one in another repository than its origins records both.
+- **Publication.** A publication in a repository other than the one its requester works in is created by a
+  Location of that repository, with that runner's own login (#4119, v327). Consuming it is refused, because
+  consuming is what lets the requester create the issue; `execute_workflow_decision` performs it instead,
+  and records the issue and the runner. With no capable Location online nothing is published, and no other
+  login stands in. A later attempt after an uncertain answer only looks for the issue. A repository the
+  requester works in stays as it was, and so does one the campaign holds no entry for, which only a person
+  can have approved: there is no Location of it to route through. This binds Wollipog's own route. A
+  requester's shell can still run `gh`, but such an issue has no consumed grant, so it can't join the scope.
+- **Epics.** `issueAuthority.epics` are the launch repository's, and `issueAuthority.otherEpics` holds
+  the boundary's other repositories' as qualified refs. A stored boundary has none, and its epics read as
+  the launch repository's at the same revision. A person's launch authorizes them: `otherIssues` on a
+  Full Control launch, each read through a Location of its own repository, join the scope and its epics,
+  as `issueNumbers` do. `get_campaign_issue_scope` and `lineage: {kind: "epic", epic, repository}` take an
+  optional `repository`, defaulting to the launch repository. A repository outside the boundary is refused
+  with `repository_outside_boundary` before any runner call. An epic elsewhere is read through a Location
+  of its repository, and a member anywhere but that repository fails the read, so members count only in a
+  boundary repository. One epic's lineage admits only that repository's members
+  (`epic_members_unverified`). A scope change that drops an epic drops its authority, in that repository
+  only, and so does narrowing the boundary, since its issues leave with it. A pre-v322 runner receives
+  `epics` alone, and can't be asked to read another repository's epic.
+- **Participants.** The root holds the whole scope. Every other Orchestrator participant, and its runner,
+  holds only its own Location repository's numbers in the earlier one-repository shape, so a number is
+  never read in the wrong repository. A retired participant in no campaign repository records the
+  revision with no numbers. Restarts and provider launches independently preserve that boundary. The runner stores the
 scope revision and updates live Claude permission classification, then restores it on reconnect/restart.
 Closure inspection and execution are fenced against both repository and scope revision. Synchronization
 failure is recoverable by reconnecting/updating the runner; closure remains refused until synchronization.
 GitHub credentials, governance, and the independent exact issue-closure decision remain authoritative;
 Custom closure approval is human-owned.
+
+A closure in another campaign repository (#4119) names it with `repository`; the root stays the requester.
+The issue is inspected and closed on the runner of the first of that repository's Locations that is in the
+campaign's Project and online at v323 or later, in that Location's path, with that runner's own forge login.
+That runner holds no copy of the campaign's scope, so it can't reread it at its mutation fence as the root's
+runner does. Its `execute` runs every forge check and answers `prepared`; the control plane then rechecks the
+scope, the boundary, the active children, the evidence digest and the Location's path, and only then sends
+`commit`. Without a commit in time, nothing is written. The runner fences what only it can see: the checkout's
+origin, the forge digest, and one durable attempt record per occurrence. A repository that is not one of the campaign's is refused before anything is inspected, and
+an owner's approved `campaign_repository_addition` is the way in. A scope change whose changed repository is
+not the closure's still invalidates it, as it always has. The forge facts its delivery proof rests on are read
+through a Location of the pull request's repository too (see Forge Status in `campaign-work-ledger.md`).
 
 Campaign GitHub operations support validated local and SSH host targets belonging to the runner.
 Container and cloud placements are unsupported. A target refusal is reported separately from origin
@@ -82,18 +407,20 @@ Campaign Status lists it as recorded work outside authority, but:
   (`request_campaign_issue_scope_change`). A refused scope change cannot be routed around by
   recommitting the item and dispatching it again; only the campaign owner can then add the issue.
   An item that tracks no issue is unaffected.
-- A merge that would close an issue outside the current scope is never Orchestrator-owned. A GitHub
+- A merge that would close an issue outside the current scope is never Orchestrator-owned. A
   `pr_merge` whose `intendedClosures` name such an issue is refused before any decision is created,
   and the refusal names each one; write "Refs #N" for an issue that must stay open, or add the issue
-  to the scope first. On a v242 runner the declared closures are exactly what GitHub would close
-  (closing keywords and linked issues): the runner reads them before the request and again before
-  arming, and any difference is refused (#3713). A merge whose closures are all in scope, or that
-  closes nothing, keeps its ownership.
+  to the scope first. On a current runner the declared closures are exactly what the forge would
+  close: for GitHub (v242, #3713) its closing keywords and linked issues; for GitLab (v295, #3762)
+  its closing pattern on the description and GitLab's own `closes_issues` list. The runner reads
+  them before the request and again before arming, and any difference, or a forge it cannot read, is
+  refused. A merge whose closures are all in scope, or that closes nothing, keeps its ownership: a
+  GitLab merge is then owned exactly like a GitHub one.
 - A merge whose closures nothing reads is never assumed to close nothing. A GitHub merge from a
-  runner older than v242, and a GitLab merge request (whose closing references are not read at
-  all), are human-owned (`unverified_closures`) whatever they declare: an unread pull request that
-  declares an in-scope closure could still close an unscoped issue. A declared unscoped closure is
-  still refused, as above.
+  runner older than v242, and a GitLab merge from a runner older than v295, are human-owned
+  (`unverified_closures`) whatever they declare, and their decision cards say "Not checked": an
+  unread pull request that declares an in-scope closure could still close an unscoped issue. A
+  declared unscoped closure is still refused, as above.
 - Retargeting a work item that has an open attempt at an issue outside the scope, through
   `record_campaign_plan` or `update_campaign_work_item`, is refused like a dispatch. Linking an accepted follow-up's published issue to its item stays allowed, because that
   record must precede the issue's scope addition; its merge still cannot close the issue unscoped.
@@ -132,7 +459,8 @@ The authenticated human admission may additionally establish `control.boundary.i
 
 ```typescript
 {
-  epics: number[],              // Exact intended umbrella issues in the authorized repository
+  epics: number[],              // Exact intended umbrella issues in the launch repository
+  otherEpics?: { repository: string, number: number }[], // In the boundary's other repositories (#4118)
   relatedFollowUps: boolean,    // Evidence-based work related to authorized origin issues
   maxIssues: number,            // Maximum current scope plus reserved publication slots (1–100)
   closureReasons: ("completed" | "not_planned")[]
@@ -153,8 +481,8 @@ stale standing authority locally until it is reauthorized. Human scope and closu
 available. A closure outside delegated reasons, or without complete machine delivery/disposition
 proof, produces a human-owned exact decision instead of silently authorizing an agent.
 
-Scope proposals carry `lineage: {kind: "epic", epic}` for freshly inspected native/checklist members
-of a human-authorized epic, or `{kind: "follow_up", publicationOccurrenceId}` for one verified
+Scope proposals carry `lineage: {kind: "epic", epic, repository?}` for freshly inspected native/checklist
+members of a human-authorized epic, or `{kind: "follow_up", publicationOccurrenceId}` for one verified
 published issue. Dependencies, incidental references and cross-repository links remain excluded.
 A follow-up publication is either a bounded grant, which carries its own `issueAdmission`, or one a
 person approved as a human-owned decision. The second kind counts only when that person's recorded
@@ -165,21 +493,78 @@ after the current boundary's `authorizedAt`, or the boundary the server recorded
 (its author and objective digest, written into the resolving audit, never taken from a request)
 matches the current boundary's, so a Human scope approval that re-mints the boundary with the same
 author and objective keeps it valid. A changed objective or author, or an approval from before this
-record existed that precedes the current authorization, is refused as
-`publication_approved_under_earlier_boundary` and leaves the change to fresh human scope review.
+record existed that precedes the current authorization, becomes the owner’s one Scope Approval with
+`publication_approved_under_earlier_boundary`.
 Such a publication carries no recommendation claim, so the server binds
 it to the one accepted, non-duplicate recommendation in this campaign that records the published
 issue as its result and has the payload's title subject. Every other check applies to both kinds:
 consumed, controlled by the root, in its repository, never used to admit an issue before, origins
 still in scope, published payload matching exactly, and scope plus reservations within `maxIssues`.
-The admission evidence names which kind it was. Each Orchestrator refusal returns a fixed sentence
-and a bounded `code`, such as `publication_approver_not_owner`, `origin_outside_scope` or
-`lineage_missing`. A campaign owner can still propose any change from Campaign Status.
+The admission evidence names which kind it was. Fixable Orchestrator refusals return a fixed sentence and a bounded `code`, such as
+`origin_outside_scope`. The seven causes requiring a person instead create one owner Scope Approval
+with the cause and any verified publication, as described below.
+
+### Owner Approval of Additions Without Lineage (#4267)
+
+An Orchestrator proposal that adds issues without any lineage, and that no scope grant review takes
+(below), is not refused. It becomes exactly one pending, human-owned `campaign_issue_scope` request
+whose snapshot carries a server-derived `ownerReview: { cause: "lineage_missing" }`, with the exact
+additions, any removals and the Orchestrator's `explanation`. That is the route for an issue the
+owner asks for in conversation after launch: the owner approves or denies the proposal in one step
+from their Inbox or from Campaign Status's **Waiting for You**, where it is listed as a Scope
+Approval (below), instead of retyping it.
+
+- When the scope plus the slots consumed publications still hold would exceed the campaign's issue
+  limit, the request states the Maximum Issues increase it needs as `ownerReview.maxIssuesIncrease: { from, increase }`.
+  Approving it applies the additions and re-mints the boundary with Maximum Issues raised from
+  `from` by exactly `increase`; denying applies neither. The Follow-Up Limit does not change. A
+  proposal that would need more than the 100-issue ceiling is still refused as `capacity_exhausted`,
+  and so is an automatically admitted lineage-bearing proposal over the limit. Pending and approved publications are not
+  counted, because the owner's approval revokes them, exactly as its resolution counts the limit.
+- Proposing the same additions and removals at the same scope revision while the request is pending
+  returns that same occurrence, whatever the explanation now says.
+- Only the owner can approve it, as any human-owned scope request: an Orchestrator can neither
+  resolve nor consume it, and an agent cannot supply an `ownerReview` or a larger increase itself.
+  Approval still revokes every outstanding decision (#3915) and records exactly which (#4332). If Maximum Issues moved since
+  the request (any boundary change revokes it anyway), approving it is refused as stale and applies
+  nothing.
+
+Valid epic, follow-up and selection admissions, the selection review below and Custom campaigns are unchanged. Lineage requiring a person uses the owner-review route described below.
+
+### Scope Approvals Under Waiting for You (#4334)
+
+Campaign Status's **Waiting for You** lists every pending, person-owned `campaign_issue_scope`
+request on the campaign root that the server created from an Orchestrator's proposal, wherever the
+proposal was routed to the owner:
+
+- `ownerReview`: additions without lineage or with lineage requiring a person (above and below);
+- `grantReview`, any cause: a failed or uncertain first-message grant (#4102), or a selection review
+  that was uncertain, failed or unverified (#4103);
+- `scopeProposal.route: "owner"`: an uncertain or failed constraint check, or anything else that makes
+  a proposal the owner's one approval (#4282). It stays presented as an Owner Question where it is
+  answered, and listed as a Scope Approval here.
+
+Each entry is a Scope Approval marked "Proposed by the Orchestrator". It names the exact
+repository-qualified additions and removals, never shortened, and any Maximum Issues increase
+approving it applies: the one an owner review states, or the derived limit a failed or uncertain grant
+or a proposal grows to fit, read under the rule the approval itself applies. An initial proposal that
+adds nothing says the campaign starts with no issues. Its Open Request opens that exact occurrence and
+no other. When the session doesn't list that occurrence, the entry offers no Open Request rather than
+another request. The request's own card and the Owner Question state the same increase. The server
+derives it on each read of the session (`PendingApproval.scopeMaxIssuesIncrease`) and never stores it,
+so it isn't part of the request's snapshot or digest and changes nothing about what approving does.
+
+An entry leaves the list once its request is approved, denied, revoked or superseded. Orchestrator-owned
+and admitted changes aren't listed, and neither is the owner's own Campaign Status change, because none
+of them carries a mark of the owner's route. Only the server writes those marks. Listing grants
+nothing: the owner still decides the exact occurrence, under the same approval rules. The Decision
+Model Checks and Scope Proposal sections keep their own displays.
 
 When the owner's first message asked the campaign to choose issues (a scope grant with a selection,
 #4102), the Orchestrator proposes the issues it chose with `lineage: {kind: "selection"}` and its
 ranking as the `explanation` (#4103); under such a grant a proposal without lineage takes the same
-route, and selection lineage under a grant without a selection is refused as `selection_not_granted`.
+route, and selection lineage under a grant without a selection becomes an owner Scope Approval
+with `selection_not_granted`.
 A selection proposal adds issues only (`selection_additions_only`). Deterministic floors then run in
 order, and the first that fails refuses the proposal with its code and no Decision Model call:
 
@@ -197,8 +582,25 @@ order, and the first that fails refuses the proposal with its code and no Decisi
    one of the issue's labels. Such a rule never matches a tool request.
 
 A runner older than v291 reports no facts, so floors 2 and 6 stay unverified and the proposal goes to
-the owner. A proposal that passes every floor is the owner's one typed approval, with
-`grantReview.cause: "selection"`, until the Decision Model reviews selection proposals.
+the owner as `grantReview.cause: "selection_unverified"`, with no model call.
+
+A proposal that passes every floor gets the Decision Model's `scope_review` (`docs/decision-model.md`):
+
+- `admit`: the server sets `issueAdmission` from the evidence (the review occurrence, the digest of
+  the grant it read, the verdict) and records it as `selectionReview`. The scope change is then
+  Orchestrator-owned and applied like an epic-lineage admission, with no human step.
+- `refuse`: the proposal is refused as `selection_refused`, with the model's reason in
+  `errorDetails.reason`. No request is created; the Orchestrator may propose another issue.
+- `uncertain`, retries exhausted or a non-transient failure: exactly one owner-owned scope approval
+  with `grantReview.cause` `selection_uncertain` or `selection_failed`, its `reviewOccurrenceId`, and
+  the uncertain reason or failure class beside the proposal, its rationale and the grant. Approving it
+  revokes every outstanding decision, as every human Full Control scope approval does (#3915).
+
+One review covers the campaign, the scope revision, the grant and the set of additions. Repeating the
+same additions at the same revision, whatever the rationale says, returns the same verdict, the same
+owner request or the same scope change: a retry can neither admit twice nor ask the owner twice, and
+a reworded rationale is not a second review. Campaign Status lists every reviewed proposal in
+Decision Model Checks with its issues, rationale, verdict, reason and outcome.
 
 The server binds lineage evidence, rationale, expected revision, affected assignments, related
 active children and affected grants into the snapshot. Root standing authorization resolves and
@@ -287,6 +689,32 @@ launch identity after forge inspection. A change refuses the close before record
 `campaign_issue_closure_authority_changed` identifies the request, occurrence and revisions without
 logging the issue payload or authority contents.
 
+### Closure Proof Across Repositories (#4120)
+
+When an issue's work items cite pull requests in the campaign's other boundary repositories, those
+pull requests count toward its delivery proof. Each must be freshly observed MERGED, at an approved
+head when its merge was gated, exactly as the issue's own repository's must:
+
+- Merge gates a delivered attempt passed in any boundary repository are candidates, as the issue's
+  own repository's are.
+- The issue repository's runner verifies only that repository's pull requests (`delivery`), as
+  before; it can't read another repository.
+- Another boundary repository's pull requests are read again at request time, uncached, through a
+  Location of their own repository (#4119). Only what that read returns MERGED into the
+  repository's default branch, as a recorded delivery requires (#4070), is bound into the snapshot
+  as `crossRepositoryDelivery`, with its head and merge commit, and into the evidence digest. A
+  read that names no default branch (a GitLab merge request, an older runner) proves nothing, and a
+  read that can't answer for every one binds none of them. The issue repository's runner also
+  checks that each merge commit is contained in the default branch; that check isn't available
+  for another repository here.
+- Before execution they are read again the same way. Each must still read MERGED at the bound head
+  and merge commit, or nothing is executed.
+- A pull request in a repository outside the boundary still produces
+  `pull_request_outside_repository`. A gap about another boundary repository's pull requests
+  names that `repository`, and its summary and compact line write them as `owner/repo#n`.
+
+Every other proof condition is unchanged. Single-repository campaigns read and bind exactly as before.
+
 ### Closure Proof Gaps
 
 A completed or not-planned closure of an in-scope issue that the boundary delegates, but that fails
@@ -362,6 +790,45 @@ sent while another is still being checked waits and inherits its outcome, and a 
 outranks a refusal recorded for the same subject meanwhile. Each check's verdict, reason and failure class appear
 in Campaign Status under Decision Model Checks, beside the follow-up or closure it affected.
 
+### Closure Request Refusals
+
+`request_github_issue_closure` tells three refusals apart before it does anything else (#3382). Each
+returns a fixed sentence and an `errorDetails.code`, which the HTTP body carries as `code`:
+
+- `issue_closure_request_invalid` (400): the request is malformed. `fields` lists each missing or
+  invalid field (`requestId`, `issue`, `reason`, `explanation`, `evidence`, `comment`), whatever the
+  scope holds.
+- `campaign_issue_scope_missing` (403): the request is well formed, but the campaign has no
+  authorized issue scope, absent or empty.
+- `campaign_issue_outside_scope` (403): the request is well formed, but the issue is not in a
+  non-empty scope. The sentence names the scope's revision, repository and up to 20 of its issues.
+
+Both scope refusals carry `issue`, `scopeRevision` and `recovery`, and name the supported route to
+add the issue:
+
+- `owner_scope_review_or_proposal`: a campaign owner adds it in Campaign Status under Issue Scope,
+  or the root proposes it with `request_campaign_issue_scope_change` for a person to approve. This
+  is also the route under Full Control issue authority when the first message's scope grant failed
+  or was uncertain, where an addition without lineage is the owner's one typed approval.
+- `owner_scope_review_or_lineage`: under Full Control issue authority without a scope grant review,
+  the root's proposal is admitted only with the lineage that authority accepts (see
+  [Bounded Full Control Issue Authority](#bounded-full-control-issue-authority)); otherwise only a
+  campaign owner can add the issue.
+- `owner_scope_review_or_selection`: under Full Control issue authority with a scope grant that asked
+  the campaign to choose issues, the root may also propose the issue as one of those choices. The
+  grant's count and floors and the Decision Model's `scope_review` then admit it, refuse it or leave
+  it to the owner, as described under the selection route above.
+- `unavailable`: no one can change the scope right now, and the sentence says why: a participating
+  runner below the scope-change protocol, or an active Orchestrator participant outside every Location
+  of the campaign's repositories. The root leaves the issue open and reports it.
+
+A scope refusal reads saved state only. It does not synchronize scope, inspect the issue, create a
+decision, post a comment or close anything, and it logs `campaign_issue_closure_refused` with the
+session, request, issue, reason, scope revision and recovery. Neither refusal grants or widens any
+authority. A scope change and the closure stay separate decisions. Once the issue is in scope, the
+closure is requested again and takes the existing closure decision under the owner current policy
+assigns, with every inspection, revision, synchronization, conflict and replay check unchanged.
+
 ### Closure Refusal Reasons
 
 A `refused` closure result always carries `refusal` (#4059): a `reason`, the related PRs it names,
@@ -403,3 +870,15 @@ The `campaign_issue_scope_refused` log includes the same reason alongside its
 operation (`entryPoint`), request and session correlation fields. No placement values
 or command output are added. These diagnostics do not modify saved placement,
 runner isolation, scope authority or closure approval requirements.
+
+### Owner Review of Lineage Requiring a Person (#4333)
+
+Lineage that needs a person becomes the same single, person-owned Scope Approval: epic_not_authorized,
+follow_ups_not_authorized, publication_unapproved, publication_authority_changed,
+publication_approved_under_earlier_boundary, publication_approver_not_owner and selection_not_granted.
+The server derives the cause, explains it in plain words and states any Maximum Issues increase.
+Keep published follow-up lineage: only server-verified consumed payloads settle their reserved slots
+on approval, so Maximum Issues counts the issue once. Denial changes nothing. Fixable errors
+(for example follow_up_not_single, publication_not_consumed, publication_already_admitted,
+payload_mismatch and epic_members_unverified) remain refusals; correct them and retry.
+Never supply an owner-review cause or a settled publication yourself.

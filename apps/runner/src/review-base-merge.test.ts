@@ -149,6 +149,57 @@ test("a clean merge carrying any other change is an ordinary commit", async (t) 
   assert.equal(await classify(dir, reference, head, base), null);
 });
 
+test("a resolution is never equivalent, whichever side it keeps", async (t) => {
+  for (const [side, kept] of [["the pull request's", "b-pr"], ["the base's, dropping the pull request's change,", "b-main"]] as const) {
+    const { dir, git, write, commit, reference } = await repository(t);
+    write("f.txt", LINES.map((line) => line === "b" ? "b-main" : line));
+    const base = await commit("base edits the same line");
+    await git("checkout", "-q", "pr");
+    await assert.rejects(git("merge", "-q", "--no-edit", "main"));
+    write("f.txt", LINES.map((line) => line === "b" ? kept : line));
+    const head = await commit("merge main, keeping one side");
+    assert.equal(await classify(dir, reference, head, base), "resolution", `keeping ${side} line`);
+  }
+});
+
+test("a merge hiding a change in a file with no conflict is an ordinary commit, even beside a real conflict", async (t) => {
+  // A file of the pull request's own, and one only the base changed, which no merge round would scope.
+  for (const [where, path] of [["the pull request's own file", "own.txt"], ["a file only the base changed", "g.txt"]] as const) {
+    const { dir, git, write, commit } = await repository(t);
+    await git("checkout", "-q", "pr");
+    write("own.txt", ["own"]);
+    const reviewed = await commit("pull request adds its own file");
+    await git("checkout", "-q", "main");
+    write("g.txt", ["y"]);
+    write("f.txt", LINES.map((line) => line === "b" ? "b-main" : line));
+    const base = await commit("base edits the same line and another file");
+    await git("checkout", "-q", "pr");
+    await assert.rejects(git("merge", "-q", "--no-edit", "main"));
+    write("f.txt", LINES.map((line) => line === "b" ? "b-resolved" : line));
+    write(path, ["hidden"]);
+    const head = await commit("merge main, resolving b and editing another file");
+    assert.equal(await classify(dir, reviewed, head, base), null, where);
+  }
+});
+
+test("a second merge since the reviewed head, or a merged parent past the reported base, is an ordinary commit", async (t) => {
+  const { dir, git, write, commit, reference } = await repository(t);
+  const before = await git("rev-parse", "main");
+  write("g.txt", ["y"]);
+  await commit("base moves");
+  await git("checkout", "-q", "pr");
+  await git("merge", "-q", "--no-edit", "main");
+  const once = await git("rev-parse", "HEAD");
+  assert.equal(await classify(dir, reference, once, before), null, "the merged parent is not yet on the reported base");
+  await git("checkout", "-q", "main");
+  write("g.txt", ["z"]);
+  const base = await commit("base moves again");
+  await git("checkout", "-q", "pr");
+  await git("merge", "-q", "--no-edit", "main");
+  assert.equal(await classify(dir, reference, await git("rev-parse", "HEAD"), base), null, "two merges since the reviewed head");
+  assert.equal(await classify(dir, once, await git("rev-parse", "HEAD"), base), "equivalent", "each merge alone is provable from its own reviewed head");
+});
+
 test("octopus merges, merges of other branches, merges in the other direction and commits after the merge are ordinary", async (t) => {
   const { dir, git, write, commit, reference } = await repository(t);
   write("g.txt", ["y"]);

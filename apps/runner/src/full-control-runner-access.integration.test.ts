@@ -13,6 +13,7 @@ import {
   type CampaignLaunchPreflight,
   type ControlPlaneToRunner,
   type FullControlLaunchRequest,
+  type ProviderAccountDefinition,
   type ResourceScope,
   type RunnerMetadata,
 } from "@wollipog/protocol";
@@ -76,9 +77,10 @@ async function waitFor(condition: () => boolean, what: string, timeoutMs = 10_00
   }
 }
 
-function runnerMeta(runnerId: string, temp: string): RunnerMetadata {
+function runnerMeta(runnerId: string, temp: string, providerAccounts?: ProviderAccountDefinition[]): RunnerMetadata {
   return {
     runnerId, hostname: runnerId, os: "linux", version: "fixture",
+    ...(providerAccounts ? { providerAccounts } : {}),
     workspaces: [{ id: WORKSPACE, name: "Repository", path: temp },
       ...(runnerId === RUNNER ? [{ id: PEER_WORKSPACE, name: "Colleague Private", path: join(temp, PEER_WORKSPACE) }] : [])],
     agents: [{ id: AGENT, name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code",
@@ -92,7 +94,7 @@ function runnerMeta(runnerId: string, temp: string): RunnerMetadata {
 
 /** A real control plane with one online synthetic organization runner, and the identities and
  * Machines both scenarios need. */
-async function stack(t: TestContext) {
+async function stack(t: TestContext, providerAccounts?: ProviderAccountDefinition[]) {
   const port = await reservePort();
   const base = `http://127.0.0.1:${port}`;
   const temp = mkdtempSync(join(tmpdir(), "wollipog-full-control-runner-access-"));
@@ -202,7 +204,7 @@ async function stack(t: TestContext) {
     socket.addEventListener("error", () => reject(new Error("runner socket failed")), { once: true });
   });
   socket.send(JSON.stringify({ type: "register", token: RUNNER_TOKEN, protocolVersion: PROTOCOL_VERSION,
-    runner: runnerMeta(RUNNER, temp), sessionSnapshots: [] }));
+    runner: runnerMeta(RUNNER, temp, providerAccounts), sessionSnapshots: [] }));
   await ready;
 
   const post = async (authorization: Record<string, string>, path: string, body: unknown) => {
@@ -227,6 +229,19 @@ async function stack(t: TestContext) {
     /** POST with one session's own credential, exactly as the CLI and MCP tools send it. */
     agent: (sessionId: string, path: string, body: unknown) => post({ authorization: `Bearer ${credentials.get(sessionId)}`,
       [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: sessionId }, path, body),
+    /** GET the raw route, with one session's own credential or as the administrator. */
+    get: async (path: string, sessionId?: string) => {
+      const response = await fetch(`${base}${path}`, { headers: sessionId
+        ? { authorization: `Bearer ${credentials.get(sessionId)}`, [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: sessionId }
+        : { authorization: `Bearer ${ADMIN_TOKEN}` } });
+      return { status: response.status, text: await response.text() };
+    },
+    savePriorityOrder: async (priorityAccountIds: string[]) => {
+      const response = await fetch(`${base}/api/runners/${RUNNER}/provider-account-policies/claude`, { method: "PUT",
+        headers: { authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ mode: "priority", priorityAccountIds, expectedRevision: 0 }) });
+      assert.equal(response.status, 200, await response.clone().text());
+    },
     tool,
     visible: async (sessionId: string) => {
       const listed = await tool(sessionId, "list_runners");
@@ -266,6 +281,11 @@ test("a Full Control root and its descendants reach the organization runner thei
   assert.deepEqual(await visibleRunners(rootId), ["member-runner", "my-team-runner", RUNNER].sort());
   const capabilities = await tool(rootId, "get_agent_capabilities", { runnerId: RUNNER, agentId: AGENT });
   assert.equal(capabilities.isError, false, capabilities.text);
+  // An agent's credential reaches the account listing over the real route, in references only (#4353).
+  const accounts = await tool(rootId, "get_provider_account_selection", { runnerId: RUNNER, agentId: AGENT });
+  assert.equal(accounts.isError, false, accounts.text);
+  assert.ok(Array.isArray(accounts.json!.accounts), accounts.text);
+  assert.match((await tool(rootId, "get_provider_account_selection", { runnerId: "colleague-runner", agentId: AGENT })).text, /runner not found/u);
   // The campaign's fixed child harness and model resolve on that runner too (only online Machines count).
   const campaign = await tool(rootId, "get_campaign");
   assert.equal(campaign.isError, false, campaign.text);
@@ -312,10 +332,15 @@ test("a Full Control root and its descendants reach the organization runner thei
   assert.match(refusedGrandchild.text, /HTTP 404: runner not found/u);
   const lineage = ControlPlaneDb.attach(s.databasePath);
   try {
+    // #3676: the allowance every member's spend and review is admitted against is the root's, which
+    // the administrator authorized; reaching the organization runner never moves a charge elsewhere.
+    const control = lineage.getSession(rootId)!.orchestratorPolicy?.control;
+    assert.equal(control?.mode === "full_control" ? control.boundary.authorizedByUserId : null, admin);
     for (const id of [rootId, childId, grandchildId]) {
       assert.equal(lineage.getSession(id)!.projectId, projectId, `${id} is in the organization Project`);
       assert.deepEqual(lineage.sessionScope(id), { organizationId: org, owner: { kind: "user", userId: admin } },
         `${id} keeps the Human's ownership`);
+      assert.equal(lineage.campaignBudgets.governingRoot(id), rootId, `${id} is charged to the root's allowance`);
     }
   } finally { lineage.close(); }
 
@@ -336,6 +361,85 @@ test("a Full Control root and its descendants reach the organization runner thei
   } finally { scopeCheck.close(); }
   assert.deepEqual(await visibleRunners(customId),
     ["colleague-runner", "member-runner", "my-team-runner", RUNNER, "their-team-runner"].sort());
+});
+
+test("an agent's credential reads account selection in references only, over the raw routes (#4353)", {
+  timeout: 120_000,
+}, async (t) => {
+  const s = await stack(t, [
+    { id: "first-person-example-com-1234", label: "first.person@example.com", provider: "claude", authStatus: "unauthenticated", billing: "subscription" },
+    { id: "second-person-example-com-5678", label: "second.person@example.com", provider: "claude", authStatus: "unauthenticated", billing: "subscription" },
+  ]);
+  const launch: FullControlLaunchRequest = { runnerId: RUNNER, workspaceId: WORKSPACE, issueNumbers: [12],
+    task: "Deliver issue 12", overrides: { session: { agentId: AGENT, config: { model: MODEL, permissionMode: "orchestrator" },
+      orchestrator: { behavior: { childModel: MODEL,
+        childHarness: { agentId: AGENT, driver: "claude-code", context: { kind: "native" } } } } } } };
+  const checked = await s.human("/api/full-control-campaigns/preflight", launch);
+  const preflight = checked.json.preflight as CampaignLaunchPreflight;
+  const admitted = await s.human("/api/full-control-campaigns", { ...launch, requestId: "launch-4353", preflightDigest: preflight.digest });
+  assert.equal(admitted.status, 201, JSON.stringify(admitted.json));
+  const rootId = admitted.json.id as string;
+  await s.running(rootId, "the root starts");
+  await s.savePriorityOrder(["first-person-example-com-1234", "second-person-example-com-5678"]);
+
+  const assertNamesNoAccount = (text: string) => {
+    for (const personal of ["first-person", "second-person", "first.person", "second.person", "example.com"]) {
+      assert.ok(!text.includes(personal), text);
+    }
+  };
+  // The inventory itself narrows for that credential, on the raw route and not only in a tool's output.
+  const inventoryAsAgent = await s.get("/api/runners", rootId);
+  assert.equal(inventoryAsAgent.status, 200, inventoryAsAgent.text);
+  assertNamesNoAccount(inventoryAsAgent.text);
+  type Listed = { runners: Array<{ runnerId: string; providerAccounts?: unknown; providerAccountDefaults?: unknown; providerLogins?: unknown;
+    agents: Array<{ id: string; available?: boolean; defaultProviderAccountId?: unknown; providerAccountReadiness?: unknown; capabilities?: unknown }> }> };
+  const narrowed = (JSON.parse(inventoryAsAgent.text) as Listed).runners.find((runner) => runner.runnerId === RUNNER)!;
+  assert.equal(narrowed.providerAccounts, undefined);
+  assert.equal(narrowed.providerAccountDefaults, undefined);
+  assert.equal(narrowed.providerLogins, undefined);
+  const narrowedAgent = narrowed.agents.find((agent) => agent.id === AGENT)!;
+  assert.equal(narrowedAgent.defaultProviderAccountId, undefined);
+  assert.equal(narrowedAgent.providerAccountReadiness, undefined);
+  assert.ok(narrowedAgent.capabilities, "what the agent tools read stays");
+  const inventoryAsPerson = await s.get("/api/runners");
+  const full = (JSON.parse(inventoryAsPerson.text) as Listed).runners.find((runner) => runner.runnerId === RUNNER)!;
+  assert.deepEqual((full.providerAccounts as Array<{ id: string }>).map((account) => account.id),
+    ["first-person-example-com-1234", "second-person-example-com-5678"], "a person reads the route as before");
+  assert.ok(full.providerAccountDefaults, "including the saved policy");
+  // Existing tools keep working from that narrowed reply, and get_campaign's Child Model check doesn't read it.
+  assert.equal((await s.tool(rootId, "list_runners")).isError, false);
+  const capabilities = await s.tool(rootId, "get_agent_capabilities", { runnerId: RUNNER, agentId: AGENT });
+  assert.equal(capabilities.isError, false, capabilities.text);
+  assertNamesNoAccount(capabilities.text);
+
+  const path = `/api/runners/${RUNNER}/provider-account-selection?agentId=${AGENT}`;
+  const asAgent = await s.get(path, rootId);
+  assert.equal(asAgent.status, 200, asAgent.text);
+  assertNamesNoAccount(asAgent.text);
+  const preview = JSON.parse(asAgent.text) as { candidates?: unknown; accountId?: unknown; refusal?: string; choices?: Array<{ accountRef: string }> };
+  assert.equal(preview.candidates, undefined);
+  assert.equal(preview.accountId, undefined);
+  assert.equal(preview.refusal, "no_eligible_account", "the reasons still reach it");
+  assert.equal(preview.choices?.length, 2, "and so does what it could name");
+  assert.ok(preview.choices?.every((choice) => /^acct:[0-9a-f]{16}$/u.test(choice.accountRef)));
+
+  // A launch's refusal says what to do, with the same narrowing.
+  const refused = await s.agent(rootId, "/api/sessions", { runnerId: RUNNER, workspaceId: WORKSPACE, agentId: AGENT, prompt: "Never launched", useWorktree: false });
+  assert.equal(refused.status, 409, JSON.stringify(refused.json));
+  assert.equal(refused.json.code, "PROVIDER_ACCOUNT_CHOICE_REQUIRED");
+  assertNamesNoAccount(JSON.stringify(refused.json));
+  const selection = refused.json.providerAccountSelection as { candidates?: unknown; refusal?: string; actions?: string[] };
+  assert.equal(selection.candidates, undefined);
+  assert.equal(selection.refusal, "no_eligible_account");
+  assert.ok(selection.actions?.includes("choose_account"));
+
+  // A person who can read the Machine's accounts keeps the whole answer.
+  const asPerson = await s.get(path);
+  assert.equal(asPerson.status, 200, asPerson.text);
+  assert.deepEqual((JSON.parse(asPerson.text) as { candidates: Array<{ accountId: string }> }).candidates.map((candidate) => candidate.accountId),
+    ["first-person-example-com-1234", "second-person-example-com-5678"]);
+  const personRefused = await s.human("/api/sessions", { runnerId: RUNNER, workspaceId: WORKSPACE, agentId: AGENT, useWorktree: false });
+  assert.equal((personRefused.json.providerAccountSelection as { candidates: unknown[] }).candidates.length, 2);
 });
 
 test("a user-delegated agent cannot launch into a workspace or host path its Human cannot (#2940 review CR-1.1)", {

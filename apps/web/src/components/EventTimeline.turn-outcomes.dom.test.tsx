@@ -98,6 +98,38 @@ test("the rejection hold is its own Automatic Turns Held notice, without Retry T
   });
 });
 
+test("the background-results hold is its own Background Results Held notice, without Retry Turn (#3542)", async () => {
+  const providerError = "bwrap: Can't find source path /tmp/worktrees/old: No such file or directory";
+  const blocker = "The automatic turn that returns the result of 1 finished background job failed to start 3 times " +
+    `in a row, before the provider accepted it: ${providerError}. Wollipog stopped retrying it and kept the result. ` +
+    "Restart the session to deliver it in a fresh provider process; a message the provider accepts also retries it.";
+  const builder = new TimelineBuilder();
+  for (const ev of [
+    event(1, at(25), { kind: "user_message", text: "Watch CI and review." }),
+    event(2, at(25, 4), { kind: "agent_message", text: "Watching.", final: true }),
+    event(3, at(40), { kind: "stderr", text: "Runner continued after managed background work completed." }),
+    event(4, at(40, 1), { kind: "error", message: blocker }),
+  ] as SessionEvent[]) builder.push(ev);
+  const retries: string[] = [];
+  const retry: TurnRetryControl = { onRetry: (prompt) => retries.push(prompt.text) };
+  await withView(<EventTimeline items={builder.snapshot()} turnRetry={retry} />, async (view) => {
+    assert.equal(notices(view.container).length, 0, "no person's turn failed");
+    const held = [...view.container.querySelectorAll(".notice")].filter((notice) =>
+      notice.querySelector(".notice-title")?.textContent === "Background Results Held");
+    assert.equal(held.length, 1);
+    const notice = held[0]!;
+    assert.match(notice.textContent ?? "",
+      /The automatic turn that returns finished background results kept failing to start, so Wollipog stopped retrying it\. The results are kept\. Restart the session to deliver them, or send a message: once the provider accepts it, they follow\./u);
+    assert.equal(button(view.container, "Retry Turn"), undefined, "Retry Turn would resend an unrelated prompt");
+    assert.equal((notice.textContent ?? "").includes(providerError), false, "the provider's words wait behind Show Details");
+    const details = [...notice.querySelectorAll("button")].find((candidate) => candidate.textContent === "Show Details");
+    assert.ok(details, "Show Details reveals the runner's account");
+    await act(async () => details.click());
+    assert.equal((notice.textContent ?? "").includes(blocker), true);
+    assert.deepEqual(retries, []);
+  });
+});
+
 test("a non-fatal driver problem is a Problem During Turn notice, without Retry Turn (#3806)", async () => {
   const problem = "Codex asked a question Wollipog can't show as an answer card. " +
     "Wollipog asked the agent to repeat it in a normal message.";
@@ -227,8 +259,8 @@ test("a stopped turn has no Interrupted row; its footer reads Stopped at its tim
     const footer = view.container.querySelector(".tl-turn-footer")!;
     const stopped = footer.querySelector(".tl-turn-stopped")!;
     assert.ok(stopped, "the stop is a footer fact");
-    assert.match(stopped.textContent?.replace(stopped.querySelector(".tl-tooltip")?.textContent ?? "", "") ?? "",
-      /^Stopped at \d{1,2}:\d{2} [AP]M$/);
+    assert.equal(stopped.textContent?.replace(stopped.querySelector(".tl-tooltip")?.textContent ?? "", "") ?? "",
+      `Stopped at ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date(at(25)))}`);
     assert.equal(stopped.querySelector("time")?.getAttribute("dateTime"), new Date(at(25)).toISOString());
     const icon = stopped.querySelector("svg")!;
     assert.equal(icon.getAttribute("width"), "14");

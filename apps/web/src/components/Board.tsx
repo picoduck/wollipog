@@ -1,6 +1,6 @@
 import { BoardIcon, ChevronDownIcon, ComputerIcon, MoreHorizontalIcon } from "./Icons.js";
 import { State, useSnapshotState } from "./State.js";
-import { type DragEvent, type KeyboardEvent, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type DragEvent, type KeyboardEvent, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import {
   BOARD_COLUMNS,
@@ -26,6 +26,7 @@ import { useExperiments } from "../use-experiments.js";
 import { activeBoardFilterCount, filterBoardSessions } from "./BoardFilters.js";
 import { showsActivityStrip } from "../activity.js";
 import { boardCardDecisions, boardCardRequestCode, boardCardSignInItems, type BoardCardSignInItem } from "../board-card.js";
+import { sessionBoardColumn } from "../session-follow-up.js";
 import { sessionRowStatus } from "../session-row-status.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { ActivityStrip } from "./ActivityStrip.js";
@@ -121,15 +122,18 @@ export function Board({ sessions: scoped, reminders = new Map(), pinnedSessionId
   const filtered = activeBoardFilterCount(filters) > 0;
   const visible = useMemo(() => filterBoardSessions(scoped, filters), [scoped, filters]);
 
+  // An at-rest Full Control root sits where its campaign's state puts it (#2938): see sessionBoardColumn.
+  const columnOf = useCallback((session: SessionView) =>
+    sessionBoardColumn(session, { reminderFired: reminders.get(session.id)?.state === "fired" }), [reminders]);
   const byColumn = useMemo(() => {
     const cols = new Map<BoardColumn, SessionView[]>();
     for (const c of BOARD_COLUMNS) cols.set(c.id, []);
-    for (const s of visible) cols.get(s.column)?.push(s);
+    for (const s of visible) cols.get(columnOf(s))?.push(s);
     // `scoped` already carries the canonical, pin- and family-aware Inbox order. Preserve it
     // within each column so pinning from a card has the same immediate ordering effect as pinning
     // from a row; sorting again by `updatedAt` would erase that structural choice.
     return cols;
-  }, [visible]);
+  }, [visible, columnOf]);
 
   // A phone shows one column (#2216). The Board opens on the first column with a card and then keeps
   // its column, the opening one or the one chosen, while it stays open: a live update that empties
@@ -240,7 +244,10 @@ export function Board({ sessions: scoped, reminders = new Map(), pinnedSessionId
       setDragging(false);
       const id = e.dataTransfer.getData("text/wollipog-session");
       if (!id) return;
-      if (allSessions.get(id)?.column === colId) return;
+      // Compared with the column the card is shown in, so dropping a campaign-placed card where it
+      // already sits never files it there for good.
+      const dropped = allSessions.get(id);
+      if (dropped && columnOf(dropped) === colId) return;
       void api.setColumn(id, colId).catch(() => {
         /* board re-syncs from the next session_upsert; a failed move just stays put */
       });

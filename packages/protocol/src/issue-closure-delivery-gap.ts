@@ -1,3 +1,5 @@
+import { campaignRepositoryLocation } from "./campaign-work-ledger.js";
+
 /** Fixed diagnostics only: never retain forge output or subprocess errors. */
 export const DELIVERY_VERIFICATION_CHECKS = ["default_branch_read", "pull_request_read", "merged_state", "head", "base", "merge_commit", "comparison_read", "containment", "runner_unavailable", "runner_response", "issue_changed", "delivery_missing"] as const;
 export interface DeliveryVerificationFailure {
@@ -133,6 +135,9 @@ export interface IssueClosureDeliveryGap {
   workItemId?: string;
   /** The pull or merge requests the gap names, ascending; omitted when it names none. */
   pullRequests?: number[];
+  /** #4120: the repository of `pullRequests` when it is another campaign repository than the
+   * issue's; omitted for the issue's own repository. */
+  repository?: string;
   /** The epic's member issues the gap names, ascending (#4060); omitted when it names none. */
   members?: number[];
   /** Derived from `code`: what would let a new request become Orchestrator-owned. */
@@ -209,7 +214,7 @@ function gapText(code: IssueClosureDeliveryGapCode, item: string, prs: string, m
     case "no_merged_delivery_pull_request": return `No merged delivery pull request is recorded${of}`;
     case "unmerged_pull_request": return `Pull requests${of} have not merged: ${prs || "unnamed"}`;
     case "stale_pull_request": return `The forge observation of pull requests${of} is not fresh: ${prs || "unnamed"}`;
-    case "pull_request_outside_repository": return `Work item ${item || "unnamed"} names pull requests outside the campaign's repository`;
+    case "pull_request_outside_repository": return `Work item ${item || "unnamed"} names pull requests outside the campaign's repositories`;
     case "delivery_not_verified_at_exact_head": return `Pull requests${of} merged at a head no consumed merge approval names: ${prs || "unnamed"}`;
     case "delivery_merge_unconfirmed": return `The runner did not confirm that pull requests${of} merged at the verified head into the default branch: ` +
       `${prs || "unnamed"}. If one did not, a person decides`;
@@ -236,15 +241,19 @@ function pullRequestNumbers(value: unknown): number[] | undefined {
 /** The one canonical gap for a code; its action and summary are always derived, never accepted. */
 export function issueClosureDeliveryGap(
   code: IssueClosureDeliveryGapCode,
-  details: { workItemId?: string; pullRequests?: readonly number[]; members?: readonly number[]; verificationFailure?: DeliveryVerificationFailure } = {},
+  details: { workItemId?: string; pullRequests?: readonly number[]; members?: readonly number[]; verificationFailure?: DeliveryVerificationFailure; repository?: string } = {},
 ): IssueClosureDeliveryGap {
   const pullRequests = pullRequestNumbers(details.pullRequests);
   const members = pullRequestNumbers(details.members);
   const workItemId = typeof details.workItemId === "string" && details.workItemId ? details.workItemId.slice(0, 256) : undefined;
+  // #4120: only a valid repository name, and only beside the pull requests it qualifies.
+  const repository = pullRequests && campaignRepositoryLocation(details.repository) ? details.repository!.toLowerCase() : undefined;
   const action = GAP_ACTION[code];
   const failure = code === "delivery_merge_unconfirmed" ? normalizeDeliveryVerificationFailure(details.verificationFailure) : null;
-  return { code, ...(failure ? { verificationFailure: failure } : {}), ...(workItemId ? { workItemId } : {}), ...(pullRequests ? { pullRequests } : {}), ...(members ? { members } : {}), action,
-    summary: `${failure ? `Delivery verification failed at ${failure.check}${failure.pullRequest ? ` for #${failure.pullRequest}` : ""}. ` : ""}${gapText(code, workItemId ?? "", named(pullRequests), named(members))}. ${ACTION_TEXT[action]}` };
+  const prs = repository ? pullRequests!.map((number) => `${repository}#${number}`).join(", ") : named(pullRequests);
+  return { code, ...(failure ? { verificationFailure: failure } : {}), ...(workItemId ? { workItemId } : {}), ...(pullRequests ? { pullRequests } : {}),
+    ...(repository ? { repository } : {}), ...(members ? { members } : {}), action,
+    summary: `${failure ? `Delivery verification failed at ${failure.check}${failure.pullRequest ? ` for #${failure.pullRequest}` : ""}. ` : ""}${gapText(code, workItemId ?? "", prs, named(members))}. ${ACTION_TEXT[action]}` };
 }
 
 /** Stored gaps, rebuilt canonically; null when the value is not a bounded gap list. An unknown
@@ -262,6 +271,7 @@ export function normalizeIssueClosureDeliveryGaps(value: unknown): IssueClosureD
       ...(record.verificationFailure === undefined ? {} : { verificationFailure: normalizeDeliveryVerificationFailure(record.verificationFailure) ?? undefined }),
       ...(record.workItemId === undefined ? {} : { workItemId: record.workItemId as string }),
       ...(record.pullRequests === undefined ? {} : { pullRequests: record.pullRequests as number[] }),
+      ...(typeof record.repository === "string" ? { repository: record.repository } : {}),
       ...(record.members === undefined ? {} : { members: record.members as number[] }),
     }));
   }
@@ -278,7 +288,7 @@ export const ISSUE_CLOSURE_DELIVERY_FAILURE_MAX = 512;
 export function issueClosureDeliveryFailure(gaps: readonly IssueClosureDeliveryGap[]): string {
   const parts = gaps.map((gap) => {
     const prs = gap.pullRequests ?? gap.members ?? [];
-    const listed = prs.slice(0, 10).map((number) => `#${number}`).join(",") + (prs.length > 10 ? `,+${prs.length - 10}` : "");
+    const listed = prs.slice(0, 10).map((number) => `${gap.repository ?? ""}#${number}`).join(",") + (prs.length > 10 ? `,+${prs.length - 10}` : "");
     return [gap.code, ...(gap.workItemId ? [gap.workItemId] : []), ...(listed ? [listed] : [])].join(":");
   });
   let line = "";
@@ -309,7 +319,7 @@ export function issueClosureProofGapNotice(gaps: readonly IssueClosureDeliveryGa
     gaps: gaps.map((gap) => ({ ...gap })),
     summary: "This issue is in the campaign's scope, but its closure failed delegated proof, so a person decides this request. " +
       (fixable
-        ? "Fix every gap below and request the closure again: a request that passes the proof is Orchestrator-owned and supersedes this one."
+        ? "Fix every gap below and request the closure again: a request that passes the proof is Orchestrator-owned and supersedes this one while it is pending. An approved closure is preserved; execute it with its occurrenceId and resourceDigest instead."
         : "At least one gap below is one only a person can resolve; leave this request for the person rather than requesting it again."),
   };
 }

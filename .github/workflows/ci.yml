@@ -150,6 +150,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.target_sha }}
+          # The protocol version ledger check compares HEAD with its first parent.
+          fetch-depth: 2
 
       - name: Verify Rolling Checkout
         if: inputs.target_sha != ''
@@ -246,6 +248,13 @@ jobs:
       - name: Verify Recommended Node Engine Boundary
         timeout-minutes: 1
         run: node scripts/check-node-engines.mjs "$RUNNER_TEMP/engine-pnpm-10/node_modules/pnpm/bin/pnpm.cjs" "$RUNNER_TEMP/engine-pnpm-current/node_modules/pnpm/bin/pnpm.cjs"
+
+      # #975: a protocol version this commit adds must be greater than the one it lands on. A pull
+      # request's merge commit, a merge-group commit and a rolling main commit each have that commit
+      # as their first parent, which the depth-2 checkout above provides. Commits without a claim pass.
+      - name: Check Protocol Version Ledger
+        timeout-minutes: 1
+        run: node scripts/protocol-version-ledger.mjs --base HEAD^1
 
       - name: Typecheck
         timeout-minutes: 6
@@ -531,31 +540,25 @@ jobs:
     needs: [suite_plan, merge_group_gate]
     name: Browser End-to-End Tests
     runs-on: ubuntu-24.04
-    # A recovered install timeout plus passing tests exhausted the old budget (#2700).
-    # Remeasured 2026-10-18: 25 jobs across five recent natural main/merge-group runs,
-    # Runs: 39135469681, 39138757428, 39141574932, 39142428503, 39142667230.
-    # Per-shard non-install maxima (1–5): 1731 / 1731 / 1585 / 1910 / 2016s.
-    # Maximum non-install remainder: 2016s (previous envelope: 1448s),
-    # including other setup, suite, shard-1 production checks and cleanup; queue wait excluded.
-    # Cache-hit OR cache-miss path: two six-minute attempts, not both exclusive paths.
-    # #3628 natural sample through 2026-11-02: job 125302223524 measured 2453s
-    # non-install work. Latest complete group 41465192009 remeasures all five shards.
-    # 720s attempts + 2460s rounded remainder + 480s cache/verify + 180s enforcement
-    # + 480s failure diagnostics + 180s reserve = 4500s, rounded to 75m (4500s).
-    # Residual reserve is 180s. Same five jobs; this changes only the finite cap.
-    # scripts/workflow-browser-budget.test.mjs derives this from bounded phases and evidence.
-    # docs/ci-browser-shards-2026-11-02.md records natural-run comparison and uncertainty.
-    timeout-minutes: 75
+    # #3628: runs 42054331358 and 42063471740 each measured all ten coherent browser jobs.
+    # Job 127371354382: maximum non-install remainder 1147s; round upward to 1150s.
+    # Includes setup, development, shard-1 production and cleanup; queue wait excluded.
+    # Cache-hit OR cache-miss: two six-minute install attempts, not both exclusive paths.
+    # 720s attempts + 1150s remainder + 480s cache/verify + 180s enforcement
+    # + 480s failure diagnostics + 180s reserve = 3190s; 54m cap = 3240s.
+    # Residual reserve: 230s. This is measured sizing, not a hosted duration guarantee.
+    # scripts/workflow-browser-budget.test.mjs derives the bound; see the dated ten-shard report.
+    timeout-minutes: 54
     strategy:
       # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
       # aggregator below reads a cancelled job as a budget hit — so one broken test would be
-      # announced as four timeouts, which is the opposite of a useful signal.
+      # announced as nine timeouts, which is the opposite of a useful signal.
       fail-fast: false
       matrix:
         # Projects partition the live file inventory by measured duration, keeping files intact.
-        # The inventory contract pins these five jobs to all five projects and compares every
+        # The inventory contract pins these ten jobs to all ten projects and compares every
         # configured test identity with the unpartitioned development inventory.
-        shard: ${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'workflow_dispatch' && inputs.browser_benchmark || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}
+        shard: ${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'workflow_dispatch' && inputs.browser_benchmark || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

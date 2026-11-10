@@ -862,7 +862,7 @@ test("every refused submit lands on a control described by its reason (#2952)", 
       };
       const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
       try {
-        const focused = await pressCreateAndHear(fixture, /The saved default account isn't on this machine anymore\. Choose an account, or change the default in Machine Settings\./, "account");
+        const focused = await pressCreateAndHear(fixture, /The saved default account isn't on this machine anymore\. Choose an account, or change the default in this machine's Provider Accounts\./, "account");
         assert.match(focused.getAttribute("aria-label") ?? "", /^Account:/);
         assert.equal(focused.getAttribute("aria-invalid"), "true");
       } finally { await unmountFixture(fixture); }
@@ -1766,6 +1766,91 @@ function assertNoFullControlForm(container: HTMLDivElement): void {
   }
 }
 
+const OLD_RUNNER_REASON = "The Location's runner can't perform this campaign's gates. Update and restart it to protocol version 327 or newer.";
+const excludingOldMac = (input: import("@wollipog/protocol").FullControlLaunchRequest) => {
+  const preflight = launchPreflight(true, input);
+  return { preflight: { ...preflight, summary: { ...preflight.summary,
+    excludedLocations: [{ locationId: "loc_old", name: "Old Mac", failure: "runner_below_gates" as const, reason: OLD_RUNNER_REASON, repository: "owner/old" }] } } };
+};
+
+test("a Project with several Locations shows the ones Full Control would leave out before Start, and Start then admits at once (#4319)", async () => {
+  const preflights: Array<[import("@wollipog/protocol").FullControlLaunchRequest, AbortSignal | undefined]> = [];
+  const admissions: unknown[] = [];
+  const twoLocations = { ...project, locations: [...project.locations, { ...project.locations[0]!, id: "loc_old", name: "Old Mac", isDefault: false }] };
+  const fixture = await mountFixture({ runners: [fullControlRunner()], projects: [twoLocations] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input, signal) => { preflights.push([input, signal]); return excludingOldMac(input); },
+    createFullControlCampaign: async (input) => { admissions.push(input); return { id: "campaign-1" } as SessionView; },
+  });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await chooseControlMode(fixture.container, "Full Control");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
+    assert.ok(preflights[0]?.[1] instanceof domWindow.AbortSignal || preflights[0]?.[1] instanceof AbortSignal, "the read is cancelled with the dialog");
+    assert.equal(fixture.container.querySelector('ul[aria-label="Excluded Locations"]')?.textContent, `Old Macowner/old${OLD_RUNNER_REASON}`, "the reason, before anything is approved");
+    assert.match(fixture.container.textContent ?? "", /Full Control starts without this Location\. It can join once its runner updates\./);
+    assert.deepEqual(admissions, []);
+
+    await act(async () => createButton(fixture.container).click());
+    await act(async () => { await Promise.resolve(); });
+    assert.equal(admissions.length, 1, "the person has seen it, so Start is one action");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a Start that finds a Location the person wasn't shown stops and shows it, and the next one admits (#4319)", async () => {
+  const preflights: unknown[] = [];
+  const admissions: unknown[] = [];
+  const closesBefore = dialogCloses.count;
+  const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => { preflights.push(input); return excludingOldMac(input); },
+    createFullControlCampaign: async (input) => { admissions.push(input); return { id: "campaign-1" } as SessionView; },
+  });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await chooseControlMode(fixture.container, "Full Control");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
+    assert.equal(preflights.length, 0, "one Location has nothing to leave out, so nothing is asked before Start");
+
+    await act(async () => createButton(fixture.container).click());
+    await act(async () => { await Promise.resolve(); });
+    assert.deepEqual(admissions, [], "not admitted");
+    assert.equal(dialogCloses.count, closesBefore, "and the dialog stays");
+    assert.equal(fixture.container.querySelector('ul[aria-label="Excluded Locations"]')?.textContent, `Old Macowner/old${OLD_RUNNER_REASON}`);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Couldn't Start the Session/, "it isn't a failure");
+
+    await act(async () => createButton(fixture.container).click());
+    await act(async () => { await Promise.resolve(); });
+    assert.equal(admissions.length, 1);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Full Control says how its first message names issues, another repository's qualified, and Custom doesn't (cwi_255bc2cf)", async () => {
+  const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => ({ preflight: launchPreflight(true, input) }),
+  });
+  const notice = () => [...fixture.container.querySelectorAll(".notice")].find((node) => node.textContent?.includes("Name Issues in Your First Message"));
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    assertNoDomNode(notice() ?? null, "a Custom Orchestrator gets its issues as it always did");
+    await chooseControlMode(fixture.container, "Full Control");
+    const shown = notice();
+    assert.ok(shown, "Full Control shows it before Start");
+    assert.equal(shown.textContent, "Name Issues in Your First Message" +
+      "When the session opens, your first message sets the campaign's task and issues. Write #12 for an issue in this repository. " +
+      "For another repository in the campaign, write owner/repo#12 or paste the issue's link, because a bare number always means this repository.");
+    assert.deepEqual([...shown.querySelectorAll("code")].map((node) => node.textContent), ["#12", "owner/repo#12"]);
+    assertNoFullControlForm(fixture.container);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("Full Control starts through the same Create Session with no form, and the session's first message is its task", async () => {
   const preflights: import("@wollipog/protocol").FullControlLaunchRequest[] = [];
   const admissions: Array<Record<string, unknown>> = [];
@@ -1857,6 +1942,66 @@ test("a genuine impossibility stops Full Control with one inline error where lau
     assert.equal(fixture.requests.length, 1);
     assert.equal(Object.hasOwn(fixture.requests[0]!.orchestrator ?? {}, "control"), false);
     assert.equal(Object.hasOwn(fixture.requests[0]!.orchestrator ?? {}, "controlMode"), false);
+  } finally { await unmountFixture(fixture); }
+});
+
+/** A machine whose Run On offers a container next to its two host placements. */
+const runOnRunner = (): RunnerView => ({ ...fullControlRunner(), executionTargets: [...hostTargets(), {
+  id: "container", runnerId: runner.runnerId, name: "Offline Container", kind: "container", workspaceStrategy: "worktree",
+  adapter: "container", boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+  compatibleAgentIds: ["claude"], available: true }] });
+
+test("Full Control forwards New Session's Run On and Harness to the server instead of starting on the host default (#2940)", async () => {
+  const preflights: import("@wollipog/protocol").FullControlLaunchRequest[] = [];
+  const admissions: Array<Record<string, unknown>> = [];
+  const fixture = await mountFixture({ runners: [runOnRunner()] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => { preflights.push(structuredClone(input)); return { preflight: launchPreflight(true, input) }; },
+    createFullControlCampaign: async (input) => { admissions.push(structuredClone(input) as unknown as Record<string, unknown>); return { id: "campaign-3" } as SessionView; },
+  });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await chooseControlMode(fixture.container, "Full Control");
+    await chooseSelectOption(fixture.container, "Run On", "Runner Host · worktree");
+    await act(async () => createButton(fixture.container).click());
+    await act(async () => { await Promise.resolve(); });
+    assert.equal(preflights.length, 1);
+    const session = preflights[0]!.overrides!.session!;
+    assert.equal(session.executionTargetId, "host-worktree", "the chosen target, not the host default");
+    assert.equal(session.useWorktree, true);
+    assert.equal(Object.hasOwn(session, "launchSurface"), false, "Direct is the server's default and is not sent");
+    assert.equal(Object.hasOwn(session, "acpSessionContext"), false, "ACP session context never travels");
+    assert.equal((admissions[0]!.overrides as typeof preflights[0]["overrides"])!.session!.executionTargetId, "host-worktree",
+      "admission carries the same choice the check saw");
+    assert.equal(fixture.requests.length, 0);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("a container Run On target is kept: the Orchestrator role is disabled there with its reason, exactly as for Custom (#2940)", async () => {
+  const preflights: unknown[] = [];
+  const admissions: unknown[] = [];
+  const fixture = await mountFixture({ runners: [runOnRunner()] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => { preflights.push(input); return { preflight: launchPreflight(true, input) }; },
+    createFullControlCampaign: async (input) => { admissions.push(input); return { id: "never" } as SessionView; },
+  });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await chooseControlMode(fixture.container, "Full Control");
+    await chooseSelectOption(fixture.container, "Run On", "Offline Container");
+    // The Role shows the change: Orchestrator is disabled on this target and says why.
+    const option = [...permissionPresetGroup(fixture.container).querySelectorAll<HTMLElement>('[role="radio"]')]
+      .find((node) => node.textContent?.includes("Orchestrator"))!;
+    assert.equal(option.getAttribute("aria-disabled") === "true" || (option as HTMLButtonElement).disabled === true, true, "Orchestrator is disabled here");
+    assert.match(fixture.container.textContent ?? "", /Orchestrator runs only on this machine's host, not in a container or the cloud\./);
+    await act(async () => createButton(fixture.container).click());
+    await act(async () => { await Promise.resolve(); });
+    assert.equal(preflights.length, 0, "no Full Control check runs for a target the Orchestrator role can't use");
+    assert.equal(admissions.length, 0, "no campaign is admitted");
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0]!.executionTargetId, "container", "the chosen target is kept, never swapped for the host");
+    assert.notEqual(fixture.requests[0]!.role, "orchestrator");
+    assert.equal(fixture.requests[0]!.orchestrator, undefined);
   } finally { await unmountFixture(fixture); }
 });
 
@@ -2624,6 +2769,54 @@ test("New Session shows the saved default but leaves the server to resolve it wh
   }
 });
 
+const priorityRunner = (order: string[]): RunnerView => ({
+  ...runner,
+  protocolVersion: PROTOCOL_VERSION,
+  providerAccounts: [
+    { id: "work", label: "Work", provider: "claude", authStatus: "unauthenticated", billing: "subscription" },
+    { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+  ],
+  providerAccountDefaults: [{ provider: "claude", accountId: null, revision: 2, mode: "priority", schemaVersion: 1, fixedAccountId: null, priorityAccountIds: order }],
+});
+const defaultHarnesses = async () => ({ defaults: [] });
+
+test("New Session shows Priority Order's expected account and why, and leaves the server to choose (#4353)", async () => {
+  const preview = { provider: "claude", mode: "priority", policyRevision: 2, status: "selected", source: "priority", accountId: "personal",
+    enforcement: "enforced", generatedAt: 1, candidates: [
+      { accountId: "work", position: 1, eligible: false, reason: "signed_out" },
+      { accountId: "personal", position: 2, eligible: true, selected: true },
+    ] };
+  const fixture = await mountFixture({ runners: [priorityRunner(["work", "personal"])] }, { projectId: null }, undefined, defaultHarnesses, undefined, undefined,
+    { providerAccountSelection: async () => preview } as unknown as Partial<ApiClient>);
+  try {
+    await act(async () => { for (let index = 0; index < 5; index += 1) await Promise.resolve(); });
+    assert.match(fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Account:"]')?.getAttribute("aria-label") ?? "", /Account: Personal/u);
+    assert.match(fixture.container.textContent ?? "", /first eligible account in the machine's Priority Order\. Skipped ahead of it: one needs sign-in\./u);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.providerAccountId, undefined, "the expected account is not an explicit override");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("New Session requires an explicit account when no account is eligible (#4353)", async () => {
+  const preview = { provider: "claude", mode: "priority", policyRevision: 2, status: "choice_required", source: "none", refusal: "no_eligible_account",
+    enforcement: "enforced", generatedAt: 1, candidates: [
+      { accountId: "work", position: 1, eligible: false, reason: "signed_out" },
+      { accountId: "personal", position: null, eligible: false, reason: "not_ranked" },
+    ] };
+  const fixture = await mountFixture({ runners: [priorityRunner(["work"])] }, { projectId: null }, undefined, defaultHarnesses, undefined, undefined,
+    { providerAccountSelection: async () => preview } as unknown as Partial<ApiClient>);
+  try {
+    await act(async () => { for (let index = 0; index < 5; index += 1) await Promise.resolve(); });
+    assert.match(fixture.container.textContent ?? "", /No Claude account in this machine's Priority Order can start this session/u);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 0, "nothing starts until someone chooses");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("New Session shows the first account this control plane may use, as the server would choose it (#3240)", async () => {
   const accountRunner: RunnerView = {
     ...runner,
@@ -2702,7 +2895,7 @@ test("a missing saved default requires an explicit account choice", async () => 
   const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
   try {
     await assertCreateRefused(fixture);
-    assert.match(fixture.container.textContent ?? "", /The saved default account isn't on this machine anymore\. Choose an account, or change the default in Machine Settings\./u);
+    assert.match(fixture.container.textContent ?? "", /The saved default account isn't on this machine anymore\. Choose an account, or change the default in this machine's Provider Accounts\./u);
     await chooseSelectOption(fixture.container, "Account", "Work");
     assert.equal(createButton(fixture.container).disabled, false);
     await act(async () => { createButton(fixture.container).click(); });

@@ -275,6 +275,17 @@ export class SessionCommandReceiptStore {
     return updates.sort((a, b) => a.invocationId.localeCompare(b.invocationId));
   }
 
+  /** Like the legacy full inventory, refresh the index, but retain no receipt across a yield. */
+  recentUpdateIds(now = this.now()): string[] {
+    return this.rebuildRecordIndex().filter((record) => record.expiresAt >= now)
+      .map((record) => record.invocationId).sort((a, b) => a.localeCompare(b));
+  }
+
+  recentUpdate(invocationId: string, now = this.now()): SessionCommandInvocationReceipt | null {
+    const record = this.read(invocationId);
+    return record && record.expiresAt >= now ? toReceipt(record, true) : null;
+  }
+
   /** Return reconstructable, nonterminal records whose prior owner can no longer be live. The
    * caller decides whether accepted/queued work has fresh live authority and queue capacity before
    * passing the envelope back through claim(); started work is always claimed so it becomes

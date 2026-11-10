@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { BACKGROUND_JOB_STALL_MS, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
   type CampaignBudgetAuthority, type CampaignForgePullRequestObservation, type PendingApproval, type RunnerMetadata,
-  type SessionSnapshot } from "@wollipog/protocol";
+  type GithubIssueClosureSnapshot, type SessionSnapshot } from "@wollipog/protocol";
+import { closureDeliveryGaps } from "./campaign-issue-authority.js";
 import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
@@ -58,6 +59,8 @@ function fixture(budgetAuthority?: CampaignBudgetAuthority, completion?: "retain
     ...(budgetAuthority ? { budgetAuthority } : {}) }, 1,
   { ...identity, kind: "human", actorId: identity.userId });
   assert.ok(enabled.ok, enabled.error ?? "admission failed");
+  // The control change's own scope synchronization (#3363) is not what these tests count.
+  sent.splice(0, sent.length, ...sent.filter((message) => (message as { type: string }).type !== "campaign_issue_scope"));
   const recovery = new CampaignRecoveryService(db, () => {}, log);
   return { db, svc, recovery, sent, logs, metadata, hub, identity };
 }
@@ -800,6 +803,15 @@ test("uncertain steering keeps its original occurrence and requests reconciliati
     const admissionLogs = h.logs.filter(message => JSON.parse(message).event === "campaign_recovery_admission");
     assert.equal(admissionLogs.length, 1, "unchanged admission emits no repeated sweep log");
     assert.ok(h.logs.every(message => !message.includes("private prompt")));
+    // A durable event caused by the provider's exact replay retires existing recovery.
+    h.db.recordSteeringResult("r", { type: "steer_session_result", requestId: "steer-1",
+      sessionId: "child", submissionId: "original-submission", turnId: "original-turn",
+      disposition: "uncertain", reason: "transport_uncertain" }, 203);
+    assert.equal(h.db.resolveSteeringAttemptFromUserMessage("child", "original-submission", "original-turn", 203), true);
+    h.recovery.maintain(204);
+    assert.equal(h.db.listSteeringAttempts("child")[0]!.state, "accepted");
+    assert.equal(h.db.campaignProjection("root")!.recovery!.records.some(item =>
+      item.resource.kind === "steering" && item.state !== "resolved"), false);
   } finally { h.db.close(); }
 });
 
@@ -989,7 +1001,7 @@ test("verified children with an unfinished original scoped PR admit exactly one 
       h.db.setSessionArchived(child, true, now);
     }
     h.db.updateSessionStatus("root", "idle", now);
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked", "child reports alone cannot finish an original open PR");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck", "child reports alone cannot finish an original open PR");
     h.recovery.maintain(now);
     h.svc.retryDuePrompts(now + 31_000);
     const continuation = h.db.latestCampaignContinuation("root")!;
@@ -1067,7 +1079,7 @@ for (const completion of ["retain", "stop_and_archive"] as const) {
         }
       }
       assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held");
-      assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+      assert.equal(h.db.campaignProjection("root")!.status, "stuck");
       assert.equal(h.db.campaignContinuationAdmission("root").state, "lifecycle_held");
       assert.equal(h.db.campaignRecovery.activeRecords("root").length, 0, "incomplete is not authority to invent a repair");
     } finally { h.db.close(); }
@@ -1097,6 +1109,41 @@ function recordEpicClosure(h: ReturnType<typeof mergedWorkVerificationFixture>, 
       JSON.stringify({ outcome: change.outcome ?? "closed", completedAt: h.now }));
 }
 
+test("an item in another campaign repository is finished only by a fresh merge in its own repository (#4119)", () => {
+  const h = mergedWorkVerificationFixture("delivered");
+  try {
+    const completion = () => h.db.campaignRecoveryCompletion("root", h.now).state;
+    assert.equal(completion(), "complete");
+    // team/api joins the boundary and the scope, with a committed item of its own.
+    const policy = h.db.getSession("root")!.orchestratorPolicy!;
+    if (policy.control?.mode !== "full_control") throw new Error("fixture control expected");
+    policy.control.boundary.repositories = [{ repository: "picoduck/wollipog", locationIds: [] }, { repository: "team/api", locationIds: [] }];
+    policy.issueScope!.issues = [...(policy.issueScope!.issues ?? policy.issueScope!.issueNumbers.map((number) => ({ repository: "picoduck/wollipog", number }))), { repository: "team/api", number: 50 }];
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+    const planned = h.svc.recordCampaignPlan("root", { planComplete: true, items: [{ key: "api:50", issue: { repository: "team/api", number: 50 } },
+      { key: "api:60", issue: { repository: "team/api", number: 60 } }] });
+    assert.ok(planned.ok, planned.error ?? "plan refused");
+    const inScope = planned.data!.items.find((item) => item.key === "api:50")!.workItemId;
+    assert.equal(completion(), "recovery_held", "it has named no pull request yet");
+
+    // A merged pull request of the launch repository is not this item's delivery.
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: inScope, stage: { stage: "merged", pullRequests: [h.ref] } }).ok);
+    assert.equal(completion(), "recovery_held", "another repository's merge proves nothing here");
+
+    // Its own pull request needs a fact: none yet, then open, then merged but stale, then fresh and merged.
+    const ref = { repository: "team/api", number: 7 };
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: inScope, stage: { stage: "merged", pullRequests: [ref] } }).ok);
+    assert.equal(completion(), "recovery_held", "no fact about it has been read");
+    h.db.campaignForgeObservations.record("root", "r2", [{ ref, observation: { ...h.observation, state: "open", mergeCommitSha: null } }], h.now);
+    assert.equal(completion(), "recovery_held", "it is still open");
+    h.db.campaignForgeObservations.record("root", "r2", [{ ref, observation: h.observation }], h.now - 60 * 60 * 1000);
+    assert.equal(completion(), "recovery_held", "an old read isn't fresh proof");
+    h.db.campaignForgeObservations.record("root", "r2", [{ ref, observation: h.observation }], h.now);
+    // team/api#60 is outside the scope, so it never held the campaign up.
+    assert.equal(completion(), "complete");
+  } finally { h.db.close(); }
+});
+
 test("an epic placeholder item is finished by its closure proven from members, and nothing else is (#4060)", () => {
   const h = mergedWorkVerificationFixture("delivered");
   try {
@@ -1104,7 +1151,7 @@ test("an epic placeholder item is finished by its closure proven from members, a
       items: [{ key: "epic:2938", issue: { repository: "picoduck/wollipog", number: 2938 } }] });
     assert.ok(placeholder.ok, placeholder.error ?? "plan refused");
     assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", "a never-dispatched item is unfinished by default");
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck");
     // Only an Orchestrator-owned, member-proven completed closure the runner confirmed closed counts.
     for (const [occurrence, change] of [["human", { authority: "human" }], ["uncertain", { outcome: "uncertain" }],
       ["already", { outcome: "already_closed" }], ["items", { members: false }], ["unadmitted", { admitted: false }]] as const) {
@@ -1122,7 +1169,7 @@ test("an epic closure proven from members does not finish the epic's own dispatc
   try {
     recordEpicClosure(h, "closure-proven");
     assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", "an item with an attempt keeps its own proof");
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck");
   } finally { h.db.close(); }
 });
 
@@ -1159,7 +1206,7 @@ test("verification insertion chronology preserves incomplete work with equal tim
     h.db.raw().prepare("UPDATE campaign_work_verifications SET verified_at=?, id=CASE outcome WHEN 'delivered' THEN ? ELSE ? END WHERE work_item_id=?")
       .run(h.now, "cver_zzzz_older_delivered", "cver_aaaa_newer_incomplete", h.workItemId);
     assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held");
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck");
   } finally { h.db.close(); }
 });
 
@@ -1197,7 +1244,7 @@ for (const outcome of ["incomplete", "delivered"] as const) {
       assert.equal(h.db.getSession("root")!.orchestratorPolicy!.control!.mode, "full_control");
       assert.equal(h.db.campaignContinuationAdmission("root").state, "authority_unavailable");
       assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, outcome === "incomplete" ? "recovery_held" : "complete");
-      assert.equal(h.db.campaignProjection("root")!.status, outcome === "incomplete" ? "blocked" : "verified_complete");
+      assert.equal(h.db.campaignProjection("root")!.status, outcome === "incomplete" ? "stuck" : "verified_complete");
       const checks = { state: "failing" as const, failing: 1, passing: 0, pending: 0 };
       h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref,
         observation: { ...h.observation, state: "open", mergeCommitSha: null, checks, requiredChecks: checks } }], h.now);
@@ -1250,7 +1297,7 @@ test("an original unknown outcome cannot reopen a child-verified campaign or spe
     assert.equal(record.resource.occurrenceId, recoveryCoordinate("original-submission"));
     assert.equal(h.db.listSteeringAttempts("child")[0]!.state, "uncertain");
     assert.equal(h.db.latestCampaignContinuation("root"), null);
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck");
   } finally { h.db.close(); }
 });
 
@@ -1306,7 +1353,7 @@ test("all four scoped repair reservations deliver; a fifth head cannot reset the
     const exhausted = h.db.campaignRecovery.projection("root").records[0]!;
     assert.equal(exhausted.reason, "attempts_exhausted");
     assert.equal(exhausted.attempts, 4);
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck");
   } finally { h.db.close(); }
 });
 
@@ -1323,8 +1370,10 @@ function completeLatestContinuation(h: ReturnType<typeof completedPrFixture>, at
   h.db.updateSessionStatus("root", "idle", at);
   return { ...continuation, text, settledAt: settled.updatedAt };
 }
+// Recovery's own wakes. The server's one repair wake for an idle campaign (#4146) is its own event
+// kind, keyed to the leftovers rather than to a recovery record, so it is not one of them.
 const recoveryEvents = (h: ReturnType<typeof completedPrFixture>) =>
-  (h.db.raw().prepare("SELECT event_id FROM orchestrator_campaign_events WHERE campaign_session_id='root' ORDER BY seq").all() as
+  (h.db.raw().prepare("SELECT event_id FROM orchestrator_campaign_events WHERE campaign_session_id='root' AND kind<>'campaign_idle' ORDER BY seq").all() as
     Array<{ event_id: string }>).map(row => row.event_id);
 
 test("an unanswered dispatched wake is woken again with backoff, then exhausts instead of staying automatic (#2938 AC8)", () => {
@@ -1368,7 +1417,7 @@ test("an unanswered dispatched wake is woken again with backoff, then exhausts i
       exhausted.records[0]!.requiredInput], ["attempts_exhausted", "blocked", 4, "none"]);
     assert.deepEqual([exhausted.unattendedReady, exhausted.automatic, exhausted.blocked], [false, 0, 1]);
     assert.equal(h.db.latestCampaignContinuation("root")!.continuationId, before, "an exhausted record is never woken again");
-    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck");
     assert.equal(JSON.stringify(exhausted).includes("Component fixture"), false, "the exception carries no transcript content");
   } finally { h.db.close(); }
 });
@@ -1752,4 +1801,75 @@ test("pause, archive, revocation and denial still prevent replacing a stopped wo
       }
     } finally { h.db.close(); }
   }
+});
+
+/** #4120: team/api joins the boundary; the delivered item #2938 depends on a team/api item outside
+ * the issue scope, so only #2938 decides completion. */
+function heldDeliveryFixture() {
+  const h = mergedWorkVerificationFixture("delivered");
+  const policy = h.db.getSession("root")!.orchestratorPolicy!;
+  if (policy.control?.mode !== "full_control") throw new Error("fixture control expected");
+  policy.control.boundary.repositories = [{ repository: "picoduck/wollipog", locationIds: [] }, { repository: "team/api", locationIds: [] }];
+  // The campaign may prove its own closures, so the proof's gaps can be read.
+  const boundary = policy.control.boundary;
+  boundary.operations = [...new Set([...boundary.operations, "issue_closure" as const])];
+  boundary.issueAuthority = { ...(boundary.issueAuthority ?? { epics: [], relatedFollowUps: false, maxIssues: 10 }),
+    closureReasons: ["completed"] } as NonNullable<typeof boundary.issueAuthority>;
+  h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+  const planned = h.svc.recordCampaignPlan("root", { planComplete: true, items: [{ key: "api:60", issue: { repository: "team/api", number: 60 } }] });
+  assert.ok(planned.ok, planned.error ?? "plan refused");
+  const prerequisite = planned.data!.items.find((item) => item.key === "api:60")!.workItemId;
+  assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.workItemId, dependsOn: [prerequisite] }).ok);
+  const completion = () => h.db.campaignRecoveryCompletion("root", h.now).state;
+  const detail = () => h.db.campaignWorkLedger.detail("root", h.workItemId, h.now)!;
+  return { ...h, prerequisite, completion, detail };
+}
+
+test("a verified item held on its own open pull request in another repository keeps the campaign unfinished (#4120)", () => {
+  const h = heldDeliveryFixture();
+  try {
+    // #2938 names its merged picoduck/wollipog#3068 and an open team/api#9; its prerequisite hasn't merged.
+    const api = { repository: "team/api", number: 9 };
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.workItemId, stage: { stage: "merged", pullRequests: [h.ref, api] } }).ok);
+    h.db.campaignForgeObservations.record("root", "r2", [{ ref: api, observation: { ...h.observation, state: "open", mergeCommitSha: null } }], h.now);
+    assert.deepEqual([h.detail().primaryState, h.detail().stateCauses], ["waiting", ["dependency_unmerged"]]);
+    assert.equal(h.completion(), "recovery_held", "its own-repository merge alone doesn't finish it");
+  } finally { h.db.close(); }
+});
+
+test("a merged item whose prerequisite failed, and whose latest read failed, is delivered: closure proof and completion agree (#4120)", () => {
+  const h = heldDeliveryFixture();
+  try {
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.prerequisite, commitment: { state: "cancelled", reason: "Dropped" } }).ok);
+    // The merged picoduck/wollipog#3068 is read again, and that read fails: the merge stands.
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, failure: "forge_unreachable" }], h.now);
+    assert.equal(h.db.campaignForgeObservations.facts("root", [h.ref], h.now)[0]!.fact.availability, "unavailable");
+    assert.deepEqual([h.detail().primaryState, h.detail().stateCauses], ["delivered", []]);
+    const root = h.db.getSession("root")!;
+    const snapshot = { category: "issue_closure", repository: "picoduck/wollipog", issue: 2938, title: "Work",
+      url: "https://github.com/picoduck/wollipog/issues/2938", forgeDigest: "a".repeat(64), reason: "completed", explanation: "Merged.",
+      evidence: ["Merged."], openPullRequests: [], activeChildren: [], delivery: [] } as unknown as GithubIssueClosureSnapshot;
+    const gaps = closureDeliveryGaps(h.db, root, snapshot, { proven: false, commentSafe: true });
+    assert.ok(gaps, "the campaign may prove closures");
+    assert.ok(!gaps.some((gap) => gap.code === "work_item_not_delivered"), JSON.stringify(gaps));
+    // Once the read answers again, the campaign completes.
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation: h.observation }], h.now);
+    assert.equal(h.completion(), "complete");
+  } finally { h.db.close(); }
+});
+
+test("a verified item held on a merge dependency still admits an independently eligible failed-check repair of its own pull request (#4120)", () => {
+  const h = heldDeliveryFixture();
+  try {
+    // Its own picoduck/wollipog#3068 is open again with failing checks; its prerequisite hasn't merged.
+    const checks = { state: "failing" as const, failing: 1, passing: 0, pending: 0 };
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref,
+      observation: { ...h.observation, state: "open", mergeCommitSha: null, checks, requiredChecks: checks } }], h.now);
+    assert.deepEqual([h.detail().primaryState, h.detail().stateCauses], ["waiting", ["dependency_unmerged"]]);
+    h.recovery.maintain(h.now);
+    const completion = h.db.campaignRecoveryCompletion("root", h.now);
+    assert.equal(completion.state, "recovery_ready");
+    assert.equal(completion.recoveryIds.length, 1);
+    assert.equal(h.db.campaignRecovery.activeRecords("root").find((record) => record.id === completion.recoveryIds[0])!.action, "repair_checks");
+  } finally { h.db.close(); }
 });

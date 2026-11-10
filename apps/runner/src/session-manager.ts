@@ -5,17 +5,22 @@ import { shellGuidance } from "./shell-guidance.js";
 import { restartResumeId } from "./restart-resume.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
-import { type BackgroundFollowUpView, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
+import { type BackgroundFollowUpView, type CampaignRetirementHold, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
 import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
-import { boundedIssueNumbers, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
+import { launchOrchestratorMeta, nextCampaignControl, validControlRevision } from "./campaign-control-order.js";
+import { boundedIssueNumbers, campaignBoundaryRepository, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
-import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
-import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, ForgeDecisionActionMessage, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
+import type { GithubIssueClosureLocation, GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
+import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, GitLabMergeClosuresMessage, GitLabMergeClosuresResultMessage, ForgeDecisionAction, ForgeDecisionActionMessage, ForgeDecisionActionOutcome, ForgeDecisionActionRefusalReason, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
-import { executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge } from "./forge-decision-action.js";
+import { executeBranchDeletion, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge } from "./forge-decision-action.js";
+import { githubSlug } from "./git-ops.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
 import { githubMergePreflight } from "./github-merge-preflight.js";
+import { gitlabMergeClosures } from "./gitlab-merge-closures.js";
+import { dequeueMerge, readMergeClosures } from "./merge-closure-watch.js";
+import type { MergeClosureWatchMessage, MergeClosureWatchResultMessage } from "@wollipog/protocol";
 /**
  * Runner-side session orchestration. For each control-plane `start_session`:
  *  - optionally create an isolated git worktree,
@@ -38,6 +43,7 @@ import { transferCodexAccountTranscript } from "./codex-account-transcript.js";
 import type { ClaudeLiveUsage } from "./drivers/claude-usage-accounting.js";
 import type { PoisonedProviderHistory } from "./drivers/poisoned-provider-history.js";
 import { UnclassifiedRejectionJournal } from "./drivers/unclassified-rejection-journal.js";
+import { PROVIDER_ACCOUNT_SKIP_TEXT, providerAccountLaunchIneligibility, type ProviderAccountBilling } from "@wollipog/protocol";
 import type {
   AgentCapabilities,
   AgentContext,
@@ -127,8 +133,8 @@ import {
   type SessionWorktreeSwitchView,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, realpathSync } from "node:fs";
-import { mkdir, realpath, rm } from "node:fs/promises";
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, realpathSync, rmSync, writeSync } from "node:fs";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { validLocationSwitchBranch, type SessionLocationSwitchMessage } from "@wollipog/protocol";
 import {
@@ -196,6 +202,7 @@ import type { ContainerTargetRegistry } from "./container-target.js";
 import type { CloudTargetRegistry } from "./cloud-target.js";
 import {
   cloneExecutionIsolationState,
+  managedWorktreeLaunchRefusal,
   migrateExecutionIsolationState,
   providerStateKey,
   removeExecutionIsolationState,
@@ -235,7 +242,8 @@ import {
   type UsageWindowRejection,
 } from "./automatic-provider-account-switch.js";
 import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type LeaseProfileBinding, type ProviderHomeReference, type ProviderProfileAccessSource } from "./provider-home-lease-async.js";
-import { providerHomeRunnerMarker } from "./provider-home-lease-evidence.js";
+import { currentLeaseProcessEvidence, isLeaseProcessEvidence, linuxLeaseProcessProbe, proveLeaseAbandoned, providerHomeRunnerMarker, type LeaseAbandonmentProof, type LeaseProcessProbe } from "./provider-home-lease-evidence.js";
+import { providerContainmentStatus, providerContainmentUnitIdentity, selectedProviderContainmentIdentity } from "./linux-cgroup.js";
 import type { AgentTuiProviderHome } from "./shell-manager.js";
 import { providerHomeLeaseEnv, providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { isolatedDiscoveryEnvironment } from "./discovery/provider-home.js";
@@ -270,6 +278,7 @@ import {
   type DurableBackgroundJob,
   type LocationHistoryEntry,
   type PendingLocationSwitch,
+  type RetiringProviderRunner,
   type SessionMeta,
   type StoredEvent,
 } from "./session-store.js";
@@ -290,6 +299,16 @@ import {
   createWorktree,
   createRequestedWorktree,
   createRecoveredBranchWorktree,
+  captureRollbackSnapshot,
+  clearWorktreeRollbackProof,
+  releaseUnchangedBranch,
+  stampWorktreeRollbackProof,
+  worktreeCheckoutNeverFinished,
+  worktreeRollbackProofState,
+  worktreeHoldsUnsharedWork,
+  worktreeIdForPath,
+  worktreeRollbackWork,
+  worktreeUncommittedChanges,
   releaseRecoveredWorktree,
   attachRequestedWorktree,
   fetchRemoteDefaultBase,
@@ -314,6 +333,7 @@ import {
   worktreeBranch,
   worktreeHead,
   mergedWorktreePullRequestForBranch,
+  branchPullRequestForAttachedWorktree,
   mergedPullRequestContainingHead,
   worktreePullRequestState,
   changeRequestProvider,
@@ -321,6 +341,10 @@ import {
   WorktreeCleanupJournal,
   type WorktreeCleanupRecord,
   type WorktreeHandle,
+  heldWorktreeRefusal,
+  heldWorktreeWayOn,
+  type WorktreeHolder,
+  type RecoveredBranchWorktree,
   type DiscoveredMergedPullRequest,
   type MergedPullRequestContainment,
   type MissingUpstreamPullRequestIdentity,
@@ -328,6 +352,7 @@ import {
   type RetainedWorktreeRefRecord,
   type SafeWorktreeDiscardResult,
 } from "./worktree.js";
+import { boundTurnDiff } from "./history-event-bound.js";
 import {
   loadWorktreeSetupConfig,
   resolvedWorktreeSetupEnvironment,
@@ -743,7 +768,7 @@ interface ActiveSession {
   codexPackageSandboxed?: boolean;
   /** Immutable package-denial snapshot from this exact native provider launch. */
   codexPackageReadOnlyPaths?: readonly string[];
-  orchestratorLaunchPolicy?: Pick<import("@wollipog/protocol").OrchestratorLaunchPolicy, "issueNumbers" | "issueScope" | "control">;
+  orchestratorLaunchPolicy?: Pick<import("@wollipog/protocol").OrchestratorLaunchPolicy, "issueNumbers" | "issueScope" | "control" | "controlRevision">;
   projectMemoryKey?: string;
   projectMemoryFailureKey?: string;
   sessionId: string;
@@ -882,10 +907,13 @@ interface ActiveSession {
   usageWindowRejection?: UsageWindowRejection;
   /** Exact canonical roots rendered into this live process's Seatbelt profile at launch. */
   seatbeltWritableRoots?: readonly string[];
-  /** The session's other managed worktrees this live process's bwrap boundary binds (#3316). The
-   * driver renders the same bind list for every later spawn — a persistent transport restart or a
-   * resume probe — so once one of them is retired the provider is rebound into its selected
-   * worktree before its next turn instead of failing on a bind source that no longer exists. */
+  /** The session's other managed worktrees this live process's bwrap boundary binds (#3316). A
+   * driver spawns again from its launch isolation — a persistent transport restart or a resume
+   * probe — so once one of them is retired the provider is rebound into its selected worktree
+   * before its next turn instead of failing on a bind source that no longer exists. The Claude
+   * driver's own spawns leave out a sibling it finds retired (#4411, `spawnIsolation`), unless
+   * dropping that bind could widen what the rest of the boundary allows, so they do not fail in
+   * the meantime. The rebind still follows: it is the launch that proves the new bind list. */
   boundOwnedWorktrees?: readonly string[];
   /** The selected worktree a retirement rebind targets, while that rebind is the pending one; only
    * such a rebind fails once when it cannot run (#3402). */
@@ -910,6 +938,10 @@ interface ProviderRetirement {
   unconfirmed: boolean;
   /** Temporary launch generation that accepts prompts while a pressure park is retiring. */
   parkingGeneration?: number;
+  /** The campaign generation whose final checkpoint this retirement fences until it is proven (#3788). */
+  campaignGeneration?: string;
+  /** Settles once this retirement's own disposal of the provider returned (true) or threw (false). */
+  disposal: Promise<boolean>;
 }
 
 type ProviderAuthenticationInspectionResult =
@@ -949,6 +981,19 @@ function canResumeSession(meta: SessionMeta): boolean {
 }
 
 /** Keep nonblocking questions while authentication owns the visible approval barrier. */
+/** A closure that threw. Execution throws only before its mutation fence: a mutation failure is an
+ * `uncertain` result. Provider output is never surfaced, only these fixed sentences. */
+function issueClosureFailure(
+  base: { type: "github_issue_closure_result"; requestId: string; sessionId: string },
+  error: unknown,
+): GithubIssueClosureResultMessage {
+  return error instanceof IssueClosureInspectionError
+    ? { ...base, ok: false, failure: error.failure, error: error.message,
+        ...(error.deliveryVerificationFailure ? { deliveryVerificationFailure: error.deliveryVerificationFailure } : {}) }
+    : { ...base, ok: false, failure: "evidence_unavailable",
+      error: "Issue inspection failed; verify gh or glab authentication and complete conflict evidence" };
+}
+
 function pendingAsyncQuestions(pending: PendingApproval | null | undefined): PendingApproval | null {
   return pendingRequests(pending)
     .filter((request) => request.kind === "question" && request.async)
@@ -1150,16 +1195,162 @@ const DISCARDED_PROMPT_QUOTE_CHARS = 400;
 /** How much of a provider's rejection a hold blocker quotes (#3100); the driver's own error row keeps it all. */
 const PROVIDER_REJECTION_QUOTE_CHARS = 500;
 const PROVIDER_CLOSE_TIMEOUT_MS = 5_000;
+/** How long a restarted runner waits between attempts to prove an earlier runner process gone (#4256). */
+const EARLIER_RUNNER_PROOF_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000, 600_000] as const;
+
+/** How a retirement fence names the runner processes that ran providers of its generation, and how a
+ * later runner process proves each gone with every process it launched (#4256). */
+export interface RetirementProcessProof {
+  /** This runner process, for a fence on `meta`; undefined when nothing could prove it gone later. */
+  current(meta: Pick<SessionMeta, "context" | "executionTarget">): RetiringProviderRunner | undefined;
+  /** True only when nothing `runner` launched can still run. */
+  abandoned(runner: RetiringProviderRunner): boolean;
+}
+
+/** Whether `runner` is exactly this lifecycle identity: the same pid, boot, start time and marker. */
+function sameRunner(runner: RetiringProviderRunner, other: RetiringProviderRunner): boolean {
+  return runner.pid === other.pid && runner.process.bootId === other.process.bootId &&
+    runner.process.startTime === other.process.startTime && runner.process.marker === other.process.marker;
+}
+
+/** Only proofs that cover a whole process tree, descendants included, release a campaign slot. A
+ * reboot ends every process; an empty provider cgroup (or its retired unit) holds none, and cgroup
+ * membership survives a child that clears its environment. The launch-marker scan does not: a child
+ * started with a cleared environment carries no marker, so it never releases a slot. */
+const WHOLE_TREE_ABANDONMENT_PROOFS: ReadonlySet<LeaseAbandonmentProof> = new Set(["reboot", "linux_cgroup", "linux_cgroup_unit_removed"]);
+
+/** The provider-HOME lease evidence (#3241), restricted to whole-tree proofs. Only host-native
+ * providers are covered: a WSL, container or cloud provider can outlive the runner outside its cgroup. */
+export function leaseRetirementProcessProof(probe: LeaseProcessProbe | undefined = linuxLeaseProcessProbe()): RetirementProcessProof {
+  // Created now, before any provider launches, so every provider this process starts carries it.
+  const marker = probe ? providerHomeRunnerMarker() : undefined;
+  let own: RetiringProviderRunner | null | undefined;
+  return {
+    current: (meta) => {
+      if (meta.context.kind !== "native" || (meta.executionTarget && meta.executionTarget.adapter !== "host")) return undefined;
+      if (own === undefined) {
+        const parent = selectedProviderContainmentIdentity();
+        const unit = providerContainmentUnitIdentity();
+        const containment = parent ? { ...parent, ...(unit ? { unit } : {}) }
+          : { kind: "marker-parent-links" as const, reason: providerContainmentStatus().reason };
+        const evidence = currentLeaseProcessEvidence(probe, process.pid, marker, containment);
+        own = evidence ? { pid: process.pid, process: evidence } : null;
+      }
+      return own ?? undefined;
+    },
+    abandoned: (runner) => {
+      if (!isLeaseProcessEvidence(runner.process) || !Number.isSafeInteger(runner.pid) || runner.pid <= 1) return false;
+      const result = proveLeaseAbandoned(runner.process, runner.pid, probe);
+      return result.proven && WHOLE_TREE_ABANDONMENT_PROOFS.has(result.proof);
+    },
+  };
+}
 const CHECKPOINT_REF_MAINTENANCE_CONCURRENCY = 4;
 const ORPHAN_RECOVERY_RETRY_MS = 30_000;
 /** (#4138) Why a moved session waits: the runner restarted between the move and its relaunch. */
 const INTERRUPTED_MOVE_REASON = "The session moved there, but the runner restarted before it continued the task.";
+
+/** (#4209) A stuck creation rollback is retried with these delays, doubling, about eleven hours in
+ * all, rather than only at the next runner start or request. */
+const WORKTREE_ROLLBACK_RETRY_BASE_MS = WORKTREE_PR_RECONCILIATION_MS;
+const WORKTREE_ROLLBACK_MAX_ATTEMPTS = 8;
+
+/** What the agent reads first when a Location switch brought it back to its own earlier worktree and
+ * that worktree is not quite as it was (#4209). Exported for tests. */
+export function returningWorktreeNotice(
+  path: string,
+  { setup, portBlock }: { setup?: "unfinished" | "unreadable"; portBlock?: WorktreePortBlock },
+): string {
+  return [
+    "[Wollipog Returning Worktree]",
+    `You are back in your own earlier worktree, ${JSON.stringify(path)}, with its files as you left them.`,
+    ...(setup === "unfinished" ? ["Its worktree setup never finished, and a worktree that already exists does not run setup again, so " +
+      "its setup environment is not available. Run any step you need yourself."] : []),
+    ...(setup === "unreadable" ? ["Its worktree setup finished, but its configuration could not be read just now, so its setup " +
+      "environment is not available for this launch. Setup does not run again, and a later launch restores the environment if the " +
+      "configuration can be read then."] : []),
+    ...(portBlock ? [`Another session now holds the ports it had, so its port block changed to ${portBlock.start}-${portBlock.end}. ` +
+      "Anything in it that names the old ports needs updating."] : []),
+    "[End Wollipog Returning Worktree]",
+  ].join("\n");
+}
+
+/** Why an agent's own attach of another session's worktree is refused (#4209), and the way on. */
+function attachHolderRefusal(path: string, holder: WorktreeHolder): string {
+  if (holder.removalPending) return `the worktree at ${path} is being removed by the runner for session ${holder.sessionId}; ask again once that finishes`;
+  // Running, but with the worktree only from a Location it has left: it has to switch back to use it.
+  if (holder.live && holder.earlierLocation) {
+    return `the worktree at ${path} belongs to session ${holder.sessionId}, which is running in another Location now. To continue ` +
+      `the task there, have session ${holder.sessionId} switch back to this Location; its work and pull request stay with it. ` +
+      "Nothing about that session or its worktree has changed";
+  }
+  if (holder.live) {
+    return `the worktree at ${path} is in use by session ${holder.sessionId}; continue the task in that session instead, so the ` +
+      "work and its pull request stay with it. Nothing about that session or its worktree has changed";
+  }
+  return `the worktree at ${path} belongs to session ${holder.sessionId}, which is not running. ${heldWorktreeWayOn(holder)}`;
+}
+
+/** What the agent reads first after a Location switch continued in an existing worktree (#4138):
+ * the runner's own facts, framed as Wollipog's, so a routine reset or clean does not discard work
+ * that was there before the session arrived. Exported for tests. */
+export function reusedWorktreeNotice(path: string, branch: string, uncommittedChanges: number | undefined): string {
+  const changes = uncommittedChanges === undefined
+    ? "It may hold uncommitted changes: Git could not count them."
+    : uncommittedChanges === 0
+    ? "It had no uncommitted changes when you arrived."
+    : `It holds ${uncommittedChanges} uncommitted change${uncommittedChanges === 1 ? "" : "s"} that this session did not make.`;
+  return [
+    "[Wollipog Existing Worktree]",
+    `You are continuing in an existing worktree, ${JSON.stringify(path)}, on branch ${JSON.stringify(branch)}, exactly as it was. ` +
+      changes,
+    "Changes already in this worktree are someone else's work. Look at them (git status, git diff) before changing anything, " +
+      "and never discard them (git reset --hard, git checkout or restore of their files, git clean, git stash drop, or deleting " +
+      "files) unless your person asks you to.",
+    "[End Wollipog Existing Worktree]",
+  ].join("\n");
+}
 const ORPHAN_RECOVERY_SCAN_DEBOUNCE_MS = 30_000;
 const ORPHAN_RECOVERY_PROMPT =
   "Continue after runner restart: consume queued background-task notifications, reconcile every orphaned task, and resume or report unfinished work without waiting for another user message.";
 const BACKGROUND_CONTINUATION_PROMPT =
   "Managed background jobs reached their terminal barrier. Consume every queued task notification and deliver the parent workflow's final user-visible result without waiting for another user message.";
 const MAX_RETAINED_DELIVERED_BACKGROUND_JOBS = 128;
+/** Attempts a background continuation gets when each fails before the provider accepts it (#3542),
+ * such as a provider process that cannot start. Then its automatic retries stop and the session
+ * says so; the result stays owed. */
+const MAX_CONTINUATION_LAUNCH_ATTEMPTS = 3;
+
+/** A finished job whose result its continuation still owes this conversation. */
+function owesBackgroundContinuation(job: DurableBackgroundJob): boolean {
+  return Boolean(job.continuationRequired && job.terminalStatus && !job.assistantResultPersistedAt &&
+    !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
+}
+
+/** The owed continuations whose automatic attempts stopped after bounded launch failures (#3542). */
+function launchHeldBackgroundJobs(meta: Pick<SessionMeta, "backgroundJobs">): DurableBackgroundJob[] {
+  return (meta.backgroundJobs ?? []).filter((job) =>
+    job.continuationLaunchHeldAt !== undefined && owesBackgroundContinuation(job));
+}
+
+/** Every owed continuation is held (#3542): nothing runs or retries until a person acts, so the
+ * session holds no active-work permit for it. */
+function backgroundContinuationsAllLaunchHeld(meta: Pick<SessionMeta, "backgroundJobs">): boolean {
+  const owed = (meta.backgroundJobs ?? []).filter(owesBackgroundContinuation);
+  return owed.length > 0 && owed.every((job) => job.continuationLaunchHeldAt !== undefined);
+}
+
+/** Why a held continuation waits and how a person recovers it (#3542). */
+function backgroundContinuationHoldBlocker(jobCount: number, attempts: number, providerError?: string): string {
+  const results = jobCount === 1 ? "the result of 1 finished background job" : `the results of ${jobCount} finished background jobs`;
+  const error = providerError?.trim().replace(/[.\s]+$/u, "");
+  const quoted = error && error.length > PROVIDER_REJECTION_QUOTE_CHARS
+    ? `${error.slice(0, PROVIDER_REJECTION_QUOTE_CHARS)}…` : error;
+  return `The automatic turn that returns ${results} failed to start ${attempts} times in a row, ` +
+    `before the provider accepted it${quoted ? `: ${quoted}` : ""}. Wollipog stopped retrying it and kept ` +
+    `${jobCount === 1 ? "the result" : "the results"}. Restart the session to deliver ${jobCount === 1 ? "it" : "them"}` +
+    " in a fresh provider process; a message the provider accepts also retries it.";
+}
 
 /** Recompute the live aggregate after a delivery receipt changes only part of the inventory. */
 function managedBackgroundWorkState(
@@ -1229,8 +1420,10 @@ function carryBackgroundWorkAcrossRestart(
         job.continuationRetryExhaustedAt !== undefined) return job;
     if (job.continuationSubmittedAt !== undefined) return { ...job, continuationMissingResultAt: now };
     if (!deliver) return { ...markRestart(job), continuationMissingResultAt: now };
+    // A fresh process is the recovery a held continuation named (#3542): it gets a fresh bound.
+    const { continuationLaunchFailures: _failures, continuationLaunchHeldAt: _held, ...carried } = markRestart(job);
     return {
-      ...markRestart(job),
+      ...carried,
       continuationId: job.continuationId ?? continuationId,
       continuationQueuedAt: job.continuationQueuedAt ?? now,
     };
@@ -1410,6 +1603,8 @@ function retainedSteeringPayloadBytes(text: string, images: PromptImageInput[]):
 }
 
 const STEERING_SUBMISSION_TIMEOUT_MS = 10_000;
+/** How long a prepared closure at a Location waits at its mutation fence for the commit (#4119). */
+const LOCATION_ISSUE_CLOSURE_COMMIT_WAIT_MS = 30_000;
 const MAX_STEERING_TERMINALS_PER_SESSION = 1_024;
 const MAX_UNRESOLVED_STEERING_ATTEMPTS_PER_SESSION = 50;
 const MAX_STEERING_RESULT_MESSAGE_CHARS = 4_096;
@@ -1563,6 +1758,22 @@ export class SessionManager {
   private readonly loggingOut = new Set<string>();
   /** Explicit stop waits for ACP session/close before this session may launch again. */
   private readonly closing = new Map<string, ProviderRetirement>();
+  /** Campaign generations of this process's providers that runner shutdown disposed mid-retirement
+   * or that exited unproven, awaiting the process-tree reaping that proves them gone (#3788). */
+  private readonly shutdownRetirements = new Map<string, Set<string>>();
+  /** Each provider instance that exited by itself (#3788), or whose Stop, park or handoff retirement
+   * completed (#4257), with its campaign generation, awaiting proof that its whole process tree is
+   * gone. A resumed provider of the same generation adds its own. */
+  private readonly treeProofRetirements = new Map<string, Map<Driver, string>>();
+  /** Fences an earlier runner process left for a generation this process has providers of again
+   * (#3788). Nothing this process proves covers that earlier provider, so they are never lifted. */
+  private readonly inheritedFences = new Map<string, string>();
+  /** Fences this runner process set itself (#4331): it may still prove them, at the latest when a
+   * shutdown reaps every provider tree, so they are never reported as a hold no process can lift. */
+  private readonly fencesSetHere = new Map<string, string>();
+  /** The process evidence a fence records, and the proof that an earlier runner process is gone (#4256). */
+  private retirementProof: RetirementProcessProof = leaseRetirementProcessProof();
+  private earlierRunnerProofTimer: ReturnType<typeof setTimeout> | null = null;
   /** A turn-boundary worktree move owns a retiring provider even after it leaves `active`.
    * Unlike an ordinary close, prompts may join its pre-launch FIFO while the conversation reopens. */
   private readonly worktreeRebindings = new Map<string, {
@@ -1579,6 +1790,8 @@ export class SessionManager {
     : transferCodexAccountTranscript(context, id, source, target);
   /** Turn-boundary provider-account handoffs share the worktree handoff's replacement guarantees
    * but keep a distinct lane so neither operation can accidentally consume the other's target. */
+  /** Tells the control plane an account's selection cooldown changed (#4353). */
+  onProviderAccountCooldown: (() => void) | undefined;
   private readonly providerAccountSwitches = new Map<string, {
     entry: ActiveSession;
     promise: Promise<void>;
@@ -1591,6 +1804,14 @@ export class SessionManager {
   private readonly deletedExpiry = new Map<string, ReturnType<typeof setTimeout>>();
   /** Every start captures one generation; delete/restart invalidates all older async continuations. */
   private readonly launchGenerations = new Map<string, number>();
+  /** The issue numbers this runner applied from a first-message reading's grant (#4269), remembered
+   * only for the launch generation that was already under way when the grant arrived. That launch
+   * was built from a spec predating the grant, so it may rebuild the session row without them; it,
+   * and only it, re-applies them. Any later launch gets its numbers from its own spec: a newer spec
+   * without them is the control plane's current authority and is never overridden. A new launch
+   * generation, any scope synchronization, the end of the launch, a stop and a deletion forget it.
+   * In memory only: after a runner restart the control plane's next spec carries the stored grant. */
+  private readonly grantedIssueNumbers = new Map<string, { launchGeneration: number; issueNumbers: number[] }>();
   /** The launch generation, per session, whose start asked to wait for a busy provider HOME
    * (#3240). Only that generation waits; a later launch of the same session does not. */
   private readonly providerHomeWaitLaunches = new Map<string, number>();
@@ -1641,6 +1862,14 @@ export class SessionManager {
   private readonly worktreeSetupEnvironments = new Map<string, {
     worktreePath: string;
     environment: Record<string, string>;
+  }>();
+  /** A Location switch's target worktree while its setup runs (#4209). Until the move's one metadata
+   * write the session belongs to its old Location, so what setup would record there is held here,
+   * and what a restart needs in order to reap it is in `record`, the attempt's journaled rollback. */
+  private readonly detachedWorktreeSetups = new WeakMap<SessionWorktreeView, {
+    record: WorktreeCleanupRecord;
+    hooks?: WorktreeHookSnapshot;
+    processMarker?: string;
   }>();
   private readonly worktreeSetupApprovals = new Map<string, (
     decision: "trusted" | "declined" | "dismissed" | "cancelled",
@@ -1713,6 +1942,8 @@ export class SessionManager {
   private readonly retainedResumableSessions = new Set<string>();
   private readonly parkedResumableSessions = new Set<string>();
   private readonly stateDir: string;
+  /** Closures at a Location waiting at their mutation fence for the control plane's commit (#4119). */
+  private readonly preparedLocationClosures = new Map<string, { commit: () => void; finished: Promise<GithubIssueClosureResultMessage> }>();
   /** Evidence for widening the provider-history classifier (#876). Nothing reads it to decide. */
   private readonly unclassifiedRejections: UnclassifiedRejectionJournal;
   private readonly providerStateReconcileTimer: ReturnType<typeof setInterval>;
@@ -1769,6 +2000,7 @@ export class SessionManager {
   /** Test seams keep forge availability and destructive Git behavior deterministic. */
   private readWorktreeBranch: typeof worktreeBranch = worktreeBranch;
   private discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch = mergedWorktreePullRequestForBranch;
+  private discoverAttachedWorktreePullRequest: typeof branchPullRequestForAttachedWorktree = branchPullRequestForAttachedWorktree;
   private probeMergedPullRequestContainment: typeof mergedPullRequestContainingHead = mergedPullRequestContainingHead;
   private resolveWorktreePullRequestState: typeof worktreePullRequestState = worktreePullRequestState;
   private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
@@ -1844,6 +2076,9 @@ export class SessionManager {
   }>();
 
   private sharedDirectoryWorkspaces: readonly RunnerConfigWorkspace[] = [];
+  /** (#4138) Existing worktrees a Location switch has chosen to continue in, by path, until its
+   * metadata records them: the window between the holder check and the move. */
+  private readonly reusedWorktreeClaims = new Map<string, string>();
   private sharedDirectoryForbiddenRoots: readonly string[] = [];
 
   /** Called by the host bootstrap, and again after a configured Workspace is removed (#4123). */
@@ -2473,8 +2708,26 @@ export class SessionManager {
     return block;
   }
 
+  /** The block a worktree that already exists gets at launch (#4209). A runner before #4395 could move a
+   * session without revalidating its row's block, so a row can name one another worktree took since,
+   * or one other than its owner holds. That refused every launch, since `ensureWorktreePortBlock` will
+   * not guess which side is right. Revalidating takes what this owner really holds, or a free block
+   * when another owner holds the row's: never one another owner holds, and never on a failure to find
+   * out. Returns the block when it changed. */
+  private settleWorktreePortBlock(meta: SessionMeta, worktree: SessionWorktreeView): WorktreePortBlock | undefined {
+    if (worktree.source === "attached" || !worktree.portBlock) {
+      this.ensureWorktreePortBlock(meta, worktree);
+      return undefined;
+    }
+    const settled = this.worktreePortAllocator.revalidate(this.worktreePortOwner(meta.sessionId, worktree.id), worktree.portBlock);
+    worktree.portBlock = settled.block;
+    return settled.replaced ? settled.block : undefined;
+  }
+
   private ensureWorktreeProcessMarker(meta: SessionMeta, worktree: SessionWorktreeView): string | undefined {
     if (worktree.source === "attached") return undefined;
+    const detached = this.detachedWorktreeSetups.get(worktree);
+    if (detached) return detached.processMarker ??= randomUUID();
     // Setup and shell-open callers may have crossed awaits with an older SessionMeta object. Merge
     // against the latest durable map so one worktree can never erase another worktree's marker.
     const latest = this.store.readMeta(meta.sessionId) ?? meta;
@@ -2513,6 +2766,15 @@ export class SessionManager {
     worktree: SessionWorktreeView,
     snapshot: WorktreeHookSnapshot,
   ): void {
+    const detached = this.detachedWorktreeSetups.get(worktree);
+    if (detached) {
+      detached.hooks = structuredClone(snapshot);
+      // Durable before any copy or step runs, so a crash from here on still runs its teardown.
+      detached.record.hooks = structuredClone(snapshot);
+      if (worktree.portBlock) detached.record.portBlock = { ...worktree.portBlock };
+      this.cleanupJournal.add(detached.record);
+      return;
+    }
     const latest = this.store.readMeta(sessionId);
     if (!latest) return;
     this.store.patchMeta(sessionId, {
@@ -2673,7 +2935,11 @@ export class SessionManager {
   }
 
   /** Every runner-created identity remains protected even while a sibling is selected or its
-   * cleanup is pending. Attached operator worktrees deliberately stay outside this boundary.
+   * cleanup is pending. Attached operator worktrees deliberately stay outside this boundary, except
+   * one a Location switch reused in place (#4138): the session works there as in one it created, so
+   * it gets the same Git write roots, read-only registration, command guard and driver veto. Every
+   * consumer of this list only restricts or grants Git access; none removes or reconfigures a
+   * worktree, so including it changes nothing about who may remove it.
    * Public because launch provisioning needs the same set the driver's veto uses.
    *
    * The session's own default worktree is also pinned to its branch (#1650): its identity is
@@ -2681,7 +2947,7 @@ export class SessionManager {
    * worktree recovery. A worktree the session created or attached for another branch is not. */
   managedWorktreeProtections(meta: SessionMeta): ManagedWorktreeProtection[] {
     return this.attributedWorktrees(meta)
-      .filter((worktree) => worktree.source !== "attached")
+      .filter((worktree) => worktree.source !== "attached" || worktree.reusedInPlace === true)
       .map((worktree) => ({
         worktreePath: worktree.path,
         repoPath: meta.repoPath,
@@ -2734,6 +3000,17 @@ export class SessionManager {
     return worktree.id;
   }
 
+  /** Wait until no worktree operation of this session is running or queued. A deleted session queues
+   * no new ones, since each checks that the session can still open first. */
+  private async settleWorktreeOperations(sessionId: string): Promise<void> {
+    for (let tail = this.worktreeOperations.get(sessionId); tail; tail = this.worktreeOperations.get(sessionId)) {
+      // Setup that began before deletion's own cancel, but registered its trust card after it, ends here.
+      void this.abortWorktreeSetup(sessionId);
+      await tail.catch(() => undefined);
+      if (this.worktreeOperations.get(sessionId) === tail) return;
+    }
+  }
+
   private runWorktreeOperation<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
     if (this.roleConversionPending(sessionId)) return Promise.reject(new Error("wait for the session role change to finish before changing worktrees"));
     const prior = this.worktreeOperations.get(sessionId) ?? Promise.resolve();
@@ -2750,6 +3027,7 @@ export class SessionManager {
     state: WorktreeSetupState,
   ): void {
     worktree.setup = state;
+    if (this.detachedWorktreeSetups.has(worktree)) return;
     const latest = this.store.readMeta(sessionId);
     if (!latest) return;
     const worktrees = this.attributedWorktrees(latest)
@@ -2760,6 +3038,7 @@ export class SessionManager {
   }
 
   private persistWorktreeView(sessionId: string, worktree: SessionWorktreeView): void {
+    if (this.detachedWorktreeSetups.has(worktree)) return;
     const latest = this.store.readMeta(sessionId);
     if (!latest) return;
     const worktrees = this.attributedWorktrees(latest)
@@ -2840,6 +3119,10 @@ export class SessionManager {
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
   }
 
+  private deletionUnderWay(sessionId: string): boolean {
+    return this.deleting.has(sessionId) || this.deleted.has(sessionId) || this.store.isDeleted(sessionId);
+  }
+
   private abortWorktreeSetup(sessionId: string): Promise<void> | undefined {
     const active = this.worktreeSetupRuns.get(sessionId);
     active?.controller.abort();
@@ -2910,6 +3193,10 @@ export class SessionManager {
     approvalSessionId = meta.sessionId,
     discoverConfig = false,
   ): Promise<"none" | "invalid" | "declined" | "cancelled" | "completed" | "failed"> {
+    // Deletion cancels setup once, as it begins, then waits for the worktree operations under way. One
+    // of those reaching setup only after that would wait on a trust card nobody can answer, and keep
+    // the deletion waiting with it, so no setup starts for a session being deleted.
+    if (this.deletionUnderWay(meta.sessionId)) return "cancelled";
     const active = this.worktreeSetupRuns.get(meta.sessionId);
     if (active) {
       await active.done;
@@ -2961,10 +3248,27 @@ export class SessionManager {
       return "none";
     }
     const priorPortBlock = worktree.portBlock;
-    this.ensureWorktreePortBlock(meta, worktree);
+    const replacedPortBlock = this.settleWorktreePortBlock(meta, worktree);
     const processMarker = this.ensureWorktreeProcessMarker(meta, worktree);
-    if (!priorPortBlock) this.persistWorktreeView(meta.sessionId, worktree);
+    if (!priorPortBlock || replacedPortBlock) this.persistWorktreeView(meta.sessionId, worktree);
+    if (replacedPortBlock && priorPortBlock) {
+      this.emitEvent(meta.sessionId, { kind: "error", message: `The worktree at ${worktree.path} had port block ` +
+        `${priorPortBlock.start}-${priorPortBlock.end}, which is no longer its own, so its port block changed to ` +
+        `${replacedPortBlock.start}-${replacedPortBlock.end}. Anything there that still uses the old ports needs the new ones.` });
+    }
     const portEnvironment = this.protectedWorktreeEnvironment(meta, worktree);
+    // A setup that ended belongs to a worktree that already exists: a launch restores its environment
+    // or goes without it, and it never runs setup again or fails over a configuration it cannot read
+    // right now. The row keeps what it finished, so a later launch can still restore it (#4209).
+    const settledSetup = !discoverConfig && (worktree.setup?.status === "completed" || worktree.setup?.status === "declined");
+    const launchWithoutSetupEnvironment = (): "none" => {
+      this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
+      if (worktree.setup?.status === "completed") {
+        this.emitEvent(meta.sessionId, { kind: "stderr", text: `The worktree setup configuration for ${worktree.branch} could not be read as it ` +
+          "was when setup finished, so its setup environment is not available for this launch. Setup did not run again." });
+      }
+      return "none";
+    };
     if (!discoverConfig && !worktree.setup && worktree.setupConfig?.status === "invalid") {
       this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
       return "invalid";
@@ -2984,6 +3288,7 @@ export class SessionManager {
     try {
       loaded = await loadWorktreeSetupConfig(meta.context, meta.repoPath, worktree.baseCommit);
     } catch (error) {
+      if (settledSetup) return launchWithoutSetupEnvironment();
       this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
       this.persistWorktreeSetupConfigStatus(meta.sessionId, worktree, {
         status: "invalid",
@@ -2992,6 +3297,7 @@ export class SessionManager {
       return "invalid";
     }
     if (signal.aborted) return "cancelled";
+    if (settledSetup && loaded && loaded.hash !== worktree.setup!.configHash) return launchWithoutSetupEnvironment();
     if (!loaded) {
       this.setWorktreeSetupEnvironment(meta.sessionId, worktree.path, portEnvironment);
       this.persistWorktreeSetupConfigStatus(meta.sessionId, worktree, { status: "absent" });
@@ -3048,12 +3354,15 @@ export class SessionManager {
           resolve(decision);
         };
         this.worktreeSetupApprovals.set(`${approvalSessionId}:${requestId}`, resolveApproval);
-        signal.addEventListener("abort", () => {
+        const cancelOnAbort = () => {
           const pending = this.worktreeSetupApprovals.get(`${approvalSessionId}:${requestId}`);
           if (pending !== resolveApproval) return;
           this.worktreeSetupApprovals.delete(`${approvalSessionId}:${requestId}`);
           resolveApproval("cancelled");
-        }, { once: true });
+        };
+        signal.addEventListener("abort", cancelOnAbort, { once: true });
+        // An abort that came first fires no listener, and would leave this waiting for good.
+        if (signal.aborted) cancelOnAbort();
       });
       const emitted = this.emitEvent(approvalSessionId, {
         kind: "permission_request",
@@ -3246,6 +3555,11 @@ export class SessionManager {
     if (this.store.readMeta(meta.sessionId)?.providerHistoryBlock) {
       throw new Error("this session's provider conversation is quarantined — recover it before changing worktrees");
     }
+    // A worktree a rollback still means to remove is never handed to the session: the rollback is
+    // proved against this very worktree, so it would take it back from under whoever selected it.
+    const rollback = this.cleanupJournal.list().find((record) => this.isAuxiliaryRollback(record) &&
+      record.sessionId === meta.sessionId && sameWorktreePath(meta.context, record.worktreePath, worktree.path));
+    if (rollback) throw new Error(this.pendingRemovalRefusal(rollback, worktree.branch));
     // A request can arrive during the current provider turn. Anchor that turn's remaining diff at
     // the newly selected tree so capture/checkpoint logic never compares two different worktrees.
     const baseTree = await withGitExecutionContext(meta.context, () => captureWorktreeTree(worktree.path));
@@ -3299,6 +3613,9 @@ export class SessionManager {
       ...(resumeAfterRecovery ? { status: "idle" as const } : {}),
     });
     if (!updated) throw new Error("session disappeared while its requested worktree was activating");
+    // The session has taken this worktree, so an earlier launch's rollback of it is over (#4209). Not
+    // before: an activation that fails above still leaves the worktree to that record.
+    this.endLaunchRollbacksAt(meta.sessionId, meta.context, worktree.path);
     const active = this.active.get(meta.sessionId);
     if (active) {
       active.worktree = { path: worktree.path, branch: worktree.branch, created: false };
@@ -3390,21 +3707,62 @@ export class SessionManager {
         allowedProjectPaths: this.configuredProjectPaths,
         onProgress: report,
       };
+      await this.refuseWhileRollbackPending(meta, (record) => record.branch === request.branch &&
+        sameWorktreePath(meta.context, record.repoPath, meta.repoPath));
       // When no base is chosen we ask the remote, and that answer is authoritative for BOTH the
       // base ref and the repository's default branch. `git fetch` never refreshes the locally
       // tracked remote HEAD, so preferring this avoids stamping a default that moved after clone.
       const advertised = request.baseRef ? null : await fetchRemoteDefaultBase(meta.repoPath, options);
       const baseRef = request.baseRef ?? advertised!.ref;
+      // On record only until Git has finished making it, so a failure or crash in between leaves an
+      // ordinary rollback rather than a tree no one owns. Its proof goes on to the rollback below,
+      // and is written before setup, so that rollback can prove what setup ran in.
+      const materializing: { record?: WorktreeCleanupRecord } = {};
       const created = await createRequestedWorktree(meta.repoPath, sessionId, {
         baseRef,
         branch: request.branch,
-      }, options);
+      }, {
+        ...options,
+        reserveWorktree: (path, branch, createsBranchAt) => {
+          const view: SessionWorktreeView = { id: worktreeIdForPath(path), path, branch, baseRef, source: "created" };
+          const record = this.cleanupRecordForWorktree(meta, view, "creation_rollback", "force");
+          record.auxiliaryWorktreeRollback = true;
+          // Nothing of setup's exists yet, and an earlier worktree's hooks or marker are not this one's.
+          delete record.hooks;
+          delete record.processMarker;
+          if (createsBranchAt) record.rollbackBranchBase = createsBranchAt;
+          this.cleanupJournal.add(record);
+          materializing.record = record;
+        },
+        materializedWorktree: async (path) => {
+          // Git has made a new worktree here, which it does only where none is, so one once kept here
+          // has gone. Not before: a reservation can still be refused by what is at the path.
+          this.forgetWorktreeKept(sessionId, path);
+          // So has whatever an earlier worktree on this path recorded under its id: this one's teardown
+          // and marker are only what its own setup gives it, and its rollback inherits none (#4209).
+          this.forgetWorktreeRecordsAt(sessionId, path, worktreeIdForPath(path));
+          const proof = randomUUID();
+          await stampWorktreeRollbackProof(path, proof, options);
+          materializing.record!.rollbackProof = proof;
+          this.cleanupJournal.add(materializing.record!);
+        },
+      }).catch(async (error: unknown) => {
+        if (materializing.record) {
+          await this.reapCreationRollback(materializing.record, meta).catch((rollbackError) => {
+            this.log(`requested worktree rollback for ${boundedSessionIdForLog(sessionId)} needs retry: ${errText(rollbackError)}`);
+          });
+        }
+        throw error;
+      });
+      if (materializing.record) this.removeWorktreeCleanupRecord(materializing.record);
+      const requestProof = materializing.record?.rollbackProof;
       if (!created.created) {
         const existing = this.attributedWorktrees(meta).find((item) =>
           item.source === "created" && sameWorktreePath(meta.context, item.path, created.path) &&
           item.branch === created.branch);
         if (!existing) {
-          throw new Error("requested worktree already exists without ownership by this session");
+          throw new Error(`requested worktree already exists without ownership by this session, at ${created.path}. Attach it to ` +
+            "continue in it, or remove it if nothing needs it, then try again");
         }
         const canonical: SessionWorktreeView = { ...existing, path: created.path };
         // An idempotent retry still asked the remote, so it still learned the current default and
@@ -3426,8 +3784,16 @@ export class SessionManager {
       // have one; the local read is the fallback for a caller-chosen base, which never contacts
       // the remote and so can only offer the possibly stale tracked HEAD.
       const defaultBranch = advertised?.branch ?? await readRepositoryDefaultBranch(meta.repoPath, options);
+      const spendRequestProof = (): void => {
+        if (!requestProof) return;
+        void clearWorktreeRollbackProof(created.path, requestProof, options).catch((error) => {
+          this.log(`session ${boundedSessionIdForLog(sessionId)} left a spent rollback proof in its worktree: ${errText(error)}`);
+        });
+      };
+      // From the whole path, as for a switch target or an attached worktree (#4209): the path's last
+      // segment hashes the branch name alone, which another Location's worktree on that branch shares.
       const worktree: SessionWorktreeView = {
-        id: created.path.split(/[\\/]/u).at(-1)!,
+        id: worktreeIdForPath(created.path),
         path: created.path,
         branch: created.branch,
         baseRef: created.baseRef,
@@ -3454,8 +3820,12 @@ export class SessionManager {
           });
         }
         report("activating");
-        return { worktree, ...await this.activateWorktreeWithNotice(meta, worktree, requester) };
+        const activated = await this.activateWorktreeWithNotice(meta, worktree, requester);
+        spendRequestProof();
+        return { worktree, ...activated };
       } catch (error) {
+        // Kept for a retry of its setup, so no rollback will ever ask for this proof.
+        if ((error as { retainWorktree?: boolean }).retainWorktree) spendRequestProof();
         if (created.created && !(error as { retainWorktree?: boolean }).retainWorktree) {
           try {
             const cleanupMeta = this.store.readMeta(sessionId) ?? meta;
@@ -3466,9 +3836,13 @@ export class SessionManager {
               "force",
             );
             cleanup.auxiliaryWorktreeRollback = true;
-            this.cleanupJournal.add(cleanup);
+            if (requestProof) cleanup.rollbackProof = requestProof;
+            cleanup.rollbackBranchBase = created.baseCommit;
+            await this.recordRollbackSnapshot(cleanup);
             await this.reapCreationRollback(cleanup, cleanupMeta);
-            this.forgetTransientWorktreeSetupState(sessionId, worktree);
+            // Only a worktree that really went takes its row with it. One kept or still stuck stays
+            // listed, holding its ports, so the session can find it and a retry can use it.
+            if (cleanup.worktreeRemovedAt) this.forgetTransientWorktreeSetupState(sessionId, worktree);
           } catch {
             this.log(`requested worktree cleanup for ${boundedSessionIdForLog(sessionId)} needs operator attention`);
           }
@@ -3556,11 +3930,14 @@ export class SessionManager {
   }> {
     const requester = options.requestedBySession ? this.requestingTurn(sessionId) : undefined;
     return this.runWorktreeOperation(sessionId, async () => {
-      const meta = this.store.readMeta(sessionId);
+      let meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
       if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
         throw new Error("session worktrees are available only on host execution targets");
       }
+      const context = meta.context;
+      await this.refuseWhileRollbackPending(meta, (record) => sameWorktreePath(context, record.worktreePath, path));
+      meta = this.store.readMeta(sessionId) ?? meta;
       const attached = await attachRequestedWorktree(meta.repoPath, sessionId, path, {
         context: meta.context,
         dataDir: this.dataDir,
@@ -3570,6 +3947,10 @@ export class SessionManager {
         // at the next launch instead of refusing a worktree the repository legitimately registers.
         allowedProjectPaths: this.configuredProjectPaths,
       });
+      if (await worktreeCheckoutNeverFinished(attached.path, { context: meta.context })) {
+        throw new Error(`the worktree at ${attached.path} never finished its checkout, so no session is put in it. Keep anything you ` +
+          "need from it, remove it (git worktree remove --force), delete its branch if nothing needs it, then ask again");
+      }
       // Re-attaching an already-attributed runner-owned tree must never launder it into an
       // operator-owned record that session deletion would deliberately retain.
       const existing = this.attributedWorktrees(meta)
@@ -3586,7 +3967,7 @@ export class SessionManager {
         // repository's default can move (`git remote set-head`) long after the worktree was linked.
         ? { ...existing, path: attached.path }
         : {
-          id: createHash("sha256").update(attached.path).digest("hex").slice(0, 16),
+          id: worktreeIdForPath(attached.path),
           path: attached.path,
           branch: attached.branch,
           baseCommit: attached.baseCommit,
@@ -3597,7 +3978,37 @@ export class SessionManager {
       // that no longer exists — and the contract on the field is that absent means unknown.
       if (attachedDefaultBranch) worktree.defaultBranch = attachedDefaultBranch;
       else delete worktree.defaultBranch;
-      return { worktree, ...await this.activateWorktreeWithNotice(meta, worktree, requester) };
+      const activate = async () => {
+        const result = { worktree, ...await this.activateWorktreeWithNotice(meta, worktree, requester) };
+        // An existing worktree's branch may already have a pull request (#4209). The lookup runs
+        // outside this lane and enters it only to record the link; reconciliation asks again later.
+        if (worktree.source === "attached") {
+          void this.linkAttachedWorktreePullRequest(sessionId, attached.path).catch((error) =>
+            this.log(`pull request lookup for an attached worktree failed for ${boundedSessionIdForLog(sessionId)}: ${errText(error)}`));
+        }
+        return result;
+      };
+      // A person's own attach is their decision, made in the app where they see the worktree, and is
+      // not checked: it is how a person deliberately puts a worktree in a session. An agent's attach
+      // is a tool call no person reviews, so it gets the switch's rule below.
+      if (!options.requestedBySession) return activate();
+      // An agent never moves itself into another session's worktree (#4209), whether that session
+      // took it with a Location switch, made it, attached it, or kept it from an earlier Location,
+      // and whether or not it is running: either would put two sessions in one worktree, or let that
+      // session's deletion or removal act under this one. Checked and claimed with no await between,
+      // like a switch, so neither a switch nor another attach takes it while this one activates.
+      // This session's own records, a pending cleanup among them, are handled above as before, and
+      // never hide another session's.
+      const holder = this.worktreeHolder(sessionId, meta.context, attached.path, { othersOnly: true });
+      if (holder) throw new Error(attachHolderRefusal(attached.path, holder));
+      if (this.reusedWorktreeClaims.has(attached.path)) return activate();
+      this.reusedWorktreeClaims.set(attached.path, sessionId);
+      try {
+        return await activate();
+      } finally {
+        // Once activation has written the row, the session's own record holds the worktree.
+        if (this.reusedWorktreeClaims.get(attached.path) === sessionId) this.reusedWorktreeClaims.delete(attached.path);
+      }
     });
   }
 
@@ -3674,8 +4085,11 @@ export class SessionManager {
     if (this.roleConversionPending(sessionId)) throw new Error("wait for the session role change to finish before selecting a worktree");
     const requester = options.requestedBySession ? this.requestingTurn(sessionId) : undefined;
     return this.runWorktreeOperation(sessionId, async () => {
-      const meta = this.store.readMeta(sessionId);
-      if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
+      const initial = this.store.readMeta(sessionId);
+      if (!initial || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
+      // One more try before any refusal, so clearing what blocked a rollback and selecting works.
+      await this.refuseWhileRollbackPending(initial, (record) => sameWorktreePath(initial.context, record.worktreePath, path));
+      const meta = this.store.readMeta(sessionId) ?? initial;
       const worktree = this.attributedWorktrees(meta)
         .find((item) => sameWorktreePath(meta.context, item.path, path));
       if (!worktree) throw new Error("worktree is not linked to this session");
@@ -4045,6 +4459,10 @@ export class SessionManager {
         if (!initial || !this.sessionCanOpen(sessionId)) return;
         const worktree = this.attributedWorktrees(initial)
           .find((item) => sameWorktreePath(initial.context, item.path, path));
+        if (worktree?.source === "attached" && !worktree.pullRequest) {
+          await this.linkAttachedWorktreePullRequest(sessionId, path, { preflightTimeoutMs: 8_000 });
+          return;
+        }
         if (!worktree || worktree.source === "attached" || worktree.pullRequest) return;
         const checkedOutBranch = await this.readWorktreeBranch(worktree.path, {
           context: initial.context,
@@ -4106,6 +4524,64 @@ export class SessionManager {
     });
   }
 
+  /** Link the pull request an attached worktree's branch already has (#4209): one a person or an agent
+   * attached, or a Location switch reused in place. Its row shows it and reconciliation keeps its
+   * state current. An attached worktree is never retired, so a merged or closed pull request removes
+   * nothing. Asked once after the attach or the move, then from reconciliation, with the same
+   * negative backoff discovery uses: a branch whose head and upstream are unchanged is not asked
+   * about again for half an hour. */
+  private async linkAttachedWorktreePullRequest(
+    sessionId: string,
+    path: string,
+    options: { preflightTimeoutMs?: number } = {},
+  ): Promise<void> {
+    const attachedRow = (meta: SessionMeta | null | undefined) => meta && this.attributedWorktrees(meta)
+      .find((item) => sameWorktreePath(meta.context, item.path, path) && item.source === "attached" &&
+        !item.pullRequest);
+    const initial = this.store.readMeta(sessionId);
+    if (!initial || !this.sessionCanOpen(sessionId)) return;
+    const worktree = attachedRow(initial);
+    if (!worktree) return;
+    const branch = await this.readWorktreeBranch(worktree.path, {
+      context: initial.context, ...(options.preflightTimeoutMs ? { timeoutMs: options.preflightTimeoutMs } : {}),
+    });
+    if (!branch || branch !== worktree.branch) return;
+    const pathKey = JSON.stringify([sessionId, worktree.path]);
+    let attempted: string | undefined;
+    let unavailable = false;
+    const found = await this.discoverAttachedWorktreePullRequest(worktree.path, branch, {
+      context: initial.context,
+      ...(options.preflightTimeoutMs ? { preflightTimeoutMs: options.preflightTimeoutMs } : {}),
+      onForgeAttempt: (identity) => {
+        const retry = this.worktreePullRequestDiscoveryRetryAt.get(pathKey);
+        if (retry?.identity === identity && retry.retryAt > this.worktreePullRequestDiscoveryNow()) return false;
+        attempted = identity;
+        return true;
+      },
+      onForgeUnavailable: () => { unavailable = true; },
+    });
+    if (!found) {
+      if (attempted && !unavailable) {
+        this.worktreePullRequestDiscoveryRetryAt.set(pathKey, {
+          identity: attempted,
+          retryAt: this.worktreePullRequestDiscoveryNow() + WORKTREE_PR_DISCOVERY_NEGATIVE_RETRY_MS,
+        });
+      }
+      return;
+    }
+    this.worktreePullRequestDiscoveryRetryAt.delete(pathKey);
+    await this.runWorktreeOperation(sessionId, async () => {
+      const latest = this.store.readMeta(sessionId);
+      const current = attachedRow(latest);
+      // An explicit link made meanwhile wins, and a row now on another branch is not this one.
+      if (!latest || !current || current.branch !== worktree.branch) return;
+      const worktrees = this.attributedWorktrees(latest).map((item) =>
+        sameWorktreePath(latest.context, item.path, current.path) ? { ...item, pullRequest: found } : item);
+      const updated = this.store.patchMeta(sessionId, { worktrees });
+      if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    });
+  }
+
   private cleanupRecordForWorktree(
     meta: SessionMeta,
     worktree: SessionWorktreeView,
@@ -4148,6 +4624,75 @@ export class SessionManager {
       ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}),
       ...(verifiedMergedHead ? { verifiedMergedHead } : {}),
     };
+  }
+
+  /** Whether a record is a launch's own rollback of the session worktree it made: not a requested or
+   * switch worktree's rollback, which has its own proof and snapshot. */
+  private isLaunchRollback(record: WorktreeCleanupRecord): boolean {
+    return record.trigger === "creation_rollback" && !this.isAuxiliaryRollback(record);
+  }
+
+  /** The session now works in, or has taken back, the worktree at `path`. A launch rollback still on
+   * record for it was for a worktree that never became anyone's, and it has now (#4209): a removal that
+   * could not finish in its own attempt, such as one whose identity check refused, would otherwise run
+   * at the next restart over everything done there since. It ends without removing anything. The
+   * worktree's ports and processes are the session's own now, so they are left as well. */
+  private endLaunchRollbacksAt(sessionId: string, context: AgentContext, path: string): void {
+    for (const record of this.cleanupJournal.list()) {
+      if (record.sessionId !== sessionId || !this.isLaunchRollback(record) ||
+          !sameWorktreePath(context, record.worktreePath, path)) continue;
+      if (this.removeWorktreeCleanupRecord(record)) {
+        this.log(`worktree rollback for ${boundedSessionIdForLog(sessionId)} dropped: the session took that worktree back`);
+      }
+    }
+  }
+
+  /** A session deletion's record for a worktree the runner kept for someone's work (#4209) leaves it
+   * where it is, on its branch: the runner said so when it kept it. Deletion still stops what runs
+   * there and gives back its ports. */
+  private keepIfKept(meta: SessionMeta, worktree: SessionWorktreeView, record: WorktreeCleanupRecord): WorktreeCleanupRecord {
+    if (!this.worktreeKept(meta, worktree.path) && !this.listedByAnotherSession(meta.sessionId, meta.context, worktree.path)) return record;
+    return { ...record, keepWorktree: true, preserveBranch: true };
+  }
+
+  /** The worktrees a runner that did not record its keeps could have kept: any from a Location the
+   * session left, or not selected. */
+  private keptWorktreeCandidates(meta: SessionMeta): SessionWorktreeView[] {
+    return [
+      ...this.attributedWorktrees(meta).filter((item) => !meta.worktreePath || !sameWorktreePath(meta.context, item.path, meta.worktreePath)),
+      ...(meta.locationHistory ?? []).flatMap((left) => left.worktrees),
+    ].filter((item) => item.source !== "attached");
+  }
+
+  /** A session from a runner that did not record its keeps (#4209). Which of its worktrees that runner
+   * kept cannot be known, so any that one could have kept, from a Location it left or not selected,
+   * counts as kept when it holds work found nowhere else. The one it works in is its own, so deletion
+   * still removes that as before. */
+  private async backfillKeptWorktrees(meta: SessionMeta, candidates: SessionWorktreeView[]): Promise<void> {
+    for (const worktree of candidates) {
+      if (await worktreeHoldsUnsharedWork(worktree.path, worktree.baseCommit, { context: meta.context })) {
+        this.log(`deleting session ${boundedSessionIdForLog(meta.sessionId)} keeps an earlier worktree that holds unshared work`);
+        this.markWorktreeKept(meta.sessionId, worktree.path);
+      }
+    }
+    this.store.patchMeta(meta.sessionId, { keptWorktreesTracked: true });
+  }
+
+  /** A requested or switch worktree's rollback still on record for this exact row. */
+  private pendingRollbackFor(meta: SessionMeta, worktree: SessionWorktreeView): WorktreeCleanupRecord | undefined {
+    return this.cleanupJournal.list().find((record) => this.isAuxiliaryRollback(record) && record.sessionId === meta.sessionId &&
+      (record.worktreeId ?? "legacy") === worktree.id && sameWorktreePath(meta.context, record.worktreePath, worktree.path));
+  }
+
+  /** Whether any other session on this runner, live or archived, works in or lists the worktree at
+   * `path`. Deleting one session never removes a worktree another one has: a fork copied rows it
+   * never owned, say, or another session attached it. */
+  private listedByAnotherSession(sessionId: string, context: AgentContext, path: string): boolean {
+    const same = (candidate: string | null | undefined) => !!candidate && sameWorktreePath(context, candidate, path);
+    // Its rows include its selected worktree, which attributedWorktrees adds when no row names it.
+    return this.store.listSessions().some((other) => other.sessionId !== sessionId && (
+      this.attributedWorktrees(other).some((item) => same(item.path)) ||
+      (other.locationHistory ?? []).some((left) => same(left.worktreePath) || left.worktrees.some((item) => same(item.path)))));
   }
 
   private async retireWorktreeProcesses(
@@ -4357,6 +4902,17 @@ export class SessionManager {
       record.cleanupId = randomUUID();
       this.cleanupJournal.add(record);
     }
+    if (record.keepWorktree) {
+      // The runner's part in it ends here: nothing it started there runs on, and no teardown, which
+      // is repository code, runs over what someone kept. The worktree and its branch stay.
+      try {
+        await this.retireWorktreeProcesses(record.sessionId, record.context, record.worktreePath, record.processMarker);
+      } catch {
+        return { removed: false, reason: "unavailable" };
+      }
+      this.log(`deleting session ${boundedSessionIdForLog(record.sessionId)} left a worktree the runner had kept in place`);
+      return { removed: true };
+    }
     const retainRefs = async (candidates: RetainedWorktreeRefCandidate[]) => {
       const now = Date.now();
       for (const candidate of candidates) {
@@ -4395,14 +4951,39 @@ export class SessionManager {
       );
       record.processesTerminatedAt = Date.now();
       this.cleanupJournal.add(record);
+      // A keep that landed while the processes were ending (#4209) runs no teardown, which is repository
+      // code, over what was kept. The callers read the keep again and remove nothing.
+      if (record.keepWorktree) return;
+      // Ending processes can take a long time, and a teardown is repository code that should not run
+      // over someone's work, so this is proved again before it as well as before the forced removal.
+      await this.assertRollbackUntouched(record);
       await this.runCleanupTeardown(record, meta);
+      // A file that appears during teardown may be the teardown's or a person's. Nothing can say, so
+      // it counts as changed like any other, and the worktree is kept.
+      await this.assertRollbackUntouched(record);
     };
     // A branch that existed before this worktree (#4138) is never deleted, and its worktree is
-    // removed only when nothing in it changed; otherwise the worktree stays for its person.
-    if (record.preserveBranch) {
+    // removed only when nothing in it changed; otherwise the worktree stays for its person. An
+    // auxiliary rollback also comes here, whatever its branch: it never deletes a branch by name.
+    // A keep can land on a deletion's record while its processes are ending (#4209). It is read again
+    // here, as the last thing before Git removes anything.
+    const keptMeanwhile = (): boolean => !!record.keepWorktree;
+    if (record.preserveBranch || this.isAuxiliaryRollback(record)) {
       try {
         await beforeRemove();
-        await releaseRecoveredWorktree(record.repoPath, record.worktreePath, { context: record.context });
+        if (keptMeanwhile()) return { removed: true };
+        // A rollback removes what this runner just checked out, and what setup then left in it,
+        // having proved nothing else is there. A branch the attempt made goes only while it is
+        // still where the attempt made it (#4209).
+        await releaseRecoveredWorktree(record.repoPath, record.worktreePath, { context: record.context },
+          { force: record.trigger === "creation_rollback" });
+        if (record.rollbackBranchBase && record.branch && !record.preserveBranch) {
+          const released = await releaseUnchangedBranch(record.repoPath, record.branch, record.rollbackBranchBase, { context: record.context });
+          if (!released && this.store.has(record.sessionId)) {
+            this.emitEvent(record.sessionId, { kind: "error", message: `Branch ${record.branch} was kept because it no longer matches what the ` +
+              "failed attempt made, and it may hold commits. A later switch that needs that branch name asks you to recover or delete it." });
+          }
+        }
         return { removed: true };
       } catch {
         return { removed: false, reason: "unavailable" };
@@ -4431,6 +5012,7 @@ export class SessionManager {
     }
     try {
       await beforeRemove();
+      if (keptMeanwhile()) return { removed: true };
       const ownedWslPath = record.context.kind === "wsl" && this.runnerOwnerHash &&
         record.worktreePath.includes(`/runner-instances/${this.runnerOwnerHash}/worktrees/`);
       await removeWorktree(
@@ -4975,10 +5557,15 @@ export class SessionManager {
     if (record.worktreeId) delete worktreeProcessMarkers[record.worktreeId];
     const removedActiveSelection = !!latest.worktreePath &&
       sameWorktreePath(latest.context, latest.worktreePath, record.worktreePath);
+    // A worktree once kept at this path has gone with this removal, so nothing there is kept now.
+    const keptWorktreePaths = record.worktreeRemovedAt
+      ? latest.keptWorktreePaths?.filter((kept) => !sameWorktreePath(latest.context, kept, record.worktreePath))
+      : latest.keptWorktreePaths;
     const updated = this.store.patchMeta(record.sessionId, {
       worktrees,
       worktreeHooks: Object.keys(worktreeHooks).length ? worktreeHooks : undefined,
       worktreeProcessMarkers: Object.keys(worktreeProcessMarkers).length ? worktreeProcessMarkers : undefined,
+      keptWorktreePaths: keptWorktreePaths?.length ? keptWorktreePaths : undefined,
       ...(removedActiveSelection
         ? { worktreePath: null, worktreeBranch: undefined, lastTurnBaseTree: undefined }
         : {}),
@@ -5159,7 +5746,9 @@ export class SessionManager {
         const meta = this.store.readMeta(candidate.sessionId);
         if (!meta || !this.sessionCanOpen(candidate.sessionId)) return [];
         return this.attributedWorktrees(meta)
-          .filter((worktree) => !worktree.pullRequest && worktree.source !== "attached")
+          // An attached worktree (one a person or an agent attached, or a switch reused) is linked too,
+          // for its row only: it is never retired.
+          .filter((worktree) => !worktree.pullRequest)
           .map((worktree) => ({ sessionId: candidate.sessionId, path: worktree.path }));
       });
       await this.discoverUnlinkedMergedWorktreesForReconciliation(unlinked);
@@ -5252,7 +5841,7 @@ export class SessionManager {
   private async replayDeferredWorktreeRetirements(): Promise<void> {
     for (const record of this.cleanupJournal.list()) {
       if (this.shuttingDown) return;
-      if (record.removalMode !== "safe") continue;
+      if (record.removalMode !== "safe" && !this.rollbackRetryDue(record)) continue;
       try {
         await this.reapWorktree(record);
       } catch (error) {
@@ -5539,6 +6128,21 @@ export class SessionManager {
    * the account chosen in authentication recovery), recording the profile id the runner verified
    * for its HOME when the configuration lacks one (#3239). Existing bindings never pass here. */
   private resolveNewProviderAccountBinding(spec: SessionLaunchSpec): BoundProviderAccount | undefined {
+    // #4353: a policy chose this account at dispatch, maybe a while ago. If it can't be used now the
+    // launch stops and says why, rather than running on it or quietly choosing another. A retry of
+    // an accepted launch never reaches here: `bindSessionProviderAccount` keeps its recorded account.
+    // This precedes the lookup below, whose errors name the account.
+    if (spec.providerAccountId && spec.providerAccountSelection?.revalidateAtLaunch) {
+      const accountId = spec.providerAccountId;
+      const reason = providerAccountLaunchIneligibility(
+        this.providerAccounts().find((candidate) => candidate.id === accountId),
+        { usage: this.subscriptionUsageInventory().find((snapshot) => snapshot.providerAccountId === accountId), now: Date.now() },
+      );
+      if (reason) {
+        throw new Error(`The account chosen for this session ${PROVIDER_ACCOUNT_SKIP_TEXT[reason]} now. ` +
+          "Start the session again to choose again, or pick an account.");
+      }
+    }
     const account = this.resolveProviderAccount?.(spec);
     if (!account || account.profileId !== undefined) return account;
     const profileId = this.providerProfileForBinding(account);
@@ -5610,6 +6214,7 @@ export class SessionManager {
   async probeProviderAccountAuthentication(
     agent: AgentDefinition,
     env: Record<string, string>,
+    observed?: (observation: { billing?: ProviderAccountBilling }) => void,
   ): Promise<"authenticated" | "unauthenticated" | "unknown"> {
     const driver = agent.driver ?? "acp";
     const context = agent.context ?? { kind: "native" as const };
@@ -5647,7 +6252,9 @@ export class SessionManager {
     const processes: Promise<boolean>[] = [];
     try {
       if (this.shuttingDown) return "unknown";
-      return (await controller.revalidate(meta, { onProcess: (proof) => processes.push(proof) })).status;
+      const observation = await controller.revalidate(meta, { onProcess: (proof) => processes.push(proof) });
+      observed?.(observation);
+      return observation.status;
     } finally {
       await this.settleProviderProcessReference(reference, processes);
     }
@@ -5873,7 +6480,9 @@ export class SessionManager {
         protocolVersion,
       ), protocolVersion);
       const meta = runnerSupportsProtocol(protocolVersion, "backgroundFollowUp") ? this.store.readMeta(snapshot.id) : null;
-      return meta ? { ...projected, backgroundFollowUp: this.backgroundFollowUp(meta) } : projected;
+      // A reconnect is where an earlier process's fence is first reported (#4331).
+      const hold = meta && runnerSupportsProtocol(protocolVersion, "campaignRetirementHold") ? this.campaignRetirementHold(meta) : {};
+      return meta ? { ...projected, backgroundFollowUp: this.backgroundFollowUp(meta), ...hold } : projected;
     });
   }
 
@@ -5920,6 +6529,7 @@ export class SessionManager {
         ? { providerHomeWait: this.providerHomeWaits.get(meta.sessionId)?.view ?? null } : {}),
       ...(runnerSupportsProtocol(protocolVersion, "worktreeSwitchStatus")
         ? { worktreeSwitch: this.publishedWorktreeSwitches.get(meta.sessionId) ?? null } : {}),
+      ...(runnerSupportsProtocol(protocolVersion, "campaignRetirementHold") ? this.campaignRetirementHold(meta) : {}),
     };
   }
 
@@ -5968,9 +6578,12 @@ export class SessionManager {
   /** Project execution evidence, never infer it from the session lifecycle alone. */
   private backgroundFollowUp(meta: SessionMeta): BackgroundFollowUpView | null {
     if (meta.backgroundWorkState !== "continuation_pending") return null;
+    // A continuation held after bounded launch failures (#3542) is neither queued nor retrying; the
+    // session's own status names that hold and its recovery.
     const jobs = (meta.backgroundJobs ?? []).filter((job) => job.continuationQueuedAt != null &&
       job.continuationRequired && !job.assistantResultPersistedAt &&
-      !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
+      !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt &&
+      job.continuationLaunchHeldAt === undefined);
     if (!jobs.length) return null;
     const queuedAt = Math.min(...jobs.map((job) => job.continuationQueuedAt!));
     const entry = this.active.get(meta.sessionId);
@@ -6212,6 +6825,12 @@ export class SessionManager {
     const pendingWorktreeCleanup = this.cleanupJournal.list();
     const currentCheckpointOwnershipKeys = new Set<string>();
     void this.reconcileProviderStateStorage();
+    // Fences a crashed or unproven runner process left (#4256), before any relaunch can inherit one.
+    try {
+      if (this.proveEarlierRunnerRetirements()) this.scheduleEarlierRunnerRetirementProof();
+    } catch (error) {
+      this.log(`earlier runner retirement proof failed: ${errText(error)}`);
+    }
     for (const m of this.store.listSessions()) {
       if (this.store.isDeleted(m.sessionId)) {
         void this.delete(m.sessionId).catch((error) => {
@@ -7039,7 +7658,7 @@ export class SessionManager {
         driver: spec.driver ?? "acp",
         context,
         config: spec.config ?? {},
-        orchestrator: (() => { const saved = this.store.readMeta(spec.sessionId)?.orchestrator; return (saved?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? saved : spec.orchestrator ?? saved; })(),
+        orchestrator: launchOrchestratorMeta(this.store.readMeta(spec.sessionId)?.orchestrator, spec.orchestrator),
         executionTarget: spec.executionTarget ?? this.store.readMeta(spec.sessionId)?.executionTarget,
       });
     } catch (error) {
@@ -7247,6 +7866,10 @@ export class SessionManager {
       providerAccountSwitchFailure: prior?.providerAccountSwitchFailure,
       // (#4138) The Locations this session left keep their worktrees attributed across restarts.
       locationHistory: prior?.locationHistory,
+      // Kept in any Location, like that history, so a relaunch never makes deletion forget them.
+      keptWorktreePaths: prior?.keptWorktreePaths,
+      // A session this runner makes records every keep from the start. One made earlier has not been.
+      keptWorktreesTracked: prior ? prior.keptWorktreesTracked : true,
       pendingLocationSwitch: priorMatchesWorkspace ? prior?.pendingLocationSwitch : undefined,
       pendingLocationContinuation: priorMatchesWorkspace ? prior?.pendingLocationContinuation : undefined,
       locationSwitchFailure: prior?.locationSwitchFailure,
@@ -7287,9 +7910,15 @@ export class SessionManager {
       config: spec.config ?? {},
       campaignBudgetDispatch: spec.campaignBudgetDispatch,
       campaignBudgetCheckpoint: undefined,
+      // A relaunch under the same generation does not prove an earlier provider of it gone (#3788),
+      // and this process now runs a provider of it too (#4256).
+      ...(prior?.retiringProviderGeneration !== undefined &&
+          prior.retiringProviderGeneration === spec.campaignBudgetDispatch?.generation
+        ? { retiringProviderGeneration: prior.retiringProviderGeneration,
+            retiringProviderRunners: this.fenceRunnersWithThisProcess(prior.retiringProviderRunners, { context, executionTarget }) } : {}),
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
-      orchestrator: (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator,
+      orchestrator: this.withAppliedIssueGrant(spec.sessionId, launchGeneration, launchOrchestratorMeta(prior?.orchestrator, spec.orchestrator)),
       ...(spec.uiEvidenceReviewer ? { uiEvidenceReviewer: { reviewId: spec.uiEvidenceReviewer.reviewId } } : {}),
       ...(spec.review ? { review: {
         ...spec.review, checkout: repoPath, launchOwner: this.lockOwner,
@@ -7380,6 +8009,12 @@ export class SessionManager {
         }
         meta.seq = latest.seq;
         meta.logEpoch = latest.logEpoch;
+        // An exit proof can lift the fence while this write waits its turn (#3788).
+        meta.retiringProviderGeneration = latest.retiringProviderGeneration !== undefined &&
+          latest.retiringProviderGeneration === meta.campaignBudgetDispatch?.generation
+          ? latest.retiringProviderGeneration : undefined;
+        meta.retiringProviderRunners = meta.retiringProviderGeneration === undefined ? undefined
+          : this.fenceRunnersWithThisProcess(latest.retiringProviderRunners, meta);
         const latestMatchesWorkspace = latest.repoPath === repoPath &&
           agentContextKey(latest.context) === agentContextKey(context);
         shouldUseWorktree = spec.useWorktree || latestMatchesWorkspace && !!latest.worktreePath &&
@@ -7389,6 +8024,11 @@ export class SessionManager {
         meta.worktrees = latestMatchesWorkspace ? latest.worktrees : undefined;
         meta.worktreeHooks = latestMatchesWorkspace ? latest.worktreeHooks : undefined;
         meta.worktreeProcessMarkers = latestMatchesWorkspace ? latest.worktreeProcessMarkers : undefined;
+        // An operation that ran meanwhile may have kept a worktree, or forgotten the rows of one it kept
+        // (#4209). Both belong to every Location, so they come from here whatever the workspace.
+        meta.keptWorktreePaths = latest.keptWorktreePaths;
+        meta.keptWorktreesTracked = latest.keptWorktreesTracked;
+        meta.locationHistory = latest.locationHistory;
         meta.lastTurnBaseTree = latest.lastTurnBaseTree;
         meta.turnCount = latest.turnCount ?? 0;
         meta.forkPoints = latest.forkPoints ?? {};
@@ -7491,16 +8131,24 @@ export class SessionManager {
     const launchWorktreeCleanup = (): WorktreeCleanupRecord => {
       if (!worktree) throw new Error("worktree cleanup requested before materialization");
       const latest = this.store.readMeta(spec.sessionId) ?? meta;
+      // A worktree remade on a branch that already held commits: undoing this launch removes the
+      // worktree and keeps the branch (#4209). Only the rollback record carries this, so the session's
+      // own row, and what deleting the session later does, stay as they were.
+      const keptBranch = worktree.branchPreexisted ? { preserveBranch: true } : {};
       if (worktreeIdentity) {
-        return this.cleanupRecordForWorktree(
-          latest,
-          { ...worktreeIdentity, path: worktree.path, branch: worktree.branch },
-          "creation_rollback",
-          "force",
-        );
+        return {
+          ...this.cleanupRecordForWorktree(
+            latest,
+            { ...worktreeIdentity, path: worktree.path, branch: worktree.branch },
+            "creation_rollback",
+            "force",
+          ),
+          ...keptBranch,
+        };
       }
       const checkpointOwnerHash = this.checkpointOwnerHash(meta);
       return {
+        ...keptBranch,
         sessionId: spec.sessionId,
         worktreeId: "legacy",
         repoPath,
@@ -7576,10 +8224,16 @@ export class SessionManager {
           // Legacy/test materializers omit the marker and historically represented a newly
           // created tree. Only an explicit false proves that this call reused durable state.
           worktreeOwnedByLaunch = worktree.created !== false;
+          // An earlier launch's rollback of this path is over either way. A worktree that was already
+          // there is taken back by this launch. One made just now is new where nothing was, so the
+          // earlier one is gone, and so is anything kept there. This launch's own rollback, if it
+          // needs one, is recorded afresh.
+          this.endLaunchRollbacksAt(spec.sessionId, context, worktree.path);
+          if (worktreeOwnedByLaunch) this.forgetWorktreeKept(spec.sessionId, worktree.path);
           if (worktreeOwnedByLaunch && worktreeIdentity && !worktreeIdentity.baseCommit) {
             worktreeIdentity = {
               ...worktreeIdentity,
-              baseRef: "HEAD",
+              baseRef: worktree.baseRef ?? "HEAD",
               baseCommit: await worktreeHead(worktree.path, worktreeOptions),
             };
           }
@@ -7697,7 +8351,11 @@ export class SessionManager {
                 worktreeBranch: prior!.worktreeBranch,
                 worktreePending: false,
               });
-              if (retained) this.recordWorktreeRecovery(retained, selected, failure, "during restart preparation");
+              if (retained) {
+                // The session holds this worktree again, so no earlier launch's rollback may take it.
+                this.endLaunchRollbacksAt(spec.sessionId, context, selected);
+                this.recordWorktreeRecovery(retained, selected, failure, "during restart preparation");
+              }
               if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
               this.releaseAdmissionIfInactive(spec.sessionId);
               durable?.failed(`${failure}; this message was not sent`, "WORKTREE_RECOVERY_REQUIRED");
@@ -7798,6 +8456,7 @@ export class SessionManager {
           worktrees,
           worktreePending: false,
         });
+        this.endLaunchRollbacksAt(spec.sessionId, context, worktree.path);
       } else {
         meta.worktreePath = null;
         meta.worktrees = worktrees;
@@ -8169,6 +8828,9 @@ export class SessionManager {
     // and a deletion marker generation never records a path of its own to overwrite it.
     this.launchingWorktreePaths.delete(sessionId);
     this.providerHomeWaitLaunches.delete(sessionId);
+    // A grant that raced with the superseded launch belongs to it alone (#4269): this launch's
+    // spec, or a grant arriving while it prepares, decides its issue numbers.
+    this.forgetIssueGrant(sessionId);
     const generation = ++this.nextLaunchGeneration;
     this.launchGenerations.set(sessionId, generation);
     this.latestLaunchGenerations.set(sessionId, generation);
@@ -8176,6 +8838,7 @@ export class SessionManager {
   }
 
   private finishLaunchGeneration(sessionId: string, generation: number): void {
+    this.forgetIssueGrant(sessionId, generation);
     if (this.launchGenerations.get(sessionId) !== generation) return;
     this.launchGenerations.delete(sessionId);
     this.providerHomeWaitLaunches.delete(sessionId);
@@ -8199,6 +8862,7 @@ export class SessionManager {
     const queuedPreparation = this.cancelWorktreePreparationWait(sessionId);
     this.launchGenerations.delete(sessionId);
     this.providerHomeWaitLaunches.delete(sessionId);
+    this.forgetIssueGrant(sessionId);
     this.forgetLaunchingWorktreePath(sessionId, generation);
     this.syncWorktreeSwitch(sessionId);
     return activePreparation || queuedPreparation || setupActive;
@@ -8570,7 +9234,16 @@ export class SessionManager {
     const continuationPending = meta.backgroundWorkState === "continuation_pending" ||
       !!meta.backgroundJobs?.some((job) => job.continuationRequired &&
         !job.assistantResultPersistedAt && !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
-    return continuationPending && automaticClaudeRecoveryAllowed(meta) && !this.backgroundRecoveryHeld(meta);
+    // A continuation held after bounded launch failures (#3542) waits for a person and keeps no
+    // permit, unless detached work is running beside it: an owed result keeps the aggregate state at
+    // continuation_pending, so a live job's pending id is what still holds the permit then. An
+    // orphaned job's id is a diagnostic, not execution, until its recovery observes it live again.
+    const orphan = meta.orphanedWork;
+    const livePendingTaskIds = (meta.pendingBackgroundTaskIds ?? []).filter((id) => !orphan ||
+      !orphan.pendingTaskIds.includes(id) || !!orphan.recoveryObservedTaskIds?.includes(id));
+    const onlyHeldResults = backgroundContinuationsAllLaunchHeld(meta) && livePendingTaskIds.length === 0;
+    return continuationPending && !onlyHeldResults &&
+      automaticClaudeRecoveryAllowed(meta) && !this.backgroundRecoveryHeld(meta);
   }
 
   private settleActiveWorkPermit(sessionId: string, entry: ActiveSession): void {
@@ -9454,11 +10127,26 @@ export class SessionManager {
       }
       // Scope synchronization can finish during any preparation or provider-home wait.
       // Refresh at the last synchronous boundary before the driver captures its live policy.
-      const authoritativeScope = this.store.readMeta(sessionId)?.orchestrator?.issueScope;
+      const stored = this.store.readMeta(sessionId)?.orchestrator;
+      const authoritativeScope = stored?.issueScope;
       if (meta.orchestrator && authoritativeScope && authoritativeScope.revision > (meta.orchestrator.issueScope?.revision ?? 0)) {
         meta.orchestrator.issueNumbers = [...authoritativeScope.issueNumbers];
         meta.orchestrator.issueScope = authoritativeScope;
+      } else if (meta.orchestrator && !meta.orchestrator.issueScope && !meta.orchestrator.issueNumbers?.length && !authoritativeScope &&
+          meta.orchestrator.control?.mode !== "full_control" && stored?.control?.mode !== "full_control") {
+        // Issue numbers a first-message reading granted while this launch prepared (#4269), stored
+        // or (when a restart's metadata replacement rewrote the row from an older spec) applied. They
+        // only ever fill an empty grant, so a launch holding numbers, a scope or Full Control never
+        // adopts them. The stored row was written by this launch or after it, so its numbers are
+        // current; a remembered grant counts only when it raced with this exact launch.
+        const granted = stored?.issueNumbers?.length ? stored.issueNumbers : this.racedIssueGrant(sessionId, launchGeneration);
+        if (granted?.length) {
+          meta.orchestrator.issueNumbers = [...granted];
+          if (stored && !stored.issueNumbers?.length) this.store.patchMeta(sessionId, { orchestrator: { ...stored, issueNumbers: [...granted] } });
+        }
       }
+      // This launch has now taken any grant it raced with into its row and policy: forget it.
+      this.forgetIssueGrant(sessionId, launchGeneration);
       driverConstructionStarted = true;
       if (meta.review?.harness === "codex") {
         // Snapshot at the final synchronous launch boundary, after all preparation awaits.
@@ -10009,14 +10697,7 @@ export class SessionManager {
     const isolationPolicy = protectedWorktree
       ? { mode: "bwrap" as const, network: this.executionIsolation.network }
       : this.executionIsolation;
-    const projectSharedWritableRoots = purpose === "provider" && !this.strictProjectIsolation(meta)
-      ? projectSharedDirectories(this.sharedDirectoryWorkspaces, meta, [
-          this.stateDir, join(homedir(), ".config/wollipog"), join(homedir(), ".ssh"),
-          ...this.sharedDirectoryForbiddenRoots,
-          join(homedir(), ".aws"), join(homedir(), ".codex"), join(homedir(), ".claude"),
-          ...[meta.providerCredentialHome, meta.pendingProviderCredentialHome].filter((path): path is string => !!path),
-        ])
-      : [];
+    const projectSharedWritableRoots = purpose === "provider" ? this.providerSharedWritableRoots(meta) : [];
     if (projectSharedWritableRoots.length && (isolationPolicy.mode !== "bwrap" || process.platform !== "linux")) {
       throw new Error("project shared writable directories require native Linux bubblewrap isolation");
     }
@@ -10102,11 +10783,26 @@ export class SessionManager {
     }));
   }
 
+  /** The Project shared directories a provider launch binds writable for this session, with the
+   * runner's protected roots excluded. One derivation for the launch and for a Location switch's
+   * check before it moves the session (#4138). */
+  private providerSharedWritableRoots(meta: SessionMeta): string[] {
+    if (this.strictProjectIsolation(meta)) return [];
+    return projectSharedDirectories(this.sharedDirectoryWorkspaces, meta, [
+      this.stateDir, join(homedir(), ".config/wollipog"), join(homedir(), ".ssh"),
+      ...this.sharedDirectoryForbiddenRoots,
+      join(homedir(), ".aws"), join(homedir(), ".codex"), join(homedir(), ".claude"),
+      ...[meta.providerCredentialHome, meta.pendingProviderCredentialHome].filter((path): path is string => !!path),
+    ]);
+  }
+
   private requiresManagedWorktreeBwrap(meta: SessionMeta): boolean {
     if (process.platform !== "linux" || meta.context.kind !== "native" || !meta.worktreePath ||
         meta.executionTarget?.adapter === "container" || meta.executionTarget?.adapter === "cloud") return false;
     const selected = this.attributedWorktreeForPath(meta, meta.worktreePath);
-    return !!selected && selected.source !== "attached";
+    // A worktree a Location switch reused in place keeps the boundary a new one would have had, so
+    // continuing existing work never runs the provider less confined than the switch would (#4138).
+    return !!selected && (selected.source !== "attached" || selected.reusedInPlace === true);
   }
 
   /**
@@ -11401,6 +12097,26 @@ export class SessionManager {
       deadlineAt: operation.deadlineAt,
       text: `${displayText}${steeringReferenceText}`,
       images: steeringImages,
+      onLateAccepted: (providerTurnId) => {
+        // Settle the initial response first, including the runner/CP timeout race. Only this
+        // operation's retained receipt may strengthen its unresolved uncertainty.
+        void operation.promise.then(() => {
+          if (this.steeringRegistry.get(request.sessionId)?.get(request.submissionId) !== operation ||
+              operation.result?.disposition !== "uncertain" || operation.result.reason !== "transport_uncertain" || operation.resolved ||
+              this.active.get(request.sessionId)?.client !== entry!.client) return;
+          if (!this.appendAcceptedSteeringEvent(request.sessionId, request.turnId,
+            request.submissionId, displayText, imageInputs)) return;
+          operation.result = this.makeSteeringResult(request, "accepted", "accepted", { providerTurnId });
+          operation.promise = Promise.resolve(operation.result);
+          const current = this.active.get(request.sessionId);
+          if (current && operation.source) this.reservedPromotions(current).delete(operation.source.id);
+          operation.source = undefined;
+          operation.request = { sessionId: request.sessionId, turnId: request.turnId,
+            submissionId: request.submissionId };
+          if (current) this.emitQueue(request.sessionId);
+          this.pruneSteeringRegistry(request.sessionId);
+        }).catch((error) => this.log(`late steering receipt failed: ${errText(error)}`));
+      },
     });
     const provider = await this.awaitSteeringDeadline(providerPromise, operation.deadlineAt, operation.lifecyclePromise);
     if (provider.cancelled) {
@@ -11715,8 +12431,8 @@ export class SessionManager {
       // Acceptance is not observable until the source-of-truth event crosses its durability fence.
       this.store.flush(sessionId);
       try {
-        this.accrueMeta(sessionId, payload);
-        this.send({ type: "session_event", sessionId, payload, seq: stored.seq, ts: stored.ts });
+        this.accrueMeta(sessionId, stored.payload);
+        this.send({ type: "session_event", sessionId, payload: stored.payload, seq: stored.seq, ts: stored.ts });
       } catch (relayError) {
         this.log(`persisted steering event relay failed for ${sessionId}: ${errText(relayError)}`);
       }
@@ -12096,9 +12812,7 @@ export class SessionManager {
     if (entry.running || entry.providerInitiatedTurnActive) return null;
     const waiting = entry.queue.filter((prompt) => !prompt.syntheticRecovery);
     if (waiting.length === 0) return null;
-    const kind: SessionQueueHoldKind | null = entry.pendingProviderAccountSwitch
-      ? "provider_account_switch"
-      : entry.pendingWorktreeRebind ? "worktree_rebind" : null;
+    const kind = this.handoffHoldKind(sessionId, entry);
     if (!kind) return null;
     const meta = this.store.readMeta(sessionId);
     if (!meta) return null;
@@ -12165,14 +12879,21 @@ export class SessionManager {
     };
   }
 
+  /** The handoff a queued prompt would wait behind. A retirement relaunch that stands aside for a
+   * live process's background work is none: that process takes the prompt (#4210). */
+  private handoffHoldKind(sessionId: string, entry: ActiveSession): SessionQueueHoldKind | null {
+    if (entry.pendingProviderAccountSwitch) return "provider_account_switch";
+    if (!entry.pendingWorktreeRebind) return null;
+    return this.retirementRebindPending(entry) && this.retiredBindWaitsForLiveWork(sessionId, entry)
+      ? null : "worktree_rebind";
+  }
+
   /** Forget a wait once it is over: the handoff applied, the prompts left, or the background work
    * stopped holding it back. A hold that forms again after that is a new wait. */
   private settleHandoffWaitStart(sessionId: string, entry: ActiveSession | undefined): void {
     const start = this.handoffWaitStarts.get(sessionId);
     if (!start) return;
-    const kind: SessionQueueHoldKind | null = entry?.pendingProviderAccountSwitch
-      ? "provider_account_switch"
-      : entry?.pendingWorktreeRebind ? "worktree_rebind" : null;
+    const kind = entry ? this.handoffHoldKind(sessionId, entry) : null;
     const meta = this.store.readMeta(sessionId);
     const stillWaiting = kind === start.kind && entry!.queue.some((prompt) => !prompt.syntheticRecovery) &&
       (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
@@ -13011,10 +13732,18 @@ export class SessionManager {
    * | Idle                                            | Rebind at once                              |
    * | Runner turn running                             | Wait; rebind when the turn ends             |
    * | Provider-initiated turn, with or without an ask | Wait; its settlement wakes the rebind       |
-   * | Unfinished background work                      | Bounded handoff hold, then rebind           |
+   * | Live process, selected worktree, background work| No hold: prompts run; rebind once work ends |
+   * | Dead process with unfinished background work    | Handoff hold, then rebind                   |
    * | Worktree gone but its row still recorded        | Requested by the next drain, then as above  |
    * | Conversation cannot resume, or lock is held     | Fail once: one error, never requested again | */
   private requestRetiredWorktreeRebind(sessionId: string, entry: ActiveSession): boolean {
+    if (entry.pendingWorktreeRebind && !this.retirementRebindPending(entry)) return true;
+    if (this.retiredBindWaitsForLiveWork(sessionId, entry)) {
+      // Requested before the work started: stand down, so nothing reads it as a move still owed.
+      entry.pendingWorktreeRebind = undefined;
+      entry.retiredWorktreeRebind = undefined;
+      return false;
+    }
     if (entry.pendingWorktreeRebind) return true;
     if (entry.retiredWorktreeRebindFailed || !this.boundWorktreeRetired(sessionId, entry)) return false;
     const selection = this.store.readMeta(sessionId)?.worktreePath;
@@ -13026,6 +13755,58 @@ export class SessionManager {
 
   private retirementRebindPending(entry: ActiveSession): boolean {
     return !!entry.retiredWorktreeRebind && entry.retiredWorktreeRebind === entry.pendingWorktreeRebind;
+  }
+
+  /**
+   * Whether a relaunch that would only drop a retired sibling waits for the live process's background
+   * work (#4210). It moves nothing: the provider already runs in its selected worktree. A retired bind
+   * could break only the next spawn from this generation's stored bind list (#3402), which the Claude
+   * driver now leaves it out of where that cannot widen the boundary (#4411), and a live process
+   * takes prompts without one, so prompts run there and no hold names the worktree it is already in.
+   * Holding them instead also never settled for a session that starts a watcher each turn, and its
+   * release ended work the relaunch did not need to end. Once the work ends, the wake in
+   * `resumeDeferredHandoff` relaunches. A process known to be gone, or one with orphaned work, has
+   * nothing to protect and needs that spawn, so it keeps the established order, as does a real move.
+   */
+  private retiredBindWaitsForLiveWork(sessionId: string, entry: ActiveSession): boolean {
+    const meta = this.store.readMeta(sessionId);
+    if (!meta?.worktreePath || !sameWorktreePath(entry.context, entry.cwd, meta.worktreePath)) return false;
+    if (!meta.backgroundWorkState && !meta.pendingBackgroundTaskIds?.length) return false;
+    if (meta.orphanedWork || meta.backgroundWorkState === "orphaned") return false;
+    return entry.client.providerProcessLive?.() !== false;
+  }
+
+  /**
+   * Whether a retirement rebind may run ahead of the background continuation that holds it (#3542).
+   * The rebind waits on background work so that retiring the provider never ends work it still
+   * owns. Once every job has finished and only a continuation that was never submitted remains,
+   * the provider owns nothing the rebind could end, provided no provider process is running: then
+   * the continuation would launch a new process from this generation's stored isolation, whose bind
+   * list still names the retired worktree. Since #4411 the Claude driver's spawn usually leaves that
+   * bind out rather than failing on it, but not when dropping it could widen the boundary, and it
+   * never takes up the bind list the session manager would prove at a fresh launch. The rebind
+   * launches the same conversation with the current bind list, and the continuation runs there
+   * first, ahead of the prompts that waited behind it. A running process, or a driver that cannot
+   * tell, keeps the established order: the continuation reaches the live process without a launch.
+   */
+  private backgroundContinuationCanCrossRetirementRebind(meta: SessionMeta, entry: ActiveSession): boolean {
+    if (entry.currentBackgroundJobIds?.length || !this.onlyUnsubmittedContinuationOwed(meta, entry)) return false;
+    // A continuation not yet queued would run after the prompts the rebind carries; wait for it.
+    // One whose attempts are held has no queued turn to wait for (a person's turn retries it).
+    return entry.queue.some((prompt) => prompt.syntheticRecovery && !!prompt.backgroundJobIds?.length) ||
+      backgroundContinuationsAllLaunchHeld(meta);
+  }
+
+  /** No provider process runs, every job has finished, and the only background debt is a
+   * continuation that never reached the provider (#3542). */
+  private onlyUnsubmittedContinuationOwed(meta: SessionMeta, entry: ActiveSession): boolean {
+    if (meta.backgroundWorkState !== "continuation_pending" || meta.pendingBackgroundTaskIds?.length ||
+        meta.orphanedWork || entry.client.providerProcessLive?.() !== false) return false;
+    const jobs = meta.backgroundJobs ?? [];
+    if (jobs.some((job) => !job.terminalStatus)) return false;
+    const owed = jobs.filter(owesBackgroundContinuation);
+    return owed.length > 0 && owed.every((job) => job.continuationSubmittedAt === undefined &&
+      job.continuationAcceptedAt === undefined);
   }
 
   /** A retirement rebind that cannot run stops here, so later drains do not request it again. */
@@ -13305,7 +14086,9 @@ export class SessionManager {
     // diagnostic metadata visible, but do not turn it into a permanent worktree/queue barrier.
     const backgroundWorkBlocksRebind =
       (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
-      !meta?.orphanedWork?.recoveryAttemptedAt;
+      !meta?.orphanedWork?.recoveryAttemptedAt &&
+      !(meta && !entry.pendingLocationSwitch && this.retirementRebindPending(entry) &&
+        this.backgroundContinuationCanCrossRetirementRebind(meta, entry));
     return !entry.running &&
       !entry.providerInitiatedTurnActive &&
       this.active.get(sessionId) === entry &&
@@ -14093,6 +14876,7 @@ export class SessionManager {
     this.store.flush(sessionId);
     this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     entry.pendingProviderAccountSwitch = target;
+    this.onProviderAccountCooldown?.();
     return true;
   }
 
@@ -14424,9 +15208,164 @@ export class SessionManager {
     ];
   }
 
+  /** Run the target repository's worktree setup as a requested worktree does, gated by the same
+   * trust approval (#4209). The old provider is still live and nothing records the target yet.
+   * Returns why the switch cannot go on, or nothing if it can: completed, declined or no setup. */
+  private async prepareLocationSwitchSetup(
+    target: SessionMeta,
+    worktree: SessionWorktreeView,
+    locationName: string,
+    record: WorktreeCleanupRecord,
+  ): Promise<string | undefined> {
+    this.detachedWorktreeSetups.set(worktree, { record, ...(record.processMarker ? { processMarker: record.processMarker } : {}) });
+    const announced = new Set<SessionWorktreeProgressPhase>();
+    const report = (phase: SessionWorktreeProgressPhase) => {
+      if (announced.has(phase)) return;
+      const text = phase === "awaiting_setup_trust"
+        ? `The switch to Location "${locationName}" is waiting for a decision on this repository's worktree setup ` +
+          "configuration. Approving the switch does not approve its setup."
+        : phase === "running_setup" ? `Running worktree setup before this session moves to Location "${locationName}".` : undefined;
+      if (!text) return;
+      announced.add(phase);
+      this.emitEvent(target.sessionId, { kind: "stderr", text });
+    };
+    let setup: Awaited<ReturnType<SessionManager["prepareWorktreeSetup"]>>;
+    try {
+      setup = await this.prepareWorktreeSetup(target, worktree, report, target.sessionId, true);
+    } catch (error) {
+      return `the target's worktree setup could not run: ${errText(error)}`;
+    }
+    if (setup === "cancelled") return "the target's worktree setup was canceled";
+    if (setup === "invalid") {
+      return `the target's worktree setup configuration is invalid: ${worktree.setupConfig?.status === "invalid"
+        ? worktree.setupConfig.error : "it could not be read"}`;
+    }
+    if (setup === "failed") return `the target's required worktree setup failed: ${worktree.setup?.error ?? "a required step failed"}`;
+    return undefined;
+  }
+
+  /** A removal an earlier attempt or request of this session left for this branch's worktree, retried
+   * once now, in case the runner has not got to it or what blocked it has passed. Returns what is
+   * still pending: no session moves into a worktree a recorded removal is about to take (#4209).
+   *
+   * A safe retirement is different. It was asked for while the session worked here, and stopped at
+   * something like a dirty tree. The session left, so that retirement can no longer finish, and the
+   * session coming back to its own worktree overrides it. It keeps every file: dropping the record
+   * removes nothing, and this is what keeps a safe record from refusing that return forever. */
+  private async pendingWorktreeRemoval(
+    sessionId: string,
+    context: AgentContext,
+    repoPath: string,
+    branch: string,
+  ): Promise<WorktreeCleanupRecord | undefined> {
+    const find = () => this.cleanupJournal.list().find((record) => record.sessionId === sessionId &&
+      record.branch === branch && sameWorktreePath(context, record.repoPath, repoPath));
+    const pending = find();
+    if (pending && this.isAuxiliaryRollback(pending)) await this.reapWorktree(pending);
+    else if (pending?.removalMode === "safe") {
+      await this.runWorktreeOperation(sessionId, async () => {
+        if (!this.cleanupJournal.list().includes(pending)) return;
+        if (pending.worktreeRemovedAt) await this.reapLiveSafeWorktree(pending, true);
+        else this.dropOvertakenRetirement(pending);
+      });
+    }
+    return find();
+  }
+
+  /** Why the session cannot have a worktree yet, in the words the person acts on. */
+  private pendingRemovalRefusal(record: WorktreeCleanupRecord, branch: string): string {
+    return (record.rollbackKeptAt
+      ? `the runner kept this session's earlier worktree for branch ${branch} at ${record.worktreePath}, and is still stopping ` +
+        "the processes its setup started there; "
+      : `the runner is still removing this session's earlier worktree for branch ${branch} at ${record.worktreePath}; `) +
+      (record.rollbackGaveUpAt
+        ? "it has stopped trying on its own, so check what is still using that directory, then ask again"
+        : "ask again once that finishes");
+  }
+
+  private isAuxiliaryRollback(record: WorktreeCleanupRecord): boolean {
+    return record.trigger === "creation_rollback" && record.auxiliaryWorktreeRollback === true;
+  }
+
+  /** Whether the periodic sweep owes this rollback an attempt: it backs off, and it stops. Giving up
+   * ends only the schedule, since a restart or a new request for the worktree still tries it. */
+  private rollbackRetryDue(record: WorktreeCleanupRecord): boolean {
+    return this.isAuxiliaryRollback(record) && !record.rollbackGaveUpAt &&
+      (record.rollbackRetryAt ?? 0) <= this.worktreePullRequestDiscoveryNow();
+  }
+
+  /** Count one failed rollback attempt and schedule the next, saying so once when the schedule ends. */
+  private noteRollbackFailure(record: WorktreeCleanupRecord): void {
+    if (!this.cleanupJournal.list().includes(record)) return;
+    const now = this.worktreePullRequestDiscoveryNow();
+    const attempts = (record.rollbackAttempts ?? 0) + 1;
+    record.rollbackAttempts = attempts;
+    record.rollbackRetryAt = now + WORKTREE_ROLLBACK_RETRY_BASE_MS * 2 ** (attempts - 1);
+    const givingUp = attempts >= WORKTREE_ROLLBACK_MAX_ATTEMPTS && !record.rollbackGaveUpAt;
+    if (givingUp) record.rollbackGaveUpAt = now;
+    this.cleanupJournal.add(record);
+    if (givingUp && this.store.has(record.sessionId) && record.rollbackKeptAt) {
+      this.emitEvent(record.sessionId, { kind: "error", message: `The worktree at ${record.worktreePath} was kept, but the processes its ` +
+        `setup started there could not be stopped after ${attempts} attempts, so the runner has stopped trying on its own. Check what ` +
+        "is still running there. The runner tries once more when it next starts, or when that worktree is asked for again." });
+    } else if (givingUp && this.store.has(record.sessionId)) {
+      this.emitEvent(record.sessionId, { kind: "error", message: `The worktree at ${record.worktreePath}, left by a Location switch or ` +
+        `worktree request that failed, could not be removed after ${attempts} attempts, so the runner has stopped trying on its own. ` +
+        "Check what is still using it. The runner tries once more when it next starts, or when that worktree is asked for again. If " +
+        "anything in it has changed by then, it keeps the worktree and says so instead of removing it." });
+    }
+  }
+
+  /** Refuse a worktree a rollback still means to remove, after one more try at the rollback. Callers
+   * hold the session's worktree lane. */
+  private async refuseWhileRollbackPending(meta: SessionMeta, matches: (record: WorktreeCleanupRecord) => boolean): Promise<void> {
+    const find = () => this.cleanupJournal.list().find((record) => record.sessionId === meta.sessionId &&
+      this.isAuxiliaryRollback(record) && matches(record));
+    const pending = find();
+    if (!pending) return;
+    await this.reapAuxiliaryRollbackLocked(pending);
+    const still = find();
+    if (still) throw new Error(this.pendingRemovalRefusal(still, still.branch ?? meta.worktreeBranch ?? "this worktree"));
+  }
+
+  /** A safe retirement whose session left the Location before it could finish. It can never finish
+   * now, because its session has no worktree there to retire. Nothing is removed: the worktree stays
+   * as this session's own from an earlier Location, which keeps whatever deferred the retirement. */
+  private dropOvertakenRetirement(record: WorktreeCleanupRecord): void {
+    if (!this.removeWorktreeCleanupRecord(record, true)) return;
+    // What deferred the retirement may be a person's uncommitted work, so this worktree is kept like
+    // any other the runner kept: deleting the session leaves it too (#4209).
+    this.markWorktreeKept(record.sessionId, record.worktreePath);
+    if (record.trigger === "archive_retirement") {
+      this.send({ type: "session_worktree_retirement_refused", sessionId: record.sessionId, worktreeId: record.worktreeId ?? "",
+        path: record.worktreePath, reason: "the session moved to another Location before the worktree could be retired" });
+    }
+    this.emitEvent(record.sessionId, { kind: "error", message: `The retirement of worktree ${record.worktreePath} did not finish before ` +
+      "this session left its Location, and it cannot finish now. The worktree stays, with everything in it. Switch back and " +
+      "discard it if you still want it gone. Deleting this session leaves it in place too." });
+  }
+
+  /** Whether a session now works in, or owns, the worktree an auxiliary creation rollback names. A
+   * rollback is only for a worktree that never became anyone's, so such a record is stale, whatever
+   * wrote it and however it survived: it is dropped, never replayed against that worktree (#4209). */
+  private creationRollbackTargetInUse(record: WorktreeCleanupRecord): boolean {
+    const same = (path: string | null | undefined) => !!path && sameWorktreePath(record.context, path, record.worktreePath);
+    for (const [claimed, owner] of this.reusedWorktreeClaims) {
+      if (owner !== record.sessionId && same(claimed)) return true;
+    }
+    // A session's history counts only from this rollback on. An entry from before it describes an
+    // earlier worktree on the path, which went, or the attempt could not have made this one.
+    const sinceRollback = (left: LocationHistoryEntry) => record.createdAt === undefined || left.switchedAt >= record.createdAt;
+    return this.store.listSessions().some((meta) => same(meta.worktreePath) ||
+      (meta.locationHistory ?? []).filter(sinceRollback).some((left) => same(left.worktreePath) || left.worktrees.some((worktree) => same(worktree.path))) ||
+      // A requested worktree's own session lists it during setup, before it ever activates.
+      (meta.sessionId !== record.sessionId && this.attributedWorktrees(meta).some((worktree) => same(worktree.path))));
+  }
+
   /**
    * Move the live session into its approved Location (#4138), at a turn boundary:
-   *  1. verify the target again and check out its worktree, while the old provider idles;
+   *  1. verify the target again, check out its worktree and run its setup (#4209), while the old
+   *     provider idles;
    *  2. retire the old provider, then copy its conversation where the new working directory's
    *     provider will look for it;
    *  3. switch every repository-bound field in one metadata write, archiving the old Location;
@@ -14436,6 +15375,16 @@ export class SessionManager {
    * a half-updated session.
    */
   private async performLocationSwitch(sessionId: string, entry: ActiveSession): Promise<void> {
+    const claim: { path?: string } = {};
+    try {
+      await this.performLocationSwitchOnce(sessionId, entry, claim);
+    } finally {
+      // Once the move's metadata names the worktree, the session's own record holds it.
+      if (claim.path && this.reusedWorktreeClaims.get(claim.path) === sessionId) this.reusedWorktreeClaims.delete(claim.path);
+    }
+  }
+
+  private async performLocationSwitchOnce(sessionId: string, entry: ActiveSession, claim: { path?: string }): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     const pending = meta?.pendingLocationSwitch;
     if (!meta || !pending || entry.pendingLocationSwitch !== pending.occurrenceId) {
@@ -14447,38 +15396,184 @@ export class SessionManager {
     const options = { context: meta.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash,
       allowedProjectPaths: this.configuredProjectPaths };
     let worktree: SessionWorktreeView;
+    let reused: { uncommittedChanges?: number } | undefined;
+    const targetOf = (view: SessionWorktreeView): SessionMeta => ({
+      ...meta, workspaceId: pending.workspaceId, repoPath: pending.repoPath, worktreePath: view.path,
+      worktreeBranch: view.branch, worktrees: [view], worktreeRecovery: undefined, launchWorktreeProof: undefined,
+    });
+    // The runner's own proof that this attempt, and nothing before it, makes the worktree: Git is
+    // about to create it, and only then. Everything destructive below depends on this and nothing
+    // else: a worktree without it is never set up, torn down or removed by this switch (#4209).
+    const reservation: { record?: WorktreeCleanupRecord; view?: SessionWorktreeView } = {};
+    // From the whole path (`worktreeIdForPath`), not its last segment: that is a hash of the branch name
+    // alone, shared by the same branch in another repository, and hooks, process markers and port
+    // blocks are keyed by this id. A failed switch must not touch what the session's current worktree holds.
+    const targetWorktreeId = worktreeIdForPath;
+    const reserveWorktree = (path: string, branch: string, createsBranchAt?: string): void => {
+      // Claimed and journaled before Git registers the path, with no await in between. Another
+      // session's switch therefore never finds it free, even mid-checkout, and from here on a crash
+      // leaves a record that ends setup's processes, runs its teardown and removes the worktree.
+      // Another session's hold, wherever this session's own records of the path are listed (#4209).
+      const holder = this.worktreeHolder(sessionId, meta.context, path, { othersOnly: true });
+      if (holder) throw new Error(heldWorktreeRefusal(branch, path, holder));
+      this.reusedWorktreeClaims.set(path, sessionId);
+      claim.path = path;
+      const view: SessionWorktreeView = { id: targetWorktreeId(path), path, branch, baseRef: branch, source: "created",
+        // A recovered branch is the person's existing work: removing this worktree keeps it.
+        ...(pending.recoverBranch ? { branchPreexisted: true } : {}) };
+      const record = this.cleanupRecordForWorktree(targetOf(view), view, "creation_rollback", "force");
+      record.auxiliaryWorktreeRollback = true;
+      // Only this attempt's own trusted setup gives it a teardown, never an earlier worktree's.
+      delete record.hooks;
+      record.processMarker = randomUUID();
+      if (createsBranchAt) record.rollbackBranchBase = createsBranchAt;
+      this.cleanupJournal.add(record);
+      reservation.record = record;
+      reservation.view = view;
+    };
+    /** Give back what this attempt made, and say so if it could not. A worktree it did not make was
+     * never its to give back, whether another owner's or this session's own from earlier. */
+    const release = async ({ beforeSetup = false }: { beforeSetup?: boolean } = {}): Promise<string | undefined> => {
+      const { record, view } = reservation;
+      if (!record || !view) return undefined;
+      const released = () => !this.cleanupJournal.list().includes(record);
+      // Only while preparing, before setup and before anything else could have been there, can this
+      // attempt say what it left: a checkout that failed is the case. Later, a missing snapshot means
+      // a read failed, and that means keep: one taken then would adopt whatever happened meanwhile.
+      if (beforeSetup && record.rollbackProof && !record.rollbackSnapshot) await this.recordRollbackSnapshot(record);
+      try {
+        await this.reapCreationRollback(record, targetOf(view));
+      } catch (error) {
+        this.log(`session ${sessionId} could not release its unused Location switch worktree: ${errText(error)}`);
+      }
+      if (released()) return undefined;
+      return `The target worktree could not be removed and is still at ${record.worktreePath}. The runner tries again on a ` +
+        "schedule, when it next starts, and when this switch is asked for again.";
+    };
+    /** A release that could not finish has nobody else to tell when no failure is being recorded. */
+    const reportKept = (kept: string | undefined): void => {
+      if (kept && this.store.has(sessionId)) this.emitEvent(sessionId, { kind: "error", message: kept });
+    };
+    // Written the moment Git has registered the worktree, before it holds any file, so a rollback that
+    // finds this token is looking at what this attempt made, and one that does not never removes it.
+    const materializedWorktree = async (path: string): Promise<void> => {
+      const { record } = reservation;
+      if (!record || !sameWorktreePath(meta.context, record.worktreePath, path)) return;
+      // Git has made a new worktree here, which it does only where none is, so one once kept here has
+      // gone. Not before: a reservation can still be refused by what is at the path.
+      this.forgetWorktreeKept(sessionId, path);
+      const proof = randomUUID();
+      await stampWorktreeRollbackProof(path, proof, options);
+      record.rollbackProof = proof;
+      this.cleanupJournal.add(record);
+    };
+    // What the session is told about a worktree it comes back to, if it is not quite as it was.
+    let returning: { setup?: "unfinished" | "unreadable"; portBlock?: WorktreePortBlock } | undefined;
     try {
       const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces,
         { workspaceId: pending.workspaceId, workspacePath: pending.repoPath, repository: pending.repository });
       if (repoPath !== pending.repoPath) throw new LocationSwitchRefusal("path_changed");
-      const created = pending.recoverBranch
-        ? await createRecoveredBranchWorktree(repoPath, sessionId, pending.recoverBranch, options)
+      const targetBranch = pending.recoverBranch ?? `agent/${sessionId}`;
+      const removal = await this.pendingWorktreeRemoval(sessionId, meta.context, repoPath, targetBranch);
+      if (removal) throw new Error(this.pendingRemovalRefusal(removal, targetBranch));
+      const created: RecoveredBranchWorktree = pending.recoverBranch
+        ? await createRecoveredBranchWorktree(repoPath, sessionId, pending.recoverBranch,
+          { ...options, reserveWorktree, materializedWorktree, holderOf: (path) =>
+            this.worktreeHolder(sessionId, meta.context, path, { othersOnly: true }) ?? this.worktreeHolder(sessionId, meta.context, path) })
         : await createRequestedWorktree(repoPath, sessionId,
-          { baseRef: (await fetchRemoteDefaultBase(repoPath, options)).ref, branch: `agent/${sessionId}` }, options);
+          { baseRef: (await fetchRemoteDefaultBase(repoPath, options)).ref, branch: targetBranch },
+          { ...options, reserveWorktree, materializedWorktree });
+      reused = created.reusedInPlace;
+      const recorded = !reused && !reservation.record ? (meta.locationHistory ?? []).flatMap((left) => left.worktrees)
+        .reverse().find((item) => sameWorktreePath(meta.context, item.path, created.path)) : undefined;
+      // A worktree on the slot that this attempt did not make and no record of this session names: one
+      // a rollback kept because someone worked in it, or a person's own. It is continued as it stands
+      // and stays theirs, like any other existing worktree, with no setup and with the notice. A tree
+      // with no file in it never got its checkout, and no session is put there.
+      if (!reused && !reservation.record && !recorded) {
+        if (await worktreeCheckoutNeverFinished(created.path, options)) {
+          throw new Error(`the worktree at ${created.path} never finished its checkout, so no session is put in it. Keep anything you ` +
+            "need from it, remove it (git worktree remove --force), delete its branch if nothing needs it, then ask again");
+        }
+        reused = { uncommittedChanges: await worktreeUncommittedChanges(created.path, options) };
+      }
+      // Checked again and claimed with no await in between, so two switches never both take one
+      // worktree while each is still verifying it. Another session's hold comes first, wherever this
+      // session's own records are listed; this session's own refuses only a worktree reused in place.
+      const holder = this.worktreeHolder(sessionId, meta.context, created.path, { othersOnly: true }) ??
+        (reused ? this.worktreeHolder(sessionId, meta.context, created.path) : undefined);
+      if (holder) throw new Error(heldWorktreeRefusal(created.branch, created.path, holder));
+      this.reusedWorktreeClaims.set(created.path, sessionId);
+      claim.path = created.path;
+      if (reused) {
+        // On native Linux the provider relaunches inside the managed bubblewrap boundary, whose
+        // launch refuses some worktree placements. Refuse those now, while nothing has moved:
+        // after the move each retry would retire the provider and fail the launch again.
+        if (process.platform === "linux") {
+          const temporary = tmpdir();
+          const refusal = managedWorktreeLaunchRefusal(created.path, realpathSync.native(join(repoPath, ".git")),
+            this.providerSharedWritableRoots({ ...meta, workspaceId: pending.workspaceId, repoPath }),
+            [...new Set([temporary, realpathSync.native(temporary)])]);
+          if (refusal) {
+            throw new Error(`branch ${created.branch} is checked out in worktree ${created.path}, which this session cannot ` +
+              `continue in: ${refusal}; move that worktree (git worktree move) or switch it to another branch, then ask again`);
+          }
+        }
+      }
       const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
-      worktree = {
-        id: created.path.split(/[\\/]/u).at(-1)!, path: created.path, branch: created.branch, baseRef: created.baseRef,
-        baseCommit: created.baseCommit, source: "created", ...(defaultBranch ? { defaultBranch } : {}),
-        // A recovered branch is the person's existing work: removing this worktree keeps it.
-        ...(pending.recoverBranch ? { branchPreexisted: true } : {}),
-      };
+      if (reservation.record) {
+        reservation.record.baseRef = created.baseRef;
+        await this.recordRollbackSnapshot(reservation.record);
+      }
+      // This session's own worktree from when it last worked in this Location keeps what it had.
+      let earlier: SessionWorktreeView | undefined;
+      if (recorded) {
+        const settled = await this.settleReturningWorktree(sessionId, meta.context, repoPath, recorded);
+        earlier = settled.view;
+        if (settled.setup || settled.portBlock) returning = settled;
+      }
+      worktree = reused
+        // An existing worktree is continued as it is and stays its owner's: attached, so nothing
+        // ever sets it up, tears it down or removes it with this session.
+        ? { id: targetWorktreeId(created.path), path: created.path,
+          branch: created.branch, baseRef: created.baseRef, baseCommit: created.baseCommit, source: "attached",
+          reusedInPlace: true, ...(defaultBranch ? { defaultBranch } : {}) }
+        : {
+          id: targetWorktreeId(created.path), path: created.path, branch: created.branch, baseRef: created.baseRef,
+          baseCommit: created.baseCommit, source: "created",
+          // A recovered branch is the person's existing work: removing this worktree keeps it.
+          ...(pending.recoverBranch ? { branchPreexisted: true } : {}),
+          ...earlier,
+          ...(defaultBranch ? { defaultBranch } : {}),
+        };
     } catch (error) {
+      const kept = await release({ beforeSetup: true });
       this.failLocationSwitch(sessionId, entry, pending, error instanceof LocationSwitchRefusal ? error.message
-        : `the target worktree could not be prepared: ${errText(error)}`);
+        : `the target worktree could not be prepared: ${errText(error)}`, kept);
       return;
     }
-    const release = async () => {
-      await (pending.recoverBranch
-        ? releaseRecoveredWorktree(pending.repoPath, worktree.path, options)
-        : removeWorktree(pending.repoPath, { path: worktree.path, branch: worktree.branch }, options)).catch((error) =>
-        this.log(`session ${sessionId} could not release its unused Location switch worktree: ${errText(error)}`));
-    };
+    // Setup runs only in a worktree this attempt made, before the old provider retires (#4209). One
+    // reused in place is someone else's. This session's own from earlier holds its work, set up when
+    // it was made: running repository commands over that work again could only harm it, and a failure
+    // there would have no safe meaning, since nothing may be removed. Either is continued as it is.
+    if (reservation.record) {
+      const setupFailure = await this.prepareLocationSwitchSetup(targetOf(worktree), worktree, pending.locationName, reservation.record);
+      await this.recordRollbackSnapshot(reservation.record);
+      if (setupFailure) {
+        const kept = await release();
+        // A runner going down cancels setup too. That is no decision about the switch, which stays
+        // durable and runs again once the runner is back.
+        if (this.shuttingDown) return;
+        this.failLocationSwitch(sessionId, entry, pending, setupFailure, kept);
+        return;
+      }
+    }
     // Preparation awaited: a Stop, Delete, Restart, or a turn that began meanwhile owns the session
     // now, and replacing the provider would override it. Give the worktree back; the switch stays
     // durable, so the session's next provider carries it out at its own turn boundary.
     if (!this.worktreeRebindCanProceed(sessionId, entry) || this.store.readMeta(sessionId)?.status === "stopped" ||
         this.store.readMeta(sessionId)?.pendingLocationSwitch?.occurrenceId !== pending.occurrenceId) {
-      await release();
+      reportKept(await release());
       const current = this.active.get(sessionId);
       if (current?.pendingLocationSwitch && !current.running) setImmediate(() => this.scheduleDrain(sessionId));
       return;
@@ -14499,6 +15594,17 @@ export class SessionManager {
           worktreePath: fresh.worktreePath, ...(fresh.worktreeBranch ? { worktreeBranch: fresh.worktreeBranch } : {}),
           worktrees: fresh.worktrees ?? [], switchedAt: Date.now(), toWorkspaceId: pending.workspaceId,
         };
+        const setup = this.detachedWorktreeSetups.get(worktree);
+        // A worktree this attempt made is new at its id, even on a path the session used before, so
+        // what it records replaces anything an earlier worktree left there, including with nothing.
+        const worktreeHooks = { ...fresh.worktreeHooks };
+        const worktreeProcessMarkers = { ...fresh.worktreeProcessMarkers };
+        if (reservation.record) {
+          delete worktreeHooks[worktree.id];
+          delete worktreeProcessMarkers[worktree.id];
+          if (setup?.hooks) worktreeHooks[worktree.id] = setup.hooks;
+          if (setup?.processMarker) worktreeProcessMarkers[worktree.id] = setup.processMarker;
+        }
         const moved = this.store.patchMeta(sessionId, {
           workspaceId: pending.workspaceId,
           repoPath: pending.repoPath,
@@ -14507,43 +15613,156 @@ export class SessionManager {
           worktrees: [worktree],
           launchWorktreeProof: undefined,
           // Hook snapshots and process markers are keyed by worktree id, so the earlier Location's
-          // stay for its worktrees' eventual teardown.
+          // stay for its worktrees' eventual teardown. Setup's join them with this write.
+          ...(reservation.record ? { worktreeHooks, worktreeProcessMarkers } : {}),
           worktreeRecovery: undefined,
           locationHistory: [...(fresh.locationHistory ?? []), left],
           pendingLocationSwitch: undefined,
           locationSwitchFailure: undefined,
           // Owed in the same write as the move, so a runner that stops before the relaunch still
           // continues the task in the new Location when it recovers.
-          pendingLocationContinuation: { occurrenceId: pending.occurrenceId, text: pending.continuation, path: worktree.path,
+          // A reused worktree's uncommitted changes are someone else's work, so the turn opens with
+          // the runner's own account of them, ahead of the control plane's continuation. So does
+          // anything about the session's own earlier worktree that is not as it left it.
+          pendingLocationContinuation: { occurrenceId: pending.occurrenceId,
+            text: [
+              ...(reused ? [reusedWorktreeNotice(worktree.path, worktree.branch, reused.uncommittedChanges)] : []),
+              ...(returning ? [returningWorktreeNotice(worktree.path, returning)] : []),
+              pending.continuation,
+            ].join("\n\n"),
+            path: worktree.path,
             branch: worktree.branch, locationName: pending.locationName, repository: pending.repository },
         });
-        if (moved) this.store.flush(sessionId);
+        if (moved) {
+          this.store.flush(sessionId);
+          // The move commits the worktree to this session, so its rollback is over and what setup
+          // records now goes on the session as usual. A crash before this line leaves a record that
+          // replay drops, because the session now works there.
+          this.detachedWorktreeSetups.delete(worktree);
+          this.endLaunchRollbacksAt(sessionId, meta.context, worktree.path);
+          if (reservation.record) {
+            this.removeWorktreeCleanupRecord(reservation.record);
+            const proof = reservation.record.rollbackProof;
+            if (proof) {
+              void clearWorktreeRollbackProof(worktree.path, proof, options).catch((error) => {
+                this.log(`session ${sessionId} left a spent rollback proof in its worktree: ${errText(error)}`);
+              });
+            }
+          }
+        }
         return moved ?? undefined;
       },
       queueFailureReason: () => "the session could not resume in its new Location",
       onLaunched: (replacementEntry) => {
-        this.emitEvent(sessionId, { kind: "stderr",
-          text: `Moved this session to Location "${pending.locationName}" (${pending.repository}), worktree ${worktree.branch}.` });
+        const changes = reused?.uncommittedChanges;
+        this.emitEvent(sessionId, { kind: "stderr", text: reused
+          ? `Moved this session to Location "${pending.locationName}" (${pending.repository}). It continues on ${worktree.branch} ` +
+            `in the existing worktree ${worktree.path}, as it was` +
+            (changes === undefined ? "." : changes === 0 ? ", with no uncommitted changes."
+              : `, with its ${changes} uncommitted change${changes === 1 ? "" : "s"} kept.`)
+          : `Moved this session to Location "${pending.locationName}" (${pending.repository}), worktree ${worktree.branch}.` +
+            (returning?.setup === "unfinished" ? " Its worktree setup never finished and did not run again, so its setup environment is not available." : "") +
+            (returning?.setup === "unreadable" ? " Its worktree setup configuration could not be read just now, so its setup environment is not available for this launch." : "") +
+            (returning?.portBlock ? ` Its port block changed to ${returning.portBlock.start}-${returning.portBlock.end}.` : "") });
         this.queueLocationContinuation(sessionId, replacementEntry);
       },
     });
     if (result.status === "launched") {
       setImmediate(() => this.scheduleDrain(sessionId));
+      // Reconciliation asks again later, after a restart too, if the forge cannot answer now.
+      if (reused) {
+        void this.linkAttachedWorktreePullRequest(sessionId, worktree.path).catch((error) =>
+          this.log(`pull request lookup for a reused worktree failed for ${boundedSessionIdForLog(sessionId)}: ${errText(error)}`));
+      }
       return;
     }
     if (result.status === "stopped" || result.status === "superseded") {
-      if (this.store.readMeta(sessionId)?.pendingLocationSwitch?.occurrenceId === pending.occurrenceId) await release();
+      // Whatever replaced or cleared the occurrence, a worktree this attempt made and never moved into
+      // is still its own to give back. One the move committed to is not, so that one stays.
+      const latest = this.store.readMeta(sessionId);
+      const committed = latest?.repoPath === pending.repoPath && !!latest.worktreePath &&
+        sameWorktreePath(latest.context, latest.worktreePath, worktree.path);
+      if (!committed) reportKept(await release());
       return;
     }
     const moved = this.store.readMeta(sessionId)?.repoPath === pending.repoPath;
-    if (!moved) await release();
+    const kept = moved ? undefined : await release();
     const reason = result.status === "prepare_failed" ? `the conversation could not be carried over: ${result.error}`
       : result.status === "not_resumable" ? LOCATION_SWITCH_FAILURES.not_resumable
       : result.status === "lock_unavailable" ? "this session is being driven by another runner process"
       : result.status === "retirement_failed" ? "the previous provider could not be stopped"
       : moved ? "the session moved, but its provider could not start in the new Location; send it a message to retry there"
       : "the provider could not resume in the new Location";
-    this.failLocationSwitch(sessionId, entry, pending, reason);
+    this.failLocationSwitch(sessionId, entry, pending, reason, kept);
+  }
+
+  /** What a session's own earlier worktree really can be on its way back (#4209), settled before the
+   * move so nothing it finds can leave the session unable to launch afterwards.
+   *
+   * A worktree that already existed never runs setup again. A setup that ended stays on the row,
+   * whatever the read here says: only a launch can restore its environment, the launch goes without
+   * one when it cannot, and a read that fails now can work later. This read only decides what the
+   * session is told. A read that works here and fails at the relaunch launches the same way, and the
+   * launch itself says so. A setup that never ended, or an invalid configuration, can only be run or
+   * refuse the launch, so the row keeps neither and the session is told what that means. That also
+   * ends Retry Setup for this row: running it over existing work is what this rule rules out.
+   *
+   * Its port block is confirmed, or replaced if another owner took it meanwhile. A throw means no
+   * block can be had at all, and it fails the switch while the session has not moved. */
+  private async settleReturningWorktree(
+    sessionId: string,
+    context: AgentContext,
+    repoPath: string,
+    recorded: SessionWorktreeView,
+  ): Promise<{ view: SessionWorktreeView; setup?: "unfinished" | "unreadable"; portBlock?: WorktreePortBlock }> {
+    const view: SessionWorktreeView = { ...recorded };
+    const { setup: earlierSetup, setupConfig } = recorded;
+    let setup: "unfinished" | "unreadable" | undefined;
+    if (earlierSetup?.status === "completed") {
+      const loaded = recorded.baseCommit
+        ? await loadWorktreeSetupConfig(context, repoPath, recorded.baseCommit).catch(() => undefined)
+        : undefined;
+      if (loaded?.hash !== earlierSetup.configHash) setup = "unreadable";
+    } else if (earlierSetup?.status !== "declined" && (earlierSetup || setupConfig?.status === "invalid")) {
+      delete view.setup;
+      delete view.setupConfig;
+      setup = "unfinished";
+    }
+    let portBlock: WorktreePortBlock | undefined;
+    if (recorded.portBlock && recorded.source !== "attached") {
+      const settled = this.worktreePortAllocator.revalidate(this.worktreePortOwner(sessionId, recorded.id), recorded.portBlock);
+      view.portBlock = settled.block;
+      if (settled.replaced) portBlock = settled.block;
+    }
+    return { view, ...(setup ? { setup } : {}), ...(portBlock ? { portBlock } : {}) };
+  }
+
+  /** Who on this runner still has a claim on `path` (#4138), from the runner's own records only: a
+   * pending cleanup that will remove it, or a session (this one included) that records it now or in
+   * an earlier Location. A stopped holder counts too: its record would remove or reuse the worktree
+   * later, under whoever then works in it. `othersOnly` skips everything of `sessionId`'s own, so the
+   * answer is another holder whenever there is one, wherever this session's own records come. */
+  private worktreeHolder(sessionId: string, context: AgentContext, path: string, { othersOnly = false } = {}): WorktreeHolder | undefined {
+    const same = (candidate: string | null | undefined) => !!candidate && sameWorktreePath(context, candidate, path);
+    const counted = (owner: string) => !othersOnly || owner !== sessionId;
+    for (const [claimed, owner] of this.reusedWorktreeClaims) {
+      if (same(claimed) && counted(owner)) return { sessionId: owner, ...(owner === sessionId ? { self: true } : {}), live: true };
+    }
+    const removal = this.cleanupJournal.list().find((record) => same(record.worktreePath) && counted(record.sessionId));
+    if (removal) return { sessionId: removal.sessionId, removalPending: true };
+    for (const meta of this.store.listSessions()) {
+      if (!counted(meta.sessionId)) continue;
+      const current = [meta.worktreePath, ...this.attributedWorktrees(meta).map((worktree) => worktree.path)];
+      const earlier = (meta.locationHistory ?? [])
+        .flatMap((left) => [left.worktreePath, ...left.worktrees.map((worktree) => worktree.path)]);
+      const now = current.some(same);
+      if (!now && !earlier.some(same)) continue;
+      const live = this.active.has(meta.sessionId) ||
+        ["queued", "starting", "running", "input_required"].includes(meta.status);
+      return { sessionId: meta.sessionId, ...(meta.sessionId === sessionId ? { self: true } : {}), ...(live ? { live } : {}),
+        ...(now ? {} : { earlierLocation: true }) };
+    }
+    return undefined;
   }
 
   /** Queue the automatic turn a completed move owes, once, ahead of anything else, in a provider
@@ -14596,10 +15815,13 @@ export class SessionManager {
 
   /** Record a failed switch where people see it. The session stays where its metadata says it is,
    * and the provider launches there on the next message. */
-  private failLocationSwitch(sessionId: string, entry: ActiveSession, pending: PendingLocationSwitch, reason: string): void {
+  private failLocationSwitch(sessionId: string, entry: ActiveSession, pending: PendingLocationSwitch, reason: string, kept?: string): void {
     entry.pendingLocationSwitch = undefined;
     const current = this.store.readMeta(sessionId);
-    const bounded = reason.length > 500 ? `${reason.slice(0, 499)}…` : reason;
+    // What is still on disk survives the bound: it is what the person has to act on.
+    const room = 500 - (kept ? kept.length + 2 : 0);
+    const shortened = reason.length > room ? `${reason.slice(0, Math.max(0, room - 1))}…` : reason;
+    const bounded = kept ? `${shortened}. ${kept}` : shortened;
     const updated = this.store.patchMeta(sessionId, {
       pendingLocationSwitch: undefined,
       locationSwitchFailure: { state: "failed", repository: pending.repository, workspaceId: pending.workspaceId,
@@ -14617,8 +15839,10 @@ export class SessionManager {
 
   private resumeDeferredHandoff(sessionId: string): void {
     const entry = this.active.get(sessionId);
+    // A retirement relaunch that stood aside for background work has no pending field to find (#4210).
     if ((entry?.pendingWorktreeRebind || entry?.pendingProviderAccountSwitch || entry?.pendingLocationSwitch ||
-        entry && this.projectMemoryChanged(sessionId, entry)) && !entry.running) {
+        entry && (this.projectMemoryChanged(sessionId, entry) || this.boundWorktreeRetired(sessionId, entry))) &&
+        !entry.running) {
       setImmediate(() => this.scheduleDrain(sessionId));
     }
   }
@@ -14703,6 +15927,19 @@ export class SessionManager {
 
     const launchGeneration = this.beginLaunchGeneration(sessionId);
     this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
+    // A background continuation crossing a retirement rebind (#3542) still runs before the prompts
+    // that waited behind the rebind, as it would have had it gone first. The replacement queue is
+    // ordered by ordinal (ordinals are positive; at 1 an equal ordinal keeps this insertion order).
+    if (this.retirementRebindPending(entry)) {
+      const index = entry.queue.findIndex((prompt) => prompt.syntheticRecovery && !!prompt.backgroundJobIds?.length);
+      if (index >= 0 && entry.queue.length > 1) {
+        const [continuation] = entry.queue.splice(index, 1);
+        const own = this.ensureQueueOrdinal(sessionId, continuation!);
+        const first = Math.min(...entry.queue.map((prompt) => this.ensureQueueOrdinal(sessionId, prompt)));
+        if (own >= first) continuation!.ordinal = Math.max(1, first - 1);
+        entry.queue.unshift(continuation!);
+      }
+    }
     const queued = entry.queue.splice(0);
     if (queued.length) this.preLaunchQueues.set(sessionId, queued);
     // The session's own switch into exactly this worktree continues once the relaunch has run
@@ -15545,14 +16782,19 @@ export class SessionManager {
       if (entry.historyIntegrityFailure) return;
       const rejectionHoldBlocker = this.trackProviderRejection(sessionId, entry, queued, stop, inputMayHaveBeenDelivered);
       this.captureAgentSessionId(sessionId, entry.client); // codex threadId becomes known after turn 1
+      let continuationHoldBlocker: string | undefined;
       if (backgroundJobIds?.length && stop === "refusal" && !entry.backgroundPromptAccepted) {
         if (capacityRetriesExhausted) {
           // Keep the terminal result for inspection with separate pre-acceptance exhaustion evidence.
           // Exhaustion must not strand a pending submission or create another automatic retry burst.
           this.markBackgroundContinuationRetryExhausted(sessionId, backgroundJobIds);
-        } else {
+        } else if (entry.providerCapacityFailure || entry.authenticationBlocked) {
+          // Capacity and authentication keep their own bounds and recovery.
           this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
           this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+        } else {
+          continuationHoldBlocker = this.retryUnacceptedBackgroundContinuation(
+            sessionId, entry, queued, backgroundJobIds, entry.client.lastTurnError?.() ?? undefined);
         }
       }
       if (syntheticRecovery) {
@@ -15621,6 +16863,7 @@ export class SessionManager {
         const scopeId = this.store.readMeta(sessionId)?.providerCredentialScopeId;
         if (scopeId) this.providerAuthAutomaticAttempted.delete(scopeId);
         if (!entry.governanceTripped) this.clearProviderAccountSwitchFailureAfterTurn(sessionId);
+        if (!automaticTurn(queued) && this.active.get(sessionId) === entry) this.rearmLaunchHeldBackgroundContinuation(sessionId);
       }
       if (stop === "refusal" && !interrupted && !entry.governanceTripped) {
         this.scheduleAutomaticProviderAccountSwitch(sessionId, entry);
@@ -15639,6 +16882,8 @@ export class SessionManager {
         this.emitStatus(sessionId, "input_required", rejectedAnswerBlocker);
       } else if (rejectionHoldBlocker && this.providerRejectionHolds.has(sessionId)) {
         this.emitStatus(sessionId, "input_required", rejectionHoldBlocker);
+      } else if (continuationHoldBlocker) {
+        this.emitStatus(sessionId, "input_required", continuationHoldBlocker);
       } else {
         // The provider completed before the interrupt took effect. Do not fabricate Interrupted
         // or strand the existing FIFO: this was a normal completed turn, not a cancelled one.
@@ -15656,9 +16901,10 @@ export class SessionManager {
       // retired generation's late settle must not touch the replacement's streak.
       if (this.active.get(sessionId) === entry) this.lastProviderRejections.delete(sessionId);
       this.settleModelStoppedJobs(sessionId, queued.id, false);
+      let continuationHoldBlocker: string | undefined;
       if (backgroundJobIds?.length && !entry.backgroundPromptAccepted) {
-        this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
-        this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+        continuationHoldBlocker = this.retryUnacceptedBackgroundContinuation(
+          sessionId, entry, queued, backgroundJobIds, errText(err));
       } else if (backgroundJobIds?.length) {
         this.markBackgroundContinuationMissingResult(sessionId, backgroundJobIds);
       }
@@ -15692,7 +16938,8 @@ export class SessionManager {
       }
       this.emitEvent(sessionId, { kind: "error", message: `prompt failed: ${errText(err)}` }, durable);
       if (entry.historyIntegrityFailure) return;
-      this.emitStatus(sessionId, "failed", errText(err));
+      if (continuationHoldBlocker) this.emitStatus(sessionId, "input_required", continuationHoldBlocker);
+      else this.emitStatus(sessionId, "failed", errText(err));
       durable?.failed(`prompt failed: ${errText(err)}`);
     }
   }
@@ -16605,6 +17852,11 @@ export class SessionManager {
         // history. The fork snapshots its own trusted config and creates its own process boundary.
         worktreeHooks: undefined,
         worktreeProcessMarkers: undefined,
+        // The worktrees the source left in other Locations, and what it kept, are the source's. A fork
+        // that listed them would retire them, with the source's work, when it is deleted (#4209).
+        locationHistory: undefined,
+        keptWorktreePaths: undefined,
+        keptWorktreesTracked: true,
         agentSessionId: forkedThreadId,
         status: "idle",
         tokensIn: 0,
@@ -17052,6 +18304,8 @@ export class SessionManager {
   }
 
   stop(sessionId: string): void {
+    // A stopped session's next launch takes its issue numbers from its own spec (#4269).
+    this.forgetIssueGrant(sessionId);
     this.flushTextDeltas(sessionId);
     // A review being judged reports its verdict and then stops its own provider; stopping it now
     // would report the session stopped before its outcome, which fails the review.
@@ -17173,7 +18427,11 @@ export class SessionManager {
       }
       return existing;
     }
-    const retirement = {
+    // Until this exact provider is proven gone, no final checkpoint may name its generation, even
+    // from a restarted runner that no longer holds it (#3788).
+    const campaignGeneration = this.fenceRetiringProvider(sessionId);
+    let disposed!: (returned: boolean) => void;
+    const retirement: ProviderRetirement = {
       client: entry.client,
       entry,
       promise: Promise.resolve(),
@@ -17183,13 +18441,17 @@ export class SessionManager {
       parking: options.parking ?? false,
       unconfirmed: false,
       ...(options.parkingGeneration === undefined ? {} : { parkingGeneration: options.parkingGeneration }),
+      ...(campaignGeneration === undefined ? {} : { campaignGeneration }),
+      disposal: new Promise<boolean>((resolve) => { disposed = resolve; }),
     };
     this.closing.set(sessionId, retirement);
     if (!entry.client.close) {
       try {
         this.disposeDriver(entry.client, { forceImmediate: true });
+        disposed(true);
         this.completeProviderRetirement(sessionId, retirement);
       } catch (error) {
+        disposed(false);
         retirement.unconfirmed = true;
         this.log(`session ${sessionId} provider retirement remains unconfirmed: ${errText(error)}`);
         // Keep `closing` installed as the exact-client fence, but preserve the synchronous Stop
@@ -17199,8 +18461,12 @@ export class SessionManager {
       return retirement;
     }
     retirement.promise = this.closeAndDispose(sessionId, entry.client, true).then(
-      () => this.completeProviderRetirement(sessionId, retirement),
+      () => {
+        disposed(true);
+        this.completeProviderRetirement(sessionId, retirement);
+      },
       (error) => {
+        disposed(false);
         // No exit proof exists. Retain every ownership boundary until this exact client later
         // reports exit or runner shutdown successfully disposes it.
         retirement.unconfirmed = true;
@@ -17211,11 +18477,21 @@ export class SessionManager {
     return retirement;
   }
 
+  /** Complete the retirement once its disposal returned or its root exited (`rootExited`). That ends
+   * the provider's local ownership, but not its campaign generation's fence: a descendant can
+   * outlive the root, so the fence lifts only on the exact driver's whole-tree proof (#4257). */
   private completeProviderRetirement(
     sessionId: string,
     retirement: ProviderRetirement,
+    rootExited = false,
   ): void {
     if (this.closing.get(sessionId) !== retirement) return;
+    // An allocation delivered while the provider was closing names a generation it must fence too.
+    retirement.campaignGeneration ??= this.fenceRetiringProvider(sessionId);
+    if (!this.shuttingDown && retirement.campaignGeneration !== undefined) {
+      this.awaitProcessTreeProof(sessionId, retirement.client, retirement.campaignGeneration,
+        this.retiredProviderTreeProof(retirement, rootExited));
+    }
     this.closing.delete(sessionId);
     if (retirement.parking) this.parkingSessions.delete(sessionId);
     // Callers suppress inventory refresh between active deletion and closing-fence installation.
@@ -17229,12 +18505,12 @@ export class SessionManager {
       this.resumePromptsQueuedDuringParking(sessionId, retirement);
       this.reportCapacity();
     }
-    if (this.shuttingDown) return;
-    const settledMeta=this.store.readMeta(sessionId);
-    // The exact provider has retired, even if Stop interrupted a running turn. Its last usage
-    // callbacks have been persisted; stale in-memory turn flags cannot keep the reservation live.
-    if(!this.active.has(sessionId) && settledMeta?.campaignBudgetDispatch &&
-        ["completed","failed","stopped"].includes(settledMeta.status)) this.emitStatus(sessionId,settledMeta.status,undefined,undefined,undefined,true);
+    // Shutdown only begins disposing the provider here; recordShutdownRetirementCheckpoints proves
+    // it gone once the process trees are reaped.
+    if (this.shuttingDown) {
+      this.awaitShutdownProof(sessionId, retirement.campaignGeneration);
+      return;
+    }
     if (this.pendingDeletions.delete(sessionId)) {
       // Deletion reaps every journal record this session owns, so it supersedes the replay below.
       setImmediate(() => {
@@ -17327,12 +18603,26 @@ export class SessionManager {
             teardownIdentityErrors.set(worktree.id, errText(error));
           }
         }
+        if (!meta.keptWorktreesTracked) {
+          // Only a session with such worktrees waits on Git; the rest stay as prompt as before.
+          const candidates = this.keptWorktreeCandidates(meta);
+          if (candidates.length) await this.backfillKeptWorktrees(meta, candidates);
+          else this.store.patchMeta(sessionId, { keptWorktreesTracked: true });
+        }
         const cleanupMeta = this.store.readMeta(sessionId) ?? meta;
         const checkpointOwnerHash = this.checkpointOwnerHash(meta);
         // Attached worktrees remain operator-owned: session deletion only forgets their
         // attribution. Runner-created/legacy worktrees carry destructive ownership proof.
         for (const worktree of this.attributedWorktrees(cleanupMeta).filter((item) => item.source !== "attached")) {
-          const cleanup = this.cleanupRecordForWorktree(cleanupMeta, worktree, "session_delete", "force");
+          // The journal holds one record per worktree, so a deletion record would replace a rollback
+          // still pending for this one, and with it the proof and snapshot that say whether anyone
+          // changed it (#4209). The rollback stays and decides, as it does for any deleted session.
+          const rollback = this.pendingRollbackFor(cleanupMeta, worktree);
+          if (rollback) {
+            worktreeCleanups.push(rollback);
+            continue;
+          }
+          const cleanup = this.keepIfKept(cleanupMeta, worktree, this.cleanupRecordForWorktree(cleanupMeta, worktree, "session_delete", "force"));
           const teardownIdentityError = teardownIdentityErrors.get(worktree.id);
           if (teardownIdentityError) {
             const now = Date.now();
@@ -17364,7 +18654,12 @@ export class SessionManager {
           const leftMeta: SessionMeta = { ...cleanupMeta, repoPath: left.repoPath, workspaceId: left.workspaceId,
             worktrees: left.worktrees, worktreePath: left.worktreePath, worktreeBranch: left.worktreeBranch };
           for (const worktree of left.worktrees.filter((item) => item.source !== "attached")) {
-            const cleanup = this.cleanupRecordForWorktree(leftMeta, worktree, "session_delete", "force");
+            const rollback = this.pendingRollbackFor(leftMeta, worktree);
+            if (rollback) {
+              worktreeCleanups.push(rollback);
+              continue;
+            }
+            const cleanup = this.keepIfKept(cleanupMeta, worktree, this.cleanupRecordForWorktree(leftMeta, worktree, "session_delete", "force"));
             if (checkpointOwnerHash) cleanup.checkpointOwnerHash = checkpointOwnerHash;
             this.cleanupJournal.add(cleanup);
             worktreeCleanups.push(cleanup);
@@ -17494,6 +18789,9 @@ export class SessionManager {
       if (meta) {
         await this.cleanupProviderState(sessionId, meta.driver, meta.context, true);
       }
+      // A worktree operation already under way, such as a request's rollback, may still keep one of
+      // these worktrees. It finishes first, and its keep reaches the records above (#4209).
+      await this.settleWorktreeOperations(sessionId);
       for (const cleanup of worktreeCleanups) await this.reapWorktree(cleanup, false, meta ?? undefined);
       if (meta) {
         await removeRequestedWorktreeBoundary(meta.repoPath, sessionId, {
@@ -17504,6 +18802,7 @@ export class SessionManager {
           this.log(`requested worktree boundary cleanup for ${boundedSessionIdForLog(sessionId)} needs retry: ${errText(error)}`);
         });
       }
+      this.grantedIssueNumbers.delete(sessionId);
       this.log(`deleted session ${sessionId} from the box store`);
     } finally {
       this.deleting.delete(sessionId);
@@ -17541,13 +18840,30 @@ export class SessionManager {
     isolationMeta?: SessionMeta,
   ): Promise<void> {
     cleanupCurrentGeneration ||= record.checkpointGenerationDisposable === true;
-    if (record.trigger === "creation_rollback" && record.auxiliaryWorktreeRollback === true &&
-        this.store.has(record.sessionId) && !cleanupCurrentGeneration) {
-      await this.runWorktreeOperation(record.sessionId, async () => {
-        await this.reapCreationRollback(record, this.store.readMeta(record.sessionId) ?? undefined);
-      });
+    const auxiliaryRollback = this.isAuxiliaryRollback(record);
+    if (auxiliaryRollback && this.rollbackAttemptIsLive(record)) return;
+    if (auxiliaryRollback && this.creationRollbackTargetInUse(record)) {
+      this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} dropped: a session now uses that worktree`);
+      // The worktree is another session's to keep. A deleted session's rollback still owes what that
+      // session held there, its setup's processes and its port block, since nothing else will ever
+      // give them back (#4209). A live session still has them on its own row.
+      if (!this.store.has(record.sessionId)) {
+        // Decided now, and on record before anything is stopped: if the processes will not stop, a retry
+        // only tries them again. It never removes the worktree, even once nothing lists it any more.
+        record.rollbackKeptAt ??= Date.now();
+        this.cleanupJournal.add(record);
+        await this.endRollbackUnremoved(record);
+        return;
+      }
+      this.removeWorktreeCleanupRecord(record);
       return;
     }
+    if (auxiliaryRollback && this.store.has(record.sessionId) && !cleanupCurrentGeneration) {
+      await this.runWorktreeOperation(record.sessionId, () => this.reapAuxiliaryRollbackLocked(record));
+      return;
+    }
+    // The session is gone, but its record still only speaks for the worktree it made.
+    if (auxiliaryRollback && await this.settleRollbackTarget(record)) return;
     if (record.removalMode === "safe" && this.store.has(record.sessionId)) {
       await this.reapLiveSafeWorktree(record);
       return;
@@ -17617,6 +18933,10 @@ export class SessionManager {
       this.finishWorktreeCleanup(record);
       return;
     }
+    if (auxiliaryRollback && !worktreeRemoved) {
+      if (await this.settleRollbackTarget(record)) return;
+      this.noteRollbackFailure(record);
+    }
     // Keep cleanup diagnostics bounded and free of repository paths, ref values, and provider
     // errors. The durable journal retains the complete operator-independent retry coordinates.
     const failedPhases = checkpointRefsCleaned
@@ -17625,18 +18945,293 @@ export class SessionManager {
     this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after ${failedPhases}`);
   }
 
+  /** A switch still running owns its reservation: it is on record while its setup runs, and giving it
+   * back is that attempt's job. Only a crash or a finished attempt leaves one for anyone else. */
+  private rollbackAttemptIsLive(record: WorktreeCleanupRecord): boolean {
+    return this.reusedWorktreeClaims.get(record.worktreePath) === record.sessionId;
+  }
+
+  /** Replay one auxiliary creation rollback. Callers hold the session's worktree lane, and the state
+   * is read again here because waiting for that lane can take a long time. */
+  private async reapAuxiliaryRollbackLocked(record: WorktreeCleanupRecord): Promise<void> {
+    if (!this.cleanupJournal.list().includes(record) || this.rollbackAttemptIsLive(record)) return;
+    if (this.creationRollbackTargetInUse(record)) {
+      this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} dropped: a session now uses that worktree`);
+      this.removeWorktreeCleanupRecord(record);
+      return;
+    }
+    // A Location switch's rollback names another repository than the session is still in, so
+    // its teardown takes its boundary from the record rather than from that session.
+    const meta = this.store.readMeta(record.sessionId) ?? undefined;
+    await this.reapCreationRollback(record, meta?.repoPath === record.repoPath ? meta : undefined);
+  }
+
+  private rollbackGitOptions(record: WorktreeCleanupRecord) {
+    return { context: record.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
+  }
+
+  private rollbackTargetState(record: WorktreeCleanupRecord) {
+    return worktreeRollbackProofState(record.repoPath, record.worktreePath, record.rollbackProof, this.rollbackGitOptions(record), record.branch);
+  }
+
+  /** Record what the runner is leaving in a rollback's worktree: once the checkout finishes, so a
+   * crash during setup still has something to compare, again when setup ends, however it ended, and
+   * when an attempt that failed before either gives its worktree back. With nothing recorded the
+   * worktree is kept. A failure here only ever costs that. */
+  private async recordRollbackSnapshot(record: WorktreeCleanupRecord): Promise<void> {
+    try {
+      const snapshot = await captureRollbackSnapshot(record.worktreePath, this.rollbackGitOptions(record));
+      if (snapshot) record.rollbackSnapshot = snapshot;
+      else delete record.rollbackSnapshot;
+    } catch (error) {
+      delete record.rollbackSnapshot;
+      this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} has no snapshot: ${errText(error)}`);
+    }
+    this.cleanupJournal.add(record);
+  }
+
+  /** Throws unless what is at a rollback's path may still be force-removed. A throw ends this attempt
+   * at removal, and the rollback's next look at the worktree decides what happens to it. */
+  private async assertRollbackUntouched(record: WorktreeCleanupRecord): Promise<void> {
+    if (!this.isAuxiliaryRollback(record)) return;
+    const state = await this.rollbackTargetState(record);
+    if (state !== "proved" && state !== "absent" && state !== "unpopulated") {
+      throw new Error("the worktree is no longer the one this rollback made");
+    }
+    if (state !== "proved") return;
+    const work = await worktreeRollbackWork(record.worktreePath, record.rollbackSnapshot, this.rollbackGitOptions(record));
+    if (work.state !== "unchanged") throw new Error("the worktree changed while this rollback was retiring it");
+  }
+
+  /** Decide what an auxiliary rollback may do with what is at its path (#4209), before anything
+   * destructive. Returns whether the rollback is settled or has to wait; otherwise it may go on.
+   *
+   * The proof is in the worktree's own Git admin directory, so a foreign directory, a worktree made
+   * there later, or a registration that went away all fail it, and the rollback ends leaving that
+   * alone. A proved worktree that has changed since the runner left it ends the same way, because
+   * the proof says which worktree it is and not whose work is in it. */
+  private async settleRollbackTarget(record: WorktreeCleanupRecord): Promise<boolean> {
+    if (record.worktreeRemovedAt) return false;
+    // Keeping is decided once. The keep spends the proof, so a second look would read a mismatch and
+    // keep again, telling the session again each time its processes would not stop.
+    if (record.rollbackKeptAt) return this.endRollbackUnremoved(record);
+    const state = await this.rollbackTargetState(record);
+    if (state === "unavailable") return this.waitForRollbackAnswer(record);
+    if (state === "mismatch" || state === "unregistered") {
+      this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} dropped: what is at its path is not what it made`);
+      // An attempt that really made a worktree, now replaced by another: that is kept like any changed
+      // worktree, so the session is told, earlier rows at the path go, and a row of this session there
+      // loses the setup it could otherwise re-run over someone else's worktree. One that made nothing,
+      // like a refusal of a stale directory or an older runner's record, leaves the session's own row
+      // where it was: any setup on it is that row's own.
+      if (record.rollbackProof) {
+        return state === "unregistered"
+          ? this.keepRollbackWorktree(record, "it is no longer registered with Git as a worktree", { unregistered: true })
+          : this.keepRollbackWorktree(record, "what is there now is not the worktree it made");
+      }
+      return this.endRollbackUnremoved(record);
+    }
+    if (state === "proved") {
+      const work = await worktreeRollbackWork(record.worktreePath, record.rollbackSnapshot, this.rollbackGitOptions(record));
+      if (work.state === "unavailable") return this.waitForRollbackAnswer(record);
+      if (work.state === "changed") return this.keepRollbackWorktree(record, work.reason);
+    }
+    return false;
+  }
+
+  /** A read that fails never removes anything. It is tried again on the schedule of any failed attempt,
+   * because a passing failure should not cost a teardown. Once that schedule has ended, the answer is
+   * to keep the worktree and end the record, rather than leave it refusing every next attempt. */
+  private waitForRollbackAnswer(record: WorktreeCleanupRecord): boolean | Promise<boolean> {
+    this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} needs retry: its worktree could not be read`);
+    this.noteRollbackFailure(record);
+    if (record.rollbackGaveUpAt) return this.keepRollbackWorktree(record, "it could not be read, so nothing proves it is only what the runner left");
+    return true;
+  }
+
+  /** Whether every process carrying a rollback's marker has ended. */
+  private terminateRollbackProcesses(marker: string): Promise<boolean> {
+    return terminatePosixProcessesByMarker(marker).catch(() => false);
+  }
+
+  /** End a rollback that leaves its path alone. Processes its setup started are still its to stop, by
+   * their own marker, unless that marker now belongs to a row of this session. Its teardown never
+   * runs here, since that is repository code in a tree that is not (or no longer only) the attempt's.
+   * Its ports go only once those processes have, and only if no row uses its id. */
+  private async endRollbackUnremoved(record: WorktreeCleanupRecord): Promise<boolean> {
+    const meta = this.store.readMeta(record.sessionId);
+    const rows = meta ? [...this.attributedWorktrees(meta), ...(meta.locationHistory ?? []).flatMap((left) => left.worktrees)] : [];
+    const idInUse = rows.some((item) => item.id === record.worktreeId);
+    const markerInUse = !!meta && Object.values(meta.worktreeProcessMarkers ?? {}).includes(record.processMarker ?? "");
+    if (record.processMarker && !markerInUse && !await this.terminateRollbackProcesses(record.processMarker)) {
+      this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} needs retry: its setup processes could not be stopped`);
+      this.noteRollbackFailure(record);
+      return true;
+    }
+    if (record.worktreeId && !idInUse) {
+      try {
+        this.worktreePortAllocator.release(this.worktreePortOwner(record.sessionId, record.worktreeId));
+      } catch (error) {
+        this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} kept its port block: ${errText(error)}`);
+      }
+    }
+    // A branch this attempt made and nothing has moved or checked out would refuse the next attempt.
+    if (record.rollbackBranchBase && record.branch && !record.preserveBranch) {
+      await releaseUnchangedBranch(record.repoPath, record.branch, record.rollbackBranchBase, this.rollbackGitOptions(record));
+    }
+    this.removeWorktreeCleanupRecord(record, true);
+    return true;
+  }
+
+  /** Remember that the runner kept the worktree at `path` for whatever someone may have in it, so that
+   * deleting the session never removes it (#4209). */
+  private markWorktreeKept(sessionId: string, path: string): void {
+    // A deletion that read the session before this keep already has its record for this worktree. It
+    // has not removed it, or this worktree would not be here to keep, so it keeps it too. That is
+    // also all a keep can still tell a session whose metadata is already gone.
+    for (const record of this.cleanupJournal.list()) {
+      if (record.sessionId !== sessionId || record.trigger !== "session_delete" || record.keepWorktree ||
+          record.worktreeRemovedAt || !sameWorktreePath(record.context, record.worktreePath, path)) continue;
+      record.keepWorktree = true;
+      record.preserveBranch = true;
+      this.cleanupJournal.add(record);
+    }
+    const latest = this.store.readMeta(sessionId);
+    if (!latest || latest.keptWorktreePaths?.some((kept) => sameWorktreePath(latest.context, kept, path))) return;
+    this.store.patchMeta(sessionId, { keptWorktreePaths: [...(latest.keptWorktreePaths ?? []), path] });
+  }
+
+  /** The worktree once kept at `path` is gone: the runner removed what is there now, or is making a new
+   * one there, which only happens where nothing is. */
+  private forgetWorktreeKept(sessionId: string, path: string): void {
+    const latest = this.store.readMeta(sessionId);
+    if (!latest?.keptWorktreePaths?.some((kept) => sameWorktreePath(latest.context, kept, path))) return;
+    const keptWorktreePaths = latest.keptWorktreePaths.filter((kept) => !sameWorktreePath(latest.context, kept, path));
+    this.store.patchMeta(sessionId, { keptWorktreePaths: keptWorktreePaths.length ? keptWorktreePaths : undefined });
+  }
+
+  /** Git has just made a new worktree at `path`, which it does only where none is, so whatever an earlier
+   * worktree there recorded is no one's now (#4209). Its teardown and process marker go, under the new
+   * worktree's id and under the id of any row still naming that path. A row stored before ids came
+   * from the whole path has another id, a hash of its branch alone; that id's port block goes too,
+   * since no record will ever give it back once the new row replaces that one. An id another row
+   * still uses, at another path, keeps everything. */
+  private forgetWorktreeRecordsAt(sessionId: string, path: string, worktreeId: string): void {
+    const latest = this.store.readMeta(sessionId);
+    if (!latest) return;
+    const rows = [...this.attributedWorktrees(latest), ...(latest.locationHistory ?? []).flatMap((left) => left.worktrees)];
+    const here = (row: SessionWorktreeView) => sameWorktreePath(latest.context, row.path, path);
+    const staleIds = [...new Set(rows.filter((row) => here(row) && row.id !== worktreeId).map((row) => row.id))]
+      .filter((id) => !rows.some((row) => row.id === id && !here(row)));
+    const ids = [worktreeId, ...staleIds];
+    for (const id of staleIds) {
+      try {
+        this.worktreePortAllocator.release(this.worktreePortOwner(sessionId, id));
+      } catch (error) {
+        this.log(`session ${boundedSessionIdForLog(sessionId)} kept an earlier worktree's port block: ${errText(error)}`);
+      }
+    }
+    if (!ids.some((id) => latest.worktreeHooks?.[id] || latest.worktreeProcessMarkers?.[id])) return;
+    const worktreeHooks = { ...latest.worktreeHooks };
+    const worktreeProcessMarkers = { ...latest.worktreeProcessMarkers };
+    for (const id of ids) {
+      delete worktreeHooks[id];
+      delete worktreeProcessMarkers[id];
+    }
+    this.store.patchMeta(sessionId, {
+      worktreeHooks: Object.keys(worktreeHooks).length ? worktreeHooks : undefined,
+      worktreeProcessMarkers: Object.keys(worktreeProcessMarkers).length ? worktreeProcessMarkers : undefined,
+    });
+  }
+
+  private worktreeKept(meta: SessionMeta, path: string): boolean {
+    return !!meta.keptWorktreePaths?.some((kept) => sameWorktreePath(meta.context, kept, path));
+  }
+
+  /** What this session's history says about a path describes a worktree from before the rollback's
+   * attempt, which went, or the attempt could not have made one there. What stays on that path now is
+   * not it, so no row may give it the old one's setup or environment on the next return. Every name
+   * for it goes too, or this session would still read as holding it and refuse the next try. */
+  private forgetEarlierRowsAt(record: WorktreeCleanupRecord): void {
+    const latest = this.store.readMeta(record.sessionId);
+    if (!latest?.locationHistory?.length) return;
+    const same = (path: string | null | undefined) => !!path && sameWorktreePath(latest.context, path, record.worktreePath);
+    const updated = this.store.patchMeta(record.sessionId, { locationHistory: latest.locationHistory.map((left): LocationHistoryEntry => {
+      const { worktreeBranch: _branch, ...rest } = left;
+      return { ...(same(left.worktreePath) ? { ...rest, worktreePath: null } : left), worktrees: left.worktrees.filter((item) => !same(item.path)) };
+    }) });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
+  /** A proved worktree with something in it the attempt did not leave. Keeping it costs a directory to
+   * delete, and removing it could cost work no one can get back. The record ends, and nothing here
+   * can come back for it later. What the next attempt finds is an existing worktree with no record of
+   * this session behind it, which it continues in as it stands, with no setup and with a notice. A
+   * row of the session's current Location stays, so a retry can use it, but no longer runs setup.
+   * A directory Git no longer lists is a stale directory to the next attempt, which refuses it until
+   * a person has dealt with it. Either way, deleting the session later leaves it where it is.
+   *
+   * This runs once per record: what it decides is on the record before the proof is spent, and the
+   * record's later retries, while its processes will not stop, only try those again. */
+  private async keepRollbackWorktree(
+    record: WorktreeCleanupRecord,
+    reason: string,
+    { unregistered = false }: { unregistered?: boolean } = {},
+  ): Promise<boolean> {
+    this.forgetEarlierRowsAt(record);
+    const latest = this.store.readMeta(record.sessionId);
+    if (latest?.worktrees?.some((item) => sameWorktreePath(latest.context, item.path, record.worktreePath))) {
+      const updated = this.store.patchMeta(record.sessionId, { worktrees: latest.worktrees.map((item) => {
+        if (!sameWorktreePath(latest.context, item.path, record.worktreePath)) return item;
+        const { setup: _setup, setupConfig: _setupConfig, ...rest } = item;
+        return rest;
+      }) });
+      if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    }
+    this.markWorktreeKept(record.sessionId, record.worktreePath);
+    if (this.store.has(record.sessionId)) {
+      this.emitEvent(record.sessionId, { kind: "error", message: unregistered
+        ? `Kept the directory at ${record.worktreePath} rather than removing it, because ${reason}, so nothing proves what is in it ` +
+          "is only what the runner left. Nothing in it was changed. Asking for that worktree again is refused until the directory is " +
+          "gone: move anything you want to keep out of it, then delete it. Deleting this session leaves it in place."
+        : `Kept the worktree at ${record.worktreePath} rather than removing it, because ${reason}. Nothing in it was changed. Asking ` +
+          "for that worktree again continues there as an existing worktree, without setup, and deleting this session leaves it in " +
+          "place. Delete the directory if nothing needs it." });
+    }
+    record.rollbackKeptAt = Date.now();
+    this.cleanupJournal.add(record);
+    if (record.rollbackProof) {
+      await clearWorktreeRollbackProof(record.worktreePath, record.rollbackProof, { context: record.context }).catch(() => undefined);
+    }
+    return this.endRollbackUnremoved(record);
+  }
+
   /** A newly created worktree that never activated owns no conversation checkpoints. Reclaim its
    * own processes, hooks, directory, branch, and port without entering the session-wide orphan
    * lane, both synchronously and when replaying a crash-journaled creation rollback. */
   private async reapCreationRollback(record: WorktreeCleanupRecord, meta?: SessionMeta): Promise<void> {
+    // A record that has left the journal has been settled, by the move committing or by another
+    // attempt finishing it. It speaks for nothing now.
+    if (!this.cleanupJournal.list().includes(record)) return;
+    if (this.isAuxiliaryRollback(record) && await this.settleRollbackTarget(record)) return;
     if (!record.worktreeRemovedAt) {
       const removal = await this.removeRecordedWorktree(record, meta);
       if (!removal.removed) {
+        // What stopped it may be a change that appeared during the removal. That is answered now, with
+        // the worktree kept and the session told, rather than reported as stuck and left for a retry.
+        if (this.isAuxiliaryRollback(record) && await this.settleRollbackTarget(record)) return;
+        this.noteRollbackFailure(record);
         this.log(`requested worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after worktree removal`);
         return;
       }
       record.worktreeRemovedAt = Date.now();
       this.cleanupJournal.add(record);
+      if (this.store.has(record.sessionId)) {
+        const text = `The worktree at ${record.worktreePath} has been removed, or was already gone. Nothing in it had changed since the runner left it.`;
+        // Routine within the failure that made it, and that failure has already been reported. After
+        // a stuck attempt, someone was told it was still there, so they need to hear that it is not.
+        this.emitEvent(record.sessionId, record.rollbackAttempts ? { kind: "error", message: text } : { kind: "stderr", text });
+      }
     }
     const snapshot = await this.forgetRemovedWorktree(record);
     if (this.store.has(record.sessionId) && !snapshot) {
@@ -17647,10 +19242,11 @@ export class SessionManager {
         sameWorktreePath(latest.context, latest.worktreePath, record.worktreePath);
       if (inventoryStillReferencesWorktree || selectionStillReferencesWorktree) {
         this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live metadata cleanup`);
+        this.noteRollbackFailure(record);
         return;
       }
     }
-    this.finishWorktreeCleanup(record);
+    if (!this.finishWorktreeCleanup(record)) this.noteRollbackFailure(record);
   }
 
   /** A retirement journaled while its session was launching or closing is recorded before the
@@ -17854,8 +19450,8 @@ export class SessionManager {
   /** Resume an interrupted explicit or post-merge cleanup without treating its still-live session
    * as a replacement generation. The safe lane never reclaims checkpoint refs: those belong to
    * the live conversation, even when its selected worktree is being retired. */
-  private async reapLiveSafeWorktree(record: WorktreeCleanupRecord): Promise<void> {
-    await this.runWorktreeOperation(record.sessionId, async () => {
+  private async reapLiveSafeWorktree(record: WorktreeCleanupRecord, laneHeld = false): Promise<void> {
+    const reap = async () => {
       const meta = this.store.readMeta(record.sessionId);
       if (!meta) {
         this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live session metadata became unreadable`);
@@ -17869,6 +19465,9 @@ export class SessionManager {
           const repaired = await this.forgetRemovedWorktree(record);
           if (repaired) this.finishWorktreeCleanup(record);
           else this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live metadata cleanup`);
+        } else if ((meta.locationHistory ?? []).some((left) => left.worktrees.some((item) => item.id === record.worktreeId &&
+            sameWorktreePath(meta.context, item.path, record.worktreePath) && (!record.branch || item.branch === record.branch)))) {
+          this.dropOvertakenRetirement(record);
         } else {
           this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after live worktree identity changed`);
         }
@@ -17980,7 +19579,9 @@ export class SessionManager {
           this.store.releaseWorktreeLease(record.sessionId, cleanupLeaseOwner);
         }
       }
-    });
+    };
+    if (laneHeld) await reap();
+    else await this.runWorktreeOperation(record.sessionId, reap);
   }
 
   private removeWorktreeCleanupRecord(
@@ -18549,7 +20150,9 @@ export class SessionManager {
     const worktreeOptions = { context: entry.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
     const captured = base ? await captureTurnDiff(entry.worktree.path, base, worktreeOptions) : null;
     const diff = captured?.diff ?? (await worktreeDiff(entry.worktree.path, worktreeOptions));
-    if (diff.trim()) this.emitEvent(sessionId, { kind: "file_edit", path: "worktree", diff });
+    // A turn that pulls in a large upstream range can produce a diff bigger than one history
+    // record may be (#4288). Keep a bounded diff whose summary names the full size and file count.
+    if (diff.trim()) this.emitEvent(sessionId, { kind: "file_edit", path: "worktree", diff: boundTurnDiff(diff) });
     return captured?.tree ?? null;
   }
 
@@ -18652,11 +20255,17 @@ export class SessionManager {
           if (entry.controlPlaneHold) this.recoveryHolds.add(sessionId);
           setImmediate(() => void this.recoverQueuedAppServer(sessionId));
         }
-      } else if (code && code !== 0) {
-        this.rejectQueued(queued, "agent exited before queued command started");
-        this.emitStatus(sessionId, "failed", `agent exited ${code}`);
       } else {
         this.rejectQueued(queued, "agent exited before queued command started");
+        // Every exit the provider makes by itself ends the session with an accurate terminal
+        // status, and its slot waits for its whole tree's proof (#3788, #4256). A clean exit
+        // between turns completed it; one that cut a turn short, a non-zero code, or a signal failed it.
+        this.fenceExitedProvider(sessionId, expectedClient);
+        const turnCut = entry.running || entry.providerInitiatedTurnActive;
+        if (code === 0 && !turnCut) this.emitStatus(sessionId, "completed", "agent exited (code 0)");
+        else if (code === 0) this.emitStatus(sessionId, "failed", "agent exited (code 0) during a turn");
+        else if (code === null) this.emitStatus(sessionId, "failed", "agent exited by a signal");
+        else this.emitStatus(sessionId, "failed", `agent exited ${code}`);
       }
     } else {
       this.deleteActiveSession(sessionId, entry);
@@ -18670,7 +20279,7 @@ export class SessionManager {
     const closing = this.closing.get(sessionId);
     if (closing?.client === expectedClient) {
       try {
-        this.completeProviderRetirement(sessionId, closing);
+        this.completeProviderRetirement(sessionId, closing, true);
       } catch (error) {
         this.log(`provider retirement cleanup failed for ${sessionId}: ${errText(error)}`);
       }
@@ -18863,6 +20472,11 @@ export class SessionManager {
       }
     }
     this.active.clear();
+    // An exited provider still awaiting its tree proof is covered by shutdown's reaping too (#3788).
+    for (const [sessionId, providers] of this.treeProofRetirements) {
+      for (const generation of providers.values()) this.awaitShutdownProof(sessionId, generation);
+    }
+    this.treeProofRetirements.clear();
     const shutdownRetirementClients = new Set<Driver>();
     for (const retirement of [...this.closing.values()]) {
       shutdownRetirementClients.add(retirement.client);
@@ -18909,6 +20523,8 @@ export class SessionManager {
     this.orphanDiscoveryLaunching.clear();
     if (this.orphanRecoveryScanTimer) clearTimeout(this.orphanRecoveryScanTimer);
     this.orphanRecoveryScanTimer = null;
+    if (this.earlierRunnerProofTimer) clearTimeout(this.earlierRunnerProofTimer);
+    this.earlierRunnerProofTimer = null;
     for (const timer of this.orphanRecoveryTimers.values()) clearTimeout(timer);
     this.orphanRecoveryTimers.clear();
     for (const { timer } of this.backgroundContinuationTimers.values()) clearTimeout(timer);
@@ -18994,6 +20610,262 @@ export class SessionManager {
     return this.providerHomeLeases ? this.providerHomeLeases.close() : true;
   }
 
+  /** The final campaign budget checkpoint of a retired provider, in local history coordinates. */
+  private finalBudgetCheckpoint(
+    meta: SessionMeta,
+    dispatch: import("@wollipog/protocol").CampaignBudgetDispatch,
+  ): import("@wollipog/protocol").CampaignBudgetUsageCheckpoint {
+    return { generation: dispatch.generation, historyEpoch: this.snapshot(meta).historyEpoch ?? 0,
+      throughSeq: meta.seq, costUsd: meta.costUsd };
+  }
+
+  /**
+   * A provider that exits by itself has retired only once every process it started, descendants
+   * included, is proven gone (#3788): an ACP terminal or a detached helper can outlive the root.
+   * Fence its generation until the driver proves that, then attest the final checkpoint. A driver
+   * that cannot prove it, or a false proof, keeps the fence until a shutdown reaps every tree.
+   */
+  private fenceExitedProvider(sessionId: string, client: Driver): void {
+    const generation = this.fenceRetiringProvider(sessionId);
+    if (generation === undefined) return;
+    this.awaitProcessTreeProof(sessionId, client, generation,
+      client.proveProcessTreeExit ? client.proveProcessTreeExit({ terminate: false }) : Promise.resolve(false));
+  }
+
+  /**
+   * The proof that retires a provider whose Stop, park or handoff completed (#4257), under the rule
+   * a provider that exits by itself follows: the killing proof once this retirement's disposal
+   * returned. A disposal that threw leaves only the root's own exit, so only the non-killing proof
+   * that follows it. A driver without a proof never proves it.
+   */
+  private async retiredProviderTreeProof(retirement: ProviderRetirement, rootExited: boolean): Promise<boolean> {
+    const client = retirement.client;
+    if (!client.proveProcessTreeExit) return false;
+    const disposed = await retirement.disposal;
+    if (disposed) return client.proveProcessTreeExit({ terminate: true });
+    return rootExited ? client.proveProcessTreeExit({ terminate: false }) : false;
+  }
+
+  /** Keep `generation` fenced until `proof` shows this exact provider's whole process tree gone, then
+   * attest the final checkpoint. A false or rejected proof keeps the fence until a shutdown reaps
+   * every tree; shutdown takes over any proof still pending. */
+  private awaitProcessTreeProof(sessionId: string, client: Driver, generation: string, proof: Promise<boolean>): void {
+    const providers = this.treeProofRetirements.get(sessionId) ?? new Map<Driver, string>();
+    providers.set(client, generation);
+    this.treeProofRetirements.set(sessionId, providers);
+    void proof.catch(() => false).then((proven) => {
+      // Shutdown took this fence over; its reaping proof decides it.
+      const current = this.treeProofRetirements.get(sessionId);
+      if (this.shuttingDown || current?.get(client) !== generation) return;
+      if (!proven) {
+        this.log(`session ${sessionId} keeps its campaign slot: its retired provider's process tree was not proven gone`);
+        return;
+      }
+      current.delete(client);
+      if (current.size === 0) this.treeProofRetirements.delete(sessionId);
+      try {
+        this.clearRetiringProvider(sessionId, generation);
+        // The exact provider has retired, even if Stop interrupted a running turn. Its last usage
+        // callbacks have been persisted; stale in-memory turn flags cannot keep the reservation live.
+        const meta = this.store.readMeta(sessionId);
+        if (meta && !this.active.has(sessionId) && isTerminal(meta.status)) {
+          this.emitStatus(sessionId, meta.status, undefined, undefined, undefined, true);
+        }
+      } catch (error) {
+        this.log(`provider retirement proof failed for ${sessionId}: ${errText(error)}`);
+      }
+    });
+  }
+
+  /** The ended worker's fence that no runner process can ever lift (#4331): it names the current
+   * generation, records no process evidence, and was left by an earlier runner process, with nothing
+   * of this process still retiring that generation. Only the campaign's owner can then release the
+   * slot. A fence this process set may still be proven by this process, so it is never reported. */
+  private campaignRetirementHold(meta: SessionMeta): { campaignRetirementHold?: CampaignRetirementHold } {
+    const generation = meta.retiringProviderGeneration;
+    if (generation === undefined || generation !== meta.campaignBudgetDispatch?.generation ||
+        meta.retiringProviderRunners?.length || !isTerminal(meta.status) || this.active.has(meta.sessionId) ||
+        this.retirementOutstanding(meta.sessionId, generation) || this.fencesSetHere.get(meta.sessionId) === generation) return {};
+    // This host records evidence for the session's location, so the fence predates that evidence.
+    const reason = this.thisRetirementRunner(meta) ? "fence_without_evidence" : "unsupported_location";
+    return { campaignRetirementHold: { generation, reason } };
+  }
+
+  /** Whether another of this process's providers of `generation` is still retiring or awaiting its
+   * exit proof (#3788). */
+  private retirementOutstanding(sessionId: string, generation: string): boolean {
+    return this.closing.get(sessionId)?.campaignGeneration === generation ||
+      [...this.treeProofRetirements.get(sessionId)?.values() ?? []].includes(generation);
+  }
+
+  /** Fence the current campaign generation's final checkpoint while one of its providers retires
+   * (#3788), recording this runner process's evidence so a later process can prove it gone (#4256).
+   * A fence already present with nothing of this process outstanding was left by an earlier runner
+   * process; only proof that the earlier process's providers are all gone lifts it. */
+  private fenceRetiringProvider(sessionId: string): string | undefined {
+    const meta = this.store.readMeta(sessionId);
+    const generation = meta?.campaignBudgetDispatch?.generation;
+    if (generation === undefined) return undefined;
+    if (meta!.retiringProviderGeneration === generation) {
+      if (!this.retirementOutstanding(sessionId, generation)) this.inheritedFences.set(sessionId, generation);
+      const runners = this.fenceRunnersWithThisProcess(meta!.retiringProviderRunners, meta!);
+      if (runners !== meta!.retiringProviderRunners) this.store.patchMeta(sessionId, { retiringProviderRunners: runners });
+    } else {
+      const runner = this.thisRetirementRunner(meta!);
+      this.store.patchMeta(sessionId, { retiringProviderGeneration: generation, retiringProviderRunners: runner ? [runner] : undefined });
+      this.fencesSetHere.set(sessionId, generation);
+    }
+    return generation;
+  }
+
+  private thisRetirementRunner(meta: Pick<SessionMeta, "context" | "executionTarget">): RetiringProviderRunner | undefined {
+    try { return this.retirementProof.current(meta); } catch { return undefined; }
+  }
+
+  /** A fence's runner list once this process runs a provider of its generation too (#4256). Every
+   * runner on it must be proven gone before a later process lifts the fence, so a list this process
+   * cannot join with evidence becomes absent: such a fence is never lifted by a later process. */
+  private fenceRunnersWithThisProcess(
+    runners: RetiringProviderRunner[] | undefined,
+    launch: Pick<SessionMeta, "context" | "executionTarget">,
+  ): RetiringProviderRunner[] | undefined {
+    if (!runners?.length) return undefined;
+    const current = this.thisRetirementRunner(launch);
+    if (!current) return undefined;
+    return runners.some((runner) => sameRunner(runner, current)) ? runners : [...runners, current];
+  }
+
+  /** Lift a proven retirement's fence on its generation's final checkpoint (#3788), unless another
+   * provider of that generation is still retiring or awaiting its exit proof, which lifts it later,
+   * or the fence came from an earlier runner process. */
+  private clearRetiringProvider(sessionId: string, generation: string | undefined): void {
+    if (generation === undefined || this.retirementOutstanding(sessionId, generation) ||
+        this.inheritedFences.get(sessionId) === generation) return;
+    if (this.store.readMeta(sessionId)?.retiringProviderGeneration === generation) {
+      this.store.patchMeta(sessionId, { retiringProviderGeneration: undefined, retiringProviderRunners: undefined });
+    }
+  }
+
+  /** Inject the process evidence fences record and the proof that an earlier runner is gone. */
+  setRetirementProcessProof(proof: RetirementProcessProof): void {
+    this.retirementProof = proof;
+  }
+
+  /**
+   * Prove gone every earlier runner process that ran a provider of a fenced generation, with every
+   * process it launched (#4256): after a crash or a shutdown that could not prove its reaping,
+   * nothing else ever would. The proof is the provider-HOME lease abandonment proof over the
+   * evidence recorded with the fence, restricted to whole-tree proofs (a reboot, or the runner's
+   * provider cgroup empty). Once every earlier runner on the list is proven gone, a fence of a
+   * terminal session stores its final checkpoint, which the negotiated session snapshots deliver;
+   * with `live`, it is reported at once too. If this process's own provider of that generation is
+   * still retiring, the fence passes to it instead. A fence without a runner list, or with any
+   * earlier runner unproven, stays. Returns whether any fence with a list remains unproven.
+   */
+  proveEarlierRunnerRetirements(live = false): boolean {
+    if (this.shuttingDown) return false;
+    const proofs = new Map<string, boolean>();
+    const abandoned = (runner: RetiringProviderRunner) => {
+      const key = JSON.stringify(runner);
+      let proven = proofs.get(key);
+      if (proven === undefined) {
+        try { proven = this.retirementProof.abandoned(runner); } catch { proven = false; }
+        proofs.set(key, proven);
+      }
+      return proven;
+    };
+    let unproven = false;
+    for (const meta of this.store.listSessions()) {
+      const generation = meta.retiringProviderGeneration;
+      const runners = meta.retiringProviderRunners;
+      if (generation === undefined || !runners?.length || this.store.isDeleted(meta.sessionId)) continue;
+      // This process's own providers are proven by its own retirements.
+      const own = this.thisRetirementRunner(meta);
+      const earlier = runners.filter((runner) => !own || !sameRunner(runner, own));
+      if (earlier.length === 0) continue;
+      if (!earlier.every(abandoned)) {
+        unproven = true;
+        continue;
+      }
+      try {
+        this.liftEarlierRunnerFence(meta.sessionId, generation, live, own);
+      } catch (error) {
+        unproven = true;
+        this.log(`earlier runner retirement proof failed for ${meta.sessionId}: ${errText(error)}`);
+      }
+    }
+    return unproven;
+  }
+
+  private liftEarlierRunnerFence(sessionId: string, generation: string, live: boolean, own: RetiringProviderRunner | undefined): void {
+    if (this.inheritedFences.get(sessionId) === generation) this.inheritedFences.delete(sessionId);
+    if (this.retirementOutstanding(sessionId, generation)) {
+      // Every earlier runner is gone; this process's own retiring provider now holds the fence alone.
+      this.store.patchMeta(sessionId, { retiringProviderRunners: own ? [own] : undefined });
+      return;
+    }
+    const meta = this.store.readMeta(sessionId)!;
+    const dispatch = meta.campaignBudgetDispatch;
+    const attest = dispatch?.generation === generation && isTerminal(meta.status) && !this.active.has(sessionId);
+    this.store.patchMeta(sessionId, { retiringProviderGeneration: undefined, retiringProviderRunners: undefined,
+      ...(attest ? { campaignBudgetCheckpoint: this.finalBudgetCheckpoint(meta, dispatch!) } : {}) });
+    this.store.flush(sessionId);
+    this.log(`session ${sessionId}: the runner process that left its retirement fence is proven gone`);
+    if (live && attest) this.emitStatus(sessionId, meta.status, undefined, undefined, undefined, true);
+  }
+
+  /** Retry the earlier-runner proofs startup could not make (#4256), backing off to a steady
+   * interval: a provider the crashed runner left may still be ending. Each retry is the same proof;
+   * nothing is inferred from elapsed time. */
+  private scheduleEarlierRunnerRetirementProof(attempt = 0): void {
+    if (this.shuttingDown) return;
+    if (this.earlierRunnerProofTimer) clearTimeout(this.earlierRunnerProofTimer);
+    const delays = EARLIER_RUNNER_PROOF_RETRY_DELAYS_MS;
+    this.earlierRunnerProofTimer = setTimeout(() => {
+      this.earlierRunnerProofTimer = null;
+      if (this.proveEarlierRunnerRetirements(true)) this.scheduleEarlierRunnerRetirementProof(attempt + 1);
+    }, delays[Math.min(attempt, delays.length - 1)]);
+    this.earlierRunnerProofTimer.unref?.();
+  }
+
+  private awaitShutdownProof(sessionId: string, generation: string | undefined): void {
+    if (generation === undefined) return;
+    const generations = this.shutdownRetirements.get(sessionId) ?? new Set<string>();
+    generations.add(generation);
+    this.shutdownRetirements.set(sessionId, generations);
+  }
+
+  /**
+   * Prove the retirements runner shutdown interrupted (#3788). Shutdown disposes each retiring
+   * provider without proof that it exited, and the runner can no longer report it. Once every spawned
+   * process tree is reaped, store each such session's final campaign checkpoint, so the restarted
+   * runner's negotiated session snapshots prove that no provider of the current generation remains.
+   * Without that proof the fence stays, and the session keeps its campaign slot.
+   */
+  recordShutdownRetirementCheckpoints(processTreesReaped: boolean): void {
+    if (!this.shuttingDown) throw new Error("shutdown retirement proof requires shutdown");
+    const retired = [...this.shutdownRetirements];
+    this.shutdownRetirements.clear();
+    if (!processTreesReaped) return;
+    for (const [sessionId, generations] of retired) {
+      try {
+        const meta = this.store.readMeta(sessionId);
+        const generation = meta?.retiringProviderGeneration;
+        // Reaping proves only the providers this process disposed or saw exit: never one whose
+        // disposal failed, nor an earlier runner process's.
+        if (!meta || generation === undefined || !generations.has(generation) ||
+            this.retirementOutstanding(sessionId, generation) || this.inheritedFences.get(sessionId) === generation) continue;
+        const dispatch = meta.campaignBudgetDispatch;
+        this.store.patchMeta(sessionId, { retiringProviderGeneration: undefined, retiringProviderRunners: undefined,
+          ...(dispatch?.generation === generation && isTerminal(meta.status)
+            ? { campaignBudgetCheckpoint: this.finalBudgetCheckpoint(meta, dispatch) } : {}) });
+        this.store.flush(sessionId);
+      } catch (error) {
+        this.log(`shutdown retirement proof failed for ${sessionId}: ${errText(error)}`);
+      }
+    }
+  }
+
   private emitStatus(
     sessionId: string,
     status: SessionStatus,
@@ -19021,6 +20893,14 @@ export class SessionManager {
     if (status === "idle" && rejectionHold !== undefined) {
       status = "input_required";
       detail = this.providerRejectionBlocker(sessionId, rejectionHold);
+    }
+    // So does a background continuation held after bounded launch failures (#3542), until Restart
+    // or a person's accepted turn retries it.
+    const launchHeld = status === "idle" && authMeta ? launchHeldBackgroundJobs(authMeta) : [];
+    if (launchHeld.length > 0) {
+      status = "input_required";
+      detail = backgroundContinuationHoldBlocker(launchHeld.length,
+        Math.max(...launchHeld.map((job) => job.continuationLaunchFailures ?? MAX_CONTINUATION_LAUNCH_ATTEMPTS)));
     }
     const entry = this.active.get(sessionId);
     const terminal = status === "completed" || status === "failed" || status === "stopped";
@@ -19052,10 +20932,10 @@ export class SessionManager {
     const finalMeta=this.store.readMeta(sessionId)!;
     const checkpoint=terminal && finalMeta.campaignBudgetDispatch && !this.closing.has(sessionId) &&
       !this.worktreeRebindings.has(sessionId) && !this.providerAccountSwitches.has(sessionId) &&
+      finalMeta.retiringProviderGeneration!==finalMeta.campaignBudgetDispatch.generation &&
       (finalProviderUsage || entry && !entry.running && !entry.providerInitiatedTurnActive) &&
       runnerSupportsProtocol(this.controlPlaneProtocolVersion(),"campaignBudgetAdmission")
-      ? {generation:finalMeta.campaignBudgetDispatch.generation,historyEpoch:this.snapshot(finalMeta).historyEpoch??0,
-        throughSeq:finalMeta.seq,costUsd:finalMeta.costUsd}:undefined;
+      ? this.finalBudgetCheckpoint(finalMeta, finalMeta.campaignBudgetDispatch):undefined;
     if(checkpoint) this.store.patchMeta(sessionId,{campaignBudgetCheckpoint:checkpoint});
     this.send({
       type: "session_status",
@@ -19196,8 +21076,9 @@ export class SessionManager {
       const stored = this.store.appendEvent(sessionId, identifiedPayload);
       if (!stored) throw new Error("session metadata disappeared before history append");
       try {
-        this.accrueMeta(sessionId, identifiedPayload);
-        this.send({ type: "session_event", sessionId, payload: identifiedPayload, seq: stored.seq, ts: stored.ts });
+        // Relay what was stored: the store may have shortened an oversized record (#4288).
+        this.accrueMeta(sessionId, stored.payload);
+        this.send({ type: "session_event", sessionId, payload: stored.payload, seq: stored.seq, ts: stored.ts });
       } catch (relayError) {
         // The authoritative append already committed. Do not misclassify a best-effort metadata or
         // transport failure as corrupt history, and never throw it through a driver callback; the
@@ -19390,10 +21271,14 @@ export class SessionManager {
       : active.running ? active.activeTurnId : undefined;
     const providerTurnId = active.client.agentTurnId?.();
     const providerThreadId = active.client.agentSessionId();
-    if (!sessionTurnId || sessionTurnId !== raw.sessionTurnId ||
-        typeof providerTurnId !== "string" || !bounded(providerTurnId, 512) ||
-        typeof providerThreadId !== "string" || !bounded(providerThreadId, 512)) {
-      return fail(occurrenceId, "App Server provider coordinates changed before action arming");
+    // Each refusal names its own cause (#4054); the control plane relays it with the recovery.
+    if (!sessionTurnId) return fail(occurrenceId, "the session has no active runner turn");
+    if (sessionTurnId !== raw.sessionTurnId) return fail(occurrenceId, "the session's runner turn changed before action arming");
+    if (typeof providerThreadId !== "string" || !bounded(providerThreadId, 512)) {
+      return fail(occurrenceId, "the Codex thread is not established");
+    }
+    if (typeof providerTurnId !== "string" || !bounded(providerTurnId, 512)) {
+      return fail(occurrenceId, "Codex has not confirmed a provider turn for the current turn");
     }
     const payload: WorkflowActionAdmissionArmedEvent = {
       kind: "workflow_action_admission_armed",
@@ -19463,9 +21348,66 @@ export class SessionManager {
     try {
       const result = await githubMergePreflight(message,
         options.gh ?? contextGhRunner(meta.context, cwd, options.agentEnv?.(meta) ?? {}));
-      return result.ok ? { ...base, ok: true, check: result.check } : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
+      return result.ok ? { ...base, ok: true, check: result.check, ...(result.checks ? { checks: result.checks } : {}) }
+        : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
     } catch {
       return { ...base, ok: false, refusal: "unavailable", reason: "GitHub could not be checked." };
+    }
+  }
+
+  /** v295 (#3762): read a GitLab `pr_merge` snapshot's merge request through the child session's own
+   * `glab` login and context, and report every issue merging it would close. Read-only; a refusal
+   * is a fixed sentence, never `glab` output. Every call names its host and project, so `glab` runs
+   * from the filesystem root, as forge actions do: no repository configuration the agent can write
+   * in its worktree is read on the way to a result that can lift a person's merge gate. */
+  async gitlabMergeClosures(
+    message: GitLabMergeClosuresMessage,
+    options: { glab?: GlabRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+  ): Promise<GitLabMergeClosuresResultMessage> {
+    const base = { type: "gitlab_merge_closures_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    const meta = this.store.readMeta(message.sessionId);
+    if (!meta) {
+      return { ...base, ok: false, refusal: "unavailable", reason: "The session is not known to this runner." };
+    }
+    try {
+      const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
+      const result = await gitlabMergeClosures(message,
+        options.glab ?? contextGlabRunner(meta.context, neutral, options.agentEnv?.(meta) ?? {}));
+      return result.ok ? { ...base, ok: true, check: result.check } : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
+    } catch {
+      return { ...base, ok: false, refusal: "unavailable", reason: "GitLab could not be checked." };
+    }
+  }
+
+  /** v330 (#4323): after a `pr_merge` decision is consumed, read what its pull request or merge
+   * request would close in any state, or take it out of the merge queue or train. Through the
+   * child session's own `gh` or `glab` login and context, from the filesystem root as forge
+   * actions run, so nothing the agent can write in its worktree is read on the way. A failure is a
+   * fixed sentence, never forge output. */
+  async mergeClosureWatch(
+    message: MergeClosureWatchMessage,
+    options: { gh?: GhRunner; glab?: GlabRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+  ): Promise<MergeClosureWatchResultMessage> {
+    const operation = message.operation === "dequeue" ? "dequeue" as const : "read" as const;
+    const base = { type: "merge_closure_watch_result" as const, requestId: message.requestId, sessionId: message.sessionId, operation };
+    const meta = this.store.readMeta(message.sessionId);
+    if (!meta) return { ...base, ok: false, reason: "The session is not known to this runner." };
+    const target = { repository: message.repository, pullRequest: message.pullRequest, headSha: message.headSha };
+    try {
+      const agentEnv = options.agentEnv?.(meta) ?? {};
+      const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
+      const forges = { gh: options.gh ?? contextGhRunner(meta.context, neutral, agentEnv),
+        glab: options.glab ?? contextGlabRunner(meta.context, neutral, agentEnv) };
+      if (operation === "dequeue") {
+        const result = await dequeueMerge(target, forges);
+        this.log(JSON.stringify({ event: "merge_closure_dequeue", sessionId: message.sessionId, repository: message.repository,
+          pullRequest: message.pullRequest, outcome: result.outcome }));
+        return { ...base, ok: true, outcome: result.outcome, ...(result.reason ? { reason: result.reason } : {}) };
+      }
+      const read = await readMergeClosures(target, forges);
+      return read.ok ? { ...base, ok: true, state: read.state, headSha: read.headSha, check: read.check } : { ...base, ok: false, reason: read.reason };
+    } catch {
+      return operation === "dequeue" ? { ...base, ok: true, outcome: "uncertain" } : { ...base, ok: false, reason: "The forge could not be checked." };
     }
   }
 
@@ -19479,6 +21421,9 @@ export class SessionManager {
   ): Promise<ForgeDecisionActionResultMessage> {
     const base = { type: "forge_decision_action_result" as const, requestId: message.requestId,
       sessionId: message.sessionId, occurrenceId: message.occurrenceId };
+    if (message.action?.kind === "issue_publication" || message.action?.kind === "issue_publication_observe") {
+      return { ...base, ...await this.issuePublicationAtLocation(message, options.gh) };
+    }
     const meta = this.store.readMeta(message.sessionId);
     if (!meta) {
       return { ...base, outcome: "refused", refusal: { reason: "runner_unavailable",
@@ -19513,6 +21458,27 @@ export class SessionManager {
     options: { gh?: GhRunner; glab?: GlabRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
   ): Promise<CampaignForgeObserveResultMessage> {
     const base = { type: "campaign_forge_observe_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    if (message.location) {
+      // #4119: another campaign repository's pull requests, with this runner's own login, in the
+      // Location's path. The Orchestrator session lives on another runner; nothing here needs it.
+      const { location } = message;
+      const repository = typeof location.repository === "string" ? location.repository.toLowerCase() : "";
+      if (typeof location.workspacePath !== "string" || !location.workspacePath.trim() || location.workspacePath.includes("\0") || !repository ||
+          !Array.isArray(message.pullRequests) || message.pullRequests.some((ref) => ref?.repository?.toLowerCase() !== repository)) {
+        return { ...base, observedAt: Date.now(), ok: false, failure: "forge_unsupported" };
+      }
+      try {
+        const cwd = await realpath(location.workspacePath);
+        const context = { kind: "native" as const };
+        const outcome = await observeForgeStatus(message.pullRequests, options.gh ?? contextGhRunner(context, cwd),
+          message.gitlab === true ? { glab: options.glab ?? contextGlabRunner(context, cwd) } : {});
+        return outcome.ok
+          ? { ...base, observedAt: Date.now(), ok: true, results: outcome.results }
+          : { ...base, observedAt: Date.now(), ok: false, failure: outcome.failure };
+      } catch {
+        return { ...base, observedAt: Date.now(), ok: false, failure: "forge_error" };
+      }
+    }
     const meta = this.store.readMeta(message.sessionId);
     if (!meta?.orchestrator || !meta.repoPath || this.campaignHostTargetRefusal(meta)) {
       return { ...base, observedAt: Date.now(), ok: false, failure: "forge_unsupported" };
@@ -19538,6 +21504,10 @@ export class SessionManager {
     options: { agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
   ): Promise<import("@wollipog/protocol").CampaignIssueScopeResultMessage> {
     const base = { type: "campaign_issue_scope_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    if (message.operation === "grant_issue_numbers") return this.grantCampaignIssueNumbers(message);
+    // Any synchronization is newer authority than a remembered grant (#4269), even one refused
+    // below: the launch it raced with takes its numbers from the stored row and scope instead.
+    if (message.operation === "synchronize") this.forgetIssueGrant(message.sessionId);
     const meta = this.store.readMeta(message.sessionId);
     if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, error: "Campaign issue scope requires a runner-local Orchestrator repository" };
@@ -19572,18 +21542,36 @@ export class SessionManager {
         return { ...base, ok: false, error: "Stale or conflicting campaign scope revision" };
       }
       let control = message.control;
-      if (control && (!validCampaignControl(control) || control.mode === "full_control" && control.boundary.repository.toLowerCase() !== repository)) return { ...base, ok: false, error: "Scope authority boundary is invalid or in another repository" };
+      // A participant in any boundary repository stores its own repository's part (#4118, v313).
+      if (control && (!validCampaignControl(control) || control.mode === "full_control" && !campaignBoundaryRepository(control.boundary, repository))) return { ...base, ok: false, error: "Scope authority boundary is invalid or in another repository" };
+      if (!validControlRevision(message.controlRevision) || message.controlRevision !== undefined && control === undefined) {
+        return { ...base, ok: false, error: "Invalid authoritative control revision" };
+      }
       // A human scope revision intentionally invalidates older standing authorization, but
       // scope removal must still persist. Disable the stale runner diagnostic contract;
       // the server independently retains its boundary and evaluates it as human-required.
       if (control?.mode === "full_control" && control.boundary.issueScopeRevision !== scope.revision) control = { mode: "custom" };
-      const updated = this.store.patchMeta(message.sessionId, { orchestrator: { ...fresh.orchestrator, issueNumbers: [...scope.issueNumbers], issueScope: scope,
-        ...(control === undefined ? {} : { control }) } });
+      // Control has its own order (#3363): within one scope revision a delayed update can carry
+      // an older control than the runner already holds, and must not roll it back.
+      const ordered = nextCampaignControl(fresh.orchestrator, { control, controlRevision: message.controlRevision });
+      const { control: _heldControl, controlRevision: _heldRevision, ...orchestrator } = fresh.orchestrator;
+      const updated = this.store.patchMeta(message.sessionId, { orchestrator: { ...orchestrator, issueNumbers: [...scope.issueNumbers], issueScope: scope,
+        ...(ordered.control === undefined ? {} : { control: ordered.control }),
+        ...(ordered.controlRevision === undefined ? {} : { controlRevision: ordered.controlRevision }) } });
       if (!updated) return { ...base, ok: false, error: "Could not persist campaign scope" };
       // The Claude auto-approval closure reads this exact object on each ask. Update it in place
       // so removals apply to the current process, as well as the next restart.
-      if (live) { live.issueNumbers = [...scope.issueNumbers]; live.issueScope = scope; if (control !== undefined) live.control = control; }
-      this.log(JSON.stringify({ event: "campaign_issue_scope_synchronized", sessionId: message.sessionId, revision: scope.revision }));
+      if (live) {
+        live.issueNumbers = [...scope.issueNumbers]; live.issueScope = scope;
+        if (ordered.control !== undefined) live.control = ordered.control;
+        if (ordered.controlRevision !== undefined) live.controlRevision = ordered.controlRevision;
+      }
+      if (ordered.outcome === "kept_newer") {
+        this.log(JSON.stringify({ event: "campaign_control_update_ignored", sessionId: message.sessionId, revision: scope.revision,
+          controlRevision: message.controlRevision ?? null, heldControlRevision: ordered.controlRevision ?? null }));
+      }
+      this.log(JSON.stringify({ event: "campaign_issue_scope_synchronized", sessionId: message.sessionId, revision: scope.revision,
+        controlRevision: ordered.controlRevision ?? null }));
       return { ...base, ok: true, repository, revision: scope.revision };
     } catch (error) {
       return { ...base, ok: false, error: error instanceof CampaignIssueScopeRefusal ? error.message
@@ -19591,13 +21579,107 @@ export class SessionManager {
     }
   }
 
+  /**
+   * The issue numbers a Custom campaign's first-message reading granted, delivered to its live
+   * Orchestrator (#4269), which launched before the reading settled and so holds none. They go on
+   * the live launch policy, which the Claude routine-write classifier reads on each ask, and on the
+   * stored launch metadata, which the issue-closure checks read. The next launch carries the same
+   * numbers from the control plane.
+   *
+   * It only ever fills an empty grant: a session holding other numbers, any issue scope or Full
+   * Control, one with no live or launching provider, and a grant for another campaign are refused,
+   * and the numbers it already holds are a no-op. It names no repository, revision or operation, so
+   * it can't widen a scope, change a repository or grant anything else. Only the authenticated
+   * control-plane channel sends it.
+   */
+  private grantCampaignIssueNumbers(
+    message: Extract<import("@wollipog/protocol").CampaignIssueScopeMessage, { operation: "grant_issue_numbers" }>,
+  ): import("@wollipog/protocol").CampaignIssueScopeResultMessage {
+    const base = { type: "campaign_issue_scope_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    const sessionId = message.sessionId;
+    const refuse = (grantRefusal: import("@wollipog/protocol").CampaignIssueNumberGrantRefusal, error: string) => {
+      this.log(JSON.stringify({ event: "campaign_issue_numbers_grant_refused", requestId: message.requestId, sessionId, grantRefusal }));
+      return { ...base, ok: false, grantRefusal, error };
+    };
+    const numbers = message.issueNumbers;
+    if (!boundedIssueNumbers(numbers) || numbers.length < 1 || typeof message.campaignSessionId !== "string" || !message.campaignSessionId) {
+      return refuse("invalid", "Invalid granted issue numbers");
+    }
+    // A grant belongs to the campaign whose first message was read, and only its root Orchestrator holds it.
+    if (message.campaignSessionId !== sessionId) return refuse("other_campaign", "The granted issue numbers belong to another campaign");
+    const meta = this.store.readMeta(sessionId);
+    if (!meta?.orchestrator) return refuse("not_orchestrator", "Granted issue numbers require a runner-local Orchestrator");
+    if (meta.orchestrator.issueScope) return refuse("issue_scope_held", "The session already holds an authorized issue scope");
+    // Full Control takes its issue numbers only from its synchronized issue scope.
+    const live = this.active.get(sessionId)?.orchestratorLaunchPolicy;
+    if (meta.orchestrator.control?.mode === "full_control" || live?.control?.mode === "full_control") {
+      return refuse("issue_scope_held", "A Full Control session takes its issue numbers from its issue scope");
+    }
+    const granted = [...numbers].sort((a, b) => a - b);
+    const held = [...(meta.orchestrator.issueNumbers ?? [])].sort((a, b) => a - b);
+    if (held.length) {
+      // A duplicate or replayed delivery finds exactly what it would set: nothing changes.
+      if (JSON.stringify(held) !== JSON.stringify(granted)) return refuse("issue_numbers_held", "The session already holds other issue numbers");
+      return { ...base, ok: true, issueNumbersGrant: "unchanged" };
+    }
+    if (live?.issueScope || live?.issueNumbers?.length) return refuse("issue_numbers_held", "The live session already holds issue authority");
+    // Only a live provider, or one launching now, takes the numbers here; anything else gets them
+    // from the control plane at its next launch. A restart of a stopped session still reads as
+    // stopped until its launch rewrites the row, so a launch under way counts as live.
+    const launching = this.launchGenerations.has(sessionId) && !this.deleting.has(sessionId) && !this.deleted.has(sessionId) &&
+      !this.store.isDeleted(sessionId);
+    if (!launching && (isTerminal(meta.status) || !live)) return refuse("not_live", "The session has no live provider");
+    const updated = this.store.patchMeta(sessionId, { orchestrator: { ...meta.orchestrator, issueNumbers: granted } });
+    if (!updated) return refuse("not_live", "Could not persist the granted issue numbers");
+    // The Claude auto-approval closure reads this exact object on each ask: update it in place. A
+    // launch still preparing adopts the stored numbers at its last synchronous boundary.
+    if (live) live.issueNumbers = [...granted];
+    // A restart already under way may rebuild the row from a spec that predates this grant: only
+    // that launch generation re-applies it. With none under way there is nothing to remember.
+    const launchGeneration = launching ? this.launchGenerations.get(sessionId) : undefined;
+    if (launchGeneration === undefined) this.grantedIssueNumbers.delete(sessionId);
+    else this.grantedIssueNumbers.set(sessionId, { launchGeneration, issueNumbers: [...granted] });
+    this.log(JSON.stringify({ event: "campaign_issue_numbers_granted", sessionId, issues: granted.length }));
+    return { ...base, ok: true, issueNumbersGrant: "applied" };
+  }
+
+  /** The issue numbers a grant (#4269) that raced with launch `launchGeneration` leaves for it to
+   * re-apply: only while that exact generation is still the session's current launch. */
+  private racedIssueGrant(sessionId: string, launchGeneration: number): number[] | undefined {
+    const remembered = this.grantedIssueNumbers.get(sessionId);
+    if (!remembered || remembered.launchGeneration !== launchGeneration || !this.launchIsCurrent(sessionId, launchGeneration)) {
+      return undefined;
+    }
+    return remembered.issueNumbers.length ? [...remembered.issueNumbers] : undefined;
+  }
+
+  /** Forget a remembered grant (#4269); with `launchGeneration`, only one bound to that launch. */
+  private forgetIssueGrant(sessionId: string, launchGeneration?: number): void {
+    if (launchGeneration === undefined || this.grantedIssueNumbers.get(sessionId)?.launchGeneration === launchGeneration) {
+      this.grantedIssueNumbers.delete(sessionId);
+    }
+  }
+
+  /** `orchestrator` with the issue numbers a grant (#4269) that raced with launch `launchGeneration`
+   * applied, when it holds no issue numbers, no issue scope and no Full Control; otherwise unchanged.
+   * Never mutates its argument. */
+  private withAppliedIssueGrant<T extends SessionMeta["orchestrator"]>(sessionId: string, launchGeneration: number, orchestrator: T): T {
+    if (!orchestrator || orchestrator.issueScope || orchestrator.issueNumbers?.length || orchestrator.control?.mode === "full_control") {
+      return orchestrator;
+    }
+    const granted = this.racedIssueGrant(sessionId, launchGeneration);
+    return granted ? { ...orchestrator, issueNumbers: granted } : orchestrator;
+  }
+
   /** Execute only trusted, human-approved closures, with a durable fence before mutation. */
   async githubIssueClosure(
     message: GithubIssueClosureMessage,
-    options: { agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+    options: { agentEnv?: (meta: SessionMeta) => Record<string, string>; locationCommitWaitMs?: number } = {},
   ): Promise<GithubIssueClosureResultMessage> {
     const base = { type: "github_issue_closure_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    if (message.location) return this.githubIssueClosureAtLocation(message, message.location, base, options.locationCommitWaitMs);
     const meta = this.store.readMeta(message.sessionId);
+    if (message.operation === "commit") return { ...base, ok: false, failure: "runner_failed", error: "Only a closure at a Location is committed separately" };
     if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a runner-local Orchestrator repository" };
     }
@@ -19652,12 +21734,159 @@ export class SessionManager {
         occurrenceId: message.occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
       return { ...base, ok: true, result };
     } catch (error) {
-      // Execution throws only before its mutation fence: a mutation failure is an `uncertain` result.
-      return error instanceof IssueClosureInspectionError
-        ? { ...base, ok: false, failure: error.failure, error: error.message,
-            ...(error.deliveryVerificationFailure ? { deliveryVerificationFailure: error.deliveryVerificationFailure } : {}) }
-        : { ...base, ok: false, failure: "evidence_unavailable",
-          error: "Issue inspection failed; verify gh or glab authentication and complete conflict evidence" };
+      return issueClosureFailure(base, error);
+    }
+  }
+
+  /** A closure in another campaign repository (#4119): in the Location the control plane resolved,
+   * with this runner's own forge login. The Orchestrator session lives on another runner, so this
+   * one holds no copy of its scope or boundary, and can't reread them at its mutation fence as the
+   * root's runner does. So `execute` runs every forge check, stops at the fence and answers
+   * `prepared`; the control plane rechecks the campaign's authority after those reads and sends
+   * `commit`. Without one in time, nothing is written. What this runner fences itself is what only
+   * it can see: the checkout's origin, the forge digest, and one durable attempt per occurrence. */
+  private async githubIssueClosureAtLocation(
+    message: GithubIssueClosureMessage,
+    location: GithubIssueClosureLocation,
+    base: { type: "github_issue_closure_result"; requestId: string; sessionId: string },
+    commitWaitMs = LOCATION_ISSUE_CLOSURE_COMMIT_WAIT_MS,
+  ): Promise<GithubIssueClosureResultMessage> {
+    if (message.operation === "commit") {
+      const prepared = this.preparedLocationClosures.get(message.occurrenceId);
+      if (!prepared) return { ...base, ok: false, failure: "runner_failed", error: "No closure is prepared for this approval; nothing was written" };
+      prepared.commit();
+      return { ...await prepared.finished, ...base };
+    }
+    // Frames are not validated on the wire.
+    if (typeof location.workspacePath !== "string" || !location.workspacePath.trim() || location.workspacePath.includes("\0") ||
+        typeof location.repository !== "string" || !location.repository) {
+      return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires the Location's path on this runner" };
+    }
+    const repository = location.repository.toLowerCase();
+    let cwd: string;
+    try {
+      cwd = await realpath(location.workspacePath);
+    } catch {
+      return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires the Location's path on this runner" };
+    }
+    const run = issueClosureRun({ kind: "native" }, cwd);
+    try {
+      if (message.operation === "inspect") {
+        const inspection = await inspectGithubIssueClosure(message.issue, run, message.deliveryPullRequests, message.epicMembers === true);
+        if (inspection.repository.toLowerCase() !== repository) return { ...base, ok: false, failure: "repository_changed", error: "The Location's repository differs from the one this closure names" };
+        return { ...base, ok: true, inspection };
+      }
+      if (message.snapshot.repository.toLowerCase() !== repository) return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the Location's" };
+      if (this.preparedLocationClosures.has(message.occurrenceId)) return { ...base, ok: false, failure: "runner_failed", error: "This approval's closure is already prepared; nothing more was written" };
+      const { occurrenceId, snapshot } = message;
+      const digest = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+      let commit = () => {};
+      let answerCommit = (_granted: boolean) => {};
+      const committed = new Promise<boolean>((resolve) => { answerCommit = resolve; });
+      let atFence = () => {};
+      const reachedFence = new Promise<"prepared">((resolve) => { atFence = () => resolve("prepared"); });
+      const finished = executeGithubIssueClosure(snapshot, run, async () => {
+        // The wait starts here: however long the forge checks took, the control plane gets all of it.
+        const timer = setTimeout(() => answerCommit(false), commitWaitMs);
+        timer.unref();
+        commit = () => { clearTimeout(timer); answerCommit(true); };
+        atFence();
+        // Nothing awaits between the commit and the durable record, and the mutation follows it.
+        return await committed && this.beginLocationIssueClosure(occurrenceId, digest);
+      }).then((result): GithubIssueClosureResultMessage => {
+        this.log(JSON.stringify({ event: "github_issue_closure_result", sessionId: message.sessionId, workspaceId: location.workspaceId,
+          occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
+        return { ...base, ok: true, result };
+      }, (error) => issueClosureFailure(base, error)).finally(() => this.preparedLocationClosures.delete(occurrenceId));
+      // A commit before the fence is reached grants nothing: `prepared` hasn't been answered yet.
+      this.preparedLocationClosures.set(occurrenceId, { commit: () => commit(), finished });
+      const first = await Promise.race([reachedFence, finished]);
+      return first === "prepared" ? { ...base, ok: true, prepared: true } : first;
+    } catch (error) {
+      return issueClosureFailure(base, error);
+    }
+  }
+
+  /** An approved publication in another of a campaign's repositories, created in a Location's path
+   * with this runner's own forge login (#4119). The session lives on another runner; nothing here
+   * needs it. The Location's origin must name the approved repository, read fresh, so the login that
+   * writes is the one holding that checkout. */
+  private async issuePublicationAtLocation(
+    message: ForgeDecisionActionMessage,
+    gh?: GhRunner,
+  ): Promise<{ outcome: ForgeDecisionActionOutcome; refusal?: { reason: ForgeDecisionActionRefusalReason; summary: string }; issue?: number }> {
+    const action = message.action as Extract<ForgeDecisionAction, { kind: "issue_publication" | "issue_publication_observe" }>;
+    const unusable = (summary: string) => ({ outcome: "refused" as const, refusal: { reason: "repository_mismatch" as const, summary } });
+    const location = message.location;
+    // Frames are not validated on the wire.
+    if (typeof location?.workspacePath !== "string" || !location.workspacePath.trim() || location.workspacePath.includes("\0") ||
+        typeof location.repository !== "string" || typeof action.repository !== "string" ||
+        location.repository.toLowerCase() !== action.repository.toLowerCase()) {
+      return unusable("A publication needs a Location of its own repository on this runner; nothing was published.");
+    }
+    let cwd: string;
+    try {
+      cwd = await realpath(location.workspacePath);
+      const origin = githubSlug((await issueClosureRun({ kind: "native" }, cwd)("git", ["remote", "get-url", "origin"])).trim());
+      if (origin?.toLowerCase() !== action.repository.toLowerCase()) return unusable("The Location's origin is not the approved repository; nothing was published.");
+    } catch {
+      return unusable("The Location's path could not be read on this runner; nothing was published.");
+    }
+    // Every `gh` call names its repository, so it runs from the filesystem root and reads nothing of the checkout.
+    const forge = gh ?? contextGhRunner({ kind: "native" }, parsePath(tmpdir()).root);
+    const directory = "location-issue-publications";
+    const digest = createHash("sha256").update(JSON.stringify(action)).digest("hex");
+    try {
+      const result = action.kind === "issue_publication_observe" ? await observeIssuePublication(action, forge)
+        : await executeIssuePublication(action, forge, {
+          fence: () => this.beginLocationAttempt(directory, message.occurrenceId, digest),
+          release: () => this.releaseLocationAttempt(directory, message.occurrenceId),
+          withPayloadFile: async (payload, use) => {
+            const folder = await mkdtemp(join(tmpdir(), "wollipog-publication-"));
+            try {
+              const path = join(folder, "payload.json");
+              await writeFile(path, payload, { mode: 0o600 });
+              return await use(path);
+            } finally {
+              await rm(folder, { recursive: true, force: true });
+            }
+          },
+        });
+      this.log(JSON.stringify({ event: "forge_decision_action_result", sessionId: message.sessionId, workspaceId: location.workspaceId,
+        occurrenceId: message.occurrenceId, kind: action.kind, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
+      return result;
+    } catch {
+      return { outcome: "uncertain" };
+    }
+  }
+
+  /** The durable fence before a Location's closure mutates anything (#4119): one record per occurrence,
+   * created exclusively and flushed, so a replay or a restart can never close through it twice. */
+  private beginLocationIssueClosure(occurrenceId: string, digest: string): boolean {
+    return this.beginLocationAttempt("location-issue-closures", occurrenceId, digest);
+  }
+
+  /** Give back a fence once the forge proves the write never happened, so the approval can retry. */
+  private releaseLocationAttempt(name: string, occurrenceId: string): void {
+    rmSync(join(this.stateDir, name, `${createHash("sha256").update(occurrenceId).digest("hex")}.attempt`), { force: true });
+  }
+
+  private beginLocationAttempt(name: string, occurrenceId: string, digest: string): boolean {
+    const directory = join(this.stateDir, name);
+    try {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const fd = openSync(join(directory, `${createHash("sha256").update(occurrenceId).digest("hex")}.attempt`), "wx", 0o600);
+      try {
+        writeSync(fd, `${digest}\n`);
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      const parent = openSync(directory, "r");
+      try { fsyncSync(parent); } finally { closeSync(parent); }
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -19823,6 +22052,7 @@ export class SessionManager {
       providerTurnId: durableReceipt.providerTurnId,
       providerItemId: durableReceipt.providerItemId,
     } : undefined;
+    let reconciliationFailure = "provider history could not prove the exact successful command and its action admission";
     if (!proof) {
       try {
         proof = await active.client.reconcileCompletedCommand(
@@ -19833,6 +22063,7 @@ export class SessionManager {
             providerTurnId: durableReceipt.providerTurnId,
             providerItemId: durableReceipt.providerItemId,
           },
+          (reason) => { reconciliationFailure = reason; },
         ) ?? undefined;
       } catch {
         return fail(occurrenceId, "provider history could not prove the completed command");
@@ -19840,7 +22071,7 @@ export class SessionManager {
     }
     if (!proof || proof.providerThreadId !== meta.agentSessionId ||
         proof.commandDigest !== commandDigest) {
-      return fail(occurrenceId, "provider history did not contain one exact successful command");
+      return fail(occurrenceId, reconciliationFailure);
     }
     const nativeAdmission = bounded(proof.providerAdmissionItemId, 512);
     const durableAdmission = durableReceipt && !proof.providerAdmissionItemId &&
@@ -20331,7 +22562,8 @@ export class SessionManager {
   private queuedBackgroundJobIds(meta: SessionMeta | null): string[] {
     const queued = (meta?.backgroundJobs ?? [])
       .filter((job) => job.continuationQueuedAt && !job.continuationSubmittedAt &&
-        !job.assistantResultPersistedAt && !job.continuationRetryExhaustedAt)
+        !job.assistantResultPersistedAt && !job.continuationRetryExhaustedAt &&
+        job.continuationLaunchHeldAt === undefined)
       .sort((left, right) => left.continuationQueuedAt! - right.continuationQueuedAt!);
     const continuationId = queued[0]?.continuationId;
     if (!continuationId) return [];
@@ -20499,6 +22731,90 @@ export class SessionManager {
       backgroundWorkState: "continuation_pending",
     });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
+  /**
+   * A runner-owned continuation ended before the provider accepted it (#3542). It never reached the
+   * conversation, so its result stays owed and another attempt is safe, but not an unbounded one:
+   * a provider process that cannot start fails the same way every time.
+   *
+   * | After this failure                                  | Next step                                   |
+   * | --------------------------------------------------- | ------------------------------------------- |
+   * | It holds a retirement rebind, and no process runs   | Back at the queue head; the rebind carries  |
+   * |                                                     | it into a launch with the current binds     |
+   * | Fewer than MAX_CONTINUATION_LAUNCH_ATTEMPTS failed  | Retried after ORPHAN_RECOVERY_RETRY_MS      |
+   * | The bound is reached                                | Held: no timer re-arms it, the session says |
+   * |                                                     | why, and Restart or a person's accepted turn|
+   * |                                                     | retries it                                  |
+   *
+   * Returns the session blocker once held.
+   */
+  private retryUnacceptedBackgroundContinuation(
+    sessionId: string,
+    entry: ActiveSession,
+    prompt: QueuedPrompt,
+    jobIds: string[],
+    providerError: string | undefined,
+  ): string | undefined {
+    this.resetBackgroundContinuationSubmission(sessionId, jobIds);
+    const current = this.store.readMeta(sessionId);
+    const selected = new Set(jobIds);
+    const failed = (current?.backgroundJobs ?? []).filter((job) => selected.has(job.id) &&
+      !job.continuationAcceptedAt && !job.assistantResultPersistedAt);
+    // A generation that Restart or Stop replaced settles late; the replacement owns the count.
+    if (!current || this.active.get(sessionId) !== entry || failed.length === 0) {
+      this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      return undefined;
+    }
+    const attempts = Math.max(...failed.map((job) => (job.continuationLaunchFailures ?? 0) + 1));
+    const held = attempts >= MAX_CONTINUATION_LAUNCH_ATTEMPTS;
+    const heldAt = Date.now();
+    const failedIds = new Set(failed.map((job) => job.id));
+    const updated = this.store.patchMeta(sessionId, {
+      backgroundJobs: current.backgroundJobs!.map((job) => failedIds.has(job.id)
+        ? { ...job, continuationLaunchFailures: attempts, ...(held ? { continuationLaunchHeldAt: heldAt } : {}) }
+        : job),
+    });
+    if (!updated) return undefined;
+    this.store.flush(sessionId);
+    this.log(JSON.stringify({ event: held ? "background_continuation_launch_held" : "background_continuation_launch_failed",
+      sessionId, jobCount: failed.length, attempts }));
+    if (!held) {
+      if (!entry.pendingLocationSwitch && this.requestRetiredWorktreeRebind(sessionId, entry) &&
+          this.onlyUnsubmittedContinuationOwed(updated, entry)) {
+        // The failed launch rendered this generation's stored binds; the rebind renders current ones.
+        entry.queue.unshift(prompt);
+        this.emitQueue(sessionId);
+      } else {
+        this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      }
+      return undefined;
+    }
+    this.cancelBackgroundContinuationTimer(sessionId);
+    this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    const blocker = backgroundContinuationHoldBlocker(failed.length, attempts, providerError);
+    // An error row stays visible in the transcript, where an Agent Log line would be hidden.
+    this.emitEvent(sessionId, { kind: "error", message: blocker });
+    return blocker;
+  }
+
+  /** A person's turn the provider accepted proves a provider process starts again (#3542): a held
+   * continuation gets a fresh bound and runs next. */
+  private rearmLaunchHeldBackgroundContinuation(sessionId: string): void {
+    const current = this.store.readMeta(sessionId);
+    if (!current || launchHeldBackgroundJobs(current).length === 0) return;
+    const updated = this.store.patchMeta(sessionId, {
+      backgroundJobs: current.backgroundJobs!.map((job) => {
+        if (job.continuationLaunchHeldAt === undefined && job.continuationLaunchFailures === undefined) return job;
+        const { continuationLaunchFailures: _failures, continuationLaunchHeldAt: _held, ...rearmed } = job;
+        return rearmed;
+      }),
+    });
+    if (!updated) return;
+    this.store.flush(sessionId);
+    this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    this.cancelBackgroundContinuationTimer(sessionId);
+    this.scheduleBackgroundContinuation(sessionId);
   }
 
   /** Provider acceptance is the at-most-once fence. Once that exact turn has ended without a

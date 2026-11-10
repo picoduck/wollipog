@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentContext } from "@wollipog/protocol";
 import {
+  namedCheckContexts,
+  parseGitLabJobs,
+  gitlabNamedChecks,
+  ghPrSummary,
   anchorForkRef,
   anchorTurnRef,
   deleteTurnRefs,
@@ -41,6 +45,7 @@ import {
   setRemoteRefsMetadataReaderForTests,
   setGitRunnerForTests,
   stageHunk,
+  latestCheckContexts,
   summarizeCheckRollup,
   summarizeGitLabPipeline,
   synchronizeCheckpointRefs,
@@ -312,6 +317,103 @@ test("summarizeCheckRollup: never throws; unknown SHAPES are pending, but a COMP
   const r = summarizeCheckRollup([{ mystery: true }, { name: "odd", status: "COMPLETED", conclusion: "WAT" }]);
   assert.equal(r.pending, 1, "an unrecognizable node shape stays pending (can't be judged)");
   assert.deepEqual(r.failingNames, ["odd"], "a terminal non-pass conclusion must not be labeled 'running'");
+});
+
+/** A check run as `gh pr view --json statusCheckRollup` reports it (#4263). */
+function ghRun(name: string, conclusion: string | null, startedAt: string | null, job: number, workflowName = "CI") {
+  return {
+    __typename: "CheckRun", name, workflowName, startedAt, completedAt: conclusion ? startedAt : null,
+    status: conclusion ? "COMPLETED" : "QUEUED", conclusion: conclusion ?? "",
+    detailsUrl: `https://github.com/picoduck/wollipog/actions/runs/${Math.floor(job / 1000)}/job/${job}`,
+  };
+}
+
+test("summarizeCheckRollup: a cancelled run superseded by a newer passing run of the same check passes (#4263)", () => {
+  // The closed pull request's run was cancelled; the replacement's run of every check passed.
+  const r = summarizeCheckRollup([
+    ghRun("Typecheck, Test & Sidecar Bundle", "CANCELLED", "2026-11-05T15:24:47Z", 127339808509),
+    ghRun("Unit Tests (1)", "CANCELLED", "2026-11-05T15:23:14Z", 127338879088),
+    ghRun("Unit Tests (1)", "SUCCESS", "2026-11-05T16:14:33Z", 127367279079),
+    ghRun("Typecheck, Test & Sidecar Bundle", "SUCCESS", "2026-11-05T16:27:37Z", 127374358123),
+  ]);
+  assert.deepEqual(r, { failing: 0, pending: 0, passing: 2, failingNames: [] });
+});
+
+test("summarizeCheckRollup: a check whose latest run failed or was cancelled still fails (#4263)", () => {
+  const r = summarizeCheckRollup([
+    ghRun("test", "SUCCESS", "2026-11-05T15:00:00Z", 1001),
+    ghRun("test", "FAILURE", "2026-11-05T16:00:00Z", 2001),
+    ghRun("e2e", "CANCELLED", "2026-11-05T15:00:00Z", 1002),
+  ]);
+  assert.deepEqual(r, { failing: 2, pending: 0, passing: 0, failingNames: ["test", "e2e"] });
+  // A queued re-run supersedes the failure it re-runs, before it has started.
+  const rerun = summarizeCheckRollup([ghRun("test", "FAILURE", "2026-11-05T15:00:00Z", 1001), ghRun("test", null, null, 2001)]);
+  assert.deepEqual(rerun, { failing: 0, pending: 1, passing: 0, failingNames: [] });
+});
+
+test("summarizeCheckRollup: the job id orders Actions runs, so an old job cancelled after the new one started does not win (#4263)", () => {
+  // The closed pull request's job never started; GitHub stamped it when it was cancelled, after the
+  // replacement's job had already started.
+  const r = summarizeCheckRollup([
+    ghRun("Lint", "SUCCESS", "2026-11-05T15:23:30Z", 2001),
+    ghRun("Lint", "CANCELLED", "2026-11-05T15:24:47Z", 1001),
+  ]);
+  assert.deepEqual(r, { failing: 0, pending: 0, passing: 1, failingNames: [] });
+});
+
+test("summarizeCheckRollup: check runs and status contexts each keep their latest entry per check (#4263)", () => {
+  const r = summarizeCheckRollup([
+    // Status contexts: an older error superseded by a newer success, and a lone failure.
+    { __typename: "StatusContext", context: "ci/legacy", state: "ERROR", startedAt: "2026-11-05T15:00:00Z" },
+    { __typename: "StatusContext", context: "ci/legacy", state: "SUCCESS", startedAt: "2026-11-05T16:00:00Z" },
+    { __typename: "StatusContext", context: "ci/broken", state: "FAILURE", startedAt: "2026-11-05T15:00:00Z" },
+    // A check run sharing a status context's name is a different check.
+    ghRun("ci/legacy", "FAILURE", "2026-11-05T14:00:00Z", 1001),
+    // The same job name in two workflows is two checks, each counted.
+    ghRun("build", "FAILURE", "2026-11-05T15:00:00Z", 1002, "Release"),
+    ghRun("build", "SUCCESS", "2026-11-05T16:00:00Z", 2002, "CI"),
+  ]);
+  assert.deepEqual(r, { failing: 3, pending: 0, passing: 2, failingNames: ["ci/broken", "ci/legacy", "build"] });
+});
+
+test("summarizeCheckRollup: runs that cannot be ordered keep the worse result (#4263)", () => {
+  // Neither carries a job id, and both started in the same second.
+  const tie = summarizeCheckRollup([
+    { name: "x", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-11-05T15:00:00Z" },
+    { name: "x", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-11-05T15:00:00Z" },
+  ]);
+  assert.deepEqual(tie, { failing: 1, pending: 0, passing: 0, failingNames: ["x"] });
+  // An unknown start time never proves a run newer, whichever order GitHub lists them in.
+  for (const nodes of [
+    [{ name: "y", status: "COMPLETED", conclusion: "SUCCESS" }, { name: "y", status: "COMPLETED", conclusion: "CANCELLED", startedAt: "2026-11-05T15:00:00Z" }],
+    [{ name: "y", status: "COMPLETED", conclusion: "CANCELLED", startedAt: "2026-11-05T15:00:00Z" }, { name: "y", status: "COMPLETED", conclusion: "SUCCESS" }],
+  ]) {
+    assert.deepEqual(summarizeCheckRollup(nodes), { failing: 1, pending: 0, passing: 0, failingNames: ["y"] });
+  }
+  // `gh` prints Go's zero time for a run with no start: unknown, never older than a real time.
+  const zero = summarizeCheckRollup([
+    { name: "z", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-11-05T15:00:00Z" },
+    { name: "z", status: "COMPLETED", conclusion: "FAILURE", startedAt: "0001-01-01T00:00:00Z" },
+  ]);
+  assert.deepEqual(zero, { failing: 1, pending: 0, passing: 0, failingNames: ["z"] });
+});
+
+test("summarizeCheckRollup: a failure no later run is provably newer than still counts, whatever the order (#4263)", () => {
+  // No ids: a failure at 15:00, a failure with no start time, and a success at 16:00. The success is
+  // newer than the first failure but cannot be shown newer than the second.
+  const timed = { name: "w", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-11-05T15:00:00Z" };
+  const untimed = { name: "w", status: "COMPLETED", conclusion: "FAILURE" };
+  const success = { name: "w", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-11-05T16:00:00Z" };
+  for (const nodes of [[timed, untimed, success], [untimed, timed, success], [success, untimed, timed]]) {
+    assert.deepEqual(summarizeCheckRollup(nodes), { failing: 1, pending: 0, passing: 0, failingNames: ["w"] }, JSON.stringify(nodes));
+  }
+  // Once every failure is provably older, the success counts.
+  assert.deepEqual(summarizeCheckRollup([timed, { ...untimed, startedAt: "2026-11-05T15:30:00Z" }, success]),
+    { failing: 0, pending: 0, passing: 1, failingNames: [] });
+  // The check keeps the place where it first appears.
+  const first = { name: "a", status: "COMPLETED", conclusion: "SUCCESS" };
+  const queued = { name: "b", status: "QUEUED" };
+  assert.deepEqual(latestCheckContexts([first, timed, queued, success]), [first, success, queued]);
 });
 
 test("summarizeCheckRollup: failing names are bounded to 8", () => {
@@ -840,9 +942,13 @@ test("GitLab MR and pipeline parsers validate revision and URL provenance", () =
     iid: 17, title: "Add GitLab", web_url: "https://gitlab.com/group/repo/-/merge_requests/17", state: "opened",
     sha: "a".repeat(40), diff_refs: { head_sha: "a".repeat(40), base_sha: "b".repeat(40) },
     head_pipeline: { id: 91, status: "failed", web_url: "https://gitlab.com/group/repo/-/pipelines/91" },
+    source_branch: "feature/gitlab", target_branch: "release", detailed_merge_status: "ci_must_pass",
   };
   const mr = parseGitLabMergeRequest(value, remote);
   assert.equal(mr.iid, 17);
+  assert.equal(mr.baseRef, "release");
+  assert.equal(mr.headRef, "feature/gitlab");
+  assert.equal(mr.mergeability, "ci_must_pass");
   assert.deepEqual(summarizeGitLabPipeline(mr.pipeline, remote), {
     failing: 1, pending: 0, passing: 0, failingNames: ["Pipeline #91"],
     url: "https://gitlab.com/group/repo/-/pipelines/91",
@@ -1497,4 +1603,62 @@ test("gitDiff last_turn: a pruned snapshot tree yields the gc guidance error", a
     () => gitDiff("/repo", "last_turn", { useWorktree: false, lastTurnBaseTree: "gone" }),
     /pruned by git \(gc\)/,
   );
+});
+
+test("named checks share latest-run selection and reject unsafe links", () => {
+  const jobs = namedCheckContexts([
+    { name: "unit", status: "COMPLETED", conclusion: "FAILURE", databaseId: 1 },
+    { name: "unit", status: "COMPLETED", conclusion: "SUCCESS", databaseId: 2, detailsUrl: "https://github.com/org/repo/actions/runs/2" },
+    { context: "external", state: "PENDING", targetUrl: "javascript:alert(1)" },
+  ]);
+  assert.deepEqual(jobs.map(({ name, state }) => ({ name, state })), [
+    { name: "unit", state: "passing" }, { name: "external", state: "pending" },
+  ]);
+  assert.equal(jobs[1]!.url, null);
+  assert.equal(namedCheckContexts(Array.from({ length: 101 }, (_, i) => ({ name: String(i) }))).length, 100);
+});
+
+test("GitLab named jobs preserve statuses and enforce host provenance and bounds", () => {
+  const remote = parseForgeRemote("https://gitlab.com/group/repo.git")!;
+  const job = { name: "unit", status: "failed", web_url: "https://gitlab.com/group/repo/-/jobs/7" };
+  assert.deepEqual(parseGitLabJobs([job], remote), {
+    jobs: [{ name: "unit", state: "failing", url: job.web_url }], jobsIncomplete: false,
+  });
+  for (const [status, state] of [["success", "passing"], ["manual", "pending"], ["canceled", "failing"]]) {
+    assert.equal(parseGitLabJobs([{ ...job, status }], remote).jobs![0]!.state, state);
+  }
+  assert.throws(() => parseGitLabJobs([{ ...job, web_url: "https://evil.test/job" }], remote));
+  assert.throws(() => parseGitLabJobs(Array(101).fill(job), remote));
+  assert.equal(parseGitLabJobs(Array(100).fill(job), remote).jobsIncomplete, true);
+});
+
+test("GitLab job-read failures preserve pipeline status and safe URL", async () => {
+  const remote = parseForgeRemote("https://gitlab.com/group/repo.git")!;
+  const pipeline = { id: 91, status: "failed", web_url: "https://gitlab.com/group/repo/-/pipelines/91" };
+  for (const result of ["throw", "bad json", "{}", '[{"name":"unit","status":"success","web_url":"https://evil.test/job"}]']) {
+    const summary = await gitlabNamedChecks("/repo", remote, pipeline, async (cwd, host, args) => {
+      assert.equal(cwd, "/repo");
+      assert.equal(host, "gitlab.com");
+      assert.deepEqual(args, ["api", "projects/group%2Frepo/pipelines/91/jobs?per_page=100&include_retried=false"]);
+      if (result === "throw") throw new Error("unavailable");
+      return result;
+    });
+    assert.deepEqual(summary, { failing: 1, pending: 0, passing: 0, failingNames: ["Pipeline #91"], url: pipeline.web_url, jobsIncomplete: true });
+  }
+  assert.deepEqual(await gitlabNamedChecks("/repo", remote, pipeline, async () => "[]"), {
+    failing: 1, pending: 0, passing: 0, failingNames: ["Pipeline #91"], url: pipeline.web_url, jobs: [], jobsIncomplete: false,
+  });
+});
+
+test("GitHub summary requests and forwards forge context and named check results", async () => {
+  const summary = await ghPrSummary("/repo-1270-summary", async (_context, command, args) => {
+    assert.equal(command, "gh");
+    assert.deepEqual(args, ["pr", "view", "--json", "number,title,url,state,statusCheckRollup,baseRefName,headRefName,mergeable"]);
+    return { stdout: JSON.stringify({ number: 7, title: "Feature", url: "https://github.com/org/repo/pull/7", state: "OPEN", baseRefName: "release", headRefName: "feature", mergeable: "CONFLICTING", statusCheckRollup: [{ name: "unit", status: "COMPLETED", conclusion: "FAILURE", detailsUrl: "https://github.com/org/repo/actions/runs/1" }] }), stderr: "" };
+  });
+  assert.equal(summary.pr?.baseRef, "release");
+  assert.equal(summary.pr?.headRef, "feature");
+  assert.equal(summary.pr?.mergeability, "CONFLICTING");
+  assert.equal(summary.checks?.failing, 1);
+  assert.deepEqual(summary.checks?.jobs, [{ name: "unit", state: "failing", url: "https://github.com/org/repo/actions/runs/1" }]);
 });

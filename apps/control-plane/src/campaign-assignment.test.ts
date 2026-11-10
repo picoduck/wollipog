@@ -58,7 +58,16 @@ test("Full Control describes the exact boundary and effective owners without cre
   assert.match(text, /without a native fallback/);
   assert.match(text, /Never update or restart the hosting stack/);
   assert.match(text, /one-shot runner permission completes consumption/);
+  assert.match(text, /implementation_question with kind: "question"/);
+  assert.match(text, /must never be consumed as an action approval/);
+  // #4137: a gate an installed or user-authored rule keeps for a person reaches the owner typed.
+  assert.match(text, /File the exact typed decision, such as pr_merge, with request_workflow_decision and name the rule in ownerRule/);
+  assert.match(text, /hand_workflow_decision_to_owner/);
+  assert.match(text, /request_owner_decision for a gate with no typed category/);
+  assert.match(text, /Never end a turn with such a gate only in prose/);
   assert.match(text, /merge-group CI passes and the forge reports actual MERGED state/);
+  // #2940: the first report is the root Orchestrator's (its preset carries it), never a child's task.
+  assert.doesNotMatch(text, /first report/i);
 });
 
 test("campaigns use review sessions without asking for admission, including without the native adapter", () => {

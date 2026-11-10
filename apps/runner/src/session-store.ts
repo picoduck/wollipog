@@ -88,7 +88,15 @@ import type {
   WorktreeRecoveryView,
 } from "@wollipog/protocol";
 import { RetentionResponse, scanRetentionSources } from "./history-retention.js";
+import { boundHistoryPayload } from "./history-event-bound.js";
 import type { WorktreeHookSnapshot } from "./worktree-setup.js";
+import type { LeaseProcessEvidence } from "./provider-home-lease-evidence.js";
+
+/** A runner process, identified by its pid and lifecycle evidence (#4256). */
+export interface RetiringProviderRunner {
+  pid: number;
+  process: LeaseProcessEvidence;
+}
 import { SESSION_COMMAND_AUTHORITY_PROTOCOL_VERSION } from "./session-command-authority.js";
 
 /** An approved, runner-verified Location switch waiting for the provider's turn to end (#4138). */
@@ -129,6 +137,14 @@ export interface SessionMeta {
   controlPlaneLaunchId?: string;
   campaignBudgetDispatch?: import("@wollipog/protocol").CampaignBudgetDispatch;
   campaignBudgetCheckpoint?: import("@wollipog/protocol").CampaignBudgetUsageCheckpoint;
+  /** The campaign generation of a provider whose retirement began but is not yet proven (#3788).
+   * It outlives a runner restart, so a restarted runner, which holds no provider of the session,
+   * still attests no final checkpoint for a provider an interrupted shutdown may have left running. */
+  retiringProviderGeneration?: string;
+  /** Every runner process that has run a provider of the fenced generation since the fence was set,
+   * with the evidence a later runner process proves each gone with (#4256). Absent once any of them
+   * could record no evidence: such a fence is never lifted by a later runner process. */
+  retiringProviderRunners?: RetiringProviderRunner[];
   /** Human-correlated two-phase role change. Retiring/prepared fence every provider submission. */
   roleConversion?: {
     command: import("@wollipog/protocol").PrepareSessionRoleMessage;
@@ -220,6 +236,15 @@ export interface SessionMeta {
   worktreeHooks?: Record<string, WorktreeHookSnapshot>;
   /** Runner-private durable POSIX descendant markers keyed by stable worktree id. */
   worktreeProcessMarkers?: Record<string, string>;
+  /** (#4209) Runner-private paths of worktrees the runner kept rather than removed because they may
+   * hold a person's work, in any Location this session has been in. Deleting the session leaves them
+   * where they are. A path leaves the list once the runner removes the worktree there, or makes a new
+   * one there. */
+  keptWorktreePaths?: string[];
+  /** (#4209) `keptWorktreePaths` is complete for this session: it was made by a runner that records
+   * every keep, or its earlier worktrees were looked at once. Without it, deletion first counts as
+   * kept any worktree from a Location it left, or not selected, that holds work found nowhere else. */
+  keptWorktreesTracked?: true;
   /** Provider-neutral placement captured at launch. Optional for pre-v60 session metadata. */
   executionTarget?: ExecutionTargetRef;
   executionHandoffRequest?: ExecutionHandoffRequest;
@@ -251,7 +276,9 @@ export interface SessionMeta {
   githubIssueClosureAttempts?: Record<string, string>;
   /** Effective Orchestrator restriction. Missing legacy metadata remains strict at launch, and a
    * missing `integrationIsolation` matches that: a strict launch never carried user integrations. */
-  orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[]; issueScope?: import("@wollipog/protocol").CampaignIssueScope; control?: import("@wollipog/protocol").CampaignControl };
+  orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[]; issueScope?: import("@wollipog/protocol").CampaignIssueScope; control?: import("@wollipog/protocol").CampaignControl;
+    /** v310 (#3363): the authoritative control revision `control` was read at; orders control updates. */
+    controlRevision?: number };
   /** v276 (#4074): a delegated image evidence reviewer. Every launch of it restricts the harness to
    * the two review tools, and it is never relaunched without this marker. */
   uiEvidenceReviewer?: { reviewId: string };
@@ -534,6 +561,12 @@ export interface DurableBackgroundJob {
   continuationMissingResultAt?: number;
   /** Capacity retries ended before provider acceptance; results remain available for inspection. */
   continuationRetryExhaustedAt?: number;
+  /** Runner-private (#3542): consecutive attempts of this job's continuation that failed before the
+   * provider accepted it, such as a provider process that could not start. Never projected. */
+  continuationLaunchFailures?: number;
+  /** Runner-private (#3542): automatic attempts stopped after the bounded launch failures. The result
+   * stays owed: Restart, or a person's turn the provider accepts, retries it. Never projected. */
+  continuationLaunchHeldAt?: number;
   assistantResultPersistedAt?: number;
   /** Runner-private proof that v82 structured delivery evidence was durably published. */
   structuredDeliveryPublishedAt?: number;
@@ -2316,9 +2349,26 @@ export class SessionStore {
     }
     const layout = this.appendHistoryLayout(id, epoch);
     offset ??= layout.totalBytes;
-    const ev: StoredEvent = { seq, ts, payload };
+    let ev: StoredEvent = { seq, ts, payload };
     try {
-      appendFileSync(layout.active.path, `${JSON.stringify(ev)}\n`);
+      // The reader refuses any record above its page budget, and one refused record makes the
+      // whole session unreadable (#4288). Shorten an oversized record's bulky text before it is
+      // written, or refuse it outright: nothing is persisted, so the existing history stays
+      // readable. The record is serialized once; only an oversized one pays for bounding.
+      let line = JSON.stringify(ev);
+      if (line.length * 3 > HISTORY_PAGE_EVENT_BUDGET && Buffer.byteLength(line, "utf8") > HISTORY_PAGE_EVENT_BUDGET) {
+        const bounded = boundHistoryPayload(payload, HISTORY_PAGE_EVENT_BUDGET,
+          (candidate) => JSON.stringify({ seq, ts, payload: candidate }));
+        if (!bounded) {
+          throw new HistoryStoreError(
+            "history_event_too_large",
+            `refused to write a ${payload.kind} record larger than the ${HISTORY_PAGE_MAX_BYTES} byte page budget`,
+          );
+        }
+        ev = { seq, ts, payload: bounded };
+        line = JSON.stringify(ev);
+      }
+      appendFileSync(layout.active.path, `${line}\n`);
     } catch (error) {
       // A failed write can leave a torn suffix. Reconcile the tail and layout from disk next time
       // instead of appending after bytes no reader will accept.
@@ -4466,7 +4516,8 @@ export function metaToSnapshot(
     seq: m.seq,
     historyEpoch: m.logEpoch ?? 0,
     ...(runnerSupportsProtocol(controlPlaneProtocolVersion,"campaignBudgetAdmission") &&
-        ["completed","failed","stopped"].includes(m.status) && m.campaignBudgetCheckpoint?.generation===m.campaignBudgetDispatch?.generation
+        ["completed","failed","stopped"].includes(m.status) && m.campaignBudgetCheckpoint?.generation===m.campaignBudgetDispatch?.generation &&
+        (m.retiringProviderGeneration===undefined || m.retiringProviderGeneration!==m.campaignBudgetDispatch?.generation)
       ? {campaignBudgetCheckpoint:m.campaignBudgetCheckpoint}:{}),
     createdAt: m.createdAt,
     updatedAt: m.updatedAt,

@@ -46,9 +46,19 @@ export function agentAvailableForRunnerDefault(
   defaults?: readonly RunnerProviderAccountDefault[],
 ): boolean {
   const provider = providerForDriver(agent.driver ?? "acp");
-  const accountId = (agent.context?.kind ?? "native") === "native" && provider
-    ? defaults?.find((choice) => choice.provider === provider)?.accountId ?? undefined : undefined;
-  return agentAvailableForImplicitLaunch(agent, accountId);
+  const native = (agent.context?.kind ?? "native") === "native";
+  const choice = native && provider ? defaults?.find((candidate) => candidate.provider === provider) : undefined;
+  // Under a policy that chooses among accounts, the launch resolves one when it starts, and it refuses
+  // with its reasons if it can't. Here only a ranked account that could possibly be chosen counts.
+  if (choice?.mode === "priority") {
+    if (agent.available !== true) return false;
+    const readiness = agent.providerAccountReadiness;
+    if (readiness === undefined) return true;
+    const ready = Array.isArray(readiness?.readyAccountIds) ? readiness.readyAccountIds : [];
+    return (choice.priorityAccountIds ?? []).some((id) => ready.includes(id));
+  }
+  if (choice?.mode === "unsupported") return false;
+  return agentAvailableForImplicitLaunch(agent, choice?.accountId ?? undefined);
 }
 
 /** Older peers cannot distinguish aggregate availability from implicit readiness. */

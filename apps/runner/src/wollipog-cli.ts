@@ -9,7 +9,10 @@ import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+  campaignRepositoryLocation,
+  canonicalGitLabIssueReference,
   canonicalIssueReference,
+  findGitLabClosingReferences,
 } from "@wollipog/protocol";
 import {
   executeManagerTool,
@@ -21,7 +24,8 @@ import {
 import { UI_EVIDENCE_REVIEWER_PRESET } from "./orchestrator-preset.js";
 import { VERSION } from "./version.js";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
-import type { GlabRunner } from "./campaign-gitlab-status.js";
+import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
+import { inspectMergeRequestClosures } from "./gitlab-merge-closures.js";
 import { PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, PULL_REQUEST_WAIT_READ_GRACE_MS, parsePullRequestRef } from "./pull-request-wait.js";
 import { inspectPullRequestClosures, pullRequestClosures } from "./github-merge-preflight.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
@@ -193,7 +197,9 @@ export async function runPullRequestCli(
     return code;
   };
   const words = positional(args, ["--repo", "--head", "--file", "--intended"]);
-  if (words[1] === "closures") return runPullRequestClosuresCli(args, words, json, io, gh, signal);
+  if (words[1] === "closures") {
+    return runPullRequestClosuresCli(args, words, json, io, gh, signal, glab ?? contextGlabRunner({ kind: "native" }, process.cwd()));
+  }
   if (words[1] !== "wait" || words.length !== 3) return fail(pullRequestHelp(), 2);
   const timeoutMs = numeric(option(args, "--timeout"));
   const intervalMs = numeric(option(args, "--interval"));
@@ -247,7 +253,9 @@ const CLOSURES_FILE_MAX_BYTES = 1024 * 1024;
 /**
  * `wollipog pr closures` (#3713): every issue merging a pull request would close, or a draft
  * description would, compared with the ones meant to close (`--intended`). Local and read-only, like
- * `pr wait`, and the same read the control plane makes before a GitHub merge decision.
+ * `pr wait`, and the same read the control plane makes before a merge decision. A GitLab merge
+ * request (#3762), named by URL, `<host>/group/project!<iid>`, or `--repo <host>/group/project`,
+ * is read with `glab`: GitLab's closing pattern on the description and GitLab's own list.
  */
 async function runPullRequestClosuresCli(
   args: string[],
@@ -255,7 +263,8 @@ async function runPullRequestClosuresCli(
   json: boolean,
   io: { stdout: Write; stderr: Write },
   gh: GhRunner,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  glab: GlabRunner,
 ): Promise<number> {
   const fail = (message: string, code: number): number => {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
@@ -279,13 +288,18 @@ async function runPullRequestClosuresCli(
     repository = parsed.repository;
     pullRequest = parsed.number;
   }
-  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/u.test(repository!)) {
-    return fail("pr closures reads GitHub pull requests only; pass a GitHub owner/name", 2);
+  const gitlab = campaignRepositoryLocation(repository)?.forge === "gitlab";
+  if (!gitlab && !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/u.test(repository!)) {
+    return fail("pr closures reads GitHub pull requests and GitLab merge requests; pass a GitHub owner/name or a GitLab <host>/group/project", 2);
   }
   const intended: string[] = [];
   for (const value of options(args, "--intended")) {
-    const issue = canonicalIssueReference(value, repository);
-    if (!issue) return fail(`--intended takes #N, owner/name#N, or a GitHub issue URL, not ${JSON.stringify(value)}`, 2);
+    const issue = gitlab ? canonicalGitLabIssueReference(value, repository!) : canonicalIssueReference(value, repository);
+    if (!issue) {
+      return fail(gitlab
+        ? `--intended takes #N, group/project#N, <host>/group/project#N, or an issue URL on that GitLab instance, not ${JSON.stringify(value)}`
+        : `--intended takes #N, owner/name#N, or a GitHub issue URL, not ${JSON.stringify(value)}`, 2);
+    }
     if (!intended.includes(issue)) intended.push(issue);
   }
   let read: { state?: string; headSha?: string; closures: ReturnType<typeof pullRequestClosures> };
@@ -298,9 +312,11 @@ async function runPullRequestClosuresCli(
     } catch {
       return fail(`could not read ${file}`, 1);
     }
-    read = { closures: pullRequestClosures(text, repository!, []) };
+    read = { closures: pullRequestClosures(text, repository!, [], gitlab ? findGitLabClosingReferences : undefined) };
   } else {
-    const inspected = await inspectPullRequestClosures(repository!, pullRequest!, gh, signal);
+    const inspected = gitlab
+      ? await inspectMergeRequestClosures(repository!, pullRequest!, glab, signal)
+      : await inspectPullRequestClosures(repository!, pullRequest!, gh, signal);
     if (!inspected.ok) return fail(inspected.reason, 1);
     read = inspected;
   }
@@ -359,13 +375,15 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
     if (words[1] === "get") {
       const epic = option(args, "--epic");
       if (epic && (!/^[1-9][0-9]*$/u.test(epic) || !Number.isSafeInteger(Number(epic)))) return { error: "epic must be a positive issue number" };
-      return { tool: "get_campaign_issue_scope", input: epic ? { epic: Number(epic) } : {} };
+      const repository = option(args, "--repository");
+      if (repository && !epic) return { error: "--repository names an epic's repository, so it requires --epic" };
+      return { tool: "get_campaign_issue_scope", input: epic ? { epic: Number(epic), ...(repository ? { repository } : {}) } : {} };
     }
     if (words[1] === "request") {
       const proposal = jsonObjectOption(args, "--proposal");
       return "error" in proposal ? proposal : { tool: "request_campaign_issue_scope_change", input: proposal.value };
     }
-    return { error: "use issue-scope get [--epic <number>] or issue-scope request --proposal <json>" };
+    return { error: "use issue-scope get [--epic <number> [--repository <owner/name>]] or issue-scope request --proposal <json>" };
   }
   if (words[0] === "issue-closure") {
     if (optionPresent(args, "--session")) return { error: "issue-closure commands act only on the injected session" };
@@ -403,6 +421,22 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
     if (verb === "plan") {
       const body = input();
       return "error" in body ? body : { tool: "record_campaign_plan", input: body.value };
+    }
+    // #4117: ask the campaign's owner to add a Project repository, read it, and carry out the approval.
+    if (verb === "repository-addition") {
+      const step = args[groupIndex + 2];
+      if (step === "request") {
+        const body = input();
+        return "error" in body ? body : { tool: "request_campaign_repository_addition", input: body.value };
+      }
+      const occurrenceId = operand(3);
+      if (step === "get" && occurrenceId) return { tool: "get_campaign_repository_addition", input: { occurrenceId } };
+      const resourceDigest = option(args, "--digest");
+      if (step === "execute" && occurrenceId && resourceDigest) {
+        return { tool: "execute_campaign_repository_addition", input: { occurrenceId, resourceDigest } };
+      }
+      return { error: "use campaign repository-addition request --input <json>, campaign repository-addition get <occurrence-id>, " +
+        "or campaign repository-addition execute <occurrence-id> --digest <digest>" };
     }
     if (verb === "update-item" && operand(2)) {
       const body = input();
@@ -458,12 +492,22 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         if (!value || value.startsWith("--")) return { error: `decision ask-owner requires ${optionName}` };
         input[key] = value;
       }
+      // An Owner Question (#4270) may suggest no options; an Owner Approval always offers them.
+      if (optionPresent(args, "--kind")) {
+        const kind = option(args, "--kind");
+        if (kind !== "question" && kind !== "approval") return { error: "--kind requires question or approval" };
+        input.kind = kind;
+      }
       const raw = option(args, "--options");
-      if (!raw || raw.startsWith("--")) return { error: "decision ask-owner requires --options as a JSON array" };
-      try {
-        input.options = JSON.parse(raw) as unknown;
-      } catch {
-        return { error: "--options must be valid JSON" };
+      if (input.kind === "question" && !optionPresent(args, "--options")) {
+        input.options = [];
+      } else {
+        if (!raw || raw.startsWith("--")) return { error: "decision ask-owner requires --options as a JSON array" };
+        try {
+          input.options = JSON.parse(raw) as unknown;
+        } catch {
+          return { error: "--options must be valid JSON" };
+        }
       }
       if (!Array.isArray(input.options)) return { error: "--options requires a JSON array of {optionId, label, description?}" };
       for (const [optionName, key] of [["--recommended", "recommendedOptionId"], ["--material", "material"]] as const) {
@@ -493,9 +537,19 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       if (!resourceKey || resourceKey.startsWith("--")) return { error: "decision request requires --resource-key" };
       const snapshot = jsonObjectOption(args, "--snapshot");
       if ("error" in snapshot) return snapshot;
+      // #4137: the rule that keeps this gate for a person, given as both its source and its quote.
+      const hasSource = optionPresent(args, "--owner-rule-source");
+      const hasQuote = optionPresent(args, "--owner-rule-quote");
+      if (hasSource && !hasQuote) return { error: "--owner-rule-source requires --owner-rule-quote" };
+      if (hasQuote && !hasSource) return { error: "--owner-rule-quote requires --owner-rule-source" };
+      const source = option(args, "--owner-rule-source");
+      const quote = option(args, "--owner-rule-quote");
+      if (hasSource && (!source || source.startsWith("--"))) return { error: "--owner-rule-source requires a file path" };
+      if (hasQuote && (!quote || quote.startsWith("--"))) return { error: "--owner-rule-quote requires the quoted requirement" };
       return {
         tool: "request_workflow_decision",
-        input: { requestId, resourceKey, resourceSnapshot: snapshot.value },
+        input: { requestId, resourceKey, resourceSnapshot: snapshot.value,
+          ...(hasSource ? { ownerRule: { source, quote } } : {}) },
       };
     }
     if (verb === "get") {
@@ -751,6 +805,10 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       if (optionPresent(args, "--work-item") && (!campaignWorkItemId?.trim() || campaignWorkItemId.startsWith("--"))) {
         return { error: "session create --work-item requires a campaign work item ID" };
       }
+      const providerAccountId = option(args, "--provider-account");
+      if (optionPresent(args, "--provider-account") && (!providerAccountId?.trim() || providerAccountId.startsWith("--"))) {
+        return { error: "session create --provider-account requires an account reference from session accounts" };
+      }
       return {
         tool: "create_session",
         input: {
@@ -768,8 +826,15 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
           maxToolCalls: numeric(option(args, "--max-tool-calls")),
           maxChildSessions: numeric(option(args, "--max-child-sessions")),
           campaignWorkItemId,
+          providerAccountId,
         },
       };
+    }
+    case "accounts": {
+      const runnerId = option(args, "--runner");
+      const agentId = option(args, "--agent");
+      if (!runnerId || !agentId) return { error: "session accounts requires --runner and --agent" };
+      return { tool: "get_provider_account_selection", input: { runnerId, agentId, workspaceId: option(args, "--workspace"), model: option(args, "--model") } };
     }
     case "prompt":
       return words[2] && words.slice(3).join(" ").trim()
@@ -1006,7 +1071,10 @@ export async function runWollipogCli(
   const workflowDecisionTools = new Set([
     "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   ]);
-  const requiredProtocol = parsed.tool === "create_session" && typeof parsed.input.campaignWorkItemId === "string"
+  const requiredProtocol = parsed.tool === "get_provider_account_selection" ||
+      (parsed.tool === "create_session" && typeof parsed.input.providerAccountId === "string")
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountAgentChoice
+    : parsed.tool === "create_session" && typeof parsed.input.campaignWorkItemId === "string"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkItemAtCreation
     : parsed.tool === "create_session" && typeof parsed.input.effort === "string"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort
@@ -1025,8 +1093,18 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal
     : parsed.tool === "execute_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.forgeDecisionActions
+    : parsed.tool === "request_owner_decision" && parsed.input.kind === "question"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions
     : parsed.tool === "request_owner_decision" || parsed.tool === "hand_workflow_decision_to_owner"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions
+    : ["request_campaign_repository_addition", "get_campaign_repository_addition", "execute_campaign_repository_addition"].includes(parsed.tool)
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryAddition
+    : parsed.tool === "request_workflow_decision" &&
+      (parsed.input.resourceSnapshot as { category?: string; kind?: string } | undefined)?.category === "implementation_question" &&
+      (parsed.input.resourceSnapshot as { kind?: string }).kind === "question"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.childQuestions
+    : parsed.tool === "request_workflow_decision" && parsed.input.ownerRule !== undefined
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule
     : ["get_campaign_issue_scope", "request_campaign_issue_scope_change"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
     : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)

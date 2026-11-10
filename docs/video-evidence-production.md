@@ -310,7 +310,8 @@ owners and admins of the personal organization only; Session credentials are ref
 
 The trusted scope port is `DelegatedVideoReviews.validationScope`. It resolves every fact from
 current records: the Human-owned pending gate, its source, the cached derivation, the context with
-the Human as UI evidence owner, the attested target on the root's runner, the request (with the
+the Human as UI evidence owner, the attested target on a Location of the child's repository (the
+root's runner for a launch-repository child), the request (with the
 pinned blind-challenge criteria and the $10 and 120 tool-call ceilings), the executable and tool
 digests, and the authority digest. The one exception is the Human's oracle commitment, which is
 part of the minted subject.

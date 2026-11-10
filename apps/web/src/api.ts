@@ -1183,6 +1183,12 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ proposal: { mode: "custom" }, expectedRevision }),
     }),
+  /** The campaign owner's release of one ended worker's held slot (#4331). Person-only: the server
+   * refuses every agent credential. */
+  releaseCampaignSlot: (campaignId: string, request: import("@wollipog/protocol").ReleaseCampaignSlotRequest) =>
+    req<import("@wollipog/protocol").CampaignSlotRelease>(
+      `/api/sessions/${encodeURIComponent(campaignId)}/orchestrator-campaign/slots/release`,
+      { method: "POST", body: JSON.stringify(request) }),
   /** Authenticated Human-only change to a Full Control campaign's follow-up approval limit (#2940);
    * `null` clears it. Compare-and-set on the campaign's policy revision. */
   setCampaignFollowUpLimit: (id: string, acceptedFollowUps: number | null, expectedRevision: number) =>
@@ -1190,6 +1196,13 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ acceptedFollowUps, expectedRevision }),
     }),
+  /** Campaign Status's Delete Merged Branches (#4146): Wollipog performs the campaign's approved
+   * merged-branch deletions it still can, through the existing forge action. It approves nothing. */
+  deleteCampaignMergedBranches: (id: string) =>
+    req<{ performed: number; refused: number }>(
+      `/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/cleanup/delete-merged-branches`,
+      { method: "POST", body: "{}" },
+    ),
   /** Authenticated Human-only change to a Full Control scope grant's selection count (#4102).
    * Compare-and-set on the campaign's policy revision. */
   setScopeGrantSelectionCount: (id: string, count: number, expectedRevision: number) =>
@@ -1225,8 +1238,8 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(id)}/descendant-requests`,
       { signal },
     ),
-  campaignIssueScope: (id: string, epic?: number, signal?: AbortSignal) =>
-    req<import("@wollipog/protocol").CampaignIssueScopeView>(`/api/sessions/${encodeURIComponent(id)}/campaign/issue-scope${epic === undefined ? "" : `?epic=${epic}`}`, { signal }),
+  campaignIssueScope: (id: string, epic?: number, signal?: AbortSignal, repository?: string) =>
+    req<import("@wollipog/protocol").CampaignIssueScopeView>(`/api/sessions/${encodeURIComponent(id)}/campaign/issue-scope${epic === undefined ? "" : `?epic=${epic}${repository ? `&repository=${encodeURIComponent(repository)}` : ""}`}`, { signal }),
   proposeCampaignIssueScope: (id: string, proposal: import("@wollipog/protocol").CampaignIssueScopeRequest) =>
     req<import("@wollipog/protocol").WorkflowDecisionView>(`/api/sessions/${encodeURIComponent(id)}/campaign/issue-scope/proposals`, { method: "POST", body: JSON.stringify(proposal) }),
   /** The campaign's Decision Model checks (#4101, #4104), each beside the request it affected. */
@@ -1593,6 +1606,12 @@ export function createApiClient(transport: ApiTransport) {
       `/api/runners/${encodeURIComponent(runnerId)}/capacity`,
       { method: "PUT", body: JSON.stringify(body) },
     ),
+  updateMachineReviewerSecurity: (runnerId: string,
+    body: { policy: import("@wollipog/protocol").ReviewerSecurityPolicy; expectedRevision: number }) =>
+    req<{ reviewerSecurity: import("@wollipog/protocol").RunnerReviewerSecurityConfiguration }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/reviewer-security`,
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
   updateMachineAutomaticAccountSwitching: (
     runnerId: string,
     body: { enabled: boolean; expectedRevision: number },
@@ -1609,6 +1628,21 @@ export function createApiClient(transport: ApiTransport) {
   ) => req<{ providerAccountDefault: import("@wollipog/protocol").RunnerProviderAccountDefault }>(
     `/api/runners/${encodeURIComponent(runnerId)}/provider-account-defaults/${provider}`,
     { method: "PUT", body: JSON.stringify(body) },
+  ),
+
+  updateMachineProviderAccountPolicy: (
+    runnerId: string,
+    provider: "claude" | "codex",
+    body: { mode: "fixed" | "priority"; priorityAccountIds?: string[]; fixedAccountId?: string | null; expectedRevision: number },
+  ) => req<{ providerAccountPolicy: import("@wollipog/protocol").RunnerProviderAccountDefault }>(
+    `/api/runners/${encodeURIComponent(runnerId)}/provider-account-policies/${provider}`,
+    { method: "PUT", body: JSON.stringify(body) },
+  ),
+  providerAccountSelection: (
+    runnerId: string,
+    target: ProviderAccountSelectionTarget,
+  ) => req<import("@wollipog/protocol").ProviderAccountSelectionPreview>(
+    `/api/runners/${encodeURIComponent(runnerId)}/provider-account-selection?${new URLSearchParams(target).toString()}`,
   ),
 
   // Phase 3: external (CLI-started) sessions on a box.
@@ -1639,15 +1673,25 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(sessionId)}/file?${new URLSearchParams({ path }).toString()}`,
     ),
 
-  /** `match` is echoed only when the runner and control plane applied it (#1263). */
-  searchWorkspaceReferences: (sessionId: string, query: string, match?: WorkspaceReferenceSearchMatch) =>
+  /** `match` is echoed only when the runner and control plane applied it (#1263). The composer's
+   * `"fuzzy_with_directories"` (#4129) asks for folders too and is echoed as `match: "fuzzy"` with
+   * `fuzzyWithDirectories`; older components answer it with substring results. */
+  searchWorkspaceReferences: (
+    sessionId: string,
+    query: string,
+    mode?: WorkspaceReferenceSearchMatch | "fuzzy_with_directories",
+  ) =>
     req<{
       results: WorkspaceReferenceCandidate[];
       truncated: boolean;
       match?: WorkspaceReferenceSearchMatch;
+      fuzzyWithDirectories?: boolean;
       limit?: WorkspaceReferenceSearchLimit;
     }>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references/search?${new URLSearchParams({ q: query, ...(match ? { match } : {}) }).toString()}`,
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references/search?${new URLSearchParams({
+        q: query,
+        ...(mode === "fuzzy_with_directories" ? { fuzzyWithDirectories: "true" } : mode ? { match: mode } : {}),
+      }).toString()}`,
     ),
 
   createWorkspaceReference: (sessionId: string, target: CreateWorkspaceReferenceRequest) =>
@@ -1873,6 +1917,16 @@ export function createApiClient(transport: ApiTransport) {
 }
 
 export type ApiClient = ReturnType<typeof createApiClient>;
+
+/** What a provider account preview is for. `noProject` means the launch chose No Project; omitting
+ * both it and `projectId` lets the server infer the project from `workspaceId`, as a launch would. */
+export type ProviderAccountSelectionTarget = {
+  agentId?: string;
+  provider?: "claude" | "codex";
+  projectId?: string;
+  workspaceId?: string;
+  noProject?: "1";
+};
 
 const defaultApiTransport = createBrowserApiTransport({
   instanceId: "local",

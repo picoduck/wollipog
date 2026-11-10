@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
+import type { ProviderAccountBilling } from "@wollipog/protocol";
 import {
   chmodSync,
   closeSync,
@@ -50,6 +51,8 @@ export interface ProviderAuthObservation {
   identityId?: string;
   /** Runner-keyed per-field digests. Values and hashes never enter logs, events, or snapshots. */
   identityEvidence?: ProviderAuthIdentityEvidence;
+  /** How the provider's status check says this credential bills (#4353). A coarse class only. */
+  billing?: ProviderAccountBilling;
 }
 
 /** A fresh provider observation plus the provider-reported email, for one authorized viewer.
@@ -340,6 +343,7 @@ function claudeInspection(
   return {
     observation: {
       status: "authenticated",
+      billing: claudeBilling(parsed),
       ...(hasAccountIdentity ? {
         identityId: digest(account, digestKey),
         identityEvidence: identityEvidence(account, digestKey, evidenceVersion),
@@ -347,6 +351,20 @@ function claudeInspection(
     },
     email: displayableProviderEmail(account.email),
   };
+}
+
+/** Matches discovery's classification (`discovery/claude-code.ts`). Claude.ai sign-in is a
+ * subscription; a console sign-in or cloud route spends credits; anything else stays unverified. */
+function claudeBilling(status: Record<string, unknown>): ProviderAccountBilling {
+  if (status.apiProvider === "bedrock" || status.apiProvider === "vertex" || status.authMethod === "console") return "api";
+  return status.authMethod === "claude.ai" || typeof status.subscriptionType === "string" ? "subscription" : "unknown";
+}
+
+/** `codex login status` names its method on stdout or stderr, depending on the version. */
+export function codexBilling(output: { stdout?: unknown; stderr?: unknown }): ProviderAccountBilling {
+  const text = [output.stdout, output.stderr].filter((part): part is string => typeof part === "string").join("\n");
+  if (/\bapi[ -]?key\b/iu.test(text)) return "api";
+  return /\bchatgpt\b/iu.test(text) ? "subscription" : "unknown";
 }
 
 function claudeObservation(
@@ -496,9 +514,9 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
         const result = await this.runExact(meta, meta.command, providerArgs(meta, ["auth", "status"]), 15_000, 64 * 1024, observer);
         return claudeObservation(result, this.digestKey, this.evidenceVersion);
       }
-      await this.runExact(meta, meta.command, providerArgs(meta, ["login", "status"]), 15_000, 64 * 1024, observer);
+      const status = await this.runExact(meta, meta.command, providerArgs(meta, ["login", "status"]), 15_000, 64 * 1024, observer);
       const identityId = codexIdentity(meta, this.digestKey);
-      return { status: "authenticated", ...(identityId ? { identityId } : {}) };
+      return { status: "authenticated", billing: scope.configuredCredential ? "api" : codexBilling(status), ...(identityId ? { identityId } : {}) };
     } catch (error) {
       // Exit status alone is not authentication evidence: old CLIs without the status subcommand,
       // transient provider failures, and a real sign-out can all be numeric non-zero exits. Claude

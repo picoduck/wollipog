@@ -766,19 +766,27 @@ test("against a plane without weekly support Group By has no Week and the Range 
 
 test("the tabs are the URL: switching pushes it and Back returns to the previous tab", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
-  await page.goto("/command-inbox-projects-e2e.html?fullShell=1&history=1&path=%2Fusage%2Fsubscriptions");
+  await page.goto("/command-inbox-projects-e2e.html?fullShell=1&history=1&path=%2Fusage");
   const tabs = page.getByRole("tablist", { name: "Usage and Cost" });
+  await expect(tabs.getByRole("tab")).toHaveText([/^Subscriptions/, "API Usage"]);
   await expect(tabs.getByRole("tab", { name: /^Subscriptions/ })).toHaveAttribute("aria-selected", "true");
   await expect(page.locator(".usage-toolbar")).toHaveCount(0);
 
   await tabs.getByRole("tab", { name: "API Usage" }).click();
   await expect(tabs.getByRole("tab", { name: "API Usage" })).toHaveAttribute("aria-selected", "true");
-  await expect(page).toHaveURL(/path=%2Fusage(&|$)/);
+  await expect(page).toHaveURL(/path=%2Fusage%2Fapi/);
   await expect(page.locator(".usage-toolbar")).toBeVisible();
 
   await page.goBack();
-  await expect(page).toHaveURL(/path=%2Fusage%2Fsubscriptions/);
+  await expect(page).toHaveURL(/path=%2Fusage(&|$)/);
   await expect(tabs.getByRole("tab", { name: /^Subscriptions/ })).toHaveAttribute("aria-selected", "true");
+});
+
+test("a link saved from Subscriptions' old path still opens Subscriptions", async ({ page }) => {
+  await page.goto("/command-inbox-projects-e2e.html?fullShell=1&history=1&path=%2Fusage%2Fsubscriptions");
+  const tabs = page.getByRole("tablist", { name: "Usage and Cost" });
+  await expect(tabs.getByRole("tab", { name: /^Subscriptions/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".usage-toolbar")).toHaveCount(0);
 });
 
 test("the Subscriptions tab counts its Approaching Limit and Exhausted badges", async ({ page }) => {
@@ -831,6 +839,7 @@ test("each account is one surface with a row per window, in the provider's order
   await expect(current.locator(".subscription-plan-account")).not.toContainText("primary@example.com");
   await current.getByRole("button", { name: "Show Account Email" }).click();
   await expect(current.locator(".subscription-plan-account .pid-value")).toHaveText("primary@example.com");
+  // This fixture speaks as a control plane older than protocol 342, where only Codex could refresh.
   await expect(current.getByRole("button", { name: "Refresh Account" })).toHaveCount(0);
   const windows = current.locator(".subscription-window");
   await expect(windows).toHaveCount(3);
@@ -884,6 +893,60 @@ test("Refresh All keeps its label and width while busy, and the result is a toas
   await expect(page.locator(".toast")).toContainText("2 of 3 machines couldn't refresh. The last known values are still shown.");
   await expect(page.locator("#usage-subscriptions-panel")).not.toContainText("couldn't refresh");
 });
+
+for (const { width, height, name } of [
+  { width: 1280, height: 800, name: "desktop-1280" },
+  { width: 390, height: 844, name: "phone-390" },
+]) {
+  test(`one subscription on three machines is one account with a machine list at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1&sharedSubscription=1");
+    const panel = page.locator("#usage-subscriptions-panel");
+    await expect(panel.locator(".section-title")).toHaveText("1 Account");
+    const account = panel.locator(".subscription-plan");
+    await expect(account).toHaveCount(1);
+    await expect(account.locator(".subscription-plan-title")).toHaveText("Claude Max");
+    await expect(account.locator(".subscription-plan-machine")).toHaveText("On 3 Machines");
+    await expect(account.locator(".subscription-plan-head .status")).toHaveCount(0);
+    // The offline machine's expired window does not outrank the laptop's current one.
+    await expect(account.locator(".subscription-window-left")).toHaveText(["48% left", "81% left"]);
+    await expect(panel).not.toContainText(/Sources? Unavailable/);
+
+    const machines = account.getByRole("list", { name: "Machines" });
+    await expect(machines).toBeHidden();
+    await account.locator("details summary").click();
+    await expect(machines.getByRole("listitem")).toHaveCount(3);
+    await expect(machines.getByRole("listitem").nth(0)).toContainText("Claude Code on laptop");
+    await expect(machines.getByRole("listitem").nth(1)).toContainText("Unavailable");
+    await expect(machines.getByRole("listitem").nth(2)).toContainText("Offline");
+    const overflow = await account.evaluate((element) => element.scrollWidth - element.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+    await page.screenshot({ path: `${SHOT}/${name}-dark-shared-subscription.png`, fullPage: true });
+  });
+}
+
+for (const { width, height, name } of [
+  { width: 1280, height: 900, name: "desktop-1280" },
+  { width: 390, height: 844, name: "phone-390" },
+]) {
+  test(`a Claude account its machine can read on request has Refresh Account at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1&claudeRefreshable=1");
+    const claude = page.locator(".subscription-plan").filter({ hasText: "Claude Code on build-box" }).first();
+    await expect(claude.locator(".subscription-plan-title")).toHaveText("Claude Max");
+    const refresh = claude.getByRole("button", { name: "Refresh Account" });
+    await expect(refresh).toBeVisible();
+    // The same control as Codex's, at the same size.
+    const codex = page.locator(".subscription-plan").filter({ hasText: "Codex App Server on build-box" })
+      .getByRole("button", { name: "Refresh Account" });
+    const [claudeBox, codexBox] = await Promise.all([refresh.boundingBox(), codex.boundingBox()]);
+    expect(claudeBox?.width).toBe(codexBox?.width);
+    expect(claudeBox?.height).toBe(codexBox?.height);
+    await page.screenshot({ path: `playwright-report/claude-refresh/${name}-dark-claude-refresh-account.png`, fullPage: true });
+    await refresh.click();
+    await expect(page.locator(".toast")).toContainText("Account refreshed.");
+  });
+}
 
 test("on a phone Refresh All is the app bar's Refresh Subscriptions (#3014)", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });

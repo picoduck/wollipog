@@ -110,6 +110,8 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "POST /api/sessions/:id/location-switch-requests/:occurrenceId/execute",
   "GET /api/compatibility",
   "GET /api/runners",
+  // What a launch would use and which accounts an agent may name (#4353); account references only.
+  "GET /api/runners/:id/provider-account-selection",
   "GET /api/sessions",
   "GET /api/sessions/:id",
   "GET /api/sessions/:id/events",
@@ -172,6 +174,8 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "POST /api/sessions/:id/review-sessions/:reviewSessionId/cancel",
   // A session parking on its own enqueued pull request (#4071); the route refuses other sessions.
   "POST /api/sessions/:id/pull-request-watch",
+  // A session's own wait_session and wait_pull_request progress (#1280); the route refuses other sessions.
+  "POST /api/sessions/:id/waits",
 ]);
 
 const ORCHESTRATOR_API_ROUTES = new Set([
@@ -179,7 +183,8 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "GET /api/sessions/:id/automation-proposals/:occurrenceId",
   "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute",
   "POST /api/sessions/:id/result/handoff",
-  "GET /api/compatibility", "GET /api/runners", "GET /api/sessions", "GET /api/sessions/:id",
+  "GET /api/compatibility", "GET /api/runners", "GET /api/runners/:id/provider-account-selection",
+  "GET /api/sessions", "GET /api/sessions/:id",
   "GET /api/sessions/:id/events", "GET /api/governance/policies",
   "GET /api/sessions/:id/campaign/issue-scope",
   "POST /api/sessions/:id/campaign/issue-scope/proposals",
@@ -194,6 +199,10 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   // A Full Control root's owner decisions and one-way handoffs to its owner (#4064).
   "POST /api/sessions/:id/owner-decisions",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner",
+  // A campaign root asks its owner to add a Project repository, then carries out the approval (#4117).
+  "POST /api/sessions/:id/orchestrator-campaign/repository-additions",
+  "GET /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId",
+  "POST /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId/execute",
   "GET /api/sessions/:id/orchestrator-campaign",
   "POST /api/sessions/:id/orchestrator-campaign/follow-ups",
   "POST /api/sessions/:id/orchestrator-campaign/verify-child",

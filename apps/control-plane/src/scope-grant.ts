@@ -1,15 +1,52 @@
 import {
-  SCOPE_GRANT_DEFAULT_SELECTION_COUNT,
+  SCOPE_GRANT_DEFAULT_SELECTION_COUNT, campaignScopeChangeResult,
   type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type CampaignIssueScopeSnapshot, type FullControlDerivedLimits,
   type OrchestratorCampaignPolicy, type ScopeGrantDropReason, type ScopeGrantSelection,
 } from "@wollipog/protocol";
 import { MAX_MESSAGE_ISSUES } from "./first-message-issue-intent.js";
 
-/** The repositories a scope grant may name: every repository in the campaign's boundary. Today a
- * boundary names one; a multi-repository boundary (#4118) lists each of its repositories here, and
- * every floor below already resolves names against the whole list. */
-export function boundaryRepositories(boundary: Pick<CampaignAuthorityBoundary, "repository">): string[] {
-  return [boundary.repository.toLowerCase()];
+/** Every repository in the campaign's boundary, the launch repository first (#4118). */
+export function boundaryRepositories(boundary: Pick<CampaignAuthorityBoundary, "repository" | "repositories">): string[] {
+  const launch = boundary.repository.toLowerCase();
+  return [launch, ...(boundary.repositories ?? []).map((entry) => entry.repository.toLowerCase()).filter((repository) => repository !== launch)];
+}
+
+const simplify = (value: string) => value.trim().toLowerCase().replace(/^the\s+/u, "").replace(/\s+(?:repo|repository)$/u, "").trim();
+
+/** The one boundary repository an owner's name for it means (#4118): its full name, its name without
+ * the owner, or the name of one of its Locations, each compared exactly and ignoring case, after
+ * dropping a leading "the" and a trailing "repo" or "repository". Null when the name matches no
+ * repository or several, so it decides nothing. */
+export function resolveRepositoryName(name: string, entries: ReadonlyArray<{ repository: string; locationNames?: readonly string[] }>): string | null {
+  const wanted = simplify(name);
+  if (!wanted) return null;
+  const matches = entries.filter((entry) => {
+    const repository = entry.repository.toLowerCase();
+    return wanted === repository || wanted === repository.slice(repository.lastIndexOf("/") + 1) ||
+      (entry.locationNames ?? []).some((location) => simplify(location) === wanted);
+  });
+  return matches.length === 1 ? matches[0]!.repository.toLowerCase() : null;
+}
+
+/** Whether the message's own words contain the name the Orchestrator says it used, as whole words,
+ * ignoring case and runs of spaces: "api" is not in "rapidly". A floor: a name the owner never wrote
+ * can't limit, or stand for, anything. Whether the message limits the work to it is the check's. */
+export function repositoryNameInMessage(text: string, name: string): boolean {
+  const flat = (value: string) => value.toLowerCase().replace(/\s+/gu, " ").trim();
+  const wanted = flat(name);
+  if (!wanted) return false;
+  const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(?<![\\p{L}\\p{N}_-])${escaped}(?![\\p{L}\\p{N}_-])`, "u").test(flat(text));
+}
+
+/** Whether the message writes the name of one of these repositories as words of its own (#4117): any
+ * name `resolveRepositoryName` would accept for it, so a Location called "The API Repository" counts
+ * when the message says "api". `owner/repo#12` or an issue's URL points at an issue and says nothing
+ * about limiting the work, so it doesn't count. */
+export function messageNamesRepository(text: string, entries: ReadonlyArray<{ repository: string; locationNames?: readonly string[] }>): boolean {
+  const words = text.replace(/\S*[\w.-]+\/[\w.-]+(?:#\d+|\/(?:issues|pull)\/\d+)\S*/gu, " ");
+  return entries.some((entry) => [entry.repository, entry.repository.slice(entry.repository.lastIndexOf("/") + 1), ...(entry.locationNames ?? []).map(simplify)]
+    .some((name) => repositoryNameInMessage(words, name)));
 }
 
 /** The repository a name the model returned resolves to: an empty name is the boundary's only
@@ -37,17 +74,34 @@ export function writtenAsDigits(text: string, n: number): boolean {
   return digitOccurrences(text, n).length > 0;
 }
 
+/** The repository that qualifies a number written at `at`, lowercased, or null when it stands alone. */
+function qualifyingRepository(text: string, at: number): string | null {
+  const before = text.slice(Math.max(0, at - 300), at);
+  const qualified = /([\w.-]+\/[\w.-]+)#$/u.exec(before) ??
+    /https?:\/\/(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+)\/(?:issues|pull)\/$/iu.exec(before) ??
+    /https?:\/\/([^\s/?#@]+\/[^\s?#]+?)\/-\/(?:issues|merge_requests)\/$/iu.exec(before);
+  return qualified ? qualified[1]!.toLowerCase() : null;
+}
+
 /** Whether every place the message writes `n` qualifies it with a repository outside the boundary:
  * `other/repo#n`, or an issue or pull request URL of another repository. A floor only: it can drop a
  * number the model returned unqualified, never add one. */
 export function onlyOtherRepositories(text: string, n: number, repositories: readonly string[]): boolean {
   const occurrences = digitOccurrences(text, n);
   return occurrences.length > 0 && occurrences.every((at) => {
-    const before = text.slice(Math.max(0, at - 300), at);
-    const qualified = /([\w.-]+\/[\w.-]+)#$/u.exec(before) ??
-      /https?:\/\/(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+)\/(?:issues|pull)\/$/iu.exec(before) ??
-      /https?:\/\/([^\s/?#@]+\/[^\s?#]+?)\/-\/(?:issues|merge_requests)\/$/iu.exec(before);
-    return Boolean(qualified && !repositories.includes(qualified[1]!.toLowerCase()));
+    const qualified = qualifyingRepository(text, at);
+    return qualified !== null && !repositories.includes(qualified);
+  });
+}
+
+/** Whether the message writes `n` for `repository` (#4118): qualified by it (`owner/api#40` or the
+ * issue's URL), or, for the launch repository only, standing alone, since a bare number means the
+ * launch repository. The same number qualified by another repository is that repository's issue. */
+export function writtenForRepository(text: string, n: number, repository: string, launch: string): boolean {
+  const wanted = repository.toLowerCase();
+  return digitOccurrences(text, n).some((at) => {
+    const qualified = qualifyingRepository(text, at);
+    return qualified === null ? wanted === launch.toLowerCase() : qualified === wanted;
   });
 }
 
@@ -202,6 +256,19 @@ export function grantReviewMaxIssues(
   return Math.min(MAX_MESSAGE_ISSUES, Math.max(issues.maxIssues, followUps === undefined ? MAX_MESSAGE_ISSUES : scopeSize + followUps));
 }
 
+/** The Maximum Issues the owner's approval of an Orchestrator proposal without lineage re-mints
+ * (#4267): the boundary's limit raised by exactly the increase the request stated. Undefined when it
+ * states none. Null when the boundary no longer holds the limit the increase was computed against, or
+ * names no issue limit at all: the request is stale and approving it must not apply. */
+export function ownerReviewMaxIssues(snapshot: Pick<CampaignIssueScopeSnapshot, "ownerReview">,
+  boundary: CampaignAuthorityBoundary): number | null | undefined {
+  const raise = snapshot.ownerReview?.maxIssuesIncrease;
+  if (!raise) return undefined;
+  const issues = boundary.issueAuthority;
+  if (!issues || issues.maxIssues !== raise.from || raise.from + raise.increase > MAX_MESSAGE_ISSUES) return null;
+  return raise.from + raise.increase;
+}
+
 /** The operations a grant leaves: the launch's own, intersected with what the message allows. A
  * grant can never add one. */
 export function grantOperations(launch: readonly CampaignAuthorityOperation[], allowed: readonly string[] | null): CampaignAuthorityOperation[] {
@@ -224,4 +291,34 @@ export function grantSelection(selection: ScopeGrantCandidates["selection"], sco
     ...(count < wanted ? { capped: true as const } : {}),
     criteria: selection.criteria.slice(0, 300), constraints: selection.constraints.slice(0, 10).map((c) => c.slice(0, 200)),
   };
+}
+
+/** The Maximum Issues an applied Orchestrator scope proposal sets (#4282) when the launch derived the
+ * limit: the scope it establishes plus follow-up room, as a first message naming those issues derived
+ * it before, never below the current limit and never past the 100-issue ceiling. The owner's words
+ * stand behind every such scope: the floors bound owner-named issues to them, and anything else was
+ * the owner's own approval. An explicit Maximum Issues never grows. Undefined when it doesn't apply. */
+export function proposalMaxIssues(policy: Pick<OrchestratorCampaignPolicy, "firstMessageScope"> | undefined,
+  snapshot: Pick<CampaignIssueScopeSnapshot, "scopeProposal">, boundary: CampaignAuthorityBoundary, scopeSize: number): number | undefined {
+  const first = policy?.firstMessageScope;
+  const issues = boundary.issueAuthority;
+  if (!snapshot.scopeProposal || !issues || first?.state !== "established" || first.grant?.status !== "proposal" ||
+      first.derivedLimits?.maxIssues !== true) return undefined;
+  const followUps = boundary.budgetAuthority?.acceptedFollowUps;
+  return Math.min(MAX_MESSAGE_ISSUES, Math.max(issues.maxIssues, followUps === undefined ? MAX_MESSAGE_ISSUES : scopeSize + followUps));
+}
+
+/** The Maximum Issues increase the owner's approval of this scope request applies, to name it where the
+ * request is listed (#4334): the one an owner review states, or the derived limit a failed or uncertain
+ * grant or a proposal grows to fit, which no snapshot field records. `boundary` is the one the approval
+ * would re-mint, absent when it wouldn't, and the scope size is the change's own result. It reads the
+ * limit and decides nothing; approval still applies its own rules. */
+export function scopeApprovalMaxIssuesIncrease(policy: Pick<OrchestratorCampaignPolicy, "firstMessageScope"> | undefined,
+  snapshot: CampaignIssueScopeSnapshot, boundary: CampaignAuthorityBoundary | undefined): { from: number; increase: number } | undefined {
+  if (snapshot.ownerReview?.maxIssuesIncrease) return snapshot.ownerReview.maxIssuesIncrease;
+  const from = boundary?.issueAuthority?.maxIssues;
+  if (!boundary || from === undefined) return undefined;
+  const scopeSize = campaignScopeChangeResult(snapshot).length;
+  const grown = proposalMaxIssues(policy, snapshot, boundary, scopeSize) ?? grantReviewMaxIssues(policy, snapshot, boundary, scopeSize);
+  return grown !== undefined && grown > from ? { from, increase: grown - from } : undefined;
 }

@@ -4066,13 +4066,70 @@ test("historical reconciliation falls back to the durable rollout after App Serv
 
     const proof = await h.driver.reconcileCompletedCommand?.("workflow-historical", command);
     assert.equal(proof?.providerItemId, "command-historical");
-    assert.deepEqual(fallback, [
+    assert.equal(typeof fallback?.[6], "function");
+    assert.deepEqual(fallback?.slice(0, 6), [
       { kind: "native" }, "/provider/home/.codex", "thread-restarted", "workflow-historical", command, undefined,
     ]);
   } finally {
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
   }
+});
+
+test("standalone CLI admissions reconcile in the active turn and preserve re-enqueue ordering", async () => {
+  const h = makeHarness({ resumeId: "thread-cli", context: { kind: "native" } });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/4350 --squash --match-head-commit ${"a".repeat(40)}`;
+  const admission = (occurrenceId: string) => ({ id: `admission-${occurrenceId}`, type: "commandExecution",
+    command: `"$WOLLIPOG_CLI" decision consume ${occurrenceId} --snapshot '{"category":"pr_merge"}' --action '${JSON.stringify({
+      kind: "pr_merge_enqueue", command,
+    })}' --json`, status: "completed", exitCode: 0,
+    aggregatedOutput: `Warning: example\n${JSON.stringify({ decision: { occurrenceId, status: "approved", actionAdmission: {
+      kind: "pr_merge_enqueue", command, providerThreadId: "thread-cli", providerTurnId: "turn-cli",
+    } } })}\n` });
+  const enqueue = { id: "command-cli", type: "commandExecution", command, status: "completed", exitCode: 0 };
+  const turn = { id: "turn-cli", status: "inProgress", itemsView: "full", items: [admission("workflow-cli"), enqueue] };
+  (h.driver as any).threadId = "thread-cli";
+  (h.driver as any).peer = { request: async () => ({ thread: { id: "thread-cli", turns: [turn] } }) };
+  assert.equal((await h.driver.reconcileCompletedCommand("workflow-cli", command))?.providerItemId, "command-cli");
+  const firstAdmission = turn.items[0]!;
+  firstAdmission.command = `/usr/bin/zsh -lc '${firstAdmission.command.replaceAll("'", "'\\''")}'`;
+  assert.ok(await h.driver.reconcileCompletedCommand("workflow-cli", command), "provider shell rendering preserves CLI admission JSON");
+  turn.items.push({ ...enqueue, id: "neighbor", command: "gh pr view 4350 --json state" });
+  assert.ok(await h.driver.reconcileCompletedCommand("workflow-cli", command));
+  enqueue.exitCode = 1;
+  let failure = "";
+  const onFailure = (reason: string) => { failure = reason; };
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command, undefined, onFailure), null);
+  assert.match(failure, /successful completion/u);
+  enqueue.exitCode = 0;
+  turn.items = [enqueue, admission("workflow-cli")];
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command, undefined, onFailure), null);
+  assert.match(failure, /action admission before/u);
+  turn.items = [admission("workflow-cli"), enqueue, admission("workflow-latest"), { ...enqueue, id: "latest" }];
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command), null);
+  assert.equal((await h.driver.reconcileCompletedCommand("workflow-latest", command))?.providerItemId, "latest");
+});
+
+test("concurrent command reconciliations keep their failure diagnostics local to the request", async () => {
+  const h = makeHarness({ resumeId: "thread-concurrent", context: { kind: "native" } });
+  (h.driver as any).threadId = "thread-concurrent";
+  const command = "gh pr merge https://github.com/team/repo/pull/1 --squash --match-head-commit " + "a".repeat(40);
+  const resolveReads: Array<(value: unknown) => void> = [];
+  (h.driver as any).peer = { request: () => new Promise((resolve) => { resolveReads.push(resolve); }) };
+  let firstFailure = "", secondFailure = "";
+  const first = h.driver.reconcileCompletedCommand("workflow-first", command, undefined, (reason) => { firstFailure = reason; });
+  const second = h.driver.reconcileCompletedCommand("workflow-second", command, undefined, (reason) => { secondFailure = reason; });
+  const history = (status: string, exitCode: number | null) => ({ thread: { id: "thread-concurrent", turns: [
+    { id: "turn-concurrent", status: "completed", itemsView: "full", items: [
+      { type: "commandExecution", id: "command-concurrent", command, status, exitCode },
+    ] },
+  ] } });
+  resolveReads[1]!(history("inProgress", null));
+  assert.equal(await second, null);
+  resolveReads[0]!(history("completed", 1));
+  assert.equal(await first, null);
+  assert.match(firstFailure, /successful completion/u);
+  assert.match(secondFailure, /unfinished exact command/u);
 });
 
 test("historical CLI admission survives a live projection that retained only the successful command", async () => {
@@ -4246,6 +4303,19 @@ test("historical reconciliation searches the provider's inherited native CODEX_H
     if (previous === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previous;
   }
+});
+
+test("historical reconciliation reads only the exact runner-attested transcript bind", async () => {
+  const h = makeHarness({ resumeId: "thread-bind", context: { kind: "native" }, env: { CODEX_HOME: "/provider/home" },
+    isolation: { backend: "bwrap", command: "bwrap", args: [], network: "inherit", writableBinds: [
+      { source: "/runner/private/session/sessions", target: "/provider/home/sessions" },
+      { source: "/runner/other/sessions", target: "/other/home/sessions" },
+    ] } });
+  (h.driver as any).threadId = "thread-bind";
+  let home: unknown;
+  (h.driver as any).readRolloutProof = async (_context: unknown, codexHome: unknown) => { home = codexHome; return null; };
+  await h.driver.reconcileCompletedCommand("workflow-bind", "gh pr merge example");
+  assert.equal(home, "/runner/private/session");
 });
 
 test("historical reconciliation derives a POSIX Codex home for Direct WSL", async () => {
@@ -5552,4 +5622,176 @@ test("Codex revoked OAuth recovery survives structured permission terminal", asy
   assert.equal(h.driver.lastTurnFailureCategory(),"permission");
   assert.equal(h.authenticationFailures(),1);
   assert.doesNotMatch(JSON.stringify([h.events,h.stderr,h.driver.lastTurnError()]),/synthetic-secret/);
+});
+
+/** A fake app server over in-memory streams whose `turn/start` response names no turn and that
+ * never sends `turn/started` (#4054). `script` sets what it sends around the response. */
+function unconfirmedTurnAppServer(h: ReturnType<typeof makeHarness>, timeoutMs = 60_000) {
+  const toServer = new PassThrough();
+  const fromServer = new PassThrough();
+  const peer = new JsonRpcPeer(toServer, fromServer);
+  const received: any[] = [];
+  const write = (message: object) => fromServer.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");
+  const notify = (method: string, params: object) => write({ method, params: { threadId: "thread-1", ...params } });
+  let afterTurnStart: (respond: () => void) => void = (respond) => respond();
+  toServer.setEncoding("utf8");
+  let buffered = "";
+  toServer.on("data", (chunk: string) => {
+    buffered += chunk;
+    for (let index = buffered.indexOf("\n"); index >= 0; index = buffered.indexOf("\n")) {
+      const message = JSON.parse(buffered.slice(0, index));
+      buffered = buffered.slice(index + 1);
+      received.push(message);
+      if (message.id === undefined) continue;
+      if (message.method === "turn/start") {
+        afterTurnStart(() => write({ id: message.id, result: { turn: { status: "inProgress", items: [] } } }));
+      } else write({ id: message.id, result: {} });
+    }
+  });
+  const driver = h.driver as any;
+  driver.turnConfirmationTimeoutMs = timeoutMs;
+  driver.peer = peer;
+  driver.threadId = "thread-1";
+  driver.registerHandlers(peer);
+  return {
+    received,
+    notify,
+    script: (next: typeof afterTurnStart) => { afterTurnStart = next; },
+  };
+}
+
+const unconfirmedTurnUsage = (turnId: string) => ({
+  turnId,
+  tokenUsage: { last: { inputTokens: 120, outputTokens: 30 }, total: { inputTokens: 120, outputTokens: 30 } },
+});
+
+test("a turn/start without a turn id is confirmed by the first turn notification, settles, and records usage (#4054)", async () => {
+  const h = makeHarness();
+  const server = unconfirmedTurnAppServer(h);
+  let confirmedDuringTurn: string | null = null;
+  server.script((respond) => {
+    respond();
+    setTimeout(() => {
+      server.notify("item/agentMessage/delta", { turnId: "turn-late", itemId: "message-1", delta: "Done." });
+      server.notify("thread/tokenUsage/updated", unconfirmedTurnUsage("turn-late"));
+    }, 10);
+    setTimeout(() => {
+      confirmedDuringTurn = h.driver.agentTurnId();
+      server.notify("turn/completed", { turn: { id: "turn-late", status: "completed" } });
+    }, 20);
+  });
+
+  assert.equal(await h.driver.prompt("task"), "end_turn", "the provider's completion settles the turn");
+  assert.equal(confirmedDuringTurn, "turn-late", "action admission can read the confirmed provider turn");
+  assert.equal(h.driver.agentTurnId(), "turn-late");
+  const usage = h.events.filter((event) => event.kind === "token_usage");
+  assert.deepEqual(usage.map((event: any) => [event.inputTokens, event.outputTokens]), [[120, 30]]);
+  assert.ok(h.events.some((event) => event.kind === "agent_response_completed"));
+  assert.ok(h.stderr.some((line) => line.includes("\"event\":\"codex_turn_confirmed\"") &&
+    line.includes("\"method\":\"item/agentMessage/delta\"")), JSON.stringify(h.stderr));
+  assert.ok(h.stderr.some((line) => /turn\/start did not confirm a turn id; waiting up to 60 seconds/u.test(line)));
+  assert.equal(h.events.some((event) => event.kind === "error"), false);
+});
+
+test("a turn/start without a turn id adopts the single turn announced before its response (#4054)", async () => {
+  const h = makeHarness();
+  const server = unconfirmedTurnAppServer(h);
+  server.script((respond) => {
+    server.notify("thread/tokenUsage/updated", unconfirmedTurnUsage("turn-early"));
+    server.notify("turn/completed", { turn: { id: "turn-early", status: "completed" } });
+    respond();
+  });
+
+  assert.equal(await h.driver.prompt("task"), "end_turn",
+    "a completion that raced ahead of the response settles once the response confirms nothing else");
+  assert.equal(h.driver.agentTurnId(), "turn-early");
+  assert.equal(h.events.filter((event) => event.kind === "token_usage").length, 1);
+});
+
+test("a turn/start without a turn id that no notification confirms ends with a visible error (#4054)", async () => {
+  const h = makeHarness();
+  const server = unconfirmedTurnAppServer(h, 50);
+  // A predecessor's notification while no turn/start is in flight can never confirm the next turn.
+  server.notify("item/agentMessage/delta", { turnId: "turn-predecessor", itemId: "old", delta: "late" });
+  await waitForCondition(() => (h.driver as any).staleRootTurnIds.has("turn-predecessor"));
+  server.script((respond) => {
+    respond();
+    setTimeout(() => {
+      server.notify("item/agentMessage/delta", { turnId: "turn-predecessor", itemId: "old-2", delta: "later" });
+      server.notify("item/agentMessage/delta", { itemId: "unscoped", delta: "no turn id" });
+    }, 5);
+  });
+
+  const started = Date.now();
+  assert.equal(await h.driver.prompt("task"), "refusal");
+  assert.ok(Date.now() - started < 5_000);
+  assert.equal(h.driver.agentTurnId(), null, "nothing can arm against an unconfirmed provider turn");
+  assert.match(h.driver.lastTurnError() ?? "", /did not confirm a provider turn within 50 ms/u);
+  assert.equal(h.driver.lastPromptUndelivered(), false, "the provider may have seen the prompt");
+  assert.ok(h.events.some((event) => event.kind === "error" &&
+    /did not confirm a provider turn within 50 ms of starting it, so the turn was ended/u.test(event.message)));
+  assert.deepEqual(server.received.filter((message) => message.method === "turn/interrupt")
+    .map((message) => message.params), [{ threadId: "thread-1" }], "the unowned provider turn is interrupted");
+  assert.ok(h.stderr.some((line) => /turn\/start did not confirm a turn id; waiting up to 50 ms/u.test(line)));
+});
+
+test("a turn/start without a turn id refuses to pick between several announced turns (#4054)", async () => {
+  const h = makeHarness();
+  const server = unconfirmedTurnAppServer(h);
+  server.script((respond) => {
+    server.notify("item/agentMessage/delta", { turnId: "turn-a", itemId: "a", delta: "a" });
+    server.notify("item/agentMessage/delta", { turnId: "turn-b", itemId: "b", delta: "b" });
+    respond();
+  });
+
+  assert.equal(await h.driver.prompt("task"), "refusal");
+  assert.equal(h.driver.agentTurnId(), null);
+  assert.match(h.driver.lastTurnError() ?? "", /did not confirm which provider turn started/u);
+
+  // Neither ambiguous candidate can be adopted by the next unconfirmed prompt.
+  let bPending = true;
+  server.script((respond) => {
+    respond();
+    setTimeout(() => {
+      server.notify("item/agentMessage/delta", { turnId: "turn-a", itemId: "a2", delta: "late a" });
+      server.notify("turn/completed", { turn: { id: "turn-b", status: "completed" } });
+    }, 5);
+  });
+  const next = h.driver.prompt("next").finally(() => { bPending = false; });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(bPending, true, "a retired candidate's completion cannot settle the next prompt");
+  assert.equal(h.driver.agentTurnId(), null);
+  server.notify("turn/completed", { turn: { id: "turn-next", status: "completed" } });
+  assert.equal(await next, "end_turn");
+  assert.equal(h.driver.agentTurnId(), "turn-next");
+});
+
+test("a canceled unconfirmed prompt's announced turn is never adopted by the next prompt (#4054)", async () => {
+  const h = makeHarness();
+  const server = unconfirmedTurnAppServer(h);
+  // Prompt A's response is held; it sees a notification naming its turn, then is canceled.
+  server.script(() => {
+    server.notify("item/agentMessage/delta", { turnId: "turn-a", itemId: "a", delta: "a" });
+  });
+  const first = h.driver.prompt("first");
+  await waitForCondition(() => (h.driver as any).provisionalRootTurnIds.has("turn-a"));
+  h.driver.cancel();
+  assert.equal(await first, "cancelled");
+
+  let bPending = true;
+  server.script((respond) => {
+    respond();
+    setTimeout(() => {
+      server.notify("item/agentMessage/delta", { turnId: "turn-a", itemId: "a2", delta: "late a" });
+      server.notify("turn/completed", { turn: { id: "turn-a", status: "interrupted" } });
+    }, 5);
+  });
+  const second = h.driver.prompt("second").finally(() => { bPending = false; });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(bPending, true, "the canceled turn's completion cannot settle the next prompt");
+  assert.equal(h.driver.agentTurnId(), null, "the canceled turn is never offered to action admission");
+  server.notify("item/agentMessage/delta", { turnId: "turn-b", itemId: "b", delta: "b" });
+  await waitForCondition(() => h.driver.agentTurnId() === "turn-b");
+  server.notify("turn/completed", { turn: { id: "turn-b", status: "completed" } });
+  assert.equal(await second, "end_turn");
 });

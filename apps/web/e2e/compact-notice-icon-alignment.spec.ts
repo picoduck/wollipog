@@ -129,7 +129,7 @@ for (const theme of ["dark", "light"]) {
             .filter({ has: page.locator(".row-title", { hasText: "Design Workstation" }) }).click();
         }
         const accounts = page.getByRole("region", { name: /^Provider Accounts/ });
-        await accounts.locator(".surface > .row").filter({ has: page.locator(".row-title", { hasText: "Codex Solo" }) })
+        await accounts.locator(".provider-accounts-list > .row").filter({ has: page.locator(".row-title", { hasText: "Codex Solo" }) })
           .getByRole("button", { name: "More Actions for Codex Solo" }).click();
         await page.getByRole("menu", { name: "Codex Solo" }).getByRole("menuitem", { name: "Remove Account…" }).click();
         await page.getByRole("dialog", { name: "Remove Account" }).getByRole("button", { name: "Remove Account" }).click();

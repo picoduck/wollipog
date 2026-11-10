@@ -152,7 +152,8 @@ CI job treats that skip as a failure rather than coverage.
 wollipog session list [--archived] --json
 wollipog session get ID --json
 wollipog session events ID [--after SEQ [--event-epoch EPOCH]] [--limit COUNT] --json
-wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] [--model MODEL] [--effort EFFORT] [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] [--work-item CAMPAIGN_WORK_ITEM_ID] --json
+wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] [--model MODEL] [--effort EFFORT] [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] [--work-item CAMPAIGN_WORK_ITEM_ID] [--provider-account ACCOUNT_REF] --json
+wollipog session accounts --runner ID --agent ID [--workspace ID] [--model MODEL] --json
 wollipog session prompt ID TEXT --json
 wollipog session steering ID --json
 wollipog session steering-get ID SUBMISSION_ID --json
@@ -240,6 +241,49 @@ continuation for its Orchestrator; the woken child's next turn end is. The wake 
 prompt and grants nothing: enqueueing, merging and branch deletion keep their typed gates. GitLab
 merge requests, older runners and older control planes are refused, so those sessions keep
 blocking waits.
+
+### Tracked Waits and Their Liveness Contracts
+
+Wollipog shows a deliberate wait as Waiting, never as a stall inferred from silence (#1280,
+#4249). Each tracked wait has an explicit liveness contract, and only a broken contract reads as
+Stalled or as an existing concrete failure. Elapsed time alone never does.
+
+- **`wait_session` and `wait_pull_request` calls (protocol 298).** Once a call has waited 15
+  seconds, the runner's MCP server reports it through `POST /api/sessions/:id/waits` (own session
+  credential only). It reports again at most every 15 seconds after a successful poll, and once more
+  when the call returns, fails or is cancelled. A report carries durations (elapsed, remaining and
+  polling interval), never runner timestamps, so every bound is measured on the control plane's
+  clock. The control plane keeps the waits in memory and refuses a report from a session outside a
+  turn, or one that names a session the caller cannot read. It forgets a session's waits when its
+  turn ends, and projects them as `SessionView.waits`. A wait is healthy unless one of these breaks:
+  - *Progress*: a successful poll was reported within three report intervals plus 30 seconds
+    (`3 × max(interval, 15 s) + 30 s`): 75 seconds for `wait_session`, 2 minutes for
+    `wait_pull_request` at its 30-second default. Otherwise the wait is `progress_lost`.
+  - *Target*: the watched session still exists (`target_missing`) and has not sat in a requested
+    state for more than 30 seconds while the wait still runs (`target_reached`). A pull request's
+    state is read only by the runner, so its outcome ends the call itself.
+  - *Deadline*: the call is not still reported in progress 60 seconds past its own timeout
+    (`deadline_passed`).
+
+  A 5-second sweep reclassifies every wait and publishes each change, so the Sessions list, Board,
+  thread rollups and detail header read one server value. Healthy waits show Waiting on Children
+  (a descendant), Waiting on Session or Waiting on Pull Request. A broken one shows Wait Stalled,
+  whose description names the part that broke. A Stalled wait is a warning, not a request, so it
+  adds to no count. An older control plane refuses the report and the runner stops reporting that
+  call; an older dashboard ignores the field and shows the lifecycle.
+- **A parked merge-queue watch (#4071).** Healthy while the watch is `watching` and its runner is
+  connected; a disconnected runner reads Disconnected. It shows Waiting on Merge Queue, then Merge
+  Queue Wake Pending once the watch fired and its wake has not reached the session. A watch no
+  runner can keep reads Merge Queue Watch Lost. A runner that cannot read GitHub for about half an
+  hour reports it lost.
+- **A managed background job.** Healthy while the connected runner still lists it and the session's
+  background work is current: it reads Running however long it has run. A job the runner stops
+  listing without a result reads Unverified, and one a runner restart orphaned reads Lost. Managed
+  jobs declare no deadline. The control plane's one-hour mark (`stalledSince`,
+  `BACKGROUND_JOB_STALL_MS`) is kept only for campaign safety: past it, a job no longer counts as a
+  campaign child's wait (`campaignChildWait`, `sessionsWithLiveBackgroundJobs`), so a monitor that
+  never fires cannot hide a finished report. Held results keep their own one-hour Result Blocked
+  bound. Neither is shown as a Stalled job.
 
 A GitLab merge request (#3602) is waited on through the local `glab` login instead, with the same
 timeout, interval, budget, and read-only contract. Give it as a merge request URL,
@@ -411,6 +455,21 @@ is spawned with, and the runner re-checks the exact authorized agent and command
 review contract and output schema (version 2) are ported from the cross-model-review skill
 (Apache-2.0, attributed).
 
+Native Claude discovery failures marked retryable (capability timeout, failed help, or an
+unverified version) schedule up to two additional discovery passes, each after a 10-second delay
+from the previous completed pass. CLI probes keep their existing timeouts; the full discovery
+pass also includes other installed harnesses. After the retry budget is exhausted, normal
+five-minute discovery continues. A successful fresh probe republishes reviewer capability; no
+ordinary Claude session needs to be opened. Retry a refused review request after recovery.
+Authentication, installation selection, account grants and reviewer trust still have to pass;
+an earlier successful probe never substitutes for current proof.
+
+Runner logs record `provider_discovery_observation` with a pass ID, entry point, observation time,
+agent ID, fixed failure code, recovery attempt and next retry delay. A later successful pass
+records `recovered`. These events omit provider output, credentials and account identities.
+Configured review refusals preserve the runner's discovery/account/trust diagnosis and distinguish
+an unsupported model/effort pair, so transient failures do not ask users to restore a healthy CLI.
+
 A review session is exempt from every session limit: it takes no runner slot, per-agent limit or
 active turn, and it is not a child, so it takes no delegation slot or charge and gives the requester
 no descendant authority. The requester's original human cost ceiling, if it has one, bounds its
@@ -419,7 +478,10 @@ reserves allowance before launch and records actual Session usage against the ca
 when present. Exhausted, stopped or unavailable allowances refuse admission with a reason;
 admission failures cannot be bypassed through the bridge. A worker's campaign allocation does
 not cap its reviews, which reserve allowance separately.
-A requester has one active review session at a time. A review session runs one turn: it takes no
+On protocol 335+, a requester can review any of its own linked managed worktrees without selecting
+it and can run one active review per pull request concurrently. Each new review reserves half the
+unreserved original human cost ceiling, when set; campaign allowance reservations still apply.
+Older runners require selecting the worktree and serializing review requests. A review session runs one turn: it takes no
 further messages, steering, configuration or commands, cannot be restarted, relaunched, forked or
 converted to another role, and has no worktree, terminal, Native TUI, side chat or children. It is never
 parked. Every MCP server Codex would load, from user or project configuration, is disabled by name.
@@ -463,8 +525,16 @@ attempt, mode, base and the files in scope):
   upvote and its findings, and a `pr_merge` decision may cite it. The control plane checks the
   claim against the run's current epoch and last valid head before recording it. An octopus
   merge, a merged parent outside the base branch, a path-level conflict, a change outside a
-  conflict block, any commit after the merge, or a requested full review is an ordinary commit and
-  counts as before. Older peers keep counting every round.
+  conflict block, a second merge before the first one's review, any commit after the merge, or a
+  requested full review is an ordinary commit and counts as before. That includes a protocol
+  renumber made inside the merge, which rewrites text outside any conflict block: the slotted ledger
+  (#975) removes the version-line conflict, but not the renumber when main passes a claim. A
+  conflict block's resolution is never equivalent; its round always has a reviewer, who gets the
+  pull request's diff of the scoped files both before and after the merge, so a change the
+  resolution dropped is visible. Each diff is capped per file, so one oversized file cannot hide the
+  others, and the prompt names any file it left out, including a binary diff, which shows nothing. A
+  round that cannot show its whole effect that way is charged like an ordinary round. Older peers
+  keep counting every round.
 - An epoch that used its rounds takes more only through a typed
   `review_round_extension` workflow decision (`request_workflow_decision`).
   - **Snapshot:** the repository, pull request, epoch, head, rounds used, the open blocking findings
@@ -1036,6 +1106,42 @@ denial, the Codex installation is unsupported with failure code `codex_sandbox_u
 `unavailableReason` names the fix and appears in Machine settings and `get_agent_capabilities`,
 and `create_session` refuses it with that reason. Contexts other than native Linux are unchanged.
 
+### Ordinary Git in This Boundary
+
+The boundary makes the worktree, its admin directory and the shared `objects`, `refs` and `logs`
+writable. The shared Git directory itself stays read-only, with its `config`, `packed-refs` and
+`rr-cache`, and so does every other session's admin directory. What that means for everyday commands,
+measured with Git 2.43:
+
+| Command | Inside the boundary | Supported Way |
+| --- | --- | --- |
+| Conflicted `git merge`, then `git commit` | Works | |
+| Conflicted `git rebase`, `git cherry-pick` | Finish with exit status 0, printing a `packed-refs.lock` error | Clear what they leave (below) |
+| `git push -u` | The push lands and exits 0, but prints `could not lock config file` and records no upstream | `git push origin HEAD:refs/heads/<branch>` |
+| `git branch --set-upstream-to`, `git config` | Fail: the shared `config` is read-only | None inside the boundary |
+| `git fetch origin main` | Moves `origin/main` as well as `FETCH_HEAD` | |
+| `git fetch --prune`, `git branch -d`, `git update-ref -d` | Cannot delete a ref | `delete_worktree_refs` (below) |
+| `git stash pop`, `git stash drop` of the last entry | Work, printing a `packed-refs.lock` error | |
+| `git switch` on the selected worktree | Works, and the next turn is held for worktree recovery unless the branch is restored first | `create_worktree` for a new branch |
+| Committing in a worktree created this turn | Fails until the session relaunches there | End the turn (`isolation.nextStep`) |
+
+**Rerere stays off.** A protected launch sets `GIT_CONFIG_PARAMETERS='rerere.enabled=false'` for
+everything in the boundary. Rerere's shared `rr-cache` has to stay read-only, because Git replays
+what it holds into other merges, so anything a session wrote there would reach another session's or
+a person's merge. With rerere on, the boundary already denied its writes: a conflict made `git commit`
+crash after the commit landed (exit status 139) and left `MERGE_RR.lock` in the admin directory, so
+every later commit in that worktree exited 128 even though it landed, and `git rebase --continue` and
+`git cherry-pick --continue` died the same way. The setting makes nothing writable, and a lock left
+by an earlier launch stops mattering because Git no longer takes it. A provider that filters this
+variable from its commands gets the old behavior back, not a new failure. The Git the runner itself
+runs on the host is unaffected. This applies to native Linux managed worktrees only: every other
+execution context has no such boundary, so its repository's `rerere.enabled` applies as before.
+
+**SSH stalls are not this boundary.** The boundary shares the host's network. Fetches and pushes
+over SSH can stall or time out when port 22 is throttled, usually after a few quick connections,
+with or without a sandbox. HTTPS through `gh` keeps working then:
+`git -c credential.helper= -c 'credential.helper=!gh auth git-credential' fetch https://github.com/<owner>/<repo>.git <ref>`.
+
 ### Deleting the Session's Own Refs
 
 Git takes `packed-refs.lock` in the shared Git directory before it deletes any ref: a worktree's
@@ -1048,6 +1154,8 @@ still needs the lock beside it and pins a stale copy once host Git repacks, a sy
 worktrees. So, inside the sandbox, `git rebase` and `git cherry-pick` still print
 `Unable to create '…/packed-refs.lock'` and leave `CHERRY_PICK_HEAD` or `AUTO_MERGE` behind, and
 `git cherry-pick --quit`, `git branch -d` and `git update-ref -d` fail with the same error (#3316).
+A finished rebase also leaves `REBASE_HEAD`, which the runner does not delete. `git status` ignores
+it once the rebase has ended.
 
 The runner deletes those refs instead, outside the sandbox, through `delete_worktree_refs` (CLI
 `wollipog worktree delete-refs`, protocol v227). Only the session's own credential can call it,
@@ -1572,6 +1680,14 @@ command permission is then admitted and the decision is marked consumed only aft
 response is delivered to the runner. A changed command, failed delivery, stale policy, changed
 ancestry, ambiguous match, persistent grant, or unsupported provider cannot consume the grant.
 
+Protocol v344 (#4242) exposes `approvedAction: {kind: "pr_merge_enqueue", command}` on approved
+merge decision reads (including `get_workflow_decision`) and resolution results, and includes the
+same exact action in the child's approval prompt. Copy this server-derived action unchanged into
+consumption alongside the approved `resourceSnapshot`; do not reconstruct the shell command.
+Discovery does not arm or execute it. The existing consumption checks and one-shot admission still
+apply. Other decision categories and non-approved statuses have no approved action. Older servers
+omit this optional field; its absence never authorizes a guessed command or an external merge.
+
 Protocol v239 (#3602) adds GitLab merge requests. The snapshot's `repository` is the project with
 its host and full namespace (`<gitlab-host>/group/subgroup/project`), `pullRequest` is the merge
 request IID, and three fields exist only for GitLab and are then required: `mergeMethod`
@@ -1608,7 +1724,7 @@ verb before a reference that must stay open (#3713).
 Protocol v242 checks this before a GitHub merge is reviewed and again before it is armed. A GitHub
 `pr_merge` snapshot may carry `intendedClosures`: every issue the merge is meant to close, as `#N`,
 `owner/repo#N`, or an issue URL, normalized to sorted unique `owner/repo#N`. It is omitted when the
-merge must close nothing, so earlier digests are unchanged; GitLab snapshots refuse it. When the
+merge must close nothing, so earlier digests are unchanged. When the
 child's runner is v242, the control plane asks it for `github_merge_preflight` before creating the
 decision. The runner reads the open pull request through the child's own `gh` login: its head, its
 description and GitHub's `closingIssuesReferences`. It reports every issue either would close, with
@@ -1634,6 +1750,69 @@ HTML parser would hide, and indented code are all read as visible text. The
 title and commit messages are not read: GitHub never links from the title, and a merge-queue squash
 commit headed "(Closes #3705)" left #3705 open. `wollipog pr closures` runs the same read locally for
 an open pull request, or for a draft description with `--file`, compared with `--intended`.
+
+Protocol v295 applies the same contract to GitLab merges (#3762). A GitLab `pr_merge` snapshot may
+carry `intendedClosures` as `#N`, `group/project#N`, `<host>/group/project#N`, or an issue URL on the
+project's instance, normalized to sorted unique `<host>/group/project#N`, lowercased. When the
+child's runner is v295, the control plane asks it for `gitlab_merge_closures` before creating the
+decision, and again when arming, alongside the GitLab merge preflight. The runner reads the open merge
+request through the child's own `glab` login with two read-only GETs naming the host: the merge
+request (state, head and description) and `closes_issues?per_page=100`. It reports every issue either
+source would close; the comparison, refusal, recorded `closingReferenceCheck`, revocation and
+retry rules are the GitHub ones above. A pre-v295 child runner is not asked, and its card says
+**Not checked**. Unlike GitHub, a GitLab merge whose closures cannot be read on a current runner is
+refused rather than created: a current runner's GitLab decision always carries its check, which is
+what Full Control's ownership of it rests on (see campaign-issue-scope.md).
+
+Protocol v330 keeps checking after approval (#4323). The forge closes issues when the merge lands,
+from the description it has then, which in a merge queue or merge train is often much later than
+the last check. So once a `pr_merge` decision is consumed (or Wollipog performed its enqueue), the
+control plane sends `merge_closure_watch` to the child's runner about once a minute (every ten
+minutes after six hours) until the pull or merge request merges or closes. `read` runs the same
+inspection as `github_merge_preflight` and `gitlab_merge_closures`, from a neutral directory with the
+child's own login, but answers in any state with `open`, `merged` or `closed`; `dequeue` removes an
+open pull request at the approved head from the merge queue with `dequeuePullRequest` (and turns off
+auto-merge), or a merge request from its merge train by cancelling its auto-merge, and writes nothing
+in any other state. The decision records the result as `closureWatch`:
+
+- An unchanged pull request is only read; nothing is refused, dequeued or reported.
+- Open at the approved head with closures that differ from `intendedClosures`: the watch becomes
+  `invalidated` and never returns, an approved but unconsumed decision is revoked, the pull request
+  is dequeued and dequeued again whenever it is re-enqueued while it stays at that head, and the child
+  is told once. The decision no longer counts as a merge that proves delivery for issue closure. A
+  newer `pr_merge` for the same pull request takes over only once it is itself consumed.
+- Merged: each issue it closed that `intendedClosures` does not list makes the watch
+  `landed_unapproved`, and the campaign's owner gets an Owner Question on the campaign's root naming
+  the pull request and quoting the text that closed each issue as a single line. Wollipog reopens
+  nothing, and the decision no longer proves delivery. A merge with exactly the approved closures is
+  `verified`. A report is stored as owed (`reportPending`) in the same write as the state that owes
+  it, and retried every read interval until delivered, also after a restart or while the campaign's
+  root has ended; a retry finds the question it already asked.
+- An unreadable forge or an offline runner never counts as unchanged: after 30 minutes the owner is
+  told the merge cannot be checked, and after a day the watch ends `unverified`. Failing dequeues are
+  retried up to ten times, then reported to the owner.
+- A pull request closed without merging ends the watch. One moved to another head is still read,
+  because the decision never covered that head, and is reported if it lands with unapproved closures.
+
+A child runner below v330 is never sent `merge_closure_watch`; its merges keep the checks they had
+before, and their decisions read `not_watched`. Merges consumed before the control plane added the
+watch are marked `not_watched` once, so none of them is read or reported.
+
+GitLab closes an issue when a merge request lands on the default branch and its title, description
+or a commit message matches the instance's closing pattern, and scans the raw text, so code spans,
+code blocks and HTML comments hide nothing. The description matcher reads GitLab's documented default
+pattern generously, never more narrowly: close, fix, resolve and implement in every form, including
+"-ing" forms and "Implements", in any letter case (GitLab requires only an initial capital), an
+optional colon, then one or more references, each optionally after "issue" or "issues", joined by
+commas, spaces or "and", so "Closes #1, #2 and group/project#3" closes all three. An external
+tracker's key (`ABC-12`) continues the list but names no GitLab issue. `#N` is this project,
+`project#N` a project in its namespace, `group/project#N` a full path, and an `http(s)` issue or work
+item URL on the same instance counts; a URL on another host does not. An instance may configure a
+different closing pattern, which no client can read, so GitLab's own `closes_issues` list, which also
+covers the title, the commits and such a pattern, is authoritative: every issue it reports is a
+closure whether or not the description matcher found it. A description match it does not report is
+still reported, because a false report costs a reworded sentence. A list that fills GitLab's largest
+page (100), or that names an external tracker's issue, is not checked and is refused as unreadable.
 
 Other categories retain immediate consumption. Consumption records that the external action may
 have started. A UI-evidence approval gates a later action rather than authorizing one, so campaign
@@ -1672,6 +1851,13 @@ item coordinates. No later arm for the same command may intervene, and the provi
 one shared claim across live consumption and every reconciliation proof. The forge, snapshot,
 policy, ancestry, and authority checks remain unchanged.
 Missing, reordered, duplicated, cross-generation, replayed, or mismatched evidence fails closed.
+
+Admission never arms against an unconfirmed provider turn (#4054). When `turn/start` answers
+without a turn id, the runner confirms the turn from the first notification for its thread that
+names one. If none does within 60 seconds, it interrupts the thread and ends the turn with a
+visible error. It never leaves the turn running without an owner. A refused admission relays the
+runner's specific cause, arms nothing and revokes nothing. The child can consume the same approval
+again in this turn or the next one, so it never has to stop the session, which would revoke it.
 
 Protocol v153 keeps that proof available across provider and session restarts. An ordered durable
 runner sequence—arm, exact Guardian receipt, and one successful terminal update for the receipt's
@@ -1771,8 +1957,10 @@ with no pending request. Before, its decision resume was dropped and nothing tol
   each blocked child with the recovery action its hold names.
 - **Refusals name the recovery step.** Prompting a held session, retrying its not-sent message, and
   attaching or selecting a worktree now on another branch all return a 409. The message says to
-  restore the expected branch (`git -C <path> switch <branch>`) and select that worktree again with
-  `select_worktree`, or to select or create another worktree.
+  restore the expected branch in the named worktree and select that worktree again with
+  `select_worktree`, or to select or create another worktree. The same text reaches people in
+  Campaign Status, so it names the branch and path, not a shell command to run inside the
+  agent-managed worktree.
 
 The mechanism is not specific to worktrees. A hold is one `SessionHoldView` kind, derived in one
 place (`sessionHolds` in the protocol package, fed by the control plane's session row). The
@@ -2131,6 +2319,15 @@ The reviewer follows the video reviewer's provenance pattern, but for images:
   bounded at $10 and two tool calls per image plus eight. Under a campaign allowance it is a budget
   member like any child, so its cost is reserved against the allowance and shows in campaign
   accounting. Like a review session, it holds no concurrency slot.
+- **Separate admission for evidence review (#4245).** Only this server-created reviewer of an exact
+  pending Orchestrator-owned decision bypasses implementation child harness/model/effort, placement
+  and capacity rules. It stays on the root's disclosed provider/model and runner; ordinary session
+  requests cannot select this exemption. At most one active image reviewer per root is admitted,
+  independently of implementation slots, and at most one live review per occurrence. On a review
+  read or preparation after 15 minutes, a stalled reviewer is stopped; a replacement waits for
+  confirmed retirement. Idle reviewers cannot receive more work. Reviewers remain subject to all
+  parent and campaign cost/tool ceilings, unpriced-stop admission and accounting, and are excluded
+  from implementation child verification, occupancy and Stop and Archive completion.
 - **Two tools only.** The runner launches it as a native Claude Code session with no built-in
   tools, no slash commands, no user or project settings, and only the runner's management MCP
   server. That server exposes exactly `review_evidence_image` and `submit_evidence_verdict`. The
@@ -2206,6 +2403,12 @@ restarts, or its provider session ends with an armed merge still approved, the o
 at once as before, so a relaunched provider cannot reuse it; the control plane then reads the forge
 and moves it to consumed if the approved head merged.
 
+A follow-up publication in another of a campaign's repositories than the one its requester works in
+(protocol v327, #4119) always takes this route and can't be consumed: the control plane sends the
+action, with a `location`, to the runner of a Location of that repository, and that runner creates the
+issue with its own `gh` login after checking the Location's origin names it. See
+[Campaign issue scope](campaign-issue-scope.md).
+
 A provider's own permission check can refuse an approved command: Claude Code's `auto` classifier
 decides inline, so a refusal never reaches the runner's permission channel. Wollipog then performs
 the one approved forge action itself (protocol v284, #4067) through `execute_workflow_decision`
@@ -2259,7 +2462,8 @@ finishes it as `complete_with_handoffs`. The forge observer keeps re-reading suc
 until it merges and its branch is gone, and `get_campaign` refreshes pending ones before answering.
 A merged pull request whose branch the forge does not name usably, including one read before branches
 were reported, stays `pending` with no branch name. A handoff can retain it, but a deletion cannot
-be pinned to it. A pull request closed without merging, a fork's branch (`crossRepository`), and
+be pinned to it. The background pass keeps re-reading it too, so a read stored before the upgrade
+settles after one read by the upgraded runner, without an on-demand read (#4145). A pull request closed without merging, a fork's branch (`crossRepository`), and
 every campaign observed by a runner older than v284 are not tracked, so those campaigns complete
 as before.
 
@@ -2339,3 +2543,11 @@ withhold the Orchestrator capability unless both peers negotiate v124 and fresh 
 complete target-local launcher contract.
 
 See [Using Wollipog](../skills/using-wollipog/SKILL.md) for the compact agent-facing skill.
+
+### Protocol 335 Rollback Constraint
+
+Concurrent reviews replace the requester-wide unique index with a per-pull-request index. Before
+rolling back to a control plane below protocol 335 against the same database, let all active reviews
+settle (or cancel them and wait for terminal states). An older binary cannot recreate its unique
+index while multiple reviews of one requester remain active. Restoring the pre-upgrade database
+backup is the alternative; do not restart the hosting stack from a hosted agent session.
