@@ -5327,8 +5327,24 @@ test("consuming a GitLab merge first checks GitLab on the child's runner, revoki
     const approved = (key: string) => {
       const decision = svc.createWorkflowDecision(child.id, { requestId: key, resourceKey: key, resourceSnapshot: GITLAB_MERGE });
       assert.ok(decision.ok && decision.data, decision.error);
-      assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
-        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      assert.equal(svc.workflowDecision(child.id, decision.data.occurrenceId).data?.approvedAction, undefined);
+      svc.onSessionStatus(child.id, "idle");
+      const resolution = svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+      assert.ok(resolution.ok, resolution.error);
+      const discovered = svc.workflowDecision(child.id, decision.data.occurrenceId).data!;
+      assert.deepEqual(resolution.data?.approvedAction, discovered.approvedAction,
+        "the resolver and child learn the same action before any consume attempt (#4242)");
+      assert.deepEqual(svc.workflowDecisions(child.id, undefined, 100).data!.decisions
+        .find((entry) => entry.occurrenceId === decision.data!.occurrenceId)?.approvedAction, discovered.approvedAction);
+      assert.equal(discovered.actionAdmission, undefined, "discovering a command does not arm it");
+      assert.equal(discovered.approvedAction?.command,
+        `glab api --method POST projects/platform%2Fagents%2Fwollipog/merge_trains/merge_requests/7 --hostname gitlab.example.com -f sha=${GITLAB_MERGE.headSha} -F squash=false`);
+      const resume = promptsSentTo(hub, child.id).at(-1)!.text;
+      assert.ok(resume.includes(`Approved enqueue action: ${JSON.stringify(discovered.approvedAction)}`),
+        "the child receives the exact action before its first attempt");
+      assert.match(resume, /not armed until consumption succeeds/);
+      db.updateSessionStatus(child.id, "running", Date.now());
       return decision.data.occurrenceId;
     };
     const command = canonicalPrMergeEnqueueCommand(GITLAB_MERGE);
@@ -5341,7 +5357,8 @@ test("consuming a GitLab merge first checks GitLab on the child's runner, revoki
       return { type: "gitlab_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId, ...answer } as RunnerRequestResult;
     };
     const consume = (occurrenceId: string) => svc.consumeWorkflowDecision(child.id, occurrenceId,
-      { resourceSnapshot: GITLAB_MERGE, action: { kind: "pr_merge_enqueue", command } });
+      { resourceSnapshot: svc.workflowDecision(child.id, occurrenceId).data!.resourceSnapshot,
+        action: svc.workflowDecision(child.id, occurrenceId).data!.approvedAction });
 
     const armed = approved("gitlab-ok");
     const result = await consume(armed);
@@ -5353,6 +5370,18 @@ test("consuming a GitLab merge first checks GitLab on the child's runner, revoki
       mergeMethod: "merge_train", squash: false, removeSourceBranch: false,
     });
 
+    const direct = svc.createWorkflowDecision(child.id, { requestId: "gitlab-direct-discovery", resourceKey: "gitlab-direct-discovery",
+      resourceSnapshot: { ...GITLAB_MERGE, mergeMethod: "merge", squash: true, removeSourceBranch: true } });
+    assert.ok(direct.ok && direct.data, direct.error);
+    assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, direct.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    const directRead = svc.workflowDecision(child.id, direct.data.occurrenceId).data!;
+    assert.equal(directRead.approvedAction?.command,
+      `glab api --method PUT projects/platform%2Fagents%2Fwollipog/merge_requests/7/merge --hostname gitlab.example.com -f sha=${GITLAB_MERGE.headSha} -F squash=true -F should_remove_source_branch=true`);
+    assert.ok((await svc.consumeWorkflowDecision(child.id, direct.data.occurrenceId,
+      { resourceSnapshot: directRead.resourceSnapshot, action: directRead.approvedAction })).ok,
+      "a direct merge also arms on the first attempt using only the decision read");
+
     for (const [refusal, revoked] of [["stale_head", true], ["mismatch", true], ["unavailable", false]] as const) {
       answer = { ok: false, refusal, reason: `GitLab said ${refusal}.` };
       const occurrence = approved(`gitlab-${refusal}`);
@@ -5362,6 +5391,8 @@ test("consuming a GitLab merge first checks GitLab on the child's runner, revoki
       assert.equal(db.workflowDecisionByOccurrence(occurrence)?.status, revoked ? "revoked" : "approved",
         `${refusal} ${revoked ? "revokes the stale or unusable approval" : "arms nothing and stays retryable"}`);
       assert.equal(db.workflowDecisionByOccurrence(occurrence)?.actionAdmission, undefined);
+      if (revoked) assert.equal(svc.workflowDecision(child.id, occurrence).data?.approvedAction, undefined,
+        "a revoked merge no longer advertises an approved action");
     }
     answer = new Error("runner did not respond in time");
     const silent = approved("gitlab-silent");
@@ -6966,6 +6997,11 @@ test("resolving any Orchestrator-owned typed decision resumes the idle child wit
           `${label}: the child leaves idle into the resumed turn, which reads queued until the runner starts it (#1651)`);
         assert.equal(promptsToChild().length, before + 1, `${label}: exactly one resuming prompt`);
         const text = promptsToChild().at(-1)!.text;
+        assert.equal(text.includes("Approved enqueue action:"), category === "pr_merge" && outcome === "approve",
+          "only approved merge prompts advertise an action (#4242)");
+        const exposed = svc.workflowDecision(child.id, decision.data.occurrenceId).data!;
+        assert.equal(exposed.approvedAction?.command,
+          category === "pr_merge" && outcome === "approve" ? canonicalPrMergeEnqueueCommand(snapshots.pr_merge) : undefined);
         assert.ok(text.includes(`[Wollipog Workflow Decision — ${decision.data.occurrenceId}]\n`), label);
         assert.ok(text.includes(`Your Orchestrator ${outcome === "approve" ? "approved" : "denied"} your ${category} ` +
           `decision ${decision.data.occurrenceId} (resource "wake:${category}:${outcome}")`), label);

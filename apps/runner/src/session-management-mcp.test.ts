@@ -443,6 +443,19 @@ test("typed workflow decision tools preserve exact request, resolution, and cons
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/resolve`);
 });
 
+test("descendant merge resolution returns the server action before consumption (#4242)", async () => {
+  const approvedAction = { kind: "pr_merge_enqueue", command:
+    `glab api --method POST projects/group%2Fsubgroup%2Fproject/merge_trains/merge_requests/7 --hostname gitlab.example.com -f sha=${"c".repeat(40)} -F squash=false` };
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { id: "child", approvedAction } }));
+  deps.orchestrator = true;
+  const result = resultJson(await callTool(deps, "resolve_descendant_workflow_decision", {
+    sessionId: "child", occurrenceId: "workflow_1", outcome: "approve",
+  }));
+  assert.deepEqual(result.decision.approvedAction, approvedAction);
+  assert.equal(result.session.approvedAction, undefined, "action metadata belongs to the decision, not the compact session");
+  assert.equal(calls.length, 1, "the resolution response suffices; no inferred or separately reconstructed command");
+});
+
 test("descendant decision resolution and child verification return a compact child, not its full session view", async () => {
   // The control plane answers both routes with the child's full SessionView; a realistic one
   // carries a large slash-command catalog and job history that overflowed tool results (#3080).
