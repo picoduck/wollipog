@@ -9961,6 +9961,9 @@ test("an unread Location a campaign session runs on can't be removed, nor its Pr
       }
       assert.deepEqual(f.db.unreadLocationsOccupied([locationId]).map((item) => item.rootId), [rootId], `${sits}: occupied`);
       assert.throws(() => f.db.removeProjectLocation(locationId), /can't be removed while a session of its campaign runs there/u, `${sits}: removal refused`);
+      // It names the sessions that hold it, and that stopping them clears the way.
+      assert.throws(() => f.db.removeProjectLocation(locationId), (error: Error) => error.message.includes(child) &&
+        (sits === "Full Control member" || error.message.includes(rootId)) && /Stop those sessions/u.test(error.message), `${sits}: names them`);
       assert.throws(() => f.db.deleteProject(projectId), /can't be removed while a session of its campaign runs there/u, `${sits}: deletion refused`);
       assert.ok(f.db.getProjectLocation(locationId), `${sits}: nothing removed`);
       const refused = await ask(f, child, publicationIn("elsewhere/repo"), `${sits}-still`);

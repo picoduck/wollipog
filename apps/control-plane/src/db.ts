@@ -10283,11 +10283,16 @@ export class ControlPlaneDb {
   /** Whether the root, while live, or a running member of its campaign sits on this runner and
    * workspace (#4319): that session acts on a runner whose repository no read has named. */
   private unreadPlaceOccupied(rootId: string, place: { runnerId: string; workspaceId: string }): boolean {
-    return [rootId, ...this.campaignDescendantIds(rootId)].some((id) => {
-      const row = this.stmt("SELECT runner_id, workspace_id, archived, status FROM sessions WHERE id=?").get(id) as
-        { runner_id: string; workspace_id: string | null; archived: number; status: string } | undefined;
-      return Boolean(row && !row.archived && !["completed", "failed", "stopped"].includes(row.status) &&
-        row.runner_id === place.runnerId && row.workspace_id === place.workspaceId);
+    return this.unreadPlaceOccupants(rootId, place).length > 0;
+  }
+
+  /** The sessions of that campaign, the live root or a running member, sitting on this runner and workspace. */
+  private unreadPlaceOccupants(rootId: string, place: { runnerId: string; workspaceId: string }): Array<{ id: string; title: string }> {
+    return [rootId, ...this.campaignDescendantIds(rootId)].flatMap((id) => {
+      const row = this.stmt("SELECT title, runner_id, workspace_id, archived, status FROM sessions WHERE id=?").get(id) as
+        { title: string | null; runner_id: string; workspace_id: string | null; archived: number; status: string } | undefined;
+      return row && !row.archived && !["completed", "failed", "stopped"].includes(row.status) &&
+        row.runner_id === place.runnerId && row.workspace_id === place.workspaceId ? [{ id, title: row.title?.trim() || id }] : [];
     });
   }
 
@@ -10295,19 +10300,25 @@ export class ControlPlaneDb {
    * Such a Location can't be removed, nor its Project deleted: with it gone nothing could read it, so
    * its refusal could never end by a read. Stopping those sessions, or a read after its runner
    * updates, clears the way. */
-  unreadLocationsOccupied(locationIds: readonly string[]): Array<{ rootId: string; locationId: string; name: string }> {
+  unreadLocationsOccupied(locationIds: readonly string[]): Array<{ rootId: string; locationId: string; name: string; sessions: Array<{ id: string; title: string }> }> {
     const ids = new Set(locationIds);
     return this.campaignsCountingUnread(ids).flatMap((root) => this.unnamedBelowGatesLocations(root).flatMap((item) => {
       const location = ids.has(item.locationId) ? this.getProjectLocation(item.locationId) : null;
-      return location && this.unreadPlaceOccupied(root.id, location) ? [{ rootId: root.id, locationId: item.locationId, name: item.name }] : [];
+      const sessions = location ? this.unreadPlaceOccupants(root.id, location) : [];
+      return sessions.length ? [{ rootId: root.id, locationId: item.locationId, name: item.name, sessions }] : [];
     }));
   }
 
+  /** Refuses, naming the sessions that hold it, to remove an unread Location a campaign session runs
+   * on (#4319). Stopping those sessions clears the way, as does a read once its runner updates. */
   private refuseOccupiedUnreadRemoval(locationIds: readonly string[]): void {
     const occupied = this.unreadLocationsOccupied(locationIds);
     if (occupied.length) {
+      const sessions = [...new Map(occupied.flatMap((item) => item.sessions).map((session) => [session.id, session])).values()]
+        .map((session) => session.title === session.id ? session.id : `${session.title} (${session.id})`);
       throw new Error(`${[...new Set(occupied.map((item) => item.name))].join(", ")} can't be removed while a session of its campaign runs there: ` +
-        "no read has named the repository it holds, and with it gone nothing could. Stop those sessions, or update and restart its runner so it can be read, then try again.");
+        `${sessions.join(", ")}. No read has named the repository it holds, and with it gone nothing could. ` +
+        "Stop those sessions, or update and restart its runner so it can be read, then try again.");
     }
   }
 
