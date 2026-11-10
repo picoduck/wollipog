@@ -1410,11 +1410,11 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // v348 slot
   // v349 slot
   // v350 slot
-  // 350: Read-only reconciliation of consumed uncertain issue closures (#4398).
-  350,
   // v351 slot
   // v352 slot
   // v353 slot
+  // 353: Read-only reconciliation of consumed uncertain issue closures (#4398).
+  353,
   // v354 slot
   // v355 slot
   // v356 slot
