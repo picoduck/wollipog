@@ -2516,6 +2516,7 @@ export const TOOLS: McpTool[] = [
           occurrenceId: args.occurrenceId,
           outcome: args.outcome,
           ...(typeof args.selectedOptionId === "string" ? { selectedOptionId: args.selectedOptionId } : {}),
+          ...(r.data?.approvedAction ? { approvedAction: r.data.approvedAction } : {}),
         },
         session: mapSession(r.data),
       });

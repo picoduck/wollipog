@@ -1398,6 +1398,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 343: Read-only forge summaries include base/head, mergeability and named CI checks (#1270).
   343,
   // v344 slot
+  // 344: Approved PR merge decision reads and resolution prompts expose the canonical action (#4242).
+  344,
   // v345 slot
   // v346 slot
   // v347 slot
