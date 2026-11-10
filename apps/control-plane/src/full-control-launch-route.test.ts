@@ -4943,6 +4943,22 @@ test("exact repository proof retains other constraint checks and lists the repos
   } finally { await c.server.close(); c.f.db.close(); }
 });
 
+test("an older root runner keeps the repository check for an exact owner-named request (#4402)", async () => {
+  const c = await multiRepositoryProposals("Fix #12 and #13 in owner/repo.");
+  try {
+    c.f.db.registerRunner({ runnerId: "r", hostname: "fixture", os: "linux", version: "test", agents: c.f.db.getRunner("r")!.agents,
+      workspaces: [{ id: "w", name: "Fixture Repo", path: "/fixture/repository" }], runtime }, Date.now(),
+    RUNNER_CAPABILITY_MIN_PROTOCOL.exactNamedRepositoryScope - 1);
+    c.f.decision.state.check = (message) => scopeCheckAnswer(message);
+    const proposed = await c.propose([named(12), named(13)]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    const record = (proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+    assert.equal(record.repositoryLimitVerified, undefined);
+    assert.ok(record.checks.includes("repository_mentioned"));
+    assert.equal(c.f.decision.checkCalls.length, 1);
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
 test("trailing restrictions and counts cannot disappear behind the repository fast path (#4402)", async () => {
   const c = await threeRepositoryProposals("Fix #12 and #13 in owner/repo. These two issues must be open; do not merge.");
   try {
