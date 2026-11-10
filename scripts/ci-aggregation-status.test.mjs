@@ -57,7 +57,9 @@ test("aggregation distinguishes job presence and terminal outcomes without timin
 test("combining historical exports recomputes diagnosis, including terminal and active absence", () => {
   const rows = [record([]), record([], { id: 2, status: "in_progress", conclusion: null }),
     record([{ ...aggregate, conclusion: "skipped" }], { id: 3 })];
-  const legacy = rows.map(({ aggregation, ...row }) => row);
+  const legacy = rows.map(({ aggregation, status, ...row }) => ({ ...row,
+    jobs: row.jobs.map(({ status, ...job }) => job) }));
+  assert.equal(legacy.some((row) => "status" in row || row.jobs.some((job) => "status" in job)), false);
   const report = { schemaVersion: 2, repository: "example/project", records: legacy, windows: [],
     pagination: [], removals: [], collectedAt: "2026-11-10T00:00:00Z" };
   const combined = combineReports([report, report]);
