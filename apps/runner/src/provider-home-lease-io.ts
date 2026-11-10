@@ -136,6 +136,50 @@ export function runProfileRootMetadataHelper(operation: "inspect" | "repair", ho
   try { return JSON.parse(result.stdout); } catch { throw new Error("Profile root metadata response could not be verified."); }
 }
 
+export type ProfileCreationComponent = "os_home" | "manager_root" | "profiles_root" | "profile_home";
+export type ProfileCreationReason = "created" | "already_exists" | "symlink" | "not_directory" | "wrong_owner" |
+  "group_or_other_write" | "unavailable" | "unsupported_layout" | "unsupported_acl" | "unsupported_platform" |
+  "unsupported_helper" | "identity_changed" | "may_have_changed";
+export interface ProfileCreationResult { ok: boolean; component: ProfileCreationComponent; reason: ProfileCreationReason; failureReason?: ProfileCreationReason }
+const CREATION_COMPONENTS = new Set(["os_home", "manager_root", "profiles_root", "profile_home"]);
+const CREATION_REASONS = new Set(["created", "already_exists", "symlink", "not_directory", "wrong_owner", "group_or_other_write",
+  "unavailable", "unsupported_layout", "unsupported_acl", "unsupported_platform", "unsupported_helper", "identity_changed", "may_have_changed"]);
+
+/** Fixed creation mode uses the existing verified resolver. Capability negotiation precedes
+ * any creation request; --probe alone says nothing about this mode. The resolver argument is
+ * an in-process test seam, never a CLI, configuration or remote input. */
+export function runManagedProfileCreationHelper(home: string, profileId: string, resolveHelper = nativeExecutable): ProfileCreationResult {
+  let binary: string;
+  const refusal = (reason: ProfileCreationReason): ProfileCreationResult => ({ ok: false, component: "profile_home", reason });
+  const invoke = (args: string[]) => spawnSync(binary, args, {
+    timeout: 10_000, killSignal: "SIGKILL", maxBuffer: 4096, encoding: "utf8", env: {},
+  });
+  try {
+    binary = resolveHelper();
+    const probe = invoke(["--profile-create", "--capabilities"]);
+    if (probe.error || probe.status !== 0) return refusal("unsupported_helper");
+    const capability: unknown = JSON.parse(probe.stdout);
+    if (!capability || typeof capability !== "object" || !("version" in capability) || capability.version !== 1 ||
+        !("supported" in capability) || typeof capability.supported !== "boolean") return refusal("unsupported_helper");
+    if (!capability.supported) return refusal("unsupported_platform");
+    // Verify the same installed/staged artifact again before the mutation request.
+    if (resolveHelper() !== binary) return refusal("unsupported_helper");
+  } catch { return refusal("unsupported_helper"); }
+  try {
+    const response = invoke(["--profile-create", home, profileId]);
+    if (response.error || response.status !== 0) return refusal("may_have_changed");
+    const value: unknown = JSON.parse(response.stdout);
+    if (!value || typeof value !== "object" || !("ok" in value) || typeof value.ok !== "boolean" ||
+        !("component" in value) || typeof value.component !== "string" || !CREATION_COMPONENTS.has(value.component) ||
+        !("reason" in value) || typeof value.reason !== "string" || !CREATION_REASONS.has(value.reason) ||
+        (value.ok ? value.component !== "profile_home" || value.reason !== "created" : value.reason === "created")) return refusal("may_have_changed");
+    // Discard all unrecognized fields: raw paths, metadata and helper errors cannot escape.
+    if ("failureReason" in value && (typeof value.failureReason !== "string" || !CREATION_REASONS.has(value.failureReason))) return refusal("may_have_changed");
+    return { ok: value.ok, component: value.component as ProfileCreationComponent, reason: value.reason as ProfileCreationReason,
+      ...("failureReason" in value ? { failureReason: value.failureReason as ProfileCreationReason } : {}) };
+  } catch { return refusal("may_have_changed"); }
+}
+
 class Writer {
   private chunks: Buffer[] = [];
   private size = 0;
