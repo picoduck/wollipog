@@ -691,6 +691,9 @@ test(`${state} slash command receipts can be dismissed and stay dismissed after 
   let fixture = await mount(current);
   try {
     assert.ok(fixture.container.querySelector('[data-testid="provider-command-reload-submission"]'));
+    assert.ok(fixture.container.querySelector(
+      '[data-testid="provider-command-reload-submission"] .tl-receipt-buttons button:not(:disabled)',
+    ), "the offscreen failure jump can find the dismissal action to focus");
     await fixture.click("Dismiss Command Message");
     assertNoDomNode(fixture.container.querySelector('[data-testid="provider-command-reload-submission"]'));
     assert.doesNotMatch(fixture.container.textContent ?? "", /Message Not Sent/);

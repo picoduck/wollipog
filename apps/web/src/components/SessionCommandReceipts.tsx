@@ -168,8 +168,10 @@ export function SessionCommandReceipts({
               reason={line.reason}
               role="status"
               actions={failed && onDismiss ? (
-                <button type="button" className="btn ghost sm" aria-label="Dismiss Command Message"
-                  onClick={() => onDismiss(invocation)}>Dismiss</button>
+                <span className="tl-receipt-buttons">
+                  <button type="button" className="btn sm" aria-label="Dismiss Command Message"
+                    onClick={() => onDismiss(invocation)}>Dismiss</button>
+                </span>
               ) : undefined}
               detailsId={`provider-command-details-${invocation.invocationId}`}
               details={invocation.error ? <p className="tl-receipt-raw">{invocation.error}</p> : undefined}
