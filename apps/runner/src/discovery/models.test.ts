@@ -336,6 +336,7 @@ test("parseClaudeModels: live metadata drives versioned labels, effort, context,
 test("parseClaudeModels: retain provider-resolved concrete pins for protected campaigns", () => {
   const models = parseClaudeModels({ models: [
     { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default",
+      description: "Opus 5.5 with 1M context",
       supportedEffortLevels: ["low", "high"] },
     { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus",
       supportedEffortLevels: ["low", "high"] },
@@ -346,11 +347,14 @@ test("parseClaudeModels: retain provider-resolved concrete pins for protected ca
   ] });
   const pin = models.find(model => model.id === "claude-opus-5-5");
   assert.ok(pin, "the concrete provider ID must pass the same catalog validation as its alias");
-  assert.equal(pin.displayName, "Opus 5.5 (Pinned)");
+  assert.equal(pin.displayName, "Opus 5.5");
+  assert.equal(pin.description, "Pinned provider model: claude-opus-5-5");
   assert.deepEqual(pin.efforts, ["low", "high"]);
   assert.equal(pin.hidden, undefined, "concrete pins must be selectable by campaign and reviewer settings");
   assert.equal(pin.default, false);
   assert.equal(pin.baseModelId, undefined);
+  assert.equal(models[0]?.contextWindow, 1_000_000);
+  assert.equal(pin.contextWindow, undefined, "an alias's description does not prove the pin's context window");
   assert.equal(models.filter(model => model.id === pin.id).length, 1);
   const variant = models.find(model => model.id === "claude-opus-5-5[1m]");
   assert.equal(variant?.contextWindow, 1_000_000);

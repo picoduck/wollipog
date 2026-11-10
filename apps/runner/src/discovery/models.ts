@@ -275,10 +275,11 @@ export function parseClaudeModels(initialization: unknown): AgentModel[] {
     if (resolved !== id && claudeResolvedDisplayName(resolved)) {
       resolvedModels.push({
         id: resolved,
-        displayName: `${claudeResolvedDisplayName(resolved)!} (Pinned)`,
+        displayName: claudeResolvedDisplayName(resolved)!,
+        description: `Pinned provider model: ${resolved}`,
         default: false,
         efforts: efforts.length ? [...new Set(efforts)] : undefined,
-        contextWindow: claudeContextWindow(info),
+        contextWindow: claudeContextWindow({ resolvedModel: resolved }),
         ...(claudeBaseModelId(resolved) ? { baseModelId: claudeBaseModelId(resolved) } : {}),
       });
     }
