@@ -143,20 +143,25 @@ For issue publication follow `.github/ISSUE_REPORTING.md` and the contributor re
 retain the drafting context, exact sanitized payload, fresh duplicate checks and verified readback.
 Follow-up recommendations go to the parent for recording and deduplication before anyone acts.
 One relatedness refusal is not a precedent for deferring other follow-ups; evaluate each on its
-own evidence. With runner protocol 351, a GitHub Actions run URL in the sanitized publication body
-is only a lookup hint. The server matches the origin item's recorded PR to a head admitted for
+own evidence. With runner protocol 351, a specific GitHub Actions job URL
+(`/actions/runs/RUN/job/JOB`) in the sanitized publication payload is only a lookup hint. The
+server matches the origin item's recorded PR to a head admitted for
 that item's child through a valid completed review session or consumed merge gate. Its runner reads GitHub to
 prove a failed merge-group run with that PR/head queue ref and ancestry, or a failed required check
-whose run names that PR/head. Only relatedness skips the Decision Model. Structural floors and
+whose run names that PR/head. The exact job must belong to that run and point to the exact failed
+check run; cancelled, skipped and passing jobs/checks do not qualify. The sanitized title or body
+must contain the check name verbatim, compared server-side to the name the runner reads from the
+forge. Only relatedness skips the Decision Model. Structural floors and
 safe-payload/duplicate inspection remain mandatory. Unknown ownership, unrelated/passing runs,
 unreadable evidence and older runners retain the ordinary check and its existing outcomes.
-The server-created admission records `failed_campaign_run` with the exact PR/head/run, or
+The server-created admission records `failed_campaign_run` with the exact PR/head/run/job/check id
+and forge-read check name, or
 `decision_model`. Requesters on older runners retain their original snapshot shape and the model
 basis remains in the admission log. Lookup has a shared 20-second deadline, with at most five seconds
 per read; a failed read immediately returns to the ordinary check. No agent-written claim or
-supplied admission can establish this basis. This proves the campaign's CI failure link, not a
-semantic comparison between the proposed defect and the run's logs; the accepted recommendation
-and unchanged structural floors remain required.
+supplied admission can establish this basis. This proves the follow-up names a real failed check
+of the campaign's own PR, not causality. The Orchestrator's accept/adjudicate step and exact-payload
+publication review remain the semantic gate; all structural floors remain required.
 Scope and closure use their dedicated exact typed routes. Current hosts without eligible issue
 authority retain human review even when the campaign requests Full Control. Use non-closing PR
 references in campaigns so merge cannot bypass the closure gate: write "Refs #N", and never put

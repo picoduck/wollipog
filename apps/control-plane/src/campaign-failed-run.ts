@@ -9,7 +9,7 @@ import { issueEvidenceDigest } from "./campaign-issue-authority.js";
 export async function failedCampaignRun(db: ControlPlaneDb, hub: Hub, root: SessionView, body: string,
   recommendation: CampaignRecommendation): Promise<CampaignFailedRunEvidence | null> {
   if (!runnerSupportsProtocol(db.getRunner(root.runnerId)?.protocolVersion, "campaignFailedRunEvidence")) return null;
-  const hints = [...body.matchAll(/https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/actions\/runs\/([1-9][0-9]*)(?=[\s/#?)\]]|$)/gu)].slice(0, 4);
+  const hints = [...body.matchAll(/https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/actions\/runs\/([1-9][0-9]*)\/job\/([1-9][0-9]*)(?=[\s/#?)\]]|$)/gu)].slice(0, 4);
   if (!hints.length) return null;
   let reads = 0;
   const deadline = Date.now() + 20_000;
@@ -33,8 +33,8 @@ export async function failedCampaignRun(db: ControlPlaneDb, hub: Hub, root: Sess
       if (!item.stage?.pullRequests.some((pr) => pr.repository.toLowerCase() === head.repository && pr.number === head.pullRequest)) continue;
       for (const hint of hints) {
         if (hint[1]!.toLowerCase() !== head.repository) continue;
-        const evidence = { repository: head.repository, pullRequest: head.pullRequest, headSha: head.headSha, runId: Number(hint[2]) };
-        if (!Number.isSafeInteger(evidence.runId)) continue;
+        const evidence = { repository: head.repository, pullRequest: head.pullRequest, headSha: head.headSha, runId: Number(hint[2]), jobId: Number(hint[3]) };
+        if (!Number.isSafeInteger(evidence.runId) || !Number.isSafeInteger(evidence.jobId)) continue;
         if (++reads > 8) return null;
         const remaining = deadline - Date.now();
         if (remaining <= 0) return null;
@@ -42,8 +42,11 @@ export async function failedCampaignRun(db: ControlPlaneDb, hub: Hub, root: Sess
         try {
           const result = await hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope",
             operation: "failed_run_inspect", sessionId: root.id, requestId, evidence }, Math.min(5_000, remaining));
-          if (result.type === "campaign_issue_scope_result" && result.requestId === requestId && result.sessionId === root.id &&
-              result.ok && result.repository === head.repository && issueEvidenceDigest(result.failedRun) === issueEvidenceDigest(evidence)) return evidence;
+          if (result.type !== "campaign_issue_scope_result" || result.requestId !== requestId || result.sessionId !== root.id ||
+              !result.ok || result.repository !== head.repository || !result.failedRun) continue;
+          const { checkRunId, checkName, ...bound } = result.failedRun;
+          if (issueEvidenceDigest(bound) === issueEvidenceDigest(evidence) && Number.isSafeInteger(checkRunId) && checkRunId > 0 &&
+              typeof checkName === "string" && checkName.trim() && checkName.length <= 512 && body.includes(checkName)) return result.failedRun;
         } catch { return null; /* A failed read retains the ordinary model check without more waits. */ }
       }
     }

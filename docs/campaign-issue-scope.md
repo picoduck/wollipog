@@ -779,13 +779,18 @@ admitted the request, never reads its text any other way, and may only refuse.
 
 - **Follow-up relatedness** (`follow_up_relatedness`). After a bounded publication passes its
   structural floor (an accepted recommendation, origins in scope, capacity, a safe payload), the
-  server first checks GitHub Actions run URLs in the sanitized body (runner v351+). A verified
+  server first checks specific GitHub Actions job URLs (`/actions/runs/RUN/job/JOB`) in the sanitized
+  payload (runner v351+). The exact job must point to a failed check run; the sanitized title or
+  body must contain the check's forge-read name verbatim. Cancelled, skipped or passing evidence
+  does not qualify. A verified
   failed merge group or required check of the origin item's recorded PR, on a head admitted for
   its child through a valid completed review session or consumed merge gate, admits relatedness without a model
-  call. The admission records `failed_campaign_run` and the PR/head/run; otherwise it records
+  call. The admission records `failed_campaign_run` and the PR/head/run/job/check id and name; otherwise it records
   `decision_model` when admitted. Text alone, another PR, a passing run, unreadable evidence and
   older runners keep the ordinary check. All structural and publication floors still apply.
   One refusal is not a precedent for deferring other follow-ups: evaluate each independently.
+  The server proves the payload names a real failing check, not causality. The Orchestrator's
+  accept/adjudicate step and exact-payload publication review remain the semantic gate.
   The ordinary model reads the owner's own words, what their grant covers, the origin work and the follow-up.
   - `related`: the publication proceeds as before.
   - `unrelated`: it is refused back to the requester as the correctable `unrelated_follow_up` (a 409,

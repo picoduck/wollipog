@@ -160,7 +160,7 @@ test("publication consumption schema preserves both server-derived relatedness b
   const admission = publication.properties.issueAdmission;
   const { deps, calls } = makeDeps();
   for (const relatedness of [{ basis: "decision_model" }, { basis: "failed_campaign_run", repository: "team/repo",
-    pullRequest: 10, headSha: "a".repeat(40), runId: 123 }]) {
+    pullRequest: 10, headSha: "a".repeat(40), runId: 123, jobId: 321, checkRunId: 456, checkName: "Broken Check" }]) {
     const stored = { boundaryRevision: 1, evidenceDigest: "b".repeat(64), relatedness };
     // Model a strict schema client: it can echo only advertised properties.
     const echoed = Object.fromEntries(Object.entries(stored).filter(([key]) => key in admission.properties));

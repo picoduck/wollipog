@@ -41,7 +41,7 @@ function harness(answer: Answer = (kind) => ({ verdict: HEALTHY_VERDICTS[kind]! 
   hub.requestFromRunner = async (_runner, requestId, message) => {
     if (message.type === "campaign_issue_scope") {
       if (message.operation === "failed_run_inspect") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true,
-        repository: "team/repo", failedRun: message.evidence };
+        repository: "team/repo", failedRun: { ...message.evidence, checkRunId: 456, checkName: "Broken Check" } };
       if (message.operation === "publication_inspect") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true,
         repository: "team/repo", duplicateSearch: "subject" as const,
         publicationDigest: issueEvidenceDigest({ sanitizedTitle: message.sanitizedTitle, sanitizedBody: message.sanitizedBody, labels: message.labels }) };
@@ -123,7 +123,7 @@ test("follow-up relatedness: an unrelated follow-up is refused back to the Orche
   } finally { h.db.close(); }
 });
 
-for (const scenario of ["owned failure", "another PR", "passed run", "no evidence", "old runner", "wrong head", "unverified review", "read timeout", "unsafe payload"] as const) {
+for (const scenario of ["owned failure", "missing check name", "workflow only", "another PR", "passed run", "cancelled run", "no evidence", "old runner", "wrong head", "unverified review", "read timeout", "unsafe payload"] as const) {
   test(`follow-up relatedness: forge evidence ${scenario}`, async () => {
     const h = harness();
     try {
@@ -145,7 +145,8 @@ for (const scenario of ["owned failure", "another PR", "passed run", "no evidenc
           assert.ok(timeout! <= 5_000, "each lookup stays within the shared admission deadline");
           if (scenario === "read timeout") throw new Error("request timed out");
           return { type: "campaign_issue_scope_result", requestId: id, sessionId: message.sessionId, ok: true, repository: "team/repo",
-            ...(scenario === "passed run" ? {} : { failedRun: scenario === "wrong head" ? { ...message.evidence, headSha: "b".repeat(40) } : message.evidence }) };
+            ...(scenario === "passed run" || scenario === "cancelled run" ? {} : { failedRun: { ...message.evidence,
+              ...(scenario === "wrong head" ? { headSha: "b".repeat(40) } : {}), checkRunId: 456, checkName: "Broken Check" } }) };
         }
         return original(runner, id, message, timeout);
       };
@@ -154,7 +155,9 @@ for (const scenario of ["owned failure", "another PR", "passed run", "no evidenc
       const result = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: scenario, resourceKey: scenario,
         resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo",
           sanitizedTitle: scenario === "unsafe payload" ? "Different Title" : recommendation.title,
-          sanitizedBody: body + (scenario === "no evidence" ? "" : "\nhttps://github.com/team/repo/actions/runs/123"),
+          sanitizedBody: body + (scenario === "missing check name" ? "" : "\nBroken Check") +
+            (scenario === "no evidence" ? "" : "\nhttps://github.com/team/repo/actions/runs/123" +
+              (scenario === "workflow only" ? "" : "/job/321")),
           labels: [], recommendationId: recommendation.id } });
       if (scenario === "unsafe payload") {
         assert.equal(result.errorDetails?.code, "title_mismatch");

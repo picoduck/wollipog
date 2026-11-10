@@ -1394,8 +1394,9 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
           relatedness: { anyOf: [
             { type: "object", properties: { basis: { const: "decision_model" } }, required: ["basis"], additionalProperties: false },
             { type: "object", properties: { basis: { const: "failed_campaign_run" }, repository: { type: "string" },
-              pullRequest: { type: "integer", minimum: 1 }, headSha: { type: "string", pattern: "^[0-9a-f]{40}$" }, runId: { type: "integer", minimum: 1 } },
-              required: ["basis", "repository", "pullRequest", "headSha", "runId"], additionalProperties: false },
+              pullRequest: { type: "integer", minimum: 1 }, headSha: { type: "string", pattern: "^[0-9a-f]{40}$" }, runId: { type: "integer", minimum: 1 },
+              jobId: { type: "integer", minimum: 1 }, checkRunId: { type: "integer", minimum: 1 }, checkName: { type: "string", minLength: 1, maxLength: 512 } },
+              required: ["basis", "repository", "pullRequest", "headSha", "runId", "jobId", "checkRunId", "checkName"], additionalProperties: false },
           ] },
           publicationAuthority: { type: "object", properties: { authorizedByUserId: { type: "string" }, objectiveDigest: { type: "string" } }, required: ["authorizedByUserId", "objectiveDigest"], additionalProperties: false } }, required: ["boundaryRevision", "evidenceDigest"], additionalProperties: false, description: "Echo only the server-derived admission from get_workflow_decision when consuming." },
       },

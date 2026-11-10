@@ -8,17 +8,30 @@ type Run = (command: string, args: string[]) => Promise<string>;
 type Candidates = NonNullable<CampaignIssueScopeView["candidates"]>;
 
 /** A URL is only a lookup hint. Failure and PR association must come from the forge. */
-export async function inspectCampaignFailedRun(run: Run, evidence: import("@wollipog/protocol").CampaignFailedRunEvidence): Promise<
+export async function inspectCampaignFailedRun(run: Run, evidence: Omit<import("@wollipog/protocol").CampaignFailedRunEvidence, "checkRunId" | "checkName">): Promise<
   { repository: string; failedRun?: import("@wollipog/protocol").CampaignFailedRunEvidence }> {
   const { repository } = await inspectCampaignIssueScope(run);
   if (repository !== evidence.repository || !/^[0-9a-f]{40}$/u.test(evidence.headSha) ||
       !Number.isSafeInteger(evidence.runId) || evidence.runId < 1 ||
+      !Number.isSafeInteger(evidence.jobId) || evidence.jobId < 1 ||
       !Number.isSafeInteger(evidence.pullRequest) || evidence.pullRequest < 1) return { repository };
   const read = async (path: string) => JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}/${path}`]));
   const failure = await read(`actions/runs/${evidence.runId}`);
   if (failure.id !== evidence.runId || failure.repository?.full_name?.toLowerCase() !== repository ||
       failure.status !== "completed" || failure.conclusion !== "failure" ||
+      !Number.isSafeInteger(failure.check_suite_id) || failure.check_suite_id < 1 ||
       typeof failure.head_sha !== "string" || !/^[0-9a-f]{40}$/u.test(failure.head_sha)) return { repository };
+  const job = await read(`actions/jobs/${evidence.jobId}`);
+  if (job.id !== evidence.jobId || job.run_id !== evidence.runId || job.status !== "completed" || job.conclusion !== "failure" ||
+      typeof job.check_run_url !== "string") return { repository };
+  const checkUrl = /^https:\/\/api\.github\.com\/repos\/([\w.-]+\/[\w.-]+)\/check-runs\/([1-9][0-9]*)$/u.exec(job.check_run_url);
+  if (!checkUrl || checkUrl[1]!.toLowerCase() !== repository) return { repository };
+  const checkRunId = Number(checkUrl[2]);
+  if (!Number.isSafeInteger(checkRunId)) return { repository };
+  const check = await read(`check-runs/${checkRunId}`);
+  if (check.id !== checkRunId || check.head_sha !== failure.head_sha || check.check_suite?.id !== failure.check_suite_id ||
+      check.status !== "completed" || check.conclusion !== "failure" || typeof check.name !== "string" ||
+      !check.name.trim() || check.name.length > 512) return { repository };
   if (failure.event === "merge_group") {
     const pr = await read(`pulls/${evidence.pullRequest}`);
     if (typeof pr.base?.ref !== "string" ||
@@ -30,20 +43,13 @@ export async function inspectCampaignFailedRun(run: Run, evidence: import("@woll
     if (!Array.isArray(failure.pull_requests) || !failure.pull_requests.some((pr: any) =>
       pr.number === evidence.pullRequest && pr.head?.sha === evidence.headSha &&
       pr.base?.repo?.full_name?.toLowerCase() === repository)) return { repository };
-    const checks = await read(`commits/${failure.head_sha}/check-runs?per_page=100`);
-    const [owner, name] = repository.split("/");
-    const query = `query { repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}) {
-      object(oid:${JSON.stringify(failure.head_sha)}) { ... on Commit { statusCheckRollup { contexts(first:100) {
-        pageInfo { hasNextPage } nodes { ... on CheckRun { databaseId isRequired(pullRequestNumber:${evidence.pullRequest}) } }
-      } } } } } }`;
+    if (typeof check.node_id !== "string" || !check.node_id) return { repository };
+    const query = `query { node(id:${JSON.stringify(check.node_id)}) { ... on CheckRun {
+      databaseId isRequired(pullRequestNumber:${evidence.pullRequest}) } } }`;
     const response = JSON.parse(await run("gh", ["api", "--hostname", "github.com", "graphql", "-f", `query=${query}`]));
-    const required = response.data?.repository?.object?.statusCheckRollup?.contexts;
-    if (response.errors || required?.pageInfo?.hasNextPage !== false || !Array.isArray(required.nodes)) return { repository };
-    if (!Array.isArray(checks.check_runs) || checks.total_count !== checks.check_runs.length ||
-        !checks.check_runs.some((check: any) => check.check_suite?.id === failure.check_suite_id &&
-          check.conclusion === "failure" && required.nodes.some((entry: any) => entry.databaseId === check.id && entry.isRequired === true))) return { repository };
+    if (response.errors || response.data?.node?.databaseId !== checkRunId || response.data.node.isRequired !== true) return { repository };
   } else return { repository };
-  return { repository, failedRun: evidence };
+  return { repository, failedRun: { ...evidence, checkRunId, checkName: check.name } };
 }
 
 /** A fixed refusal whose sentence is safe to return to the control plane as is. */

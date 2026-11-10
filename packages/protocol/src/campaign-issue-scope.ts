@@ -242,10 +242,13 @@ export function validIssueAdmission(value: unknown): boolean {
   const r = v.relatedness as Record<string, unknown> | undefined;
   const related = r === undefined || Boolean(r && typeof r === "object" &&
     (r.basis === "decision_model" && Object.keys(r).length === 1 ||
-     r.basis === "failed_campaign_run" && Object.keys(r).length === 5 &&
+     r.basis === "failed_campaign_run" && Object.keys(r).length === 8 &&
      typeof r.repository === "string" && /^[\w.-]+\/[\w.-]+$/u.test(r.repository) &&
      Number.isSafeInteger(r.pullRequest) && (r.pullRequest as number) > 0 &&
      Number.isSafeInteger(r.runId) && (r.runId as number) > 0 &&
+     Number.isSafeInteger(r.jobId) && (r.jobId as number) > 0 &&
+     Number.isSafeInteger(r.checkRunId) && (r.checkRunId as number) > 0 &&
+     typeof r.checkName === "string" && r.checkName.trim().length > 0 && r.checkName.length <= 512 &&
      typeof r.headSha === "string" && /^[0-9a-f]{40}$/u.test(r.headSha)));
   return related && Object.keys(v).every((key) => ["boundaryRevision", "evidenceDigest", "publicationAuthority", "relatedness"].includes(key)) &&
     (p === undefined || Boolean(p && typeof p === "object" && Object.keys(p).length === 2 &&
