@@ -1,7 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { PROTOCOL_VERSION, type GitStatusInfo, type ReviewFinding, type SessionView } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { ReviewPanel } from "../components/ReviewPanel.js";
@@ -64,6 +64,20 @@ const git: GitStatus = {
 
 const client: ApiClient = {
   ...api,
+  git: async (_id, body) => {
+    if (body.action !== "request_diff") throw new Error("Unexpected action");
+    if (params.has("stale")) throw new Error("revisions changed");
+    if (params.has("authError")) throw new ApiError("Authenticated GitLab integration is unavailable on this machine.", 409);
+    return { requestDiff: {
+      requestUrl: params.has("wrong") ? "https://evil.test/other/pull/19" : body.requestUrl!,
+      headOid: "a".repeat(40), baseOid: "b".repeat(40), targetOid: "c".repeat(40),
+      baseRef: "release", headRef: "feature/gitlab", readAt: Date.now(), incomplete: params.has("partial"),
+      diff: { scope: "all_branch", diffHash: "d".repeat(64), stats: { filesChanged: 1, insertions: 1, deletions: 1 },
+        files: [{ path: "src/request.ts", status: "modified", binary: false,
+          hunks: [{ header: "@@ -1 +1 @@", oldStart: 1, oldCount: 1, newStart: 1, newCount: 1,
+            lines: [{ status: "-", text: "old target" }, { status: "+", text: "authoritative request head" }] }] }] },
+    } };
+  },
   bundleReviewFindings: async (_id, body) => {
     if (body.findings.length !== 1 || body.findings[0]?.findingId !== finding.findingId) throw new Error("Unexpected bundle");
     return {
@@ -92,7 +106,7 @@ function Fixture() {
             <ReviewPanel
               session={session}
               runnerOnline
-              runnerProtocolVersion={legacy ? 105 : PROTOCOL_VERSION}
+              runnerProtocolVersion={legacy ? 105 : params.has("oldDiff") ? 343 : PROTOCOL_VERSION}
               git={git}
               forgeFacts={request ? {
                 pr: {

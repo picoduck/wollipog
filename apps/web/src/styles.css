@@ -5853,7 +5853,7 @@ body.shell-dock-dragging * {
   font: var(--type-small);
 }
 .review-request-facts > div { display: flex; gap: var(--space-2); min-width: 0; }
-.review-request-facts dt { color: var(--text-dim); }
+.review-request-facts dt { color: var(--text-dim); flex-shrink: 0; }
 .review-request-facts dd { margin: 0; overflow-wrap: anywhere; min-width: 0; }
 .review-request-checks { font: var(--type-small); overflow-wrap: anywhere; }
 .review-request-checks summary { cursor: pointer; }

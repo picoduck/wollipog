@@ -6644,14 +6644,15 @@ app.post("/api/sessions/:id/git", async (req, reply) => {
   // capture a partial snapshot and can race the post-turn diff capture.
   const gate = gitActionAllowed(action, session.status);
   if (!gate.ok) return reply.code(409).send({ error: gate.error });
-  if (!["status", "summary", "diff", "github_review_sync", "forge_review_sync"].includes(action.kind)) {
+  if (!["status", "summary", "diff", "request_diff", "github_review_sync", "forge_review_sync"].includes(action.kind)) {
     const reconciliationBlock = svc.podReconciliationMutationError(id);
     if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   }
 
   const requestId = randomUUID();
   // Pushing + calling gh takes longer than a quick status read.
-  const timeoutMs = action.kind === "open_pr" || action.kind === "github_review_sync" || action.kind === "forge_review_sync"
+  const timeoutMs = action.kind === "request_diff" ? 180_000
+    : action.kind === "open_pr" || action.kind === "github_review_sync" || action.kind === "forge_review_sync"
     ? 60_000
     : 30_000;
   try {

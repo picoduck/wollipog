@@ -33,6 +33,7 @@ import type {
   GitHubReviewThread,
   GitPrInfo,
   GitPrSummary,
+  GitRequestDiffInfo,
   GitRepositoryFacts,
   GitStatusInfo,
   GitSummaryInfo,
@@ -2149,6 +2150,111 @@ async function forgeReviewSync(cwd: string): Promise<ForgeReviewSyncInfo> {
   return gitlabReviewSync(cwd, readiness.remote);
 }
 
+/** Read only the origin's exact request. URLs never select another host or repository. */
+export async function loadRequestDiff(
+  remote: ForgeRemote,
+  requestUrl: string,
+  read: (args: string[]) => Promise<string>,
+): Promise<GitRequestDiffInfo> {
+  const github = remote.provider === "github";
+  const url = new URL(requestUrl);
+  const expectedPath = `/${remote.project}/${github ? "pull" : "-/merge_requests"}/`;
+  const path = github ? url.pathname.toLowerCase() : url.pathname;
+  const prefix = github ? expectedPath.toLowerCase() : expectedPath;
+  const suffix = path.startsWith(prefix) ? path.slice(prefix.length) : "";
+  if (url.host.toLowerCase() !== remote.host.toLowerCase() || !["http:", "https:"].includes(url.protocol) ||
+      url.username || url.password || url.search || url.hash || !/^[1-9][0-9]*$/.test(suffix)) {
+    throw new Error("the request does not belong to the origin repository");
+  }
+  const endpoint = github ? `repos/${remote.project}/pulls/${suffix}`
+    : `projects/${encodeURIComponent(remote.project)}/merge_requests/${suffix}`;
+  const metadata = (raw: string) => {
+    const value = jsonObject(JSON.parse(raw));
+    const refs = jsonObject(value?.diff_refs);
+    const base = jsonObject(value?.base);
+    const head = jsonObject(value?.head);
+    const headOid = gitlabOid(github ? head?.sha : refs?.head_sha);
+    const baseOid = gitlabOid(github ? base?.sha : refs?.base_sha);
+    const targetOid = gitlabOid(github ? base?.sha : refs?.start_sha);
+    const baseRef = jsonString(github ? base?.ref : value?.target_branch);
+    const headRef = jsonString(github ? head?.ref : value?.source_branch);
+    if ((github ? value?.html_url : value?.web_url) !== requestUrl ||
+        (github ? value?.number : value?.iid) !== Number(suffix) ||
+        !headOid || !baseOid || !targetOid || !baseRef || !headRef) {
+      throw new Error("the forge returned invalid request revisions");
+    }
+    return { headOid, baseOid, targetOid, baseRef, headRef, state: value?.state,
+      files: value?.changed_files, additions: value?.additions, deletions: value?.deletions };
+  };
+  const before = metadata(await read(["api", endpoint]));
+  let diffBaseOid = before.baseOid;
+  let raw: string;
+  let incomplete = false;
+  let expectedFiles: unknown = before.files;
+  if (github) {
+    const comparison = jsonObject(JSON.parse(await read(["api", `repos/${remote.project}/compare/${before.targetOid}...${before.headOid}`])));
+    const mergeBase = gitlabOid(jsonObject(comparison?.merge_base_commit)?.sha);
+    if (!mergeBase) throw new Error("GitHub did not return the request's diff base revision");
+    diffBaseOid = mergeBase;
+    raw = await read(["api", endpoint, "-H", "Accept: application/vnd.github.diff"]);
+  } else {
+    // /changes carries diff_refs and overflow on supported GitLab API v4 servers. Failure on
+    // a future API does not fall back to a local comparison or unvalidated raw patch.
+    const response = await read(["api", `${endpoint}/changes`]);
+    const changesMeta = metadata(response);
+    if (JSON.stringify(changesMeta) !== JSON.stringify(before)) throw new Error("the request changed while its diff was loading — reload");
+    const value = jsonObject(JSON.parse(response))!;
+    if (!Array.isArray(value.changes) || typeof value.overflow !== "boolean") throw new Error("GitLab returned incomplete diff metadata");
+    incomplete = value.overflow;
+    expectedFiles = /^\d+$/.test(String(value.changes_count)) ? Number(value.changes_count) : null;
+    raw = value.changes.map((entry) => {
+      const change = jsonObject(entry);
+      const path = githubReviewPath(change?.new_path);
+      const oldPath = githubReviewPath(change?.old_path);
+      if (!path || !oldPath || /[\x00-\x1f\x7f]/.test(path + oldPath) || typeof change?.diff !== "string") throw new Error("GitLab returned invalid diff paths");
+      if (change.collapsed || change.too_large) incomplete = true;
+      if (!change.diff && !change.renamed_file) incomplete = true;
+      return `diff --git a/${oldPath} b/${path}\n`
+        + (change.new_file ? "new file mode 100644\n" : change.deleted_file ? "deleted file mode 100644\n" : "")
+        + (change.renamed_file ? `rename from ${oldPath}\nrename to ${path}\n` : "")
+        + `--- ${change.new_file ? "/dev/null" : `a/${oldPath}`}\n+++ ${change.deleted_file ? "/dev/null" : `b/${path}`}\n`
+        + change.diff + "\n";
+    }).join("");
+  }
+  if (Buffer.byteLength(raw) > FORGE_MAX_BUFFER) throw new Error("the request diff exceeds this machine's display limit — open the forge");
+  const files = parseDiff(raw);
+  const stats = diffStats(files);
+  if (expectedFiles !== files.length || (raw.trim() && files.length === 0)) incomplete = true;
+  if (github && (before.additions !== stats.insertions || before.deletions !== stats.deletions)) incomplete = true;
+  for (const file of files) {
+    if (!githubReviewPath(file.path) || (file.oldPath && !githubReviewPath(file.oldPath))) throw new Error("the forge returned an unsafe diff path");
+    for (const hunk of file.hunks) {
+      if (hunk.lines.filter((line) => line.status !== "+").length !== hunk.oldCount ||
+          hunk.lines.filter((line) => line.status !== "-").length !== hunk.newCount) incomplete = true;
+    }
+  }
+  const after = metadata(await read(["api", endpoint]));
+  if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error("the request changed while its diff was loading — reload");
+  return { requestUrl, headOid: before.headOid, baseOid: diffBaseOid, targetOid: before.targetOid,
+    baseRef: before.baseRef, headRef: before.headRef, readAt: Date.now(), incomplete,
+    diff: { scope: "all_branch", files, stats, diffHash: computeDiffHash(raw) } };
+}
+
+async function requestDiff(cwd: string, requestUrl: string): Promise<GitRequestDiffInfo> {
+  const remoteUrl = (await git(cwd, ["remote", "get-url", "origin"])).trim();
+  const remote = parseForgeRemote(remoteUrl) ?? credentialFreeGitHubRemote(remoteUrl);
+  if (!remote) throw new Error("the origin remote is not a supported forge repository");
+  if (remote.provider !== "github") {
+    const readiness = await gitlabReadiness(cwd, remote);
+    if (!readiness?.forge.authenticated) throw new Error("authenticated GitLab integration is unavailable on this machine");
+    return loadRequestDiff(readiness.remote, requestUrl, (args) => runGlab(cwd, remote.host, args));
+  }
+  const context = executionContext.getStore() ?? { kind: "native" as const };
+  return loadRequestDiff(remote, requestUrl, async (args) => (await runContextCommand(context, "gh", args, {
+    cwd, timeoutMs: GH_TIMEOUT_MS, maxBuffer: FORGE_MAX_BUFFER,
+  })).stdout);
+}
+
 /** The PR + checks for the branch checked out in `cwd`, via gh. Null when gh is missing,
  * unauthenticated, the repo isn't on GitHub, or the branch has no PR — never a throw. */
 export async function ghPrSummary(cwd: string, runCommand: typeof runContextCommand = runContextCommand): Promise<{ pr: GitPrSummary | null; checks: GitChecksSummary | null }> {
@@ -3146,6 +3252,8 @@ export async function runGitAction(cwd: string, action: GitAction, ctx: GitActio
       return { forgeReview: await forgeReviewSync(cwd) };
     case "diff":
       return { diff: await gitDiff(cwd, action.scope, ctx) };
+    case "request_diff":
+      return { requestDiff: await requestDiff(cwd, action.requestUrl) };
     case "commit": {
       // The button's meaning depends on whether anything is staged ("Commit Staged" vs commit-
       // everything). If the index moved since the panel read it (agent's own git add, another

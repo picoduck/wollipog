@@ -1,5 +1,36 @@
 import { expect, test } from "@playwright/test";
 
+test("request diff is distinct from local Branch and safely read-only", async ({ page }) => {
+  await page.goto("/forge-review-e2e.html?request=1&theme=dark&partial=1");
+  await page.getByText("Request Diff", { exact: true }).click();
+  await expect(page.getByText("authoritative request head", { exact: true })).toBeVisible();
+  const diff = page.locator("details").filter({ has: page.getByRole("button", { name: "Reload Request Diff" }) });
+  await expect(diff).toContainText("release");
+  await expect(diff).toContainText("a".repeat(40));
+  await expect(diff).toContainText("This diff is incomplete.");
+  await expect(diff.getByRole("button", { name: /Stage|Discard|Add Finding/ })).toHaveCount(0);
+  await expect(diff.getByRole("link", { name: "Open Request on Forge" })).toHaveAttribute("href", "https://gitlab.example.test/team/sub/wollipog/-/merge_requests/19");
+  if (process.env.CAPTURE_1270) {
+    await diff.getByRole("link", { name: "Open Request on Forge" }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: "/tmp/1270-request-dark.png", fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/forge-review-e2e.html?request=1&theme=light");
+    await page.getByText("Request Diff", { exact: true }).click();
+    await expect(page.getByText("authoritative request head", { exact: true })).toBeVisible();
+    await page.getByRole("link", { name: "Open Request on Forge" }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: "/tmp/1270-request-mobile-light.png", fullPage: true });
+  }
+});
+
+test("unsupported, wrong-request and stale reads never display local changes as the request", async ({ page }) => {
+  for (const variant of ["oldDiff", "wrong", "stale", "authError"]) {
+    await page.goto(`/forge-review-e2e.html?request=1&${variant}=1`);
+    await page.getByText("Request Diff", { exact: true }).click();
+    await expect(page.getByText(variant === "oldDiff" ? /does not support request diffs/ : variant === "wrong" ? /did not return a diff/ : variant === "authError" ? /Authenticated GitLab integration is unavailable/ : /revisions changed while loading/)).toBeVisible();
+    await expect(page.getByText("authoritative request head", { exact: true })).toHaveCount(0);
+  }
+});
+
 test("MR context and named checks stay beside the existing thread bundle pipeline (#1270)", async ({ page }) => {
   await page.goto("/forge-review-e2e.html?request=1&theme=dark");
   const request = page.getByRole("group", { name: "Merge Request", exact: true });
