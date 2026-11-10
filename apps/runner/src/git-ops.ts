@@ -1534,6 +1534,18 @@ export function summarizeCheckRollup(nodes: unknown): Omit<GitChecksSummary, "ur
   return countCheckContexts(latestCheckContexts(nodes));
 }
 
+/** Named checks use exactly the rollup's latest-run selection. */
+export function namedCheckContexts(nodes: unknown): NonNullable<GitChecksSummary["jobs"]> {
+  return latestCheckContexts(nodes).slice(0, 100).map((raw) => {
+    const n = (raw ?? {}) as CheckContextNode & { targetUrl?: unknown };
+    return {
+      name: (typeof n.name === "string" ? n.name : typeof n.context === "string" ? n.context : "Check").slice(0, 256),
+      state: checkContextResult(raw),
+      url: safeHttpUrl(n.detailsUrl ?? n.targetUrl),
+    };
+  });
+}
+
 /** TTL cache for the gh PR lookup — the pinned summary refreshes on every turn flip, and a
  * network round trip to GitHub per flip would be wasteful (and rate-limited). */
 const GH_PR_CACHE_TTL_MS = 15_000;
@@ -1766,6 +1778,9 @@ interface GitLabMergeRequest {
   headOid: string;
   baseOid: string;
   pipeline: JsonObject | null;
+  baseRef?: string;
+  headRef?: string;
+  mergeability?: string;
 }
 
 function sanitizedForgeError(error: unknown): string {
@@ -1814,7 +1829,12 @@ export function parseGitLabMergeRequest(value: unknown, remote: ForgeRemote): Gi
       (object?.head_pipeline != null && !pipeline)) {
     throw new Error("GitLab returned invalid merge-request metadata");
   }
-  return { iid, title, webUrl, state, headOid, baseOid, pipeline };
+  return {
+    iid, title, webUrl, state, headOid, baseOid, pipeline,
+    ...(jsonString(object?.target_branch) ? { baseRef: jsonString(object?.target_branch)!.slice(0, 256) } : {}),
+    ...(jsonString(object?.source_branch) ? { headRef: jsonString(object?.source_branch)!.slice(0, 256) } : {}),
+    ...(jsonString(object?.detailed_merge_status) ? { mergeability: jsonString(object?.detailed_merge_status)!.slice(0, 128) } : {}),
+  };
 }
 
 /** Collapse GitLab's bounded head-pipeline object into the existing provider-neutral check rollup. */
@@ -1833,6 +1853,35 @@ export function summarizeGitLabPipeline(pipeline: unknown, remote: ForgeRemote):
     return { failing: 0, pending: 1, passing: 0, failingNames: [], url };
   }
   return { failing: 1, pending: 0, passing: 0, failingNames: [name], url };
+}
+
+/** A failed job read preserves the authoritative pipeline rollup. No mutations are made. */
+export async function gitlabNamedChecks(cwd: string, remote: ForgeRemote, pipeline: unknown, read: typeof runGlab = runGlab): Promise<GitChecksSummary | null> {
+  const summary = summarizeGitLabPipeline(pipeline, remote);
+  if (!summary) return null;
+  const id = jsonInt(jsonObject(pipeline)?.id);
+  if (id == null || id < 1) return { ...summary, jobsIncomplete: true };
+  try {
+    const raw = await read(cwd, remote.host, ["api", `projects/${encodeURIComponent(remote.project)}/pipelines/${id}/jobs?per_page=100&include_retried=false`]);
+    return { ...summary, ...parseGitLabJobs(JSON.parse(raw), remote) };
+  } catch {
+    return { ...summary, jobsIncomplete: true };
+  }
+}
+
+export function parseGitLabJobs(value: unknown, remote: ForgeRemote): Pick<GitChecksSummary, "jobs" | "jobsIncomplete"> {
+  if (!Array.isArray(value) || value.length > 100) throw new Error("GitLab returned invalid jobs");
+  const jobs = value.map((raw) => {
+    const job = jsonObject(raw);
+    const name = jsonString(job?.name);
+    const status = jsonString(job?.status);
+    const url = gitlabUrl(job?.web_url, remote);
+    if (!name || !status || !url) throw new Error("GitLab returned invalid job metadata");
+    const state = status === "success" || status === "skipped" ? "passing" as const
+      : status === "failed" || status === "canceled" ? "failing" as const : "pending" as const;
+    return { name: name.slice(0, 256), state, url };
+  });
+  return { jobs, jobsIncomplete: value.length === 100 };
 }
 
 async function runGlab(cwd: string, host: string, args: string[]): Promise<string> {
@@ -2102,7 +2151,7 @@ async function forgeReviewSync(cwd: string): Promise<ForgeReviewSyncInfo> {
 
 /** The PR + checks for the branch checked out in `cwd`, via gh. Null when gh is missing,
  * unauthenticated, the repo isn't on GitHub, or the branch has no PR — never a throw. */
-async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; checks: GitChecksSummary | null }> {
+export async function ghPrSummary(cwd: string, runCommand: typeof runContextCommand = runContextCommand): Promise<{ pr: GitPrSummary | null; checks: GitChecksSummary | null }> {
   const context = executionContext.getStore() ?? { kind: "native" as const };
   const cacheKey = `${context.kind === "wsl" ? `wsl:${context.distro}` : "native"}:${cwd}`;
   const hit = ghPrCache.get(cacheKey);
@@ -2110,7 +2159,7 @@ async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; chec
   let pr: GitPrSummary | null = null;
   let checks: GitChecksSummary | null = null;
   try {
-    const { stdout } = await runContextCommand(context, "gh", ["pr", "view", "--json", "number,title,url,state,statusCheckRollup"], {
+    const { stdout } = await runCommand(context, "gh", ["pr", "view", "--json", "number,title,url,state,statusCheckRollup,baseRefName,headRefName,mergeable"], {
       cwd,
       timeoutMs: GH_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
@@ -2121,6 +2170,9 @@ async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; chec
       url?: string;
       state?: string;
       statusCheckRollup?: unknown;
+      baseRefName?: string;
+      headRefName?: string;
+      mergeable?: string;
     };
     const url = safeHttpUrl(d.url);
     if (typeof d.number === "number" && url) {
@@ -2131,10 +2183,17 @@ async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; chec
         state: d.state ?? "OPEN",
         provider: "github",
         kind: "pull_request",
+        baseRef: d.baseRefName,
+        headRef: d.headRefName,
+        mergeability: d.mergeable,
       };
       const rollup = summarizeCheckRollup(d.statusCheckRollup);
       // No checks configured at all → omit the section rather than showing 0/0/0.
-      checks = rollup.failing + rollup.pending + rollup.passing > 0 ? { ...rollup, url: `${url.replace(/\/$/, "")}/checks` } : null;
+      checks = rollup.failing + rollup.pending + rollup.passing > 0 ? {
+        ...rollup, jobs: namedCheckContexts(d.statusCheckRollup),
+        jobsIncomplete: latestCheckContexts(d.statusCheckRollup).length > 100,
+        url: `${url.replace(/\/$/, "")}/checks`,
+      } : null;
     }
   } catch {
     // gh absent/unauth/no PR — the card simply hides the PR/checks rows.
@@ -2195,8 +2254,11 @@ export async function forgeSummary(
         state: mr.state.toUpperCase(),
         provider: "gitlab" as const,
         kind: "merge_request" as const,
+        baseRef: mr.baseRef,
+        headRef: mr.headRef,
+        mergeability: mr.mergeability,
       } : null,
-      checks: mr ? summarizeGitLabPipeline(mr.pipeline, readiness.remote) : null,
+      checks: mr ? await gitlabNamedChecks(cwd, readiness.remote, mr.pipeline) : null,
       forge: readiness.forge,
     };
     forgeSummaryCache.set(key, { at: Date.now(), value });
