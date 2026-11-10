@@ -1,5 +1,6 @@
 import { hostAdminUsage } from "./host-admin-cli.js";
 import { serviceUsage } from "./service-cli.js";
+import { profileRootUsage } from "./provider-profile-root-cli.js";
 
 export interface HelpResponse {
   ok: boolean;
@@ -33,6 +34,7 @@ export function rootHelp(): string {
     "  review              Start or inspect a review session for your own pushed pull request",
     "  admin               Administer a control plane from its host",
     "  service             Manage a headless Linux systemd deployment",
+    "  profile-root        Inspect managed profile roots; local human-confirmed Linux repair",
     "  help [topic]        Show root or topic-specific help",
     "",
     "Global Option: --version",
@@ -54,7 +56,7 @@ export function rootHelp(): string {
     "  wollipog admin runner-credential rotate --runner RUNNER_ID --output ./runner.token",
     "  wollipog service uninstall  # preserves data by default",
     "",
-    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, automation, decision, campaign, pr, review",
+    "Topics: init, doctor, update, pair, service, profile-root, admin, session, worktree, artifact, automation, decision, campaign, pr, review",
     "Run `wollipog help <topic>` for complete commands and options. Help is always text; operational commands use --json for stable machine-readable output.",
   ].join("\n");
 }
@@ -318,6 +320,8 @@ function helpForTopic(topic: string): string | null {
       return doctorHelp();
     case "service":
       return serviceUsage();
+    case "profile-root":
+      return `Usage: wollipog ${profileRootUsage}\nMetadata only; no credential reads. Linux repair requires local interactive confirmation for one fresh snapshot. macOS/Windows and uncertain ACLs require operator guidance. There is no --yes, remote repair or stored consent.`;
     case "admin":
       return hostAdminUsage();
     case "session":
