@@ -6,7 +6,7 @@ for (const [device, width, height, theme] of [["desktop", 1440, 1200, "dark"], [
     await page.clock.setFixedTime(new Date("2026-01-01T12:00:00Z"));
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    for (const mode of ["complete", "delivery"] as const) {
+    for (const mode of ["complete", "delivery", "legacy"] as const) {
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&epicTracking=${mode}&theme=${theme}`);
       const panel = page.locator(".campaign-status");
       const summary = page.locator(".campaign-status-summary");
@@ -16,7 +16,8 @@ for (const [device, width, height, theme] of [["desktop", 1440, 1200, "dark"], [
       await page.getByRole("option", { name: "All States" }).click();
       const rows = page.locator(".campaign-work-row");
       await expect(rows).toHaveCount(2);
-      const epic = rows.filter({ hasText: mode === "complete" ? "Epic Tracking" : "Epic With Delivery Work" });
+      const title = mode === "legacy" ? "Legacy Epic Tracking" : mode === "complete" ? "Epic Tracking" : "Epic With Delivery Work";
+      const epic = rows.filter({ hasText: title });
       await expect(epic).toHaveAttribute("data-state", mode === "complete" ? "delivered" : "planned");
       const geometry = await panel.evaluate((element) => ({ width: element.clientWidth, scroll: element.scrollWidth }));
       expect(geometry.scroll).toBeLessThanOrEqual(geometry.width + 1);
@@ -29,9 +30,10 @@ for (const [device, width, height, theme] of [["desktop", 1440, 1200, "dark"], [
         }
       }
       await epic.click();
-      await expect(page.locator("h3.campaign-detail-title")).toHaveText(mode === "complete" ? "Epic Tracking" : "Epic With Delivery Work");
+      await expect(page.locator("h3.campaign-detail-title")).toHaveText(title);
       await expect(panel).toContainText("Previous Attempts");
-      await expect(panel).toContainText("Failed");
+      if (mode === "legacy") await expect(panel).not.toContainText("Failed");
+      else await expect(panel).toContainText("Failed");
       expect(errors).toEqual([]);
     }
   });

@@ -789,7 +789,8 @@ still need delivery proof unless the ledger proves they are tracking work: no op
 delivered attempts, verifications, deliveries, PRs or recorded delivery-stage activity. Ended
 tracking attempts alone do not disqualify an item. Titles prove nothing. Sticky activity and PR
 history prevent cleared stages from qualifying; incomplete migrated history retains the ordinary
-proof for dispatched work. Campaign Status item states, counts, recovery and closure gaps use the
+proof for all pre-history work, even without attempts: root-reported delivery stages or PRs could
+have been cleared before upgrade. Campaign Status item states, counts, recovery and closure gaps use the
 same predicate and the verified member-proven closure receipt. The old placeholder rule required
 zero attempts, so it excluded tracking items whose tracking attempts had already ended.
 

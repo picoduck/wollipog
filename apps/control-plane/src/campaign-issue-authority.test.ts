@@ -173,12 +173,20 @@ test("#4403 upgrading existing work retains unknown PR and delivery history acro
   const path = join(dir, "test.db");
   const h = harness(true, 5, [100], path);
   const itemId = h.item.id;
+  let undispatchedItemId = "";
   try {
     assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: itemId, childSessionId: "child" }).ok);
     assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId,
       stage: { stage: "implementing", pullRequests: [{ repository: "team/repo", number: 77 }] } }).ok);
     assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId, stage: null,
       endAttempt: { reason: "failed", note: "Ended old work" } }).ok);
+    const plan = h.svc.recordCampaignPlan("root", { planComplete: true,
+      items: [{ key: "undispatched-old-work", issue: { repository: "team/repo", number: 100 } }] });
+    assert.ok(plan.ok, plan.error ?? "undispatched item");
+    undispatchedItemId = plan.data!.items.find((item) => item.key === "undispatched-old-work")!.workItemId;
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: undispatchedItemId,
+      stage: { stage: "in_review", pullRequests: [{ repository: "team/repo", number: 78 }] } }).ok);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: undispatchedItemId, stage: null }).ok);
     // Reproduce a pre-history schema, whose cleared stages cannot be reconstructed on upgrade.
     h.db.raw().exec(`DROP TRIGGER campaign_work_delivery_stage_inserted;
       DROP TRIGGER campaign_work_delivery_stage_updated;
@@ -196,6 +204,8 @@ test("#4403 upgrading existing work retains unknown PR and delivery history acro
     assert.equal(db.campaignWorkLedger.closurePullRequestHistory("root", "team/repo"), undefined);
     assert.equal(db.campaignWorkLedger.epicTrackingItem("root", itemId), false,
       "an ended legacy attempt cannot prove absence of delivery work");
+    assert.equal(db.campaignWorkLedger.epicTrackingItem("root", undispatchedItemId), false,
+      "zero attempts cannot prove the absence of erased delivery work or PRs before migration");
     const svc = new SessionsService(db, new Hub(db), { info() {}, warn() {}, error() {} });
     const added = svc.recordCampaignPlan("root", { planComplete: true,
       items: [{ key: "fresh-tracking", issue: { repository: "team/repo", number: 100 } }] });
@@ -254,20 +264,20 @@ test("#4403 execution refreshes campaign context, retains the approved payload a
 });
 
 test("#4403 an ended epic-tracking attempt is enough, but delivery work, PRs, open attempts and unknown history stay gaps", async () => {
-  for (const mode of ["tracking", "open", "delivery", "pull_request", "delivered_attempt", "legacy"] as const) {
+  for (const mode of ["tracking", "open", "delivery", "pull_request", "delivered_attempt", "legacy", "legacy_undispatched"] as const) {
     const h = harness(true, 5, [100, 101]);
     try {
       h.state.epicMembers = { readable: true, members: [{ number: 101, state: "completed" }] };
-      assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.item.id, childSessionId: "child" }).ok);
+      if (mode !== "legacy_undispatched") assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.item.id, childSessionId: "child" }).ok);
       if (mode === "delivery" || mode === "pull_request") {
         assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id, title: "Close Epic Once Members Finish",
           stage: { stage: "implementing", ...(mode === "pull_request" ? { pullRequests: [{ repository: "team/repo", number: 77 }] } : {}) } }).ok);
         assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id, stage: null }).ok);
       }
-      if (mode !== "open") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+      if (mode !== "open" && mode !== "legacy_undispatched") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
         endAttempt: { reason: "failed", note: "Tracking attempt ended" } }).ok);
       if (mode === "delivered_attempt") h.db.raw().prepare("UPDATE campaign_work_attempts SET end_reason='delivered' WHERE work_item_id=?").run(h.item.id);
-      if (mode === "legacy") h.db.raw().prepare("INSERT INTO campaign_work_pr_history_legacy VALUES (?)").run(h.item.id);
+      if (mode === "legacy" || mode === "legacy_undispatched") h.db.raw().prepare("INSERT INTO campaign_work_pr_history_legacy VALUES (?)").run(h.item.id);
       const result = await h.svc.requestGithubIssueClosure("root", { requestId: `tracking-${mode}`, issue: 100, reason: "completed",
         explanation: "Members verified closed", evidence: ["Forge member read"] });
       assert.ok(result.ok, result.error ?? mode);

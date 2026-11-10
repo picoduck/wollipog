@@ -1329,21 +1329,21 @@ test("an epic closure proven from members does not finish the epic's own dispatc
 });
 
 test("#4403 Campaign Status finishes ended epic tracking and retains the same delivery and history gaps", () => {
-  for (const mode of ["tracking", "open", "delivery", "legacy"] as const) {
+  for (const mode of ["tracking", "open", "delivery", "legacy", "legacy_undispatched"] as const) {
     const h = mergedWorkVerificationFixture("delivered");
     try {
       const plan = h.svc.recordCampaignPlan("root", { planComplete: true,
         items: [{ key: "epic-tracking", issue: { repository: "picoduck/wollipog", number: 2938 } }] });
       assert.ok(plan.ok, plan.error ?? mode);
       const itemId = plan.data!.items.find((item) => item.key === "epic-tracking")!.workItemId;
-      assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: itemId, childSessionId: "unaffected" }).ok);
+      if (mode !== "legacy_undispatched") assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: itemId, childSessionId: "unaffected" }).ok);
       if (mode === "delivery") {
         assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId, stage: { stage: "implementing" } }).ok);
         assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId, stage: null }).ok);
       }
-      if (mode !== "open") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId,
+      if (mode !== "open" && mode !== "legacy_undispatched") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId,
         endAttempt: { reason: "failed", note: "Tracking completed without delivery work" } }).ok);
-      if (mode === "legacy") h.db.raw().prepare("INSERT INTO campaign_work_pr_history_legacy VALUES (?)").run(itemId);
+      if (mode === "legacy" || mode === "legacy_undispatched") h.db.raw().prepare("INSERT INTO campaign_work_pr_history_legacy VALUES (?)").run(itemId);
       const report = h.db.appendEvent("unaffected", { kind: "agent_message", final: true, text: "Tracking report." }, Date.now());
       assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "unaffected", reportEventSeq: report.seq, followUpsAccounted: true }).ok);
       const before = h.db.campaignProjection("root")!.work!;

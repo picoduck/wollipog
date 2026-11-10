@@ -862,7 +862,8 @@ export class CampaignWorkLedgerStore {
   }
 
   /** No title/prose classification: a tracking item has no open attempt, delivery claim, PR,
-   * verification or recorded delivery. Dispatched legacy work has incomplete history and refuses. */
+   * verification or recorded delivery. Legacy work has incomplete history and refuses, even
+   * without attempts: a root could have reported and then cleared a delivery stage or PR. */
   epicTrackingItem(campaignId: string, itemId: string): boolean {
     return Boolean(this.stmt(`SELECT 1 FROM campaign_work_items item WHERE item.campaign_session_id=? AND item.id=?
       AND item.stage IS NULL AND coalesce(json_array_length(item.stage_pull_requests),0)=0
@@ -870,8 +871,7 @@ export class CampaignWorkLedgerStore {
       AND NOT EXISTS (SELECT 1 FROM campaign_work_verifications v WHERE v.work_item_id=item.id)
       AND NOT EXISTS (SELECT 1 FROM campaign_work_deliveries d WHERE d.work_item_id=item.id)
       AND NOT EXISTS (SELECT 1 FROM campaign_work_delivery_activity d WHERE d.work_item_id=item.id)
-      AND (NOT EXISTS (SELECT 1 FROM campaign_work_attempts a WHERE a.work_item_id=item.id)
-        OR NOT EXISTS (SELECT 1 FROM campaign_work_pr_history_legacy legacy WHERE legacy.work_item_id=item.id))`).get(campaignId, itemId));
+      AND NOT EXISTS (SELECT 1 FROM campaign_work_pr_history_legacy legacy WHERE legacy.work_item_id=item.id)`).get(campaignId, itemId));
   }
 
   /** Current open work only, with append-only issue/lineage attribution. Scope changes keep using

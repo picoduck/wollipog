@@ -105,7 +105,8 @@ const scenario = params.get("scenario") ?? "campaign";
 if (params.get("theme") === "light") document.documentElement.dataset.theme = "light";
 
 const NOW = params.has("closureRecovery") || params.has("epicTracking") ? Date.parse("2026-01-01T12:00:00Z") : Date.now();
-const epicTracking = params.has("epicTracking") ? epicTrackingFixture(NOW, params.get("epicTracking") === "delivery") : null;
+const epicTracking = params.has("epicTracking") ? epicTrackingFixture(NOW,
+  params.get("epicTracking") === "delivery" ? "delivery" : params.get("epicTracking") === "legacy" ? "legacy" : "complete") : null;
 const recoveryReason = params.get("recovery");
 const recoveryRecord = recoveryReason && ["missing_access", "missing_human_information", "boundary_enlargement",
   "human_required_rule", "unsupported_capability", "attempts_exhausted", "failed_checks", "reviewer_objection", "uncertain_outcome", "request_declined",
