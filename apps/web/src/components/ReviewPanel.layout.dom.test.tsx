@@ -708,7 +708,7 @@ test("GitLab summary shows base/head, mergeability and named job links with safe
     assert.match(row.textContent!, /BasereleaseHeadfeature\/gitlabMergeabilityCI Must Pass/);
     assert.match(row.textContent!, /unit — Failing/);
     assert.match(row.textContent!, /lint — Pending/);
-    assert.equal(row.querySelector('a[href="javascript:alert(1)"]'), null);
+    assertNoDomNode(row.querySelector('a[href="javascript:alert(1)"]'));
     assert.equal(row.querySelector('a[href="https://gitlab.com/acme/shop/-/jobs/7"]')?.textContent, "unit");
     assert.match(row.textContent!, /Some checks are unavailable/);
     await harness.render({ forgeFacts: { pr: openPr, checks: failingChecks } });
