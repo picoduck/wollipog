@@ -86,6 +86,18 @@ for (const state of ["busy", "unknown", "restricted", "offline"]) {
   });
 }
 
+for (const state of ["installation-blocked", "prerequisite-missing"]) {
+  test(`Account Setup keeps ${state} installation unavailable with a confirmed sign-in`, async ({ page }, testInfo) => {
+    await page.goto(`/new-session-choices-e2e.html?accountSetup=${state}`);
+    await page.getByRole("button", { name: "Account Setup…", exact: true }).click();
+    const setup = page.getByRole("dialog", { name: "Account Setup", exact: true });
+    await expect(setup.locator(".machine-agent-status")).toHaveText("Unavailable");
+    await expect(setup.getByText("Sign-In Confirmed", { exact: true })).toHaveCount(0);
+    await dialogMotionSettled(page);
+    await page.screenshot({ path: testInfo.outputPath(`readiness-${state}.png`) });
+  });
+}
+
 test("missing provider installation explains the next step before starting setup", async ({ page }) => {
   await page.goto("/new-session-choices-e2e.html?accountSetup=missing");
   await page.getByRole("button", { name: "Account Setup…", exact: true }).click();

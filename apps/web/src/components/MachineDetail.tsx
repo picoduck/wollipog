@@ -537,7 +537,7 @@ export function MachineDetail({ entry, actions, showTitle, children }: {
         </ul>
       </header>
       {actions.notice}
-      {box?.harnessReadiness?.state === "failed" && box.status === "online" && (
+      {box?.harnessReadiness?.state === "failed" && box.status === "online" && runner?.status === "online" && (
         <Notice tone="warning" title="Provider Readiness Needs Attention" role="status">
           <p>The SSH connection is working, but the replacement runner has not passed its provider readiness checks. Review Agents and Provider Accounts before starting work.</p>
           <p>{({ ownership_blocked: "Account ownership prevented inspection.", installation_regressed: "A previously compatible installation is unavailable.",

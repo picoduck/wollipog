@@ -51,7 +51,9 @@ function AgentRow({ row, name, current, onOpen }: { row: MachineAgentRow; name: 
         <span className="row-body">
           <span className="row-line">
             <span className="row-title" title={name}>{name}</span>
-            <AgentBadge status={status} label={status === "unavailable" && agent.providerReadiness ? providerReadinessLabel(agent.providerReadiness) : undefined} />
+            <AgentBadge status={status} label={status === "unavailable" && agent.providerReadiness &&
+              agent.providerReadiness.reason !== "ready" && agent.providerReadiness.installationAdmission !== "blocked"
+              ? providerReadinessLabel(agent.providerReadiness) : undefined} />
           </span>
           <span className="row-sub machine-agent-meta">
             <span>{agent.providerReadiness ? `${current ? "Checked" : "Last Checked"} ${relativeTime(agent.providerReadiness.checkedAt)}` : agentDriverLabel(agent)}</span>

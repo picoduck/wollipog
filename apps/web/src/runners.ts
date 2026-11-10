@@ -243,7 +243,7 @@ function machineEntry(runner: RunnerView | undefined, box: BoxView | undefined, 
     kind: box ? "ssh" : "native",
     status: machineStatus(runner, box),
     ...(providerStatus && machineNeedsAttention(providerStatus) ? { attentionStatus: providerStatus } : {}),
-    ...(box?.harnessReadiness?.state === "failed" ? { readinessNeedsAttention: true } : {}),
+    ...(box?.status === "online" && runner?.status === "online" && box.harnessReadiness?.state === "failed" ? { readinessNeedsAttention: true } : {}),
     online: runner?.status === "online",
     capacity: capacity
       ? { configuredUnits: capacity.configuredUnits, ...(capacity.usedUnits === undefined ? {} : { usedUnits: capacity.usedUnits }) }

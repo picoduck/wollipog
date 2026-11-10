@@ -95,6 +95,18 @@ async function mount(view: RunnerView, client: Partial<ApiClient> = {}, onChoose
   return { body, unmount: async () => { await act(async () => root.unmount()); mountPoint.remove(); } };
 }
 
+test("a confirmed account never relabels an unusable installation as a positive agent status", async () => {
+  for (const installationAdmission of ["blocked", "permitted"] as const) {
+    const view = await mount(runner([{ ...readyClaude, available: false,
+      providerReadiness: { checkedAt: Date.now(), installation: "unknown", installationAdmission, authentication: "authenticated", reason: "ready" },
+    }]));
+    try {
+      assert.equal(view.body.querySelector(".machine-agent-status")?.textContent, "Unavailable");
+      assert.doesNotMatch(view.body.querySelector(".machine-agent-list")?.textContent ?? "", /Sign-In Confirmed/);
+    } finally { await view.unmount(); }
+  }
+});
+
 const rowNamed = (scope: Element, name: string) => [...scope.querySelectorAll<HTMLButtonElement>("button.row")]
   .find((row) => row.querySelector(".row-title")?.textContent === name) ?? null;
 const dialog = (body: HTMLElement) => body.querySelector<HTMLElement>('[role="dialog"]');
