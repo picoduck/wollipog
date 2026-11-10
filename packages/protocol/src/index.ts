@@ -456,7 +456,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * the control plane by the runner, because an older control plane would ignore the field and ask
    * the question as an approval, and against the root's runner by the control plane. */
   ownerQuestions: 303,
-  issueClosureReconciliation: 353,
+  issueClosureReconciliation: 355,
   /** v332 (#4359): explicit child clarifications, with free text and no consumable action grant. */
   childQuestions: 332,
   /** v308 (#4282): structured scope proposals, `proposal` on request_campaign_issue_scope_change.

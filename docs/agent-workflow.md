@@ -157,7 +157,7 @@ a merge request closes decides where it disagrees with Wollipog's match. Deliver
 acceptance criterion and cite the actual merge commit; report remaining original work candidly.
 
 An uncertain consumed issue closure is recovered by the server's read-only forge reconciliation
-(runner protocol 353+). It never repeats the comment or closure. The issue must read closed with
+(runner protocol 355+). It never repeats the comment or closure. The issue must read closed with
 the approved state reason and a unique exact-body comment by the runner's forge login, posted
 after consumption. Incomplete, ambiguous or unreadable evidence leaves an Owner Question naming
 the issue and original occurrence. Answering or dismissing it acknowledges the uncertainty and
