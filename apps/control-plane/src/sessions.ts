@@ -11780,6 +11780,13 @@ export class SessionsService {
       if (decision.status !== "approved" || decision.resourceSnapshot.category !== "pr_merge" || decision.actionAdmission?.kind !== "pr_merge_enqueue" ||
           (approval && decision.actionAdmission.command !== command)) continue;
       const refusal = this.excludedRepositoryRefusalDetail(session, null, decision.resourceSnapshot);
+      // A boundary repository whose runners all dropped below the floor lifts only when one updates; no
+      // replacement is admitted while it stands (#4319 follow-on A).
+      if (refusal?.entryBelow) {
+        return `${refusal.sentence} Command tools are blocked while this session's armed merge can't run, since it must not. If it already ran, reconcile it. ` +
+          `Otherwise this lifts when a runner of a Location of that repository is updated and restarted to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer; ` +
+          "a new pr_merge decision for it is refused until then.";
+      }
       // An unread Location's refusal ends by a read or its removal, not by a join (#4319).
       if (refusal) return `${refusal.sentence} Command tools are blocked while this session's armed merge can't run, since it must not. If it already ran, reconcile it. ` +
         (refusal.unread
@@ -11791,10 +11798,7 @@ export class SessionsService {
             "(a read that names this repository leaves it refused by name); " +
             `when ${refusal.unread} is removed from the Project, which revokes it too; `
           // The way in is the refusal's own, which knows a first-message limit (#4319).
-          // A repository in the boundary whose runners all dropped below the floor needs one back (#4319 follow-on A).
-          : refusal.entryBelow
-            ? `Otherwise this lifts when a runner of a Location of that repository is updated and restarted to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer, `
-            : "Otherwise this lifts once that repository is brought in as said above, which revokes the armed merge, ") +
+          : "Otherwise this lifts once that repository is brought in as said above, which revokes the armed merge, ") +
         "or when you request a new pr_merge decision for the same pull request with the request_workflow_decision tool " +
         "(the CLI needs the shell), which replaces the armed one.";
     }
@@ -12317,8 +12321,11 @@ export class SessionsService {
     // Asking anyone to approve what no login may carry out helps no one (#4319). The exception replaces
     // an armed merge left out after arming, which is how its session gets its shell back.
     const requesting = normalized.ok && normalized.data ? this.db.getSession(sessionId) : null;
-    const excludedRepository = requesting && normalized.data && !this.armedMergesOf(requesting, normalized.data).length
-      ? this.excludedRepositoryRefusal(requesting, null, normalized.data) : null;
+    const refusal = requesting && normalized.data ? this.excludedRepositoryRefusalDetail(requesting, null, normalized.data) : null;
+    // Not for a boundary repository whose runners all dropped below the floor (#4319 follow-on A): that
+    // block lifts by itself when one updates, so no replacement is needed, and refusing it keeps every
+    // request made while it stands refused, which is why its lift has nothing to revoke.
+    const excludedRepository = refusal && (refusal.entryBelow || !this.armedMergesOf(requesting!, normalized.data!).length) ? refusal.sentence : null;
     if (excludedRepository) return fail(excludedRepository, 409);
     if (normalized.ok && normalized.data?.category === "follow_up_issue_publication" && normalized.data.recommendationId) {
       if (normalized.data.issueAdmission) return this.createWorkflowDecision(sessionId, request, canAccess);

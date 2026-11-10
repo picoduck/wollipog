@@ -10311,7 +10311,14 @@ test("an armed merge in a boundary repository whose runners all drop below the f
     registerSecondMachine(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
     const hook = childHook(f, m.child, "entry-below").data;
     assert.equal(hook?.decision, "deny");
-    assert.match(hook?.reason ?? "", /Otherwise this lifts when a runner of a Location of that repository is updated and restarted to protocol version \d+ or newer/u);
+    assert.match(hook?.reason ?? "", /Otherwise this lifts when a runner of a Location of that repository is updated and restarted to protocol version \d+ or newer; a new pr_merge decision for it is refused until then\./u);
+    assert.doesNotMatch(hook?.reason ?? "", /which replaces the armed one/u);
+    // No replacement is admitted while it stands (review round 1): it lifts by itself when a runner
+    // updates, and so every request made meanwhile is refused, and the lift has nothing to revoke.
+    const replacement = await ask(f, m.child, mergeIn("other/repo"), "other-merge-replacement");
+    assert.equal(replacement.ok, false, "a replacement is refused like any request");
+    assert.match(replacement.error!, ENTRY_BELOW);
+    assert.equal(f.db.workflowDecisionByOccurrence(asked.data!.occurrenceId)!.status, "approved", "and the armed merge stays as it was");
     registerSecondMachine(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
     assert.notEqual(childHook(f, m.child, "entry-current").data?.decision, "deny");
   } finally { await m.server.close(); f.db.close(); }
