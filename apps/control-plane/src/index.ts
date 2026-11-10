@@ -227,7 +227,7 @@ import { MergeClosureWatcher } from "./merge-closure-watch.js";
 import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
 import { ProviderPublicationUnavailable, type PublicationObservation } from "./provider-profile-publication-store.js";
 import { readSshConfigHosts } from "./ssh-config.js";
-import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS, TeamMemberContainmentError } from "./db.js";
+import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS, OccupiedUnreadLocationError, TeamMemberContainmentError } from "./db.js";
 import { registerIdentityTeamRoutes, TEAM_NAME_TAKEN } from "./identity-team-route.js";
 import { logWalCheckpointerEvent } from "./wal-checkpointer.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
@@ -2626,7 +2626,15 @@ app.delete("/api/projects/:id", async (req, reply) => {
   if (!canManageAffectedSessions(principal, (session) => session.projectId === id)) {
     return reply.code(409).send({ error: "project contains sessions you cannot manage" });
   }
-  const deleted = db.deleteProject(id);
+  // What deleting it ends of an unread Location's refusal leaves its pauses like any revocation, and
+  // names who deleted it, whose action led to it (#4319, #3916).
+  let deleted: ReturnType<typeof db.deleteProject>;
+  try {
+    deleted = db.deleteProject(id, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
+  } catch (error) {
+    // Only the sessions this person can see are named (#4319).
+    return reply.code(409).send({ error: error instanceof OccupiedUnreadLocationError ? error.describe((sessionId) => db.canAccessSession(principal, sessionId)) : (error as Error).message });
+  }
   if (!deleted) return reply.code(404).send({ error: "project not found" });
   hub.projectRemoved(id);
   for (const sessionId of deleted.sessionIds) hub.sessionChangedById(sessionId);
@@ -2724,7 +2732,8 @@ app.post("/api/projects/:id/locations/move", async (req, reply) => {
     .map((session) => session.id);
   let moved: ProjectLocationView | null;
   try {
-    // What a move ends of an unread Location's refusal leaves its pauses like any revocation (#4319).
+    // What a move ends of an unread Location's refusal leaves its pauses like any revocation, and
+    // names who moved it, whose action led to it (#4319, #3916).
     moved = db.moveProjectLocation(location.id, id, Date.now(), principal.userId,
       (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
   } catch (error) {
@@ -2749,8 +2758,15 @@ app.delete("/api/projects/:id/locations/:locationId", async (req, reply) => {
   if (!canManageAffectedSessions(principal, (session) => session.projectLocationId === locationId)) {
     return reply.code(409).send({ error: "project location contains sessions you cannot manage" });
   }
-  // What removing it ends of an unread Location's refusal leaves its pauses like any revocation (#4319).
-  db.removeProjectLocation(locationId, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
+  // What removing it ends of an unread Location's refusal leaves its pauses like any revocation, and
+  // names who removed it, whose action led to it (#4319, #3916).
+  // A campaign session running on an unread Location keeps it in place, so a read can still end its
+  // refusal; the refusal says so (#4319).
+  try {
+    db.removeProjectLocation(locationId, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
+  } catch (error) {
+    return reply.code(409).send({ error: error instanceof OccupiedUnreadLocationError ? error.describe((sessionId) => db.canAccessSession(principal, sessionId)) : (error as Error).message });
+  }
   const project = db.getProject(id)!;
   hub.projectChanged(project);
   for (const session of db.listSessions({ includeArchived: true })) {

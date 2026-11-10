@@ -2247,6 +2247,11 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
    * a current runner) ends it, so a failed read, an update before the read, a revoke or a
    * re-authorization never does. */
   unreadLocations?: Array<{ locationId: string; name: string }>;
+  /** Which of `unreadLocations` count only by the owner's consent (#4319): someone else's Location the
+   * owner saw excluded before Start, or brought in with Include in Campaign. A revoke withdraws that
+   * consent, so the owner can always end a refusal resting on a runner or Location they don't control.
+   * A separate list, so a control plane that doesn't know it keeps every unread record. */
+  unreadByConsent?: string[];
   /** What the Full Control launch or enable that set `control` disclosed about capabilities and
    * evidence (#2940). Server-owned and informational: it grants nothing, a revoke to Custom drops
    * it, and a campaign authorized before it existed has none. */

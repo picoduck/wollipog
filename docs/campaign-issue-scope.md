@@ -217,27 +217,39 @@ armed; a revoke to Custom revokes it too. A requester running in that very Locat
 repository. The record keeps one repository per Location, the latest a read named, so a runner naming a
 new one each time can't grow it.
 
-A Location the campaign holds by consent (the owner's own, or one the owner included), excluded with no
-repository named on a runner that, when it was excluded, was below the gates' floor or had no known
-version, may hold any repository. That covers a runner too old to read a Location (below v288), a read
-that failed (a timeout, say), an offline machine, a missing folder, and the owner's exclusion #4372
-recorded with no repository. The campaign keeps each such Location in a record of its own
-(`unreadLocations`). While one is still in the Project, every repository without an entry is refused the
-same way, including one the campaign never had, and none of them has a forge reader. Only two things end
-it: a read that resolves it (it names the repository, which is then refused by name, or the Location
-joins, or it reads on a current runner), or the Location leaving the Project. A runner's update before
-its read, a failed read, a move to waiting, a revoke, a re-authorization and a revival never do. Leaving
-the Project revokes the root's follow-ups, merges and branch deletions in repositories without an entry,
-since nothing read the repository. The refusal names the Location and those two ways out. A requester in
-that Location isn't exempt, nor is one in a Location refused by name, since nothing shows which
-repository it acts in. Someone else's Location, waiting or excluded, counts only once the owner includes
-it, which reads it. A reconnect reads such a Location again, a missing folder included. A Custom campaign
+While the owner's first message limits the campaign's repositories, a join leaves a repository with no
+entry available instead, so the refusal says only an approved repository addition brings it in.
+
+A Location the campaign holds by consent (the owner's own, one the owner included, or one the person saw
+excluded before Start, whoever added it), excluded with no repository named on a runner that, when it
+was excluded, was below the gates' floor or had no known version, may hold any repository. That covers a
+runner too old to read a Location (below v288), a read that failed (a timeout, say), an offline machine,
+a missing folder, and the owner's exclusion #4372 recorded with no repository. The campaign keeps each
+such Location in a record of its own (`unreadLocations`). While one is still in the Project, every
+repository without an entry is refused the same way, including one the campaign never had, and none of
+them has a forge reader. Only three things end it: a read that resolves it (it names the repository,
+which is then refused by name, or the Location joins, or a read succeeds on a current runner), the
+Location leaving the Project (its removal, its move, or the Project's deletion), or, for someone else's
+Location, a revoke, which withdraws the consent the authorization gave (`unreadByConsent`). A runner's
+update before its read, a failed read, a move to waiting, a re-authorization and a revival never do, nor
+does a revoke for the owner's own Location. **Every lift that isn't a Full Control join revokes what the
+refusal covered:** the root's follow-ups, merges and branch deletions in each repository that had no
+entry, except one a read's name still refuses, whose own stay blocked until a join revokes them. A Full
+Control join revokes every decision already. The outermost Orchestrator controls every member's gates, a
+nested Orchestrator's included, so this reaches the whole campaign, and it reaches a stopped, failed,
+completed or archived root's campaign too, since its children can outlive it. Each revocation names the
+person whose action led to it, such as whoever removed, moved or deleted something. The refusal names the Location and
+its ways out. A requester in that Location isn't exempt, nor is one in a Location refused by name, since
+nothing shows which repository it acts in. Someone else's Location, waiting or excluded mid-campaign,
+counts only once the owner includes it, which reads it. A reconnect reads such a Location again, a
+missing folder included, and its runner's registration also reads again an unread Location whose
+exclusion a revoke, a re-authorization or a revival dropped, or a stale record a rollback left: that read
+only names the repository, or ends the record on a current runner, and never joins. A Custom campaign
 records one even beside a single repository, including its own Location when that can't be read at
 creation, and reads one that was offline or missing at creation only to name its repository: it never
 joins on a reconnect, as such a Location never has, and the repository a read names stays refused until
-an approved addition. After a revoke, a re-authorization listing no exclusions or a revival drops the
-exclusion, nothing re-reads it, so removing it is the way out. Otherwise an unknown repository keeps its
-rule: a person's approval lets the requester act with its own login.
+an approved addition. Otherwise an unknown repository keeps its rule: a person's approval lets the
+requester act with its own login.
 
 This narrows only what joins. A Location the campaign already holds keeps its place on any runner, so a
 re-authorization or enable never drops a repository, and each gate still refuses a runner below its own
