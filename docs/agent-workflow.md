@@ -164,6 +164,9 @@ the issue and original occurrence. Answering or dismissing it acknowledges the u
 clears recovery bookkeeping; it grants no new closure authority and leaves the recorded outcome
 uncertain. A lost reconciliation read also goes to that question rather than being replayed.
 The ordinary sweep discovers pre-upgrade uncertain closures; no agent assertion settles them.
+Temporary runner disconnects and upgrades preserve the read opportunity for five minutes before
+falling back to the owner's actionable question. A repository removed from the campaign goes to
+that question immediately. Unavailable transport never repeats a closure or comment.
 
 Use `wollipog review session run` (MCP `request_review_session`) for your own pushed PR's required
 cross-model review, including from an isolated campaign child. Follow the shipped `using-wollipog`

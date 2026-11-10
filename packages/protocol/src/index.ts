@@ -5038,6 +5038,8 @@ export interface GithubIssueClosureResult {
   refusal?: GithubIssueClosureRefusal;
   /** Read-only recovery of an uncertain mutation (#4398), never a new closure grant. */
   reconciliation?: { checkedAt: number; verified?: true; ownerDecisionOccurrenceId?: string; acknowledgedAt?: number };
+  /** Start of the bounded reconnect/runner-upgrade grace period, before any read is dispatched. */
+  reconciliationWaitingSince?: number;
 }
 
 export interface AutomationCreationRequest {

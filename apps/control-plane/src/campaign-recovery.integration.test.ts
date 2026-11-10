@@ -1229,6 +1229,34 @@ test("4398 owner recovery survives more than twenty revoked cards and refuses ag
   } finally { h.db.close(); }
 });
 
+for (const unavailable of ["offline", "old_runner", "removed_repository", "not_sent"] as const) {
+  test(`4398 lasting ${unavailable} leaves one answerable owner request`, async () => {
+    const h = mergedWorkVerificationFixture("delivered");
+    try {
+      recordEpicClosure(h, "permanent-unavailability", { outcome: "uncertain" });
+      if (unavailable === "removed_repository") {
+        const stored = h.db.workflowDecisionByOccurrence("permanent-unavailability")!;
+        h.db.raw().prepare("UPDATE workflow_decisions SET resource_snapshot=? WHERE occurrence_id=?")
+          .run(JSON.stringify({ ...stored.resourceSnapshot, repository: "removed/repository", url: "https://github.com/removed/repository/issues/2938" }), stored.occurrenceId);
+      } else {
+        if (unavailable === "offline") h.hub.isRunnerOnline = () => false;
+        else if (unavailable === "old_runner") h.db.registerRunner(h.metadata, 1, 349);
+        h.db.recordGithubIssueClosureResult("permanent-unavailability", { outcome: "uncertain", completedAt: h.now,
+          reconciliationWaitingSince: Date.now() - 6 * 60_000 });
+      }
+      h.hub.requestFromRunner = async () => {
+        if (unavailable === "not_sent") throw new RunnerRequestNotSentError();
+        throw Error("Unavailable recovery must never dispatch");
+      };
+      await h.svc.reconcileUncertainIssueClosures("root");
+      const questionId = h.db.workflowDecisionByOccurrence("permanent-unavailability")!.issueClosureResult!.reconciliation!.ownerDecisionOccurrenceId!;
+      assert.equal(h.db.workflowDecisionByOccurrence(questionId)!.status, "pending");
+      assert.ok(h.svc.answerOwnerQuestion("root", questionId, {}, "dismiss", { kind: "human", id: h.identity.userId }).ok);
+      assert.ok(h.db.workflowDecisionByOccurrence("permanent-unavailability")!.issueClosureResult!.reconciliation!.acknowledgedAt);
+    } finally { h.db.close(); }
+  });
+}
+
 test("an item in another campaign repository is finished only by a fresh merge in its own repository (#4119)", () => {
   const h = mergedWorkVerificationFixture("delivered");
   try {

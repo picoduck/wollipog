@@ -14558,12 +14558,24 @@ export class SessionsService {
           const target = this.closureTarget(root, snapshot.repository);
           // An upgrade/reconnect that cannot send a read has made no recovery attempt yet.
           if (!target || !this.hub.isRunnerOnline(target.runnerId) ||
-              !runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "issueClosureReconciliation")) continue;
+              !runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "issueClosureReconciliation")) {
+            const repositoryRemoved = Boolean(campaignOtherRepository(root, snapshot.repository)) &&
+              !campaignScopeRepositories(root).some(entry => entry.repository.toLowerCase() === snapshot.repository.toLowerCase());
+            const waitingSince = result.reconciliationWaitingSince ?? Date.now();
+            if (!repositoryRemoved && Date.now() - waitingSince < 5 * 60_000) {
+              if (result.reconciliationWaitingSince === undefined) this.db.recordGithubIssueClosureResult(decision.occurrenceId,
+                { ...result, reconciliationWaitingSince: waitingSince });
+              continue;
+            }
+            // A permanently absent target must still have an answerable owner request. The grace
+            // period bounds reconnect waiting; no absent runner is mistaken for a forge read.
+          }
           const beforeRead = result;
           result = { ...result, reconciliation: { checkedAt: Date.now() } };
           this.db.recordGithubIssueClosureResult(decision.occurrenceId, result);
           let verified = false;
-          if (target && runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "issueClosureReconciliation")) {
+          if (target && this.hub.isRunnerOnline(target.runnerId) &&
+              runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "issueClosureReconciliation")) {
             const requestId = `issue_closure_reconcile_${randomUUID()}`;
             try {
               const response = await this.hub.requestFromRunner(target.runnerId, requestId, {
@@ -14575,8 +14587,11 @@ export class SessionsService {
                 response.ok === true && response.reconciled === true;
             } catch (error) {
               if (isRunnerRequestNotSentError(error)) {
-                this.db.recordGithubIssueClosureResult(decision.occurrenceId, beforeRead);
-                continue;
+                const waitingSince = beforeRead.reconciliationWaitingSince ?? Date.now();
+                if (Date.now() - waitingSince < 5 * 60_000) {
+                  this.db.recordGithubIssueClosureResult(decision.occurrenceId, { ...beforeRead, reconciliationWaitingSince: waitingSince });
+                  continue;
+                }
               }
               // A dispatched unreadable forge is owner recovery, never proof of success.
             }
