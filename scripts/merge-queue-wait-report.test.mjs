@@ -238,14 +238,14 @@ test("a skipped merge-group gate leaves every disabled-gate measurement byte-for
       assert.deepEqual(withGate.metrics, without.metrics, `shape ${index} attempt metrics`);
     }
   }
-  // Baseline output includes the new timing-quality classification and recomputed metrics.
+  // Baseline output includes timing quality, recomputed metrics and aggregation diagnosis.
   const outputs = [];
   return Promise.all([["--json"], []].map(async (flags) => {
     const lines = [];
     assert.equal(await main(["--input", "docs/ci-baseline-2026-10-22.json", ...flags], { out: (line) => lines.push(line) }), 0);
     outputs.push(createHash("sha256").update(lines.join("\n") + "\n").digest("hex"));
-  })).then(() => assert.deepEqual(outputs.sort(), ["27d81a4d3d3e0490cfaab975e12c3a12c0894e2a803bc95aa3ef21c5ac4823cd",
-    "af5e44ba4326b763905dfc1d34ab9a47bc66c418c42f20e6b95c723bb27cd994"].sort()));
+  })).then(() => assert.deepEqual(outputs.sort(), ["dcb84f4cf551dcef5de8dfc429c52a28695880442b1a2092ef6ace7234858d82",
+    "df68c609335127194de1196e284659de83074a483e20164550012c4a5d66165e"].sort()));
 });
 
 test("the assumed dependency structure matches the CI workflow files", () => {

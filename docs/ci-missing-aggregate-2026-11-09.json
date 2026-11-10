@@ -1,0 +1,252 @@
+{
+  "repository": "picoduck/wollipog",
+  "run": {
+    "check_suite_id": 115572303054,
+    "conclusion": "failure",
+    "created_at": "2026-11-09T18:06:28Z",
+    "event": "merge_group",
+    "head_branch": "gh-readonly-queue/main/pr-4409-f4e424a55bccb7f75228a7c91551e7139a33410e",
+    "head_sha": "36dc6a362edea7ffee8ab0de8e07515d3a2e825a",
+    "id": 42671030052,
+    "path": ".github/workflows/ci.yml",
+    "run_attempt": 1,
+    "run_started_at": "2026-11-09T18:06:28Z",
+    "status": "completed",
+    "updated_at": "2026-11-09T18:27:21Z",
+    "workflow_id": 333881967
+  },
+  "jobsTotalCount": 20,
+  "jobs": [
+    {
+      "id": 129347214239,
+      "run_id": 42671030052,
+      "name": "Suite Selection Shadow (Advisory)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:30Z",
+      "completed_at": "2026-11-09T18:06:41Z"
+    },
+    {
+      "id": 129347214635,
+      "run_id": 42671030052,
+      "name": "WebKit End-to-End Tests",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:30Z",
+      "completed_at": "2026-11-09T18:08:16Z"
+    },
+    {
+      "id": 129347214987,
+      "run_id": 42671030052,
+      "name": "Unit Tests (1)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:31Z",
+      "completed_at": "2026-11-09T18:23:54Z"
+    },
+    {
+      "id": 129347215045,
+      "run_id": 42671030052,
+      "name": "Delegated Pipeline Recovery",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:31Z",
+      "completed_at": "2026-11-09T18:07:32Z"
+    },
+    {
+      "id": 129347215064,
+      "run_id": 42671030052,
+      "name": "Unit Tests (3)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:30Z",
+      "completed_at": "2026-11-09T18:19:40Z"
+    },
+    {
+      "id": 129347215100,
+      "run_id": 42671030052,
+      "name": "Browser End-to-End Tests (6)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:31Z",
+      "completed_at": "2026-11-09T18:25:45Z"
+    },
+    {
+      "id": 129347215101,
+      "run_id": 42671030052,
+      "name": "Unit Tests (2)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:30Z",
+      "completed_at": "2026-11-09T18:15:52Z"
+    },
+    {
+      "id": 129347215119,
+      "run_id": 42671030052,
+      "name": "Settings-Rows win32 Baselines / Detect Settings-Rows Changes",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:31Z",
+      "completed_at": "2026-11-09T18:06:40Z"
+    },
+    {
+      "id": 129347215174,
+      "run_id": 42671030052,
+      "name": "Browser End-to-End Tests (4)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:31Z",
+      "completed_at": "2026-11-09T18:25:48Z"
+    },
+    {
+      "id": 129347215176,
+      "run_id": 42671030052,
+      "name": "Browser End-to-End Tests (3)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:31Z",
+      "completed_at": "2026-11-09T18:19:30Z"
+    },
+    {
+      "id": 129347215181,
+      "run_id": 42671030052,
+      "name": "Browser End-to-End Tests (8)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:31Z",
+      "completed_at": "2026-11-09T18:25:02Z"
+    },
+    {
+      "id": 129347215202,
+      "run_id": 42671030052,
+      "name": "Browser End-to-End Tests (9)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:31Z",
+      "completed_at": "2026-11-09T18:26:29Z"
+    },
+    {
+      "id": 129347215229,
+      "run_id": 42671030052,
+      "name": "Browser End-to-End Tests (7)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:30Z",
+      "completed_at": "2026-11-09T18:18:43Z"
+    },
+    {
+      "id": 129347215261,
+      "run_id": 42671030052,
+      "name": "Browser End-to-End Tests (2)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:31Z",
+      "completed_at": "2026-11-09T18:18:25Z"
+    },
+    {
+      "id": 129347215315,
+      "run_id": 42671030052,
+      "name": "Browser End-to-End Tests (10)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:31Z",
+      "completed_at": "2026-11-09T18:24:50Z"
+    },
+    {
+      "id": 129347215339,
+      "run_id": 42671030052,
+      "name": "Browser End-to-End Tests (5)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:30Z",
+      "completed_at": "2026-11-09T18:18:48Z"
+    },
+    {
+      "id": 129347215541,
+      "run_id": 42671030052,
+      "name": "Browser End-to-End Tests (1)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:31Z",
+      "completed_at": "2026-11-09T18:19:13Z"
+    },
+    {
+      "id": 129347216549,
+      "run_id": 42671030052,
+      "name": "Typecheck & Bundles",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:31Z",
+      "completed_at": "2026-11-09T18:09:34Z"
+    },
+    {
+      "id": 129347216823,
+      "run_id": 42671030052,
+      "name": "PR Suite Routing",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:29Z",
+      "completed_at": "2026-11-09T18:06:29Z"
+    },
+    {
+      "id": 129347217107,
+      "run_id": 42671030052,
+      "name": "Merge Group Gate",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-09T18:06:29Z",
+      "started_at": "2026-11-09T18:06:29Z",
+      "completed_at": "2026-11-09T18:06:29Z"
+    }
+  ],
+  "workflowBlobSha": "8e659c50499b2c34c71534a402911aab833ebd87",
+  "workflowAnnotation": {
+    "source": "https://github.com/picoduck/wollipog/actions/runs/42671030052",
+    "level": "error",
+    "message": "Internal server error.",
+    "correlationId": "3072fa72-f54a-44ea-b9ee-b77c8e1b83e9",
+    "scope": "workflow; omitted from job/check-run annotations and gh run view"
+  },
+  "overlappingGitHubIncident": {
+    "url": "https://www.githubstatus.com/incidents/tp8cghg7tlc4",
+    "name": "Incident with Actions and Checks API",
+    "createdAt": "2026-11-09T18:12:37.242Z",
+    "resolvedAt": "2026-11-09T18:59:32.565Z",
+    "relationship": "Temporal overlap only; no verified correlation-ID linkage"
+  },
+  "checkSuite": {
+    "id": 115572303054,
+    "status": "completed",
+    "conclusion": "failure",
+    "latestCheckRunsCount": 20
+  },
+  "comparison": {
+    "runId": 42678692594,
+    "attempt": 1,
+    "event": "merge_group",
+    "sha": "4b991314dc3de212f765a128b6f087b5f984d7bd",
+    "conclusion": "success",
+    "workflowBlobSha": "8e659c50499b2c34c71534a402911aab833ebd87",
+    "aggregateJobId": 129378043749,
+    "aggregateConclusion": "success"
+  }
+}

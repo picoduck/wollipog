@@ -284,6 +284,61 @@ both concluded `cancelled`; its replacement started without manual cancellation.
 That is one observed check-conclusion outcome, not proof of every queued,
 same-head replacement, dependency-timeout, or cancellation interleaving.
 
+## Missing Required Aggregate
+
+**Means:** a completed CI attempt has no protected aggregate record, or the API evidence is incomplete.
+**First check:** collect the exact attempt's full job inventory, compare its check suite, and open the workflow run page's Annotations section.
+**Escalate to:** a repository operator, then GitHub Support for workflow-level internal errors or unexplained absence.
+
+Use the version-2 report (`--all-events --json`) when investigating presence and outcome.
+Its per-attempt `aggregation` field is independent of timestamps: `absent` means a terminal
+run with a complete inventory but no job of the protected name; `pending` distinguishes
+`not-created` on an active run from a recorded `job-waiting`. `running`, `passing`,
+`failing`, `cancelled` and `skipped` describe the recorded job. Incomplete listings,
+duplicate aggregate records, and unsupported statuses are `unmeasured`.
+Older exports can be recombined offline with `--input` to derive the field from retained metadata.
+Missing timing is not missing aggregation; the legacy `aggregatorNeverRan` timing counter
+alone cannot distinguish these cases. These reports are advisory and grant no merge authority.
+Absence describes the API records, not whether the job should have been admitted; check event
+and draft guards before treating an absent record as an incident.
+
+For an exact incident, substitute the public repository, numeric run/attempt and check-suite IDs:
+
+```sh
+gh api repos/OWNER/REPO/actions/runs/RUN/attempts/ATTEMPT
+gh api --paginate 'repos/OWNER/REPO/actions/runs/RUN/attempts/ATTEMPT/jobs?per_page=100'
+gh api repos/OWNER/REPO/check-suites/SUITE
+gh api --paginate 'repos/OWNER/REPO/check-suites/SUITE/check-runs?per_page=100'
+gh api --paginate 'repos/OWNER/REPO/check-runs/CHECK/annotations?per_page=100'
+gh api 'repos/OWNER/REPO/contents/.github/workflows/ci.yml?ref=TESTED_SHA'
+gh run view RUN --attempt ATTEMPT --repo OWNER/REPO
+```
+
+Retain run ID, attempt, event, tested SHA, workflow blob, conclusions, counts and queue-removal
+reason/time. Verify all pages and uniqueness against `total_count`; do not call a truncated
+listing absent. Check that the suite is for the same tested SHA. The check-suite endpoint lists
+current check records, so do not use it to attribute a historical attempt after reruns; correlate
+job IDs to the exact attempt. Inspect output/annotations on relevant checks and the run page
+for orchestration errors. The run page is a separate evidence source: workflow-level errors may
+be omitted from the jobs/check-run annotations APIs and from `gh run view`. In the November 9
+incident, only that page exposed GitHub's internal server error and correlation ID. Retain that
+ID for support; do not treat successful job annotations as proof that no workflow error exists.
+Sanitize before sharing; raw responses may contain runner and user identities.
+
+A recorded queue wait is a scheduling investigation under #2674; a failing work job needs its
+failure investigated first. A completed run without an aggregate cannot gain one by waiting.
+For a workflow internal server error or unexplained missing job, preserve the public run links,
+error/correlation ID when present, and workflow comparison for an operator to escalate to GitHub
+Support. A successful identical definition alone does not prove a GitHub outage; a reported internal
+error identifies a failure class without revealing its internal cause. See the
+[November 9 incident](ci-missing-aggregate-2026-11-09.md).
+
+Recovery requires the existing gates: recheck main health, PR head, review and required branch checks;
+obtain the applicable merge authorization before re-enqueueing after removal. A rerun also needs the
+normal operator authorization. Do not automatically retry, synthesize a passing status, bypass the queue,
+remove a required check, or expand timeout/capacity. Verify actual merge separately. Report diagnostic
+coverage separately from whether GitHub's underlying failure has been resolved.
+
 ## Safe Verification
 
 Run the dedicated source contract and aggregation fixtures:
