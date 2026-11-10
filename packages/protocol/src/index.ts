@@ -12467,6 +12467,10 @@ export interface GitPrSummary {
   /** Additive forge identity. Missing means a pre-v106 GitHub summary. */
   provider?: ForgeProvider;
   kind?: ForgeChangeRequestKind;
+  /** Read-only context; absent on older runners. */
+  baseRef?: string;
+  headRef?: string;
+  mergeability?: string;
 }
 
 /** Check rollup for that PR (CheckRuns + commit StatusContexts combined). */
@@ -12476,6 +12480,10 @@ export interface GitChecksSummary {
   passing: number;
   /** Names of the failing checks (bounded) — feeds the "Fix" prompt. */
   failingNames: string[];
+  /** Bounded named checks using the rollup's latest-run selection. */
+  jobs?: { name: string; state: "passing" | "failing" | "pending"; url: string | null }[];
+  /** Named checks are unavailable or only a bounded subset was read. */
+  jobsIncomplete?: boolean;
   /** The PR's checks tab, when the PR is known. */
   url: string | null;
 }

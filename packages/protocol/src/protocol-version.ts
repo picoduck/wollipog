@@ -1395,6 +1395,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   //      runner keeps reporting Claude usage from session responses alone.
   342,
   // v343 slot
+  // 343: Read-only forge summaries include base/head, mergeability and named CI checks (#1270).
+  343,
   // v344 slot
   // 344: Approved PR merge decision reads and resolution prompts expose the canonical action (#4242).
   344,

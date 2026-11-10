@@ -1,5 +1,29 @@
 import { expect, test } from "@playwright/test";
 
+test("MR context and named checks stay beside the existing thread bundle pipeline (#1270)", async ({ page }) => {
+  await page.goto("/forge-review-e2e.html?request=1&theme=dark");
+  const request = page.getByRole("group", { name: "Merge Request", exact: true });
+  await expect(request).toContainText("Base");
+  await expect(request).toContainText("release");
+  await expect(request).toContainText("feature/gitlab");
+  await expect(request.locator("summary")).toHaveText("Checks (Pipeline Failing)");
+  await request.locator("summary").click();
+  await expect(request.getByRole("link", { name: "unit", exact: true })).toHaveAttribute("href", /\/jobs\/11$/);
+  await expect(request).toContainText("unit — Failing");
+  await expect(request).toContainText("typecheck — Passing");
+  if (process.env.CAPTURE_1270) await page.screenshot({ path: "/tmp/1270-desktop-dark.png", fullPage: true });
+  await page.getByRole("checkbox", { name: "Select Finding on src/gitlab.ts Line 42" }).check();
+  await page.getByRole("button", { name: "Send to Agent", exact: true }).click();
+  await expect(page.getByText("Sent 1 finding to Codex App Server.", { exact: true })).toBeVisible();
+  if (process.env.CAPTURE_1270) {
+    await page.screenshot({ path: "/tmp/1270-bundled-dark.png", fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/forge-review-e2e.html?request=1&theme=light");
+    await page.getByRole("group", { name: "Merge Request", exact: true }).locator("summary").click();
+    await page.screenshot({ path: "/tmp/1270-mobile-light.png", fullPage: true });
+  }
+});
+
 test("GitLab review surfaces use merge-request terminology and provenance", async ({ page }) => {
   await page.goto("/forge-review-e2e.html?theme=dark");
   const commitBar = page.getByRole("region", { name: "Commit" });

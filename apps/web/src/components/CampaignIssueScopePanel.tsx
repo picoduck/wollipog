@@ -128,7 +128,7 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision, b
     const names = repositories.map((entry) => entry.repository.toLowerCase());
     const result = new Map<string, { repository: string; number: number }>();
     for (const ref of text.split(/[\s,]+/u).filter(Boolean)) {
-      const match = /^([\w.-]+\/[\w.-]+)#([1-9][0-9]*)$/u.exec(ref);
+      const match = /^([\w.-]+(?:\/[\w.-]+)+)#([1-9][0-9]*)$/u.exec(ref);
       if (!match || !Number.isSafeInteger(Number(match[2])) || !names.includes(match[1]!.toLowerCase())) {
         throw new Error(grouped ? `Use repository-qualified issues from this campaign's repositories (${names.join(", ")}), such as ${view?.repository}#123.`
           : `Use repository-qualified issues from ${view?.repository}, such as ${view?.repository}#123.`);
