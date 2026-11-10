@@ -4902,7 +4902,79 @@ test("a limit the check can't confirm goes to the owner, whose approval applies 
   } finally { await c.server.close(); c.f.db.close(); }
 });
 
-test("a message naming a repository with no limit proposed always reaches the check, and a limit left out goes to the owner (#4117)", async () => {
+test("exact owner-named repository scope needs no model and keeps later work inside the limit (#4402)", async () => {
+  const messages = ["Fix #12 and #13 in owner/repo.",
+    "Use the orchestrate-issues skill to fix #4398, #4399, #4400, #4401, #4402, #4403, #4404 and #4405 in owner/repo."];
+  for (const message of messages) {
+    const c = await threeRepositoryProposals(message);
+    try {
+      const numbers = [...message.matchAll(/#(\d+)/gu)].map((match) => Number(match[1]));
+      const proposed = await c.propose(numbers.map((number) => named(number)));
+      assert.equal(proposed.ok, true, proposed.error ?? "");
+      assert.equal(proposed.data!.authority, "orchestrator");
+      const record = (proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+      assert.deepEqual(record.repositoryConstraints, [{ name: "owner/repo", repository: "owner/repo" }]);
+      assert.equal(record.repositoryLimitVerified, true);
+      assert.deepEqual(record.checks, []);
+      assert.equal(c.f.decision.checkCalls.length, 0);
+      assert.equal(c.ownerRequests().length, 0);
+      assert.equal(c.apply(proposed.data!.occurrenceId).ok, true);
+      assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo"]);
+      assert.deepEqual((await c.propose([otherNamed(60)])).errorDetails, { code: "repository_outside_boundary", repository: "other/repo" });
+    } finally { await c.server.close(); c.f.db.close(); }
+  }
+});
+
+test("exact repository proof retains other constraint checks and lists the repository for completeness (#4402)", async () => {
+  const c = await threeRepositoryProposals("Fix #12 and #13 in owner/repo. Only open bugs; do not merge.");
+  try {
+    c.f.decision.state.check = (message) => {
+      assert.match(JSON.stringify(message), /repositoryConstraints/u);
+      assert.doesNotMatch(JSON.stringify(message), /repository_limit__/u);
+      return scopeCheckAnswer(message);
+    };
+    const proposed = await c.propose([named(12), named(13)], { constraints: ["Only open bugs"], withheldOperations: ["pr_merge"] });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "orchestrator");
+    const record = (proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+    assert.deepEqual(record.checks, ["constraints", "withheld_operations"]);
+    assert.equal(record.repositoryLimitVerified, true);
+    assert.equal(c.f.decision.checkCalls.length, 1);
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
+test("trailing restrictions and counts cannot disappear behind the repository fast path (#4402)", async () => {
+  const c = await threeRepositoryProposals("Fix #12 and #13 in owner/repo. These two issues must be open; do not merge.");
+  try {
+    c.f.decision.state.check = (message) => scopeCheckAnswer(message, (question) => question === "constraints_complete"
+      ? { value: "missing_constraint" } : undefined);
+    const proposed = await c.propose([named(12), named(13)], { requestedCount: 2 });
+    assert.equal(proposed.ok, false);
+    assert.equal(proposed.errorDetails?.code, "constraint_check_refused");
+    assert.equal(c.f.decision.checkCalls.length, 1);
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
+test("ambiguous and incomplete owner-named repository requests keep the check (#4402)", async () => {
+  for (const [message, issues] of [
+    ["Fix #12 and #13 in owner/repo.", [named(12)]],
+    ["Fix #12 not in owner/repo.", [named(12)]],
+    ["Fix #12 in owner/repo. Also consider third/repo.", [named(12)]],
+    ["Fix #12 in owner/repo. Also other/repo#40.", [named(12), otherNamed(40)]],
+  ] as const) {
+    const c = await threeRepositoryProposals(message);
+    try {
+      c.f.decision.state.check = (message) => scopeCheckAnswer(message, (question) => question === "repository_limits_complete" ? { value: "cannot_tell" } : undefined);
+      const proposed = await c.propose([...issues]);
+      assert.equal(proposed.ok, true, proposed.error ?? "");
+      assert.equal((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.repositoryLimitVerified, undefined);
+      assert.equal(c.f.decision.checkCalls.length, 1);
+      assert.equal(proposed.data!.authority, "human");
+    } finally { await c.server.close(); c.f.db.close(); }
+  }
+});
+
+test("an ambiguous repository mention with no limit proposed reaches the check (#4117)", async () => {
   const c = await threeRepositoryProposals("Fix #12, in r2 c's sibling only if it reads the same; stay in Fixture Repo.");
   const { f } = c;
   try {

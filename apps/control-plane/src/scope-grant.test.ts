@@ -7,11 +7,26 @@ import { test } from "node:test";
 import type { CampaignAuthorityBoundary } from "@wollipog/protocol";
 import { DECISION_KINDS, decisionOutputSchema, renderDecisionInput, validateDecisionOutput } from "./decision-kinds.js";
 import {
-  boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, messageNamesRepository, onlyOtherRepositories, repositoryNameInMessage, resolveGrantRepository, resolveRepositoryName,
+  boundaryRepositories, exactNamedRepositoryLimit, grantOperations, grantReviewMaxIssues, grantSelection, messageNamesRepository, onlyOtherRepositories, repositoryNameInMessage, resolveGrantRepository, resolveRepositoryName,
   scopeGrantCandidates, writtenAsCount, writtenAsDigits, writtenAsRange, writtenForRepository, type ScopeGrantFields,
 } from "./scope-grant.js";
 import { issueReferencesAcrossRepositories } from "./campaign-launch-admission.js";
 import { EMPTY_GRANT, issues } from "./scope-grant-test-fixture.js";
+
+test("the campaign launch request proves only its named repository, never another limit (#4402)", () => {
+  const message = "Use the orchestrate-issues skill to fix #4398, #4399, #4400, #4401, #4402, #4403, #4404 and #4405 in picoduck/wollipog. Each issue specifies its behavior and acceptance criteria. Follow them, say so in each PR, and close each issue only after verifying every criterion against merged main.";
+  const entries = [{ repository: "picoduck/wollipog" }, { repository: "misko19/dev-box-setup" }];
+  const refs = Array.from({ length: 8 }, (_, i) => ({ repository: entries[0]!.repository, number: 4398 + i }));
+  const proposed = refs.map((ref) => ({ ...ref, origin: "owner_named" }));
+  assert.equal(exactNamedRepositoryLimit(message, entries, proposed, refs), "picoduck/wollipog");
+  for (const changed of [message.replace(" in picoduck", " not in picoduck"), message + " Also misko19/dev-box-setup.",
+    message + " But not in picoduck/wollipog.", message.replace("to fix", "to discuss")]) {
+    assert.equal(exactNamedRepositoryLimit(changed, entries, proposed, refs), null, changed);
+  }
+  assert.equal(exactNamedRepositoryLimit(message, entries, proposed.slice(1), refs), null);
+  assert.equal(exactNamedRepositoryLimit(message, entries, [...proposed, { repository: entries[1]!.repository, number: 1, origin: "owner_named" }], refs), null);
+  assert.equal(exactNamedRepositoryLimit(message, entries, proposed, [...refs, { repository: entries[1]!.repository, number: 1 }]), null);
+});
 
 const BOUNDARY = { repository: "Owner/Repo" };
 const fields = (overrides: Partial<ScopeGrantFields>): ScopeGrantFields => ({ ...EMPTY_GRANT, ...overrides });

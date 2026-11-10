@@ -20,6 +20,20 @@ test("v308 adds structured scope proposals (#4282)", () => {
   assert.equal(runnerSupportsProtocol(308, "campaignScopeProposals"), true);
 });
 
+test("only server-derived exact owner-named limits may omit the repository judgment (#4402)", () => {
+  const record = { initial: true, messageDigest: "a".repeat(64), issues: [{ number: 12, origin: "owner_named", rationale: "r", title: "" }],
+    requestedCount: null, constraints: [], withheldOperations: [], checks: [], route: "admitted",
+    repositoryConstraints: [{ name: "owner/repo", repository: "owner/repo" }], repositoryLimitVerified: true };
+  assert.equal(validScopeProposal(record), true);
+  for (const extra of [{ initial: false }, { repositoryLimitVerified: false }, { repositoryConstraints: [] },
+    { repositoryConstraints: [{ name: "repo", repository: null }] }, { issues: [{ ...record.issues[0], origin: "orchestrator_chosen" }] }]) {
+    assert.equal(validScopeProposal({ ...record, ...extra }), false);
+  }
+  assert.match(normalizeScopeProposalInput(input({ repositoryLimitVerified: true }), additions) as string, /unknown field/u);
+  assert.equal(runnerSupportsProtocol(345, "exactNamedRepositoryScope"), false);
+  assert.equal(runnerSupportsProtocol(346, "exactNamedRepositoryScope"), true);
+});
+
 test("a proposal must list exactly its additions, each once, with an origin and a rationale; text is only trimmed (#4282)", () => {
   const normalized = normalizeScopeProposalInput(input(), additions);
   assert.notEqual(typeof normalized, "string");
