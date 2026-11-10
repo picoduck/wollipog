@@ -2388,7 +2388,7 @@ const DELEGATED_IMAGE_REVIEW = Symbol("server-created image reviewer");
 const PREPARED_MEDIA_CAPTURE = Symbol("private prepared media Session capture");
 /** Why a gate refuses a repository left out for a runner's version (#4319), and, when the refusal is
  * an unread Location's rather than a named repository's, that Location's name. */
-type ExcludedRepositoryDetail = { sentence: string; unread: string | null };
+type ExcludedRepositoryDetail = { sentence: string; unread: string | null; unreadOld?: string; unreadMissing?: string };
 type PreparedMediaCapture = { identity: PreparedMediaIdentity; subject: PreparedMediaSubject; decision: WorkflowDecisionView; operatorValidation?: OperatorVideoValidationPurpose; command: Extract<DurableSessionCommand, { type: "start_session" }> | null };
 
 export class SessionsService {
@@ -11783,8 +11783,11 @@ export class SessionsService {
       // An unread Location's refusal ends by a read or its removal, not by a join (#4319).
       if (refusal) return `${refusal.sentence} Command tools are blocked while this session's armed merge can't run, since it must not. If it already ran, reconcile it. ` +
         (refusal.unread
-          ? `Otherwise this lifts when the runner of ${refusal.unread} is updated and restarted and a read names another repository, ` +
-            "or succeeds once it is on that version, which revokes the armed merge once no such Location is left " +
+          // What each needs, as the refusal says: an old runner its update, a current one's missing folder
+          // its folder (Orchestrator's read of 0e33a01).
+          ? `Otherwise this lifts when ${[refusal.unreadOld ? `the runner of ${refusal.unreadOld} is updated and restarted` : "",
+            refusal.unreadMissing ? `the folder of ${refusal.unreadMissing} is restored and its runner restarted` : ""].filter(Boolean).join(", or ")} ` +
+            `and a read names another repository, or succeeds${refusal.unreadOld ? " once it is on that version" : ""}, which revokes the armed merge once no such Location is left ` +
             "(a read that names this repository leaves it refused by name); " +
             `when ${refusal.unread} is removed from the Project, which revokes it too; `
           // The way in is the refusal's own, which knows a first-message limit (#4319).
@@ -12715,6 +12718,8 @@ export class SessionsService {
     const byConsent = new Set(root.orchestratorPolicy?.unreadByConsent ?? []);
     const consented = root.orchestratorPolicy?.control?.mode === "full_control" ? unnamed.filter((item) => byConsent.has(item.locationId) &&
       (!owner || this.db.projectLocationAddedBy(item.locationId) !== owner)).map((item) => item.name) : [];
+    const occupied = [...new Set(this.db.unreadLocationsOccupied(unnamed.map((item) => item.locationId))
+      .filter((item) => item.rootId === root.id).map((item) => item.name))];
     return { sentence: `${named} can't be acted on while ${old.length ? `the runner of ${names} can't perform this campaign's gates` : `${names} can't be read`} ` +
       "and no read has named the repository it holds, which may be this one. " +
       (old.length ? `Update and restart that runner to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer so it can be read, or remove that Location from the Project. ` : "") +
@@ -12724,7 +12729,10 @@ export class SessionsService {
       `A read that names another repository, or one that succeeds${old.length ? " once it is on that version" : ""}, lifts this once no such Location is left; ` +
       "one that names this repository leaves it refused by name. " +
       (consented.length ? `A revoke of Full Control also lifts this for ${consented.join(", ")}, since it counts only by the consent that revoke withdraws. ` : "") +
-      "Until then no other login stands in, and nothing was performed.", unread: names };
+      // Removal is refused while a session of this campaign runs on it, so a read can still end this.
+      (occupied.length ? `${occupied.join(", ")} can be removed once no session of this campaign runs there. ` : "") +
+      "Until then no other login stands in, and nothing was performed.", unread: names,
+      ...(old.length ? { unreadOld: old.join(", ") } : {}), ...(missing.length ? { unreadMissing: missing.join(", ") } : {}) };
   }
 
   /** What actually brings a refused repository in (#4319), so the refusal never promises a join that

@@ -9871,6 +9871,124 @@ test("a malformed element in another campaign's records doesn't break finding th
   } finally { await c.server.close(); f.db.close(); }
 });
 
+/** A Custom root on an old runner whose own Location couldn't be read at creation: it is recorded
+ * unread, and `readable(true)` lets its next read succeed. */
+async function customOwnUnread(f: ReturnType<typeof fixture>) {
+  const root = f.db.getRunner("r")!;
+  f.db.registerRunner({ runnerId: "r", hostname: "r", os: "linux", version: "test", agents: root.agents, runtime: root.runtime, workspaces: root.workspaces },
+    Date.now(), CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+  const answers = f.state.inspect;
+  let ownReadable = false;
+  f.state.inspect = (message) => message.workspacePath === "/fixture/repository" && !ownReadable
+    ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: true, repository: "owner/repo",
+      issueNumbers: message.issueNumbers, digest: "not-a-digest" }
+    : answers(message);
+  const project = f.db.createProject({ name: "Custom Own Unread", scope: f.scope });
+  const launchLocation = f.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w", addedByUserId: f.human.userId });
+  const created = f.sessions.createSession({ ...request, projectId: project.id, projectLocationId: launchLocation.id }, undefined, f.scope);
+  assert.ok(created.ok && created.data, created.error ?? "created");
+  const id = created.data.id;
+  const policy = () => f.db.getSession(id)!.orchestratorPolicy!;
+  for (let attempt = 0; attempt < 200 && !policy().unreadLocations; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(policy().unreadLocations?.map((item) => item.locationId), [launchLocation.id]);
+  f.db.raw().prepare("UPDATE sessions SET parent_control_policy=? WHERE id=?").run(JSON.stringify({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY }), id);
+  const child = childAt(f, id, "r", "w");
+  const locations = new CampaignLocations({ db: f.db, hub: f.hub, synchronize: () => { throw new Error("a Custom list has no boundary to synchronize"); },
+    settle: (before, revoked, owner, now) => f.sessions.settleCampaignBoundaryChange(before, revoked, owner, now),
+    reestablish: (rootId) => f.sessions.establishCustomCampaignRepositories(rootId), log: { warn(message) { throw new Error(message); } } });
+  return { id, project, launchLocation, policy, child, locations, readable: (value: boolean) => { ownReadable = value; } };
+}
+const OWN_UNREAD = /elsewhere\/repo can't be acted on while the runner of Fixture Repo can't perform this campaign's gates and no read has named the repository it holds/u;
+
+test("a Custom root's own unread Location moved to another Project keeps its refusal while the root runs on it, until a read ends it (#4319, Orchestrator's read of 0e33a01, 1)", async () => {
+  const f = fixture();
+  try {
+    const c = await customOwnUnread(f);
+    await stillUnreadAs(f, c.child, "elsewhere/repo", OWN_UNREAD, "before the move");
+    const target = f.db.createProject({ name: "Moved Own", scope: f.scope });
+    f.db.moveProjectLocation(c.launchLocation.id, target.id, Date.now(), f.human.userId);
+    assert.equal(f.db.getSession(c.id)!.projectId, target.id, "the root moved with it");
+    assert.deepEqual(c.policy().unreadLocations?.map((item) => item.locationId), [c.launchLocation.id], "not released: the root runs on it");
+    await stillUnreadAs(f, c.child, "elsewhere/repo", OWN_UNREAD, "after the move");
+    // A read of its runner ends it, in the Project it is in now.
+    c.readable(true);
+    await c.locations.runnerReconnected("r");
+    assert.equal(c.policy().unreadLocations, undefined, "the read resolves it");
+    const allowed = await ask(f, c.child, publicationIn("elsewhere/repo"), "own-moved-read");
+    assert.equal(allowed.ok, true, allowed.error ?? "");
+  } finally { f.db.close(); }
+});
+
+test("a Custom root's own unread Location moved into a Project that already has that workspace carries its record to that Location (#4319, Orchestrator's read of 0e33a01, 1)", async () => {
+  const f = fixture();
+  try {
+    const c = await customOwnUnread(f);
+    const target = f.db.createProject({ name: "Already There", scope: f.scope });
+    const there = f.db.addProjectLocation(target.id, { runnerId: "r", workspaceId: "w", addedByUserId: f.human.userId });
+    f.db.moveProjectLocation(c.launchLocation.id, target.id, Date.now(), f.human.userId);
+    assert.equal(f.db.getProjectLocation(c.launchLocation.id), null, "folded into the target's own Location");
+    assert.equal(f.db.getSession(c.id)!.projectLocationId, there.id);
+    assert.deepEqual(c.policy().unreadLocations?.map((item) => item.locationId), [there.id], "the record follows the root");
+    await stillUnreadAs(f, c.child, "elsewhere/repo", /no read has named the repository it holds/u, "after the fold");
+  } finally { f.db.close(); }
+});
+
+test("an unread Location a campaign session runs on can't be removed, nor its Project deleted, so its refusal can still end by a read (#4319, Orchestrator's read of 0e33a01, 1)", async () => {
+  for (const sits of ["own Custom root", "Full Control member"] as const) {
+    const f = fixture();
+    let close = async () => {};
+    try {
+      let locationId: string;
+      let projectId: string;
+      let rootId: string;
+      let child: string;
+      if (sits === "own Custom root") {
+        const c = await customOwnUnread(f);
+        ({ id: rootId, child } = c);
+        locationId = c.launchLocation.id;
+        projectId = c.project.id;
+      } else {
+        const c = await launchedMultiRepositoryCampaign(f);
+        close = () => c.server.close();
+        registerBelow(f);
+        failBelowReads(f);
+        const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+        await c.locations.locationAdded(below.id, f.human);
+        rootId = c.rootId;
+        child = childAt(f, rootId, "below", "z");
+        locationId = below.id;
+        projectId = c.p.project.id;
+      }
+      assert.deepEqual(f.db.unreadLocationsOccupied([locationId]).map((item) => item.rootId), [rootId], `${sits}: occupied`);
+      assert.throws(() => f.db.removeProjectLocation(locationId), /can't be removed while a session of its campaign runs there/u, `${sits}: removal refused`);
+      assert.throws(() => f.db.deleteProject(projectId), /can't be removed while a session of its campaign runs there/u, `${sits}: deletion refused`);
+      assert.ok(f.db.getProjectLocation(locationId), `${sits}: nothing removed`);
+      const refused = await ask(f, child, publicationIn("elsewhere/repo"), `${sits}-still`);
+      assert.equal(refused.ok, false, `${sits}: still refused`);
+      assert.match(refused.error!, /can be removed once no session of this campaign runs there/u, `${sits}: the refusal says why removal waits`);
+    } finally { await close(); f.db.close(); }
+  }
+});
+
+test("the armed-merge hook asks for the folder, not an update, when an unread Location's runner is current and its folder is missing (#4319, Orchestrator's read of 0e33a01, 2)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.equal((await armMerge(f, m)).ok, true);
+    failBelowReads(f);
+    const below = f.db.addProjectLocation(m.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await m.locations.locationAdded(below.id, f.human);
+    registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    belowFolder(f);
+    await m.locations.runnerReconnected("below");
+    assert.equal(m.policy().excludedLocations!.find((item) => item.locationId === below.id)?.failure, "path_missing");
+    const hook = childHook(f, m.child, "missing-folder-hook").data;
+    assert.equal(hook?.decision, "deny");
+    assert.doesNotMatch(hook?.reason ?? "", /runner of below z is updated and restarted/u);
+    assert.match(hook?.reason ?? "", /Otherwise this lifts when the folder of below z is restored and its runner restarted and a read names another repository, or succeeds, which revokes the armed merge/u);
+  } finally { await m.server.close(); f.db.close(); }
+});
+
 test("the unread retry settles what it revokes even when the campaign has no owning person (#4319, Orchestrator's read of 5c6f47d, 3)", async () => {
   const f = fixture();
   const c = await launchedMultiRepositoryCampaign(f);

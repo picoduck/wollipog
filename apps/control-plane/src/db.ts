@@ -10216,8 +10216,10 @@ export class ControlPlaneDb {
         this.stmt("UPDATE project_locations SET added_by_user_id=? WHERE id=?").run(movedByUserId ?? null, locationId);
         this.forgetCampaignLocation(targetProjectId, locationId, now);
       }
-      // Moving it out of the Project ends its unread refusal there, as removing it does (#4319).
-      released = this.releaseUnreadLocation(counting, new Set([locationId]), now);
+      // Moving it out of the Project ends its unread refusal there, as removing it does, unless a session
+      // of that campaign runs on it (#4319).
+      released = this.releaseUnreadLocation(counting, new Set([locationId]), now,
+        { places: new Map([[locationId, { runnerId: location.runnerId, workspaceId: location.workspaceId }]]), ...(targetLocation ? { repointTo: targetLocation.id } : {}) });
     });
     this.settleReleasedUnread(released, settle);
     return targetLocation ? this.projectLocation(targetLocation.id) : this.projectLocation(locationId);
@@ -10278,6 +10280,37 @@ export class ControlPlaneDb {
       ELSE 0 END`).all(ids, ids) as Array<{ id: string }>).map(({ id }) => id);
   }
 
+  /** Whether the root, while live, or a running member of its campaign sits on this runner and
+   * workspace (#4319): that session acts on a runner whose repository no read has named. */
+  private unreadPlaceOccupied(rootId: string, place: { runnerId: string; workspaceId: string }): boolean {
+    return [rootId, ...this.campaignDescendantIds(rootId)].some((id) => {
+      const row = this.stmt("SELECT runner_id, workspace_id, archived, status FROM sessions WHERE id=?").get(id) as
+        { runner_id: string; workspace_id: string | null; archived: number; status: string } | undefined;
+      return Boolean(row && !row.archived && !["completed", "failed", "stopped"].includes(row.status) &&
+        row.runner_id === place.runnerId && row.workspace_id === place.workspaceId);
+    });
+  }
+
+  /** The unread Locations among these that a session of the campaign counting them runs on (#4319).
+   * Such a Location can't be removed, nor its Project deleted: with it gone nothing could read it, so
+   * its refusal could never end by a read. Stopping those sessions, or a read after its runner
+   * updates, clears the way. */
+  unreadLocationsOccupied(locationIds: readonly string[]): Array<{ rootId: string; locationId: string; name: string }> {
+    const ids = new Set(locationIds);
+    return this.campaignsCountingUnread(ids).flatMap((root) => this.unnamedBelowGatesLocations(root).flatMap((item) => {
+      const location = ids.has(item.locationId) ? this.getProjectLocation(item.locationId) : null;
+      return location && this.unreadPlaceOccupied(root.id, location) ? [{ rootId: root.id, locationId: item.locationId, name: item.name }] : [];
+    }));
+  }
+
+  private refuseOccupiedUnreadRemoval(locationIds: readonly string[]): void {
+    const occupied = this.unreadLocationsOccupied(locationIds);
+    if (occupied.length) {
+      throw new Error(`${[...new Set(occupied.map((item) => item.name))].join(", ")} can't be removed while a session of its campaign runs there: ` +
+        "no read has named the repository it holds, and with it gone nothing could. Stop those sessions, or update and restart its runner so it can be read, then try again.");
+    }
+  }
+
   /** Whether an unread Location stands for this root under `policy` (#4319). */
   private unreadStands(rootId: string, policy: OrchestratorCampaignPolicy | undefined): boolean {
     return this.unnamedBelowGatesLocations({ id: rootId, orchestratorPolicy: policy }).length > 0;
@@ -10321,10 +10354,23 @@ export class ControlPlaneDb {
    * record. Where none is left, the refusal ends with no read having named a repository, so what it
    * covered is revoked (`revokeUnreadCovered`). Call it once the Locations have left, so a removed one
    * no longer counts; a moved one is dropped from the record here. */
-  private releaseUnreadLocation(roots: readonly SessionView[], locationIds: ReadonlySet<string>, now: number): Array<{ root: SessionView; revoked: WorkflowDecisionView[] }> {
+  private releaseUnreadLocation(roots: readonly SessionView[], leaving: ReadonlySet<string>, now: number,
+    keep: { places: ReadonlyMap<string, { runnerId: string; workspaceId: string }>; repointTo?: string } = { places: new Map() }): Array<{ root: SessionView; revoked: WorkflowDecisionView[] }> {
     return roots.map((root) => {
       const policy = this.sessionOrchestratorPolicy(root.id);
       if (!policy) return { root, revoked: [] };
+      // One the root or a running member sits on isn't released (Orchestrator's read of 0e33a01): that
+      // runner still can't perform the gates, and only its read ends the refusal. A move that folds it
+      // into the target's own Location of the same workspace carries the record over to that Location.
+      const occupied = new Set([...leaving].filter((id) => { const place = keep.places.get(id); return Boolean(place && this.unreadPlaceOccupied(root.id, place)); }));
+      const locationIds = new Set([...leaving].filter((id) => !occupied.has(id)));
+      if (keep.repointTo && occupied.size) {
+        const to = keep.repointTo;
+        // An earlier control plane's exclusion is already in the record: startup writes it there.
+        policy.unreadLocations = (policy.unreadLocations ?? []).map((item) => occupied.has(item.locationId) ? { ...item, locationId: to } : item)
+          .filter((item, index, all) => all.findIndex((other) => other.locationId === item.locationId) === index);
+        if (policy.unreadByConsent) policy.unreadByConsent = [...new Set(policy.unreadByConsent.map((id) => occupied.has(id) ? to : id))];
+      }
       const entries = this.campaignEntryRepositories(policy);
       const unread = (policy.unreadLocations ?? []).filter((item) => !locationIds.has(item.locationId));
       if (unread.length) policy.unreadLocations = unread; else delete policy.unreadLocations;
@@ -10347,6 +10393,7 @@ export class ControlPlaneDb {
   removeProjectLocation(locationId: string, now = Date.now(), settle?: UnreadReleaseSettle): ProjectLocationView | null {
     const location = this.projectLocation(locationId);
     if (!location) return null;
+    this.refuseOccupiedUnreadRemoval([locationId]);
     const counting = this.campaignsCountingUnread(new Set([locationId]));
     let released: Array<{ root: SessionView; revoked: WorkflowDecisionView[] }> = [];
     this.atomic(() => {
@@ -10561,6 +10608,7 @@ export class ControlPlaneDb {
       unknown as Array<{ id: string }>).map((row) => row.id);
     // Every Location of the Project leaves with it, active or detached (#4319).
     const leaving = new Set((this.stmt("SELECT id FROM project_locations WHERE project_id=? AND removed_at IS NULL").all(projectId) as Array<{ id: string }>).map((row) => row.id));
+    this.refuseOccupiedUnreadRemoval([...leaving]);
     const counting = this.campaignsCountingUnread(leaving);
     let released: Array<{ root: SessionView; revoked: WorkflowDecisionView[] }> = [];
     this.atomic(() => {

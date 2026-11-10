@@ -2628,7 +2628,12 @@ app.delete("/api/projects/:id", async (req, reply) => {
   }
   // What deleting it ends of an unread Location's refusal leaves its pauses like any revocation, and
   // names who deleted it, whose action led to it (#4319, #3916).
-  const deleted = db.deleteProject(id, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
+  let deleted: ReturnType<typeof db.deleteProject>;
+  try {
+    deleted = db.deleteProject(id, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
+  } catch (error) {
+    return reply.code(409).send({ error: (error as Error).message });
+  }
   if (!deleted) return reply.code(404).send({ error: "project not found" });
   hub.projectRemoved(id);
   for (const sessionId of deleted.sessionIds) hub.sessionChangedById(sessionId);
@@ -2754,7 +2759,13 @@ app.delete("/api/projects/:id/locations/:locationId", async (req, reply) => {
   }
   // What removing it ends of an unread Location's refusal leaves its pauses like any revocation, and
   // names who removed it, whose action led to it (#4319, #3916).
-  db.removeProjectLocation(locationId, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
+  // A campaign session running on an unread Location keeps it in place, so a read can still end its
+  // refusal; the refusal says so (#4319).
+  try {
+    db.removeProjectLocation(locationId, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
+  } catch (error) {
+    return reply.code(409).send({ error: (error as Error).message });
+  }
   const project = db.getProject(id)!;
   hub.projectChanged(project);
   for (const session of db.listSessions({ includeArchived: true })) {
