@@ -1302,12 +1302,6 @@ CREATE TABLE IF NOT EXISTS session_system_notice_commands (
   command_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
 );
-CREATE TABLE IF NOT EXISTS session_prompt_report_boundaries (
-  command_id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  event_epoch INTEGER NOT NULL,
-  event_seq INTEGER NOT NULL
-);
 CREATE TABLE IF NOT EXISTS session_prompt_commands (
   command_id       TEXT PRIMARY KEY,
   session_id       TEXT NOT NULL,
@@ -22451,10 +22445,6 @@ export class ControlPlaneDb {
              WHERE delivered.session_id=target.session_id AND delivered.seq<target.seq
                AND delivered.kind='user_message'
                AND json_extract(delivered.payload, '$.commandId')=command.command_id)
-           AND NOT EXISTS (SELECT 1 FROM session_prompt_report_boundaries boundary
-             WHERE boundary.command_id=command.command_id AND boundary.session_id=target.session_id
-               AND boundary.event_epoch=(SELECT event_epoch FROM sessions WHERE id=target.session_id)
-               AND boundary.event_seq<target.seq)
        ) AND NOT EXISTS (
          SELECT 1 FROM campaign_work_attempts assignment
          WHERE assignment.session_id=target.session_id
@@ -23050,7 +23040,6 @@ export class ControlPlaneDb {
         this.campaignContinuationAuthorityDigest(input.campaignSessionId) ?? null,
         input.attemptCount, input.now, input.now, input.now,
       );
-      this.recordPromptReportBoundary(input.campaignSessionId, input.commandId);
       this.db.exec("COMMIT");
       return this.campaignContinuationForCommand(input.commandId);
     } catch (error) {
@@ -23213,9 +23202,6 @@ export class ControlPlaneDb {
                WHERE delivered.session_id=target.session_id AND delivered.seq<target.seq
                  AND delivered.kind='user_message'
                  AND json_extract(delivered.payload, '$.commandId')=command.command_id)
-             AND NOT EXISTS (SELECT 1 FROM session_prompt_report_boundaries boundary
-               WHERE boundary.command_id=command.command_id AND boundary.session_id=target.session_id
-                 AND boundary.event_epoch=child.event_epoch AND boundary.event_seq<target.seq)
          )
          AND NOT EXISTS (
            SELECT 1 FROM campaign_work_attempts assignment
@@ -28620,17 +28606,6 @@ export class ControlPlaneDb {
     };
   }
 
-  /** Server ordering, never CP/runner wall-clock comparison. Missing legacy/replaced-epoch
-   * provenance stays ambiguous. A retry updates the boundary before its possible delivery. */
-  private recordPromptReportBoundary(sessionId: string, commandId: string): void {
-    const boundary = this.campaignAttemptBoundary(sessionId);
-    if (boundary.eventEpoch === null) return;
-    this.stmt(`INSERT INTO session_prompt_report_boundaries (command_id,session_id,event_epoch,event_seq)
-      VALUES (?,?,?,?) ON CONFLICT(command_id) DO UPDATE SET
-        event_epoch=excluded.event_epoch,event_seq=excluded.event_seq WHERE session_id=excluded.session_id`)
-      .run(commandId, sessionId, boundary.eventEpoch, boundary.seq ?? 0);
-  }
-
   stageSessionPromptCommand(input: {
     commandId: string;
     sessionId: string;
@@ -28659,7 +28634,6 @@ export class ControlPlaneDb {
       input.commandId, input.sessionId, input.runnerId, input.payloadJson, input.payloadSha256,
       input.now, input.expiresAt, input.now, input.now,
     );
-    this.recordPromptReportBoundary(input.sessionId, input.commandId);
     if (input.systemNotice) this.stmt(
       "INSERT INTO session_system_notice_commands (command_id,session_id) VALUES (?,?)",
     ).run(input.commandId, input.sessionId);
@@ -28732,7 +28706,6 @@ export class ControlPlaneDb {
         commandId, input.sessionId, input.runnerId, input.payloadJson, input.payloadSha256,
         input.now, input.expiresAt, input.now, input.now,
       );
-      this.recordPromptReportBoundary(input.sessionId, commandId);
       const command = this.getSessionPromptCommand(commandId)!;
       dismissPredecessor();
       this.db.exec("COMMIT");
@@ -28816,7 +28789,6 @@ export class ControlPlaneDb {
              attempt_count=attempt_count+1,next_attempt_at=?,updated_at=?
          WHERE command_id=?`,
       ).run(nextAttemptAt, now, commandId);
-      this.recordPromptReportBoundary(row.session_id, commandId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");

@@ -1433,6 +1433,13 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       parent.id, grandchild.data.id, humanMerge.data.occurrenceId,
       { outcome: "approve" }, "human", { kind: "human", id: "owner" }, () => true,
     ).ok);
+    // This fixture acts on the approved resume before reporting. Model the runner's correlated
+    // user message too: transport send alone cannot prove queued work actually started (#4400).
+    const nestedResume = hub.sentOfType("durable_session_command").find((message) =>
+      message.command.type === "prompt_session" && message.command.sessionId === grandchild.data!.id);
+    assert.ok(nestedResume && nestedResume.command.type === "prompt_session");
+    db.appendEvent(grandchild.data.id, { kind: "user_message", text: nestedResume.command.text,
+      commandId: nestedResume.commandId }, Date.now());
     const humanMergeSnapshot = { ...mergeSnapshot, headSha: "b".repeat(40),
       requiredChecks: { ...mergeSnapshot.requiredChecks, headSha: "b".repeat(40) } };
     const humanMergeCommand = canonicalPrMergeEnqueueCommand(humanMergeSnapshot);

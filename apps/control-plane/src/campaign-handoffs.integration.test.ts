@@ -127,20 +127,21 @@ for (const createdAt of [99, 201]) for (const deliveredBeforeReport of [false, t
   } finally { h.db.close(); }
 });
 
-for (const ordering of ["earlier", "unknown", "retried_later"] as const) test(`uncertain command awaiting its receipt: ${ordering} (#4400)`, () => {
+for (const ordering of ["sent", "retried_later", "queued"] as const) test(`uncertain command awaiting its receipt: ${ordering} (#4400)`, () => {
   const h = fixture();
   try {
     h.db.stageSessionPromptCommand({ commandId: "receipt", sessionId: "child", runnerId: "r",
       payloadJson: "{}", payloadSha256: "test", now: 1000, expiresAt: Date.now() + 200_000 });
     h.db.markSessionPromptCommandSent("receipt", "first", 1001, Date.now() + 200_000);
+    if (ordering === "queued") h.db.recordSessionPromptCommandReceipt({ commandId: "receipt", sessionId: "child",
+      runnerId: "r", state: "queued", revision: 1, now: 1002 });
     const seq = h.report("child");
-    if (ordering === "unknown") h.db.raw().prepare("DELETE FROM session_prompt_report_boundaries WHERE command_id=?").run("receipt");
     if (ordering === "retried_later") h.db.markSessionPromptCommandSent("receipt", "retry", 1002, Date.now() + 200_000);
     h.db.updateSessionStatus("child", "idle", Date.now());
     assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: seq, followUpsAccounted: true }).ok);
     h.db.updateSessionStatus("child", "failed", Date.now());
-    assert.equal(h.db.durableFinalReportSeq("child"), ordering === "earlier" ? seq : null);
-    assert.equal(h.db.campaignChildReportVerified("root", "child"), ordering === "earlier");
+    assert.equal(h.db.durableFinalReportSeq("child"), null);
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
   } finally { h.db.close(); }
 });
 
