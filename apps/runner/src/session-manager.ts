@@ -597,6 +597,7 @@ function canCarrySlashCommandCatalog(
  * before emitting the corresponding runner receipt. */
 export interface DurableCommandLifecycle {
   readonly commandId: string;
+  readonly issueClosureResume?: true;
   queued(error?: string, code?: DurableSessionCommandErrorCode): void;
   started(userEventSeq?: number): void;
   beginSteering?(): boolean | void;
@@ -11862,6 +11863,12 @@ export class SessionManager {
       prompt.durable?.beginSteering && prompt.durable.steeringRejected);
   }
 
+  private isSteerableIssueClosureResume(entry: ActiveSession, prompt: QueuedPrompt | undefined): boolean {
+    const meta = this.store.readMeta(entry.sessionId);
+    return Boolean(meta && isOrchestratorLaunch(meta) && prompt?.durable?.issueClosureResume === true &&
+      prompt.durable.beginSteering && prompt.durable.steeringRejected);
+  }
+
   /** #4022: direct text from the child's controlling Orchestrator into a turn its control plane
    * started from the durable prompt outbox. The control plane proves the ancestry and names the
    * exact command; an automation's command id never matches, and the steering attempt keeps its
@@ -11879,7 +11886,7 @@ export class SessionManager {
     source: QueuedPrompt | undefined,
     request: SteeringRequest | undefined,
   ): boolean {
-    return Boolean(entry.currentDurable) && !this.isSteerableAsyncAnswer(source) &&
+    return Boolean(entry.currentDurable) && !this.isSteerableAsyncAnswer(source) && !this.isSteerableIssueClosureResume(entry, source) &&
       !this.isControllingOrchestratorSteer(entry, request);
   }
 
@@ -11951,7 +11958,7 @@ export class SessionManager {
       };
     }
     if (!prompt) return { eligible: true };
-    if ((prompt.durable && !this.isSteerableAsyncAnswer(prompt)) ||
+    if ((prompt.durable && !this.isSteerableAsyncAnswer(prompt) && !this.isSteerableIssueClosureResume(entry, prompt)) ||
         prompt.sessionCommand || (prompt.syntheticRecovery || prompt.providerRecovery)) {
       return {
         eligible: false,
@@ -21716,7 +21723,7 @@ export class SessionManager {
     const run = issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {});
     try {
       if (message.operation === "inspect") {
-        const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests, message.epicMembers === true);
+        const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests, message.epicMembers === true, message.campaignPullRequests);
         if (meta.orchestrator.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the authorized scope" };
         return { ...base, ok: true, inspection };
       }
@@ -21785,7 +21792,7 @@ export class SessionManager {
         reconciled: message.snapshot.repository.toLowerCase() === repository &&
           await reconcileGithubIssueClosure(message.snapshot, message.consumedAt, run) };
       if (message.operation === "inspect") {
-        const inspection = await inspectGithubIssueClosure(message.issue, run, message.deliveryPullRequests, message.epicMembers === true);
+        const inspection = await inspectGithubIssueClosure(message.issue, run, message.deliveryPullRequests, message.epicMembers === true, message.campaignPullRequests);
         if (inspection.repository.toLowerCase() !== repository) return { ...base, ok: false, failure: "repository_changed", error: "The Location's repository differs from the one this closure names" };
         return { ...base, ok: true, inspection };
       }

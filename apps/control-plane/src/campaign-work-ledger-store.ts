@@ -276,6 +276,53 @@ CREATE TABLE IF NOT EXISTS campaign_work_deliveries (
 CREATE INDEX IF NOT EXISTS idx_campaign_work_deliveries_campaign
   ON campaign_work_deliveries(campaign_session_id, work_item_id, recorded_at);
 
+-- #4403: a stage edit cannot make an open PR stop belonging to this campaign. Existing items
+-- predate complete PR history, so absence of a row cannot prove their PRs unrelated.
+CREATE TABLE IF NOT EXISTS campaign_work_pr_history_start (singleton INTEGER PRIMARY KEY CHECK (singleton=1));
+CREATE TABLE IF NOT EXISTS campaign_work_pr_history_legacy (
+  work_item_id TEXT PRIMARY KEY REFERENCES campaign_work_items(id) ON DELETE CASCADE
+);
+INSERT INTO campaign_work_pr_history_legacy SELECT id FROM campaign_work_items
+  WHERE NOT EXISTS (SELECT 1 FROM campaign_work_pr_history_start) ON CONFLICT DO NOTHING;
+INSERT INTO campaign_work_pr_history_start VALUES (1) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS campaign_work_pr_history (
+  campaign_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  work_item_id TEXT NOT NULL REFERENCES campaign_work_items(id) ON DELETE CASCADE,
+  repository TEXT NOT NULL, number INTEGER NOT NULL CHECK (number > 0),
+  PRIMARY KEY (campaign_session_id, work_item_id, repository, number)
+);
+CREATE TABLE IF NOT EXISTS campaign_work_delivery_activity (
+  work_item_id TEXT PRIMARY KEY REFERENCES campaign_work_items(id) ON DELETE CASCADE
+);
+INSERT INTO campaign_work_delivery_activity SELECT id FROM campaign_work_items WHERE stage IS NOT NULL
+  ON CONFLICT DO NOTHING;
+CREATE TRIGGER IF NOT EXISTS campaign_work_delivery_stage_inserted AFTER INSERT ON campaign_work_items WHEN NEW.stage IS NOT NULL
+BEGIN
+  INSERT INTO campaign_work_delivery_activity VALUES (NEW.id) ON CONFLICT DO NOTHING;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_work_delivery_stage_updated AFTER UPDATE OF stage ON campaign_work_items WHEN NEW.stage IS NOT NULL
+BEGIN
+  INSERT INTO campaign_work_delivery_activity VALUES (NEW.id) ON CONFLICT DO NOTHING;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_work_pr_stage_inserted AFTER INSERT ON campaign_work_items
+BEGIN
+  INSERT INTO campaign_work_pr_history SELECT NEW.campaign_session_id,NEW.id,
+    lower(json_extract(value,'$.repository')),json_extract(value,'$.number')
+    FROM json_each(coalesce(NEW.stage_pull_requests,'[]')) WHERE true ON CONFLICT DO NOTHING;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_work_pr_stage_updated AFTER UPDATE OF stage_pull_requests ON campaign_work_items
+BEGIN
+  INSERT INTO campaign_work_pr_history SELECT NEW.campaign_session_id,NEW.id,
+    lower(json_extract(value,'$.repository')),json_extract(value,'$.number')
+    FROM json_each(coalesce(NEW.stage_pull_requests,'[]')) WHERE true ON CONFLICT DO NOTHING;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_work_pr_delivery_recorded AFTER INSERT ON campaign_work_deliveries
+BEGIN
+  INSERT INTO campaign_work_pr_history SELECT NEW.campaign_session_id,NEW.work_item_id,
+    lower(json_extract(value,'$.repository')),json_extract(value,'$.number')
+    FROM json_each(NEW.pull_requests) WHERE true ON CONFLICT DO NOTHING;
+END;
+
 -- Recommendation (follow-up) extensions. A missing disposition row means awaiting adjudication,
 -- or duplicate for a row the server already deduplicated.
 CREATE TABLE IF NOT EXISTS campaign_recommendation_origins (
@@ -773,6 +820,70 @@ export class CampaignWorkLedgerStore {
       this.statements.set(sql, statement);
     }
     return statement;
+  }
+
+  /** Complete, append-only campaign PR identities, or unknown for pre-history work. */
+  closurePullRequestHistory(campaignId: string, repository: string): number[] | undefined {
+    if (this.stmt(`SELECT 1 FROM campaign_work_pr_history_legacy legacy JOIN campaign_work_items item
+      ON item.id=legacy.work_item_id WHERE item.campaign_session_id=? LIMIT 1`).get(campaignId)) return undefined;
+    const rows = this.stmt(`SELECT DISTINCT number FROM campaign_work_pr_history WHERE campaign_session_id=? AND repository=lower(?)
+      ORDER BY number LIMIT 10001`).all(campaignId, repository) as Array<{ number: number }>;
+    return rows.length > 10_000 ? undefined : rows.map((row) => row.number);
+  }
+
+  /** No title/prose classification: a tracking item has no open attempt, delivery claim, PR,
+   * verification or recorded delivery. Dispatched legacy work has incomplete history and refuses. */
+  epicTrackingItem(campaignId: string, itemId: string): boolean {
+    return Boolean(this.stmt(`SELECT 1 FROM campaign_work_items item WHERE item.campaign_session_id=? AND item.id=?
+      AND item.stage IS NULL AND coalesce(json_array_length(item.stage_pull_requests),0)=0
+      AND NOT EXISTS (SELECT 1 FROM campaign_work_attempts a WHERE a.work_item_id=item.id AND (a.ended_at IS NULL OR a.end_reason='delivered'))
+      AND NOT EXISTS (SELECT 1 FROM campaign_work_verifications v WHERE v.work_item_id=item.id)
+      AND NOT EXISTS (SELECT 1 FROM campaign_work_deliveries d WHERE d.work_item_id=item.id)
+      AND NOT EXISTS (SELECT 1 FROM campaign_work_delivery_activity d WHERE d.work_item_id=item.id)
+      AND (NOT EXISTS (SELECT 1 FROM campaign_work_attempts a WHERE a.work_item_id=item.id)
+        OR NOT EXISTS (SELECT 1 FROM campaign_work_pr_history_legacy legacy WHERE legacy.work_item_id=item.id))`).get(campaignId, itemId));
+  }
+
+  /** Current open work only, with append-only issue/lineage attribution. Scope changes keep using
+   * the stricter all-attempt history projection; only a closure may ignore a departed child. */
+  closureReassignedSessions(campaignId: string, repository: string, issue: number): Set<string> {
+    return new Set((this.stmt(`WITH RECURSIVE reach(session_id,work_item_id) AS (
+      SELECT session_id,work_item_id FROM campaign_work_attempts WHERE campaign_session_id=?1 AND session_id IS NOT NULL AND ended_at IS NULL
+      UNION SELECT reach.session_id,edge.result_work_item_id FROM reach JOIN campaign_work_lineage_edges edge ON edge.origin_work_item_id=reach.work_item_id
+      UNION SELECT reach.session_id,edge.origin_work_item_id FROM reach JOIN campaign_work_lineage_edges edge ON edge.result_work_item_id=reach.work_item_id)
+      SELECT DISTINCT session_id FROM reach candidate WHERE NOT EXISTS (SELECT 1 FROM reach WHERE reach.session_id=candidate.session_id AND (
+        EXISTS (SELECT 1 FROM campaign_work_legacy_items legacy WHERE legacy.work_item_id=reach.work_item_id)
+        OR EXISTS (SELECT 1 FROM campaign_work_item_issue_history history WHERE history.work_item_id=reach.work_item_id
+          AND history.issue_repository=lower(?2) AND history.issue_number=?3)))`).all(campaignId, repository, issue) as Array<{ session_id: string }>).map((row) => row.session_id));
+  }
+
+  /** Stable work for one issue, excluding only the assignment boundary that moves the child away.
+   * Delivery, PR and verification changes remain bound. Missing history proves nothing. */
+  closureChildIssueWork(campaignId: string, sessionId: string, repository: string, issue: number) {
+    const attempted = this.stmt(`SELECT DISTINCT work_item_id FROM campaign_work_attempts WHERE campaign_session_id=? AND session_id=? LIMIT 10001`)
+      .all(campaignId, sessionId) as Array<{ work_item_id: string }>;
+    if (!attempted.length || attempted.length > 10_000 || this.stmt(`SELECT 1 FROM campaign_work_attempts a
+      WHERE a.campaign_session_id=? AND a.session_id=? AND (EXISTS (SELECT 1 FROM campaign_work_legacy_items l WHERE l.work_item_id=a.work_item_id)
+      OR EXISTS (SELECT 1 FROM campaign_work_pr_history_legacy l WHERE l.work_item_id=a.work_item_id)) LIMIT 1`).get(campaignId, sessionId)) return null;
+    const related = new Set((this.stmt(`WITH RECURSIVE related(work_item_id) AS (
+      SELECT h.work_item_id FROM campaign_work_item_issue_history h JOIN campaign_work_items item ON item.id=h.work_item_id
+        WHERE item.campaign_session_id=?1 AND h.issue_repository=lower(?2) AND h.issue_number=?3
+      UNION SELECT edge.result_work_item_id FROM related JOIN campaign_work_lineage_edges edge ON edge.origin_work_item_id=related.work_item_id
+      UNION SELECT edge.origin_work_item_id FROM related JOIN campaign_work_lineage_edges edge ON edge.result_work_item_id=related.work_item_id)
+      SELECT work_item_id FROM related LIMIT 10001`).all(campaignId, repository, issue) as Array<{ work_item_id: string }>).map((row) => row.work_item_id));
+    if (related.size > 10_000) return null;
+    const items = attempted.filter((row) => related.has(row.work_item_id)).map((row) => this.detail(campaignId, row.work_item_id, Date.now()));
+    if (items.some((item) => !item) || !items.length) return null;
+    const prs = this.stmt(`SELECT repository,number,work_item_id FROM campaign_work_pr_history WHERE campaign_session_id=? LIMIT 10001`)
+      .all(campaignId) as Array<{ repository: string; number: number; work_item_id: string }>;
+    if (prs.length > 10_000) return null;
+    const key = (pr: { repository: string; number: number }) => `${pr.repository.toLowerCase()}#${pr.number}`;
+    const relatedPrs = new Set(prs.filter((pr) => related.has(pr.work_item_id)).map(key));
+    const attemptedIds = new Set(attempted.map((row) => row.work_item_id));
+    return { unrelatedPullRequests: new Set(prs.filter((pr) => attemptedIds.has(pr.work_item_id) && !related.has(pr.work_item_id) && !relatedPrs.has(key(pr))).map(key)),
+      items: items.map((item) => ({ id: item!.id, commitment: item!.commitmentRecord, stage: item!.stage,
+        attempts: item!.attempts.map((attempt) => ({ id: attempt.id, sessionId: attempt.sessionId, delivered: attempt.endReason === "delivered" })),
+        verifications: item!.verifications, deliveries: item!.deliveries })) };
   }
 
   /** #4120: for each armed, unconsumed merge of this campaign, the signature of everything that would

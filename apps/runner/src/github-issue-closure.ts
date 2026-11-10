@@ -36,7 +36,7 @@ export class IssueClosureInspectionError extends Error {
  * whether it closes the issue. Its title, body, head and updatedAt are left out, so a push, a merge
  * from the default branch or a body edit keeps an approval unless it changes one of these, or
  * whether the PR is related at all. */
-export function closureDigestPullRequest(pr: { number: number; url: string; closesIssue: boolean }) {
+export function closureDigestPullRequest(pr: { number: number; url: string; closesIssue?: boolean }) {
   return { number: pr.number, url: pr.url, closesIssue: pr.closesIssue };
 }
 
@@ -97,7 +97,11 @@ export function issueClosureRun(context: AgentContext, cwd: string, agentEnv: Re
 /** Inspect an issue of the origin's repository: GitHub through `gh`, or a GitLab project (#3539,
  * v249) through `glab` with the same result shape and digest. */
 export async function inspectGithubIssueClosure(issue: number, run: Run, deliveryPullRequests?: Array<{number:number;headSha:string}>,
-  epicMembers = false): Promise<GithubIssueClosureInspection> {
+  epicMembers = false, campaignPullRequests?: number[] | null): Promise<GithubIssueClosureInspection> {
+  if (campaignPullRequests !== undefined && campaignPullRequests !== null && (!Array.isArray(campaignPullRequests) || campaignPullRequests.length > 10_000 ||
+      campaignPullRequests.some((number) => !Number.isSafeInteger(number) || number < 1))) {
+    throw new IssueClosureInspectionError("Campaign pull-request identities are incomplete");
+  }
   if (!Number.isSafeInteger(issue) || issue < 1) throw new IssueClosureInspectionError("issue must be a positive integer");
   const origin = (await run("git", ["remote", "get-url", "origin"])).trim();
   const repository = githubSlug(origin);
@@ -132,13 +136,16 @@ export async function inspectGithubIssueClosure(issue: number, run: Run, deliver
     if (!Number.isSafeInteger(pr.number) || (pr.number as number) < 1 ||
         pr.url !== `https://github.com/${canonicalRepository}/pull/${pr.number}` ||
         !/^[0-9a-f]{40}$/u.test(text(pr.headRefOid))) throw new IssueClosureInspectionError("GitHub pull-request evidence is invalid");
-    const closing = nodes(pr.closingIssuesReferences).some((rawIssue) => {
+    const closing = (() => { try { return nodes(pr.closingIssuesReferences).some((rawIssue) => {
       const linked = object(rawIssue);
       return linked.number === issue && object(linked.repository).nameWithOwner === canonicalRepository;
-    });
+    }); } catch { return undefined; } })();
     const body = text(pr.body);
     const title = text(pr.title);
-    return closing || referenced.includes(pr.number) || mention.test(`${title}\n${body}`) || body.includes(url)
+    const related = campaignPullRequests === undefined
+      ? closing !== false || referenced.includes(pr.number) || mention.test(`${title}\n${body}`) || body.includes(url)
+      : campaignPullRequests === null || closing !== false || campaignPullRequests.includes(pr.number as number);
+    return related
       ? [{ number: pr.number as number, title, url: text(pr.url), headSha: text(pr.headRefOid), closesIssue: closing }] : [];
   }).sort((a, b) => a.number - b.number);
   const title = text(target.title);
@@ -183,6 +190,7 @@ export async function inspectGithubIssueClosure(issue: number, run: Run, deliver
     ...(members ? { epicMembers: members } : {}),
   })).digest("hex");
   return { repository: canonicalRepository, issue, title, url, state: target.state as "OPEN" | "CLOSED", forgeDigest,
+    ...(campaignPullRequests === undefined ? {} : { campaignPullRequests: campaignPullRequests === null ? null : [...campaignPullRequests] }),
     openPullRequests: relevant, ...(deliveryPullRequests === undefined ? {} : { delivery }), ...(members ? { epicMembers: members } : {}) };
 }
 
@@ -224,7 +232,7 @@ export async function executeGithubIssueClosure(
   // Every refusal precedes the mutation fence, so it names its reason and nothing was written.
   const refused = (refusal: GithubIssueClosureRefusal): GithubIssueClosureResult => ({ ...result("refused"), refusal });
   const current = await inspectGithubIssueClosure(snapshot.issue, run, snapshot.delivery?.map(({number,headSha}) => ({number,headSha})),
-    snapshot.epicMembers !== undefined);
+    snapshot.epicMembers !== undefined, snapshot.campaignPullRequests);
   if (current.repository !== snapshot.repository) return refused(githubIssueClosureRefusal("repository_changed"));
   if (current.state === "CLOSED") return result("already_closed");
   if (current.forgeDigest !== snapshot.forgeDigest) return refused(forgeChange(snapshot, current));

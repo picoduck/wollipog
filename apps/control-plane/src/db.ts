@@ -6412,9 +6412,9 @@ export class ControlPlaneDb {
         if (handedOff.has(item.id)) continue;
         // Delivery is proven in the item's own repository, whichever of the campaign's it is (#4119).
         if (item.commitment !== "committed" || !item.issue || !campaignIssueInScope(policy, item.issue)) continue;
-        // A never-dispatched placeholder of an epic this campaign closed from its members (#4060) is
-        // finished by that closure. Any item with an attempt still needs its own delivery.
-        if (item.attemptCount === 0 && !item.currentAttempt && this.memberProvenEpicClosure(campaignId, item.issue.repository, item.issue.number)) continue;
+        // The same server-derived tracking predicate as closure proof and gaps (#4403), so an
+        // ended tracking attempt is finished by the epic's proven closure while delivery work isn't.
+        if (this.campaignWorkLedger.epicTrackingItem(campaignId, item.id) && this.memberProvenEpicClosure(campaignId, item.issue.repository, item.issue.number)) continue;
         // These are trusted work-item attestations, not agent stage prose or session-report verification.
         // Keep an unresolved incomplete attestation across new workers/heads. A legitimate later
         // delivery supersedes it; insertion order, not tied timestamps or random UUIDs, is chronology.

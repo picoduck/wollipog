@@ -73,7 +73,7 @@ import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compat
   everyOutstandingScopeDecision, outstandingDecisionsBearOnScopeRequest, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
 import { boundedDecisionString, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
 import { needsCampaignIssueScopeSeed } from "./campaign-issue-scope-seed.js";
-import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureCrossRepositoryDelivery, closureCrossRepositoryPullRequests, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
+import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureCampaignPullRequests, closureCrossRepositoryDelivery, closureCrossRepositoryPullRequests, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
   CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES, type CampaignPullRequestRef } from "@wollipog/protocol";
 import { forgeRefKey, type ForgeReadResult } from "./campaign-forge-observations.js";
@@ -94,7 +94,7 @@ import {
 import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
   type SessionReviewJobUpdate } from "@wollipog/protocol";
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
-import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosureBindingSnapshot, issueClosureChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
+import { normalizeIssueClosureSnapshot, issueClosureActiveChildrenMatch, issueClosureBindingSnapshot, issueClosureChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
 import { normalizeLocationSwitchSnapshot } from "./location-switch-snapshot.js";
 import { normalizeCampaignRepositoryAdditionSnapshot } from "./campaign-repository-addition-snapshot.js";
@@ -110,6 +110,7 @@ import { issueClosureDeliveryFailure, issueClosureDeliveryGap, issueClosureProof
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import type { PromptSessionMessage } from "@wollipog/protocol";
 import { posix, win32 } from "node:path";
 import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   addPendingRequest, removePendingRequest, pendingRequests, parentControlRequestEligible, campaignHumanAttentionAdded,
@@ -7395,6 +7396,7 @@ export class SessionsService {
       if (first?.state === "delivering" && first.deliveryId === message.commandId) this.reconcileFirstMessageDelivery(message.sessionId, Date.now());
       this.reconcileCampaignContinuationCommand(message.commandId, Date.now());
       this.reconcileWorkflowDecisionResumeCommand(message.commandId, Date.now());
+      this.promoteIssueClosureResume(message.commandId);
       this.reconcileRestartNoticeCommand(message.commandId, Date.now());
       this.reconcileReviewContinuationCommand(message.commandId, Date.now());
       this.reconcilePullRequestWatchWakeCommand(message.commandId, Date.now());
@@ -14007,7 +14009,9 @@ export class SessionsService {
       const requestId = `issue_closure_epic_${randomUUID()}`;
       const result = await this.hub.requestFromRunner(target.runnerId, requestId, { type: "github_issue_closure", operation: "inspect", requestId, sessionId,
         ...(target.location ? { location: target.location } : {}),
-        issue: base.issue, scopeRevision: base.scopeRevision, epicMembers: true, ...(deliveryPullRequests ? { deliveryPullRequests } : {}) }, 60_000).catch(() => null);
+        issue: base.issue, scopeRevision: base.scopeRevision, epicMembers: true,
+        ...(base.campaignPullRequests === undefined ? {} : { campaignPullRequests: base.campaignPullRequests }),
+        ...(deliveryPullRequests ? { deliveryPullRequests } : {}) }, 60_000).catch(() => null);
       if (deliveryPullRequests) {
         verificationFailure = !result ? { check: "runner_unavailable" }
           : result.type !== "github_issue_closure_result" || result.sessionId !== sessionId ? { check: "runner_response" }
@@ -14087,9 +14091,13 @@ export class SessionsService {
       const target = this.closureTarget(session, request.repository);
       if (!target) return fail(`No Location of ${otherRepository} is online on a runner that can close its issues, so no closure was requested. Retry once one is.`, 409);
       const routed = target.location ? { location: target.location } : {};
+      const repository = otherRepository ?? session.orchestratorPolicy.issueScope?.repository;
+      const campaignPullRequests = repository && runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "closureCampaignPullRequests")
+        ? closureCampaignPullRequests(this.db, session, repository) ?? null : undefined;
       const inspected = await this.hub.requestFromRunner(target.runnerId, requestId, {
         type: "github_issue_closure", operation: "inspect", requestId, sessionId, issue: request.issue, ...routed,
         ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
+        ...(campaignPullRequests === undefined ? {} : { campaignPullRequests }),
       }, 60_000);
       if (inspected.type !== "github_issue_closure_result" || inspected.sessionId !== sessionId ||
           !inspected.ok || !inspected.inspection || inspected.inspection.issue !== request.issue) {
@@ -14134,6 +14142,7 @@ export class SessionsService {
             const verified = await this.hub.requestFromRunner(target.runnerId, verificationId, {
               type: "github_issue_closure", operation: "inspect", requestId: verificationId, sessionId, issue: request.issue, ...routed,
               scopeRevision: snapshot.scopeRevision, deliveryPullRequests: delivery.map(({ number, headSha }) => ({ number, headSha })),
+              ...(snapshot.campaignPullRequests === undefined ? {} : { campaignPullRequests: snapshot.campaignPullRequests }),
             }, 60_000).catch(() => null);
             let failure: GithubIssueClosureSnapshot["deliveryVerificationFailure"];
             if (!verified) failure = { check: "runner_unavailable" };
@@ -14228,8 +14237,11 @@ export class SessionsService {
         !this.closureScopeCurrent(session, snapshot)) return "issue scope changed";
     if (!session.parentControlPolicy || decision.policyRevision !== session.parentControlPolicy.revision) return "policy revision changed";
     if (!this.workflowDecisionAuthorityCurrent(session, session.parentControlPolicy, decision)) return "approval authority changed";
-    if (auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !==
-        auditDigest(snapshot.activeChildren)) return "active child work changed";
+    if (snapshot.campaignPullRequests !== undefined &&
+        auditDigest(closureCampaignPullRequests(this.db, session, snapshot.repository) ?? null) !== auditDigest(snapshot.campaignPullRequests)) {
+      return "campaign pull-request ledger changed or became unreadable";
+    }
+    if (!issueClosureActiveChildrenMatch(this.db, sessionId, snapshot)) return "active child work changed";
     return null;
   }
 
@@ -18131,7 +18143,10 @@ export class SessionsService {
         // the outbox rather than reported, exactly as for a human's durable prompt.
         stage: (plan) => {
           staged = this.promptOutbox.stageWorkflowDecisionResume(
-            decision.occurrenceId, from, child.id, plan.runnerId, plan.commands[0]!, now,
+            decision.occurrenceId, from, child.id, plan.runnerId,
+            decision.category === "issue_closure" && decision.status === "approved" && sessionRole(child) === "orchestrator" &&
+              runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "closureApprovalSteering")
+              ? { ...plan.commands[0]!, issueClosureResume: true } as DurableSessionCommand : plan.commands[0]!, now,
           );
         },
         activate: (plan) => {
@@ -18168,6 +18183,36 @@ export class SessionsService {
     const session = this.db.getSession(queued.sessionId);
     if (!session || !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "queuedPromptCancellation")) return;
     this.hub.sendToRunner(session.runnerId, { type: "cancel_queued_prompt", sessionId: queued.sessionId, promptId: queued.commandId });
+  }
+
+  /** Promote the same queued notification, never send a second copy. Durable steering fences
+   * provider delivery; refusals keep its FIFO command, uncertainty never replays it (#4403). */
+  private promoteIssueClosureResume(commandId: string): void {
+    const command = this.db.getSessionPromptCommand(commandId);
+    const resume = this.db.workflowDecisionResumeForCommand(commandId);
+    if (!command || command.state !== "queued" || resume?.state !== "delivering") return;
+    const decision = this.db.workflowDecisionByOccurrence(resume.occurrenceId);
+    const child = this.db.getSession(command.sessionId);
+    if (!decision || decision.category !== "issue_closure" || decision.status !== "approved" || !child ||
+        child.status !== "running" || sessionRole(child) !== "orchestrator" ||
+        pendingRequests(child.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
+        this.db.listOpenPolicyHookApprovals(child.id).length ||
+        this.db.resolvedCampaignSessionId(child.id) !== child.id ||
+        !runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "closureApprovalSteering")) return;
+    let payload: Partial<PromptSessionMessage>;
+    try { payload = JSON.parse(command.payloadJson); } catch { return; }
+    if (payload.type !== "prompt_session" || payload.issueClosureResume !== true) return;
+    const turnId = this.hub.activeTurnIdForSession(child.id);
+    if (!turnId) return;
+    const submissionId = `closure_resume_${commandId}`;
+    if (this.db.findSteeringAttemptBySubmission(child.id, submissionId)) return;
+    void this.steer(child.id, { submissionId, turnId, promotePromptId: commandId }).then((result) => {
+      this.log.info(JSON.stringify({ event: "issue_closure_approval_wake", entryPoint: "queued_resume_receipt", sessionId: child.id,
+        occurrenceId: decision.occurrenceId, commandId, requestId: submissionId, outcome: result.ok ? result.data?.state : "queued_fallback" }));
+    }).catch(() => {
+      this.log.warn(JSON.stringify({ event: "issue_closure_approval_wake", entryPoint: "queued_resume_receipt", sessionId: child.id,
+        occurrenceId: decision.occurrenceId, commandId, requestId: submissionId, outcome: "promotion_failed" }));
+    });
   }
 
   /** Follow the durable command that carries a decision's resume. Known non-delivery for worktree

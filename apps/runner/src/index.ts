@@ -1633,6 +1633,7 @@ function durableLifecycle(handle: DurableCommandHandle): DurableCommandLifecycle
   };
   return {
     commandId: handle.commandId,
+    ...(handle.issueClosureResume ? { issueClosureResume: true as const } : {}),
     beginSteering: () => {
       const prepared = handle.beginSteering();
       if (!prepared) sendDurableUpdate(handle.current);
