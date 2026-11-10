@@ -18515,7 +18515,7 @@ export class ControlPlaneDb {
       // does, so what was evaluated while the limit left it out is revoked and asked again.
       const widens = Boolean(consumed) && campaignRepositoryOutsideLimit(policy, update.joins[0]!.repository);
       if (joins.length || widens) {
-        const order =new Map((this.getProject(this.getSession(rootId)?.projectId ?? "")?.locations ?? []).map((location, index) => [location.id, index]));
+        const order = new Map((this.getProject(this.getSession(rootId)?.projectId ?? "")?.locations ?? []).map((location, index) => [location.id, index]));
         const repositories = structuredClone(control.boundary.repositories);
         for (const join of joins) {
           const name = join.repository.toLowerCase();
