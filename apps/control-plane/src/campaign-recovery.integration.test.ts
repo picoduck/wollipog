@@ -1244,11 +1244,14 @@ for (const unavailable of ["offline", "old_runner", "removed_repository", "not_s
         h.db.recordGithubIssueClosureResult("permanent-unavailability", { outcome: "uncertain", completedAt: h.now,
           reconciliationWaitingSince: Date.now() - 6 * 60_000 });
       }
+      let dispatches = 0;
       h.hub.requestFromRunner = async () => {
+        dispatches++;
         if (unavailable === "not_sent") throw new RunnerRequestNotSentError();
         throw Error("Unavailable recovery must never dispatch");
       };
       await h.svc.reconcileUncertainIssueClosures("root");
+      assert.equal(dispatches, unavailable === "not_sent" ? 1 : 0, "unavailable runners must not receive a recovery read");
       const questionId = h.db.workflowDecisionByOccurrence("permanent-unavailability")!.issueClosureResult!.reconciliation!.ownerDecisionOccurrenceId!;
       assert.equal(h.db.workflowDecisionByOccurrence(questionId)!.status, "pending");
       assert.ok(h.svc.answerOwnerQuestion("root", questionId, {}, "dismiss", { kind: "human", id: h.identity.userId }).ok);
