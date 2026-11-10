@@ -770,6 +770,12 @@ or unreadable campaign history counts every open PR as related. A bare outside m
 timeline event is not a gap when both facts are known. Older peers retain the conservative mention
 and timeline rule.
 
+An existing campaign whose items predate append-only PR history remains in this conservative mode:
+current stages cannot prove that a cleared PR was never part of the campaign. This can retain a
+person-owned closure and bind its approval to all open PRs in the repository. The explicit human
+approval still executes if those bindings remain unchanged. Falling back to mention matching would
+allow a campaign PR with erased history and no mention to be incorrectly excluded.
+
 Execution reads current campaign identities and forge closing references again using the same
 predicate. New closed PR identities do not require reapproval; a newly related open PR does. The
 approved snapshot remains immutable. Root and Location executions with this context use the existing

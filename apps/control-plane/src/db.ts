@@ -6595,7 +6595,7 @@ export class ControlPlaneDb {
             pullRequest: { repository: snapshot.repository, number: snapshot.pullRequest } }] : [];
         }),
       campaignRepositories: (campaignId) => this.campaignRepositoriesOf(campaignId),
-      memberProvenEpicClosure: (campaignId, repository, issue) => this.memberProvenEpicClosure(campaignId, repository, issue),
+      memberProvenEpicClosures: (campaignId) => this.memberProvenEpicClosures(campaignId),
     });
     return this.campaignWorkLedgerStore;
   }
@@ -25879,17 +25879,36 @@ export class ControlPlaneDb {
    * proven from the epic's members (#4060) that the runner confirmed closed. An uncertain, refused,
    * already-closed or person-owned closure does not count. */
   memberProvenEpicClosure(campaignId: string, repository: string, issue: number): boolean {
+    const key = `issue_closure:${repository.toLowerCase()}#${issue}`;
     const rows = this.stmt(`SELECT resource_snapshot, issue_closure_result FROM workflow_decisions
       WHERE session_id=? AND controlling_session_id=? AND category='issue_closure' AND resource_key=? AND status='consumed'
         AND authority='orchestrator' AND issue_closure_result IS NOT NULL`)
-      .all(campaignId, campaignId, `issue_closure:${repository.toLowerCase()}#${issue}`) as Array<{ resource_snapshot: string; issue_closure_result: string }>;
-    return rows.some((row) => {
-      const snapshot = parseJson<GithubIssueClosureSnapshot>(row.resource_snapshot);
-      const result = parseJson<GithubIssueClosureResult>(row.issue_closure_result);
-      return snapshot?.category === "issue_closure" && snapshot.reason === "completed" && snapshot.issue === issue &&
-        Boolean(snapshot.issueAdmission) && snapshot.epicMembers?.readable === true && snapshot.epicMembers.members.length > 0 &&
-        result?.outcome === "closed";
-    });
+      .all(campaignId, campaignId, key) as Array<{ resource_snapshot: string; issue_closure_result: string }>;
+    return rows.some((row) => this.memberProvenEpicClosureKey(row) === key);
+  }
+
+  /** One read per ledger projection, rather than one receipt query per planned issue item. */
+  memberProvenEpicClosures(campaignId: string): ReadonlySet<string> {
+    const rows = this.stmt(`SELECT resource_key, resource_snapshot, issue_closure_result FROM workflow_decisions
+      WHERE session_id=? AND controlling_session_id=? AND category='issue_closure' AND status='consumed'
+        AND authority='orchestrator' AND issue_closure_result IS NOT NULL`)
+      .all(campaignId, campaignId) as Array<{ resource_key: string; resource_snapshot: string; issue_closure_result: string }>;
+    const issues = new Set<string>();
+    for (const row of rows) {
+      const key = this.memberProvenEpicClosureKey(row);
+      if (key && key === row.resource_key) issues.add(key.slice("issue_closure:".length));
+    }
+    return issues;
+  }
+
+  private memberProvenEpicClosureKey(row: { resource_snapshot: string; issue_closure_result: string }): string | null {
+    const snapshot = parseJson<GithubIssueClosureSnapshot>(row.resource_snapshot);
+    const result = parseJson<GithubIssueClosureResult>(row.issue_closure_result);
+    return snapshot?.category === "issue_closure" && snapshot.reason === "completed" &&
+      typeof snapshot.repository === "string" && Number.isSafeInteger(snapshot.issue) && snapshot.issue > 0 &&
+      Boolean(snapshot.issueAdmission) && snapshot.epicMembers?.readable === true && Array.isArray(snapshot.epicMembers.members) &&
+      snapshot.epicMembers.members.length > 0 && result?.outcome === "closed"
+      ? `issue_closure:${snapshot.repository.toLowerCase()}#${snapshot.issue}` : null;
   }
 
   /** Consumption and its initial uncertainty are one durable write before dispatch. */

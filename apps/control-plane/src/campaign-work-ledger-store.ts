@@ -474,7 +474,7 @@ const itemIssue = (repository: string | null, number: number | null): CampaignIs
  * rows: a SessionView embeds the campaign projection, which would recurse. */
 export interface CampaignWorkLedgerHooks {
   /** Server-observed, Orchestrator-owned completed closure proven from members. */
-  memberProvenEpicClosure?(campaignId: string, repository: string, issue: number): boolean;
+  memberProvenEpicClosures?(campaignId: string): ReadonlySet<string>;
   observeSession(sessionId: string): CampaignAttemptSessionObservation | null;
   /** How current the control plane's copy of a session is: fresh while its runner is connected,
    * otherwise last known as of the row's update time. Null when the session is gone. */
@@ -2301,6 +2301,7 @@ export class CampaignWorkLedgerStore {
     };
     const ownMerges = new Map(items.filter((item) => mergePrerequisites.get(item.id)?.length).map((item) => [item.id, ownMerge(item.id)]));
     const observations = new Map<string, CampaignAttemptSessionObservation | null>();
+    const closedEpics = this.hooks.memberProvenEpicClosures?.(campaignId);
     const records = items.map((item) => {
       const latest = attempts.get(item.id)?.at(-1);
       const open = latest && latest.ended_at === null ? latest : undefined;
@@ -2320,8 +2321,8 @@ export class CampaignWorkLedgerStore {
         } : null,
         openAttemptSession: open?.session_id ? observations.get(open.session_id) ?? null : null,
         recordedDelivery: currentDelivery(deliveries.get(item.id), latest) !== null,
-        epicTrackingClosed: Boolean(item.issue_repository && item.issue_number && this.epicTrackingItem(campaignId, item.id) &&
-          this.hooks.memberProvenEpicClosure?.(campaignId, item.issue_repository, item.issue_number)),
+        epicTrackingClosed: Boolean(item.issue_repository && item.issue_number &&
+          closedEpics?.has(`${item.issue_repository.toLowerCase()}#${item.issue_number}`) && this.epicTrackingItem(campaignId, item.id)),
         mergeDependencies: (mergePrerequisites.get(item.id) ?? []).map(campaignMergeDependencyStatus),
         ...(ownMerges.has(item.id) ? { ownPullRequestsMerged: ownMerges.get(item.id)!.merged } : {}),
       };

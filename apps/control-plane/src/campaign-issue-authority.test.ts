@@ -100,6 +100,74 @@ test("#4403 campaign PR identities include other work, and incomplete ledger rea
   } finally { h.db.close(); }
 });
 
+test("#4403 an upgraded campaign cannot exclude an outside PR when historical membership is unknown", async () => {
+  const h = harness(true, 5, [100, 101]);
+  try {
+    h.state.epicMembers = { readable: true, members: [{ number: 101, state: "completed" }] };
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (r, id, message, timeout) => {
+      const answer = await runner(r, id, message, timeout);
+      if (message.type === "github_issue_closure" && message.operation === "inspect" &&
+          answer.type === "github_issue_closure_result" && answer.inspection) {
+        // The PR has no mention or closing reference. Mirror the real runner's null rule:
+        // unreadable historical campaign membership cannot prove even this PR unrelated.
+        return { ...answer, inspection: { ...answer.inspection,
+          openPullRequests: message.campaignPullRequests === null ? [openPullRequest(99)] : [] } };
+      }
+      return answer;
+    };
+    const request = (requestId: string) => h.svc.requestGithubIssueClosure("root", { requestId, issue: 100,
+      reason: "completed", explanation: "Members verified closed", evidence: ["Forge member read"] });
+    const known = await request("known-campaign");
+    assert.ok(known.ok, known.error ?? "known campaign request");
+    assert.equal(known.data!.decision!.authority, "orchestrator");
+    assert.deepEqual(closureSnapshot(known.data!.decision!).campaignPullRequests, []);
+    // This is the marker the real database migration gives existing items (reopen tested below).
+    h.db.raw().prepare("INSERT INTO campaign_work_pr_history_legacy VALUES (?)").run(h.item.id);
+    const unknown = await request("legacy-campaign");
+    assert.ok(unknown.ok, unknown.error ?? "unknown campaign request");
+    const d = unknown.data!.decision!;
+    assert.equal(d.authority, "human", "unknown membership cannot remove an owner step");
+    assert.equal(closureSnapshot(d).campaignPullRequests, null);
+    assert.ok(closureSnapshot(d).deliveryGaps?.some((gap) => gap.code === "open_related_pull_requests"));
+    assert.equal((await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest)).ok, false,
+      "an unapproved human-owned closure cannot execute");
+    assert.equal(h.state.executes, 0);
+    assert.ok(h.approve(d).ok);
+    assert.ok((await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest)).ok,
+      "the unchanged explicit human approval remains executable");
+    assert.equal(h.state.executes, 1);
+  } finally { h.db.close(); }
+});
+
+test("#4403 a large planned campaign reads member-proven receipts once and skips ineligible tracking queries", (t) => {
+  const issues = Array.from({ length: 20 }, (_, index) => 100 + index);
+  const h = harness(false, 20, issues);
+  try {
+    const items = Array.from({ length: 499 }, (_, index) => ({ key: `planned-${index}`,
+      issue: { repository: "team/repo", number: issues[index % issues.length]! } }));
+    for (let offset = 0; offset < items.length; offset += 100) {
+      const plan = h.svc.recordCampaignPlan("root", { planComplete: true,
+        items: items.slice(offset, offset + 100) });
+      assert.ok(plan.ok, plan.error ?? "planned batch");
+    }
+    let receipts = 0, tracking = 0;
+    const read = h.db.memberProvenEpicClosures.bind(h.db);
+    const qualify = h.db.campaignWorkLedger.epicTrackingItem.bind(h.db.campaignWorkLedger);
+    h.db.memberProvenEpicClosures = (root) => { receipts++; return read(root); };
+    h.db.campaignWorkLedger.epicTrackingItem = (root, item) => { tracking++; return qualify(root, item); };
+    h.db.campaignWorkLedger.observedChanged("root", Date.now());
+    const started = performance.now();
+    const summary = h.db.campaignWorkLedger.summary("root", { campaignCreatedAt: 1, complete: false,
+      childSessionIds: ["child"], cleanupPending: 0 });
+    assert.equal(summary.counts.committed, 500);
+    assert.equal(summary.counts.delivered, 0);
+    assert.equal(receipts, 1, "receipt lookup is per projection, not per item");
+    assert.equal(tracking, 0, "ordinary planned issues without qualifying receipts need no tracking queries");
+    t.diagnostic(JSON.stringify({ plannedItems: 500, receiptReads: receipts, trackingReads: tracking, durationMs: performance.now() - started }));
+  } finally { h.db.close(); }
+});
+
 test("#4403 upgrading existing work retains unknown PR and delivery history across reopen", () => {
   const dir = mkdtempSync(join(tmpdir(), "closure-history-upgrade-"));
   const path = join(dir, "test.db");

@@ -1308,9 +1308,12 @@ test("an epic placeholder item is finished by its closure proven from members, a
     for (const [occurrence, change] of [["human", { authority: "human" }], ["uncertain", { outcome: "uncertain" }],
       ["already", { outcome: "already_closed" }], ["items", { members: false }], ["unadmitted", { admitted: false }]] as const) {
       recordEpicClosure(h, `closure-${occurrence}`, change);
+      assert.equal(h.db.memberProvenEpicClosures("root").has("picoduck/wollipog#2938"),
+        h.db.memberProvenEpicClosure("root", "picoduck/wollipog", 2938), "batch and scalar proof predicates agree");
       assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", occurrence);
     }
     recordEpicClosure(h, "closure-proven");
+    assert.equal(h.db.memberProvenEpicClosures("root").has("picoduck/wollipog#2938"), true);
     assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "complete");
     assert.equal(h.db.campaignProjection("root")!.status, "verified_complete", "no scope_removed marking is needed");
   } finally { h.db.close(); }
