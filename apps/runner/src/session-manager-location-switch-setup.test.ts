@@ -3148,6 +3148,48 @@ test("deleting a session whose pending rollback names a worktree another session
   });
 });
 
+test("a deleted session's rollback that gave way to an attaching session never takes the worktree back, even once that session goes too", async () => {
+  await withSession("delete-pending-attached-later", async (h) => {
+    const teardownLog = join(h.root, "teardown-log");
+    git(h.docs, "checkout", "--quiet", "-b", "config-base");
+    writeFileSync(join(h.docs, ".wollipog.json"), JSON.stringify({ version: 1, setup: [LOG_STEP(h)],
+      teardown: [{ name: "Tear Down", command: [process.execPath, "-e", `require('fs').appendFileSync(${JSON.stringify(teardownLog)},'x')`], timeoutSeconds: 30 }] }));
+    git(h.docs, "add", ".wollipog.json");
+    git(h.docs, "commit", "--quiet", "-m", "setup and teardown");
+    git(h.docs, "checkout", "--quiet", "main");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const internals = internalsOf(h);
+    const activate = internals.activateWorktreeWithNotice.bind(h.manager);
+    internals.activateWorktreeWithNotice = async () => { throw new Error("activation failed"); };
+    const removal = stickRemoval(h);
+    const failing = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/other" });
+    await answerTrust(h, "trust");
+    await assert.rejects(failing, /activation failed/u);
+    internals.activateWorktreeWithNotice = activate;
+    const [rollback] = journal(h);
+    assert.ok(rollback?.processMarker, "the rollback has setup's processes to stop");
+    const slot = rollback!.worktreePath;
+    const meta = h.store.readMeta(h.sessionId)!;
+    h.store.create({ ...meta, sessionId: "s_attached_then_gone", worktreePath: slot, worktreeBranch: "fix/other",
+      worktrees: [{ id: "attached-then-gone", path: slot, branch: "fix/other", source: "attached" }], locationHistory: undefined,
+      keptWorktreePaths: undefined, worktreeHooks: undefined, worktreeProcessMarkers: undefined });
+    const before = files(slot);
+    removal.free();
+    // The deleted session's processes will not stop just now, so its rollback stays on record.
+    keepInternalsOf(h).terminateRollbackProcesses = async () => false;
+    await h.manager.delete(h.sessionId);
+    assert.equal(journal(h).length, 1, "the rollback waits for its processes");
+    // Then the session that attached the worktree goes too, which leaves an attached worktree alone.
+    await h.manager.delete("s_attached_then_gone");
+    h.restart();
+    await waitFor(() => journal(h).length === 0, "the restart did not finish the rollback");
+    assert.deepEqual(files(slot), before, "nothing took the worktree back");
+    assert.equal(existsSync(teardownLog), false, "and no teardown ran there");
+    assert.equal(git(h.docs, "rev-parse", "--verify", "refs/heads/fix/other").length, 40, "the branch stays");
+  });
+});
+
 test("deleting a session while its request's rollback is still pending lets that rollback decide, so hand edits are kept", async () => {
   await withSession("delete-pending-rollback", async (h) => {
     git(h.docs, "checkout", "--quiet", "-b", "config-base");

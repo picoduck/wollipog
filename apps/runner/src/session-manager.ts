@@ -18721,6 +18721,10 @@ export class SessionManager {
       // session held there, its setup's processes and its port block, since nothing else will ever
       // give them back (#4209). A live session still has them on its own row.
       if (!this.store.has(record.sessionId)) {
+        // Decided now, and on record before anything is stopped: if the processes will not stop, a retry
+        // only tries them again. It never removes the worktree, even once nothing lists it any more.
+        record.rollbackKeptAt ??= Date.now();
+        this.cleanupJournal.add(record);
         await this.endRollbackUnremoved(record);
         return;
       }
