@@ -5294,6 +5294,26 @@ test("a GitLab merge snapshot pins its merge method and a canonical glab call to
   }
 });
 
+test("a refused GitLab enqueue names the exact approved command, so a nested-namespace project can consume (#4242)", () => {
+  const canonical = canonicalPrMergeEnqueueCommand(GITLAB_MERGE);
+  const sha = "c".repeat(40);
+  const path = encodeURIComponent("platform/agents/wollipog");
+  // The shapes a child plausibly submits (#4242): a numeric project id, and the URL-encoded nested
+  // path with glab's short method flag, the host flag first and `-f squash=` instead of `-F`.
+  const attempted = [
+    `glab api --hostname gitlab.example.com -X POST projects/9001/merge_trains/merge_requests/7 -f sha=${sha} -f squash=false`,
+    `glab api --hostname gitlab.example.com -X POST projects/${path}/merge_trains/merge_requests/7 -f sha=${sha} -f squash=false`,
+  ];
+  for (const command of attempted) {
+    const refused = normalizeWorkflowDecisionAction(GITLAB_MERGE, { kind: "pr_merge_enqueue", command });
+    assert.ok(!refused.ok && refused.status === 409, command);
+    assert.ok(refused.error?.includes(canonical),
+      `the refusal names the approved command for ${command}, not: ${refused.error}`);
+  }
+  assert.ok(normalizeWorkflowDecisionAction(GITLAB_MERGE, { kind: "pr_merge_enqueue", command: canonical }).ok,
+    "the command the refusal names is admitted on the retry");
+});
+
 test("consuming a GitLab merge first checks GitLab on the child's runner, revoking a stale or mismatched approval (#3602)", async () => {
   const { db, hub } = makeHarness();
   const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
