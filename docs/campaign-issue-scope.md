@@ -764,7 +764,7 @@ operation the boundary does not delegate (whose `deliveryFailure` reads `outside
 gaps), and an admission bound to another boundary revision.
 
 **Closure relatedness uses closing references and campaign history (#4403).** On runner protocol
-358+, the server supplies append-only campaign PR identities. Every open campaign PR remains a
+360+, the server supplies append-only campaign PR identities. Every open campaign PR remains a
 gap, even without an issue mention. An outside PR is related only when its forge closing references
 include the issue. An unreadable closing-reference connection counts that PR as related; incomplete
 or unreadable campaign history counts every open PR as related. A bare outside mention or retained
@@ -802,7 +802,7 @@ before execution, including when no child was live at approval. Prompt identitie
 before reassignment remain bound, while later prompts on the unrelated attempt do not. A prompt
 in an unassigned interval cannot be attributed away from the issue. Missing boundary history or
 uncertain attribution retains strict assignment binding.
-Approved root notifications on protocol 358+ can promote the same durable queued command through
+Approved root notifications on protocol 360+ can promote the same durable queued command through
 the existing steering lane at a safe tool boundary. Rejection retains queued delivery; uncertain
 provider delivery is not replayed. Older runners keep queued continuation delivery.
 

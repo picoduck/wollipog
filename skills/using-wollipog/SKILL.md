@@ -849,13 +849,13 @@ wollipog issue-closure execute <occurrence-id> --digest <resource-digest> --json
 An approved closure does not expire on age alone. The payload, scope, policy revision, authority,
 issue-bound child work and freshly read forge evidence must still match; a changed binding is
 named in the refusal. A bound child moving to unrelated recorded work does not invalidate unchanged
-issue work on protocol 358+. A new child joining the issue or a new unconsumed issue-bound decision
+issue work on protocol 360+. A new child joining the issue or a new unconsumed issue-bound decision
 still does; incomplete history retains the stricter binding. Human-owned closures stay human-owned.
 On compatible runners an approval received mid-turn uses the existing durable steering lane at a
 safe tool boundary; rejected steering retains its queued continuation, and uncertain delivery is
 never replayed. Older runners keep queued delivery.
 
-On protocol 358+, an open PR is a closure gap when it closes the issue or belongs to this campaign.
+On protocol 360+, an open PR is a closure gap when it closes the issue or belongs to this campaign.
 A mere mention by an outside PR is not a gap. Unreadable closing references or campaign history
 count the PR as related. Execution repeats these reads before writing; older runners retain the
 conservative mention and timeline rule.

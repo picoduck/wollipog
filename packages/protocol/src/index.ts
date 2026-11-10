@@ -497,8 +497,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v278 issue-closure inspection reads an epic's sub-issues and member checklist with each member's
    * state (#4060). Without it an epic's completed closure has only the work-item proof. */
   epicClosureMembers: 278,
-  closureCampaignPullRequests: 358,
-  closureApprovalSteering: 358,
+  closureCampaignPullRequests: 360,
+  closureApprovalSteering: 360,
   /** v282 runner delivers a Full Control standing dismissal or decline with text naming the policy
    * rather than a person (#4063). Older runners keep the fixed text and the separate notices. */
   fullControlResponseAttribution: 282,
@@ -4989,7 +4989,7 @@ export function validCampaignIssueFacts(value: unknown): value is CampaignIssueF
 }
 
 export interface GithubIssueClosureInspection {
-  /** v358 (#4403): complete server-derived campaign PR identities in this repository. Missing
+  /** v360 (#4403): complete server-derived campaign PR identities in this repository. Missing
    * retains conservative mention matching; null means unreadable and relates every open PR.
    * Execution reuses this exact binding. */
   campaignPullRequests?: number[] | null;
@@ -5044,10 +5044,10 @@ export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspe
   explanation: string;
   evidence: string[];
   comment?: string;
-  /** v358: server-derived issue attempt identities, including children that ended before execution. */
+  /** v360: server-derived issue attempt identities, including children that ended before execution. */
   issueAttemptDigest?: string;
   activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string;
-    /** v358: server-derived issue work, stable across leaving for proven unrelated work. */
+    /** v360: server-derived issue work, stable across leaving for proven unrelated work. */
     issueWorkDigest?: string }>;
   /** Server-derived (#3237): the live campaign children the ledger proves unrelated, so left out of
    * `activeChildren`, each with the ledger facts that excluded it. Read-only: it stays outside the
@@ -10004,9 +10004,9 @@ export type GithubIssueClosureMessage = {
       /** v278 (#4060): also read the issue's epic members into the inspection and its digest. */
       epicMembers?: true }
   | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot;
-      /** v358: fresh server-derived campaign context. Null relates every open PR. */
+      /** v360: fresh server-derived campaign context. Null relates every open PR. */
       campaignPullRequests?: number[] | null;
-      /** v358: root execution also stops at the forge fence for a final control-plane recheck. */
+      /** v360: root execution also stops at the forge fence for a final control-plane recheck. */
       prepare?: true }
   | { operation: "reconcile"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot; consumedAt: number }
   /** v323 (#4119): only with `location`. A Location's runner holds no copy of the campaign's scope,
@@ -10848,7 +10848,7 @@ export interface StartSessionMessage {
 }
 
 export interface PromptSessionMessage {
-  /** v358: server-created approved root issue-closure notification. This marks only its durable
+  /** v360: server-created approved root issue-closure notification. This marks only its durable
    * receipt as eligible for safe queue promotion; public prompt APIs never accept this field. */
   issueClosureResume?: true;
   artifactUploads?: ArtifactUploadPreference;

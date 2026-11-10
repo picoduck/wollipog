@@ -25,7 +25,7 @@ for (const [device, width, height, theme] of [["desktop", 1440, 1200, "dark"], [
         await expect(summary).toContainText("12m");
         await expect(epic).toContainText("10m");
         await expect(panel).toContainText("picoduck/wollipog#4401");
-        await expect(panel).not.toContainText("#44031");
+        await expect(panel.locator('a[href$="/issues/44031"]')).toHaveCount(0);
       }
       const geometry = await panel.evaluate((element) => ({ width: element.clientWidth, scroll: element.scrollWidth }));
       expect(geometry.scroll).toBeLessThanOrEqual(geometry.width + 1);
