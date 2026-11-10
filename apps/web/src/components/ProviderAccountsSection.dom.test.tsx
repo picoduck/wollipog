@@ -1858,6 +1858,34 @@ test("an Owner can copy a Codex API-key sign-in after a confirmation naming the 
   }
 });
 
+test("a missing CLI blocks new sign-in while an admitted API-key copy still requires confirmation", async () => {
+  const api = importClient();
+  const ui = await render({ runner: runnerView({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.providerSetupReadiness,
+    agentsRefreshed: true, runtime: IMPORT_RUNTIME }), api: api.client });
+  try {
+    const add = await openAdd(ui);
+    await chooseRadio(ui, add.dialog, "Codex");
+    assert.equal(ui.button(add.dialog, "Start Sign-In").disabled, true);
+    assert.match(add.dialog.textContent ?? "", /Install Codex on this machine/);
+    await chooseRadio(ui, add.dialog, "Copy Existing Sign-In");
+    assert.equal(ui.button(add.dialog, "Copy Sign-In").disabled, false);
+    assert.doesNotMatch(add.dialog.textContent ?? "", /Installation Needed/);
+    await chooseRadio(ui, add.dialog, "New Sign-In");
+    assert.equal(ui.button(add.dialog, "Start Sign-In").disabled, true);
+    await chooseRadio(ui, add.dialog, "Copy Existing Sign-In");
+    await add.type("Copied");
+    await act(async () => { ui.button(add.dialog, "Copy Sign-In").click(); });
+    await ui.settle();
+    assert.deepEqual(api.imports, [], "an installation fact never bypasses copy confirmation");
+    await act(async () => { ui.button(dialogs().at(-1)!, "Copy Sign-In").click(); });
+    await ui.settle();
+    assert.equal(api.imports.length, 1);
+    assert.deepEqual(api.calls, [], "copy never starts a sign-in command");
+  } finally {
+    await ui.unmount();
+  }
+});
+
 test("declining the copy confirmation sends nothing, and a runner refusal is a notice in the dialog", async () => {
   const api = importClient(async () => { throw new ApiError("Only a Codex sign-in that uses an API key stored in auth.json can be copied.", 409); });
   const ui = await render({ runner: runnerView({ protocolVersion: IMPORTING, runtime: IMPORT_RUNTIME }), api: api.client });

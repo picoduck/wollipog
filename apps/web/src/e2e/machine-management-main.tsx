@@ -171,6 +171,21 @@ if (signInFixture && runner.providerAccounts) {
     },
   ];
 }
+// Successful new-sign-in scenarios need compatible CLIs, even with no ready default account.
+if (new URLSearchParams(window.location.search).get("providerSetup") === "installed") {
+  runner.agents.push({ id: "claude", name: "Claude Code", command: "claude", args: [], env: {},
+    driver: "claude-code", context: { kind: "native" }, available: false, authStatus: "unauthenticated",
+    claudeCode: { status: "unauthenticated", effortLevels: [], permissionModes: [], streamJsonInput: true,
+      streamJsonImages: true, controlProtocol: true, forkSession: true, replayUserMessages: true,
+      auth: { status: "unauthenticated", billingSource: "unknown" } },
+    providerReadiness: { checkedAt: Date.now(), installation: "compatible", installationAdmission: "permitted",
+      authentication: "unauthenticated", reason: "sign_in_required" } });
+  runner.agents.push({ id: "codex", name: "Codex", command: "codex", args: [], env: {},
+    driver: "codex-app-server", context: { kind: "native" }, available: false, authStatus: "unauthenticated",
+    codexAppServer: { status: "supported", appServerAvailable: true },
+    providerReadiness: { checkedAt: Date.now(), installation: "compatible", installationAdmission: "permitted",
+      authentication: "unauthenticated", reason: "sign_in_required" } });
+}
 // Provider profiles (#3239): one account in each access state, and Codex Solo left a legacy HOME.
 if (new URLSearchParams(window.location.search).has("profiles") && runner.providerAccounts) {
   // A Windows runner refuses every adoption, so the Machine that adopts is a Linux one (#3240).

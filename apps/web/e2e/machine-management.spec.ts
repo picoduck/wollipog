@@ -593,6 +593,7 @@ test("Owners recover a stale provider HOME lease only where the machine can prov
 });
 
 test("Machine owners can start both provider sign-in flow shapes", async ({ page }) => {
+  await page.goto(`/machine-management-e2e.html?providerSetup=installed&${DESIGN_WORKSTATION}`);
   await providerAccounts(page).getByRole("button", { name: "Add Separate Sign-In…" }).click();
   const claudeDialog = page.getByRole("dialog", { name: "Add Account" });
   await claudeDialog.getByLabel("Account Label").fill("Studio Claude");
@@ -741,6 +742,7 @@ test("a hidden email's sign-in head and badge remain unclipped at 390px (#2996)"
 });
 
 test("Add Account refuses an empty or duplicate label under the field, and shows a request failure above the footer", async ({ page }) => {
+  await page.goto(`/machine-management-e2e.html?providerSetup=installed&${DESIGN_WORKSTATION}`);
   await providerAccounts(page).getByRole("button", { name: "Add Separate Sign-In…" }).click();
   const dialog = page.getByRole("dialog", { name: "Add Account" });
   await expect(dialog).toContainText("Design Workstation");

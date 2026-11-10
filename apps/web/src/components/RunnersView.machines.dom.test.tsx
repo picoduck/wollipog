@@ -835,7 +835,11 @@ test("Needs Attention lists the offline runner and the outdated SSH machine in l
     const items = attentionRows(view.body);
     assert.deepEqual(items.map((item) => item.querySelector(".row-title")?.textContent), ["Build Box", "Downstairs"],
       "the list's order, and only the machines that need the person");
-    assert.deepEqual(items.map((item) => item.querySelector(".status")?.textContent), ["Update Required", "Offline"]);
+    assert.deepEqual(items.map((item) => item.querySelector(".status")?.textContent), ["Online", "Offline"],
+      "SSH connection health stays separate from the reason it needs attention");
+    assert.equal(row(view.body, "Build Box").querySelector(".machine-row-status")?.textContent, "Online");
+    assert.match(row(view.body, "Build Box").querySelector(".machine-row-meta")?.textContent ?? "", /Update Required/,
+      "the SSH list still exposes its runner update requirement");
     assert.deepEqual(items.map((item) => item.querySelector(".row-sub")?.textContent), [
       "Its runner is out of date.",
       "Last seen 4m ago. Repair its connection to run agents there again.",

@@ -98,8 +98,9 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
   const submittingRef = useRef(false);
 
   const copyOffered = provider === "codex" && importOffer?.available === true && importOffer.sources.length > 0;
-  const installationIssue = installationIssues?.[provider];
   const copying = copyOffered && method === "copy";
+  // Copying an admitted API-key record does not execute the provider's sign-in command.
+  const installationIssue = copying ? undefined : installationIssues?.[provider];
   const source = copying ? importOffer.sources.find((choice) => choice.key === sourceKey) ?? importOffer.sources[0] : undefined;
   // A hidden email label shows numbered until the person reveals emails, so they can tell which
   // account's key and billing they are copying without exposing it before reveal (#3719).
