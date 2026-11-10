@@ -868,7 +868,7 @@ test("a rollback proof holds only in the worktree it was written in, and in no l
     renameSync(handle.path, pruned);
     execFileSync("git", ["-C", fixture.repo, "worktree", "prune"]);
     renameSync(pruned, handle.path);
-    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "mismatch");
+    assert.equal(await worktreeRollbackProofState(fixture.repo, handle.path, "token-1", options), "unregistered");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -4993,6 +4993,8 @@ test("concurrent requests retain every created branch and deletion leaves attach
       context: { kind: "native" }, agentSessionId: null, status: "idle", title: "multi",
       config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
       seq: 0, createdAt: 1, updatedAt: 1,
+      // A session this runner made, which records every worktree it keeps (#4209).
+      keptWorktreesTracked: true,
     });
     manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
     (manager as unknown as { configuredProjectPaths: string[] }).configuredProjectPaths = [join(root, "operator-location")];

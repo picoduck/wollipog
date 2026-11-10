@@ -202,6 +202,14 @@ export interface WorktreeCleanupRecord {
   rollbackAttempts?: number;
   rollbackRetryAt?: number;
   rollbackGaveUpAt?: number;
+  /** (#4209) When an auxiliary creation rollback decided to keep its worktree. Its later retries only
+   * stop its processes and give back its ports, and never tell the session again. */
+  rollbackKeptAt?: number;
+  /** (#4209) A session deletion's record for a worktree the runner kept for a person's work. It stops
+   * the worktree's processes and gives back its ports, and leaves the worktree and its branch alone.
+   * Such a record also carries `preserveBranch`, so a runner that predates this field removes the
+   * worktree only if nothing in it changed. */
+  keepWorktree?: boolean;
   createdAt?: number;
   completedAt?: number;
   /** Forge-verified head used only for safe cleanup when the branch upstream disappeared. */
@@ -1427,7 +1435,8 @@ function nativeRegisteredWorktreeGitDir(commonDir: string, worktreePath: string)
   try {
     entries = readdirSync(adminRoot, { withFileTypes: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    // Missing, or something that is not a directory: either way Git keeps no registration there.
+    if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return null;
     throw error;
   }
   const matches = entries.flatMap((entry) => {
@@ -1470,6 +1479,28 @@ async function registeredWorktreeGitDir(
     { cwd: "/", timeoutMs: 8_000 },
   );
   return result.stdout.trim() || null;
+}
+
+/** Drop one worktree's registration once its directory has gone, as `git worktree prune` would for it
+ * alone. Prune itself drops every worktree whose directory is away, even for a moment, as on an
+ * unmounted volume, and with each its index, HEAD and reflog and private refs. A locked registration,
+ * or a path that is there again, is left as it is. */
+async function pruneOwnRegistration(context: AgentContext, repoPath: string, path: string): Promise<void> {
+  const commonDir = (await command(context, repoPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]))
+    .trim().replace(/[\\/]$/u, "");
+  const gitDir = await registeredWorktreeGitDir(context, commonDir, path);
+  if (!gitDir) return;
+  try {
+    if (await removalPathIdentity(context, path) !== null) return;
+  } catch {
+    return;
+  }
+  if (context.kind === "wsl") {
+    await runContextCommand(context, "sh", ["-c", 'test -e "$1/locked" || rm -rf -- "$1"', "sh", gitDir], { cwd: "/", timeoutMs: 30_000 });
+    return;
+  }
+  if (existsSync(join(gitDir, "locked"))) return;
+  await rm(gitDir, { recursive: true, force: true });
 }
 
 async function registeredWorktreeForRemoval(
@@ -1628,13 +1659,27 @@ export async function createWorktree(repoPath: string, sessionId: string, option
     .filter((candidate): candidate is string => !!candidate)
     .some((candidate) => sameWorktreePath(context, candidate, path));
   if (registered) {
-    try {
-      if ((await command(context, path, ["rev-parse", "--is-inside-work-tree"])).trim() === "true") {
-        return { path, branch, created: false };
+    // A registration whose directory has gone holds no file, so only it goes. A directory that is
+    // there but does not answer as a worktree may still hold work: its configuration no longer
+    // parses, say, or Git failed just this once. Git's own forced removal would take it regardless,
+    // so it is left for a person to look at (#4209).
+    if (await removalPathIdentity(context, path).catch(() => undefined) === null) {
+      await pruneOwnRegistration(context, repoPath, path);
+    } else {
+      let failure = "Git says it is not a work tree";
+      try {
+        if ((await command(context, path, ["rev-parse", "--is-inside-work-tree"])).trim() === "true") {
+          return { path, branch, created: false };
+        }
+      } catch (error) {
+        const detail = String((error as { stderr?: string }).stderr ?? "").trim().split("\n")[0];
+        failure = (detail || (error as Error).message).slice(0, 200);
       }
-    } catch { /* stale registration: remove below */ }
-    await command(context, repoPath, ["worktree", "remove", "--force", path], 120_000).catch(() => {});
-    await command(context, repoPath, ["worktree", "prune"]).catch(() => {});
+      // The path and the instruction come first, since a failure reason is bounded.
+      throw new Error(`this session's worktree at ${path} was left as it is, in case it holds work: it is registered with Git ` +
+        "but does not answer as a worktree. Repair it, or move anything you want to keep out of it and remove it with " +
+        `git worktree remove --force, then try again (${failure})`);
+    }
   } else {
     // A crash can leave an unregistered directory at the deterministic path. It is owned by this
     // exact session root, so clear it before `git worktree add` rather than failing every restart.
@@ -2855,7 +2900,7 @@ export async function discardWorktreeIfSafe(
         updatedAt: Date.now(),
       }, { context });
     }
-    await command(context, repoPath, ["worktree", "prune"]);
+    await pruneOwnRegistration(context, repoPath, handle.path);
     return { removed: true };
   } catch {
     return { removed: false, reason: "unavailable" };
@@ -2864,9 +2909,11 @@ export async function discardWorktreeIfSafe(
 
 /** Remove a worktree this runner just checked out on an existing branch, keeping the branch. Git
  * refuses (and the worktree stays) if anything in it changed, unless `force` says those changes are
- * the runner's own: a setup that ran there before the worktree was given back (#4209). A forced
- * release may be replaying a reservation whose checkout never happened, so an absent path only
- * needs its registration pruned. */
+ * the runner's own: a setup that ran there before the worktree was given back (#4209). Either way
+ * the path is first proved again to be the worktree its repository registered there, as
+ * `removeWorktree` proves it: Git removes a worktree it cannot answer from inside, a configuration
+ * that no longer parses say, and that may be anyone's. A release may be replaying a reservation
+ * whose checkout never happened, so an absent path only needs its own registration dropped. */
 export async function releaseRecoveredWorktree(
   repoPath: string,
   path: string,
@@ -2874,8 +2921,14 @@ export async function releaseRecoveredWorktree(
   { force = false }: { force?: boolean } = {},
 ): Promise<void> {
   const context = options.context ?? nativeContext;
-  if (force && await removalPathIdentity(context, path) === null) {
-    await command(context, repoPath, ["worktree", "prune"]);
+  let identity: WorktreeRemovalIdentity | null;
+  try {
+    identity = await revalidateWorktreeRemovalIdentity(repoPath, path, options);
+  } catch (error) {
+    throw new Error(`worktree cleanup identity could not be revalidated: ${(error as Error).message}`);
+  }
+  if (!identity) {
+    await pruneOwnRegistration(context, repoPath, path);
     return;
   }
   await command(context, repoPath,
@@ -2907,7 +2960,7 @@ export async function removeWorktree(repoPath: string, handle: WorktreeHandle, o
         // Git can fail after removing either the directory or its registration. Accept only a
         // genuinely absent path; a present unregistered path has lost the identity just proved and
         // must be retained for a later retry or operator inspection.
-        await command(context, repoPath, ["worktree", "prune"]).catch(() => {});
+        await pruneOwnRegistration(context, repoPath, handle.path).catch(() => {});
         try {
           const listed = parseWorktreePorcelain(
             await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
@@ -2926,7 +2979,7 @@ export async function removeWorktree(repoPath: string, handle: WorktreeHandle, o
     // remove` with a missing pathname: another process could recreate it between this proof and
     // Git's recursive removal.
     try {
-      await command(context, repoPath, ["worktree", "prune"]);
+      await pruneOwnRegistration(context, repoPath, handle.path);
       const listed = parseWorktreePorcelain(
         await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
       );
@@ -2945,7 +2998,7 @@ export async function removeWorktree(repoPath: string, handle: WorktreeHandle, o
   if (removalConfirmed && !repositoryUnavailable) {
     try { await command(context, repoPath, ["branch", "-D", handle.branch]); }
     catch { /* branch may already be absent */ }
-    try { await command(context, repoPath, ["worktree", "prune"]); }
+    try { await pruneOwnRegistration(context, repoPath, handle.path); }
     catch (error) { failures.push(`prune: ${(error as Error).message}`); }
   }
   if (failures.length) throw new Error(`worktree cleanup incomplete (${failures.join("; ")})`);
@@ -2971,8 +3024,10 @@ export async function clearWorktreeRollbackProof(path: string, proof: string, op
  * - `unpopulated`: no proof, but the branch it reserved registered here with no file at all, which
  *   is what an attempt leaves when it stops before its proof. There is nothing in it to lose;
  * - `mismatch`: something it did not make, on the repository's own word. Never removed;
+ * - `unregistered`: a directory the repository does not list as a worktree at all. Never removed
+ *   either, and the next attempt at that path refuses it, saying what to do, until it is gone;
  * - `unavailable`: nothing can be concluded yet. */
-export type WorktreeRollbackProofState = "proved" | "absent" | "unpopulated" | "mismatch" | "unavailable";
+export type WorktreeRollbackProofState = "proved" | "absent" | "unpopulated" | "mismatch" | "unregistered" | "unavailable";
 
 export async function worktreeRollbackProofState(
   repoPath: string,
@@ -3005,7 +3060,7 @@ export async function worktreeRollbackProofState(
   try {
     const entry = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]))
       .find((item) => sameWorktreePath(context, item.path, path));
-    if (!entry) return "mismatch";
+    if (!entry) return "unregistered";
     const toplevel = (await command(context, path, ["rev-parse", "--path-format=absolute", "--show-toplevel"])).trim();
     if (!sameWorktreePath(context, toplevel, path)) return "unavailable";
     if (proof && (proofUnread || !await worktreeRefsReadable(context, path))) return "unavailable";
@@ -3105,6 +3160,31 @@ export async function captureRollbackSnapshot(path: string, options: WorktreeOpt
   // Reads the working files through a temporary index, so it writes nothing to the admin directory.
   const tree = await withGitExecutionContext(context, () => captureWorktreeTree(path));
   return `${head}:${tree}:${await adminDirectoryDigest(context, gitDir)}`;
+}
+
+/** Whether a worktree may hold work that exists nowhere else: anything Git sees as changed or
+ * untracked, or a commit since `baseCommit` that no remote branch has. With no base, every commit no
+ * remote has counts. An answer Git cannot give counts as yes, and a directory that has gone as no.
+ * Ignored files are not looked at. */
+export async function worktreeHoldsUnsharedWork(
+  path: string,
+  baseCommit: string | undefined,
+  options: WorktreeOptions = {},
+): Promise<boolean> {
+  const context = options.context ?? nativeContext;
+  try {
+    if (await removalPathIdentity(context, path) === null) return false;
+  } catch {
+    return true;
+  }
+  try {
+    if ((await command(context, path, ["status", "--porcelain=v1", "--untracked-files=all"])).trim()) return true;
+    const unshared = await command(context, path,
+      ["rev-list", "--count", "HEAD", "--not", "--remotes", ...(baseCommit ? [safeGitArgument(baseCommit, "base commit")] : [])]);
+    return Number(unshared.trim()) !== 0;
+  } catch {
+    return true;
+  }
 }
 
 export type WorktreeRollbackWork = { state: "unchanged" } | { state: "changed"; reason: string } | { state: "unavailable" };
