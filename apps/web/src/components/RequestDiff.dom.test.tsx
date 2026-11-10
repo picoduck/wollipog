@@ -13,8 +13,8 @@ test("a late response cannot replace a newer observation; failed reload removes 
   const globals = { window, document: window.document, HTMLElement: window.HTMLElement, Node: window.Node, React, IS_REACT_ACT_ENVIRONMENT: true };
   const prior = Object.getOwnPropertyDescriptors(globalThis);
   for (const [name, value] of Object.entries(globals)) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
-  const container = window.document.createElement("div");
-  window.document.body.append(container);
+  const container = document.createElement("div");
+  document.body.append(container);
   const root = createRoot(container);
   const pending: { resolve: (value: GitActionData) => void; reject: (error: Error) => void }[] = [];
   const client: ApiClient = { ...api, git: () => new Promise((resolve, reject) => pending.push({ resolve, reject })) };
