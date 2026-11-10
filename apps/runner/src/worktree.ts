@@ -981,6 +981,8 @@ export interface WorktreeHolder {
   live?: boolean;
   /** A recorded cleanup is going to remove the worktree. */
   removalPending?: boolean;
+  /** The holder records the worktree only from a Location it has since left. */
+  earlierLocation?: boolean;
 }
 
 /** Where a recovered branch continues (#4138):
@@ -1029,7 +1031,15 @@ export function recoveredBranchPlacement(
         "to another branch, then ask again"
       : holder.live
       ? `${where} worktree ${elsewhere.path}, which session ${holder.sessionId} is using; ${keep}`
-      : `${where} worktree ${elsewhere.path}, which session ${holder.sessionId} still owns although it is not running; ${keep}` };
+      // A stopped holder keeps its worktree (#4209): handing it over is a decision no switch makes.
+      // The way on is that session itself, which still has everything it had.
+      : holder.earlierLocation
+      ? `${where} worktree ${elsewhere.path}, which session ${holder.sessionId} kept from an earlier Location and is not ` +
+        `running. To continue the task there, send session ${holder.sessionId} a message and have it switch back to this ` +
+        "Location; its work and pull request stay with it. Nothing about that session or its worktree has changed"
+      : `${where} worktree ${elsewhere.path}, which session ${holder.sessionId} still owns although it is not running. To ` +
+        `continue the task there, send session ${holder.sessionId} a message: it resumes in that worktree, with its work ` +
+        "and pull request. Nothing about that session or its worktree has changed" };
   }
   if (elsewhere.locked) {
     return { kind: "refuse", reason: `${where} worktree ${elsewhere.path}, which is locked; unlock it (git worktree unlock) ` +
@@ -2172,6 +2182,93 @@ export async function mergedWorktreePullRequestForBranch(
     // the reconciliation backoff.
     return null;
   }
+}
+
+/** The pull request a reused worktree's branch already has, for its record only (#4209). */
+export type DiscoveredBranchPullRequest =
+  | { url: string; state: "open"; provider: "github"; kind: "pull_request" }
+  | DiscoveredMergedPullRequest;
+
+/** Find the pull request an existing branch already has, for a worktree a Location switch reused
+ * in place: typically the head branch of a pull request someone pushed, recovered to continue it.
+ * The link is only shown and kept current. Such a worktree stays its owner's, so nothing about the
+ * pull request ever removes it.
+ *
+ * GitHub only, and only from the repository the branch's remote names, rebuilt from that URL so
+ * gh's own choice of repository plays no part. A candidate must come from that same repository
+ * (not a fork) and from the branch's upstream branch, or the branch itself when it has none. One
+ * open pull request is linked as open. With none open, a merged one is linked only when its head
+ * is exactly the local tip, the same proof discovery asks of any merged link. Several open ones, a
+ * closed one, or a merged one with an earlier head link nothing. Every failure links nothing. */
+export async function branchPullRequestForReusedWorktree(
+  worktreePath: string,
+  branch: string,
+  options: WorktreeOptions & {
+    /** Test-only subprocess seam for the forge CLI. Git always runs for real. */
+    runForgeCommand?: typeof runContextCommand;
+    preflightTimeoutMs?: number;
+    /** Admission hook, after every local check passes, keyed by what the forge is asked about. */
+    onForgeAttempt?: (identity: string) => boolean;
+    /** Transport, auth or tool failure, as against an answer that lists nothing. */
+    onForgeUnavailable?: () => void;
+  } = {},
+): Promise<DiscoveredBranchPullRequest | null> {
+  const context = options.context ?? nativeContext;
+  const timeout = options.preflightTimeoutMs ?? 30_000;
+  let project: string;
+  let headBranch: string;
+  let head: string;
+  try {
+    const remote = (await command(context, worktreePath, ["config", "--get", "--default", "", `branch.${branch}.remote`], timeout)).trim();
+    const merge = (await command(context, worktreePath, ["config", "--get", "--default", "", `branch.${branch}.merge`], timeout)).trim();
+    if ((remote || merge) && (!remote || remote === "." || !/^refs\/heads\/./u.test(merge))) return null;
+    headBranch = merge ? merge.slice("refs/heads/".length) : branch;
+    const remoteUrl = (await command(
+      context, worktreePath, ["config", "--get", "--default", "", `remote.${remote || "origin"}.url`], timeout,
+    )).trim();
+    const parsed = parseForgeRemote(remoteUrl);
+    if (parsed?.provider !== "github" || parsed.host !== "github.com" ||
+        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(parsed.project) || parsed.project.startsWith("-")) return null;
+    project = parsed.project;
+    head = (await command(context, worktreePath, ["rev-parse", "--verify", "HEAD"], timeout)).trim().toLowerCase();
+    if (!/^[a-f0-9]{40,64}$/u.test(head)) return null;
+  } catch {
+    return null;
+  }
+  if (options.onForgeAttempt && !options.onForgeAttempt(JSON.stringify([project, headBranch, head]))) return null;
+  let listed: unknown;
+  try {
+    const result = await (options.runForgeCommand ?? runContextCommand)(
+      context,
+      "gh",
+      [
+        "pr", "list", "--repo", `github.com/${project}`, "--head", headBranch, "--state", "all", "--limit", "20",
+        "--json", "url,state,headRefOid,headRefName,isCrossRepository",
+      ],
+      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
+    );
+    listed = JSON.parse(result.stdout) as unknown;
+  } catch {
+    options.onForgeUnavailable?.();
+    return null;
+  }
+  if (!Array.isArray(listed)) {
+    options.onForgeUnavailable?.();
+    return null;
+  }
+  const own = listed.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const item = value as Record<string, unknown>;
+    if (typeof item.url !== "string" || item.isCrossRepository !== false || item.headRefName !== headBranch) return [];
+    const request = linkedChangeRequest(item.url);
+    if (request?.provider !== "github" || request.project.toLowerCase() !== project.toLowerCase()) return [];
+    return [{ url: item.url, state: item.state, headOid: typeof item.headRefOid === "string" ? item.headRefOid.toLowerCase() : "" }];
+  });
+  const open = own.filter((item) => item.state === "OPEN");
+  if (open.length === 1) return { url: open[0]!.url, state: "open", provider: "github", kind: "pull_request" };
+  if (open.length > 1) return null;
+  const merged = own.find((item) => item.state === "MERGED" && item.headOid === head);
+  return merged ? { url: merged.url, state: "merged", headOid: merged.headOid, provider: "github", kind: "pull_request" } : null;
 }
 
 /** Candidate merged pull requests checked per containment proof; each one costs a forge fetch. */

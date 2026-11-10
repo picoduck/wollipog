@@ -333,6 +333,7 @@ import {
   worktreeBranch,
   worktreeHead,
   mergedWorktreePullRequestForBranch,
+  branchPullRequestForReusedWorktree,
   mergedPullRequestContainingHead,
   worktreePullRequestState,
   changeRequestProvider,
@@ -1272,6 +1273,19 @@ export function returningWorktreeNotice(
   ].join("\n");
 }
 
+/** Why an agent's own attach of another session's worktree is refused (#4209), and the way on. */
+function attachHolderRefusal(path: string, holder: WorktreeHolder): string {
+  const keep = "Nothing about that session or its worktree has changed";
+  if (holder.removalPending) return `the worktree at ${path} is being removed by the runner for session ${holder.sessionId}; ask again once that finishes`;
+  if (holder.live) {
+    return `the worktree at ${path} is in use by session ${holder.sessionId}; continue the task in that session instead, so the ` +
+      `work and its pull request stay with it. ${keep}`;
+  }
+  return `the worktree at ${path} belongs to session ${holder.sessionId}, which is not running. To continue the task there, send ` +
+    `session ${holder.sessionId} a message${holder.earlierLocation ? " and have it switch back to this Location" : ""}; its work ` +
+    `and pull request stay with it. ${keep}`;
+}
+
 /** What the agent reads first after a Location switch continued in an existing worktree (#4138):
  * the runner's own facts, framed as Wollipog's, so a routine reset or clean does not discard work
  * that was there before the session arrived. Exported for tests. */
@@ -1981,6 +1995,7 @@ export class SessionManager {
   /** Test seams keep forge availability and destructive Git behavior deterministic. */
   private readWorktreeBranch: typeof worktreeBranch = worktreeBranch;
   private discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch = mergedWorktreePullRequestForBranch;
+  private discoverReusedWorktreePullRequest: typeof branchPullRequestForReusedWorktree = branchPullRequestForReusedWorktree;
   private probeMergedPullRequestContainment: typeof mergedPullRequestContainingHead = mergedPullRequestContainingHead;
   private resolveWorktreePullRequestState: typeof worktreePullRequestState = worktreePullRequestState;
   private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
@@ -3958,7 +3973,25 @@ export class SessionManager {
       // that no longer exists — and the contract on the field is that absent means unknown.
       if (attachedDefaultBranch) worktree.defaultBranch = attachedDefaultBranch;
       else delete worktree.defaultBranch;
-      return { worktree, ...await this.activateWorktreeWithNotice(meta, worktree, requester) };
+      if (!options.requestedBySession) return { worktree, ...await this.activateWorktreeWithNotice(meta, worktree, requester) };
+      // An agent never moves itself into another session's worktree (#4209), whether that session
+      // took it with a Location switch, made it, attached it, or kept it from an earlier Location,
+      // and whether or not it is running: either would put two sessions in one worktree, or let that
+      // session's deletion or removal act under this one. Checked and claimed with no await between,
+      // like a switch, so neither a switch nor another attach takes it while this one activates. A
+      // person's own attach is their decision and is not checked.
+      // This session's own records, a pending cleanup among them, are handled above as before, and
+      // never hide another session's.
+      const holder = this.worktreeHolder(sessionId, meta.context, attached.path, { othersOnly: true });
+      if (holder) throw new Error(attachHolderRefusal(attached.path, holder));
+      if (this.reusedWorktreeClaims.has(attached.path)) return { worktree, ...await this.activateWorktreeWithNotice(meta, worktree, requester) };
+      this.reusedWorktreeClaims.set(attached.path, sessionId);
+      try {
+        return { worktree, ...await this.activateWorktreeWithNotice(meta, worktree, requester) };
+      } finally {
+        // Once activation has written the row, the session's own record holds the worktree.
+        if (this.reusedWorktreeClaims.get(attached.path) === sessionId) this.reusedWorktreeClaims.delete(attached.path);
+      }
     });
   }
 
@@ -4409,6 +4442,10 @@ export class SessionManager {
         if (!initial || !this.sessionCanOpen(sessionId)) return;
         const worktree = this.attributedWorktrees(initial)
           .find((item) => sameWorktreePath(initial.context, item.path, path));
+        if (worktree?.source === "attached" && worktree.reusedInPlace === true && !worktree.pullRequest) {
+          await this.linkReusedWorktreePullRequest(sessionId, path, { preflightTimeoutMs: 8_000 });
+          return;
+        }
         if (!worktree || worktree.source === "attached" || worktree.pullRequest) return;
         const checkedOutBranch = await this.readWorktreeBranch(worktree.path, {
           context: initial.context,
@@ -4467,6 +4504,63 @@ export class SessionManager {
       } catch (error) {
         this.log(`merged pull request discovery failed for ${boundedSessionIdForLog(sessionId)}: ${errText(error)}`);
       }
+    });
+  }
+
+  /** Link the pull request a worktree reused in place by a Location switch already has (#4209), so
+   * its row shows it and reconciliation keeps its state current. The row stays attached, and an
+   * attached worktree is never retired, so a merged or closed pull request removes nothing. Asked
+   * once after the move and then from reconciliation, with the same negative backoff discovery uses:
+   * a branch whose head and upstream are unchanged is not asked about again for half an hour. */
+  private async linkReusedWorktreePullRequest(
+    sessionId: string,
+    path: string,
+    options: { preflightTimeoutMs?: number } = {},
+  ): Promise<void> {
+    const reusedRow = (meta: SessionMeta | null | undefined) => meta && this.attributedWorktrees(meta)
+      .find((item) => sameWorktreePath(meta.context, item.path, path) && item.source === "attached" &&
+        item.reusedInPlace === true && !item.pullRequest);
+    const initial = this.store.readMeta(sessionId);
+    if (!initial || !this.sessionCanOpen(sessionId)) return;
+    const worktree = reusedRow(initial);
+    if (!worktree) return;
+    const branch = await this.readWorktreeBranch(worktree.path, {
+      context: initial.context, ...(options.preflightTimeoutMs ? { timeoutMs: options.preflightTimeoutMs } : {}),
+    });
+    if (!branch || branch !== worktree.branch) return;
+    const pathKey = JSON.stringify([sessionId, worktree.path]);
+    let attempted: string | undefined;
+    let unavailable = false;
+    const found = await this.discoverReusedWorktreePullRequest(worktree.path, branch, {
+      context: initial.context,
+      ...(options.preflightTimeoutMs ? { preflightTimeoutMs: options.preflightTimeoutMs } : {}),
+      onForgeAttempt: (identity) => {
+        const retry = this.worktreePullRequestDiscoveryRetryAt.get(pathKey);
+        if (retry?.identity === identity && retry.retryAt > this.worktreePullRequestDiscoveryNow()) return false;
+        attempted = identity;
+        return true;
+      },
+      onForgeUnavailable: () => { unavailable = true; },
+    });
+    if (!found) {
+      if (attempted && !unavailable) {
+        this.worktreePullRequestDiscoveryRetryAt.set(pathKey, {
+          identity: attempted,
+          retryAt: this.worktreePullRequestDiscoveryNow() + WORKTREE_PR_DISCOVERY_NEGATIVE_RETRY_MS,
+        });
+      }
+      return;
+    }
+    this.worktreePullRequestDiscoveryRetryAt.delete(pathKey);
+    await this.runWorktreeOperation(sessionId, async () => {
+      const latest = this.store.readMeta(sessionId);
+      const current = reusedRow(latest);
+      // An explicit link made meanwhile wins, and a row now on another branch is not this one.
+      if (!latest || !current || current.branch !== worktree.branch) return;
+      const worktrees = this.attributedWorktrees(latest).map((item) =>
+        sameWorktreePath(latest.context, item.path, current.path) ? { ...item, pullRequest: found } : item);
+      const updated = this.store.patchMeta(sessionId, { worktrees });
+      if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     });
   }
 
@@ -5634,7 +5728,8 @@ export class SessionManager {
         const meta = this.store.readMeta(candidate.sessionId);
         if (!meta || !this.sessionCanOpen(candidate.sessionId)) return [];
         return this.attributedWorktrees(meta)
-          .filter((worktree) => !worktree.pullRequest && worktree.source !== "attached")
+          // A worktree a switch reused in place is linked too, for its row only: it is never retired.
+          .filter((worktree) => !worktree.pullRequest && (worktree.source !== "attached" || worktree.reusedInPlace === true))
           .map((worktree) => ({ sessionId: candidate.sessionId, path: worktree.path }));
       });
       await this.discoverUnlinkedMergedWorktreesForReconciliation(unlinked);
@@ -15557,6 +15652,11 @@ export class SessionManager {
     });
     if (result.status === "launched") {
       setImmediate(() => this.scheduleDrain(sessionId));
+      // Reconciliation asks again later, after a restart too, if the forge cannot answer now.
+      if (reused) {
+        void this.linkReusedWorktreePullRequest(sessionId, worktree.path).catch((error) =>
+          this.log(`pull request lookup for a reused worktree failed for ${boundedSessionIdForLog(sessionId)}: ${errText(error)}`));
+      }
       return;
     }
     if (result.status === "stopped" || result.status === "superseded") {
@@ -15623,23 +15723,27 @@ export class SessionManager {
   /** Who on this runner still has a claim on `path` (#4138), from the runner's own records only: a
    * pending cleanup that will remove it, or a session (this one included) that records it now or in
    * an earlier Location. A stopped holder counts too: its record would remove or reuse the worktree
-   * later, under whoever then works in it. */
-  private worktreeHolder(sessionId: string, context: AgentContext, path: string): WorktreeHolder | undefined {
+   * later, under whoever then works in it. `othersOnly` skips everything of `sessionId`'s own, so the
+   * answer is another holder whenever there is one, wherever this session's own records come. */
+  private worktreeHolder(sessionId: string, context: AgentContext, path: string, { othersOnly = false } = {}): WorktreeHolder | undefined {
     const same = (candidate: string | null | undefined) => !!candidate && sameWorktreePath(context, candidate, path);
+    const counted = (owner: string) => !othersOnly || owner !== sessionId;
     for (const [claimed, owner] of this.reusedWorktreeClaims) {
-      if (same(claimed)) return { sessionId: owner, ...(owner === sessionId ? { self: true } : {}), live: true };
+      if (same(claimed) && counted(owner)) return { sessionId: owner, ...(owner === sessionId ? { self: true } : {}), live: true };
     }
-    const removal = this.cleanupJournal.list().find((record) => same(record.worktreePath));
+    const removal = this.cleanupJournal.list().find((record) => same(record.worktreePath) && counted(record.sessionId));
     if (removal) return { sessionId: removal.sessionId, removalPending: true };
     for (const meta of this.store.listSessions()) {
-      const recorded = [
-        meta.worktreePath, ...this.attributedWorktrees(meta).map((worktree) => worktree.path),
-        ...(meta.locationHistory ?? []).flatMap((left) => [left.worktreePath, ...left.worktrees.map((worktree) => worktree.path)]),
-      ];
-      if (!recorded.some(same)) continue;
+      if (!counted(meta.sessionId)) continue;
+      const current = [meta.worktreePath, ...this.attributedWorktrees(meta).map((worktree) => worktree.path)];
+      const earlier = (meta.locationHistory ?? [])
+        .flatMap((left) => [left.worktreePath, ...left.worktrees.map((worktree) => worktree.path)]);
+      const now = current.some(same);
+      if (!now && !earlier.some(same)) continue;
       const live = this.active.has(meta.sessionId) ||
         ["queued", "starting", "running", "input_required"].includes(meta.status);
-      return { sessionId: meta.sessionId, ...(meta.sessionId === sessionId ? { self: true } : {}), ...(live ? { live } : {}) };
+      return { sessionId: meta.sessionId, ...(meta.sessionId === sessionId ? { self: true } : {}), ...(live ? { live } : {}),
+        ...(now ? {} : { earlierLocation: true }) };
     }
     return undefined;
   }
