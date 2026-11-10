@@ -447,6 +447,10 @@ const defaults: AgentHarnessDefaultsView = {
 
 const client = {
   ...api,
+  rediscover: async () => {
+    document.documentElement.dataset.rediscoverRequests = String(Number(document.documentElement.dataset.rediscoverRequests ?? "0") + 1);
+    return { ok: true as const };
+  },
   agentHarnessDefaults: () => savedDefaults === "error"
     ? Promise.reject(new Error("Saved defaults are unavailable."))
     : savedDefaults === "pending" ? new Promise<AgentHarnessDefaultsView>(() => undefined) : Promise.resolve(defaults),

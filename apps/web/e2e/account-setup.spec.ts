@@ -17,6 +17,9 @@ for (const theme of ["light", "dark"]) {
       const setup = page.getByRole("dialog", { name: "Account Setup", exact: true });
       await expect(setup).toBeVisible();
       await expect(setup.getByRole("button", { name: "Add Separate Sign-In…" })).toBeEnabled();
+      await setup.getByRole("button", { name: "Rediscover Agents", exact: true }).click();
+      await expect(setup.getByText("Rediscovery Requested", { exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.dataset.rediscoverRequests)).toBe("1");
       await dialogMotionSettled(page);
       await page.screenshot({ path: testInfo.outputPath(`setup-${width}-${theme}.png`) });
       await setup.getByRole("button", { name: "Add Separate Sign-In…" }).click();
