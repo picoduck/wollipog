@@ -134,7 +134,7 @@ longer holds the campaign's completion, so the root need not mark it `scope_remo
 Status uses the same tracking predicate and closure receipt for item states, counts and recovery.
 An item with delivery activity or an open attempt still needs its own delivery. Not-planned closures, issues with a fixed-by
 plan and issues without members are unchanged. The member read needs runner protocol 278 and a
-GitHub repository; the expanded tracking rule needs protocol 357. Elsewhere the epic keeps the
+GitHub repository; the expanded tracking rule needs a control plane with the tracking history. Elsewhere the epic keeps the
 own-work proof and its closure stays human-owned.
 
 Custom preserves existing user approval rules. Full Control delegates an eligible exact decision

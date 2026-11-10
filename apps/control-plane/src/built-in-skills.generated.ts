@@ -222,7 +222,7 @@ export const BUILT_IN_SKILL_SOURCES: readonly BuiltInSkillSource[] = [
           "An in-scope epic needs no fixed-by plan: when its completed closure has no other proof, the server",
           "has the runner read its members on the forge (sub-issues and the member checklist) and proves it",
           "from them. Every member must be in scope and closed as completed. The epic's own delivery work must",
-          "still be delivered. On protocol 357+, server-derived epic tracking items may have ended tracking",
+          "still be delivered. With tracking history on the control plane, server-derived epic tracking items may have ended tracking",
           "attempts, but no open attempts, delivered attempts, verifications, deliveries, PRs or recorded",
           "delivery-stage activity. Titles do not qualify items, and incomplete migrated history retains the",
           "ordinary proof. These items neither block the closure nor, once the epic closes this way, the",
