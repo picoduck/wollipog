@@ -102,6 +102,26 @@ test("a failed child's open attempt can record delivery from its standing report
   } finally { h.db.close(); }
 });
 
+for (const deliveredBeforeReport of [false, true]) test(`failed report uses prompt event order, prior delivery=${deliveredBeforeReport} (#4400)`, () => {
+  const h = fixture();
+  try {
+    // Clock skew must not establish ordering between a CP command and a runner report.
+    h.db.stageSessionPromptCommand({ commandId: "real-prompt", sessionId: "child", runnerId: "r",
+      payloadJson: "{}", payloadSha256: "test", now: Date.now() + 100_000, expiresAt: Date.now() + 200_000 });
+    h.db.markSessionPromptCommandSent("real-prompt", "sent-request", Date.now() + 100_001, Date.now() + 200_000);
+    if (deliveredBeforeReport) h.db.appendEvent("child", { kind: "user_message", text: "Real work",
+      commandId: "real-prompt" }, 100);
+    const seq = h.db.appendEvent("child", { kind: "agent_message", final: true, text: "Completed work" }, 101).seq;
+    h.db.updateSessionStatus("child", "idle", 102);
+    assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: seq, followUpsAccounted: true }).ok);
+    h.db.updateSessionStatus("child", "failed", 103);
+    assert.equal(h.db.durableFinalReportSeq("child"), deliveredBeforeReport ? seq : null);
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), deliveredBeforeReport);
+    assert.equal(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: seq,
+      followUpsAccounted: true }).ok, deliveredBeforeReport);
+  } finally { h.db.close(); }
+});
+
 for (const dirty of [false, true]) test(`successor delivery settles failed child, preserved worktree=${dirty} (#4400)`, () => {
   const h = fixture("stop_and_archive");
   try {

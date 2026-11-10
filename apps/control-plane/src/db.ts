@@ -22436,10 +22436,14 @@ export class ControlPlaneDb {
          )
        ) AND NOT EXISTS (
          SELECT 1 FROM session_prompt_commands command
-         WHERE command.session_id=target.session_id AND command.created_at>target.ts
+         WHERE command.session_id=target.session_id
            AND command.state IN ('pending','sent','accepted','queued','started','uncertain')
            AND NOT EXISTS (SELECT 1 FROM session_system_notice_commands notice
              WHERE notice.command_id=command.command_id AND notice.session_id=command.session_id)
+           AND NOT EXISTS (SELECT 1 FROM session_events delivered
+             WHERE delivered.session_id=target.session_id AND delivered.seq<target.seq
+               AND delivered.kind='user_message'
+               AND json_extract(delivered.payload, '$.commandId')=command.command_id)
        ) AND NOT EXISTS (
          SELECT 1 FROM campaign_work_attempts assignment
          WHERE assignment.session_id=target.session_id
@@ -23189,14 +23193,19 @@ export class ControlPlaneDb {
          )
          AND NOT EXISTS (
            SELECT 1 FROM session_prompt_commands command
-           WHERE command.session_id=target.session_id AND command.created_at>target.ts
+           WHERE child.status IN ('failed','stopped') AND command.session_id=target.session_id
              AND command.state IN ('pending','sent','accepted','queued','started','uncertain')
              AND NOT EXISTS (SELECT 1 FROM session_system_notice_commands notice
                WHERE notice.command_id=command.command_id AND notice.session_id=command.session_id)
+             AND NOT EXISTS (SELECT 1 FROM session_events delivered
+               WHERE delivered.session_id=target.session_id AND delivered.seq<target.seq
+                 AND delivered.kind='user_message'
+                 AND json_extract(delivered.payload, '$.commandId')=command.command_id)
          )
          AND NOT EXISTS (
            SELECT 1 FROM campaign_work_attempts assignment
-           WHERE assignment.session_id=target.session_id AND assignment.start_event_epoch=child.event_epoch
+           WHERE child.status IN ('failed','stopped') AND assignment.session_id=target.session_id
+             AND assignment.start_event_epoch=child.event_epoch
              AND assignment.start_seq>=target.seq
          )
          AND NOT EXISTS (
