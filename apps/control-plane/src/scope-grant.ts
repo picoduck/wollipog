@@ -49,6 +49,26 @@ export function messageNamesRepository(text: string, entries: ReadonlyArray<{ re
     .some((name) => repositoryNameInMessage(words, name)));
 }
 
+/** A literal affirmative owner request, never a semantic guess about a repository mention.
+ * Only an exact owner-named issue list followed by `in owner/repo` qualifies. Other wording,
+ * exclusions, aliases, omissions and multiple repository names retain the model/owner route. */
+export function exactNamedRepositoryLimit(text: string, entries: ReadonlyArray<{ repository: string; locationNames?: readonly string[] }>,
+  issues: ReadonlyArray<{ repository: string; number: number; origin: string }>, references: ReadonlyArray<{ repository: string; number: number }>): string | null {
+  const match = /^(?:Use the orchestrate-issues skill to )?(?:fix|implement|work on)\s+(#\d+(?:(?:\s*,\s*(?:and\s+)?|\s+and\s+)#\d+)*)\s+in\s+([\w.-]+\/[\w.-]*[\w-])(?=\s*(?:[.!\n]|$))/iu.exec(text.trim());
+  if (!match) return null;
+  const repository = match[2]!.toLowerCase();
+  if (!entries.some((entry) => entry.repository.toLowerCase() === repository)) return null;
+  const outsidePhrase = text.trim().slice(match[0].length);
+  if (messageNamesRepository(outsidePhrase, entries)) return null;
+  // Any later negation/qualification of the same repository is ambiguous too.
+  if (repositoryNameInMessage(text.trim().slice(match[0].length), repository)) return null;
+  const numbers = [...match[1]!.matchAll(/#(\d+)/gu)].map((item) => Number(item[1]));
+  if (!numbers.length || new Set(numbers).size !== numbers.length || issues.length !== numbers.length ||
+      issues.some((issue) => issue.origin !== "owner_named" || issue.repository.toLowerCase() !== repository || !numbers.includes(issue.number)) ||
+      references.some((ref) => ref.repository.toLowerCase() !== repository || !numbers.includes(ref.number))) return null;
+  return repository;
+}
+
 /** The repository a name the model returned resolves to: an empty name is the boundary's only
  * repository, and any other must match exactly one boundary entry. Anything else is null, so the
  * reference grants nothing. */

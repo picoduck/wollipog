@@ -50,7 +50,7 @@ function issueLabel(repository: string, number: number, title: string, room: num
  * Every parameter fits the framework's bound with the constraint whole: the issue's title shortens
  * first, then goes, and when even the bare reference and the whole constraint can't fit, the result
  * is null, so the proposal is never checked against part of a constraint and goes to the owner. */
-export function scopeCheckParameters(repository: string, proposal: Pick<CampaignScopeProposal, "issues" | "constraints" | "repositoryConstraint" | "repositoryConstraints">): Record<string, string[]> | null {
+export function scopeCheckParameters(repository: string, proposal: Pick<CampaignScopeProposal, "issues" | "constraints" | "repositoryConstraint" | "repositoryConstraints" | "repositoryLimitVerified">): Record<string, string[]> | null {
   const max = DECISION_QUESTION_PARAMETER_MAX_CHARS;
   const named = proposal.issues.filter((issue) => issue.origin === "owner_named")
     .map((issue) => issueLabel(issue.repository ?? repository, issue.number, issue.title, max));
@@ -67,7 +67,7 @@ export function scopeCheckParameters(repository: string, proposal: Pick<Campaign
   }
   // A repository limit is the agent's claim about the owner's words, so the check judges each name
   // (#4117, #4118). A list with a name that resolved to nothing limits nothing, so none is asked.
-  const limits = scopeProposalRepositoryLimits(proposal).length
+  const limits = !proposal.repositoryLimitVerified && scopeProposalRepositoryLimits(proposal).length
     ? scopeProposalRepositoryConstraints(proposal).map((item) => `${oneLine(item.name)} — ${item.repository}`) : [];
   if (limits.some((limit) => limit.length > max)) return null;
   return { ...(named.length ? { named_asked_for: named } : {}), ...(pairs.length ? { constraint_met: pairs } : {}), ...(limits.length ? { repository_limit: limits } : {}) };
@@ -153,12 +153,13 @@ const normalized = (value: string) => oneLine(value).toLowerCase();
  * reworded rationale joins the recorded occurrence and returns its verdict, its owner request or its
  * admission: rewording never buys a second verdict. */
 export function scopeCheckKey(rootId: string, boundaryRevision: number, revision: number,
-  proposal: Pick<CampaignScopeProposal, "issues" | "requestedCount" | "constraints" | "withheldOperations" | "repositoryConstraint" | "repositoryConstraints">): string {
+  proposal: Pick<CampaignScopeProposal, "issues" | "requestedCount" | "constraints" | "withheldOperations" | "repositoryConstraint" | "repositoryConstraints" | "repositoryLimitVerified">): string {
   const named = scopeProposalRepositoryConstraints(proposal);
   const subject = sha256(JSON.stringify({
     issues: [...proposal.issues].map((issue) => [issueKey(issue), issue.origin]).sort((a, b) => byIssueKey(a[0] as number | string, b[0] as number | string)),
     requestedCount: proposal.requestedCount, constraints: [...new Set(proposal.constraints.map(normalized))].sort(),
     withheldOperations: [...new Set(proposal.withheldOperations)].sort(),
+    ...(proposal.repositoryLimitVerified ? { repositoryLimitVerified: true } : {}),
     // The limit the check reads, by what it resolved to; left out when absent, and one name keeps the
     // shape it always had, so older keys still join.
     ...(named.length === 1 ? { repository: named[0]!.repository } : {}),

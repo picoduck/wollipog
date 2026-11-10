@@ -309,15 +309,29 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
   name matches one repository, every issue must be in one of them (`repository_constraint_mismatch`). That
   proves what the names are, not what the owner meant by them, so they are still the Orchestrator's claim:
   a `repository_limit` question for each name asks the Decision Model whether the message limits the work
-  to it, rather than excluding or only mentioning it, and named repositories never take the no-model path.
+  to it, rather than excluding or only mentioning it, except for the literal owner-named fast path below.
   Any name that matches none or several grants nothing, for the whole list: the proposal becomes the
   owner's one approval (`repository_name_unresolved`) with no model call, and approving it applies no part
   of the limit. A name only ever resolves against the boundary, so a limit can't add a repository.
 - **A limit left out.** The `repository_limits_complete` question asks whether the message limits the work
   to a repository the proposal doesn't name. `omits_limit` is neither a refusal nor an admission: the
   proposal goes to the owner's one approval. A message that writes a campaign repository's name beside an
-  initial proposal with no limit (`repository_mentioned`) always reaches this check; `owner/repo#12` and an
+  initial proposal with no limit (`repository_mentioned`) reaches this check unless the literal fast path
+  below proves the limit; `owner/repo#12` and an
   issue's URL point at an issue and don't count.
+- **Exact owner-named repository (#4402, protocol 348).** An affirmative request such as
+  `Use the orchestrate-issues skill to fix #1, #2 and #3 in owner/repo` with exactly those owner-named
+  issues in that repository records the full repository name as a limit, with the server-derived
+  `repositoryLimitVerified` marker. No model judges that repository phrase. With nothing else to check,
+  admission needs no model call or owner prompt. Counts, constraints and withheld operations still run
+  their existing checks; the recorded limit counts as listed for `constraints_complete`. Omissions,
+  another repository's proposed or named issue, multiple repository names, exclusions, aliases and
+  ambiguous wording retain the existing check/owner route. Older runners retain that route too.
+  The named repository becomes the admitted limit even with a broad trailing invitation such as
+  `Fix #12 in owner/repo. Afterwards feel free to pick follow-ups from any of the campaign's repositories.`
+  This conservatively narrows the boundary; it never grants more authority. Work in another repository
+  must first use the existing owner-approved repository-addition and scope routes to widen that limit.
+  In unusual wording this may cost an extra owner approval rather than silently widening authority.
 - **Narrowing the boundary (#4117).** Admitting a limited initial scope, by the check or by the owner,
   re-mints the boundary without the other repositories at a new revision, and revokes what was bound to
   the old one. It happens before anything is dispatched. The admitted scope records `repositoryLimits`, and

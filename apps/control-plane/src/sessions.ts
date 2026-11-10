@@ -57,7 +57,7 @@ import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesAcrossRepositories, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { digitRangeMembers, firstMessageTargetEpics } from "./first-message-issue-intent.js";
-import { messageNamesRepository, onlyOtherRepositories, proposalMaxIssues, repositoryNameInMessage, resolveRepositoryName, writtenForRepository } from "./scope-grant.js";
+import { exactNamedRepositoryLimit, messageNamesRepository, onlyOtherRepositories, proposalMaxIssues, repositoryNameInMessage, resolveRepositoryName, writtenForRepository } from "./scope-grant.js";
 import { initialScopeRepositoryLimits, normalizeScopeProposalInput, scopeProposalAgentQuestions, scopeProposalAnswer, scopeProposalChecks, scopeProposalOfRequest,
   scopeProposalRepositoryLimits, type CampaignScopeProposal, type ScopeProposalCheck, type ScopeProposalOwnerCause } from "@wollipog/protocol";
 import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, ownerReviewMaxIssues, writtenAsCount, writtenAsDigits } from "./scope-grant.js";
@@ -13365,6 +13365,11 @@ export class SessionsService {
       const stray = limits.length ? refs.find((r) => !limits.includes(r.repository)) : undefined;
       if (stray) return refuse("repository_constraint_mismatch", issueDetails(stray));
     }
+    const exactRepository = initial && scopeEntries.length > 1 && proposal && runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "exactNamedRepositoryScope")
+      ? exactNamedRepositoryLimit(ownerMessage, scopeEntries, proposal.issues, issueReferencesAcrossRepositories(ownerMessage, launch, repositories)) : null;
+    const repositoryLimitVerified = Boolean(exactRepository && (!repositoryConstraints ||
+      (repositoryConstraints.length === 1 && repositoryConstraints[0]!.repository === exactRepository)));
+    if (repositoryLimitVerified) repositoryConstraints = [{ name: exactRepository!, repository: exactRepository! }];
     // A message that writes a campaign repository's name may limit the work to it, so an initial
     // proposal that states no limit never takes the no-model path: the check asks if it left one out.
     const repositoryMentioned = initial && Boolean(proposal) && !repositoryConstraints && scopeEntries.length > 1 &&
@@ -13440,16 +13445,20 @@ export class SessionsService {
     const checks: ScopeProposalCheck[] = proposal
       ? [...scopeProposalChecks(proposal, issueReferencesAcrossRepositories(ownerMessage, launch, repositories).filter((r) => !inScope(r))),
         ...(laterNamed ? ["later_named_issues" as const] : []), ...(unresolvedName ? ["repository_name_unresolved" as const] : []),
-        ...(repositoryConstraints && !unresolvedName ? ["repository_limit" as const] : []),
+        ...(repositoryConstraints && !unresolvedName && !repositoryLimitVerified ? ["repository_limit" as const] : []),
         ...(repositoryMentioned ? ["repository_mentioned" as const] : [])]
       : ["proposal_unstructured"];
+    // Text after the literal request can add restrictions the proposal failed to list. Keep the
+    // completeness/operations questions for all such text, even when the agent listed nothing.
+    if (repositoryLimitVerified && /[\p{L}\p{N}]/u.test(ownerMessage.slice(ownerMessage.toLowerCase().indexOf(exactRepository!) + exactRepository!.length)) && !checks.includes("constraints")) checks.push("constraints");
+    if (repositoryLimitVerified && proposal?.requestedCount !== null && !checks.includes("requested_count")) checks.push("requested_count");
     const issues = proposal?.issues ?? refs.map((r) => ({ ...r, origin: "orchestrator_chosen" as const, rationale: "" }));
     // The proposal as recorded, before any route: the floors' facts beside the Orchestrator's words.
     const base: CampaignScopeProposal = { initial, messageDigest: first.messageDigest,
       issues: issues.map((issue) => ({ ...(issue.repository === launch ? {} : { repository: issue.repository }), number: issue.number, origin: issue.origin, rationale: issue.rationale,
         title: (titles.get(issueKey(issue)) ?? "").replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim().slice(0, 300) })),
       requestedCount: proposal?.requestedCount ?? null, constraints: proposal?.constraints ?? [], withheldOperations: proposal?.withheldOperations ?? [],
-      ...(repositoryConstraints ? { repositoryConstraints } : {}), checks, route: "admitted" };
+      ...(repositoryConstraints ? { repositoryConstraints } : {}), ...(repositoryLimitVerified ? { repositoryLimitVerified: true as const } : {}), checks, route: "admitted" };
     const ownerRecord = (cause: ScopeProposalOwnerCause, constraintCheck?: CampaignScopeProposal["constraintCheck"]): CampaignScopeProposal => ({
       ...base, route: "owner", ownerCause: cause, ownerMessage: boundary.objective.replace(/[\p{Cc}]+/gu, " ").slice(0, 4000),
       ...(constraintCheck ? { constraintCheck } : {}) });

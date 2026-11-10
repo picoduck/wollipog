@@ -1408,6 +1408,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 347: bounded published-issue field/read diagnostics and trailing body whitespace tolerance (#4404).
   347,
   // v348 slot
+  // 348: Server-proven repository limits for exact owner-named scope proposals (#4402).
+  348,
   // v349 slot
   // v350 slot
   // v351 slot
