@@ -1399,6 +1399,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   343,
   // v344 slot
   // v345 slot
+  // 345: Read-only authoritative forge request diffs with pinned revision metadata (#1270).
+  345,
   // v346 slot
   // v347 slot
   // v348 slot

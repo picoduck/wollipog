@@ -321,6 +321,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   fineGrainedDiff: 50,
   githubReviewReconciliation: 51,
   forgeIntegration: 106,
+  requestDiff: 345,
   podReconciliation: 52,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
@@ -11895,6 +11896,7 @@ export type GitAction =
   | { kind: "status" }
   | { kind: "summary" }
   | { kind: "diff"; scope: GitDiffScope }
+  | { kind: "request_diff"; requestUrl: string }
   /** `all` forces the legacy commit-everything (`git add -A`) even when hunks are staged.
    * `expectStaged` is the client's belief about whether anything is staged — when it no longer
    * matches reality the runner refuses with GIT_STALE instead of committing a different set
@@ -12579,6 +12581,19 @@ export interface GitDiffInfo {
   unstagedStats?: GitDiffStats;
 }
 
+/** Forge-owned diff, bracketed by identical request revision reads; never derived from local HEAD. */
+export interface GitRequestDiffInfo {
+  requestUrl: string;
+  headOid: string;
+  baseOid: string;
+  targetOid: string;
+  baseRef: string;
+  headRef: string;
+  readAt: number;
+  incomplete: boolean;
+  diff: GitDiffInfo;
+}
+
 export interface GitPrInfo {
   /** Authoritative change-request URL or a validated prefilled creation URL fallback. */
   url: string;
@@ -12677,6 +12692,7 @@ export interface GitActionData {
   status?: GitStatusInfo;
   summary?: GitSummaryInfo;
   diff?: GitDiffInfo;
+  requestDiff?: GitRequestDiffInfo;
   commit?: GitCommitInfo;
   pr?: GitPrInfo;
   githubReview?: GitHubReviewSyncInfo;
@@ -13388,6 +13404,7 @@ export interface SetProjectRequest {
 /** Body for POST /api/sessions/:id/git — the action plus its parameters. */
 export interface GitActionRequest {
   action: GitAction["kind"];
+  requestUrl?: string;
   /** For diff. */
   scope?: GitDiffScope;
   /** For commit. */

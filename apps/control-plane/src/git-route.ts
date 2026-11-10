@@ -28,6 +28,11 @@ export function parseGitAction(body: GitActionRequest): { action: GitAction } | 
       return { action: { kind: "github_review_sync" } };
     case "forge_review_sync":
       return { action: { kind: "forge_review_sync" } };
+    case "request_diff": {
+      const requestUrl = asString(body.requestUrl);
+      if (!requestUrl || requestUrl.length > 2048) return { error: "a requestUrl is required" };
+      return { action: { kind: "request_diff", requestUrl } };
+    }
     case "diff": {
       if (!isDiffScope(body.scope)) {
         return { error: `invalid diff scope: ${String(body.scope)} (expected uncommitted | all_branch | last_turn)` };
@@ -135,7 +140,7 @@ const GIT_BUSY: ReadonlySet<SessionStatus> = new Set<SessionStatus>([
  * don't stage or commit a partial snapshot mid-turn or race the post-turn diff capture.
  */
 export function gitActionAllowed(action: GitAction, status: SessionStatus): { ok: true } | { ok: false; error: string } {
-  if (action.kind === "status" || action.kind === "summary" || action.kind === "diff" ||
+  if (action.kind === "status" || action.kind === "summary" || action.kind === "diff" || action.kind === "request_diff" ||
       action.kind === "github_review_sync" || action.kind === "forge_review_sync") return { ok: true };
   if (GIT_BUSY.has(status)) {
     return {
@@ -154,6 +159,7 @@ export function gitActionRequiresLinkedWorktree(action: GitAction): boolean {
 
 /** Runner capability required by protocol-backed git actions; baseline actions predate capability gates. */
 export function gitActionCapability(action: GitAction): { capability: RunnerProtocolCapability; label: string } | null {
+  if (action.kind === "request_diff") return { capability: "requestDiff", label: "forge request diff loading" };
   if (action.kind === "diff") return { capability: "richDiff", label: "rich diff loading" };
   if (action.kind === "stage_hunk") return { capability: "hunkStaging", label: "hunk staging" };
   if (action.kind === "stage_lines" || action.kind === "discard_file") {

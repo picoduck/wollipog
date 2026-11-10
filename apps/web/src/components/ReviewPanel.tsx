@@ -61,6 +61,7 @@ import { FindingSelectionBar, ReviewFindings, type FindingSyncControl } from "./
 import { ReviewRuns } from "./ReviewRuns.js";
 import { isOpenFinding } from "../review-finding-copy.js";
 import { ReviewSummary } from "./ReviewSummary.js";
+import { RequestDiff } from "./RequestDiff.js";
 import { ReviewToolbar } from "./ReviewToolbar.js";
 import { StaleContent } from "./StaleContent.js";
 import { State } from "./State.js";
@@ -1388,6 +1389,14 @@ export function ReviewPanel({
               onDismissNotice={() => setFindingNotice(null)}
               triggerRef={findingsTriggerRef}
             />
+            {summaryPr && <RequestDiff
+              key={`${session.id}:${summaryPr.url}`}
+              sessionId={session.id}
+              pr={summaryPr}
+              online={runnerOnline}
+              protocol={runnerProtocolVersion}
+              observation={git.observation}
+            />}
             <ReviewRuns
               key={`runs-${session.id}`}
               runs={reviewRuns}
