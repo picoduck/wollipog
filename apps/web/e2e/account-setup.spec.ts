@@ -49,3 +49,17 @@ for (const state of ["viewer", "old", "missing"]) {
     }
   });
 }
+
+test("returning from setup preserves an explicit account, installation and project placement", async ({ page }) => {
+  await page.goto("/new-session-choices-e2e.html");
+  const account = page.getByRole("button", { name: /Account:/ });
+  await account.click();
+  await page.getByRole("option", { name: /Personal/ }).click();
+  await page.getByRole("button", { name: "Account Setup…", exact: true }).click();
+  await page.getByRole("dialog", { name: "Account Setup", exact: true }).getByRole("button", { name: "Done", exact: true }).click();
+  await expect(account).toHaveAccessibleName(/Account: Personal/);
+  await page.getByRole("button", { name: "Create Session", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => document.documentElement.dataset.createSessionRequest)).toBeTruthy();
+  const request = JSON.parse((await page.evaluate(() => document.documentElement.dataset.createSessionRequest))!);
+  expect(request).toMatchObject({ runnerId: "runner-1", agentId: "claude", workspaceId: "workspace-1", providerAccountId: "claude-personal" });
+});
