@@ -306,6 +306,7 @@ import {
   worktreeCheckoutNeverFinished,
   worktreeRollbackProofState,
   worktreeHoldsUnsharedWork,
+  worktreeIdForPath,
   worktreeRollbackWork,
   worktreeUncommittedChanges,
   releaseRecoveredWorktree,
@@ -3703,7 +3704,7 @@ export class SessionManager {
       }, {
         ...options,
         reserveWorktree: (path, branch, createsBranchAt) => {
-          const view: SessionWorktreeView = { id: path.split(/[\\/]/u).at(-1)!, path, branch, baseRef, source: "created" };
+          const view: SessionWorktreeView = { id: worktreeIdForPath(path), path, branch, baseRef, source: "created" };
           const record = this.cleanupRecordForWorktree(meta, view, "creation_rollback", "force");
           record.auxiliaryWorktreeRollback = true;
           // Nothing of setup's exists yet, and an earlier worktree's hooks or marker are not this one's.
@@ -3717,6 +3718,9 @@ export class SessionManager {
           // Git has made a new worktree here, which it does only where none is, so one once kept here
           // has gone. Not before: a reservation can still be refused by what is at the path.
           this.forgetWorktreeKept(sessionId, path);
+          // So has whatever an earlier worktree on this path recorded under its id: this one's teardown
+          // and marker are only what its own setup gives it, and its rollback inherits none (#4209).
+          this.forgetWorktreeRecordsAt(sessionId, worktreeIdForPath(path));
           const proof = randomUUID();
           await stampWorktreeRollbackProof(path, proof, options);
           materializing.record!.rollbackProof = proof;
@@ -3766,8 +3770,10 @@ export class SessionManager {
           this.log(`session ${boundedSessionIdForLog(sessionId)} left a spent rollback proof in its worktree: ${errText(error)}`);
         });
       };
+      // From the whole path, as for a switch target or an attached worktree (#4209): the path's last
+      // segment hashes the branch name alone, which another Location's worktree on that branch shares.
       const worktree: SessionWorktreeView = {
-        id: created.path.split(/[\\/]/u).at(-1)!,
+        id: worktreeIdForPath(created.path),
         path: created.path,
         branch: created.branch,
         baseRef: created.baseRef,
@@ -3941,7 +3947,7 @@ export class SessionManager {
         // repository's default can move (`git remote set-head`) long after the worktree was linked.
         ? { ...existing, path: attached.path }
         : {
-          id: createHash("sha256").update(attached.path).digest("hex").slice(0, 16),
+          id: worktreeIdForPath(attached.path),
           path: attached.path,
           branch: attached.branch,
           baseCommit: attached.baseCommit,
@@ -15285,10 +15291,10 @@ export class SessionManager {
     // about to create it, and only then. Everything destructive below depends on this and nothing
     // else: a worktree without it is never set up, torn down or removed by this switch (#4209).
     const reservation: { record?: WorktreeCleanupRecord; view?: SessionWorktreeView } = {};
-    // From the whole path, not its last segment: that is a hash of the branch name alone, shared by
-    // the same branch in another repository, and hooks, process markers and port blocks are keyed
-    // by this id. A failed switch must not touch what the session's current worktree holds.
-    const targetWorktreeId = (path: string) => createHash("sha256").update(path).digest("hex").slice(0, 16);
+    // From the whole path (`worktreeIdForPath`), not its last segment: that is a hash of the branch name
+    // alone, shared by the same branch in another repository, and hooks, process markers and port
+    // blocks are keyed by this id. A failed switch must not touch what the session's current worktree holds.
+    const targetWorktreeId = worktreeIdForPath;
     const reserveWorktree = (path: string, branch: string, createsBranchAt?: string): void => {
       // Claimed and journaled before Git registers the path, with no await in between. Another
       // session's switch therefore never finds it free, even mid-checkout, and from here on a crash
@@ -18981,6 +18987,19 @@ export class SessionManager {
     if (!latest?.keptWorktreePaths?.some((kept) => sameWorktreePath(latest.context, kept, path))) return;
     const keptWorktreePaths = latest.keptWorktreePaths.filter((kept) => !sameWorktreePath(latest.context, kept, path));
     this.store.patchMeta(sessionId, { keptWorktreePaths: keptWorktreePaths.length ? keptWorktreePaths : undefined });
+  }
+
+  /** Drop the teardown and process marker recorded under a worktree id, for a new worktree that takes
+   * that id. */
+  private forgetWorktreeRecordsAt(sessionId: string, worktreeId: string): void {
+    const latest = this.store.readMeta(sessionId);
+    if (!latest || (!latest.worktreeHooks?.[worktreeId] && !latest.worktreeProcessMarkers?.[worktreeId])) return;
+    const { [worktreeId]: _hooks, ...worktreeHooks } = latest.worktreeHooks ?? {};
+    const { [worktreeId]: _marker, ...worktreeProcessMarkers } = latest.worktreeProcessMarkers ?? {};
+    this.store.patchMeta(sessionId, {
+      worktreeHooks: Object.keys(worktreeHooks).length ? worktreeHooks : undefined,
+      worktreeProcessMarkers: Object.keys(worktreeProcessMarkers).length ? worktreeProcessMarkers : undefined,
+    });
   }
 
   private worktreeKept(meta: SessionMeta, path: string): boolean {
