@@ -40,8 +40,7 @@ Plain `wollipog update` continues to select the latest stable release. Publishin
 
 ## Upgrade and Rollback Guidance
 
-
-Upgrade the control plane before standalone or remote runners, and update all components to this release. The runner protocol is v335; new account, worktree, and review capabilities requires compatible components. Updating only the control plane does not install runner capabilities or a reviewer.
+Upgrade the control plane before standalone or remote runners, and update all components to this release. The runner protocol is v345; new account, worktree, and review capabilities require compatible components. Updating only the control plane does not install runner capabilities or a reviewer.
 
 Before upgrading, stop processes sharing a mutable data directory and back up the control-plane database and runner data. Retain the previous binaries and configuration. To roll back, stop all v0.37.0-rc.1 processes before restoring the backup and starting the previous binaries. Headless update rollback of executables and the dashboard does not replace a data backup.
 
@@ -49,6 +48,11 @@ Runner-log retention remains active for organizations that have archived-history
 
 The control plane continues to advertise the `wollipog-control-plane` service identity. Desktop v0.15.0 and later accept both the current and legacy service identities. Older clients may report `The address is not a Wollipog control plane.` and must be upgraded before connecting.
 
-The release workflow builds all six supported native targets and verifies exactly 47 signed release assets: 14 desktop bundles, 12 runner names, 6 headless control-plane executables, the web bundle, `SHA256SUMS`, 12 updater signatures, and `latest.json`. Final verification checks inventory, signatures, compatibility-copy equality, and publisher digests.
+The release workflow builds all six supported native targets. Its base draft holds exactly 34 assets:
+14 desktop bundles, 12 runner names, 6 headless `wollipog-control-plane-<triple>` executables, the
+`wollipog-web.tar.gz` dashboard bundle, and
+`SHA256SUMS`. A signed tag run adds 12 updater signatures and `latest.json` for exactly 47 assets.
+The final workflow verifies inventory, signatures, byte-identical compatibility copies, and
+publisher digests. Publishing the verified draft remains a manual operator step.
 
 This candidate remains a prerelease. Stable v0.37.0 requires a separate version-checked build and exact-commit regression certification; changing the prerelease flag cannot graduate the signed RC packages to stable. These changes do not establish unattended Full Control production readiness or waive human-owned approval gates.
