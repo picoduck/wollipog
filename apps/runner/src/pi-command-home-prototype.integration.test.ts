@@ -1,13 +1,71 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { buildBwrapArgs, type BwrapSpawnIsolation } from "./spawn.js";
+import { buildBwrapArgs } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
-import { managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
+import { managedWorktreeGitLayout, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
 import { piCommandHomePrototypeNamespaceUnavailable, type PiCommandHomePrototypePolicy } from "./pi-command-home-prototype.js";
+
+/** Production managed-worktree inputs, all confined to an inert repository and synthetic HOME.
+ * Resolve before the namespace probe so unavailable local kernels cannot hide setup regressions. */
+async function prepareTopology(root: string) {
+  const worktree = join(root, "worktrees", "selected"), nativeHome = join(root, "home"),
+    home = join(nativeHome, ".pi", "agent"), immutable = join(root, "immutable"), repo = join(root, "repo");
+  for (const path of [home, immutable, repo]) mkdirSync(path, { recursive: true });
+  writeFileSync(join(home, "auth.json"), "synthetic-only");
+  writeFileSync(join(immutable, "hook.mjs"), "inert-hook");
+  const git = (args: string[]) => {
+    const result = spawnSync("git", args, { cwd: repo, encoding: "utf8", timeout: 5_000,
+      env: { PATH: "/usr/bin:/bin", HOME: nativeHome, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+      stdio: ["ignore", "pipe", "pipe"] });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  git(["init", "--quiet", "--initial-branch=main"]);
+  writeFileSync(join(repo, "tracked"), "inert"); git(["add", "tracked"]);
+  git(["-c", "user.name=Inert", "-c", "user.email=inert@example.invalid", "commit", "--quiet", "-m", "fixture"]);
+  git(["worktree", "add", "--quiet", "-b", "prototype", worktree]);
+  symlinkSync(home, join(worktree, "home-alias"));
+  const protections = [{ worktreePath: worktree, repoPath: repo }];
+  const layout = managedWorktreeGitLayout(worktree, repo);
+  assert.ok(layout);
+  const configPath = join(layout.worktreeGitDir, "config.worktree");
+  assert.equal(existsSync(configPath), false, "Git fixture begins with no per-worktree config");
+  const readOnlyPaths = managedWorktreeReadOnlyPaths(protections, true);
+  assert.ok(readOnlyPaths.includes(configPath), "reserve the missing runner-owned config using production setup");
+  const state = {
+    driver: "pi" as const, dataDir: join(root, "state"), env: { HOME: nativeHome, PI_CODING_AGENT_DIR: home }, sessionId: "inert",
+    cwd: worktree, preserveProviderHome: true, readOnlyPaths,
+    protectedWorktree: { path: worktree, gitWritableRoots: managedWorktreeGitWritableRoots(worktree, protections),
+      requiredReadOnlyPaths: readOnlyPaths },
+  };
+  // A real resolver, with only ambient provider environment replaced by synthetic fixture values.
+  // Omission must retain its production refusal, rather than silently broadening the Git grant.
+  const runtime = { nativeEnvironment: () => ({}), nativeHome: () => nativeHome };
+  await assert.rejects(resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, runtime,
+    { ...state, readOnlyPaths: [] }), /managed worktree config cannot be protected before provider launch/u);
+  const resolved = await resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, runtime, state);
+  assert.ok(resolved?.backend === "bwrap");
+  assert.equal(lstatSync(configPath).isFile(), true);
+  assert.equal(lstatSync(configPath).nlink, 1);
+  assert.equal(realpathSync(configPath), configPath);
+  assert.equal(readFileSync(configPath, "utf8"), "");
+  assert.ok(resolved.readOnlyBinds?.includes(configPath));
+  assert.ok(readOnlyPaths.every(path => resolved.readOnlyBinds?.includes(path)));
+  assert.deepEqual(resolved.writableBinds?.find(bind => bind.source === home), { source: home, target: home });
+  return { worktree, home, immutable, outer: resolved, configPath };
+}
+
+test("inert production resolver reserves and pins managed Git config before any namespace availability test", {
+  skip: process.platform !== "linux" ? "UNAVAILABLE: fixture requires native Linux" :
+    !existsSync("/usr/bin/bwrap") ? "UNAVAILABLE: bubblewrap is not installed at the fixture's probed path" : false,
+}, async () => {
+  const root = realpathSync(mkdtempSync(join(process.cwd(), ".pi-managed-config-")));
+  try { await prepareTopology(root); }
+  finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("installed pinned Pi SDK factory invokes the prototype operations without any provider or command process", {
   skip: process.env.WOLLIPOG_TEST_PI_CODE_ROOT ? false : "UNAVAILABLE: supply an audited installed Pi code root; no package is downloaded",
@@ -31,11 +89,11 @@ test("inert provider keeps refresh/config/transcripts while operations commands 
 }, async t => {
   const root = realpathSync(mkdtempSync(join(process.cwd(), ".pi-command-conformance-")));
   try {
-    const worktree = join(root, "worktree"), nativeHome = join(root, "home"),
-      home = join(nativeHome, ".pi", "agent"), immutable = join(root, "immutable");
-    for (const path of [home, immutable]) mkdirSync(path, { recursive: true });
-    writeFileSync(join(home, "auth.json"), "synthetic-only");
-    writeFileSync(join(immutable, "hook.mjs"), "inert-hook");
+    if (!existsSync("/usr/bin/bwrap")) { t.skip("UNAVAILABLE: bubblewrap is not installed at the fixture's probed path"); return; }
+    const { worktree, home, immutable, outer, configPath } = await prepareTopology(root);
+    const outerArgs = buildBwrapArgs({ command: "/bin/true", args: [], cwd: worktree }, outer);
+    assert.ok(outerArgs.some((value, index, args) => value === "--ro-bind" && args[index + 1] === configPath),
+      "the actual outer launch pins the reserved config read-only");
     const probe = spawnSync("/usr/bin/bwrap", ["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
       "--tmpfs", "/tmp", "--unshare-pid", "--", "/bin/true"], { encoding: "utf8", timeout: 5_000,
       env: { PATH: "/usr/bin:/bin", HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
@@ -46,28 +104,6 @@ test("inert provider keeps refresh/config/transcripts while operations commands 
       t.skip("UNAVAILABLE: host refuses the outer namespace; no write-denial conformance established"); return;
     }
     assert.equal(probe.status, 0, probe.stderr);
-    const repo = join(root, "repo"); mkdirSync(repo);
-    const git = (args: string[]) => {
-      const result = spawnSync("git", args, { cwd: repo, encoding: "utf8", timeout: 5_000,
-        env: { PATH: "/usr/bin:/bin", HOME: nativeHome, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
-        stdio: ["ignore", "pipe", "pipe"] });
-      assert.equal(result.status, 0, result.stderr);
-    };
-    git(["init", "--quiet", "--initial-branch=main"]);
-    writeFileSync(join(repo, "tracked"), "inert"); git(["add", "tracked"]);
-    git(["-c", "user.name=Inert", "-c", "user.email=inert@example.invalid", "commit", "--quiet", "-m", "fixture"]);
-    git(["worktree", "add", "--quiet", "-b", "prototype", worktree]);
-    symlinkSync(home, join(worktree, "home-alias"));
-    const protections = [{ worktreePath: worktree, repoPath: repo }];
-    const readOnlyPaths = managedWorktreeReadOnlyPaths(protections);
-    const resolved = await resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
-      driver: "pi", dataDir: join(root, "state"), env: { HOME: nativeHome }, sessionId: "inert",
-      cwd: worktree, preserveProviderHome: true,
-      protectedWorktree: { path: worktree, gitWritableRoots: managedWorktreeGitWritableRoots(worktree, protections),
-        requiredReadOnlyPaths: readOnlyPaths },
-    });
-    assert.ok(resolved?.backend === "bwrap");
-    const outer: BwrapSpawnIsolation = resolved;
     const policy: PiCommandHomePrototypePolicy = { outer, providerHome: home, immutablePaths: [immutable],
       installationRoot: immutable, version: "0.85.0", configuredArgs: ["--no-extensions"],
       shell: realpathSync("/bin/sh"), nodeRuntime: realpathSync(process.execPath),

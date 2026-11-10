@@ -75,8 +75,12 @@ A local installed-SDK contract test imports only the pinned Bash tool factory in
 with a synthetic HOME and a clean environment. It executes the injected inert operations callback;
 no provider CLI, sign-in, credentials, network or model is exercised.
 
-The kernel conformance fixture first checks availability, then uses the production isolation
-resolver and bwrap argument builder for the outer synthetic provider. Inside it, the actual
+The topology setup first uses the production managed-worktree helpers and isolation resolver,
+reserving absent per-worktree Git config and passing the same read-only registration paths as a
+real launch. A separate resolver test executes these checks even when the kernel is unavailable;
+omitting the read-only paths must retain the real resolver's refusal. The kernel fixture then
+checks namespace availability and uses the production bwrap argument builder for the outer
+synthetic provider, including an attempted rewrite of its protected Git config. Inside it, the actual
 operations backend attempts denied create/overwrite/delete/temp-rename/alias/descendant writes,
 ordinary reads and worktree writes, while the parent synthetic provider performs credential
 temp-rename refresh, transcript/state and value/batch/skills configuration writes. Cancellation

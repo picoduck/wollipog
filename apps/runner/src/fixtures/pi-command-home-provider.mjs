@@ -20,6 +20,11 @@ if (probe.exitCode !== 0 && piCommandHomePrototypeNamespaceUnavailable(probe.out
   console.log("PI_COMMAND_HOME_UNAVAILABLE: nested namespace refused");
 } else {
   assert.equal(probe.exitCode, 0, probe.output);
+  const config = policy.outer.readOnlyBinds.find(path => path.endsWith("/config.worktree"));
+  assert.ok(config, "production outer topology pins its reserved Git config");
+  assert.throws(() => writeFileSync(config, "provider-must-not-rewrite-managed-config"), error =>
+    error.code === "EROFS" || error.code === "EACCES");
+  assert.equal(readFileSync(config, "utf8"), "");
   const auth = `${home}/auth.json`;
   // The provider itself retains temp-file-and-rename refresh and state/config writes.
   writeFileSync(`${auth}.temp`, "provider-refresh"); renameSync(`${auth}.temp`, auth);
