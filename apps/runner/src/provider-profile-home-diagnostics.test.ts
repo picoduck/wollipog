@@ -19,7 +19,7 @@ before(() => {
 });
 after(() => { if (fixture) rmSync(fixture, { recursive: true, force: true }); });
 const create = (root: string, profileId: string) => createManagedProviderProfileHome(root, profileId, "linux",
-  (home, identity) => runManagedProfileCreationHelper(home, identity, () => binary));
+  { create: (home, identity) => runManagedProfileCreationHelper(home, identity, () => binary) });
 
 const id = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
 for (const component of ["manager_root", "profiles_root"] as const) {

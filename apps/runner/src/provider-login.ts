@@ -632,7 +632,7 @@ export class ProviderLoginSupervisor {
   private async createProfileHome(resolved: ResolvedProviderLogin, profile: { id: string; grantId: string }): Promise<void> {
     const profiles = this.options.profiles!;
     // Its refusals are path-free; the grant is not recorded yet, so the refused start is enough.
-    createManagedProviderProfileHome(profiles.root, profile.id, this.options.platform);
+    createManagedProviderProfileHome(profiles.root, profile.id, this.options.platform, { helperDataDir: this.options.dataDir });
     try {
       await profiles.create(resolved.directory, resolved.provider, profile.id, profile.grantId);
     } catch (error) {

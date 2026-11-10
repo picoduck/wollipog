@@ -14,7 +14,7 @@ import { ProviderProfileGrants } from "./provider-profile-grants.js";
 import { createManagedProviderProfileHome, isManagedProviderProfileHome, managedProviderProfileRoot } from "./provider-profile-home.js";
 import { PROVIDER_PROFILE_DIRECTORY, PROVIDER_PROFILE_MARKER, readProviderProfileMarker } from "./provider-profile.js";
 
-const posixOnly = { skip: process.platform === "win32" };
+const posixOnly = { skip: process.platform !== "linux" }; // New managed-directory creation needs validated Linux ACL semantics.
 const INSTANCE = "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
 const OTHER_INSTANCE = "1a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
 const GRANT = "2a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";

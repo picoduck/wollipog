@@ -4,14 +4,22 @@ New managed account directories use the existing verified native lease helper in
 `--profile-create` mode. This does not change WPLL4 or `--probe`. The runner checks the creation
 capability before requesting any directory creation; an older helper fails closed, without a
 path-based fallback. Resolver, asset verification and distribution remain shared with leases.
+Add Account supplies the runner's existing data directory as the same staging fallback used by
+leases; refusing temporary-directory execution alone must not disable account creation.
 
 The runner supplies its trusted OS-home context and a generated lowercase UUID v4, never a
-remote or CLI path. The only possible layout is `.agent-manager/profiles/<profileId>`. Each
-component is opened relative to its pinned parent with no symlink following, checked for expected
+remote or CLI path. The only possible layout is `.agent-manager/profiles/<profileId>`. The trusted
+OS-home alias is canonicalized before owned components are appended; aliases among the owned
+components are still refused. Each component is opened relative to its pinned parent with no
+symlink following, checked for expected
 UID, directory type, group/other write bits and unsupported ACLs, and rechecked before the next
 mkdir and before success. Existing `0750` and `0755` roots remain accepted; `0775` roots remain
 refused. Fresh directories use `0700` subject to the process umask. Existing payloads are never
 read, moved, removed or modified. Creation never chmods, chowns or repairs anything.
+Unlike the old pathname mkdir sequence, the OS home itself must also be expected-owner,
+non-writable by group/others and free of special mode bits and unverified access/default ACLs.
+This conservative ancestry requirement can refuse operator-managed ACL layouts even when the
+owned roots were acceptable previously; it offers guidance, never changes the OS home.
 
 Linux is the validated creation platform. macOS, Windows and other platforms return explicit
 unsupported guidance before creation; shared POSIX APIs alone do not establish equivalent ACL
@@ -28,6 +36,8 @@ original fixed reason as `failureReason` when known. A lost or malformed respons
 `may_have_changed`; it cannot establish whether a directory was created. There is no automatic
 retry, rollback or cleanup. The directories and any ownership evidence must be preserved for
 operator inspection. This is diagnostic data, never repair authorization.
+Definite first-mkdir admission/resource errors are clean `unavailable` refusals; ambiguous I/O
+failures remain uncertain even if no successful mkdir was observed.
 
 This is race-aware validation, not exclusion of all same-UID writers. Linux `mkdirat` does not
 return a descriptor. The helper observes and opens the new directory immediately, then verifies

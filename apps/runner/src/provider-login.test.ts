@@ -1193,6 +1193,7 @@ test("removing an account is refused while it signs in, while an agent defaults 
 });
 
 const posixOnly = { skip: process.platform === "win32" };
+const managedCreationOnly = { skip: process.platform !== "linux" };
 const INSTANCE = "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
 const GRANT = "2a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
 
@@ -1240,7 +1241,7 @@ function profileFixture(t: TestContext, options: Parameters<typeof fixture>[0] &
   return { fx, grants, registry: state.registry, settled, root: profileRoot };
 }
 
-test("uncertain account publication retains the marker without false settlement or revived CP access", posixOnly, async t => {
+test("uncertain account publication retains the marker without false settlement or revived CP access", managedCreationOnly, async t => {
   for (const publication of ["unknown", "committed"] as const) {
     for (const revoked of [false, true]) {
       const p = profileFixture(t, { writeError: new AccountConfigPublicationError(publication, "IO") });
@@ -1279,7 +1280,7 @@ test("uncertain removal never retires grants, deletes credentials or reports acc
   } finally { fx.cleanup(); }
 });
 
-test("Add Account with this control plane's grant creates a managed profile HOME whose marker grants it", posixOnly, async (t) => {
+test("Add Account with this control plane's grant creates a managed profile HOME whose marker grants it", managedCreationOnly, async (t) => {
   const p = profileFixture(t);
   const started = await p.fx.supervisor.startAccount({ provider: "claude", label: "Work", profileGrantId: GRANT });
   const home = p.fx.spawns[0]!.cwd as string;
@@ -1355,7 +1356,7 @@ test("without a grant, or on Windows, Add Account keeps today's HOME and writes 
   await assert.rejects(p.fx.supervisor.startAccount({ provider: "claude", label: "Bad", profileGrantId: "not-a-grant" }), /grant is invalid/u);
 });
 
-test("a cancelled or failed managed-profile sign-in retains its HOME and stops using its grant", posixOnly, async (t) => {
+test("a cancelled or failed managed-profile sign-in retains its HOME and stops using its grant", managedCreationOnly, async (t) => {
   const p = profileFixture(t, { probe: async () => false });
   await p.fx.supervisor.startAccount({ provider: "claude", label: "Cancelled", profileGrantId: GRANT });
   const cancelled = p.fx.spawns[0]!.cwd as string;
@@ -1391,7 +1392,7 @@ test("a cancelled or failed managed-profile sign-in retains its HOME and stops u
   assert.deepEqual(p.grants.access().activeProfileIds, []);
 });
 
-test("a duplicate sign-in's managed profile HOME is retained while its grant is dropped", posixOnly, async (t) => {
+test("a duplicate sign-in's managed profile HOME is retained while its grant is dropped", managedCreationOnly, async (t) => {
   const p = profileFixture(t, { identify: async () => "same-person" });
   const existing = join(p.fx.root, "existing");
   mkdirSync(existing);
@@ -1411,7 +1412,7 @@ test("a duplicate sign-in's managed profile HOME is retained while its grant is 
   assert.deepEqual(p.fx.accounts.map((account) => account.id), ["existing"]);
 });
 
-test("a managed profile that cannot be created starts no sign-in and preserves its unproved HOME", posixOnly, async (t) => {
+test("a managed profile that cannot be created starts no sign-in and preserves its unproved HOME", managedCreationOnly, async (t) => {
   const refused = profileFixture(t, { create: async () => { throw new Error("marker refused"); } });
   await assert.rejects(refused.fx.supervisor.startAccount({ provider: "claude", label: "Refused", profileGrantId: GRANT }),
     /provider profile could not be created: marker refused/u);
@@ -1430,7 +1431,7 @@ test("a managed profile that cannot be created starts no sign-in and preserves i
   assert.deepEqual(entries(elsewhere), []);
 });
 
-test("a managed Add Account refused before it takes its lease retains the HOME it created", posixOnly, async (t) => {
+test("a managed Add Account refused before it takes its lease retains the HOME it created", managedCreationOnly, async (t) => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const p = profileFixture(t, {
@@ -1451,7 +1452,7 @@ test("a managed Add Account refused before it takes its lease retains the HOME i
   await eventually(() => p.settled.length === 1, "the created profile is settled as unrecorded");
 });
 
-test("an overlapping managed Add Account with the same label is refused before it creates a HOME or starts a sign-in", posixOnly, async (t) => {
+test("an overlapping managed Add Account with the same label is refused before it creates a HOME or starts a sign-in", managedCreationOnly, async (t) => {
   // Each profile creation waits for the test: true creates the marker, false refuses it.
   const gates: Array<(create: boolean) => void> = [];
   const created: string[] = [];

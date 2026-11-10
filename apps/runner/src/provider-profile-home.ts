@@ -2,7 +2,7 @@ import { lstatSync, realpathSync, type Stats } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isProviderProfileId } from "./provider-profile.js";
-import { runManagedProfileCreationHelper, type ProfileCreationComponent, type ProfileCreationReason } from "./provider-home-lease-io.js";
+import { runManagedProfileCreationHelper, withLeaseIoOptions, type ProfileCreationComponent, type ProfileCreationReason } from "./provider-home-lease-io.js";
 
 /**
  * Managed provider profile HOMEs (#3239). An account created through Add Account for a control
@@ -12,6 +12,9 @@ import { runManagedProfileCreationHelper, type ProfileCreationComponent, type Pr
  * Existing account homes keep their paths.
  */
 export function managedProviderProfileRoot(home = homedir()): string {
+  // Canonicalize only the trusted OS-home context, before appending the owned components.
+  // Do not resolve .agent-manager/profiles: their links must still be refused by the helper.
+  try { home = realpathSync(home); } catch { /* Missing/unavailable OS home is diagnosed by creation. */ }
   return join(home, ".agent-manager", "profiles");
 }
 
@@ -65,15 +68,16 @@ function verifiedRoot(root: string): boolean {
  * only after a capability-checked, descriptor-relative helper operation. Linux is the currently
  * validated platform. `root` is trusted runner context (production constructs it from homedir),
  * never a wire/CLI path: even in synthetic contexts it must have the exact fixed layout.
- * The final argument is an in-process test seam, not a runtime configuration option.
+ * Options carry the trusted runner staging directory; `create` is an in-process test seam.
  */
 export function createManagedProviderProfileHome(root: string, profileId: string, platform: NodeJS.Platform = process.platform,
-  create = runManagedProfileCreationHelper): string {
+  options: { helperDataDir?: string; create?: typeof runManagedProfileCreationHelper } = {}): string {
   if (platform !== "linux") throw new ManagedProfileDirectoryError("profile_home", "unsupported_platform");
   const osHome = dirname(dirname(root));
   if (!isAbsolute(root) || root !== resolve(root) || root !== managedProviderProfileRoot(osHome) || !isProviderProfileId(profileId))
     throw new ManagedProfileDirectoryError("profile_home", "unsupported_layout");
-  const result = create(osHome, profileId);
+  const result = withLeaseIoOptions({ ...(options.helperDataDir === undefined ? {} : { helperDataDir: options.helperDataDir }),
+    providerHome: join(root, profileId) }, () => (options.create ?? runManagedProfileCreationHelper)(osHome, profileId));
   if (!result.ok) throw new ManagedProfileDirectoryError(result.component, result.reason === "created" ? "may_have_changed" : result.reason, result.failureReason);
   return join(root, profileId);
 }

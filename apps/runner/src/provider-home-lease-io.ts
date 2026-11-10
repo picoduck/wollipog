@@ -174,7 +174,8 @@ export function runManagedProfileCreationHelper(home: string, profileId: string,
         !("reason" in value) || typeof value.reason !== "string" || !CREATION_REASONS.has(value.reason) ||
         (value.ok ? value.component !== "profile_home" || value.reason !== "created" : value.reason === "created")) return refusal("may_have_changed");
     // Discard all unrecognized fields: raw paths, metadata and helper errors cannot escape.
-    if ("failureReason" in value && (typeof value.failureReason !== "string" || !CREATION_REASONS.has(value.failureReason))) return refusal("may_have_changed");
+    if ("failureReason" in value && (value.ok || value.reason !== "may_have_changed" || typeof value.failureReason !== "string" ||
+        !CREATION_REASONS.has(value.failureReason) || value.failureReason === "created" || value.failureReason === "may_have_changed")) return refusal("may_have_changed");
     return { ok: value.ok, component: value.component as ProfileCreationComponent, reason: value.reason as ProfileCreationReason,
       ...("failureReason" in value ? { failureReason: value.failureReason as ProfileCreationReason } : {}) };
   } catch { return refusal("may_have_changed"); }

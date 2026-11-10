@@ -526,7 +526,13 @@ static int profile_create_command(int argc, char **argv) {
        * same-UID writer can still replace a directory before this first observation.
        * No root is group/other writable, and no open follows a link. */
       if (mkdirat(fds[i - 1], names[i], 0700)) {
-        if (errno != EEXIST) return profile_create_result(component, "unavailable", 1);
+        if (errno != EEXIST) {
+          /* Definite local admission/resource failures cannot have created this directory.
+           * An ambiguous I/O/interruption result still preserves uncertainty. */
+          int definite = errno == EACCES || errno == EPERM || errno == EROFS || errno == ENOSPC || errno == EDQUOT ||
+            errno == ENOENT || errno == ENOTDIR || errno == ELOOP || errno == ENAMETOOLONG || errno == EMLINK;
+          return profile_create_result(component, "unavailable", changed || !definite);
+        }
         if (i == 3) return profile_create_result(component, "already_exists", changed);
       } else changed = 1;
       if (fstatat(fds[i - 1], names[i], &named, AT_SYMLINK_NOFOLLOW)) return profile_create_result(component, "unavailable", changed);

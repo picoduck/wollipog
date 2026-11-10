@@ -14,11 +14,11 @@ test("unvalidated creation platforms and caller-selected layouts refuse before t
   let calls = 0;
   const create = () => { calls++; return { ok: true as const, component: "profile_home" as const, reason: "created" as const }; };
   for (const platform of ["darwin", "win32", "freebsd"] as const) {
-    assert.throws(() => createManagedProviderProfileHome("/synthetic/home/.agent-manager/profiles", id, platform, create),
+    assert.throws(() => createManagedProviderProfileHome("/synthetic/home/.agent-manager/profiles", id, platform, { create }),
       (error: unknown) => JSON.stringify(error).includes('"reason":"unsupported_platform"'));
   }
   for (const root of ["/synthetic/arbitrary", "/synthetic/home/.agent-manager/profiles/../profiles", "relative/.agent-manager/profiles"]) {
-    assert.throws(() => createManagedProviderProfileHome(root, id, "linux", create),
+    assert.throws(() => createManagedProviderProfileHome(root, id, "linux", { create }),
       (error: unknown) => JSON.stringify(error).includes('"reason":"unsupported_layout"'));
   }
   assert.equal(calls, 0);
@@ -33,9 +33,21 @@ test("fixed native profile creation preserves admission and detects pinned compo
   assert.deepEqual(JSON.parse(execFileSync(binary, ["--profile-create", "--capabilities"], { encoding: "utf8" })), { version: 1, supported: true });
   const adapterHome = join(fixture, "adapter-home"); mkdirSync(adapterHome, { mode: 0o700 });
   const create = (home: string, identity: string) => runManagedProfileCreationHelper(home, identity, () => binary);
-  assert.equal(createManagedProviderProfileHome(managedProviderProfileRoot(adapterHome), id, "linux", create), join(adapterHome, ".agent-manager", "profiles", id));
-  assert.throws(() => createManagedProviderProfileHome(join(adapterHome, "arbitrary"), id, "linux", create), /could not be verified/u);
-  assert.throws(() => createManagedProviderProfileHome(managedProviderProfileRoot(adapterHome), id, "darwin", create), /could not be verified/u);
+  assert.equal(createManagedProviderProfileHome(managedProviderProfileRoot(adapterHome), id, "linux", { create }), join(adapterHome, ".agent-manager", "profiles", id));
+  assert.throws(() => createManagedProviderProfileHome(join(adapterHome, "arbitrary"), id, "linux", { create }), /could not be verified/u);
+  assert.throws(() => createManagedProviderProfileHome(managedProviderProfileRoot(adapterHome), id, "darwin", { create }), /could not be verified/u);
+  const linkedHome = join(fixture, "linked-os-home"); symlinkSync(adapterHome, linkedHome);
+  assert.equal(managedProviderProfileRoot(linkedHome), managedProviderProfileRoot(adapterHome), "trusted OS-home aliases resolve before owned components are appended");
+  const linkedId = "7f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+  assert.equal(createManagedProviderProfileHome(managedProviderProfileRoot(linkedHome), linkedId, "linux", { create }), join(adapterHome, ".agent-manager", "profiles", linkedId));
+  // A first, definitely failed mkdir is a clean refusal. No broader mutation is attempted.
+  const readOnlyHome = join(fixture, "read-only-home"); mkdirSync(readOnlyHome, { mode: 0o500 });
+  const denied = run(readOnlyHome);
+  if (typeof process.getuid === "function" && process.getuid() !== 0) {
+    assert.deepEqual(denied, { ok: false, component: "manager_root", reason: "unavailable" });
+    assert.deepEqual(readdirSync(readOnlyHome), []);
+  }
+  chmodSync(readOnlyHome, 0o700);
   for (const mode of [0o700, 0o750, 0o755, 0o775]) {
     const home = join(fixture, `home-${mode}`); mkdirSync(home, { mode: 0o700 });
     const manager = join(home, ".agent-manager"); mkdirSync(manager); chmodSync(manager, mode);
@@ -153,7 +165,7 @@ int main(int argc, char **argv) {
 test("mixed helpers and lost creation responses fail safely without retry or fallback", { skip: process.platform !== "linux" }, t => {
   const fixture = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-create-adapter-")));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
-  for (const mode of ["old", "malformed", "lost", "safe-refusal"]) {
+  for (const mode of ["old", "malformed", "lost", "safe-refusal", "inconsistent", "recursive"]) {
     const binary = join(fixture, mode), marker = join(fixture, `${mode}-called`);
     execFileSync("/usr/bin/cc", ["-x", "c", "-", "-o", binary], { input: `
 #include <stdio.h>
@@ -165,6 +177,8 @@ int main(int argc, char **argv) {
   FILE *file = fopen(${JSON.stringify(marker)}, "a"); fputs("called\\n", file); fclose(file);
   if (${JSON.stringify(mode)}[0] == 'l') return 1;
   if (${JSON.stringify(mode)}[0] == 'm') { puts("raw sensitive path text"); return 0; }
+  if (${JSON.stringify(mode)}[0] == 'i') { puts("{\\\"ok\\\":false,\\\"component\\\":\\\"profile_home\\\",\\\"reason\\\":\\\"unavailable\\\",\\\"failureReason\\\":\\\"identity_changed\\\"}"); return 0; }
+  if (${JSON.stringify(mode)}[0] == 'r') { puts("{\\\"ok\\\":false,\\\"component\\\":\\\"profile_home\\\",\\\"reason\\\":\\\"may_have_changed\\\",\\\"failureReason\\\":\\\"may_have_changed\\\"}"); return 0; }
   puts("{\\\"ok\\\":false,\\\"component\\\":\\\"profiles_root\\\",\\\"reason\\\":\\\"unsupported_acl\\\",\\\"raw\\\":\\\"secret\\\"}"); return 0;
 }` });
     assert.equal(execFileSync(binary, ["--probe"], { encoding: "utf8" }), "");
