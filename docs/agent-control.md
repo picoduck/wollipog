@@ -1680,6 +1680,14 @@ command permission is then admitted and the decision is marked consumed only aft
 response is delivered to the runner. A changed command, failed delivery, stale policy, changed
 ancestry, ambiguous match, persistent grant, or unsupported provider cannot consume the grant.
 
+Protocol v344 (#4242) exposes `approvedAction: {kind: "pr_merge_enqueue", command}` on approved
+merge decision reads (including `get_workflow_decision`) and resolution results, and includes the
+same exact action in the child's approval prompt. Copy this server-derived action unchanged into
+consumption alongside the approved `resourceSnapshot`; do not reconstruct the shell command.
+Discovery does not arm or execute it. The existing consumption checks and one-shot admission still
+apply. Other decision categories and non-approved statuses have no approved action. Older servers
+omit this optional field; its absence never authorizes a guessed command or an external merge.
+
 Protocol v239 (#3602) adds GitLab merge requests. The snapshot's `repository` is the project with
 its host and full namespace (`<gitlab-host>/group/subgroup/project`), `pullRequest` is the merge
 request IID, and three fields exist only for GitLab and are then required: `mergeMethod`

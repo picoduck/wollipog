@@ -1000,12 +1000,18 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
   const option = decision.selectedOptionId === undefined || decision.withdrawal
     ? ""
     : ` with option ${decisionLiteral(decision.selectedOptionId)}`;
+  const approvedAction = approvedWorkflowDecisionAction(decision);
   return [
     `[Wollipog Workflow Decision — ${decision.occurrenceId}]`,
     `${resolver} ${decision.withdrawal ? "withdrew" : decision.status} your ${decision.category} decision ${decision.occurrenceId} ` +
       `(resource ${decisionLiteral(decision.resourceKey)})${option}` +
       (message ? " and left this message for you:" : "."),
     ...(message ? [message] : []),
+    ...(approvedAction ? [
+      `Approved enqueue action: ${JSON.stringify(approvedAction)}`,
+      "Pass this exact action to consume_workflow_decision with the unchanged approved resourceSnapshot before executing it. " +
+        "This command is informational; it is not armed until consumption succeeds.",
+    ] : []),
     ...(decision.category === "campaign_follow_up_admission" ? [decision.status === "approved"
       ? "Repeat the same request for that follow-up; the campaign applies it once and consumes this approval. Do not call consume_workflow_decision."
       : "Do not repeat that request for that follow-up: it stays refused."] : []),
@@ -1645,6 +1651,13 @@ export function canonicalPrMergeEnqueueCommand(
         `-F should_remove_source_branch=${snapshot.removeSourceBranch === true}`;
   }
   return `gh pr merge https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest} --squash --match-head-commit ${snapshot.headSha}`;
+}
+
+/** Derived from the saved snapshot, never from a caller or an earlier action admission. */
+function approvedWorkflowDecisionAction(decision: WorkflowDecisionView): WorkflowDecisionView["approvedAction"] {
+  return decision.status === "approved" && decision.resourceSnapshot.category === "pr_merge"
+    ? { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(decision.resourceSnapshot) }
+    : undefined;
 }
 
 /** The pull request's or merge request's web URL, as the forge proof reads it (#3602). */
@@ -16957,6 +16970,8 @@ export class SessionsService {
 
   /** The decision API exposes current server facts, never a child's asserted review result. */
   private withMergeReviewEvidence(decision: WorkflowDecisionView): WorkflowDecisionView {
+    const approvedAction = approvedWorkflowDecisionAction(decision);
+    decision = { ...decision, ...(approvedAction ? { approvedAction } : {}) };
     const snapshot = decision.resourceSnapshot;
     if (snapshot.category !== "pr_merge" || snapshot.reviewSessionId === undefined) return decision;
     const child = this.db.getSession(decision.sessionId);
@@ -18646,7 +18661,7 @@ export class SessionsService {
     occurrenceId: string,
     resolution: DescendantRequestResolution,
     canAccess: (sessionId: string) => boolean,
-  ): ServiceResult<SessionView> {
+  ): ServiceResult<SessionView & { approvedAction?: WorkflowDecisionView["approvedAction"] }> {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);
     const rootCampaign = this.orchestratorCampaignController(parent);
@@ -18706,7 +18721,8 @@ export class SessionsService {
         { kind: "agent", id: parentSessionId },
         canAccess,
       );
-      return resolved.ok ? ok(this.db.getSession(childSessionId)!) : failAs(resolved);
+      return resolved.ok ? ok({ ...this.db.getSession(childSessionId)!,
+        ...(resolved.data?.approvedAction ? { approvedAction: resolved.data.approvedAction } : {}) }) : failAs(resolved);
     }
     const pending = pendingRequests(child.pendingApproval).find((request) => request.occurrenceId === occurrenceId);
     if (!pending) return fail("descendant request occurrence is stale or no longer pending", 409);

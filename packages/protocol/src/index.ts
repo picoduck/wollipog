@@ -5248,6 +5248,10 @@ export type MergeReviewEvidence =
  * child-facing message is the exception by design: its audience is the child, so it is retained
  * on the decision and delivered, while audit still records only its digest. */
 export interface WorkflowDecisionView {
+  /** v344 (#4242): server-derived canonical action for an approved PR merge, available before
+   * consumption. Informational only: consume the unchanged snapshot with this exact action to
+   * arm it. Absent on older servers and on decisions that are not currently approved merges. */
+  approvedAction?: WorkflowDecisionAction;
   /** Server-derived current verification of the optional merge citation. Never caller supplied. */
   reviewEvidence?: MergeReviewEvidence;
   requestId: string;
