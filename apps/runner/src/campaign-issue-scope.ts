@@ -7,6 +7,45 @@ import { gitlabIssueOrigin, readGitlabIssue, readGitlabProject } from "./gitlab-
 type Run = (command: string, args: string[]) => Promise<string>;
 type Candidates = NonNullable<CampaignIssueScopeView["candidates"]>;
 
+/** A URL is only a lookup hint. Failure and PR association must come from the forge. */
+export async function inspectCampaignFailedRun(run: Run, evidence: import("@wollipog/protocol").CampaignFailedRunEvidence): Promise<
+  { repository: string; failedRun?: import("@wollipog/protocol").CampaignFailedRunEvidence }> {
+  const { repository } = await inspectCampaignIssueScope(run);
+  if (repository !== evidence.repository || !/^[0-9a-f]{40}$/u.test(evidence.headSha) ||
+      !Number.isSafeInteger(evidence.runId) || evidence.runId < 1 ||
+      !Number.isSafeInteger(evidence.pullRequest) || evidence.pullRequest < 1) return { repository };
+  const read = async (path: string) => JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}/${path}`]));
+  const failure = await read(`actions/runs/${evidence.runId}`);
+  if (failure.id !== evidence.runId || failure.repository?.full_name?.toLowerCase() !== repository ||
+      failure.status !== "completed" || failure.conclusion !== "failure" ||
+      typeof failure.head_sha !== "string" || !/^[0-9a-f]{40}$/u.test(failure.head_sha)) return { repository };
+  if (failure.event === "merge_group") {
+    const pr = await read(`pulls/${evidence.pullRequest}`);
+    if (typeof pr.base?.ref !== "string" ||
+        failure.head_branch !== `gh-readonly-queue/${pr.base.ref}/pr-${evidence.pullRequest}-${evidence.headSha}` ||
+        !/^[0-9a-f]{40}$/u.test(failure.head_sha)) return { repository };
+    const comparison = await read(`compare/${evidence.headSha}...${failure.head_sha}`);
+    if (!["ahead", "identical"].includes(comparison.status)) return { repository };
+  } else if (failure.event === "pull_request") {
+    if (!Array.isArray(failure.pull_requests) || !failure.pull_requests.some((pr: any) =>
+      pr.number === evidence.pullRequest && pr.head?.sha === evidence.headSha &&
+      pr.base?.repo?.full_name?.toLowerCase() === repository)) return { repository };
+    const checks = await read(`commits/${failure.head_sha}/check-runs?per_page=100`);
+    const [owner, name] = repository.split("/");
+    const query = `query { repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}) {
+      object(oid:${JSON.stringify(failure.head_sha)}) { ... on Commit { statusCheckRollup { contexts(first:100) {
+        pageInfo { hasNextPage } nodes { ... on CheckRun { databaseId isRequired(pullRequestNumber:${evidence.pullRequest}) } }
+      } } } } } }`;
+    const response = JSON.parse(await run("gh", ["api", "--hostname", "github.com", "graphql", "-f", `query=${query}`]));
+    const required = response.data?.repository?.object?.statusCheckRollup?.contexts;
+    if (response.errors || required?.pageInfo?.hasNextPage !== false || !Array.isArray(required.nodes)) return { repository };
+    if (!Array.isArray(checks.check_runs) || checks.total_count !== checks.check_runs.length ||
+        !checks.check_runs.some((check: any) => check.check_suite?.id === failure.check_suite_id &&
+          check.conclusion === "failure" && required.nodes.some((entry: any) => entry.databaseId === check.id && entry.isRequired === true))) return { repository };
+  } else return { repository };
+  return { repository, failedRun: evidence };
+}
+
 /** A fixed refusal whose sentence is safe to return to the control plane as is. */
 export class CampaignIssueScopeRefusal extends Error {}
 

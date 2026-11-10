@@ -1,6 +1,7 @@
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { normalizeDeliveryVerificationFailure, publishedIssueFailure, type PublishedIssueFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
+import { failedCampaignRun } from "./campaign-failed-run.js";
 import {
   isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_REF_PREFIX, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
   memberProviderAccountsError, providerAccountExplicitRecord, providerAccountIneligibility, providerAccountNamedRefusal, providerAccountNamedRefusalSentence,
@@ -12834,18 +12835,22 @@ export class SessionsService {
     // After the structural floor, the Decision Model checks the follow-up belongs to the work the
     // owner asked for (#4104). It can only refuse: unrelated goes back to the requester with the
     // model's reason, and an uncertain or failed check makes the publication the owner's.
-    const related = await this.followUpRelatedness(root, sessionId, snapshot, evidence);
-    if (related.outcome === "refused") return refused("unrelated_follow_up", boundaryRevision, related.reason);
-    if (related.outcome === "owner") return refused("relatedness_unconfirmed", boundaryRevision);
+    const failedRun = await failedCampaignRun(this.db, this.hub, root, snapshot.sanitizedBody, evidence.recommendation);
+    if (!failedRun) {
+      const related = await this.followUpRelatedness(root, sessionId, snapshot, evidence);
+      if (related.outcome === "refused") return refused("unrelated_follow_up", boundaryRevision, related.reason);
+      if (related.outcome === "owner") return refused("relatedness_unconfirmed", boundaryRevision);
+    }
+    const relatedness = failedRun ? { basis: "failed_campaign_run" as const, ...failedRun } : { basis: "decision_model" as const };
     const publicationDigest = await this.inspectCampaignPublicationDigest(root, snapshot);
     if (!publicationDigest) return refused("inspection_failed", boundaryRevision);
     const current = this.db.getSession(root.id)!;
     const boundary = issueBoundary(current);
     if (!boundary || issueEvidenceDigest(publicationEvidence(this.db, current, snapshot)) !== issueEvidenceDigest(evidence)) return refused("evidence_changed", boundaryRevision);
     this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "publication_proposal", sessionId, requestId: request.requestId,
-      controllingSessionId: root.id, boundaryRevision: evidence.boundaryRevision, scopeRevision: evidence.scopeRevision, recommendationId: snapshot.recommendationId, outcome: "admitted" }));
+      controllingSessionId: root.id, boundaryRevision: evidence.boundaryRevision, scopeRevision: evidence.scopeRevision, recommendationId: snapshot.recommendationId, outcome: "admitted", relatedness }));
     return this.createWorkflowDecision(sessionId, { ...request, resourceKey: `publication:${snapshot.recommendationId}`,
-      resourceSnapshot: { ...snapshot, issueAdmission: { boundaryRevision: evidence.boundaryRevision,
+      resourceSnapshot: { ...snapshot, issueAdmission: { relatedness, boundaryRevision: evidence.boundaryRevision,
         evidenceDigest: issueEvidenceDigest({ evidence, publicationDigest }),
         publicationAuthority: { authorizedByUserId: boundary.authorizedByUserId, objectiveDigest: issueEvidenceDigest(boundary.objective) } } } }, canAccess,
       { trustedPublication: true, requestedResourceKey: request.resourceKey });

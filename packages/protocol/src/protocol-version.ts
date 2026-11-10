@@ -1413,6 +1413,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // v349 slot
   // v350 slot
   // v351 slot
+  // 351: Runner-verifiable failed campaign run evidence for follow-up relatedness (#4401).
+  351,
   // v352 slot
   // v353 slot
   // v354 slot

@@ -1,6 +1,32 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+import { CampaignIssueScopeRefusal, inspectCampaignFailedRun, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+
+for (const scenario of ["merge failure", "required failure", "another PR", "passed", "wrong head", "optional check", "incomplete checks"] as const) {
+  test(`failed campaign run evidence: ${scenario}`, async () => {
+    const evidence = { repository: "team/repo", pullRequest: 10, headSha: "a".repeat(40), runId: 123 };
+    const merge = scenario !== "required failure" && scenario !== "optional check" && scenario !== "incomplete checks";
+    const run = async (command: string, args: string[]) => {
+      if (command === "git") return "https://github.com/team/repo.git";
+      const path = args[args.indexOf("github.com") + 1];
+      if (path === "graphql") return JSON.stringify({ data: { repository: { object: { statusCheckRollup: {
+        contexts: { pageInfo: { hasNextPage: false }, nodes: [{ databaseId: 456, isRequired: scenario !== "optional check" }] }
+      } } } } });
+      if (path?.includes("actions/runs/")) return JSON.stringify({ id: 123, repository: { full_name: "team/repo" },
+        status: "completed", conclusion: scenario === "passed" ? "success" : "failure", event: merge ? "merge_group" : "pull_request",
+        head_sha: "b".repeat(40), check_suite_id: 789,
+        head_branch: `gh-readonly-queue/main/pr-${scenario === "another PR" ? 11 : 10}-${scenario === "wrong head" ? "c".repeat(40) : evidence.headSha}`,
+        pull_requests: [{ number: 10, head: { sha: evidence.headSha }, base: { repo: { full_name: "team/repo" } } }] });
+      if (path?.includes("pulls/")) return JSON.stringify({ base: { ref: "main" } });
+      if (path?.includes("compare/")) return JSON.stringify({ status: "ahead" });
+      if (path?.includes("check-runs")) return JSON.stringify({ total_count: scenario === "incomplete checks" ? 2 : 1,
+        check_runs: [{ id: 456, check_suite: { id: 789 }, conclusion: "failure" }] });
+      throw new Error(`Unexpected command ${args.join(" ")}`);
+    };
+    const result = await inspectCampaignFailedRun(run, evidence);
+    assert.deepEqual(result.failedRun, scenario === "merge failure" || scenario === "required failure" ? evidence : undefined);
+  });
+}
 
 /** GitLab answers for a nested project on a self-managed host (#3539). */
 function gitlabScope(issues: Record<number, { title: string; description?: string | null; web_url?: string; project_id?: number }>) {

@@ -40,6 +40,8 @@ function harness(answer: Answer = (kind) => ({ verdict: HEALTHY_VERDICTS[kind]! 
   hub.isRunnerOnline = () => true; hub.sessionChangedById = () => {}; hub.sendToRunner = () => true;
   hub.requestFromRunner = async (_runner, requestId, message) => {
     if (message.type === "campaign_issue_scope") {
+      if (message.operation === "failed_run_inspect") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true,
+        repository: "team/repo", failedRun: message.evidence };
       if (message.operation === "publication_inspect") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true,
         repository: "team/repo", duplicateSearch: "subject" as const,
         publicationDigest: issueEvidenceDigest({ sanitizedTitle: message.sanitizedTitle, sanitizedBody: message.sanitizedBody, labels: message.labels }) };
@@ -67,7 +69,7 @@ function harness(answer: Answer = (kind) => ({ verdict: HEALTHY_VERDICTS[kind]! 
   const item = page.data.items[0]!;
   const calls = (kind: DecisionKind) => fake.calls.filter((message) => fakeDecisionKind(message) === kind);
   const occurrences = (kind: DecisionKind) => db.listCampaignDecisionOccurrences("root").filter((occurrence) => occurrence.kind === kind);
-  return { db, svc, principal, item, calls, occurrences };
+  return { db, svc, principal, item, calls, occurrences, hub };
 }
 
 const body = "## Problem\nThe importer leaks a temp file on the crash path\n## Proposed Behavior\nRemove it\n## Acceptance Criteria\n- Verified\n" +
@@ -120,6 +122,51 @@ test("follow-up relatedness: an unrelated follow-up is refused back to the Orche
     assert.equal(h.db.workflowDecisionByRequestId("child", "unrelated"), null, "no decision for anyone");
   } finally { h.db.close(); }
 });
+
+for (const scenario of ["owned failure", "another PR", "passed run", "no evidence", "old runner", "wrong head", "unverified review", "unsafe payload"] as const) {
+  test(`follow-up relatedness: forge evidence ${scenario}`, async () => {
+    const h = harness();
+    try {
+      assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.item.id, childSessionId: "child" }).ok);
+      assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+        stage: { stage: "implementing", pullRequests: [{ repository: "team/repo", number: 10 }] } }).ok);
+      h.db.createSession({ id: "review", runnerId: "r", workspaceId: "w", agentId: "claude", title: "review",
+        useWorktree: false, driver: "claude-code", now: 3, config: {} });
+      h.db.reviewSessions.record({ reviewSessionId: "review", requesterSessionId: "child", runnerId: "r",
+        pullRequest: { repository: "team/repo", number: scenario === "another PR" ? 11 : 10 },
+        headSha: "a".repeat(40), reviewer: "claude-code" }, 3);
+      if (scenario !== "unverified review") h.db.raw().prepare("UPDATE review_sessions SET state='completed',verdict_json=? WHERE review_session_id='review'")
+        .run(JSON.stringify({ valid: true, consumed: true, effectiveVote: "UPVOTE", failureClass: null, validationErrors: [] }));
+      const original = h.hub.requestFromRunner.bind(h.hub);
+      let inspections = 0;
+      h.hub.requestFromRunner = async (runner, id, message, timeout) => {
+        if (message.type === "campaign_issue_scope" && message.operation === "failed_run_inspect") {
+          inspections++;
+          return { type: "campaign_issue_scope_result", requestId: id, sessionId: message.sessionId, ok: true, repository: "team/repo",
+            ...(scenario === "passed run" ? {} : { failedRun: scenario === "wrong head" ? { ...message.evidence, headSha: "b".repeat(40) } : message.evidence }) };
+        }
+        return original(runner, id, message, timeout);
+      };
+      if (scenario === "old runner") h.db.raw().prepare("UPDATE runners SET protocol_version=350 WHERE runner_id='r'").run();
+      const recommendation = recommend(h);
+      const result = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: scenario, resourceKey: scenario,
+        resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo",
+          sanitizedTitle: scenario === "unsafe payload" ? "Different Title" : recommendation.title,
+          sanitizedBody: body + (scenario === "no evidence" ? "" : "\nhttps://github.com/team/repo/actions/runs/123"),
+          labels: [], recommendationId: recommendation.id } });
+      if (scenario === "unsafe payload") {
+        assert.equal(result.errorDetails?.code, "title_mismatch");
+        assert.equal(inspections, 0);
+      } else {
+        assert.ok(result.ok, result.error ?? "publication");
+        assert.equal(h.calls("follow_up_relatedness").length, scenario === "owned failure" ? 0 : 1);
+        const snapshot = result.data!.resourceSnapshot;
+        assert.ok(snapshot.category === "follow_up_issue_publication");
+        assert.equal(snapshot.issueAdmission?.relatedness?.basis, scenario === "owned failure" ? "failed_campaign_run" : "decision_model");
+      }
+    } finally { h.db.close(); }
+  });
+}
 
 test("follow-up relatedness: a transient failure that succeeds on retry asks nobody", async () => {
   const h = harness((kind, _message, attempt) => kind === "follow_up_relatedness" && attempt === 1

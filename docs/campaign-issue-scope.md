@@ -779,7 +779,14 @@ admitted the request, never reads its text any other way, and may only refuse.
 
 - **Follow-up relatedness** (`follow_up_relatedness`). After a bounded publication passes its
   structural floor (an accepted recommendation, origins in scope, capacity, a safe payload), the
-  model reads the owner's own words, what their grant covers, the origin work and the follow-up.
+  server first checks GitHub Actions run URLs in the sanitized body (runner v351+). A verified
+  failed merge group or required check of the origin item's recorded PR, on a head admitted for
+  its child through a valid completed review session or consumed merge gate, admits relatedness without a model
+  call. The admission records `failed_campaign_run` and the PR/head/run; otherwise it records
+  `decision_model` when admitted. Text alone, another PR, a passing run, unreadable evidence and
+  older runners keep the ordinary check. All structural and publication floors still apply.
+  One refusal is not a precedent for deferring other follow-ups: evaluate each independently.
+  The ordinary model reads the owner's own words, what their grant covers, the origin work and the follow-up.
   - `related`: the publication proceeds as before.
   - `unrelated`: it is refused back to the requester as the correctable `unrelated_follow_up` (a 409,
     nothing created), with the model's reason appended to the fixed sentence.

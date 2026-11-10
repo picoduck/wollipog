@@ -142,6 +142,16 @@ permit bounded worker reservations/allocations; never expand allowances or use u
 For issue publication follow `.github/ISSUE_REPORTING.md` and the contributor reporting skill:
 retain the drafting context, exact sanitized payload, fresh duplicate checks and verified readback.
 Follow-up recommendations go to the parent for recording and deduplication before anyone acts.
+One relatedness refusal is not a precedent for deferring other follow-ups; evaluate each on its
+own evidence. With runner protocol 351, a GitHub Actions run URL in the sanitized publication body
+is only a lookup hint. The server matches the origin item's recorded PR to a head admitted for
+that item's child through a valid completed review session or consumed merge gate. Its runner reads GitHub to
+prove a failed merge-group run with that PR/head queue ref and ancestry, or a failed required check
+whose run names that PR/head. Only relatedness skips the Decision Model. Structural floors and
+safe-payload/duplicate inspection remain mandatory. Unknown ownership, unrelated/passing runs,
+unreadable evidence and older runners retain the ordinary check and its existing outcomes.
+The server-created admission records `failed_campaign_run` with the exact PR/head/run, or
+`decision_model`. No agent-written claim or supplied admission can establish this basis.
 Scope and closure use their dedicated exact typed routes. Current hosts without eligible issue
 authority retain human review even when the campaign requests Full Control. Use non-closing PR
 references in campaigns so merge cannot bypass the closure gate: write "Refs #N", and never put

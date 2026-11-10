@@ -6,7 +6,7 @@ import { restartResumeId } from "./restart-resume.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { type BackgroundFollowUpView, type CampaignRetirementHold, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
-import { CampaignIssueScopeRefusal, PublishedIssueMismatch, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+import { CampaignIssueScopeRefusal, PublishedIssueMismatch, inspectCampaignFailedRun, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
 import { launchOrchestratorMeta, nextCampaignControl, validControlRevision } from "./campaign-control-order.js";
 import { boundedIssueNumbers, campaignBoundaryRepository, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
@@ -21522,6 +21522,7 @@ export class SessionManager {
     }
     try {
       const run = issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {});
+      if (message.operation === "failed_run_inspect") return { ...base, ok: true, ...await inspectCampaignFailedRun(run, message.evidence) };
       if (message.operation === "publication_inspect") return { ...base, ok: true, ...await inspectCampaignPublication(run, message) };
       if (message.operation === "inspect") {
         if (message.epic !== undefined && (!Number.isSafeInteger(message.epic) || message.epic < 1) ||
