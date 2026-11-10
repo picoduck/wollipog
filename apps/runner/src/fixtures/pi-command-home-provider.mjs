@@ -4,6 +4,13 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 const [moduleUrl, encoded] = process.argv.slice(2);
 const policy = JSON.parse(encoded);
 const { createPiCommandHomePrototype, piCommandHomePrototypeNamespaceUnavailable } = await import(moduleUrl);
+// This is an outer-provider invariant, independent of nested namespace availability.
+const config = policy.outer.readOnlyBinds.find(path => path.endsWith("/config.worktree"));
+assert.ok(config, "production outer topology pins its reserved Git config");
+assert.throws(() => writeFileSync(config, "provider-must-not-rewrite-managed-config"), error =>
+  error.code === "EROFS" || error.code === "EACCES");
+assert.equal(readFileSync(config, "utf8"), "");
+console.log("PI_COMMAND_HOME_OUTER_CONFIG: passed");
 // This fixture proves the production operations backend's OS topology, NOT a real Pi runtime.
 // The separate source audit/eligibility tests do not turn this synthetic installation into Pi.
 const backend = createPiCommandHomePrototype(policy, { auditInstallation: () => true, auditRuntime: () => true });
@@ -20,11 +27,6 @@ if (probe.exitCode !== 0 && piCommandHomePrototypeNamespaceUnavailable(probe.out
   console.log("PI_COMMAND_HOME_UNAVAILABLE: nested namespace refused");
 } else {
   assert.equal(probe.exitCode, 0, probe.output);
-  const config = policy.outer.readOnlyBinds.find(path => path.endsWith("/config.worktree"));
-  assert.ok(config, "production outer topology pins its reserved Git config");
-  assert.throws(() => writeFileSync(config, "provider-must-not-rewrite-managed-config"), error =>
-    error.code === "EROFS" || error.code === "EACCES");
-  assert.equal(readFileSync(config, "utf8"), "");
   const auth = `${home}/auth.json`;
   // The provider itself retains temp-file-and-rename refresh and state/config writes.
   writeFileSync(`${auth}.temp`, "provider-refresh"); renameSync(`${auth}.temp`, auth);

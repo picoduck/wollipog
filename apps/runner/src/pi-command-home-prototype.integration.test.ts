@@ -6,8 +6,11 @@ import { test } from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { buildBwrapArgs } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
+import { resolveNative } from "./discovery/resolve.js";
 import { managedWorktreeGitLayout, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
-import { piCommandHomePrototypeNamespaceUnavailable, type PiCommandHomePrototypePolicy } from "./pi-command-home-prototype.js";
+import { createPiCommandHomePrototype, piCommandHomePrototypeNamespaceUnavailable, type PiCommandHomePrototypePolicy } from "./pi-command-home-prototype.js";
+
+const nativeBwrap = process.platform === "linux" ? await resolveNative("bwrap") : null;
 
 /** Production managed-worktree inputs, all confined to an inert repository and synthetic HOME.
  * Resolve before the namespace probe so unavailable local kernels cannot hide setup regressions. */
@@ -55,12 +58,23 @@ async function prepareTopology(root: string) {
   assert.ok(resolved.readOnlyBinds?.includes(configPath));
   assert.ok(readOnlyPaths.every(path => resolved.readOnlyBinds?.includes(path)));
   assert.deepEqual(resolved.writableBinds?.find(bind => bind.source === home), { source: home, target: home });
-  return { worktree, home, immutable, outer: resolved, configPath };
+  // Discovery preserves stable installation aliases. This strict experimental backend takes
+  // canonical executable paths, so spell the same selected binary canonically in its fixture.
+  // No launcher flags or writable grants change.
+  const outer = { ...resolved, command: realpathSync(resolved.command) };
+  const policy: PiCommandHomePrototypePolicy = { outer, providerHome: home, immutablePaths: [immutable],
+    installationRoot: immutable, version: "0.85.0", configuredArgs: ["--no-extensions"],
+    shell: realpathSync("/bin/sh"), nodeRuntime: realpathSync(process.execPath),
+    commandEntrypoint: fileURLToPath(new URL("./pi-command-home-entrypoint.mjs", import.meta.url)) };
+  // Validate the actual backend's topology inputs before a kernel skip as well. These audits
+  // deliberately stand for the inert installation; they attest to no loaded Pi/runtime bytes.
+  createPiCommandHomePrototype(policy, { auditInstallation: () => true, auditRuntime: () => true });
+  return { worktree, home, outer, configPath, policy };
 }
 
 test("inert production resolver reserves and pins managed Git config before any namespace availability test", {
   skip: process.platform !== "linux" ? "UNAVAILABLE: fixture requires native Linux" :
-    !existsSync("/usr/bin/bwrap") ? "UNAVAILABLE: bubblewrap is not installed at the fixture's probed path" : false,
+    !nativeBwrap ? "UNAVAILABLE: production discovery cannot resolve bubblewrap" : false,
 }, async () => {
   const root = realpathSync(mkdtempSync(join(process.cwd(), ".pi-managed-config-")));
   try { await prepareTopology(root); }
@@ -89,12 +103,12 @@ test("inert provider keeps refresh/config/transcripts while operations commands 
 }, async t => {
   const root = realpathSync(mkdtempSync(join(process.cwd(), ".pi-command-conformance-")));
   try {
-    if (!existsSync("/usr/bin/bwrap")) { t.skip("UNAVAILABLE: bubblewrap is not installed at the fixture's probed path"); return; }
-    const { worktree, home, immutable, outer, configPath } = await prepareTopology(root);
+    if (!nativeBwrap) { t.skip("UNAVAILABLE: production discovery cannot resolve bubblewrap"); return; }
+    const { worktree, home, outer, configPath, policy } = await prepareTopology(root);
     const outerArgs = buildBwrapArgs({ command: "/bin/true", args: [], cwd: worktree }, outer);
     assert.ok(outerArgs.some((value, index, args) => value === "--ro-bind" && args[index + 1] === configPath),
       "the actual outer launch pins the reserved config read-only");
-    const probe = spawnSync("/usr/bin/bwrap", ["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
+    const probe = spawnSync(outer.command, [...outer.args, "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
       "--tmpfs", "/tmp", "--unshare-pid", "--", "/bin/true"], { encoding: "utf8", timeout: 5_000,
       env: { PATH: "/usr/bin:/bin", HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
     if (probe.error && (probe.error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -104,10 +118,6 @@ test("inert provider keeps refresh/config/transcripts while operations commands 
       t.skip("UNAVAILABLE: host refuses the outer namespace; no write-denial conformance established"); return;
     }
     assert.equal(probe.status, 0, probe.stderr);
-    const policy: PiCommandHomePrototypePolicy = { outer, providerHome: home, immutablePaths: [immutable],
-      installationRoot: immutable, version: "0.85.0", configuredArgs: ["--no-extensions"],
-      shell: realpathSync("/bin/sh"), nodeRuntime: realpathSync(process.execPath),
-      commandEntrypoint: fileURLToPath(new URL("./pi-command-home-entrypoint.mjs", import.meta.url)) };
     const fixture = fileURLToPath(new URL("./fixtures/pi-command-home-provider.mjs", import.meta.url));
     const moduleUrl = new URL("./pi-command-home-prototype.ts", import.meta.url).href;
     const args = buildBwrapArgs({ command: process.execPath, cwd: worktree,
@@ -115,6 +125,8 @@ test("inert provider keeps refresh/config/transcripts while operations commands 
     const result = spawnSync(outer.command, args, { encoding: "utf8", timeout: 35_000,
       env: { PATH: "/usr/bin:/bin", HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /PI_COMMAND_HOME_OUTER_CONFIG: passed/u,
+      "the outer Git config check must pass even when the nested namespace is unavailable");
     if (result.stdout.includes("PI_COMMAND_HOME_UNAVAILABLE")) {
       t.skip("UNAVAILABLE: inner namespace refused; no write-denial conformance established"); return;
     }
