@@ -30374,11 +30374,11 @@ test("releaseQueueHold is refused for a runner older than v247 without contactin
 });
 
 test("issue closure requires an exact human decision and executes one durable action", async () => {
-  const successes = new Set(["success", "human_approve", "recovered", "unchanged_child", "multi_pending", "approved_rerequest", "pending_rerequest"]);
+  const successes = new Set(["success", "human_approve", "recovered", "unchanged_child", "multi_pending", "approved_rerequest", "pending_rerequest", "aged"]);
   const uncertain = new Set(["uncertain", "invalid_result"]);
   const refused = new Set(["runner_refused", "not_sent"]);
   for (const mode of ["success", "human_approve", "recovered", "unchanged_child", "multi_pending", "already_closed",
-    "runner_refused", "not_sent", "deny", "expired", "changed_payload", "changed_policy", "new_child",
+    "runner_refused", "not_sent", "deny", "aged", "changed_payload", "changed_policy", "new_child",
     "changed_assignment", "history_reassignment", "approved_rerequest", "pending_rerequest", "stopped", "uncertain", "invalid_result"]) {
     const { db, hub, svc } = makeHarness();
     try {
@@ -30467,7 +30467,7 @@ test("issue closure requires an exact human decision and executes one durable ac
       const resolved = svc.approve(id, decision.occurrenceId, mode === "deny" ? "deny" : "approve", { kind: "human", id: "reviewer" });
       assert.ok(resolved.ok, `${mode}: ${resolved.error}`);
       assert.equal((await svc.consumeWorkflowDecision(id, decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot })).ok, false, "generic consumption never authorizes a shell close");
-      if (mode === "expired") db.db.prepare("UPDATE workflow_decisions SET resolved_at=? WHERE occurrence_id=?").run(Date.now() - 31 * 60_000, decision.occurrenceId);
+      if (mode === "aged") db.db.prepare("UPDATE workflow_decisions SET resolved_at=? WHERE occurrence_id=?").run(Date.now() - 31 * 60_000, decision.occurrenceId);
       if (mode === "changed_policy") assert.ok(svc.setParentControlPolicy(id, { ...db.getSession(id)!.parentControlPolicy!.decisions, pr_merge: "orchestrator" }, decision.policyRevision).ok);
       if (mode === "new_child") db.createSession({ id: "closure-new-child", runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
         agentId: AGENT_ID, title: "Fix issue 123", parentSessionId: id, driver: "claude-code", config: {}, useWorktree: false, now: Date.now() });
@@ -30505,7 +30505,7 @@ test("issue closure requires an exact human decision and executes one durable ac
       } else {
         assert.equal(result.ok, false, `${mode}: no execution`);
         assert.equal(executions, 0);
-        if (mode === "new_child" || mode === "expired") {
+        if (mode === "new_child") {
           assert.equal(svc.workflowDecision(id, decision.occurrenceId).data?.status, "revoked");
           const next = await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "renewed-closure" });
           assert.ok(next.ok && next.data?.decision, next.error);
