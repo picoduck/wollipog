@@ -2456,9 +2456,31 @@ test("#2940 a person-approved publication names the failed condition: removed or
       return message.type === "campaign_issue_scope" && message.operation === "inspect" && message.publication && result.type === "campaign_issue_scope_result"
         ? { ...result, candidates: result.candidates?.map((c) => ({ ...c, title: "[Feature]: An edited title" })) } : result;
     };
-    assert.equal(refusalCode(await followUpScope(mismatch, "payload-mismatch", p.decision.occurrenceId)), "payload_mismatch");
+    assert.equal(refusalCode(await followUpScope(mismatch, "payload-mismatch", p.decision.occurrenceId)), "payload_title_mismatch");
     assert.equal(mismatch.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
   } finally { mismatch.db.close(); }
+});
+
+test("#4404 publication refusals distinguish fields and failed reads without echoing content", async () => {
+  for (const field of ["title", "body", "labels", undefined, "untrusted Private content"] as const) {
+    const h = harness(true, 3);
+    try {
+      const p = await humanApprovedPublication(h);
+      const runner = h.hub.requestFromRunner.bind(h.hub);
+      h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+        const result = await runner(runnerId, requestId, message, timeout);
+        return message.type === "campaign_issue_scope" && message.operation === "inspect" && message.publication && result.type === "campaign_issue_scope_result"
+          ? { ...result, ok: false, publicationFailure: field as "body", error: "Private issue content and token" } : result;
+      };
+      const refused = await followUpScope(h, "field-refusal", p.decision.occurrenceId);
+      const known = field === "title" || field === "body" || field === "labels";
+      assert.equal(refusalCode(refused), known ? `payload_${field}_mismatch` : "payload_read_failed");
+      assert.match(refused.error!, known ? new RegExp(field) : /could not be read/);
+      assert.doesNotMatch(JSON.stringify(refused), /Private|token|untrusted/);
+      assert.equal(h.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
+      assert.equal(pendingScopeRequests(h).length, 0);
+    } finally { h.db.close(); }
+  }
 });
 
 test("#2940 Orchestrator scope refusals name their condition with a bounded code and no requested content", async () => {
@@ -4624,7 +4646,7 @@ test("a follow-up in another boundary repository is inspected through its Locati
       explanation: "The published follow-up", lineage: { kind: "follow_up", publicationOccurrenceId } });
     publishedPayloadMatches = false;
     const altered = await join("join-altered", 77, admitted.data!.occurrenceId);
-    assert.equal(altered.errorDetails?.code, "payload_mismatch", "an edited issue never joins");
+    assert.equal(altered.errorDetails?.code, "payload_read_failed", "an old runner's unclassified refusal never admits an edited issue");
     publishedPayloadMatches = true;
     verifications.length = 0;
     const joined = await join("join", 77, admitted.data!.occurrenceId);
@@ -4775,7 +4797,7 @@ test("#4333 owner routing states a required increase and refuses a mismatched pu
       return message.type === "campaign_issue_scope" && message.operation === "inspect" && message.publication && result.type === "campaign_issue_scope_result"
         ? { ...result, candidates: [] } : result;
     };
-    assert.equal(refusalCode(await followUpScope(mismatch, "routed-mismatch", p.decision.occurrenceId)), "payload_mismatch");
+    assert.equal(refusalCode(await followUpScope(mismatch, "routed-mismatch", p.decision.occurrenceId)), "payload_read_failed");
     assert.equal(pendingScopeRequests(mismatch).length, 0);
     assert.equal(mismatch.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
   } finally { mismatch.db.close(); }

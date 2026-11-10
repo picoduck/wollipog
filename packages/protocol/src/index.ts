@@ -4899,7 +4899,15 @@ export type CampaignIssueNumberGrantRefusal =
    * numbers come only from its scope. */
   | "issue_scope_held";
 
+/** Bounded diagnostics only; never surface raw forge output. */
+export type PublishedIssueFailure = "title" | "body" | "labels" | "read_failed";
+export function publishedIssueFailure(value: unknown): PublishedIssueFailure {
+  return value === "title" || value === "body" || value === "labels" ? value : "read_failed";
+}
+
 export interface CampaignIssueScopeResultMessage {
+  /** v346: absent or unknown failures remain failed reads. */
+  publicationFailure?: PublishedIssueFailure;
   type: "campaign_issue_scope_result";
   requestId: string;
   sessionId: string;

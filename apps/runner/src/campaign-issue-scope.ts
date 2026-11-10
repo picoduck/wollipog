@@ -10,6 +10,12 @@ type Candidates = NonNullable<CampaignIssueScopeView["candidates"]>;
 /** A fixed refusal whose sentence is safe to return to the control plane as is. */
 export class CampaignIssueScopeRefusal extends Error {}
 
+export class PublishedIssueMismatch extends CampaignIssueScopeRefusal {
+  constructor(readonly field: "title" | "body" | "labels") {
+    super(`Published issue ${field} differs from its authorization`);
+  }
+}
+
 export const GITLAB_PUBLICATION_REFUSAL = "Campaign issue publication supports GitHub repositories only";
 
 /** One requested number's facts (#4103), bounded. Every string is the forge's untrusted text.
@@ -57,8 +63,13 @@ export async function inspectCampaignIssueScope(run: Run, epic?: number, issues:
         typeof raw.html_url !== "string" || raw.html_url.toLowerCase() !== `https://github.com/${repository}/issues/${number}`) {
       throw new Error("GitHub could not verify a repository-qualified issue");
     }
-    if (publication && (raw.title !== publication.sanitizedTitle || raw.body !== publication.sanitizedBody ||
-        !Array.isArray(raw.labels) || JSON.stringify(raw.labels.map((label: {name:string}) => label.name).sort()) !== JSON.stringify([...publication.labels].sort()))) throw new Error("Published issue payload differs from its exact authorization");
+    if (publication) {
+      if (raw.title !== publication.sanitizedTitle) throw new PublishedIssueMismatch("title");
+      // Only whitespace at the very end of the body is immaterial to authorization.
+      if (raw.body === null || raw.body.trimEnd() !== publication.sanitizedBody.trimEnd()) throw new PublishedIssueMismatch("body");
+      const labels = names(raw.labels, "name");
+      if (!labels || JSON.stringify([...labels].sort()) !== JSON.stringify([...publication.labels].sort())) throw new PublishedIssueMismatch("labels");
+    }
     if (report) {
       const labels = names(raw.labels, "name");
       const assignees = names(raw.assignees, "login");

@@ -133,6 +133,33 @@ test("follow-up scope inspects exact title, body and labels rather than trusting
   }
 });
 
+test("published bodies ignore only trailing whitespace, with content-free field refusals (#4404)", async () => {
+  const publication = { sanitizedTitle: "Private title", sanitizedBody: "Private body\nSecond line", labels: ["feature"] };
+  for (const [body, title, labels, field] of [
+    [publication.sanitizedBody + "\n", publication.sanitizedTitle, ["feature"], null],
+    [publication.sanitizedBody + " \t\r\n", publication.sanitizedTitle, ["feature"], null],
+    [" " + publication.sanitizedBody, publication.sanitizedTitle, ["feature"], "body"],
+    ["Private  body\nSecond line", publication.sanitizedTitle, ["feature"], "body"],
+    ["Private body\nChanged line", publication.sanitizedTitle, ["feature"], "body"],
+    [publication.sanitizedBody, publication.sanitizedTitle + " ", ["feature"], "title"],
+    [publication.sanitizedBody, "Other title", ["feature"], "title"],
+    [publication.sanitizedBody, publication.sanitizedTitle, ["bug"], "labels"],
+  ] as const) {
+    const run = async (command: string) => command === "git" ? "https://github.com/team/repo.git" : JSON.stringify({ number: 10,
+      title, body, labels: labels.map((name) => ({ name })), html_url: "https://github.com/team/repo/issues/10" });
+    if (field) await assert.rejects(inspectCampaignIssueScope(run, undefined, [10], publication), (error: Error) => {
+      assert.match(error.message, new RegExp(field));
+      assert.doesNotMatch(error.message, /Private|Second|feature|bug/);
+      return true;
+    });
+    else assert.equal((await inspectCampaignIssueScope(run, undefined, [10], publication)).candidates.length, 1);
+    // Compare both directions, including an approved trailing newline absent on the forge.
+    if (!field) assert.equal((await inspectCampaignIssueScope(async (command) => command === "git" ? "https://github.com/team/repo.git" : JSON.stringify({
+      number: 10, title, body: publication.sanitizedBody, labels: [{ name: "feature" }], html_url: "https://github.com/team/repo/issues/10" }),
+      undefined, [10], { ...publication, sanitizedBody: body })).candidates.length, 1);
+  }
+});
+
 test("runner fails closed on incomplete, external or excessive membership", async () => {
   for (const members of [null, [{ number: 2, title: "Other", html_url: "https://github.com/other/repo/issues/2" }], Array(100).fill({})]) {
     const run = async (command: string, args: string[]) => command === "git" ? "https://github.com/team/repo.git"
