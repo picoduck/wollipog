@@ -3343,7 +3343,7 @@ test("an ambiguous Native TUI launch retains one session and prevents duplicate 
     assert.equal(notice.closest(".modal-body") !== null, true, "the notice is in the body");
     assert.equal(notice.parentElement?.lastElementChild === notice, true, "at the body's end, above the footer");
     const footerButtons = [...fixture.container.querySelectorAll(".modal-foot button")].map((button) => button.textContent);
-    assert.deepEqual(footerButtons, ["Cancel", "Create Session"], "the footer has only Cancel and Create Session");
+    assert.deepEqual(footerButtons, ["Account Setup…", "Cancel", "Create Session"], "setup remains separate from the creation actions");
     assertNoDomNode(fixture.container.querySelector(".modal-foot .form-error"));
 
     await assertCreateRefused(fixture);
