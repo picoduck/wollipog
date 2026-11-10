@@ -448,7 +448,7 @@ function ProviderAccountGroup({ runner, online, provider, policy, canEdit, savin
  * and Add Account…, then one surface of account rows, each with one status. Removal and the profile
  * actions live in each row's ⋯; a refusal is one compact notice between the title and the rows.
  */
-export function ProviderAccountsSection({ runner, online, machineName, canManageProfiles = false, profileAccessKnown = true, intent }: {
+export function ProviderAccountsSection({ runner, online, machineName, canManageProfiles = false, profileAccessKnown = true, intent, showMachineSettings = true }: {
   runner: RunnerView;
   online: boolean;
   /** The machine's display name, for Add Account and the removal confirmation. */
@@ -462,6 +462,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   /** Set Up Managed Profile or Recover Existing Profile from a refused session (#3240): each new
    * activation scrolls here and opens it once. */
   intent?: MachineAccountsIntent;
+  /** Embedded setup keeps unrelated running-session policy in Machine detail. */
+  showMachineSettings?: boolean;
 }) {
   const privacy = useAccountEmailPrivacy();
   const api = useApi();
@@ -1122,7 +1124,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           </>} />;
       })}
       </div> : null}
-      <RunningSessionAccountSettings key={runner.runnerId} runner={runner} online={online} canEdit={canManageProfiles && canManage} />
+      {showMachineSettings && <RunningSessionAccountSettings key={runner.runnerId} runner={runner} online={online} canEdit={canManageProfiles && canManage} />}
       {accessAccount && profileActions && canManage && <Modal title="Account Access" description={identifier(accessAccount)} size="sm"
         onClose={() => setAccessAccountId(null)} footer={<button type="button" className="btn" onClick={() => setAccessAccountId(null)}>Close</button>}>
         <p>{accessAccount.profile?.access === "granted"

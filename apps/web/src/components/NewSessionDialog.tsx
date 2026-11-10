@@ -1,5 +1,7 @@
 import { flushSync } from "react-dom";
 import {
+  lazy,
+  Suspense,
   useEffect,
   useId,
   useLayoutEffect,
@@ -153,6 +155,8 @@ const OPTIONS_CONTROLS: ReadonlySet<ProblemControl> = new Set<ProblemControl>([
   "defaults", "harness", "mode", "execution-target", "cloud-budget",
 ]);
 
+const AccountSetupDialog = lazy(() => import("./AccountSetupDialog.js").then((module) => ({ default: module.AccountSetupDialog })));
+
 /** Pre-selection for launches from a project's menu ("Create permanent worktree"). */
 export interface NewSessionPreset {
   runnerId?: string;
@@ -174,6 +178,7 @@ export function NewSessionDialog({
   preset?: NewSessionPreset;
 }) {
   const api = useApi();
+  const [accountSetupRunnerId, setAccountSetupRunnerId] = useState<string | null>(null);
   const instanceScope = useInstanceScope();
   const {
     runners,
@@ -1297,8 +1302,9 @@ export function NewSessionDialog({
     onClose();
     navigate({ name: "runners", section: "machines", ...(runner ? { machineId: runner.runnerId } : {}) });
   };
-  // Machines in Connections lists each machine with its agents (#2953).
-  const setUpAgentsAction: PickerFooterAction = { label: "Set Up Agents in Connections", onSelect: openConnections };
+  // Setup stays over the draft even when no installation can launch (#4438).
+  const openAccountSetup = () => { if (runnerId) setAccountSetupRunnerId(runnerId); else openConnections(); };
+  const setUpAgentsAction: PickerFooterAction = { label: "Account Setup…", onSelect: openAccountSetup };
 
   // Project takes focus as the dialog opens, with its list closed (#1143, #2951): typing filters
   // at once, Arrow Down opens it, and it never covers the form uninvited.
@@ -1664,6 +1670,7 @@ export function NewSessionDialog({
                 />
               )}
             </div>
+            {runnerId && <button type="button" className="btn sm" onClick={openAccountSetup}>Account Setup…</button>}
             {problemFor("agent")}
             {agentDefaultProblem && (agentDefaultProblem.tone === "error"
               ? <FieldError id={agentDefaultProblemId}>{agentDefaultProblem.message}</FieldError>
@@ -1943,6 +1950,11 @@ export function NewSessionDialog({
           )}
         </form>
     </Modal>
+    {accountSetupRunnerId && (
+      <Suspense fallback={null}>
+        <AccountSetupDialog runnerId={accountSetupRunnerId} onClose={() => setAccountSetupRunnerId(null)} />
+      </Suspense>
+    )}
     {choosingFolder && runner && (
       <ChooseFolderDialog
         runnerId={runner.runnerId}

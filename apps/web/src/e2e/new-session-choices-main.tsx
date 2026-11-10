@@ -357,6 +357,22 @@ const runProjects: ProjectView[] = runDialog ? [
   ]),
 ] : [];
 
+// #4438: deterministic account-setup states; no live provider sign-in runs in this fixture.
+const accountSetup = fixtureParams.get("accountSetup");
+if (accountSetup) {
+  runner.canManage = accountSetup !== "viewer";
+  runner.agentsRefreshed = true;
+  runner.agents = runner.agents.filter((agent) => agent.driver === "claude-code").map((agent) => ({
+    ...agent, available: false, authStatus: "unauthenticated", version: "2.1.277",
+    claudeCode: { status: "unauthenticated", effortLevels: [], permissionModes: [], streamJsonInput: true,
+      streamJsonImages: true, controlProtocol: true, forkSession: true, replayUserMessages: true,
+      auth: { status: "unauthenticated", billingSource: "unknown" } },
+  }));
+  runner.providerAccounts = [];
+  if (accountSetup === "missing") runner.agents = [];
+  if (accountSetup === "old") runner.protocolVersion = 100;
+}
+
 const snapshot: UiSnapshotMessage = {
   type: "snapshot",
   capabilities: {
