@@ -89,8 +89,9 @@ import {
  * so an issue prompt admitted before reassignment cannot disappear behind unrelated later work. */
 const closurePromptStateSql = (session: string) => `json_object(
   'latest', (SELECT max(seq) FROM session_events WHERE session_id=${session} AND kind='user_message'),
-  'command', (SELECT json_object('id',command_id,'digest',payload_sha256) FROM session_prompt_commands
-    WHERE session_id=${session} ORDER BY created_at DESC,rowid DESC LIMIT 1),
+  'command', (SELECT json_object('id',command_id,'digest',payload_sha256,'count',
+    (SELECT count(*) FROM session_prompt_commands WHERE session_id=${session})) FROM session_prompt_commands
+    WHERE session_id=${session} ORDER BY rowid DESC LIMIT 1),
   'immediate', (SELECT json_object('id',admission_id,'digest',payload_sha256) FROM session_immediate_prompt_admissions WHERE session_id=${session}),
   'steering', (SELECT json_object('id',request_id,'digest',request_sha256,'count',
     (SELECT count(*) FROM session_steering_attempts WHERE session_id=${session})) FROM session_steering_attempts
