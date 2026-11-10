@@ -191,7 +191,7 @@ can (verify the child with `verify_campaign_child`, record the delivery pull req
 reported stage, or wait for a named open pull request to merge or close) and request the closure
 again: a request that passes the proof is Orchestrator-owned and supersedes the person's. An open
 pull request that closes the issue or belongs to the campaign keeps blocking until it merges or
-closes. On protocol 357+, a bare mention by an outside PR is not a gap; unreadable closing references
+closes. On protocol 358+, a bare mention by an outside PR is not a gap; unreadable closing references
 or campaign history count it as related. Older runners retain the conservative mention and timeline
 rule. Leave a `person_decides` gap to the person, and never ask a person to approve a closure you
 could make Orchestrator-owned yourself.
@@ -224,7 +224,7 @@ wollipog issue-closure execute <occurrence-id> --digest <resource-digest> --json
 
 An approved closure does not expire on age alone. Payload, scope, policy revision, authority,
 issue-bound child work and freshly read forge evidence must still match; refusals name changed
-bindings. On protocol 357+, a bound child moving to unrelated recorded work preserves unchanged
+bindings. On protocol 358+, a bound child moving to unrelated recorded work preserves unchanged
 issue work. New issue-bound children or unconsumed decisions still invalidate it; incomplete history
 retains strict binding. Human-owned closures stay human-owned. Mid-turn approvals use the durable
 steering lane at a safe tool boundary, falling back to the queued continuation on rejection;

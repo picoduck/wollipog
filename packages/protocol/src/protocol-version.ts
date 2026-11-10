@@ -1427,9 +1427,9 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 356: Audit byte-verified UI evidence receipt reuse across approval occurrences.
   356,
   // v357 slot
-  // 357: Bind closure PR relatedness and child work to server facts; safely steer approved closure notices (#4403).
-  357,
   // v358 slot
+  // 358: Bind closure PR relatedness and child work to server facts; safely steer approved closure notices (#4403).
+  358,
   // v359 slot
   // v360 slot
   // v361 slot
