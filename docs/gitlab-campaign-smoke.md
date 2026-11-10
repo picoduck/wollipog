@@ -137,7 +137,12 @@ or missing review/cost proof as blocked. Repeat for MR B before its direct merge
    as part of this smoke procedure (related contributor work: #4242 / #4247).
 4. Observe the train entry and its pipeline while pending/running in Campaign Status.
    Start a **separate** `wait_pull_request` at the approved head before the train
-   pipeline finishes. Record its pipeline ID separately from the head pipeline ID.
+   pipeline finishes. Capture the train pipeline ID from Campaign Status or a GET of
+   `projects/<encoded-project>/merge_trains/merge_requests/<iid>` while the car is
+   active, separately from the head pipeline ID. On success the wait continues until
+   `merged`; its final summary can have `mergeTrain: null`, so do not expect that
+   summary to retain the train pipeline ID. Read the captured pipeline ID afterward
+   to verify its terminal status.
    A head-pipeline-only result does not satisfy the train-pipeline criterion. If the
    train finishes too quickly to observe, mark that transition unexecuted and use a
    newly authorized MR for another attempt, never replay the consumed merge command.
@@ -173,8 +178,29 @@ still points to that head, and no open MR targets that source branch. Check all 
 Request a distinct `merged_branch_deletion` snapshot with `repository`, branch,
 `headSha`, MR number, `merged: true`, verified `mergeCommitSha`, and fresh
 `dependentPullRequests: {checkedAt, open: []}`. Read owner/approval and consume the
-unchanged snapshot immediately before deleting only that approved remote ref through
-the supported GitLab path. Never reuse GitHub-only execution helpers for GitLab.
+unchanged snapshot immediately before the operator deletes only that approved branch.
+Wollipog's `execute_workflow_decision` deletion executor is GitHub-only and refuses
+GitLab; this case uses an operator-run `glab` command after typed consumption.
+
+Using the operator's existing login, read the exact branch immediately before
+consumption and confirm `commit.id` equals the approved head, `default` and `protected`
+are false, and the dependent-MR check is still current. For a branch named `smoke/a`,
+the read/delete/read sequence is:
+
+```sh
+glab api projects/group%2Fsubgroup%2Fsmoke/repository/branches/smoke%2Fa --hostname gitlab.example.com
+# Only after the checks and exact typed deletion approval/consumption above:
+glab api --method DELETE projects/group%2Fsubgroup%2Fsmoke/repository/branches/smoke%2Fa --hostname gitlab.example.com
+glab api projects/group%2Fsubgroup%2Fsmoke/repository/branches/smoke%2Fa --hostname gitlab.example.com
+```
+
+Percent-encode the actual approved branch name as one path component. The
+[GitLab branch API](https://docs.gitlab.com/api/branches/#delete-repository-branch)
+delete endpoint has no expected-head field: this is not an atomic compare-and-delete.
+Use only branches reserved exclusively for this disposable smoke with no concurrent
+writers; otherwise block the case rather than weaken the approved-head requirement.
+The final read must establish branch absence (404) while a project read still succeeds;
+an auth or transport failure proves nothing. Never bypass a refused tool permission.
 
 - **A: delete, then retire.** Execute the authorized remote deletion, independently
   confirm the exact remote ref is absent, then call `discard_worktree` for its clean,
@@ -182,7 +208,7 @@ the supported GitLab path. Never reuse GitHub-only execution helpers for GitLab.
 - **B: retire, then delete.** Save the pushed branch/head/MR/merge identifiers first.
   Retire the clean, fully pushed managed worktree with `discard_worktree`. After the
   retirement is actually complete, request/consume the fresh deletion approval and
-  delete the remote branch via the supported route without depending on that directory.
+  delete the remote branch with the operator-run API sequence without depending on that directory.
   Confirm absence independently. A `deferred` retirement is pending until provider exit;
   record the later completion before claiming this ordering passed.
 
