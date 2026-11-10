@@ -4573,6 +4573,7 @@ test("a follow-up in another boundary repository is inspected through its Locati
     const inspections: Array<{ runnerId: string; workspacePath?: string; publication?: unknown }> = [];
     const verifications: Array<{ issueNumbers: number[]; title?: string }> = [];
     let publishedPayloadMatches = true;
+    let publicationFailure: "title" | "body" | "labels" | undefined;
     // Runs while the runner is answering, as a person changing the Location mid-request would.
     let whileInspecting: (() => void) | null = null;
     const runner = h.hub.requestFromRunner;
@@ -4587,7 +4588,7 @@ test("a follow-up in another boundary repository is inspected through its Locati
       // Reading issues, with a payload to match or without one, is not a duplicate search.
       if (message.issueNumbers.length) {
         verifications.push({ issueNumbers: message.issueNumbers, ...(message.publication ? { title: message.publication.sanitizedTitle } : {}) });
-        return message.publication && !publishedPayloadMatches ? { ...result, ok: false, failure: "publication_refused" as const } : result;
+        return message.publication && !publishedPayloadMatches ? { ...result, ok: false, failure: "publication_refused" as const, publicationFailure } : result;
       }
       inspections.push({ runnerId, workspacePath: message.workspacePath, publication: message.publication });
       return { ...result, publicationDigest: issueEvidenceDigest(message.publication), duplicateSearch: "subject" as const };
@@ -4647,6 +4648,13 @@ test("a follow-up in another boundary repository is inspected through its Locati
     publishedPayloadMatches = false;
     const altered = await join("join-altered", 77, admitted.data!.occurrenceId);
     assert.equal(altered.errorDetails?.code, "payload_read_failed", "an old runner's unclassified refusal never admits an edited issue");
+    for (const field of ["title", "body", "labels"] as const) {
+      publicationFailure = field;
+      const refused = await join(`join-altered-${field}`, 77, admitted.data!.occurrenceId);
+      assert.equal(refused.errorDetails?.code, `payload_${field}_mismatch`);
+      assert.match(refused.error!, new RegExp(field));
+      assert.doesNotMatch(refused.error!, /Related repair|Private|token/);
+    }
     publishedPayloadMatches = true;
     verifications.length = 0;
     const joined = await join("join", 77, admitted.data!.occurrenceId);
