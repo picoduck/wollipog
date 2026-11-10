@@ -55,6 +55,96 @@ function fixture(completion: "retain" | "stop_and_archive" = "retain") {
 
 type Fixture = ReturnType<typeof fixture>;
 
+for (const later of ["none", "notice", "prompt", "unknown_notice", "assignment", "report", "no_report"] as const) {
+  test(`failed child report finality: ${later} (#4400)`, async () => {
+    const h = fixture();
+    try {
+      assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "child" }).ok);
+      const seq = later === "no_report" ? 1 : h.report("child");
+      if (later === "notice") {
+        // Server staging, not a payload flag or a recognizable notice string, establishes origin.
+        h.db.stageSessionPromptCommand({ commandId: "notice", sessionId: "child", runnerId: "r",
+          payloadJson: "{}", payloadSha256: "test", now: Date.now(), expiresAt: Date.now() + 1000, systemNotice: true });
+      }
+      if (["notice", "prompt", "unknown_notice"].includes(later)) h.db.appendEvent("child", {
+        kind: "user_message", text: "Identical notice-looking text", commandId: later === "notice" ? "notice" : "unknown",
+      }, Date.now());
+      if (later === "report") h.report("child", "A later completed report.");
+      if (later === "assignment") assert.ok(h.svc.assignCampaignWorkItem("root", {
+        workItemId: h.advisory, childSessionId: "child",
+      }).ok);
+      h.db.updateSessionStatus("child", "failed", Date.now());
+      const acceptable = later === "none" || later === "notice";
+      const verify = h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: seq, followUpsAccounted: true });
+      assert.equal(verify.ok, acceptable, verify.error ?? "verification result");
+      assert.equal(h.db.campaignChildReportVerified("root", "child"), acceptable);
+      const record = () => h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery,
+        report: { childSessionId: "child", reportEventSeq: seq } });
+      if (!acceptable) assert.equal((await record()).ok, false);
+      if (later !== "assignment") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.delivery, endAttempt: { reason: "failed" } }).ok);
+      const recorded = await record();
+      assert.equal(recorded.ok, acceptable, recorded.error ?? "delivery result");
+      assert.equal(h.db.campaignWorkLedger.detail("root", h.delivery, Date.now())!.primaryState === "delivered", acceptable);
+    } finally { h.db.close(); }
+  });
+}
+
+test("a failed child's open attempt can record delivery from its standing report (#4400)", async () => {
+  const h = fixture();
+  try {
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "child" }).ok);
+    const seq = h.report("child");
+    h.db.updateSessionStatus("child", "failed", Date.now());
+    const result = await h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery,
+      report: { childSessionId: "child", reportEventSeq: seq } });
+    assert.ok(result.ok, result.error ?? "delivery refused");
+    assert.equal(result.data!.item.primaryState, "delivered");
+  } finally { h.db.close(); }
+});
+
+for (const dirty of [false, true]) test(`successor delivery settles failed child, preserved worktree=${dirty} (#4400)`, () => {
+  const h = fixture("stop_and_archive");
+  try {
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "child" }).ok);
+    h.db.updateSessionStatus("child", "failed", Date.now());
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.delivery, endAttempt: { reason: "failed" } }).ok);
+    if (dirty) h.db.raw().prepare("UPDATE sessions SET worktree_path=? WHERE id='child'").run("/preserved/dirty");
+    assert.equal(h.db.campaignChildFailureSuperseded("root", "child"), false, "failure never proves delivery");
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "other" }).ok);
+    h.db.updateSessionStatus("other", "completed", Date.now());
+    const verified = h.svc.verifyCampaignChild("root", { childSessionId: "other", reportEventSeq: h.report("other"),
+      followUpsAccounted: true, workItem: { id: h.delivery, outcome: "delivered" } });
+    assert.ok(verified.ok, verified.error ?? "verification refused");
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), false, "no invented report verification");
+    assert.equal(h.db.campaignChildFailureSuperseded("root", "child"), true);
+    assert.ok(handOff(h, h.advisory, "human").ok);
+    h.db.updateSessionStatus("root", "idle", Date.now());
+    assert.equal(h.db.campaignProjection("root")!.status, "complete_needs_cleanup");
+    assert.equal(h.db.campaignProjection("root")!.children.blocked, 0);
+    if (dirty) assert.equal(h.db.campaignProjection("root")!.cleanupWorktrees?.[0]?.path, "/preserved/dirty");
+  } finally { h.db.close(); }
+});
+
+test("failed at creation with no report does not hold an otherwise completed campaign (#4400)", () => {
+  const h = fixture();
+  try {
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "child" }).ok);
+    h.db.updateSessionStatus("child", "failed", Date.now());
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.delivery, endAttempt: { reason: "failed" } }).ok);
+    assert.ok(h.svc.setArchived("child", true).ok);
+    for (const workItemId of [h.delivery, h.advisory]) {
+      assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId, childSessionId: "other" }).ok);
+      h.db.updateSessionStatus("other", "idle", Date.now());
+      const result = h.svc.verifyCampaignChild("root", { childSessionId: "other", reportEventSeq: h.report("other"),
+        followUpsAccounted: true, workItem: { id: workItemId, outcome: "delivered" } });
+      assert.ok(result.ok, result.error ?? "verification refused");
+    }
+    h.db.updateSessionStatus("root", "idle", Date.now());
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
+    assert.equal(h.db.campaignProjection("root")!.status, "verified_complete");
+  } finally { h.db.close(); }
+});
+
 /** Both children report and are verified; `child` delivers `delivery` through its open attempt. */
 function finishChildren(h: Fixture, completion: "retain" | "stop_and_archive" = "retain") {
   assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "child" }).ok);
@@ -332,7 +422,7 @@ test("a delivery with an open attempt closes it, and another session still worki
     const report = h.report("child");
     const working = await h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery,
       report: { childSessionId: "child", reportEventSeq: report } });
-    assert.match(working.error ?? "", /still working on this item/u);
+    assert.match(working.error ?? "", /child is running/u);
     h.db.updateSessionStatus("child", "idle", Date.now());
     const recorded = await h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery,
       report: { childSessionId: "child", reportEventSeq: report } });
