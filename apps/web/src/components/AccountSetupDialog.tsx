@@ -28,8 +28,8 @@ export function AccountSetupDialog({ runnerId, onClose }: { runnerId: string; on
   const online = runner?.status === "online" && (!box || box.status === "online");
   return (
     <Modal title="Account Setup" description={name} onClose={onClose} phoneSheet="full"
-      footer={<button type="button" className="btn" onClick={onClose}>Back to New Session</button>}>
-      <p className="section-note">Review this machine's installations and permitted sign-ins. Account setup does not change the account selected for your draft.</p>
+      footer={<button type="button" className="btn" onClick={onClose}>Done</button>}>
+      <p className="section-note">Review this machine's installations and permitted sign-ins. Your draft stays open. Changing this machine's account policy also updates drafts that use that policy.</p>
       {runner ? <>
         {!online && <p className="section-note">This machine is offline. Installation and account details are last reported; reconnect before starting setup.</p>}
         {!runnerSupportsProtocol(runner.protocolVersion, "providerLogin") && <p className="section-note">Update this machine's runner to set up accounts here. Its existing sign-in status may be unknown.</p>}

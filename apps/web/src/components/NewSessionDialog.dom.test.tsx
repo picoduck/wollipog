@@ -1523,8 +1523,8 @@ test("keyboard Account Setup returns to the existing New Session draft (#4438)",
     assert.deepEqual(navigated, []);
     // React.lazy loads the actual Machine account surface, rather than replacing navigation.
     await act(async () => { await import("./AccountSetupDialog.js"); });
-    assert.ok(buttonNamed(fixture.container, "Back to New Session"));
-    await act(async () => { buttonNamed(fixture.container, "Back to New Session")!.click(); });
+    assert.ok(buttonNamed(fixture.container, "Done"));
+    await act(async () => { buttonNamed(fixture.container, "Done")!.click(); });
     assert.equal(combobox(fixture.container, "Project").value, project.name);
     assert.equal(dialogCloses.count, closesBefore);
   } finally {
