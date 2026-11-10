@@ -36,7 +36,7 @@ function harness(options: { runnerProtocol?: number; issueScope?: boolean } = {}
   hub.sendToRunner = (_runner, message) => { toRunner.push(message); return true; };
   // The runner's campaign issue scope commands (#3915), answered the way a healthy runner does.
   hub.requestFromRunner = async (_runner, requestId, message) => {
-    if (message.type !== "campaign_issue_scope" || message.operation === "publication_inspect") {
+    if (message.type !== "campaign_issue_scope" || message.operation === "publication_inspect" || message.operation === "failed_run_inspect") {
       throw new Error(`unexpected runner command ${message.type}`);
     }
     return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true, repository: "team/repo",

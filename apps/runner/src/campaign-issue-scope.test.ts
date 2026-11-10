@@ -1,6 +1,34 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+import { CampaignIssueScopeRefusal, inspectCampaignFailedRun, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+
+for (const scenario of ["merge failure", "required failure", "another PR", "passed", "cancelled", "skipped", "wrong head", "optional check", "wrong job", "passing check", "cancelled check", "skipped check"] as const) {
+  test(`failed campaign run evidence: ${scenario}`, async () => {
+    const evidence = { repository: "team/repo", pullRequest: 10, headSha: "a".repeat(40), runId: 123, jobId: 321 };
+    const merge = scenario !== "required failure" && scenario !== "optional check";
+    const run = async (command: string, args: string[]) => {
+      if (command === "git") return "https://github.com/team/repo.git";
+      const path = args[args.indexOf("github.com") + 1];
+      if (path === "graphql") return JSON.stringify({ data: { node: { databaseId: 456, isRequired: scenario !== "optional check" } } });
+      if (path?.includes("actions/runs/")) return JSON.stringify({ id: 123, repository: { full_name: "team/repo" },
+        status: "completed", conclusion: scenario === "passed" ? "success" : scenario === "cancelled" ? "cancelled" : scenario === "skipped" ? "skipped" : "failure", event: merge ? "merge_group" : "pull_request",
+        head_sha: "b".repeat(40), check_suite_id: 789,
+        head_branch: `gh-readonly-queue/main/pr-${scenario === "another PR" ? 11 : 10}-${scenario === "wrong head" ? "c".repeat(40) : evidence.headSha}`,
+        pull_requests: [{ number: 10, head: { sha: evidence.headSha }, base: { repo: { full_name: "team/repo" } } }] });
+      if (path?.includes("pulls/")) return JSON.stringify({ base: { ref: "main" } });
+      if (path?.includes("compare/")) return JSON.stringify({ status: "ahead" });
+      if (path?.includes("actions/jobs/")) return JSON.stringify({ id: 321, run_id: scenario === "wrong job" ? 124 : 123,
+        status: "completed", conclusion: "failure", check_run_url: "https://api.github.com/repos/team/repo/check-runs/456" });
+      if (path?.includes("check-runs/")) return JSON.stringify({ id: 456, node_id: "node456", head_sha: "b".repeat(40), name: "Broken Check",
+        status: "completed", check_suite: { id: 789 }, conclusion: scenario === "passing check" ? "success"
+          : scenario === "cancelled check" ? "cancelled" : scenario === "skipped check" ? "skipped" : "failure" });
+      throw new Error(`Unexpected command ${args.join(" ")}`);
+    };
+    const result = await inspectCampaignFailedRun(run, evidence);
+    assert.deepEqual(result.failedRun, scenario === "merge failure" || scenario === "required failure"
+      ? { ...evidence, checkRunId: 456, checkName: "Broken Check" } : undefined);
+  });
+}
 
 /** GitLab answers for a nested project on a self-managed host (#3539). */
 function gitlabScope(issues: Record<number, { title: string; description?: string | null; web_url?: string; project_id?: number }>) {

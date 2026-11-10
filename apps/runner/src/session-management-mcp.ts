@@ -1391,6 +1391,13 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
         labels: { type: "array", maxItems: 32, items: { type: "string" } },
         recommendationId: { type: "string", description: "The accepted campaign recommendation this publishes. Under Full Control the server inspects sanitation, duplicates, lineage and capacity for a bounded grant; otherwise the person decides. It is kept in the stored snapshot either way, so consume with exactly what you requested. After publishing, record the issue with adjudicate_campaign_recommendation (accepted, resultingIssue)." },
         issueAdmission: { type: "object", properties: { boundaryRevision: { type: "integer" }, evidenceDigest: { type: "string" },
+          relatedness: { anyOf: [
+            { type: "object", properties: { basis: { const: "decision_model" } }, required: ["basis"], additionalProperties: false },
+            { type: "object", properties: { basis: { const: "failed_campaign_run" }, repository: { type: "string" },
+              pullRequest: { type: "integer", minimum: 1 }, headSha: { type: "string", pattern: "^[0-9a-f]{40}$" }, runId: { type: "integer", minimum: 1 },
+              jobId: { type: "integer", minimum: 1 }, checkRunId: { type: "integer", minimum: 1 }, checkName: { type: "string", minLength: 1, maxLength: 512 } },
+              required: ["basis", "repository", "pullRequest", "headSha", "runId", "jobId", "checkRunId", "checkName"], additionalProperties: false },
+          ] },
           publicationAuthority: { type: "object", properties: { authorizedByUserId: { type: "string" }, objectiveDigest: { type: "string" } }, required: ["authorizedByUserId", "objectiveDigest"], additionalProperties: false } }, required: ["boundaryRevision", "evidenceDigest"], additionalProperties: false, description: "Echo only the server-derived admission from get_workflow_decision when consuming." },
       },
       required: ["category", "repository", "sanitizedTitle", "sanitizedBody", "labels"], additionalProperties: false,

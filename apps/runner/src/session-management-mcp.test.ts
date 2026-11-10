@@ -152,6 +152,29 @@ function resultText(result: any): string {
   return result.content.map((c: { text: string }) => c.text).join("\n");
 }
 
+test("publication consumption schema preserves both server-derived relatedness bases", async () => {
+  const tool = TOOLS.find((candidate) => candidate.name === "consume_workflow_decision")!;
+  const schema = tool.inputSchema as any;
+  const publication = schema.properties.resourceSnapshot.oneOf.find((variant: any) =>
+    variant.properties?.category?.const === "follow_up_issue_publication");
+  const admission = publication.properties.issueAdmission;
+  const { deps, calls } = makeDeps();
+  for (const relatedness of [{ basis: "decision_model" }, { basis: "failed_campaign_run", repository: "team/repo",
+    pullRequest: 10, headSha: "a".repeat(40), runId: 123, jobId: 321, checkRunId: 456, checkName: "Broken Check" }]) {
+    const stored = { boundaryRevision: 1, evidenceDigest: "b".repeat(64), relatedness };
+    // Model a strict schema client: it can echo only advertised properties.
+    const echoed = Object.fromEntries(Object.entries(stored).filter(([key]) => key in admission.properties));
+    assert.deepEqual(echoed, stored);
+    const variant = admission.properties.relatedness.anyOf.find((entry: any) => entry.properties.basis.const === relatedness.basis);
+    assert.deepEqual(Object.keys(relatedness).sort(), Object.keys(variant.properties).sort());
+    const resourceSnapshot = { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Title",
+      sanitizedBody: "Body", labels: [], issueAdmission: echoed };
+    const result = await callTool(deps, "consume_workflow_decision", { occurrenceId: "publication", resourceSnapshot });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(calls.at(-1)?.body, { resourceSnapshot });
+  }
+});
+
 test("decision inspection targets descendants without changing mutation identity and fails closed on old control planes", async () => {
   const { deps, calls } = makeDeps();
   deps.orchestrator = true;

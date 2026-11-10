@@ -42,6 +42,7 @@ function harness(full = true, maximum = 5, issues = [100]) {
     epicMembers: undefined as IssueClosureEpicMembers | undefined, closureMessages: [] as unknown[] };
   hub.requestFromRunner = async (_runner, requestId, message) => {
     if (message.type === "campaign_issue_scope") {
+      if (message.operation === "failed_run_inspect") throw new Error("Unexpected failure inspection");
       if (message.operation === "publication_inspect") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId,
         ok: state.publicationOk, repository: "team/repo", publicationDigest: issueEvidenceDigest({ sanitizedTitle: message.sanitizedTitle, sanitizedBody: message.sanitizedBody, labels: message.labels }),
         ...(state.subjectSearch ? { duplicateSearch: "subject" as const } : {}) };

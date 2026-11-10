@@ -655,6 +655,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   locationForgeObservation: 326,
   /** v327 creates an approved follow-up issue in a named Location's repository (#4119). */
   locationIssuePublication: 327,
+  campaignFailedRunEvidence: 351,
   /** The highest floor of the three gates above: a Location on an older runner doesn't join a campaign (#4319). */
   campaignLocationGates: CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL,
   /** v330 reads a consumed merge's closures in any state and dequeues it (#4323). */
@@ -4641,7 +4642,21 @@ export interface CampaignIssueScopeRepositoryChange {
   removals: number[];
 }
 
+export interface CampaignFailedRunEvidence {
+  /** Repository/PR/head from the origin work item's server-proven ownership; IDs locate forge reads. */
+  repository: string;
+  pullRequest: number;
+  headSha: string;
+  runId: number;
+  jobId: number;
+  /** Read from the exact job's check_run_url and check run, never supplied by the requester. */
+  checkRunId: number;
+  checkName: string;
+}
+
 export interface CampaignIssueAdmission {
+  /** Server-derived relatedness basis. */
+  relatedness?: { basis: "decision_model" } | ({ basis: "failed_campaign_run" } & CampaignFailedRunEvidence);
   boundaryRevision: number;
   evidenceDigest: string;
   /** Original publication authority survives compatible reauthorization, never a new grant. */
@@ -4865,6 +4880,7 @@ export type CampaignIssueScopeMessage = {
 } & ({ operation: "inspect"; epic?: number; issues?: number[]; publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] };
        /** v291 (#4103): also report `issueFacts` for each of `issues`. */
        facts?: true } |
+     { operation: "failed_run_inspect"; evidence: Omit<CampaignFailedRunEvidence, "checkRunId" | "checkName"> } |
      { operation: "publication_inspect"; sanitizedTitle: string; sanitizedBody: string; labels: string[] } |
      { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl;
        /** v310 (#3363): the campaign root's policy revision `control` was read at. A runner never
@@ -4907,6 +4923,8 @@ export function publishedIssueFailure(value: unknown): PublishedIssueFailure {
 }
 
 export interface CampaignIssueScopeResultMessage {
+  /** v351: exact forge-verified failure; absent when unproven. */
+  failedRun?: CampaignFailedRunEvidence;
   /** v347: absent or unknown failures remain failed reads. */
   publicationFailure?: PublishedIssueFailure;
   type: "campaign_issue_scope_result";
