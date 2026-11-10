@@ -23,7 +23,7 @@ for (const theme of ["light", "dark"]) {
       const add = page.getByRole("dialog", { name: "Add Account", exact: true });
       await expect(add).toBeVisible();
       await add.getByRole("button", { name: "Cancel", exact: true }).click();
-      await setup.getByRole("button", { name: "Back to New Session" }).last().click();
+      await setup.getByRole("button", { name: "Done", exact: true }).click();
       await expect(draft).toBeVisible();
       expect(width > 600 ? await project.inputValue() : await project.textContent()).toEqual(before);
       await expect(setupButton).toBeFocused();
