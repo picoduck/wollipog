@@ -95,6 +95,27 @@ test("unsupported forms keep a scope but cannot execute a status, inspection or 
   }
 });
 
+test("selected zero-argument direct executable targets keep v1 identity and working recovery", async () => {
+  for (const command of ["/fixture/bin/codex-target", "/fixture/node_modules/@openai/codex/bin/codex.js"]) {
+    const calls: string[][] = [];
+    const controller = createTestProviderAuthRecovery(async (_context, actualCommand, args) => {
+      assert.equal(actualCommand, command); calls.push(args); return { stdout: "ok", stderr: "" };
+    });
+    let login: ResolvedProviderLogin | undefined;
+    Object.assign(controller, { loginSupervisor: { startResolved(value: ResolvedProviderLogin) {
+      login = value; return { completion: Promise.resolve("cancelled") };
+    } } });
+    const m = meta({ command });
+    assert.equal(controller.describe(m)?.id, legacyScope(m));
+    assert.equal((await controller.revalidate(m)).status, "authenticated");
+    assert.equal((await controller.inspect!(m)).observation.status, "authenticated");
+    assert.deepEqual(calls, [["login", "status"], ["login", "status"]]);
+    assert.equal(await controller.startLogin(m), "cancelled");
+    assert.deepEqual(login?.args, []);
+    assert.equal(login?.command, command);
+  }
+});
+
 test("scope and configured identity compatibility preserves exact controls and never aliases lossy legacy evidence", async () => {
   const controller = createTestProviderAuthRecovery(async () => ({ stdout: "ok", stderr: "" }));
   for (const [command, prefix] of supported) {
@@ -126,6 +147,38 @@ test("scope and configured identity compatibility preserves exact controls and n
   }
 });
 
+test("a saved key-only identity cannot silently authorize a changed installation at production launch preflight", async () => {
+  const root = mkdtempSync(join(tmpdir(), "recovery-preflight-"));
+  const store = new SessionStore(join(root, "sessions"));
+  const oldIdentity = hash([["OPENAI_API_KEY", "synthetic-placeholder"]]);
+  const m = meta({ command: "npx", args: ["-y", "@openai/codex"], repoPath: root,
+    env: { OPENAI_API_KEY: "synthetic-placeholder" }, providerCredentialIdentityId: oldIdentity });
+  store.create({ ...m, providerCredentialScopeId: legacyScope(m) });
+  const controller = createTestProviderAuthRecovery(async () => ({ stdout: "ok", stderr: "" }));
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+    (() => { assert.fail("provider launched"); }) as never, undefined, 4, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, [],
+    undefined, undefined, undefined, undefined, undefined, undefined, controller);
+  const internal = manager as unknown as {
+    launchIsCurrent(session: string, generation: number): boolean;
+    preflightProviderAuthentication(meta: SessionMeta, generation: number): Promise<boolean>;
+  };
+  // Isolate the production preflight from asynchronous driver generation management.
+  internal.launchIsCurrent = () => true;
+  try {
+    assert.equal(await internal.preflightProviderAuthentication(m, 1), false);
+    const blocked = store.readMeta(m.sessionId)!;
+    assert.equal(blocked.providerAuthBlock?.identityMismatch, true);
+    assert.equal(blocked.providerAuthBlock?.expectedIdentityId, oldIdentity);
+    assert.equal(blocked.providerCredentialIdentityId, oldIdentity);
+    assert.equal(blocked.providerAuthBlock?.credentialScopeId, controller.describe(m)?.id);
+    assert.ok(blocked.pendingApproval?.options.some(option => option.optionId === "auth:accept-current"));
+    assert.equal(blocked.providerAuthBlock?.resolution, undefined);
+  } finally {
+    manager.shutdownAll(); rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("persisted incompatible blocks refuse actual production recovery actions on upgrade, rollback and mixed installations", async (t) => {
   const changed = meta({ command: "npx", args: ["-y", "@openai/codex@1"] });
   const currentScope = describeProviderCredentialScope(changed)!.id;
@@ -147,7 +200,8 @@ test("persisted incompatible blocks refuse actual production recovery actions on
       store.flush(m.sessionId);
       store = new SessionStore(join(root, "sessions"));
       const controller = createTestProviderAuthRecovery(async () => { assert.fail("scope mismatch probed"); });
-      // Rollback emulates the old describe result; the production equality/action boundary is unchanged.
+      // This emulates the pinned old describe result, not an old runner binary. The assertion
+      // exercises today's unchanged production action boundary; it cannot verify an old runner.
       if (name === "rollback") {
         controller.describe = () => ({ id: live!, provider: "codex", canStartLogin: true, configuredCredential: false });
       } else if (name === "mixed") {

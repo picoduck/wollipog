@@ -265,7 +265,7 @@ function launchFingerprint(meta: SessionMeta) {
   const legacy = legacyLaunchFingerprint(meta);
   if (providerFamily(meta.driver) !== "codex") return legacy;
   try {
-    const bootstrap = codexLauncherBootstrap(meta.command, meta.args);
+    const bootstrap = codexRecoveryBootstrap(meta);
     // Preserve old evidence only where it already described the complete installation.
     // Never alias the lossy package/env/flagged-Node identity to a newly distinguished launch.
     return JSON.stringify(bootstrap) === JSON.stringify(legacy.bootstrap)
@@ -277,9 +277,15 @@ function launchFingerprint(meta: SessionMeta) {
   }
 }
 
+function codexRecoveryBootstrap(meta: SessionMeta): string[] {
+  // Match account sign-in: selected direct executables (including discovered codex.js
+  // targets) with no arguments need no prefix. Nonempty launchers require the shared grammar.
+  return meta.args.length === 0 ? [] : codexLauncherBootstrap(meta.command, meta.args);
+}
+
 function providerArgs(meta: SessionMeta, tail: string[]): string[] {
   return [...(providerFamily(meta.driver) === "codex"
-    ? codexLauncherBootstrap(meta.command, meta.args)
+    ? codexRecoveryBootstrap(meta)
     : legacyLaunchFingerprint(meta).bootstrap), ...tail];
 }
 
