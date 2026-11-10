@@ -1,4 +1,4 @@
-import type { AgentDefinition, ProviderCommandHomeWriteSeparation } from "@wollipog/protocol";
+import type { AgentDefinition, ProviderCommandHomeWriteSeparation, SessionSnapshot } from "@wollipog/protocol";
 
 /** A disclosure of the runner's complete command mediation, not the configured isolation mode or
  * whether a provider's nested sandbox happens to work. Never probe credentials or run a provider. */
@@ -25,8 +25,10 @@ export function withProviderCommandHomeWriteSeparation(
 }
 
 export function providerCommandHomeWriteSeparationDiagnostic(
-  agent: Pick<AgentDefinition, "driver" | "context">,
+  agent: Pick<AgentDefinition, "driver" | "context"> & Pick<Partial<SessionSnapshot>, "executionTarget">,
 ): string {
   return JSON.stringify({ event: "provider_command_home_write_separation",
-    ...providerCommandHomeWriteSeparation(agent) });
+    ...(agent.executionTarget && agent.executionTarget.adapter !== "host"
+      ? { status: "unknown", reason: "report_unavailable" }
+      : providerCommandHomeWriteSeparation(agent)) });
 }

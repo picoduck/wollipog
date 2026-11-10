@@ -11,6 +11,7 @@ import { mergeAgents } from "./discovery/discover.js";
 import { buildCodexTurnParams } from "./drivers/codex-app-server.js";
 import { AcpFilesystemService, AcpTerminalService } from "./acp-client-services.js";
 import type { AgentProcess } from "./spawn.js";
+import { providerCommandHomeWriteSeparationDiagnostic } from "./provider-command-home-write-separation.js";
 import type { Driver } from "./drivers/driver.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
@@ -86,6 +87,7 @@ test("real session launch emits truthful separation disclosure without changing 
   for (const driver of ["claude-code", "codex-app-server", "pi", "acp"] as const) {
     const root = mkdtempSync(join(tmpdir(), "command-home-disclosure-"));
     const sent: RunnerToControlPlane[] = [];
+    const logs: string[] = [];
     let captured: unknown;
     const factory = (_kind: AgentDriverKind, options: unknown): Driver => {
       captured = options;
@@ -94,15 +96,17 @@ test("real session launch emits truthful separation disclosure without changing 
         resolvePermission: () => false, prompt: async () => "end_turn" } as unknown as Driver;
     };
     const store = new SessionStore(join(root, "sessions"));
-    const manager = new SessionManager(message => sent.push(message), () => {}, store, "runner", undefined, factory);
+    const manager = new SessionManager(message => sent.push(message), message => logs.push(message), store, "runner", undefined, factory);
     const spec: SessionLaunchSpec = { sessionId: "fixture", agentId: driver, workspaceId: null,
       workspacePath: root, driver, command: "inert-provider", args: ["--fixture"],
       env: { HOME: root, FIXTURE_VALUE: "synthetic-only" }, context: { kind: "native" }, useWorktree: false };
     try {
       assert.equal(await manager.start(spec), true);
-      const diagnostics = sent.flatMap(message => message.type === "session_event" && message.payload.kind === "stderr"
-        ? [message.payload.text] : []).filter(text => text.includes("provider_command_home_write_separation"));
+      const diagnostics = logs.filter(text => text.includes("provider_command_home_write_separation"));
       assert.equal(diagnostics.length, 1);
+      assert.equal(sent.some(message => message.type === "session_event" && message.payload.kind === "stderr" &&
+        message.payload.text.includes("provider_command_home_write_separation")), false,
+      "launch disclosure must not change provider history or its accounting replay boundary");
       const report = JSON.parse(diagnostics[0]!);
       assert.notEqual(report.status, "protected");
       assert.equal(report.reason, process.platform === "linux" || process.platform === "darwin"
@@ -116,5 +120,13 @@ test("real session launch emits truthful separation disclosure without changing 
     } finally {
       manager.shutdownAll(); rmSync(root, { recursive: true, force: true });
     }
+  }
+});
+
+test("remote launch diagnostics never reuse the runner host's native assessment", () => {
+  for (const adapter of ["container", "cloud"]) {
+    const report = JSON.parse(providerCommandHomeWriteSeparationDiagnostic({ ...agent("codex-app-server"),
+      executionTarget: { adapter } as never }));
+    assert.deepEqual(report, { event: "provider_command_home_write_separation", status: "unknown", reason: "report_unavailable" });
   }
 });

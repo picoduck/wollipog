@@ -10159,7 +10159,7 @@ export class SessionManager {
         this.send({ type: "review_session_update", sessionId, state: "running", admission });
       }
       const reviewWriter = this.beginProviderReviewWriter(meta, isolation);
-      this.emitEvent(sessionId, { kind: "stderr", text: providerCommandHomeWriteSeparationDiagnostic(meta) });
+      this.log(providerCommandHomeWriteSeparationDiagnostic(meta));
       client = this.createDriver(
         meta.driver,
         {
