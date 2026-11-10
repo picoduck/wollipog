@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -31,3 +31,27 @@ for (const component of ["manager_root", "profiles_root"] as const) {
     });
   }
 }
+
+for (const mode of [0o750, 0o755]) {
+  test(`diagnostics preserve admission of an existing ${mode.toString(8)} root`, { skip: process.platform === "win32" }, (t) => {
+    const home = mkdtempSync(join(tmpdir(), "wollipog-root-admission-"));
+    t.after(() => rmSync(home, { force: true, recursive: true }));
+    const manager = join(home, ".agent-manager"); mkdirSync(manager); chmodSync(manager, mode);
+    const profile = createManagedProviderProfileHome(managedProviderProfileRoot(home), id);
+    assert.equal(statSync(manager).mode & 0o777, mode);
+    assert.equal(statSync(profile).mode & 0o777, 0o700);
+  });
+}
+
+test("an unavailable parent reports its safe component without retaining the raw filesystem cause", { skip: process.platform === "win32" }, (t) => {
+  const base = mkdtempSync(join(tmpdir(), "wollipog-root-unavailable-"));
+  t.after(() => rmSync(base, { force: true, recursive: true }));
+  const home = join(base, "missing-home");
+  assert.throws(() => createManagedProviderProfileHome(managedProviderProfileRoot(home), id), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.deepEqual(JSON.parse(JSON.stringify(error)), { code: "managed_profile_directory", component: "manager_root", reason: "unavailable" });
+    assert.equal(error.cause, undefined);
+    assert.ok(!error.message.includes(base));
+    return true;
+  });
+});
