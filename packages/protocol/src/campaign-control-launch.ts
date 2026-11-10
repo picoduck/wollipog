@@ -133,7 +133,7 @@ export interface CampaignLaunchInspectionCancelMessage {
 }
 
 export interface CampaignLaunchInspectionResult {
-  /** v346: absent failures remain failed reads. */
+  /** v347: absent failures remain failed reads. */
   publicationFailure?: import("./index.js").PublishedIssueFailure;
   type: "campaign_launch_inspection_result";
   requestId: string;

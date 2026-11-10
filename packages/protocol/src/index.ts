@@ -4906,7 +4906,7 @@ export function publishedIssueFailure(value: unknown): PublishedIssueFailure {
 }
 
 export interface CampaignIssueScopeResultMessage {
-  /** v346: absent or unknown failures remain failed reads. */
+  /** v347: absent or unknown failures remain failed reads. */
   publicationFailure?: PublishedIssueFailure;
   type: "campaign_issue_scope_result";
   requestId: string;
