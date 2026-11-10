@@ -19,3 +19,11 @@ test("discovery distinguishes busy, restricted, unverified ownership and signed-
   assert.equal(providerReadinessObservation(installed, "unauthenticated").reason, "sign_in_required");
   assert.equal(providerReadinessObservation({ ...installed, codexAppServer: undefined }, "unknown").installation, "unknown");
 });
+
+test("a missing Claude host prerequisite is not classified as an updateable installation", () => {
+  const agent: AgentDefinition = { ...installed, driver: "claude-code", codexAppServer: undefined,
+    claudeCode: { status: "unsupported", failure: { code: "unsupported_mode", message: "Native Claude Code requires Git for Windows Bash.", retryable: false },
+      effortLevels: [], permissionModes: [], streamJsonInput: false, streamJsonImages: false, controlProtocol: false, forkSession: false,
+      replayUserMessages: false, auth: { status: "unknown", billingSource: "unknown" } } };
+  assert.equal(providerReadinessObservation(agent, "unknown").installation, "unknown");
+});

@@ -2,6 +2,8 @@
 export interface ProviderReadiness {
   checkedAt: number;
   installation: "compatible" | "missing" | "incompatible" | "unknown";
+  /** Admission of the installation probe itself, never the selected account's authentication. */
+  installationAdmission?: "permitted" | "blocked" | "unknown";
   authentication: "authenticated" | "unauthenticated" | "unknown";
   reason: "ready" | "sign_in_required" | "in_use" | "restricted" | "unknown";
 }
@@ -15,7 +17,9 @@ export function safeProviderReadiness(value: unknown, now = Date.now()): Provide
       !["authenticated", "unauthenticated", "unknown"].includes(item.authentication as string) ||
       !["ready", "sign_in_required", "in_use", "restricted", "unknown"].includes(item.reason as string)) return undefined;
   if (item.authentication !== (item.reason === "ready" ? "authenticated" : item.reason === "sign_in_required" ? "unauthenticated" : "unknown")) return undefined;
+  if (item.installationAdmission !== undefined && !["permitted", "blocked", "unknown"].includes(item.installationAdmission as string)) return undefined;
   return { checkedAt: item.checkedAt as number, installation: item.installation as ProviderReadiness["installation"],
+    ...(item.installationAdmission !== undefined ? { installationAdmission: item.installationAdmission as ProviderReadiness["installationAdmission"] } : {}),
     authentication: item.authentication as ProviderReadiness["authentication"], reason: item.reason as ProviderReadiness["reason"] };
 }
 

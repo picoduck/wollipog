@@ -9,9 +9,28 @@ import { registerAuthGate } from "./http-auth.js";
 import { HOST_ADMIN_FORBIDDEN, hostAdminDoctor, hostAdminStatus, probePublicOriginWithFetch, registerHostAdminRoute, runnerHarnessReadiness, type HostAdminRouteDeps } from "./host-admin-route.js";
 import { APP_RELEASE_VERSION } from "./release-version.js";
 import { isLoopback } from "./net.js";
+import { providerReadinessObservation, mergeInstallationAndAccountReadiness } from "../../runner/src/provider-readiness.js";
+import { ProviderHomeLeaseError } from "../../runner/src/provider-home-lease-worker-protocol.js";
 
 const BOOTSTRAP = "local-bootstrap-token";
 const DEVICE = "paired-device-token";
+
+test("typed installation admission preserves updater ownership failures independently of account readiness", () => {
+  const agent = { id: "codex", name: "Codex", command: "codex", args: [], env: {}, available: false };
+  const readyAccount = { checkedAt: 2, installation: "compatible" as const, authentication: "authenticated" as const, reason: "ready" as const };
+  for (const error of [new ProviderHomeLeaseError("foreign_owner"), new ProviderHomeLeaseError("foreign_host"),
+    new ProviderHomeLeaseError("invalid_journal"), new ProviderHomeLeaseError("unavailable"), new ProviderHomeLeaseError("expired"), new Error("admission unavailable")]) {
+    const installation = { ...providerReadinessObservation(agent, "unknown", error), installationAdmission: "blocked" as const };
+    const merged = mergeInstallationAndAccountReadiness(installation, readyAccount);
+    assert.equal(runnerHarnessReadiness({ connectedAt: 1, agents: [{ ...agent, providerReadiness: merged }] }).agents[0]!.ownershipBlocked, true);
+  }
+  for (const reason of ["in_use", "restricted", "unknown"] as const) {
+    const report = mergeInstallationAndAccountReadiness({ ...readyAccount, installation: "unknown", installationAdmission: "permitted" },
+      { ...readyAccount, authentication: "unknown", reason });
+    assert.equal(runnerHarnessReadiness({ connectedAt: 1, agents: [{ ...agent, providerReadiness: report }] }).agents[0]!.ownershipBlocked, false,
+      "a busy default plus an uncertain installation must never invent an installation admission failure");
+  }
+});
 
 test("upgrade readiness reports completed discovery and ownership refusals without provider metadata", () => {
   const readiness = runnerHarnessReadiness({ connectedAt: 123, agentsRefreshed: true, agents: [

@@ -81,6 +81,7 @@ for (const state of ["busy", "unknown", "restricted", "offline"]) {
     if (state === "restricted") await expect(setup.getByText(/current access permissions/).first()).toBeVisible();
     if (state === "offline") await expect(setup.getByRole("button", { name: "Add Separate Sign-In…" })).toBeDisabled();
     await dialogMotionSettled(page);
+    expect(await setup.locator(".modal-body").evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
     await page.screenshot({ path: testInfo.outputPath(`readiness-${state}.png`) });
   });
 }

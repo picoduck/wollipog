@@ -315,7 +315,7 @@ function AccountMenu({ name, heading, busy, items }: {
  * expansion under it: its sign-in's steps or ending (#2996). While a sign-in runs for a label that is
  * a hidden email, `hiddenTitle` ("Signing In to Codex") replaces the mask, with "Email hidden" as line 2.
  */
-function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, status, actions, children, marker, rank, skip, usage }: {
+function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, status, actions, children, marker, rank, skip, usage, readinessNote }: {
   /** "Default", or "Next Session" for the account Priority Order expects to use. */
   marker?: string;
   /** The account's place in the Priority Order, leading its name. */
@@ -332,6 +332,7 @@ function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, stat
   status: AccountStatus | null;
   actions?: ReactNode;
   children?: ReactNode;
+  readinessNote?: string;
 }) {
   const meta = status && status !== "signed_in" ? statusMeta("provider_account", status) : null;
   return (
@@ -359,7 +360,7 @@ function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, stat
         {usage}
         {actions && <span className="provider-account-actions">{actions}</span>}
       </div>
-      {children && <div className="provider-account-expansion">{children}</div>}
+      {(children || readinessNote) && <div className="provider-account-expansion">{readinessNote && <p className="section-note">{readinessNote}</p>}{children}</div>}
     </>
   );
 }
@@ -1077,8 +1078,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                 identity={`${runner.runnerId}:${account.id}`}
                 label={account.label}
                 hiddenTitle={login && providerSignInHiddenTitle(login, privacy.hide)}
-                profile={[account.profile ? PROFILE_ACCESS[account.profile.access] : undefined,
-                  account.providerReadiness ? providerReadinessSentence(account.providerReadiness, online && runner.agentsRefreshed === true) : undefined].filter(Boolean).join(" ") || undefined}
+                profile={account.profile ? PROFILE_ACCESS[account.profile.access] : undefined}
+                readinessNote={account.providerReadiness ? providerReadinessSentence(account.providerReadiness, online && runner.agentsRefreshed === true) : undefined}
                 lease={leaseActions && leases[account.id]?.state === "stale" ? {
                   label: "Recovery Needed",
                   title: providerHomeLeaseDescription(leases[account.id]!) ?? "An earlier Wollipog runner left this account locked. Choose Recover Account in its menu to try unlocking it.",

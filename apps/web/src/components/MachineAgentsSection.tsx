@@ -21,7 +21,7 @@ import {
 } from "../machine-agents.js";
 import { agentInstallHints, harnessUpdateGuidance } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
-import { providerReadinessSentence } from "../provider-readiness.js";
+import { providerReadinessSentence, providerReadinessLabel } from "../provider-readiness.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { agentSessionDiscoveryUnavailableReason, agentSupportsSessionDiscovery, AgentSessionDiscoveryDialog } from "./AgentSessionDiscoveryDialog.js";
 import { CopyButton, Modal } from "./common.js";
@@ -36,8 +36,8 @@ import { StatusBadge } from "./StatusBadge.js";
 
 const SKELETON_ROWS = 3;
 
-function AgentBadge({ status }: { status: AgentStatus }) {
-  return <StatusBadge meta={statusMeta("agent", status)} inline={status === "ready"} className="machine-agent-status" />;
+function AgentBadge({ status, label }: { status: AgentStatus; label?: string }) {
+  return <StatusBadge meta={{ ...statusMeta("agent", status), ...(label ? { label } : {}) }} inline={status === "ready"} className="machine-agent-status" />;
 }
 
 /** One agent: its name and one badge, then the integration, where it runs and its version (§5.2). */
@@ -51,14 +51,13 @@ function AgentRow({ row, name, current, onOpen }: { row: MachineAgentRow; name: 
         <span className="row-body">
           <span className="row-line">
             <span className="row-title" title={name}>{name}</span>
-            <AgentBadge status={status} />
+            <AgentBadge status={status} label={status === "unavailable" && agent.providerReadiness ? providerReadinessLabel(agent.providerReadiness) : undefined} />
           </span>
           <span className="row-sub machine-agent-meta">
-            <span>{agentDriverLabel(agent)}</span>
+            <span>{agent.providerReadiness ? `${current ? "Checked" : "Last Checked"} ${relativeTime(agent.providerReadiness.checkedAt)}` : agentDriverLabel(agent)}</span>
             <span className="machine-agent-meta-extra">{agentContextLabel(agent.context)}</span>
             {agent.version && <span className="machine-agent-meta-extra">v{agent.version}</span>}
           </span>
-          {agent.providerReadiness && <span className="row-sub">{providerReadinessSentence(agent.providerReadiness, current)}</span>}
         </span>
       </button>
     </li>

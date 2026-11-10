@@ -1,6 +1,10 @@
 import type { ProviderReadiness } from "@wollipog/protocol";
 import { relativeTime } from "./format.js";
 
+export function providerReadinessLabel(report: ProviderReadiness): string {
+  return { ready: "Sign-In Confirmed", sign_in_required: "Sign-In Required", in_use: "Account in Use", restricted: "Restricted Access", unknown: "Status Unknown" }[report.reason];
+}
+
 export function providerReadinessSentence(report: ProviderReadiness, current: boolean): string {
   // Discovery refreshes every five minutes. A disconnected or replayed report older than two
   // refresh windows remains useful history, never a fresh authentication assertion.

@@ -33,8 +33,8 @@ export function runnerHarnessReadiness(runner: Pick<RunnerView, "connectedAt" | 
         : agent.driver === "claude-code" && agent.claudeCode
           ? agent.claudeCode.status === "ready" || agent.claudeCode.status === "unauthenticated"
           : agent.driver === "pi" && agent.capabilities?.modelSource === "live" ? true : agent.available === true,
-      ownershipBlocked: agent.providerReadiness
-        ? agent.providerReadiness.installation === "unknown" && ["in_use", "restricted"].includes(agent.providerReadiness.reason)
+      ownershipBlocked: agent.providerReadiness?.installationAdmission !== undefined
+        ? agent.providerReadiness.installationAdmission === "blocked"
         // Keep the older updater's conservative compatibility contract until its runner upgrades.
         : agent.unavailableReason?.startsWith("Provider HOME ownership ") === true,
     })),

@@ -754,6 +754,7 @@ export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "a
           args: bin.launch.args, bin: k.bin, installation, source: "discovered",
           unavailableReason: message };
         blocked.providerReadiness = providerReadinessObservation(blocked, "unknown", error);
+        blocked.providerReadiness.installationAdmission = "blocked";
         nativeSlots[knownIndex]![index] = [blocked];
         return;
       }
@@ -848,6 +849,7 @@ export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "a
         ) } : {}),
       };
       base.providerReadiness = providerReadinessObservation(base, base.authStatus ?? "unknown", launchHomeError);
+      base.providerReadiness.installationAdmission = "permitted";
       nativeSlots[knownIndex]![index] = nativeDiscoveredDefinitions(base, codexAppServer, slashCommands);
       } finally {
         await authorization.settle(processes);

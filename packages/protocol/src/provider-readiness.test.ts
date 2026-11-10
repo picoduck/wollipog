@@ -6,8 +6,9 @@ import { safeProviderReadiness, providerLoginInstallationMissing, type ProviderR
 const now = 1_800_000_000_000;
 const reports = fc.record({ checkedAt: fc.integer({ min: 0, max: now }),
   installation: fc.constantFrom("compatible", "missing", "incompatible", "unknown"),
+  installationAdmission: fc.option(fc.constantFrom("permitted", "blocked", "unknown"), { nil: undefined }),
   reason: fc.constantFrom("ready", "sign_in_required", "in_use", "restricted", "unknown"),
-}).map((value) => ({ ...value, authentication: value.reason === "ready" ? "authenticated"
+}).map(({ installationAdmission, ...value }) => ({ ...value, ...(installationAdmission ? { installationAdmission } : {}), authentication: value.reason === "ready" ? "authenticated"
   : value.reason === "sign_in_required" ? "unauthenticated" : "unknown" } as ProviderReadiness));
 
 test("provider observations survive JSON roundtrip while arbitrary extra diagnostics are stripped", () => {

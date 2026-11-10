@@ -203,7 +203,7 @@ import {
   skillReconciliationProviderAccountPlan,
 } from "./provider-accounts.js";
 import { providerHomeLaunchRefusal } from "./provider-home-launch-refusal.js";
-import { providerReadinessObservation } from "./provider-readiness.js";
+import { providerReadinessObservation, mergeInstallationAndAccountReadiness } from "./provider-readiness.js";
 import { inheritProviderPlugins, pluginProviderForDriver } from "./provider-plugins.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
 import {
@@ -2290,8 +2290,7 @@ async function discoverAndPublish(refreshModels: boolean, refreshSubscriptionUsa
     const installationReport = agent.providerReadiness ?? providerReadinessObservation(agent, agent.authStatus ?? "unknown");
     const accountId = agent.defaultProviderAccountId ?? agent.providerAccountReadiness?.defaultAccountId;
     const accountReport = accountId ? providerAccountReadiness.get(accountId) : undefined;
-    return { ...agent, providerReadiness: accountReport
-      ? { ...accountReport, installation: installationReport.installation } : installationReport };
+    return { ...agent, providerReadiness: mergeInstallationAndAccountReadiness(installationReport, accountReport) };
   });
   log(JSON.stringify({ event: "provider_discovery_completed", runnerId: config.runnerId,
     nativeProbeHome: "isolated", agents: metadata.agents.length,
