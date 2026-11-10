@@ -8,6 +8,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
+import { withProviderCommandHomeWriteSeparation } from "../provider-command-home-write-separation.js";
 import { join } from "node:path";
 import { agentContextKey, CODEX_EXEC_RETIRED_CONFIG_REASON, isRetiredCodexExec } from "@wollipog/protocol";
 import type {
@@ -944,7 +945,7 @@ export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "a
   // Defensive: collapse any duplicate ids (e.g. two distros that resolve identically).
   const byId = new Map<string, AgentDefinition>();
   for (const a of found) if (!byId.has(a.id)) byId.set(a.id, a);
-  return [...byId.values()];
+  return withProviderCommandHomeWriteSeparation([...byId.values()]);
 }
 
 /** Basename of a command, treating it as either a Windows or POSIX path. */
@@ -1159,7 +1160,7 @@ export function mergeAgents(
   }
   // A configured `driver: "codex"` entry stays listed so Machine Settings can name the fix, but it
   // never launches (#3259).
-  return [...enriched, ...extras].map((agent) => isRetiredCodexExec(agent)
+  return withProviderCommandHomeWriteSeparation([...enriched, ...extras].map((agent) => isRetiredCodexExec(agent)
     ? { ...agent, available: false, unavailableReason: CODEX_EXEC_RETIRED_CONFIG_REASON }
-    : agent);
+    : agent));
 }

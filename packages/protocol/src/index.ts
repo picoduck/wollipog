@@ -1,4 +1,6 @@
 export * from "./shared-predicates.js";
+export * from "./provider-command-home-write-separation.js";
+import type { ProviderCommandHomeWriteSeparation } from "./provider-command-home-write-separation.js";
 export * from "./provider-account-selection.js";
 import { isProviderHomeRecoveryCause, PROVIDER_HOME_RECOVERY_CAUSE_CODES, type ProviderHomeRecoveryCause, type ProviderHomeBlockingProcess } from "./provider-home-recovery.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } from "./orchestrator-review-policy.js";
@@ -2929,6 +2931,9 @@ export interface HarnessUpdateAssessment {
 }
 
 export interface AgentDefinition {
+  /** v359: runner-owned provider/command credential-home WRITE separation only. Omission is
+   * unknown, not protected. Independent of any provider's nested command sandbox. */
+  providerCommandHomeWriteSeparation?: ProviderCommandHomeWriteSeparation;
   id: string;
   name: string;
   command: string;

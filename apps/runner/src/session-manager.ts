@@ -1,6 +1,7 @@
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
 import { isProviderCapacityFailure, PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import { artifactGuidance } from "./artifact-guidance.js";
+import { providerCommandHomeWriteSeparationDiagnostic } from "./provider-command-home-write-separation.js";
 import { shellGuidance } from "./shell-guidance.js";
 import { restartResumeId } from "./restart-resume.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
@@ -10158,6 +10159,7 @@ export class SessionManager {
         this.send({ type: "review_session_update", sessionId, state: "running", admission });
       }
       const reviewWriter = this.beginProviderReviewWriter(meta, isolation);
+      this.emitEvent(sessionId, { kind: "stderr", text: providerCommandHomeWriteSeparationDiagnostic(meta) });
       client = this.createDriver(
         meta.driver,
         {

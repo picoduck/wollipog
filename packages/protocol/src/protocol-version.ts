@@ -1429,6 +1429,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // v357 slot
   // v358 slot
   // v359 slot
+  // 359: Disclose runner-enforced provider/command credential-home write separation (#3922).
+  359,
   // v360 slot
   // v361 slot
   // v362 slot

@@ -1,4 +1,4 @@
-import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS } from "@wollipog/protocol";
+import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, knownProviderCommandHomeWriteSeparation } from "@wollipog/protocol";
 import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
@@ -823,6 +823,7 @@ CREATE TABLE IF NOT EXISTS runner_agents (
   native_tui_accounting TEXT,
   default_provider_account_id TEXT,
   provider_account_readiness TEXT,
+  provider_command_home_write_separation TEXT,
   wsl_agent_control TEXT,
   acp TEXT,
   registry TEXT,
@@ -7814,7 +7815,7 @@ export class ControlPlaneDb {
     );
     db.prepare("DELETE FROM driver_telemetry_hourly WHERE bucket_ts < ?").run(Date.now() - 180 * 86_400_000);
     // Additive migrations for DBs created before discovery columns existed.
-    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "unavailable_reason TEXT", "source TEXT", "installation TEXT", "update_assessment TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "default_provider_account_id TEXT", "provider_account_readiness TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
+    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "unavailable_reason TEXT", "source TEXT", "installation TEXT", "update_assessment TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "default_provider_account_id TEXT", "provider_account_readiness TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT", "provider_command_home_write_separation TEXT"]) {
       try {
         db.exec(`ALTER TABLE runner_agents ADD COLUMN ${col}`);
       } catch {
@@ -8877,8 +8878,8 @@ export class ControlPlaneDb {
     );
     const insRa = this.stmt(
       `INSERT INTO runner_agents
-         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, unavailable_reason, source, installation, update_assessment, codex_app_server, claude_code, native_tui_accounting, default_provider_account_id, wsl_agent_control, acp, registry, acp_transport, provider_account_readiness)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, unavailable_reason, source, installation, update_assessment, codex_app_server, claude_code, native_tui_accounting, default_provider_account_id, wsl_agent_control, acp, registry, acp_transport, provider_account_readiness, provider_command_home_write_separation)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const a of agents) {
       upAgent.run(a.id, a.name, now);
@@ -8909,6 +8910,7 @@ export class ControlPlaneDb {
         a.registry ? JSON.stringify(a.registry) : null,
         a.acpTransport ?? null,
         a.providerAccountReadiness ? JSON.stringify(a.providerAccountReadiness) : null,
+        JSON.stringify(knownProviderCommandHomeWriteSeparation(a.providerCommandHomeWriteSeparation)) ?? null,
       );
     }
   }
@@ -15825,6 +15827,7 @@ export class ControlPlaneDb {
                   ra.native_tui_accounting AS native_tui_accounting,
                   ra.default_provider_account_id AS default_provider_account_id,
                   ra.provider_account_readiness AS provider_account_readiness,
+                  ra.provider_command_home_write_separation AS provider_command_home_write_separation,
                   ra.wsl_agent_control AS wsl_agent_control,
                   ra.acp AS acp, ra.registry AS registry, ra.acp_transport AS acp_transport
              FROM runner_agents ra JOIN agent_definitions ad ON ad.id = ra.agent_id
@@ -15851,6 +15854,7 @@ export class ControlPlaneDb {
         native_tui_accounting: string | null;
         default_provider_account_id: string | null;
         provider_account_readiness: string | null;
+        provider_command_home_write_separation: string | null;
         wsl_agent_control: string | null;
         acp: string | null;
         registry: string | null;
@@ -15879,6 +15883,7 @@ export class ControlPlaneDb {
       nativeTuiAccounting: parseJson<AgentDefinition["nativeTuiAccounting"]>(a.native_tui_accounting) ?? undefined,
       defaultProviderAccountId: a.default_provider_account_id ?? undefined,
       providerAccountReadiness: parseJson<AgentDefinition["providerAccountReadiness"]>(a.provider_account_readiness) ?? undefined,
+      providerCommandHomeWriteSeparation: knownProviderCommandHomeWriteSeparation(parseJson(a.provider_command_home_write_separation)),
       wslAgentControl: parseJson<AgentDefinition["wslAgentControl"]>(a.wsl_agent_control) ?? undefined,
       acp: parseJson<AgentDefinition["acp"]>(a.acp) ?? undefined,
       registry: parseJson<AgentDefinition["registry"]>(a.registry) ?? undefined,
