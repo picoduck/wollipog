@@ -124,6 +124,18 @@ export function ensureLeaseIoAvailable(): void {
   catch { throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE); }
 }
 
+/** Uses the same verified, packaged POSIX helper, in its separate metadata-only mode.
+ * It never invokes the lease protocol or traverses provider HOME contents. */
+export function runProfileRootMetadataHelper(operation: "inspect" | "repair", home: string,
+  component: "manager_root" | "profiles_root", identity?: string): unknown {
+  if (process.platform !== "linux" && process.platform !== "darwin") throw new Error("Profile root maintenance is unsupported on this platform.");
+  const args = ["--profile-root", operation, home, component, ...(identity === undefined ? [] : [identity])];
+  const result = spawnSync(nativeExecutable(), args, { timeout: 10_000, killSignal: "SIGKILL", maxBuffer: 4096, encoding: "utf8", env: {} });
+  // Raw subprocess errors can include paths. Only return a safe diagnostic on this boundary.
+  if (result.error || result.status !== 0) throw new Error("Profile root metadata could not be verified; preserve the directories and request operator guidance.");
+  try { return JSON.parse(result.stdout); } catch { throw new Error("Profile root metadata response could not be verified."); }
+}
+
 class Writer {
   private chunks: Buffer[] = [];
   private size = 0;

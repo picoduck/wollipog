@@ -21,6 +21,7 @@
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/vfs.h>
+#include <sys/xattr.h>
 #elif defined(__APPLE__)
 #include <sys/mount.h>
 #endif
@@ -302,8 +303,137 @@ static void select_checkpoint(const char *name) {
   require(anchor_fd >= 0 && fstat(anchor_fd, &anchor_identity) == 0, "selected checkpoint unavailable");
   boundary("selection-published"); sync_fd(root_fd); boundary("selection-durable");
 }
+/* Metadata-only root maintenance. This does not enter the lease transaction, enumerate a
+ * directory, or read credentials. The public CLI must obtain human confirmation first. */
+static int profile_root_result(const char *component, const char *reason) {
+  printf("{\"ok\":false,\"component\":\"%s\",\"reason\":\"%s\",\"repairable\":false}\n", component, reason);
+  return 0;
+}
+static int profile_root_acl_clear(int fd) {
+#ifdef __linux__
+  const char *names[] = { "system.posix_acl_access", "system.posix_acl_default" };
+  for (unsigned i = 0; i < 2; i++) {
+    errno = 0;
+    if (fgetxattr(fd, names[i], NULL, 0) >= 0 || errno != ENODATA) return 0;
+  }
+  return 1;
+#elif defined(__APPLE__)
+  /* macOS ACL entry APIs have different return semantics from Linux. Until the
+   * descriptor ACL refusal has platform regression coverage, maintenance stays read-only. */
+  (void)fd; return 0;
+#else
+  (void)fd; return 0;
+#endif
+}
+static const char *profile_root_stat_reason(const struct stat *info) {
+  if (S_ISLNK(info->st_mode)) return "symlink";
+  if (!S_ISDIR(info->st_mode)) return "not_directory";
+  if (info->st_uid != getuid()) return "wrong_owner";
+  return NULL;
+}
+static void profile_root_token(const struct stat *info, char token[320]) {
+  char time[160]; stamp(info, time);
+  snprintf(token, 320, "%" PRIu64 ":%" PRIu64 ":%u:%u:%s", (uint64_t)info->st_dev,
+    (uint64_t)info->st_ino, (unsigned)info->st_uid, (unsigned)(info->st_mode & 07777), time);
+}
+static int profile_root_pinned(void) {
+  struct stat current;
+  if (getppid() != parent) return 0;
+  for (unsigned i = 0; i < ancestry_count; i++)
+    if (fstatat(ancestry_fds[i], ancestry_names[i], &current, AT_SYMLINK_NOFOLLOW) ||
+        !S_ISDIR(current.st_mode) || !same_identity(&current, &ancestry_ids[i])) return 0;
+  return !lstat(root_path, &current) && S_ISDIR(current.st_mode) && same_identity(&current, &root_identity);
+}
+static int profile_root_barrier(const char *stage) {
+#ifdef WOLLIPOG_PROFILE_ROOT_TEST_BARRIER
+  const char *requested = getenv("WOLLIPOG_PROFILE_ROOT_TEST_BARRIER");
+  if (requested && !strcmp(requested, stage)) {
+    printf("{\"barrier\":\"%s\"}\n", stage); fflush(stdout);
+    return getchar() == '1';
+  }
+#else
+  (void)stage;
+#endif
+  return 1;
+}
+static int profile_root_command(int argc, char **argv) {
+  /* Only the two fixed components under the supplied OS home can ever be selected. */
+  const char *component = "manager_root";
+  if (argc < 5 || (strcmp(argv[4], "manager_root") && strcmp(argv[4], "profiles_root")))
+    return profile_root_result(component, "unsupported_layout");
+  component = argv[4];
+  int repair = !strcmp(argv[2], "repair");
+  if ((!repair && strcmp(argv[2], "inspect")) || argc != (repair ? 6 : 5))
+    return profile_root_result(component, "unsupported_layout");
+  parent = getppid(); root_path = argv[3]; root_fd = open_root(root_path);
+  if (fstat(root_fd, &root_identity) || root_identity.st_uid != getuid() || (root_identity.st_mode & 0022))
+    return profile_root_result(component, "unsafe_ancestry");
+  if (!profile_root_acl_clear(root_fd)) return profile_root_result(component, "unsupported_acl");
+  struct stat manager, target;
+  if (fstatat(root_fd, ".agent-manager", &manager, AT_SYMLINK_NOFOLLOW)) return profile_root_result(component, "unavailable");
+  const char *reason = profile_root_stat_reason(&manager);
+  if (reason) return profile_root_result("manager_root", reason);
+  int manager_fd = openat(root_fd, ".agent-manager", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (manager_fd < 0 || fstat(manager_fd, &target) || !same_identity(&manager, &target))
+    return profile_root_result("manager_root", "identity_changed");
+  manager = target;
+  reason = profile_root_stat_reason(&manager);
+  if (reason) return profile_root_result("manager_root", reason);
+  int target_fd = manager_fd, container_fd = root_fd; const char *name = ".agent-manager";
+  if (!strcmp(component, "profiles_root")) {
+    if (manager.st_mode & 0022) return profile_root_result("manager_root", "group_or_other_write");
+    if (!profile_root_acl_clear(manager_fd)) return profile_root_result("manager_root", "unsupported_acl");
+    container_fd = manager_fd; name = "profiles";
+    if (fstatat(container_fd, name, &target, AT_SYMLINK_NOFOLLOW)) return profile_root_result(component, "unavailable");
+    reason = profile_root_stat_reason(&target);
+    if (reason) return profile_root_result(component, reason);
+    target_fd = openat(container_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat opened;
+    if (target_fd < 0 || fstat(target_fd, &opened) || !same_identity(&target, &opened))
+      return profile_root_result(component, "identity_changed");
+    target = opened;
+  }
+  reason = profile_root_stat_reason(&target);
+  if (reason) return profile_root_result(component, reason);
+  char identity[320]; profile_root_token(&target, identity);
+  if (repair && strcmp(identity, argv[5])) return profile_root_result(component, "identity_changed");
+  if (target.st_mode & 07000) return profile_root_result(component, "unsupported_layout");
+  if (!profile_root_acl_clear(target_fd)) return profile_root_result(component, "unsupported_acl");
+  if (!repair) {
+    printf("{\"ok\":%s,\"component\":\"%s\",\"reason\":\"%s\",\"repairable\":%s,\"identity\":\"%s\"}\n",
+      target.st_mode & 0022 ? "false" : "true", component,
+      target.st_mode & 0022 ? "group_or_other_write" : "private", target.st_mode & 0022 ? "true" : "false", identity);
+    return 0;
+  }
+  if (!(target.st_mode & 0022)) return profile_root_result(component, "identity_changed");
+  /* Compile-time-only rejection probe. Packaged helpers contain no test barrier. */
+  if (!profile_root_barrier("before")) return profile_root_result(component, "identity_changed");
+  /* Revalidate the complete pinned ancestry and the exact target immediately before fchmod.
+   * A renamed/replaced path never redirects the descriptor to an unapproved object. */
+  struct stat current, named, manager_now, home_now;
+  if (!profile_root_pinned() || fstat(root_fd, &home_now) || !same_stamp(&home_now, &root_identity) || !profile_root_acl_clear(root_fd) ||
+      fstatat(root_fd, ".agent-manager", &manager_now, AT_SYMLINK_NOFOLLOW) || !same_stamp(&manager_now, &manager) ||
+      fstat(target_fd, &current) || !same_stamp(&current, &target) ||
+      fstatat(container_fd, name, &named, AT_SYMLINK_NOFOLLOW) || !same_stamp(&named, &target))
+    return profile_root_result(component, "identity_changed");
+  if (!profile_root_acl_clear(target_fd)) return profile_root_result(component, "unsupported_acl");
+  /* Once attempted, an error or lost named binding cannot promise no mutation. */
+  if (fchmod(target_fd, target.st_mode & 07777 & ~0022)) return profile_root_result(component, "may_have_changed");
+  if (!profile_root_barrier("after")) return profile_root_result(component, "may_have_changed");
+  if (!profile_root_pinned() || fstatat(root_fd, ".agent-manager", &manager_now, AT_SYMLINK_NOFOLLOW) ||
+      !same_identity(&manager_now, &manager) || manager_now.st_uid != getuid() || (manager_now.st_mode & 0022) ||
+      !profile_root_acl_clear(manager_fd) || fstat(root_fd, &home_now) || home_now.st_uid != getuid() || (home_now.st_mode & 0022) ||
+      !profile_root_acl_clear(root_fd) || !profile_root_acl_clear(target_fd) ||
+      fstat(target_fd, &current) || !same_identity(&current, &target) || current.st_uid != target.st_uid ||
+      (current.st_mode & 07777) != (target.st_mode & 07777 & ~0022) ||
+      fstatat(container_fd, name, &named, AT_SYMLINK_NOFOLLOW) || !same_identity(&named, &target))
+    return profile_root_result(component, "may_have_changed");
+  printf("{\"ok\":true,\"component\":\"%s\",\"reason\":\"repaired\",\"repairable\":false}\n", component);
+  return 0;
+}
 int main(int argc, char **argv) {
   if (argc == 2 && !strcmp(argv[1], "--probe")) return 0;
+  if (argc >= 2 && !strcmp(argv[1], "--profile-root")) return profile_root_command(argc, argv);
   require(argc == 1, "unsupported lease helper arguments");
   unsigned char magic[5]; input(magic, sizeof(magic)); require(!memcmp(magic, "WPLL4", 5), "invalid lease I/O protocol");
   unsigned operation = in8(); parent = (pid_t)in32(); allowed_reads = in32(); allowed_bytes = in64(); fence_wait_ms = in32(); require((fence_wait_ms == 0 || fence_wait_ms == 10000) && allowed_reads <= MAX_READS && allowed_bytes <= MAX_WORK, "invalid remaining lease work budget"); alive(); root_path = in_text(32768);
