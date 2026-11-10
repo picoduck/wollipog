@@ -1573,6 +1573,7 @@ export function NewSessionDialog({
       onClose={onClose}
       phoneSheet="full"
       onKeyDown={submitOnModifiedEnter}
+      tertiary={runnerId ? <button type="button" className="btn ghost" onClick={openAccountSetup}>Account Setup…</button> : undefined}
       footer={
         <>
           {blockedReason && <p className="new-session-reason" id={blockedReasonId}>{blockedReason}</p>}
@@ -1670,7 +1671,6 @@ export function NewSessionDialog({
                 />
               )}
             </div>
-            {runnerId && <button type="button" className="btn sm" onClick={openAccountSetup}>Account Setup…</button>}
             {problemFor("agent")}
             {agentDefaultProblem && (agentDefaultProblem.tone === "error"
               ? <FieldError id={agentDefaultProblemId}>{agentDefaultProblem.message}</FieldError>
