@@ -997,6 +997,36 @@ export type RecoveredBranchPlacement =
   | { kind: "reuse"; entry: ListedWorktree }
   | { kind: "refuse"; reason: string };
 
+/** How to continue in the session that holds a worktree, said the same way by every refusal that
+ * finds one (#4209): that session itself is the way on, and nothing about it changes. */
+export function heldWorktreeWayOn(holder: WorktreeHolder): string {
+  return `To continue the task there, send session ${holder.sessionId} a message ` +
+    (holder.earlierLocation ? "and have it switch back to this Location" : "so it resumes in its own worktree") +
+    "; its work and pull request stay with it. Nothing about that session or its worktree has changed";
+}
+
+/** Why a Location switch cannot continue on `branch` in the worktree at `path`, which `holder` has,
+ * and the way on. Every holder check a switch makes says it this way. */
+export function heldWorktreeRefusal(branch: string, path: string, holder: WorktreeHolder): string {
+  const at = `branch ${branch} is checked out in worktree ${path}, which`;
+  if (holder.removalPending) return `${at} the runner is removing for session ${holder.sessionId}; ask again once that finishes`;
+  if (holder.self) return `${at} this session still owns from an earlier Location; switch that worktree to another branch, then ask again`;
+  if (holder.live && holder.earlierLocation) {
+    return `${at} session ${holder.sessionId} has from an earlier Location and is running in another Location now. To continue ` +
+      `the task there, have session ${holder.sessionId} switch back to this Location; its work and pull request stay with it. ` +
+      "Nothing about that session or its worktree has changed";
+  }
+  if (holder.live) {
+    return `${at} session ${holder.sessionId} is using; continue the task in that session instead, so the work and its pull ` +
+      "request stay with it";
+  }
+  // A stopped holder keeps its worktree (#4209): handing it over is a decision no switch makes. The
+  // way on is that session itself, which still has everything it had.
+  return holder.earlierLocation
+    ? `${at} session ${holder.sessionId} kept from an earlier Location and is not running. ${heldWorktreeWayOn(holder)}`
+    : `${at} session ${holder.sessionId} still owns although it is not running. ${heldWorktreeWayOn(holder)}`;
+}
+
 /** Decide where a recovered branch continues from the repository's own worktree list. Paths are
  * compared in the session's execution context, so a Direct WSL distro path is matched as the POSIX
  * path it is and a Windows path case-insensitively, exactly as every other worktree identity check. */
@@ -1022,25 +1052,7 @@ export function recoveredBranchPlacement(
       "there, so switch that checkout to another branch, then ask again" };
   }
   const holder = holderOf(elsewhere.path);
-  if (holder) {
-    const keep = "continue the task in that session instead, so the work and its pull request stay with it";
-    return { kind: "refuse", reason: holder.removalPending
-      ? `${where} worktree ${elsewhere.path}, which the runner is removing for session ${holder.sessionId}; ask again once that finishes`
-      : holder.self
-      ? `${where} worktree ${elsewhere.path}, which this session still owns from an earlier Location; switch that worktree ` +
-        "to another branch, then ask again"
-      : holder.live
-      ? `${where} worktree ${elsewhere.path}, which session ${holder.sessionId} is using; ${keep}`
-      // A stopped holder keeps its worktree (#4209): handing it over is a decision no switch makes.
-      // The way on is that session itself, which still has everything it had.
-      : holder.earlierLocation
-      ? `${where} worktree ${elsewhere.path}, which session ${holder.sessionId} kept from an earlier Location and is not ` +
-        `running. To continue the task there, send session ${holder.sessionId} a message and have it switch back to this ` +
-        "Location; its work and pull request stay with it. Nothing about that session or its worktree has changed"
-      : `${where} worktree ${elsewhere.path}, which session ${holder.sessionId} still owns although it is not running. To ` +
-        `continue the task there, send session ${holder.sessionId} a message: it resumes in that worktree, with its work ` +
-        "and pull request. Nothing about that session or its worktree has changed" };
-  }
+  if (holder) return { kind: "refuse", reason: heldWorktreeRefusal(branch, elsewhere.path, holder) };
   if (elsewhere.locked) {
     return { kind: "refuse", reason: `${where} worktree ${elsewhere.path}, which is locked; unlock it (git worktree unlock) ` +
       "once nothing uses it, then ask again" };
@@ -2184,15 +2196,15 @@ export async function mergedWorktreePullRequestForBranch(
   }
 }
 
-/** The pull request a reused worktree's branch already has, for its record only (#4209). */
+/** The pull request an attached worktree's branch already has, for its record only (#4209). */
 export type DiscoveredBranchPullRequest =
   | { url: string; state: "open"; provider: "github"; kind: "pull_request" }
   | DiscoveredMergedPullRequest;
 
-/** Find the pull request an existing branch already has, for a worktree a Location switch reused
- * in place: typically the head branch of a pull request someone pushed, recovered to continue it.
- * The link is only shown and kept current. Such a worktree stays its owner's, so nothing about the
- * pull request ever removes it.
+/** Find the pull request an existing branch already has, for an attached worktree: one a person or
+ * an agent attached, or one a Location switch reused in place, typically the head branch of a pull
+ * request someone pushed, recovered to continue it. The link is only shown and kept current. Such a
+ * worktree stays its owner's, so nothing about the pull request ever removes it.
  *
  * GitHub only, and only from the repository the branch's remote names, rebuilt from that URL so
  * gh's own choice of repository plays no part. A candidate must come from that same repository
@@ -2200,7 +2212,7 @@ export type DiscoveredBranchPullRequest =
  * open pull request is linked as open. With none open, a merged one is linked only when its head
  * is exactly the local tip, the same proof discovery asks of any merged link. Several open ones, a
  * closed one, or a merged one with an earlier head link nothing. Every failure links nothing. */
-export async function branchPullRequestForReusedWorktree(
+export async function branchPullRequestForAttachedWorktree(
   worktreePath: string,
   branch: string,
   options: WorktreeOptions & {

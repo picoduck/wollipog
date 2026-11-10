@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { branchPullRequestForReusedWorktree } from "./worktree.js";
+import { branchPullRequestForAttachedWorktree } from "./worktree.js";
 
 // #4209: the pull request a worktree reused in place by a Location switch already has is linked on
 // its row, from the forge's answer about that branch, in that repository, and nothing else.
@@ -32,8 +32,8 @@ test("a reused branch's own pull request is linked: one open, or a merged one at
   const { root, repo, head } = fixture();
   try {
     const calls: string[][] = [];
-    const lookup = (listing: unknown, extra: Parameters<typeof branchPullRequestForReusedWorktree>[2] = {}) =>
-      branchPullRequestForReusedWorktree(repo, "fix/local", {
+    const lookup = (listing: unknown, extra: Parameters<typeof branchPullRequestForAttachedWorktree>[2] = {}) =>
+      branchPullRequestForAttachedWorktree(repo, "fix/local", {
         runForgeCommand: (async (_context: unknown, command: string, args: string[]) => {
           calls.push([command, ...args]);
           if (listing instanceof Error) throw listing;
