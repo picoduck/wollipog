@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentContext } from "@wollipog/protocol";
 import {
+  namedCheckContexts,
+  parseGitLabJobs,
   anchorForkRef,
   anchorTurnRef,
   deleteTurnRefs,
@@ -938,9 +940,13 @@ test("GitLab MR and pipeline parsers validate revision and URL provenance", () =
     iid: 17, title: "Add GitLab", web_url: "https://gitlab.com/group/repo/-/merge_requests/17", state: "opened",
     sha: "a".repeat(40), diff_refs: { head_sha: "a".repeat(40), base_sha: "b".repeat(40) },
     head_pipeline: { id: 91, status: "failed", web_url: "https://gitlab.com/group/repo/-/pipelines/91" },
+    source_branch: "feature/gitlab", target_branch: "release", detailed_merge_status: "ci_must_pass",
   };
   const mr = parseGitLabMergeRequest(value, remote);
   assert.equal(mr.iid, 17);
+  assert.equal(mr.baseRef, "release");
+  assert.equal(mr.headRef, "feature/gitlab");
+  assert.equal(mr.mergeability, "ci_must_pass");
   assert.deepEqual(summarizeGitLabPipeline(mr.pipeline, remote), {
     failing: 1, pending: 0, passing: 0, failingNames: ["Pipeline #91"],
     url: "https://gitlab.com/group/repo/-/pipelines/91",
@@ -1595,4 +1601,31 @@ test("gitDiff last_turn: a pruned snapshot tree yields the gc guidance error", a
     () => gitDiff("/repo", "last_turn", { useWorktree: false, lastTurnBaseTree: "gone" }),
     /pruned by git \(gc\)/,
   );
+});
+
+test("named checks share latest-run selection and reject unsafe links", () => {
+  const jobs = namedCheckContexts([
+    { name: "unit", status: "COMPLETED", conclusion: "FAILURE", databaseId: 1 },
+    { name: "unit", status: "COMPLETED", conclusion: "SUCCESS", databaseId: 2, detailsUrl: "https://github.com/org/repo/actions/runs/2" },
+    { context: "external", state: "PENDING", targetUrl: "javascript:alert(1)" },
+  ]);
+  assert.deepEqual(jobs.map(({ name, state }) => ({ name, state })), [
+    { name: "unit", state: "passing" }, { name: "external", state: "pending" },
+  ]);
+  assert.equal(jobs[1]!.url, null);
+  assert.equal(namedCheckContexts(Array.from({ length: 101 }, (_, i) => ({ name: String(i) }))).length, 100);
+});
+
+test("GitLab named jobs preserve statuses and enforce host provenance and bounds", () => {
+  const remote = parseForgeRemote("https://gitlab.com/group/repo.git")!;
+  const job = { name: "unit", status: "failed", web_url: "https://gitlab.com/group/repo/-/jobs/7" };
+  assert.deepEqual(parseGitLabJobs([job], remote), {
+    jobs: [{ name: "unit", state: "failing", url: job.web_url }], jobsIncomplete: false,
+  });
+  for (const [status, state] of [["success", "passing"], ["manual", "pending"], ["canceled", "failing"]]) {
+    assert.equal(parseGitLabJobs([{ ...job, status }], remote).jobs![0]!.state, state);
+  }
+  assert.throws(() => parseGitLabJobs([{ ...job, web_url: "https://evil.test/job" }], remote));
+  assert.throws(() => parseGitLabJobs(Array(101).fill(job), remote));
+  assert.equal(parseGitLabJobs(Array(100).fill(job), remote).jobsIncomplete, true);
 });

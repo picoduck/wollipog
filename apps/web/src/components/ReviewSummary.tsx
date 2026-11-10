@@ -5,6 +5,7 @@ import { safeExternalHref } from "../external-href.js";
 import { fixChecksPrompt, forgeStateLabel } from "../pinned-summary.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
 import { statusMeta } from "../status-meta.js";
+import { titleCaseLabel } from "../format.js";
 import { Spinner } from "./common.js";
 import { BranchIcon, PullRequestIcon } from "./Icons.js";
 import { StatusBadge } from "./StatusBadge.js";
@@ -155,6 +156,31 @@ function PullRequestRow({ session, pr, checks, canPrompt }: {
           <a className="link" href={href} target="_blank" rel="noreferrer">Open on {forgeName}</a>
         )}
       </div>
+      {(pr.baseRef || pr.headRef || pr.mergeability) && (
+        <dl className="review-request-facts">
+          {pr.baseRef && <div><dt>Base</dt><dd>{pr.baseRef}</dd></div>}
+          {pr.headRef && <div><dt>Head</dt><dd>{pr.headRef}</dd></div>}
+          {pr.mergeability && <div><dt>Mergeability</dt><dd>{titleCaseLabel(pr.mergeability.replaceAll("_", " ").toLowerCase()).replace(/\bCi\b/g, "CI")}</dd></div>}
+        </dl>
+      )}
+      {checks && (
+        <details className="review-request-checks">
+          <summary>Checks ({checks.passing} Passing, {checks.pending} Pending, {checks.failing} Failing)</summary>
+          {checks.jobs && checks.jobs.length > 0 ? (
+            <ul>
+              {checks.jobs.map((job, index) => {
+                const jobHref = safeExternalHref(job.url);
+                return <li key={index}>
+                  {jobHref ? <a className="link" href={jobHref} target="_blank" rel="noreferrer">{job.name}</a> : <span>{job.name}</span>}
+                  {" — "}{job.state === "passing" ? "Passing" : job.state === "failing" ? "Failing" : "Pending"}
+                </li>;
+              })}
+            </ul>
+          ) : <p>Named checks are unavailable from this machine.</p>}
+          {checks.jobsIncomplete && <p>Some checks are unavailable. Open the forge for the complete list.</p>}
+          {safeExternalHref(checks.url) && <a className="link" href={safeExternalHref(checks.url)!} target="_blank" rel="noreferrer">Open Checks</a>}
+        </details>
+      )}
       {failing && canPrompt && promptRefusal !== null && (
         <p id={refusalId} className="review-pr-refusal">{promptRefusal}</p>
       )}

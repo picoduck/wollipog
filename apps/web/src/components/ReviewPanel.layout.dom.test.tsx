@@ -694,3 +694,24 @@ test("a scope picked before the first status read loads at once, and the opening
     await harness.unmount();
   }
 });
+
+test("GitLab summary shows base/head, mergeability and named job links with safe legacy fallback (#1270)", async () => {
+  const harness = await mountReview({ forgeFacts: {
+    pr: { ...openPr, provider: "gitlab", kind: "merge_request", baseRef: "release", headRef: "feature/gitlab", mergeability: "ci_must_pass", url: "https://gitlab.com/acme/shop/-/merge_requests/42" },
+    checks: { ...failingChecks, jobs: [
+      { name: "unit", state: "failing", url: "https://gitlab.com/acme/shop/-/jobs/7" },
+      { name: "lint", state: "pending", url: "javascript:alert(1)" },
+    ], jobsIncomplete: true },
+  } });
+  try {
+    const row = harness.container.querySelector('[aria-label="Merge Request"]')!;
+    assert.match(row.textContent!, /BasereleaseHeadfeature\/gitlabMergeabilityCI Must Pass/);
+    assert.match(row.textContent!, /unit — Failing/);
+    assert.match(row.textContent!, /lint — Pending/);
+    assert.equal(row.querySelector('a[href="javascript:alert(1)"]'), null);
+    assert.equal(row.querySelector('a[href="https://gitlab.com/acme/shop/-/jobs/7"]')?.textContent, "unit");
+    assert.match(row.textContent!, /Some checks are unavailable/);
+    await harness.render({ forgeFacts: { pr: openPr, checks: failingChecks } });
+    assert.match(harness.container.textContent!, /Named checks are unavailable/);
+  } finally { await harness.unmount(); }
+});
