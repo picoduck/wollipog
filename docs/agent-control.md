@@ -2273,12 +2273,33 @@ parameters.
 
 Each delivery records a server-side review receipt bound to the reviewer, child, occurrence, policy
 revision, evidence identifier, artifact, and digest. `resolve_descendant_workflow_decision` approves a
-UI-evidence decision only when an acknowledged, unexpired (one hour), unconsumed, unrevoked receipt exists for every
+UI-evidence decision only when an acknowledged, unexpired (one hour), unrevoked receipt exists for every
 item; repeating `evidenceReviewed` identifiers is not sufficient. Denial needs no receipts and must omit
 `evidenceReviewed`, which accompanies only an approval. Receipts
-are spent by resolution and revoked with the decision, so a policy-revision or ownership change,
-supersession, or revocation invalidates them. The resolution audit lists evidence identifier and
+are spent by resolution and revoked with the decision. A policy-revision or ownership change or
+explicit revocation invalidates them; byte-identical images can retain delivery proof after
+supersession as described below. The resolution audit lists evidence identifier and
 digest pairs and the receipt ids spent; each delivery is a `review`-stage audit entry.
+
+With runner protocol 356 or later, an acknowledged image delivery can also support a new occurrence
+without delivering the image again (#4405). The server matches the controlling Orchestrator,
+reviewer Session, child Session, artifact id, SHA-256 and policy revision, and rehashes the stored
+artifact bytes. Its original one-hour expiry still applies. Resolution spends the old occurrence's
+receipt without erasing this delivery proof; supersession alone also preserves the proof, while
+explicit revocation, denial, missing acknowledgement or any mismatch requires fresh review.
+Only missing images appear in the approval refusal for a mixed set. The resolution audit lists
+`reusedReviewReceipts`, including each original receipt id, occurrence, reviewer and review time.
+No receipt is copied or given a fresh expiry. Video frames never use this path; older runners
+retain per-occurrence behavior.
+
+Delegated image review may reuse its original approving verdict only with that same reviewer
+Session's matching receipts and current audience checks. The current preparation must also have
+the same claims-and-criteria brief hash; the server binds that preparation to the new occurrence
+and resource digest, so forwarding an old reference cannot bypass a changed brief. Preparing an identical set returns the
+original review reference rather than launching another reviewer. A different reviewer receives
+fresh images; it cannot inherit deliveries to another Session. A changed set needs a fresh
+delegated review because the existing reviewer is restricted to its one pinned review task.
+Reusing a verdict does not consume the original occurrence's verdict while that occurrence is pending.
 
 Video evidence is reviewed by a separate managed reviewer, never by the Orchestrator itself.
 `prepare_descendant_video_evidence_review` (`sessionId`, `occurrenceId`, `evidenceId`) asks the
