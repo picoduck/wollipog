@@ -524,7 +524,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** Runner attests `AgentCapabilities.imageToolResults`. Before it, nothing states whether a
    * harness shows the model an image returned by a tool, so review cannot be delegated. */
   orchestratorImageToolResults: 179,
-  uiEvidenceReceiptReuse: 355,
+  uiEvidenceReceiptReuse: 356,
   orchestratorVideoFrameReview: 189,
   /** Pi driver never reports a provider-acknowledged steer as a definite `stale_turn` (#1433).
    * Gates Pi's admission to the automatic mid-turn steering lane; an older runner would re-queue

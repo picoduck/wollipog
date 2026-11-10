@@ -26754,7 +26754,7 @@ test("byte-identical receipts back successors and mixed sets with original audit
 
 test("image receipt reuse refuses every identity, lifetime and revocation mismatch (#4405)", () => {
   for (const mismatch of ["sha", "artifact", "child", "reviewer", "controller", "policy", "expired", "revoked", "spent-revoked", "unacknowledged", "bytes", "video", "old-runner"]) {
-    const h = uiEvidenceReviewHarness(mismatch === "old-runner" ? 354 : PROTOCOL_VERSION);
+    const h = uiEvidenceReviewHarness(mismatch === "old-runner" ? RUNNER_CAPABILITY_MIN_PROTOCOL.uiEvidenceReceiptReuse - 1 : PROTOCOL_VERSION);
     try {
       const child = h.createChild("UI Child");
       const image = h.screenshot(child.id, "image");
@@ -27316,6 +27316,36 @@ test("a delegated image reviewer approves N images without any reaching the Orch
   } finally {
     h.db.close();
   }
+});
+
+test("delegated reuse preserves the source verdict and binds the current claims and criteria (#4405)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const image = h.screenshot(child.id, "image");
+    const source = h.request(child.id, "source", [image.item]).data!;
+    const prepared = prepareImageReview(h, child.id, source.occurrenceId).data!;
+    assert.ok(reviewerLook(h, prepared.reviewerSessionId, "image").ok);
+    assert.ok(reviewerVerdict(h, prepared.reviewerSessionId, passingVerdict(["image"])).ok);
+    const reference = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, prepared.reviewId, () => true).data!.delegatedImageReview!;
+    const target = h.request(child.id, "target", [image.item]).data!;
+    const approve = (occurrenceId: string) => h.svc.resolveDescendantRequest(h.parent.id, child.id, occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["image"], delegatedImageReview: reference }, () => true);
+    assert.equal(approve(target.occurrenceId).status, 409, "a forwarded reference cannot bypass preparation of the current brief");
+    assert.equal(prepareImageReview(h, child.id, target.occurrenceId).data?.reviewId, prepared.reviewId);
+    assert.ok(approve(target.occurrenceId).ok);
+    assert.equal(h.db.delegatedImageReviews.get(prepared.reviewId)?.state, "verdict", "reuse cannot spend another pending occurrence's verdict");
+    assert.ok(approve(source.occurrenceId).ok, "the source still approves without another provider delivery");
+
+    const changed = h.request(child.id, "changed", [image.item]).data!;
+    assert.equal(prepareImageReview(h, child.id, changed.occurrenceId).data?.reviewId, prepared.reviewId);
+    const newBrief = prepareImageReview(h, child.id, changed.occurrenceId,
+      "Different claims: the screenshot must show an error banner.");
+    assert.ok(newBrief.ok && newBrief.data, newBrief.error);
+    assert.notEqual(newBrief.data.reviewId, prepared.reviewId, "changed claims need a fresh verdict");
+    assert.notEqual(newBrief.data.reviewerSessionId, prepared.reviewerSessionId);
+    assert.equal(approve(changed.occurrenceId).status, 409, "changed preparation invalidates the earlier reuse binding");
+  } finally { h.db.close(); }
 });
 
 test("delegated image review fails closed on supersession, tampering, policy change and expiry (#4074)", () => {

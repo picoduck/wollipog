@@ -15705,7 +15705,9 @@ export class SessionsService {
         ? this.workflowVideoApprovals!.resolve(decision, normalizedResolution, now, commitResolution) : commitResolution();
     } catch { return fail("Original video approval lacks current complete worker and image provenance", 409); }
     if (!resolved) return fail("workflow decision was resolved concurrently", 409);
-    if (delegatedImage) this.db.delegatedImageReviews.consume(delegatedImage.reviewId, now);
+    if (delegatedImage && this.db.delegatedImageReviews.get(delegatedImage.reviewId)?.occurrenceId === occurrenceId) {
+      this.db.delegatedImageReviews.consume(delegatedImage.reviewId, now);
+    }
     this.db.consumeUiEvidenceReviewReceipts(occurrenceId, now);
     if (resolvedBySelf) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now);
     else this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
@@ -17271,13 +17273,17 @@ export class SessionsService {
     }
     // Reuse an actual verdict only with that same reviewer's acknowledged byte deliveries.
     // A fresh reviewer never inherits images delivered to a different Session.
+    const briefSha256 = createHash("sha256").update(brief).digest("hex");
+    this.db.delegatedImageReviews.clearReuse(occurrenceId);
     for (const prior of this.db.delegatedImageReviews.forChild(parentSessionId, childSessionId)) {
-      if (prior.occurrenceId === occurrenceId || !prior.verdict) continue;
+      if (prior.occurrenceId === occurrenceId || !prior.verdict || prior.briefSha256 !== briefSha256) continue;
       const reference = { reviewId: prior.reviewId, verdictId: prior.verdict.verdictId, reviewerSessionId: prior.reviewerSessionId };
+      this.db.delegatedImageReviews.prepareReuse(occurrenceId, prior.reviewId, briefSha256, decision.resourceDigest);
       if (!this.delegatedImageApprovalRefusal(decision, reference, now)) {
         return ok({ ...this.db.delegatedImageReviews.view(prior, false), occurrenceId,
           delegatedImageReview: reference });
       }
+      this.db.delegatedImageReviews.clearReuse(occurrenceId);
     }
     // A live review is returned as it is. One that can no longer back an approval (its reviewer ended
     // without a verdict, or its verdict's receipts expired) is retired, and a fresh reviewer replaces it.
@@ -17408,6 +17414,8 @@ export class SessionsService {
       return "the delegated image review does not identify an actual reviewer verdict for this decision";
     }
     const reuse = review.occurrenceId !== decision.occurrenceId;
+    if (reuse && !this.db.delegatedImageReviews.reusePrepared(decision.occurrenceId, review.reviewId,
+      review.briefSha256, decision.resourceDigest)) return "prepare this occurrence with the same claims and criteria before reusing a delegated verdict";
     if (!reuse && review.state !== "verdict") return `the delegated image review is ${review.state}${review.endedReason ? ` (${review.endedReason})` : ""}`;
     if (review.verdictSha256 !== delegatedImageVerdictSha256(verdict)) return "the delegated image review verdict is invalid";
     if (verdict.recommendation !== "approve") return "the reviewer recommended denial, so its verdict cannot back an approval";
