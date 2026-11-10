@@ -804,9 +804,18 @@ export async function isAutomaticSessionWorktree(
     await sessionPath(repoPath, sessionId, options, false));
 }
 
-/** The last path segment of a requested worktree: a hash of its branch name. Exported for tests. */
+/** The last path segment of a requested worktree: a hash of its branch name. Exported for tests. It is
+ * the same in every repository, so it is never a worktree's identity: see `worktreeIdForPath`. */
 export function requestedSlot(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+/** The identity a session gives a worktree it makes or attaches: a hash of its whole path. A path names
+ * one repository's worktree, since each repository's requested worktrees sit under their own root,
+ * so the same branch name in two Locations gets two identities. Hooks, process markers, port owners
+ * and cleanup records are keyed by it. Rows already stored keep the id they were given. */
+export function worktreeIdForPath(path: string): string {
+  return createHash("sha256").update(path).digest("hex").slice(0, 16);
 }
 
 function validateSessionId(sessionId: string): void {

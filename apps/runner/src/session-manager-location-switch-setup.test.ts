@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { claudeProjectPathKey } from "./claude-background-work.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
-import { requestedSlot, requestedWorktreeBoundary, type WorktreeCleanupRecord } from "./worktree.js";
+import { requestedSlot, requestedWorktreeBoundary, worktreeIdForPath, type WorktreeCleanupRecord } from "./worktree.js";
 
 // #4209: a live Location switch applies the target repository's worktree setup exactly as a
 // requested worktree does, before the old provider retires, and only with #637's trust approval.
@@ -2536,18 +2536,22 @@ test("a request's failed activation of an unchanged worktree runs teardown, remo
     await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
     const internals = internalsOf(h);
     const activate = internals.activateWorktreeWithNotice.bind(h.manager);
-    internals.activateWorktreeWithNotice = async () => { throw new Error("activation failed"); };
+    const slot = await docsSlot(h, "fix/other");
+    const owner = `${h.sessionId}\0${worktreeIdForPath(slot)}`;
+    internals.activateWorktreeWithNotice = async () => {
+      assert.ok(internals.worktreePortAllocator.get(owner), "setup gave the worktree a port block under its own id");
+      throw new Error("activation failed");
+    };
     const failing = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/other" });
     await answerTrust(h, "trust");
     await assert.rejects(failing, /activation failed/u);
     internals.activateWorktreeWithNotice = activate;
-    const slot = await docsSlot(h, "fix/other");
     assert.deepEqual(journal(h), []);
     assert.equal(existsSync(slot), false);
     assert.equal(readFileSync(teardownLog, "utf8"), "x");
     assert.throws(() => git(h.docs, "rev-parse", "--verify", "refs/heads/fix/other"), "the branch it made goes");
     assert.equal(h.store.readMeta(h.sessionId)!.worktrees!.some((item) => item.path === slot), false);
-    assert.equal(internals.worktreePortAllocator.get(`${h.sessionId}\0${requestedSlot("fix/other")}`), undefined);
+    assert.equal(internals.worktreePortAllocator.get(owner), undefined);
   });
 });
 
@@ -3701,4 +3705,222 @@ test("a launch rollback leaves a worktree Git cannot answer from inside byte for
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// Requested worktrees get an identity unique per repository, as switch targets and attached worktrees
+// already do: the same branch name in two Locations is two worktrees.
+
+/** A setup with a teardown that logs, on `branch` of `repo`. */
+function commitSetupWithTeardown(h: Harness, repo: string, branch: string, teardownLog: string): void {
+  git(repo, "checkout", "--quiet", branch);
+  writeFileSync(join(repo, ".wollipog.json"), JSON.stringify({ version: 1, setup: [LOG_STEP(h)],
+    teardown: [{ name: "Tear Down", command: [process.execPath, "-e", `require('fs').appendFileSync(${JSON.stringify(teardownLog)},'x')`], timeoutSeconds: 30 }] }));
+  git(repo, "add", ".wollipog.json");
+  git(repo, "commit", "--quiet", "-m", "setup and teardown");
+}
+
+test("a requested worktree stored before ids came from the whole path keeps its id, and its hooks, marker and ports with it", async () => {
+  if (process.platform === "win32") return;
+  await withSession("request-stored-id", async (h) => {
+    const teardownLog = join(h.root, "teardown-log");
+    commitSetupWithTeardown(h, h.docs, "main", teardownLog);
+    serveOriginLocally(h);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const meta = () => h.store.readMeta(h.sessionId)!;
+    const moved = meta().worktreePath!;
+    const requesting = h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/stored" });
+    await answerTrust(h, "trust");
+    const { worktree } = await requesting;
+    await h.manager.selectWorktree(h.sessionId, moved);
+    await waitFor(() => meta().worktreePath === moved && h.providers.at(-1)?.cwd === moved && meta().status === "idle",
+      "the session did not go back to its switch worktree");
+
+    // As an earlier runner stored it: under the branch-only slot, with everything keyed by that.
+    const oldId = requestedSlot("fix/stored");
+    assert.notEqual(oldId, worktree.id);
+    const allocator = internalsOf(h).worktreePortAllocator;
+    const block = allocator.get(`${h.sessionId}\0${worktree.id}`);
+    allocator.release(`${h.sessionId}\0${worktree.id}`);
+    allocator.allocate(`${h.sessionId}\0${oldId}`, block);
+    const rekey = <T>(map: Record<string, T> | undefined) => {
+      const { [worktree.id]: value, ...rest } = map ?? {};
+      return value === undefined ? map : { ...rest, [oldId]: value };
+    };
+    h.store.patchMeta(h.sessionId, {
+      worktrees: meta().worktrees!.map((row) => row.id === worktree.id ? { ...row, id: oldId } : row),
+      worktreeHooks: rekey(meta().worktreeHooks), worktreeProcessMarkers: rekey(meta().worktreeProcessMarkers),
+    });
+
+    const again = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/stored" });
+    assert.equal(again.worktree.id, oldId, "the stored row keeps its id");
+    assert.deepEqual(allocator.get(`${h.sessionId}\0${oldId}`), block, "and its port block");
+    assert.equal(allocator.get(`${h.sessionId}\0${worktree.id}`), undefined, "with none made under a new id");
+    await h.manager.selectWorktree(h.sessionId, moved);
+    await waitFor(() => meta().worktreePath === moved && h.providers.at(-1)?.cwd === moved && meta().status === "idle",
+      "the session did not go back to its switch worktree again");
+    await h.manager.discardWorktree(h.sessionId, worktree.path);
+    assert.equal(existsSync(worktree.path), false);
+    assert.equal(readFileSync(teardownLog, "utf8"), "x", "its teardown, stored under the old id, runs");
+    assert.equal(allocator.get(`${h.sessionId}\0${oldId}`), undefined, "and its ports are given back");
+  });
+});
+
+for (const shared of [false, true]) {
+test(`a requested worktree made again where a row stored under its branch's id was ${shared
+  ? "leaves that id's records to the other Location's row that shares it" : "gives that id's port block back"}`, async () => {
+  if (process.platform === "win32") return;
+  await withSession(`request-remade-stored-id-${shared ? "shared" : "alone"}`, async (h) => {
+    const teardownLog = join(h.root, "teardown-log");
+    commitSetupWithTeardown(h, h.docs, "main", teardownLog);
+    serveOriginLocally(h);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const meta = () => h.store.readMeta(h.sessionId)!;
+    const moved = meta().worktreePath!;
+    const goBack = async () => {
+      await h.manager.selectWorktree(h.sessionId, moved);
+      await waitFor(() => meta().worktreePath === moved && h.providers.at(-1)?.cwd === moved && meta().status === "idle",
+        "the session did not go back to its switch worktree");
+    };
+    const requesting = h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/legacy" });
+    await answerTrust(h, "trust");
+    const { worktree } = await requesting;
+    await goBack();
+    // As an earlier runner stored it, under the branch-only slot.
+    const oldId = requestedSlot("fix/legacy");
+    const oldOwner = `${h.sessionId}\0${oldId}`;
+    const newOwner = `${h.sessionId}\0${worktree.id}`;
+    const allocator = internalsOf(h).worktreePortAllocator;
+    const block = allocator.get(newOwner);
+    allocator.release(newOwner);
+    allocator.allocate(oldOwner, block);
+    const rekey = <T>(map: Record<string, T> | undefined) => {
+      const { [worktree.id]: value, ...rest } = map ?? {};
+      return value === undefined ? map : { ...rest, [oldId]: value };
+    };
+    h.store.patchMeta(h.sessionId, {
+      worktrees: meta().worktrees!.map((row) => row.id === worktree.id ? { ...row, id: oldId } : row),
+      worktreeHooks: rekey(meta().worktreeHooks), worktreeProcessMarkers: rekey(meta().worktreeProcessMarkers),
+    });
+    if (shared) {
+      // An earlier runner also gave the same branch name in App this id, so its row there shares it.
+      const elsewhere = join(h.root, "app-fix-legacy");
+      h.store.patchMeta(h.sessionId, { locationHistory: meta().locationHistory!.map((left, index) => index === 0
+        ? { ...left, worktrees: [...left.worktrees, { id: oldId, path: elsewhere, branch: "fix/legacy", source: "created" as const }] }
+        : left) });
+    }
+    const hooksBefore = meta().worktreeHooks?.[oldId];
+    const markerBefore = meta().worktreeProcessMarkers?.[oldId];
+    // A person removes it by hand, then asks for it again.
+    git(h.docs, "worktree", "remove", "--force", worktree.path);
+    git(h.docs, "branch", "--quiet", "-D", "fix/legacy");
+    const again = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/legacy" });
+    assert.equal(again.worktree.id, worktree.id, "the new worktree takes the id of its whole path");
+    assert.equal(meta().worktrees!.filter((row) => row.path === worktree.path).length, 1, "one row names the path");
+    if (shared) {
+      assert.deepEqual(allocator.get(oldOwner), block, "the shared id keeps its port block");
+      assert.deepEqual(meta().worktreeHooks?.[oldId], hooksBefore, "its teardown");
+      assert.equal(meta().worktreeProcessMarkers?.[oldId], markerBefore, "and its marker");
+      return;
+    }
+    assert.equal(allocator.get(oldOwner), undefined, "the stored row's port block is given back");
+    assert.equal(meta().worktreeHooks?.[oldId], undefined, "with its teardown");
+    assert.equal(meta().worktreeProcessMarkers?.[oldId], undefined, "and its marker");
+    await goBack();
+    await h.manager.discardWorktree(h.sessionId, worktree.path);
+    assert.equal(existsSync(worktree.path), false);
+    assert.equal(allocator.get(oldOwner), undefined);
+    assert.equal(allocator.get(newOwner), undefined, "and discarding the new one gives its own back");
+  });
+});
+}
+
+test("a requested worktree made again on a path an earlier one used rolls back with none of that one's teardown", async () => {
+  if (process.platform === "win32") return;
+  await withSession("request-remade-path", async (h) => {
+    const teardownLog = join(h.root, "teardown-log");
+    git(h.docs, "checkout", "--quiet", "-b", "config-base");
+    commitSetupWithTeardown(h, h.docs, "config-base", teardownLog);
+    git(h.docs, "checkout", "--quiet", "main");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const meta = () => h.store.readMeta(h.sessionId)!;
+    const moved = meta().worktreePath!;
+    const first = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/again" });
+    await answerTrust(h, "trust");
+    const { worktree } = await first;
+    assert.ok(meta().worktreeHooks?.[worktree.id], "the first worktree has a teardown");
+    await h.manager.selectWorktree(h.sessionId, moved);
+    await waitFor(() => meta().worktreePath === moved && h.providers.at(-1)?.cwd === moved && meta().status === "idle",
+      "the session did not go back to its switch worktree");
+    // A person removes it by hand, so nothing of the runner's clears what it recorded.
+    git(h.docs, "worktree", "remove", "--force", worktree.path);
+    git(h.docs, "branch", "--quiet", "-D", "fix/again");
+
+    // The same branch name again, on a base with no setup at all, and its activation fails.
+    const internals = internalsOf(h);
+    const activate = internals.activateWorktreeWithNotice.bind(h.manager);
+    internals.activateWorktreeWithNotice = async () => { throw new Error("activation failed"); };
+    await assert.rejects(h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/again" }), /activation failed/u);
+    internals.activateWorktreeWithNotice = activate;
+    await waitFor(() => journal(h).length === 0, "the rollback did not finish");
+    assert.equal(existsSync(worktree.path), false, "the new worktree was rolled back");
+    assert.equal(existsSync(teardownLog), false, "with no teardown, since its own setup gave it none");
+  });
+});
+
+test("discarding a requested worktree leaves the hooks, marker and port block of the same branch name's worktree in another Location", async () => {
+  if (process.platform === "win32") return;
+  await withSession("request-same-branch", async (h) => {
+    const appTeardown = join(h.root, "app-teardown");
+    const docsTeardown = join(h.root, "docs-teardown");
+    git(h.app, "checkout", "--quiet", "-b", "config-base");
+    commitSetupWithTeardown(h, h.app, "config-base", appTeardown);
+    git(h.app, "checkout", "--quiet", "main");
+    commitSetupWithTeardown(h, h.docs, "main", docsTeardown);
+    serveOriginLocally(h);
+
+    // In App, the session asks for fix/same.
+    const inApp = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/same" });
+    await answerTrust(h, "trust");
+    const appRow = (await inApp).worktree;
+    const internals = internalsOf(h);
+    const meta = () => h.store.readMeta(h.sessionId)!;
+    const appOwner = `${h.sessionId}\0${appRow.id}`;
+    const appHooks = meta().worktreeHooks?.[appRow.id];
+    const appMarker = meta().worktreeProcessMarkers?.[appRow.id];
+    const appBlock = internals.worktreePortAllocator.get(appOwner);
+    assert.ok(appHooks && appMarker && appBlock, "the App worktree has its teardown, marker and ports");
+
+    // It moves to Docs and asks for the same branch name there.
+    await waitFor(() => meta().worktreePath === appRow.path && h.providers.at(-1)?.cwd === appRow.path && meta().status === "idle",
+      "the session did not settle in its App worktree");
+    const launched = h.providers.length;
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[launched]?.prompts.length === 1 && meta().status === "idle" || failure(h) !== undefined,
+      "the move did not finish");
+    assert.equal(failure(h), undefined);
+    const moved = meta().worktreePath!;
+    const inDocs = h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/same" });
+    await waitFor(() => payloads(h, "permission_request").length >= 2, "the Docs worktree's setup did not ask for trust");
+    h.manager.resolvePermission(h.sessionId, payloads(h, "permission_request").at(-1).requestId, "trust");
+    const docsRow = (await inDocs).worktree;
+    assert.notEqual(docsRow.id, appRow.id, "two repositories never share a worktree identity");
+    assert.notEqual(meta().worktreeProcessMarkers?.[docsRow.id], appMarker);
+
+    // Discarding the Docs one runs its own teardown and leaves the App one's records as they were.
+    await h.manager.selectWorktree(h.sessionId, moved);
+    await waitFor(() => meta().worktreePath === moved && h.providers.at(-1)?.cwd === moved && meta().status === "idle",
+      "the session did not go back to its switch worktree");
+    await h.manager.discardWorktree(h.sessionId, docsRow.path);
+    assert.equal(existsSync(docsRow.path), false, "the Docs worktree was discarded");
+    assert.equal(readFileSync(docsTeardown, "utf8"), "x", "with its own teardown");
+    assert.equal(existsSync(appTeardown), false, "and not the App one's");
+    assert.deepEqual(meta().worktreeHooks?.[appRow.id], appHooks, "the App worktree keeps its teardown");
+    assert.equal(meta().worktreeProcessMarkers?.[appRow.id], appMarker, "its marker");
+    assert.deepEqual(internals.worktreePortAllocator.get(appOwner), appBlock, "and its port block");
+    assert.ok(meta().locationHistory!.some((left) => left.worktrees.some((row) => row.id === appRow.id && row.path === appRow.path)),
+      "and its row in the Location the session left");
+  });
 });
