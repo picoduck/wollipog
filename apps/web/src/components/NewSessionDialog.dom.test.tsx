@@ -1829,6 +1829,28 @@ test("a Start that finds a Location the person wasn't shown stops and shows it, 
   }
 });
 
+test("Full Control says how its first message names issues, another repository's qualified, and Custom doesn't (cwi_255bc2cf)", async () => {
+  const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => ({ preflight: launchPreflight(true, input) }),
+  });
+  const notice = () => [...fixture.container.querySelectorAll(".notice")].find((node) => node.textContent?.includes("Name Issues in Your First Message"));
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    assertNoDomNode(notice() ?? null, "a Custom Orchestrator gets its issues as it always did");
+    await chooseControlMode(fixture.container, "Full Control");
+    const shown = notice();
+    assert.ok(shown, "Full Control shows it before Start");
+    assert.equal(shown.textContent, "Name Issues in Your First Message" +
+      "When the session opens, your first message sets the campaign's task and issues. Write #12 for an issue in this repository. " +
+      "For another repository in the campaign, write owner/repo#12 or paste the issue's link, because a bare number always means this repository.");
+    assert.deepEqual([...shown.querySelectorAll("code")].map((node) => node.textContent), ["#12", "owner/repo#12"]);
+    assertNoFullControlForm(fixture.container);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("Full Control starts through the same Create Session with no form, and the session's first message is its task", async () => {
   const preflights: import("@wollipog/protocol").FullControlLaunchRequest[] = [];
   const admissions: Array<Record<string, unknown>> = [];

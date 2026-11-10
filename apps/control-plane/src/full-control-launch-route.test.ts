@@ -3962,6 +3962,43 @@ test("a proposal names issues in any boundary repository, each read through a Lo
   } finally { await server.close(); f.db.close(); }
 });
 
+test("a first message's bare #40 is the launch repository's and other/repo#40 is the other's: two issues, each read where it lives (cwi_255bc2cf, #4118)", async () => {
+  const { f, server, routed, propose, apply, id } = await multiRepositoryProposals("Fix #40 here, and other/repo#40 as well.");
+  try {
+    routed.length = 0;
+    const proposed = await propose([named(40), otherNamed(40)]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "orchestrator", "both are written in the owner's words, so neither needs a check");
+    assert.equal(f.decision.checkCalls.length, 0);
+    const snapshot = proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
+    assert.deepEqual([snapshot.additions, snapshot.otherRepositories], [[40], [{ repository: "other/repo", before: [], additions: [40], removals: [] }]]);
+    // The other repository's #40 is read through its own Location's runner, the launch one's through the root's.
+    const reads = routed.filter(({ message }) => message.type === "campaign_launch_inspect" ||
+      (message.type === "campaign_issue_scope" && message.operation === "inspect"));
+    assert.deepEqual(reads.filter(({ runnerId }) => runnerId === "r2").map(({ message }) =>
+      message.type === "campaign_launch_inspect" ? [message.workspacePath, message.issueNumbers] : null), [["/fixture/two/other", [40]]]);
+    assert.ok(reads.some(({ runnerId, message }) => runnerId === "r" && message.type === "campaign_issue_scope" && message.operation === "inspect" &&
+      message.issues?.includes(40)),
+      "the launch repository's #40 is read on the root's runner");
+    assert.equal(reads.some(({ runnerId, message }) => runnerId === "r" && message.type === "campaign_launch_inspect"), false);
+    assert.equal(apply(proposed.data!.occurrenceId).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issues, [{ repository: "other/repo", number: 40 }, { repository: "owner/repo", number: 40 }]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a first message that writes only a bare #40 names no other repository's #40, and one outside the boundary is refused by name (cwi_255bc2cf, #4118)", async () => {
+  const { f, server, routed, propose } = await multiRepositoryProposals("Fix #40.");
+  try {
+    routed.length = 0;
+    assert.deepEqual((await propose([otherNamed(40)])).errorDetails, { code: "owner_named_not_in_message", issue: 40, repository: "other/repo" });
+    const outside = await propose([{ ...named(40), repository: "elsewhere/repo" }]);
+    assert.equal(outside.errorDetails?.code, "repository_outside_boundary");
+    assert.equal((outside.errorDetails as { repository?: string } | undefined)?.repository, "elsewhere/repo");
+    assert.equal(routed.some(({ runnerId, message }) => runnerId === "r2" && message.type === "campaign_launch_inspect"), false, "nothing is read in the other repository");
+    assert.equal(f.decision.checkCalls.length, 0);
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("each proposal floor answers for the issue's own repository (#4118, #4282)", async () => {
   const { f, server, otherFacts, propose } = await multiRepositoryProposals("Fix #12 and other/repo#40, other/repo#42, other/repo#43, other/repo#44 and other/repo#45.");
   try {

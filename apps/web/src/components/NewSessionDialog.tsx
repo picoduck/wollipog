@@ -79,7 +79,7 @@ import { BusyButton } from "./ui/BusyButton.js";
 import { FieldError } from "./FieldError.js";
 import { FieldWarning } from "./FieldWarning.js";
 import { Notice } from "./Notice.js";
-import { checkFullControlLocations, FullControlBlockedError, FullControlLocationNotices, FullControlLocationsToReview, launchFullControlCampaign, type FullControlLocationReport } from "./FullControlPreparation.js";
+import { checkFullControlLocations, FullControlBlockedError, FullControlFirstMessageNotice, FullControlLocationNotices, FullControlLocationsToReview, launchFullControlCampaign, type FullControlLocationReport } from "./FullControlPreparation.js";
 import {
   evaluateOrchestratorPolicy,
   policyDraftFromDefaults,
@@ -1912,6 +1912,8 @@ export function NewSessionDialog({
           </SessionOptions>
 
           {problemFor("form")}
+          {/* Full Control takes its issues from the first message, so the launch says how to name them. */}
+          {fullControlLaunch && <FullControlFirstMessageNotice />}
           {/* `contents`: each notice takes the form's own spacing; the wrapper only holds the scroll target. */}
           {fullControlLaunch && <div ref={locationNoticesRef} style={{ display: "contents" }}><FullControlLocationNotices report={locationReport} /></div>}
           {/* A request failure sits at the body's end, directly above the footer (§7.3, §13.2). */}

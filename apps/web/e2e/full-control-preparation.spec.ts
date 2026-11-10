@@ -144,6 +144,7 @@ for (const viewport of viewports) {
       const start = page.getByRole("button", { name: "Create Session", exact: true });
       // Custom, for comparison: the same row and the same action.
       await expect(control).not.toContainText(FULL_CONTROL_LINE);
+      await expect(page.locator(".notice").filter({ hasText: "Name Issues in Your First Message" })).toHaveCount(0);
       await expect(start).toBeEnabled();
       await shoot(page, control, `${prefix}-custom.png`);
       await editSessionPolicy(page, "Decisions", async (policy) => {
@@ -163,6 +164,12 @@ for (const viewport of viewports) {
       await expect(start).toBeEnabled();
       expect(preflights, "nothing is checked or shown before Start").toHaveLength(0);
       await shoot(page, control, `${prefix}-full-control.png`);
+      // The first message names the issues (cwi_255bc2cf): the launch says how to write another repository's.
+      const firstMessage = page.locator(".notice").filter({ hasText: "Name Issues in Your First Message" });
+      await expect(firstMessage).toHaveCount(1);
+      await expect(firstMessage).toContainText("For another repository in the campaign, write owner/repo#12 or paste the issue's link, because a bare number always means this repository.");
+      await expect(firstMessage.locator("code")).toHaveText(["#12", "owner/repo#12"]);
+      await shoot(page, firstMessage, `${prefix}-first-message.png`);
 
       await start.click();
       await expect(start).toHaveAttribute("aria-busy", "true");
