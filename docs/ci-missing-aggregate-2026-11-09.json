@@ -219,6 +219,13 @@
     }
   ],
   "workflowBlobSha": "8e659c50499b2c34c71534a402911aab833ebd87",
+  "workflowAnnotation": {
+    "source": "https://github.com/picoduck/wollipog/actions/runs/42671030052",
+    "level": "error",
+    "message": "Internal server error.",
+    "correlationId": "3072fa72-f54a-44ea-b9ee-b77c8e1b83e9",
+    "scope": "workflow; omitted from job/check-run annotations and gh run view"
+  },
   "checkSuite": {
     "id": 115572303054,
     "status": "completed",

@@ -287,8 +287,8 @@ same-head replacement, dependency-timeout, or cancellation interleaving.
 ## Missing Required Aggregate
 
 **Means:** a completed CI attempt has no protected aggregate record, or the API evidence is incomplete.
-**First check:** collect the exact attempt's full job inventory and compare its check suite.
-**Escalate to:** a repository operator, then GitHub Support if no workflow or job diagnostic explains the absence.
+**First check:** collect the exact attempt's full job inventory, compare its check suite, and open the workflow run page's Annotations section.
+**Escalate to:** a repository operator, then GitHub Support for workflow-level internal errors or unexplained absence.
 
 Use the version-2 report (`--all-events --json`) when investigating presence and outcome.
 Its per-attempt `aggregation` field is independent of timestamps: `absent` means a terminal
@@ -319,13 +319,19 @@ reason/time. Verify all pages and uniqueness against `total_count`; do not call 
 listing absent. Check that the suite is for the same tested SHA. The check-suite endpoint lists
 current check records, so do not use it to attribute a historical attempt after reruns; correlate
 job IDs to the exact attempt. Inspect output/annotations on relevant checks and the run page
-for orchestration errors. Sanitize before sharing; raw responses may contain runner and user identities.
+for orchestration errors. The run page is a separate evidence source: workflow-level errors may
+be omitted from the jobs/check-run annotations APIs and from `gh run view`. In the November 9
+incident, only that page exposed GitHub's internal server error and correlation ID. Retain that
+ID for support; do not treat successful job annotations as proof that no workflow error exists.
+Sanitize before sharing; raw responses may contain runner and user identities.
 
 A recorded queue wait is a scheduling investigation under #2674; a failing work job needs its
 failure investigated first. A completed run without an aggregate cannot gain one by waiting.
-If no record explains the missing job, preserve the public run links and workflow comparison for
-an operator to escalate to GitHub Support. A successful identical definition is comparison evidence,
-not proof of a specific GitHub outage. See the [November 9 incident](ci-missing-aggregate-2026-11-09.md).
+For a workflow internal server error or unexplained missing job, preserve the public run links,
+error/correlation ID when present, and workflow comparison for an operator to escalate to GitHub
+Support. A successful identical definition alone does not prove a GitHub outage; a reported internal
+error identifies a failure class without revealing its internal cause. See the
+[November 9 incident](ci-missing-aggregate-2026-11-09.md).
 
 Recovery requires the existing gates: recheck main health, PR head, review and required branch checks;
 obtain the applicable merge authorization before re-enqueueing after removal. A rerun also needs the

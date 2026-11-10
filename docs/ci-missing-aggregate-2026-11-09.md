@@ -14,7 +14,8 @@ No workflow, queue setting, permission, or live stack was changed for this inves
 | Complete jobs listing | 20 of 20 records: 18 success, 2 skipped |
 | Check suite 115572303054 | Failure; 20 checks, matching the jobs inventory |
 | Required aggregate | No job or check named `Typecheck, Test & Sidecar Bundle` |
-| Available job annotations | Passing Playwright summaries; no explanatory failure annotation in `gh run view` |
+| Job annotations / `gh run view` | Passing Playwright summaries; workflow-level error omitted |
+| Workflow run page, Annotations | `Internal server error. Correlation ID: 3072fa72-f54a-44ea-b9ee-b77c8e1b83e9` |
 | [PR #4409](https://github.com/picoduck/wollipog/pull/4409) | Removed November 9 at 20:07:18 UTC, `checks_timed_out`; unchanged head later merged |
 
 The successful work includes all three unit shards, ten Chromium shards, WebKit,
@@ -37,11 +38,17 @@ The aggregate is absent, not a recorded skipped or queued job. The workflow had 
 concluded failure about 100 minutes before queue removal; continuing to wait could not
 produce a result in that completed attempt.
 
-No deterministic workflow defect or GitHub scheduler root cause is established.
-An identical successful workflow weakens a deterministic-definition explanation but does not
-exclude an event-dependent evaluation or infrastructure failure. Public job metadata and
-annotations do not explain a job that GitHub never recorded. Obtaining GitHub's orchestration
-diagnostics requires operator escalation; a local expression fixture cannot reproduce those internals.
+The run page reports a GitHub internal server error at workflow level. Its Annotations section
+contains one error and twelve notices; the error links to the workflow rather than to any job.
+The public jobs/check-run APIs and `gh run view` expose the twelve job notices but omit this
+workflow-level error. Their lack of an error annotation does not establish that GitHub reported none.
+
+This establishes the reported infrastructure failure class, not the internal mechanism that left
+the aggregate absent. No deterministic repository workflow defect is established. An identical
+successful workflow is comparison evidence, not a reproduction of the error. Preserve the correlation
+ID above for GitHub Support; obtaining internal orchestration diagnostics requires operator escalation.
+A local expression fixture cannot reproduce those internals. The unchanged-head re-enqueue and
+eventual merge demonstrate recovery in this occurrence, not prevention of recurrence.
 
 The delivered correction is to investigation output: version-2 per-attempt reports now classify
 absent, pending, running, passing, failing, cancelled, skipped, and unmeasured aggregation
