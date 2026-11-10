@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { runnerSupportsProtocol, type GitPrSummary, type GitRequestDiffInfo } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { ApiError } from "../api.js";
 import { safeExternalHref } from "../external-href.js";
 import { GitDiffViewer } from "./GitDiffViewer.js";
 
@@ -31,8 +32,9 @@ export function RequestDiff({ sessionId, pr, online, protocol, observation }: {
       if (!data.requestDiff || data.requestDiff.requestUrl !== pr.url) {
         setError("The machine did not return a diff for this request.");
       } else setResult(data.requestDiff);
-    }).catch(() => {
-      if (current) setError("The request diff is unavailable or its revisions changed while loading. Reload or open the forge.");
+    }).catch((cause: unknown) => {
+      if (current) setError(cause instanceof ApiError ? cause.message
+        : "The request diff is unavailable or its revisions changed while loading. Reload or open the forge.");
     }).finally(() => { if (current) setBusy(false); });
     return () => { current = false; };
   }, [api, sessionId, pr.url, pr.baseRef, pr.headRef, pr.state, open, online, supported, reload, observation]);

@@ -332,6 +332,7 @@ export function ReviewPanel({
   const [diffReadAt, setDiffReadAt] = useState<number | null>(null);
   /** The header Refresh's own reload of status, diff and findings together. */
   const [refreshing, setRefreshing] = useState(false);
+  const [requestDiffRefresh, setRequestDiffRefresh] = useState(0);
   const [diffError, setDiffError] = useState<string | null>(null);
   // Per-hunk staging (PR-B): the in-flight mutation's `${path}#${index}` key.
   const [hunkBusy, setHunkBusy] = useState<string | null>(null);
@@ -995,6 +996,7 @@ export function ReviewPanel({
       // captured scope and revisions keep that from touching anything newer.
       if (mode === "push" ? !!pr : created) releaseSubmitted(submitted);
       if (pr && current()) {
+        setRequestDiffRefresh((value) => value + 1);
         if (mode === "push") {
           // Without forge tooling the runner returns a creation page; the request already exists.
           const url = created ? pr.url : pushTarget?.url ?? pr.url;
@@ -1125,6 +1127,7 @@ export function ReviewPanel({
   const fileCount = status?.files.length ?? 0;
 
   const refreshReview = async () => {
+    setRequestDiffRefresh((value) => value + 1);
     setRefreshing(true);
     try {
       await Promise.all([runnerOnline ? git.refresh() : null, loadDiff(), loadFindings(), loadReviewRuns()]);
@@ -1395,7 +1398,7 @@ export function ReviewPanel({
               pr={summaryPr}
               online={runnerOnline}
               protocol={runnerProtocolVersion}
-              observation={git.observation}
+              observation={requestDiffRefresh}
             />}
             <ReviewRuns
               key={`runs-${session.id}`}

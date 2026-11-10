@@ -2156,10 +2156,16 @@ export async function loadRequestDiff(
   requestUrl: string,
   read: (args: string[]) => Promise<string>,
 ): Promise<GitRequestDiffInfo> {
-  const prefix = `${remote.webUrl}/${remote.provider === "github" ? "pull" : "-/merge_requests"}/`;
-  const suffix = requestUrl.startsWith(prefix) ? requestUrl.slice(prefix.length) : "";
-  if (!/^[1-9][0-9]*$/.test(suffix)) throw new Error("the request does not belong to the origin repository");
   const github = remote.provider === "github";
+  const url = new URL(requestUrl);
+  const expectedPath = `/${remote.project}/${github ? "pull" : "-/merge_requests"}/`;
+  const path = github ? url.pathname.toLowerCase() : url.pathname;
+  const prefix = github ? expectedPath.toLowerCase() : expectedPath;
+  const suffix = path.startsWith(prefix) ? path.slice(prefix.length) : "";
+  if (url.host.toLowerCase() !== remote.host.toLowerCase() || !["http:", "https:"].includes(url.protocol) ||
+      url.username || url.password || url.search || url.hash || !/^[1-9][0-9]*$/.test(suffix)) {
+    throw new Error("the request does not belong to the origin repository");
+  }
   const endpoint = github ? `repos/${remote.project}/pulls/${suffix}`
     : `projects/${encodeURIComponent(remote.project)}/merge_requests/${suffix}`;
   const metadata = (raw: string) => {
@@ -2205,7 +2211,7 @@ export async function loadRequestDiff(
       const change = jsonObject(entry);
       const path = githubReviewPath(change?.new_path);
       const oldPath = githubReviewPath(change?.old_path);
-      if (!path || !oldPath || typeof change?.diff !== "string") throw new Error("GitLab returned invalid diff paths");
+      if (!path || !oldPath || /[\x00-\x1f\x7f]/.test(path + oldPath) || typeof change?.diff !== "string") throw new Error("GitLab returned invalid diff paths");
       if (change.collapsed || change.too_large) incomplete = true;
       if (!change.diff && !change.renamed_file) incomplete = true;
       return `diff --git a/${oldPath} b/${path}\n`
@@ -2235,7 +2241,8 @@ export async function loadRequestDiff(
 }
 
 async function requestDiff(cwd: string, requestUrl: string): Promise<GitRequestDiffInfo> {
-  const remote = parseForgeRemote((await git(cwd, ["remote", "get-url", "origin"])).trim());
+  const remoteUrl = (await git(cwd, ["remote", "get-url", "origin"])).trim();
+  const remote = parseForgeRemote(remoteUrl) ?? credentialFreeGitHubRemote(remoteUrl);
   if (!remote) throw new Error("the origin remote is not a supported forge repository");
   if (remote.provider !== "github") {
     const readiness = await gitlabReadiness(cwd, remote);

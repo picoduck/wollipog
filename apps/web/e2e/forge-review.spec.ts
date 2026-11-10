@@ -23,10 +23,10 @@ test("request diff is distinct from local Branch and safely read-only", async ({
 });
 
 test("unsupported, wrong-request and stale reads never display local changes as the request", async ({ page }) => {
-  for (const variant of ["oldDiff", "wrong", "stale"]) {
+  for (const variant of ["oldDiff", "wrong", "stale", "authError"]) {
     await page.goto(`/forge-review-e2e.html?request=1&${variant}=1`);
     await page.getByText("Request Diff", { exact: true }).click();
-    await expect(page.getByText(variant === "oldDiff" ? /does not support request diffs/ : variant === "wrong" ? /did not return a diff/ : /revisions changed while loading/)).toBeVisible();
+    await expect(page.getByText(variant === "oldDiff" ? /does not support request diffs/ : variant === "wrong" ? /did not return a diff/ : variant === "authError" ? /Authenticated GitLab integration is unavailable/ : /revisions changed while loading/)).toBeVisible();
     await expect(page.getByText("authoritative request head", { exact: true })).toHaveCount(0);
   }
 });

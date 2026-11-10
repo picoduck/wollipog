@@ -44,6 +44,28 @@ test("nested host-qualified GitLab validates diff_refs and encodes the complete 
   assert.deepEqual(calls[1], ["api", "projects/team%2Fsub%2Frepo/merge_requests/19/changes"]);
 });
 
+test("GitHub canonical URL casing and configured HTTP GitLab retain exact repository identity", async () => {
+  const canonical = "https://github.com/Owner/Repo/pull/19";
+  const result = await loadRequestDiff(gh, canonical, async (args) => {
+    if (args.includes("-H")) return patch;
+    if (args[1]?.includes("compare")) return JSON.stringify({ merge_base_commit: { sha: base } });
+    return JSON.stringify({ ...github(), html_url: canonical });
+  });
+  assert.equal(result.requestUrl, canonical);
+  const httpUrl = glUrl.replace("https:", "http:");
+  const httpResult = await loadRequestDiff(gl, httpUrl, async (args) => JSON.stringify({
+    ...(args[1]?.endsWith("/changes") ? changes() : gitlab()), web_url: httpUrl,
+  }));
+  assert.equal(httpResult.requestUrl, httpUrl);
+});
+
+test("GitLab filenames cannot inject patch headers through control characters", async () => {
+  for (const path of ["a\n+++ b/README.md", "a\rhidden", "a\tname", "a\x7fname"]) {
+    await assert.rejects(loadRequestDiff(gl, glUrl, async (args) => JSON.stringify(args[1]?.endsWith("/changes")
+      ? { ...changes(), changes: [{ ...changes().changes[0], new_path: path }] } : gitlab())), /invalid diff paths/);
+  }
+});
+
 for (const url of ["https://evil.test/owner/repo/pull/19", `${ghUrl}?token=x`, `${ghUrl}/files`, `${gh.webUrl}/pull/19/../../20`, `${gh.webUrl}/pull/0`]) {
   test(`rejects untrusted request identity before any forge access: ${url}`, async () => {
     await assert.rejects(loadRequestDiff(gh, url, async () => { assert.fail("must not read"); }), /origin repository/);

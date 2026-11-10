@@ -1,7 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { PROTOCOL_VERSION, type GitStatusInfo, type ReviewFinding, type SessionView } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { ReviewPanel } from "../components/ReviewPanel.js";
@@ -67,6 +67,7 @@ const client: ApiClient = {
   git: async (_id, body) => {
     if (body.action !== "request_diff") throw new Error("Unexpected action");
     if (params.has("stale")) throw new Error("revisions changed");
+    if (params.has("authError")) throw new ApiError("Authenticated GitLab integration is unavailable on this machine.", 409);
     return { requestDiff: {
       requestUrl: params.has("wrong") ? "https://evil.test/other/pull/19" : body.requestUrl!,
       headOid: "a".repeat(40), baseOid: "b".repeat(40), targetOid: "c".repeat(40),
