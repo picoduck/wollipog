@@ -166,6 +166,24 @@ jobs:
           fi
           node apps/runner/scripts/verify-provider-home-worker-binary.mjs --packaged
 
+      - name: Verify Darwin Profile Creation Conformance
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The baseline is fixed production code, used only for inert ACL compatibility fixtures.
+          git fetch --depth=1 origin a8522cddd10699809e8a2cf8f0b6f9d0937e5d60
+          rc=0
+          output=$(node --import tsx --test --test-reporter=tap apps/runner/src/provider-profile-creation-darwin.test.ts < /dev/null) || rc=$?
+          printf '%s\n' "$output"
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          if ! printf '%s\n' "$output" | grep -qx '# skipped 0'; then
+            echo "Darwin native creation conformance must actually execute" >&2
+            exit 1
+          fi
+          node --import tsx --test apps/runner/src/provider-profile-home-diagnostics.test.ts apps/runner/src/provider-profile-home-alias.test.ts apps/runner/src/provider-profile-managed-home.test.ts apps/runner/src/provider-profile-creation-fallback.test.ts apps/runner/src/provider-login.test.ts
+          node apps/runner/scripts/verify-profile-creation-darwin.mjs
+
       # The managed-worktree read-only rule and the hook-state mask (#1336) are only meaningful
       # against a real kernel mount, so this job installs bubblewrap and runs the enforcement tests
       # without their skip. A host that cannot create a user namespace would silently skip them,

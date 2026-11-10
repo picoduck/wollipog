@@ -63,14 +63,14 @@ function verifiedRoot(root: string): boolean {
 /**
  * Create the HOME of a new managed profile: `.agent-manager` and `profiles` are created 0700 when
  * missing and must be private real directories, and `<profileId>` itself must not exist yet. POSIX
- * only after a capability-checked, descriptor-relative helper operation. Linux is the currently
- * validated platform. `root` is trusted runner context (production constructs it from homedir),
+ * only after a capability-checked, descriptor-relative Linux/Darwin helper operation.
+ * `root` is trusted runner context (production constructs it from homedir),
  * never a wire/CLI path: even in synthetic contexts it must have the exact fixed layout.
  * Options carry the trusted runner staging directory; `create` is an in-process test seam.
  */
 export function createManagedProviderProfileHome(root: string, profileId: string, platform: NodeJS.Platform = process.platform,
   options: { helperDataDir?: string; create?: typeof runManagedProfileCreationHelper } = {}): string {
-  if (platform !== "linux") throw new ManagedProfileDirectoryError("profile_home", "unsupported_platform");
+  if (platform !== "linux" && platform !== "darwin") throw new ManagedProfileDirectoryError("profile_home", "unsupported_platform");
   const osHome = dirname(dirname(root));
   if (!isAbsolute(root) || root !== resolve(root) || root !== managedProviderProfileRoot(osHome) || !isProviderProfileId(profileId))
     throw new ManagedProfileDirectoryError("profile_home", "unsupported_layout");

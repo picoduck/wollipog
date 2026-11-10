@@ -12,9 +12,9 @@ import { runManagedProfileCreationHelper } from "./provider-home-lease-io.js";
 // helper installation suite), including in namespaces that correctly refuse shared cache roots.
 let fixture: string, binary: string;
 before(() => {
-  if (process.platform !== "linux") return;
+  if (process.platform !== "linux" && process.platform !== "darwin") return;
   fixture = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-diagnostic-helper-"))); binary = join(fixture, "helper");
-  execFileSync("/usr/bin/cc", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", "-static",
+  execFileSync(process.platform === "darwin" ? "/usr/bin/clang" : "/usr/bin/cc", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", ...(process.platform === "linux" ? ["-static"] : []),
     fileURLToPath(new URL("../native/provider-home-lease-io.c", import.meta.url)), "-o", binary]);
 });
 after(() => { if (fixture) rmSync(fixture, { recursive: true, force: true }); });
@@ -24,7 +24,7 @@ const create = (root: string, profileId: string) => createManagedProviderProfile
 const id = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
 for (const component of ["manager_root", "profiles_root"] as const) {
   for (const reason of ["symlink", "not_directory", "group_or_other_write"] as const) {
-    test(`managed profile creation identifies ${component}/${reason} without exposing paths`, { skip: process.platform !== "linux" }, (t) => {
+    test(`managed profile creation identifies ${component}/${reason} without exposing paths`, { skip: process.platform === "win32" }, (t) => {
       const home = mkdtempSync(join(tmpdir(), "wollipog-root-diagnostic-"));
       t.after(() => rmSync(home, { force: true, recursive: true }));
       const manager = join(home, ".agent-manager");
@@ -49,7 +49,7 @@ for (const component of ["manager_root", "profiles_root"] as const) {
 }
 
 for (const mode of [0o750, 0o755]) {
-  test(`diagnostics preserve admission of an existing ${mode.toString(8)} root`, { skip: process.platform !== "linux" }, (t) => {
+  test(`diagnostics preserve admission of an existing ${mode.toString(8)} root`, { skip: process.platform === "win32" }, (t) => {
     const home = mkdtempSync(join(tmpdir(), "wollipog-root-admission-"));
     t.after(() => rmSync(home, { force: true, recursive: true }));
     const manager = join(home, ".agent-manager"); mkdirSync(manager); chmodSync(manager, mode);
@@ -59,7 +59,7 @@ for (const mode of [0o750, 0o755]) {
   });
 }
 
-test("an unavailable OS home reports its safe component without retaining the raw filesystem cause", { skip: process.platform !== "linux" }, (t) => {
+test("an unavailable OS home reports its safe component without retaining the raw filesystem cause", { skip: process.platform === "win32" }, (t) => {
   const base = mkdtempSync(join(tmpdir(), "wollipog-root-unavailable-"));
   t.after(() => rmSync(base, { force: true, recursive: true }));
   const home = join(base, "missing-home");

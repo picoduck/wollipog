@@ -25,6 +25,7 @@
 #include <sys/xattr.h>
 #elif defined(__APPLE__)
 #include <sys/mount.h>
+#include <sys/acl.h>
 #endif
 
 #define MAX_ENTRIES 8208U
@@ -466,13 +467,86 @@ static int profile_create_open_home(const char *path) {
   }
   free(copy); return current;
 }
+/* Creation-only Darwin ACL admission. Repair deliberately keeps its separate unsupported
+ * Darwin gate. A deny ACE cannot grant a foreign principal write/delete rights. Inheritance
+ * of known deny flags preserves that property; allow ACEs and deferred/unknown flags do not.
+ * No ACL is edited and no principal names or ACL bytes leave this helper. */
+#ifdef __APPLE__
+static int profile_create_acl_fault(const char *point) {
+#ifdef WOLLIPOG_PROFILE_CREATE_DARWIN_TEST
+  const char *fault = getenv("WOLLIPOG_PROFILE_CREATE_DARWIN_FAULT");
+  return fault && !strcmp(fault, point);
+#else
+  (void)point; return 0;
+#endif
+}
+static int profile_create_darwin_acl(int fd) {
+  struct stat before, metadata, after; struct statfs filesystem;
+  if (fstat(fd, &before) || fstatfs(fd, &filesystem) ||
+      (strcmp(filesystem.f_fstypename, "apfs") && strcmp(filesystem.f_fstypename, "hfs"))) return 0;
+  filesec_t security = filesec_init();
+  if (!security) return 0;
+  acl_t acl = NULL, empty = NULL, one = NULL; int safe = 0, present = 0;
+  if (profile_create_acl_fault("stat") || fstatx_np(fd, &metadata, security) || !same_stamp(&before, &metadata) ||
+      before.st_uid != metadata.st_uid || before.st_mode != metadata.st_mode) goto done;
+  /* Successful metadata plus an explicit property query establishes absence. Neither NULL
+   * from acl_get_fd_np nor an errno by itself establishes that an ACL is absent. */
+  if (profile_create_acl_fault("query") || filesec_query_property(security, FILESEC_ACL, &present)) goto done;
+  if (!present) { safe = 1; goto done; }
+  if (profile_create_acl_fault("property") || filesec_get_property(security, FILESEC_ACL, &acl) ||
+      !acl || (void *)acl == _FILESEC_REMOVE_ACL || acl_valid(acl)) goto done;
+#ifdef WOLLIPOG_PROFILE_CREATE_DARWIN_TEST
+  if (profile_create_acl_fault("empty")) { acl_free(acl); acl = acl_init(0); if (!acl) goto done; }
+#endif
+  acl_flagset_t flags;
+  if (acl_get_flagset_np(acl, &flags)) goto done;
+#ifdef WOLLIPOG_PROFILE_CREATE_DARWIN_TEST
+  if (profile_create_acl_fault("unknown_flags") && acl_add_flag_np(flags, (acl_flag_t)(1U << 30))) goto done;
+  if (profile_create_acl_fault("deferred") && acl_add_flag_np(flags, ACL_FLAG_DEFER_INHERIT)) goto done;
+#endif
+  if (acl_get_flag_np(flags, (acl_flag_t)~(unsigned)ACL_FLAG_NO_INHERIT) != 0) goto done;
+  /* Derive the entry count from public serialized sizes, not iterator exhaustion/errno or
+   * private structure layout. Every expected entry must be retrieved and classified. */
+  empty = acl_init(0); one = acl_init(1); acl_entry_t sample;
+  if (!empty || !one || acl_create_entry(&one, &sample)) goto done;
+  ssize_t base = acl_size(empty), unit = acl_size(one) - base, size = acl_size(acl);
+  if (base < 0 || unit <= 0 || size < base || (size - base) % unit || (size - base) / unit > ACL_MAX_ENTRIES) goto done;
+  unsigned count = (unsigned)((size - base) / unit);
+  acl_permset_mask_t supported;
+  if (acl_maximal_permset_mask_np(&supported)) goto done;
+  unsigned known_flags = ACL_ENTRY_INHERITED | ACL_ENTRY_FILE_INHERIT | ACL_ENTRY_DIRECTORY_INHERIT |
+    ACL_ENTRY_LIMIT_INHERIT | ACL_ENTRY_ONLY_INHERIT;
+  for (unsigned i = 0; i < count; i++) {
+    acl_entry_t entry; acl_tag_t tag; acl_permset_mask_t permissions;
+    if (profile_create_acl_fault("entry") || acl_get_entry(acl, (int)i, &entry) ||
+        acl_get_tag_type(entry, &tag) || tag != ACL_EXTENDED_DENY ||
+        acl_get_flagset_np(entry, &flags) || acl_get_flag_np(flags, (acl_flag_t)~known_flags) != 0 ||
+        acl_get_permset_mask_np(entry, &permissions) || (permissions & ~supported)) goto done;
+  }
+  safe = 1;
+done:
+  if (one) acl_free(one);
+  if (empty) acl_free(empty);
+  if (acl && (void *)acl != _FILESEC_REMOVE_ACL) acl_free(acl);
+  filesec_free(security);
+  return safe && !fstat(fd, &after) && same_stamp(&before, &after) &&
+    before.st_uid == after.st_uid && before.st_mode == after.st_mode;
+}
+#endif
+static int profile_create_acl_clear(int fd) {
+#ifdef __APPLE__
+  return profile_create_darwin_acl(fd);
+#else
+  return profile_root_acl_clear(fd);
+#endif
+}
 static const char *profile_create_safe(int fd, struct stat *info) {
   if (fstat(fd, info)) return "unavailable";
   const char *reason = profile_root_stat_reason(info);
   if (reason) return reason;
   if (info->st_mode & 0022) return "group_or_other_write";
   if (info->st_mode & 07000) return "unsupported_layout";
-  if (!profile_root_acl_clear(fd)) return "unsupported_acl";
+  if (!profile_create_acl_clear(fd)) return "unsupported_acl";
   return NULL;
 }
 /* A failed check after any successful mkdir cannot imply a clean refusal. */
@@ -493,7 +567,7 @@ static const char *profile_create_check(int *fds, const char **names, struct sta
 }
 static int profile_create_command(int argc, char **argv) {
   if (argc == 3 && !strcmp(argv[2], "--capabilities")) {
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
     puts("{\"version\":1,\"supported\":true}");
 #else
     puts("{\"version\":1,\"supported\":false}");
@@ -501,7 +575,7 @@ static int profile_create_command(int argc, char **argv) {
     return 0;
   }
   if (argc != 4 || !profile_create_id(argv[3])) return profile_create_result("profile_home", "unsupported_layout", 0);
-#ifndef __linux__
+#if !defined(__linux__) && !defined(__APPLE__)
   return profile_create_result("os_home", "unsupported_platform", 0);
 #endif
   parent = getppid(); root_path = argv[2]; root_fd = profile_create_open_home(root_path);

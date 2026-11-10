@@ -13,7 +13,7 @@ const id = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
 test("unvalidated creation platforms and caller-selected layouts refuse before the helper", () => {
   let calls = 0;
   const create = () => { calls++; return { ok: true as const, component: "profile_home" as const, reason: "created" as const }; };
-  for (const platform of ["darwin", "win32", "freebsd"] as const) {
+  for (const platform of ["win32", "freebsd"] as const) {
     assert.throws(() => createManagedProviderProfileHome("/synthetic/home/.agent-manager/profiles", id, platform, { create }),
       (error: unknown) => JSON.stringify(error).includes('"reason":"unsupported_platform"'));
   }
@@ -35,7 +35,6 @@ test("fixed native profile creation preserves admission and detects pinned compo
   const create = (home: string, identity: string) => runManagedProfileCreationHelper(home, identity, () => binary);
   assert.equal(createManagedProviderProfileHome(managedProviderProfileRoot(adapterHome), id, "linux", { create }), join(adapterHome, ".agent-manager", "profiles", id));
   assert.throws(() => createManagedProviderProfileHome(join(adapterHome, "arbitrary"), id, "linux", { create }), /could not be verified/u);
-  assert.throws(() => createManagedProviderProfileHome(managedProviderProfileRoot(adapterHome), id, "darwin", { create }), /could not be verified/u);
   const linkedHome = join(fixture, "linked-os-home"); symlinkSync(adapterHome, linkedHome);
   assert.equal(managedProviderProfileRoot(linkedHome), join(linkedHome, ".agent-manager", "profiles"), "configured spelling remains stable for account classification");
   const linkedId = "7f1c2d3e-4a5b-4c6d-8e7f-001122334455";

@@ -20,13 +20,20 @@ mkdir and before success. Existing `0750` and `0755` roots remain accepted; `077
 refused. Fresh directories use `0700` subject to the process umask. Existing payloads are never
 read, moved, removed or modified. Creation never chmods, chowns or repairs anything.
 Unlike the old pathname mkdir sequence, the OS home itself must also be expected-owner,
-non-writable by group/others and free of special mode bits and unverified access/default ACLs.
+non-writable by group/others and free of special mode bits and unverified ACL grants.
 This conservative ancestry requirement can refuse operator-managed ACL layouts even when the
 owned roots were acceptable previously; it offers guidance, never changes the OS home.
 
-Linux is the validated creation platform. macOS, Windows and other platforms return explicit
-unsupported guidance before creation; shared POSIX APIs alone do not establish equivalent ACL
-and metadata behavior. Existing account directories do not pass through this new-account path.
+Linux creation requires absence of POSIX access/default ACLs. Darwin creation uses successful
+descriptor metadata retrieval and an explicit ACL-property query on APFS/HFS. It accepts absent
+or empty ACLs and known deny-only entries (including known inheritance flags). A deny entry adds
+no write/delete permission to any principal. Allow entries, deferred/unknown flags or permissions,
+and metadata/retrieval errors receive `unsupported_acl` guidance; ACLs are never removed or edited.
+This preserves ordinary non-granting deny-only homes without pretending every operator ACL is
+supported. The native checks and complete Add Account/import/admission paths are exercised on the
+hosted macOS job, including the actual packaged native and lease-worker assets. Darwin repair
+remains unsupported. Windows/other unvalidated platforms refuse before creation. Existing
+account directories do not pass through this new-account path.
 
 Failures use the existing `managed_profile_directory` error with a fixed `component`:
 `os_home`, `manager_root`, `profiles_root` or `profile_home`. Fixed reasons include `symlink`,

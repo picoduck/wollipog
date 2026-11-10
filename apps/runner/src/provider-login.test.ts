@@ -1193,7 +1193,7 @@ test("removing an account is refused while it signs in, while an agent defaults 
 });
 
 const posixOnly = { skip: process.platform === "win32" };
-const managedCreationOnly = { skip: process.platform !== "linux" };
+const managedCreationOnly = { skip: process.platform === "win32" };
 const INSTANCE = "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
 const GRANT = "2a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
 
