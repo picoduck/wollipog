@@ -3720,7 +3720,7 @@ export class SessionManager {
           this.forgetWorktreeKept(sessionId, path);
           // So has whatever an earlier worktree on this path recorded under its id: this one's teardown
           // and marker are only what its own setup gives it, and its rollback inherits none (#4209).
-          this.forgetWorktreeRecordsAt(sessionId, worktreeIdForPath(path));
+          this.forgetWorktreeRecordsAt(sessionId, path, worktreeIdForPath(path));
           const proof = randomUUID();
           await stampWorktreeRollbackProof(path, proof, options);
           materializing.record!.rollbackProof = proof;
@@ -18989,13 +18989,34 @@ export class SessionManager {
     this.store.patchMeta(sessionId, { keptWorktreePaths: keptWorktreePaths.length ? keptWorktreePaths : undefined });
   }
 
-  /** Drop the teardown and process marker recorded under a worktree id, for a new worktree that takes
-   * that id. */
-  private forgetWorktreeRecordsAt(sessionId: string, worktreeId: string): void {
+  /** Git has just made a new worktree at `path`, which it does only where none is, so whatever an earlier
+   * worktree there recorded is no one's now (#4209). Its teardown and process marker go, under the new
+   * worktree's id and under the id of any row still naming that path. A row stored before ids came
+   * from the whole path has another id, a hash of its branch alone; that id's port block goes too,
+   * since no record will ever give it back once the new row replaces that one. An id another row
+   * still uses, at another path, keeps everything. */
+  private forgetWorktreeRecordsAt(sessionId: string, path: string, worktreeId: string): void {
     const latest = this.store.readMeta(sessionId);
-    if (!latest || (!latest.worktreeHooks?.[worktreeId] && !latest.worktreeProcessMarkers?.[worktreeId])) return;
-    const { [worktreeId]: _hooks, ...worktreeHooks } = latest.worktreeHooks ?? {};
-    const { [worktreeId]: _marker, ...worktreeProcessMarkers } = latest.worktreeProcessMarkers ?? {};
+    if (!latest) return;
+    const rows = [...this.attributedWorktrees(latest), ...(latest.locationHistory ?? []).flatMap((left) => left.worktrees)];
+    const here = (row: SessionWorktreeView) => sameWorktreePath(latest.context, row.path, path);
+    const staleIds = [...new Set(rows.filter((row) => here(row) && row.id !== worktreeId).map((row) => row.id))]
+      .filter((id) => !rows.some((row) => row.id === id && !here(row)));
+    const ids = [worktreeId, ...staleIds];
+    for (const id of staleIds) {
+      try {
+        this.worktreePortAllocator.release(this.worktreePortOwner(sessionId, id));
+      } catch (error) {
+        this.log(`session ${boundedSessionIdForLog(sessionId)} kept an earlier worktree's port block: ${errText(error)}`);
+      }
+    }
+    if (!ids.some((id) => latest.worktreeHooks?.[id] || latest.worktreeProcessMarkers?.[id])) return;
+    const worktreeHooks = { ...latest.worktreeHooks };
+    const worktreeProcessMarkers = { ...latest.worktreeProcessMarkers };
+    for (const id of ids) {
+      delete worktreeHooks[id];
+      delete worktreeProcessMarkers[id];
+    }
     this.store.patchMeta(sessionId, {
       worktreeHooks: Object.keys(worktreeHooks).length ? worktreeHooks : undefined,
       worktreeProcessMarkers: Object.keys(worktreeProcessMarkers).length ? worktreeProcessMarkers : undefined,

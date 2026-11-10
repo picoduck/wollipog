@@ -3766,6 +3766,76 @@ test("a requested worktree stored before ids came from the whole path keeps its 
   });
 });
 
+for (const shared of [false, true]) {
+test(`a requested worktree made again where a row stored under its branch's id was ${shared
+  ? "leaves that id's records to the other Location's row that shares it" : "gives that id's port block back"}`, async () => {
+  if (process.platform === "win32") return;
+  await withSession(`request-remade-stored-id-${shared ? "shared" : "alone"}`, async (h) => {
+    const teardownLog = join(h.root, "teardown-log");
+    commitSetupWithTeardown(h, h.docs, "main", teardownLog);
+    serveOriginLocally(h);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const meta = () => h.store.readMeta(h.sessionId)!;
+    const moved = meta().worktreePath!;
+    const goBack = async () => {
+      await h.manager.selectWorktree(h.sessionId, moved);
+      await waitFor(() => meta().worktreePath === moved && h.providers.at(-1)?.cwd === moved && meta().status === "idle",
+        "the session did not go back to its switch worktree");
+    };
+    const requesting = h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/legacy" });
+    await answerTrust(h, "trust");
+    const { worktree } = await requesting;
+    await goBack();
+    // As an earlier runner stored it, under the branch-only slot.
+    const oldId = requestedSlot("fix/legacy");
+    const oldOwner = `${h.sessionId}\0${oldId}`;
+    const newOwner = `${h.sessionId}\0${worktree.id}`;
+    const allocator = internalsOf(h).worktreePortAllocator;
+    const block = allocator.get(newOwner);
+    allocator.release(newOwner);
+    allocator.allocate(oldOwner, block);
+    const rekey = <T>(map: Record<string, T> | undefined) => {
+      const { [worktree.id]: value, ...rest } = map ?? {};
+      return value === undefined ? map : { ...rest, [oldId]: value };
+    };
+    h.store.patchMeta(h.sessionId, {
+      worktrees: meta().worktrees!.map((row) => row.id === worktree.id ? { ...row, id: oldId } : row),
+      worktreeHooks: rekey(meta().worktreeHooks), worktreeProcessMarkers: rekey(meta().worktreeProcessMarkers),
+    });
+    if (shared) {
+      // An earlier runner also gave the same branch name in App this id, so its row there shares it.
+      const elsewhere = join(h.root, "app-fix-legacy");
+      h.store.patchMeta(h.sessionId, { locationHistory: meta().locationHistory!.map((left, index) => index === 0
+        ? { ...left, worktrees: [...left.worktrees, { id: oldId, path: elsewhere, branch: "fix/legacy", source: "created" as const }] }
+        : left) });
+    }
+    const hooksBefore = meta().worktreeHooks?.[oldId];
+    const markerBefore = meta().worktreeProcessMarkers?.[oldId];
+    // A person removes it by hand, then asks for it again.
+    git(h.docs, "worktree", "remove", "--force", worktree.path);
+    git(h.docs, "branch", "--quiet", "-D", "fix/legacy");
+    const again = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/legacy" });
+    assert.equal(again.worktree.id, worktree.id, "the new worktree takes the id of its whole path");
+    assert.equal(meta().worktrees!.filter((row) => row.path === worktree.path).length, 1, "one row names the path");
+    if (shared) {
+      assert.deepEqual(allocator.get(oldOwner), block, "the shared id keeps its port block");
+      assert.deepEqual(meta().worktreeHooks?.[oldId], hooksBefore, "its teardown");
+      assert.equal(meta().worktreeProcessMarkers?.[oldId], markerBefore, "and its marker");
+      return;
+    }
+    assert.equal(allocator.get(oldOwner), undefined, "the stored row's port block is given back");
+    assert.equal(meta().worktreeHooks?.[oldId], undefined, "with its teardown");
+    assert.equal(meta().worktreeProcessMarkers?.[oldId], undefined, "and its marker");
+    await goBack();
+    await h.manager.discardWorktree(h.sessionId, worktree.path);
+    assert.equal(existsSync(worktree.path), false);
+    assert.equal(allocator.get(oldOwner), undefined);
+    assert.equal(allocator.get(newOwner), undefined, "and discarding the new one gives its own back");
+  });
+});
+}
+
 test("a requested worktree made again on a path an earlier one used rolls back with none of that one's teardown", async () => {
   if (process.platform === "win32") return;
   await withSession("request-remade-path", async (h) => {
