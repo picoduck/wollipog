@@ -1,9 +1,39 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GithubIssueClosureSnapshot } from "@wollipog/protocol";
-import { executeGithubIssueClosure, inspectGithubIssueClosure, IssueClosureInspectionError, issueClosureRun } from "./github-issue-closure.js";
+import { executeGithubIssueClosure, inspectGithubIssueClosure, reconcileGithubIssueClosure, IssueClosureInspectionError, issueClosureRun } from "./github-issue-closure.js";
 
 const connection = (nodes: unknown[] = []) => ({ nodes, pageInfo: { hasNextPage: false } });
+test("uncertain closure recovery reads exact state, reason, author and body without mutations (#4398)", async () => {
+  const approved = await snapshot(fixture());
+  const at = Date.parse("2026-01-01T00:00:00Z");
+  const comment = { id: "IC_1", body: approved.comment, author: { login: "closer" }, createdAt: "2026-01-01T00:00:01Z" };
+  for (const [name, change, expected] of [
+    ["closed with comment", {}, true], ["without comment", { comments: [] }, false],
+    ["open", { state: "OPEN" }, false], ["wrong reason", { stateReason: "COMPLETED" }, false],
+    ["other author", { comments: [{ ...comment, author: { login: "other" } }] }, false],
+    ["substring", { comments: [{ ...comment, body: `${approved.comment}\nextra` }] }, false],
+    ["newline mismatch", { comments: [{ ...comment, body: `${approved.comment}\n` }] }, false],
+    ["duplicate", { comments: [comment, { ...comment, id: "IC_2" }] }, false],
+    ["old comment", { comments: [{ ...comment, createdAt: "2025-01-01T00:00:00Z" }] }, false],
+    ["truncated", { truncated: true }, false],
+  ] as const) {
+    const value = change as { comments?: unknown[]; state?: string; stateReason?: string; truncated?: boolean };
+    const calls: string[][] = [];
+    const read = await reconcileGithubIssueClosure(approved, at, async (command, args) => {
+      calls.push([command, ...args]);
+      if (command === "git") return "https://github.com/team/repo.git";
+      return JSON.stringify({ data: { viewer: { login: "closer" }, repository: { nameWithOwner: approved.repository,
+        issue: { number: approved.issue, url: approved.url, state: value.state ?? "CLOSED", stateReason: value.stateReason ?? "NOT_PLANNED",
+          comments: { nodes: value.comments ?? [comment], pageInfo: { hasPreviousPage: value.truncated ?? false } } } } } });
+    });
+    assert.equal(read, expected, name);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1]![1], "api");
+    assert.ok(!calls.flat().some(arg => /mutation|closeIssue|addComment/.test(arg)));
+  }
+  await assert.rejects(() => reconcileGithubIssueClosure(approved, at, async () => { throw Error("unreadable"); }));
+});
 test("#4164 merge-queue delivery survives a comparison larger than the command buffer", async () => {
   const f = fixture();
   const bounded = issueClosureRun({ kind: "native" }, process.cwd());

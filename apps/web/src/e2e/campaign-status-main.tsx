@@ -103,7 +103,7 @@ const params = new URLSearchParams(window.location.search);
 const scenario = params.get("scenario") ?? "campaign";
 if (params.get("theme") === "light") document.documentElement.dataset.theme = "light";
 
-const NOW = Date.now();
+const NOW = params.has("closureRecovery") ? Date.parse("2026-01-01T12:00:00Z") : Date.now();
 const recoveryReason = params.get("recovery");
 const recoveryRecord = recoveryReason && ["missing_access", "missing_human_information", "boundary_enlargement",
   "human_required_rule", "unsupported_capability", "attempts_exhausted", "failed_checks", "reviewer_objection", "uncertain_outcome", "request_declined",
@@ -690,7 +690,12 @@ const projectionFor = (rev: number) => campaignProjection(
 const ownerScenario = ["before", "after", "rule"].includes(params.get("owners") ?? "") ? params.get("owners") as "before" | "after" | "rule" : null;
 const ownerRule = { source: "~/.codex/skills/issue-workflow/SKILL.md",
   quote: "Never merge a pull request without per-PR user authorization through the structured question tool." };
-const ownerSnapshot = { category: "owner_decision" as const, question: "Which credential design should the provider bridge use?",
+const ownerSnapshot = params.get("closureRecovery") === "owner" ? {
+  category: "owner_decision" as const, kind: "question" as const,
+  question: "Review the uncertain closure of picoduck/wollipog#4398 (occurrence closure_4398).",
+  material: "Wollipog could not prove the approved state reason and exact closing comment on the forge. Inspect https://github.com/picoduck/wollipog/issues/4398. Answer or dismiss this request to acknowledge the uncertainty and clear this recovery record. This does not close the issue, post a comment, or authorize another attempt.",
+  options: [{ optionId: "acknowledge", label: "Acknowledge Outcome", description: "Acknowledge the uncertainty." }],
+} : { category: "owner_decision" as const, question: "Which credential design should the provider bridge use?",
   material: "PR picoduck/wollipog#4141 at head 3f9c2e1. Both designs pass CI; the broker adds a helper process the owner would run.",
   recommendedOptionId: "lease", options: [
     { optionId: "lease", label: "Short-Lived Lease", description: "Credentials expire with the session." },
@@ -1321,7 +1326,7 @@ function Fixture() {
                   ))}
                 </div>
               </div>
-              {ownerScopeCards.length > 0 && session.pendingApproval && (
+              {(ownerScopeCards.length > 0 || params.get("closureRecovery") === "owner") && session.pendingApproval && (
                 <RequestDock session={session} requests={dockRequests(pendingRequests(withPresentedOwnerQuestions(session).pendingApproval))} runnerOnline />
               )}
             </div>

@@ -7339,6 +7339,9 @@ export class SessionsService {
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
     this.expireAutomationCreationDecisions(now);
+    for (const campaignId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
+      void this.reconcileUncertainIssueClosures(campaignId).catch(() => this.log.warn(`Issue closure recovery is pending for ${campaignId}`));
+    }
     this.campaignRecovery.maintain(now, runnerId);
     // A first message whose command expired or failed without a receipt reopens its wait.
     for (const { sessionId } of this.db.firstMessageDeliveries()) {
@@ -14310,6 +14313,7 @@ export class SessionsService {
     }
     const consumed = this.db.consumeGithubIssueClosure(occurrenceId, now);
     if (!consumed) return fail("issue-closure approval was consumed concurrently", 409);
+    this.issueClosureRecoveries.add(occurrenceId);
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
     this.retireResumeConsumedByRequester(consumed, now);
     this.hub.sessionChangedById(sessionId);
@@ -14367,6 +14371,7 @@ export class SessionsService {
       }
     }
     this.db.recordGithubIssueClosureResult(occurrenceId, result);
+    this.issueClosureRecoveries.delete(occurrenceId);
     this.log.info(JSON.stringify({ event: "github_issue_closure_result", sessionId, occurrenceId,
       resourceDigest: decision.resourceDigest, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
     this.hub.sessionChangedById(sessionId);
@@ -14533,6 +14538,84 @@ export class SessionsService {
       : `Neither the owner nor the root Orchestrator could be told: ${told.error ?? "the message was refused"}` }, delivered: told.ok };
   }
 
+  private readonly issueClosureRecoveries = new Set<string>();
+
+  /** Upgrade recovery uses the stored consumed occurrence. A durable read fence precedes dispatch;
+   * a lost read goes to the owner after restart, never to another mutation or an agent assertion. */
+  async reconcileUncertainIssueClosures(campaignId: string): Promise<void> {
+    const root = this.db.getSession(campaignId);
+    if (!root || root.archived || isTerminal(root.status)) return;
+    for (const decision of this.db.campaignRecoverySettledDecisions(campaignId)) {
+      if (decision.status !== "consumed" || decision.resourceSnapshot.category !== "issue_closure" ||
+          decision.issueClosureResult?.outcome !== "uncertain" || this.issueClosureRecoveries.has(decision.occurrenceId)) continue;
+      const pendingOwner = decision.issueClosureResult.reconciliation?.ownerDecisionOccurrenceId;
+      if (pendingOwner && this.db.workflowDecisionByOccurrence(pendingOwner)?.status === "pending") continue;
+      this.issueClosureRecoveries.add(decision.occurrenceId);
+      try {
+        const snapshot = decision.resourceSnapshot;
+        let result = decision.issueClosureResult;
+        if (!result.reconciliation) {
+          result = { ...result, reconciliation: { checkedAt: Date.now() } };
+          this.db.recordGithubIssueClosureResult(decision.occurrenceId, result);
+          const target = this.closureTarget(root, snapshot.repository);
+          let verified = false;
+          if (target && runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "issueClosureReconciliation")) {
+            const requestId = `issue_closure_reconcile_${randomUUID()}`;
+            try {
+              const response = await this.hub.requestFromRunner(target.runnerId, requestId, {
+                type: "github_issue_closure", operation: "reconcile", requestId, sessionId: decision.sessionId,
+                occurrenceId: decision.occurrenceId, snapshot, consumedAt: decision.consumedAt ?? result.completedAt,
+                ...(target.location ? { location: target.location } : {}),
+              }, 60_000);
+              verified = response.type === "github_issue_closure_result" && response.sessionId === decision.sessionId &&
+                response.ok === true && response.reconciled === true;
+            } catch { /* An unreadable forge is actionable owner recovery, never proof of success. */ }
+          }
+          if (verified) {
+            this.db.recordGithubIssueClosureResult(decision.occurrenceId, { outcome: "closed", completedAt: Date.now(),
+              reconciliation: { checkedAt: result.reconciliation!.checkedAt, verified: true } });
+            this.log.info(JSON.stringify({ event: "issue_closure_reconciled", entryPoint: "recovery_sweep", campaignId, occurrenceId: decision.occurrenceId, outcome: "closed" }));
+            continue;
+          }
+        }
+        // Reserved coordinates make this idempotent even if a restart lost the result update.
+        let requestId = `issue_closure_recovery_${decision.occurrenceId}`;
+        let question = this.db.workflowDecisionByRequestId(campaignId, requestId);
+        // A session stop may revoke an unanswered card. Keep one current request, and never read
+        // that revocation as acknowledgement or redispatch the forge read.
+        for (let n = 1; question?.status === "revoked" && n <= 20; n++) {
+          requestId = `issue_closure_recovery_${decision.occurrenceId}_${n}`;
+          question = this.db.workflowDecisionByRequestId(campaignId, requestId);
+        }
+        if (!question) {
+          const created = this.createWorkflowDecision(campaignId, { requestId,
+            resourceKey: `issue_closure_recovery:${decision.occurrenceId}`,
+            resourceSnapshot: { category: "owner_decision", kind: "question",
+              question: `Review the uncertain closure of ${snapshot.repository}#${snapshot.issue} (occurrence ${decision.occurrenceId}).`,
+              material: `Wollipog could not prove the approved state reason and exact closing comment on the forge. Inspect ${snapshot.url}. Answer or dismiss this request to acknowledge the uncertainty and clear this recovery record. This does not close the issue, post a comment, or authorize another attempt.`,
+              options: [{ optionId: "acknowledge", label: "Acknowledge Outcome" }] } }, () => true,
+          { trustedOwnerDecision: true, trustedIssueClosureRecovery: true });
+          if (created.ok) question = created.data ?? null;
+          this.log.info(JSON.stringify({ event: "issue_closure_recovery_owner_request", entryPoint: "recovery_sweep", campaignId,
+            occurrenceId: decision.occurrenceId, outcome: question ? "requested" : "pending" }));
+        }
+        if (question) {
+          const acknowledged = question.authority === "human" && ["approved", "denied"].includes(question.status);
+          this.db.recordGithubIssueClosureResult(decision.occurrenceId, { ...result,
+            reconciliation: { checkedAt: result.reconciliation!.checkedAt, ownerDecisionOccurrenceId: question.occurrenceId,
+              ...(acknowledged ? { acknowledgedAt: Date.now() } : {}) } });
+          if (acknowledged) this.log.info(JSON.stringify({ event: "issue_closure_recovery_acknowledged", entryPoint: "owner_answer",
+            campaignId, occurrenceId: decision.occurrenceId, ownerDecisionOccurrenceId: question.occurrenceId }));
+        }
+      } finally {
+        this.issueClosureRecoveries.delete(decision.occurrenceId);
+        const fresh = this.db.getSession(campaignId);
+        if (fresh) this.campaignRecovery.synchronize(fresh, Date.now());
+        this.hub.sessionChangedById(campaignId);
+      }
+    }
+  }
+
   createWorkflowDecision(
     sessionId: string,
     request: CreateWorkflowDecisionRequest,
@@ -14553,6 +14636,7 @@ export class SessionsService {
       trustedOwnerDecision?: boolean;
       /** The server's own report of a merge's closures (#4323): the only caller of its request ids. */
       trustedMergeClosureReport?: boolean;
+      trustedIssueClosureRecovery?: boolean;
       /** #4104: the Decision Model's screen of an implementation question, taken by the async
        * route just before this call. Without one, a Full Control question waits for its owner. */
       credentialScreen?: CredentialScreenFact },
@@ -14561,6 +14645,8 @@ export class SessionsService {
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
       return fail("requestId and resourceKey are required bounded identifiers", 400);
     }
+    if ((request.requestId.startsWith("issue_closure_recovery_") || request.resourceKey.startsWith("issue_closure_recovery:")) &&
+        !internal?.trustedIssueClosureRecovery) return fail("Issue closure recovery coordinates are reserved for the server", 400);
     // #4323: the server's merge closure reports are found again by their request id, so nobody else
     // may claim one and stand in for a report.
     if ((request.requestId.startsWith(MERGE_CLOSURE_REPORT_REQUEST_PREFIX) || request.resourceKey.startsWith(MERGE_CLOSURE_REPORT_RESOURCE_PREFIX)) &&
@@ -14917,6 +15003,7 @@ export class SessionsService {
     if (!resolved) return fail("this owner question was answered concurrently", 409);
     this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
     this.recordWorkflowDecisionAudit(resolved, answer ? "answered" : "denied", actor, now);
+    void this.reconcileUncertainIssueClosures(sessionId).catch(() => this.log.warn("Issue closure acknowledgement is pending"));
     this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(root);
     return ok(this.db.getSession(sessionId)!);

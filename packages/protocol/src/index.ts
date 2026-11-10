@@ -456,6 +456,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * the control plane by the runner, because an older control plane would ignore the field and ask
    * the question as an approval, and against the root's runner by the control plane. */
   ownerQuestions: 303,
+  issueClosureReconciliation: 350,
   /** v332 (#4359): explicit child clarifications, with free text and no consumable action grant. */
   childQuestions: 332,
   /** v308 (#4282): structured scope proposals, `proposal` on request_campaign_issue_scope_change.
@@ -5035,6 +5036,8 @@ export interface GithubIssueClosureResult {
   /** Why a `refused` outcome was refused (#4059). The control plane records one for every refusal;
    * a result stored by an older control plane omits it. */
   refusal?: GithubIssueClosureRefusal;
+  /** Read-only recovery of an uncertain mutation (#4398), never a new closure grant. */
+  reconciliation?: { checkedAt: number; verified?: true; ownerDecisionOccurrenceId?: string; acknowledgedAt?: number };
 }
 
 export interface AutomationCreationRequest {
@@ -9965,6 +9968,7 @@ export type GithubIssueClosureMessage = {
       /** v278 (#4060): also read the issue's epic members into the inspection and its digest. */
       epicMembers?: true }
   | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot }
+  | { operation: "reconcile"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot; consumedAt: number }
   /** v323 (#4119): only with `location`. A Location's runner holds no copy of the campaign's scope,
    * so its `execute` stops at the mutation fence and answers `prepared`. The control plane rechecks
    * the campaign's authority after those forge reads, and this lets the prepared closure go on. */
@@ -9979,6 +9983,8 @@ export interface GithubIssueClosureResultMessage {
   ok: boolean;
   inspection?: GithubIssueClosureInspection;
   result?: GithubIssueClosureResult;
+  /** Only a read of the exact issue state, reason and unique approved comment can prove this. */
+  reconciled?: boolean;
   /** v323 (#4119): a Location's `execute` passed every forge check and waits for `commit`. Nothing was written. */
   prepared?: true;
   error?: string;
