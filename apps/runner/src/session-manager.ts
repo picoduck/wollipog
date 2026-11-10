@@ -9,7 +9,7 @@ import { type BackgroundFollowUpView, type CampaignRetirementHold, CODEX_EXEC_RE
 import { CampaignIssueScopeRefusal, PublishedIssueMismatch, inspectCampaignFailedRun, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
 import { launchOrchestratorMeta, nextCampaignControl, validControlRevision } from "./campaign-control-order.js";
 import { boundedIssueNumbers, campaignBoundaryRepository, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
-import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
+import { executeGithubIssueClosure, inspectGithubIssueClosure, reconcileGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureLocation, GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, GitLabMergeClosuresMessage, GitLabMergeClosuresResultMessage, ForgeDecisionAction, ForgeDecisionActionMessage, ForgeDecisionActionOutcome, ForgeDecisionActionRefusalReason, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
@@ -21689,6 +21689,13 @@ export class SessionManager {
     if (this.campaignHostTargetRefusal(meta)) {
       return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a valid local or SSH host execution target belonging to its runner" };
     }
+    // A consumed operation's read-only outcome does not depend on current mutation scope.
+    if (message.operation === "reconcile") {
+      try {
+        return { ...base, ok: true, reconciled: await reconcileGithubIssueClosure(message.snapshot, message.consumedAt,
+          issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {})) };
+      } catch (error) { return issueClosureFailure(base, error); }
+    }
     const issue = message.operation === "inspect" ? message.issue : message.snapshot.issue;
     if (!meta.orchestrator.issueNumbers?.includes(issue)) {
       return { ...base, ok: false, failure: "campaign_authority_changed", error: "Issue is outside the human-authorized campaign scope" };
@@ -21774,6 +21781,9 @@ export class SessionManager {
     }
     const run = issueClosureRun({ kind: "native" }, cwd);
     try {
+      if (message.operation === "reconcile") return { ...base, ok: true,
+        reconciled: message.snapshot.repository.toLowerCase() === repository &&
+          await reconcileGithubIssueClosure(message.snapshot, message.consumedAt, run) };
       if (message.operation === "inspect") {
         const inspection = await inspectGithubIssueClosure(message.issue, run, message.deliveryPullRequests, message.epicMembers === true);
         if (inspection.repository.toLowerCase() !== repository) return { ...base, ok: false, failure: "repository_changed", error: "The Location's repository differs from the one this closure names" };

@@ -6510,7 +6510,9 @@ export class ControlPlaneDb {
   campaignRecoverySettledDecisions(campaignId: string): WorkflowDecisionView[] {
     return (this.stmt(`SELECT decision.* FROM workflow_decisions decision
       WHERE controlling_session_id=? AND (status='denied' OR
-        (status='consumed' AND json_extract(issue_closure_result,'$.outcome')='uncertain'))
+        (status='consumed' AND json_extract(issue_closure_result,'$.outcome')='uncertain'
+          AND json_extract(issue_closure_result,'$.reconciliation.acknowledgedAt') IS NULL))
+        AND NOT (category='owner_decision' AND request_id GLOB 'issue_closure_recovery_*')
         AND NOT EXISTS (SELECT 1 FROM campaign_recovery_denial_settlements settled
           WHERE decision.status='denied' AND settled.campaign_session_id=decision.controlling_session_id
             AND settled.occurrence_id=decision.occurrence_id)

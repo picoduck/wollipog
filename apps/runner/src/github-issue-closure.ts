@@ -41,6 +41,33 @@ export function closureDigestPullRequest(pr: { number: number; url: string; clos
 }
 
 type Run = (command: string, args: string[]) => Promise<string>;
+/** Recovery never calls the mutation executor. Bounded/incomplete/ambiguous evidence fails closed.
+ * The current forge login must own exactly one byte-identical comment posted after consumption;
+ * an account change or edited/missing comment conservatively goes to the owner. */
+export async function reconcileGithubIssueClosure(snapshot: GithubIssueClosureSnapshot, consumedAt: number, run: Run): Promise<boolean> {
+  const origin = githubSlug((await run("git", ["remote", "get-url", "origin"])).trim());
+  if (!origin || origin.toLowerCase() !== snapshot.repository.toLowerCase() || !Number.isSafeInteger(consumedAt)) return false;
+  const [owner, repo] = origin.split("/");
+  const response = object(JSON.parse(await run("gh", ["api", "graphql", "--hostname", "github.com", "-f",
+    `query=query($owner:String!,$repo:String!,$number:Int!){viewer{login} repository(owner:$owner,name:$repo){nameWithOwner issue(number:$number){number url state stateReason comments(last:100){nodes{id body createdAt author{login}} pageInfo{hasPreviousPage}}}}}`,
+    "-f", `owner=${owner}`, "-f", `repo=${repo}`, "-F", `number=${snapshot.issue}`])));
+  if (response.errors) return false;
+  const data = object(response.data), repository = object(data.repository), issue = object(repository.issue);
+  if (text(repository.nameWithOwner).toLowerCase() !== snapshot.repository.toLowerCase() || issue.number !== snapshot.issue ||
+      issue.url !== snapshot.url || issue.state !== "CLOSED" || issue.stateReason !== snapshot.reason.toUpperCase()) return false;
+  // State alone cannot attribute a comment-less closure to the consumed operation.
+  if (snapshot.comment === undefined) return false;
+  const login = text(object(data.viewer).login);
+  const comments = object(issue.comments);
+  if (!login || object(comments.pageInfo).hasPreviousPage !== false || !Array.isArray(comments.nodes)) return false;
+  const digest = (body: string) => createHash("sha256").update(body).digest("hex");
+  const matches = comments.nodes.filter(raw => {
+    const comment = object(raw);
+    return typeof comment.id === "string" && text(object(comment.author).login) === login &&
+      digest(text(comment.body)) === digest(snapshot.comment!) && Date.parse(text(comment.createdAt)) >= Math.floor(consumedAt / 1000) * 1000;
+  });
+  return matches.length === 1;
+}
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new IssueClosureInspectionError("GitHub returned incomplete issue evidence");
   return value as Record<string, unknown>;

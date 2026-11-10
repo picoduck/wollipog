@@ -1421,6 +1421,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 354: Runner-proven protocol renumbers in free base-merge review rounds (#4399).
   354,
   // v355 slot
+  // 355: Read-only reconciliation of consumed uncertain issue closures (#4398).
+  355,
   // v356 slot
   // v357 slot
   // v358 slot

@@ -176,6 +176,18 @@ one keyword, reads code and the title, and may differ per instance, so GitLab's 
 a merge request closes decides where it disagrees with Wollipog's match. Delivery comments compare every
 acceptance criterion and cite the actual merge commit; report remaining original work candidly.
 
+An uncertain consumed issue closure is recovered by the server's read-only forge reconciliation
+(runner protocol 355+). It never repeats the comment or closure. The issue must read closed with
+the approved state reason and a unique exact-body comment by the runner's forge login, posted
+after consumption. Incomplete, ambiguous or unreadable evidence leaves an Owner Question naming
+the issue and original occurrence. Answering or dismissing it acknowledges the uncertainty and
+clears recovery bookkeeping; it grants no new closure authority and leaves the recorded outcome
+uncertain. A lost reconciliation read also goes to that question rather than being replayed.
+The ordinary sweep discovers pre-upgrade uncertain closures; no agent assertion settles them.
+Temporary runner disconnects and upgrades preserve the read opportunity for five minutes before
+falling back to the owner's actionable question. A repository removed from the campaign goes to
+that question immediately. Unavailable transport never repeats a closure or comment.
+
 Use `wollipog review session run` (MCP `request_review_session`) for your own pushed PR's required
 cross-model review, including from an isolated campaign child. Follow the shipped `using-wollipog`
 skill: provide the brief, let the completion continuation arrive when idle, read the full verdict
