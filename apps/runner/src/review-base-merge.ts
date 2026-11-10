@@ -137,16 +137,24 @@ export async function classifyBaseMerge(raw: BaseMergeGit, reference: string, he
     const differing = await rawChanges(git, automatic.tree, `${head}^{tree}`);
     if (!differing || differing.length > MAX_CONFLICTED_FILES) return null;
     const read = (revision: string, path: string) => git(["cat-file", "blob", `${revision}:${path}`]);
+    const mergeBase = async (revision: string) => (await git(["merge-base", "--end-of-options", baseSha, revision])).trim();
     // Missing, unsupported or ambiguous declarations disable the relaxation, not the old proof.
-    const versions = await Promise.all([reference, head].map(async (revision) => {
+    const declarations = await Promise.all([reference, head, await mergeBase(reference), merged].map(async (revision) => {
       try {
-        const entries = ledgerEntries(await read(revision, LEDGER));
-        return entries ? Math.max(...entries.entries.keys()) : null;
+        return ledgerEntries(await read(revision, LEDGER));
       } catch { return null; }
     }));
-    const [oldVersion, newVersion] = versions;
-    const renumber = oldVersion !== null && oldVersion !== undefined && newVersion !== null && newVersion !== undefined &&
-      newVersion > oldVersion ? { oldVersion, newVersion } : null;
+    const [prior, current, originalBase, mergedBase] = declarations;
+    const oldVersion = prior ? Math.max(...prior.entries.keys()) : 0;
+    const newVersion = current ? Math.max(...current.entries.keys()) : 0;
+    // A base's version advance is not a PR renumber. Both numbers must be this PR's own claims,
+    // and the new entry must be exactly the old one, placed under its declared slot.
+    const newEntry = current?.entries.get(newVersion);
+    const renumber = prior && current && originalBase && mergedBase && newVersion > oldVersion &&
+      !originalBase.entries.has(oldVersion) && !mergedBase.entries.has(newVersion) &&
+      newEntry === replaceVersion(prior.entries.get(oldVersion)!, oldVersion, newVersion) &&
+      (await read(head, LEDGER)).includes(`  // v${newVersion} slot\n${newEntry}`)
+      ? { oldVersion, newVersion } : null;
     for (const { path, oldMode, newMode, status } of differing) {
       // Content only: modes, types, additions and deletions never receive the relaxation.
       if (status !== "M" || oldMode !== newMode || !REGULAR_FILE.test(newMode)) return null;
@@ -177,7 +185,6 @@ export async function classifyBaseMerge(raw: BaseMergeGit, reference: string, he
       if (conflicted.has(path) ? resolvedWithinConflicts(normalized, resolution, reference, merged) : normalized === resolution) continue;
       return null;
     }
-    const mergeBase = async (revision: string) => (await git(["merge-base", "--end-of-options", baseSha, revision])).trim();
     const own = async (revision: string) => git(["diff", "--raw", "--no-abbrev", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
       "--end-of-options", await mergeBase(revision), revision]);
     const [before, after] = await Promise.all([own(reference), own(head)]);
@@ -202,7 +209,7 @@ export async function classifyBaseMerge(raw: BaseMergeGit, reference: string, he
       }
       if (a[1] !== b[1]) return "resolution";
       if (a[2] === b[2]) continue;
-      if (!/^:100(?:644|755) 100(?:644|755) /u.test(a[1]!)) return "resolution";
+      if (!/^:(?:000000|100(?:644|755)) 100(?:644|755) /u.test(a[1]!)) return "resolution";
       const [left, right] = await Promise.all([read(reference, path), read(head, path)]);
       if (Buffer.byteLength(left) > MAX_CONFLICTED_FILE_BYTES || Buffer.byteLength(right) > MAX_CONFLICTED_FILE_BYTES) return "resolution";
       if (path === BUILT_IN_SKILLS) {

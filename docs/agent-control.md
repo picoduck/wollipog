@@ -519,7 +519,7 @@ attempt, mode, base and the files in scope):
   is one merge of the moved base: a two-parent merge whose first parent is the last valid head,
   whose second is a commit of the pull request's current base that head did not contain, and whose
   tree differs from Git's own merge only inside its conflicted hunks or by a proven protocol
-  renumber (runner v352, #4399). Such a head gets a
+  renumber (runner v354, #4399). Such a head gets a
   base-merge round (`round.baseMerge`): a delta round scoped to the merge's effect on the pull
   request's own diff, which does not count against the epoch's budget and needs no extension. When
   the last valid round was an upvote and the merge leaves the pull request's own diff byte-identical
@@ -531,6 +531,9 @@ attempt, mode, base and the files in scope):
   conflict block other than the proven renumber, a second merge before the first one's review, any
   commit after the merge, or a requested full review is an ordinary commit and counts as before.
   The renumber proof reads the old and new ledger declarations without executing repository code.
+  The old entry must be a claim added by the PR, absent from its original base; the new entry must
+  be absent from the merged base and match that exact old entry under its new slot. A base-only
+  version advance cannot excuse edits to existing capability floors or other numbers.
   Outside conflict blocks it accepts only exact replacements of the previous declared version with
   the head's declared version, including moving that exact ledger entry to its new slot. Other
   numbers, mixed edits, modes, types and unsupported declarations fail closed. Generated output

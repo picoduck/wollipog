@@ -27,7 +27,8 @@ export function ledgerEntries(text: string): { prefix: string; entries: Map<numb
 }
 
 export function replaceVersion(text: string, oldVersion: number, newVersion: number): string {
-  return text.replace(new RegExp(`(?<![0-9])${oldVersion}(?![0-9])`, "gu"), String(newVersion));
+  return text.replace(new RegExp(`(?:(?<![A-Za-z0-9_.])v${oldVersion}|(?<![A-Za-z0-9_.+\\-])${oldVersion})(?![A-Za-z0-9_]|\\.[0-9])`, "gu"),
+    (match) => `${match.startsWith("v") ? "v" : ""}${newVersion}`);
 }
 
 /** A ledger renumber moves exactly one entry; anchors and all other bytes remain unchanged. */

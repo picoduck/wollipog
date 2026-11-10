@@ -9,6 +9,8 @@ export async function reproduceBuiltInSkills(git: BaseMergeGit, tree: string): P
   const skills = new Map<string, Array<{ path: string; content: string }>>();
   let bytes = 0;
   for (const record of paths) {
+    // The shipped collector ignores top-level files and hidden entries.
+    if (/^[0-9]{6} \S+ [0-9a-f]{40}\tskills\/[^/]+$/u.test(record)) continue;
     const match = /^100644 blob [0-9a-f]{40}\tskills\/([^/]+)\/(.+)$/u.exec(record);
     if (!match) return null;
     const name = match[1]!, path = match[2]!;
