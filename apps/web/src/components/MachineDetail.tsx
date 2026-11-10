@@ -537,6 +537,13 @@ export function MachineDetail({ entry, actions, showTitle, children }: {
         </ul>
       </header>
       {actions.notice}
+      {box?.harnessReadiness?.state === "failed" && box.status === "online" && (
+        <Notice tone="warning" title="Provider Readiness Needs Attention" role="status">
+          <p>The SSH connection is working, but the replacement runner has not passed its provider readiness checks. Review Agents and Provider Accounts before starting work.</p>
+          <p>{({ ownership_blocked: "Account ownership prevented inspection.", installation_regressed: "A previously compatible installation is unavailable.",
+            authentication_regressed: "A previously signed-in account could not be confirmed.", report_timeout: "The runner did not report fresh discovery within 90 seconds." })[box.harnessReadiness.reason ?? "report_timeout"]}</p>
+        </Notice>
+      )}
       {children}
       {actions.dialogs}
     </article>

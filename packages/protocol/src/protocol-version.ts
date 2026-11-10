@@ -1423,6 +1423,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // v355 slot
   // v356 slot
   // v357 slot
+  // 357: Timestamped provider setup observations and transport-independent SSH readiness (#4438).
+  357,
   // v358 slot
   // v359 slot
   // v360 slot

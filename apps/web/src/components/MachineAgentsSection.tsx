@@ -21,6 +21,7 @@ import {
 } from "../machine-agents.js";
 import { agentInstallHints, harnessUpdateGuidance } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
+import { providerReadinessSentence } from "../provider-readiness.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { agentSessionDiscoveryUnavailableReason, agentSupportsSessionDiscovery, AgentSessionDiscoveryDialog } from "./AgentSessionDiscoveryDialog.js";
 import { CopyButton, Modal } from "./common.js";
@@ -168,6 +169,7 @@ function AgentDetailsDialog({ agent, name, machineName, runner, online, returnFo
         )}
         <div><dt>Version</dt><dd>{agent.version ? `v${agent.version}` : "Unknown"}</dd></div>
         <div><dt>Sign-In</dt><dd>{agentSignInFact(agent)}</dd></div>
+        {agent.providerReadiness && <div><dt>Last Check</dt><dd>{providerReadinessSentence(agent.providerReadiness, online && runner.agentsRefreshed === true)}</dd></div>}
         {agent.update && (
           <div>
             <dt>Updates</dt>

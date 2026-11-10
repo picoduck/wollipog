@@ -9,6 +9,7 @@ import type {
 } from "@wollipog/protocol";
 import type { RunnerConfigAgent, RunnerProviderAccount } from "./config.js";
 import type { SessionMeta } from "./session-store.js";
+import { providerReadinessObservation } from "./provider-readiness.js";
 
 export { providerForDriver };
 
@@ -216,18 +217,30 @@ export async function probeProviderAccountsForDiscovery(input: {
   environment(agent: AgentDefinition): Record<string, string>;
   probe(agent: AgentDefinition, env: Record<string, string>, account: RunnerProviderAccount): Promise<ProviderAccountDefinition["authStatus"]>;
   failed?(account: RunnerProviderAccount): void;
+  observed?(account: RunnerProviderAccount, report: NonNullable<ProviderAccountDefinition["providerReadiness"]>): void;
 }): Promise<Map<string, ProviderAccountDefinition["authStatus"]>> {
   const statuses = new Map<string, ProviderAccountDefinition["authStatus"]>();
   const installed = input.agents.filter(providerAccountProbeAvailable);
   await Promise.all(input.accounts.map(async (account) => {
-    if (!input.usable(account)) { statuses.set(account.id, "unknown"); return; }
+    if (!input.usable(account)) {
+      statuses.set(account.id, "unknown");
+      input.observed?.(account, { checkedAt: Date.now(), installation: "unknown", authentication: "unknown", reason: "restricted" });
+      return;
+    }
     const agent = agentForProviderAccount(installed, account);
-    if (!agent) { statuses.set(account.id, "unknown"); return; }
+    if (!agent) {
+      statuses.set(account.id, "unknown");
+      input.observed?.(account, { checkedAt: Date.now(), installation: "unknown", authentication: "unknown", reason: "unknown" });
+      return;
+    }
     try {
       const env = { ...input.environment(agent), ...providerAccountEnvironment({ provider: account.provider, credentialHome: account.directory }) };
-      statuses.set(account.id, mergeProviderAccountAuthStatus(account, await input.probe(agent, env, account)));
-    } catch {
-      statuses.set(account.id, mergeProviderAccountAuthStatus(account, "unknown"));
+      const observed = await input.probe(agent, env, account);
+      statuses.set(account.id, observed);
+      input.observed?.(account, providerReadinessObservation(agent, observed));
+    } catch (error) {
+      statuses.set(account.id, "unknown");
+      input.observed?.(account, providerReadinessObservation(agent, "unknown", error));
       input.failed?.(account);
     }
   }));

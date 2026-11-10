@@ -13,6 +13,7 @@ import { machineSettingsMutationError, runnerDisplay } from "../runners.js";
 import type { MachineAccountsIntent } from "../navigation.js";
 import { providerHomeBlockingProcessCopy, providerHomeRecoveryCauseCopy } from "../provider-home-refusal.js";
 import { statusMeta } from "../status-meta.js";
+import { providerReadinessSentence } from "../provider-readiness.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { activeSessionConflict } from "./active-session-conflict.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
@@ -169,6 +170,7 @@ type AccountStatus = "signed_in" | "sign_in_required" | "status_unknown" | "sign
 
 function accountStatus(account: ProviderAccountDefinition, signingIn: boolean): AccountStatus {
   if (signingIn) return "signing_in";
+  if (account.providerReadiness && ["in_use", "restricted", "unknown"].includes(account.providerReadiness.reason)) return "status_unknown";
   return account.authStatus === "authenticated" ? "signed_in"
     : account.authStatus === "unauthenticated" ? "sign_in_required"
     : "status_unknown";
@@ -1065,7 +1067,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                 identity={`${runner.runnerId}:${account.id}`}
                 label={account.label}
                 hiddenTitle={login && providerSignInHiddenTitle(login, privacy.hide)}
-                profile={account.profile ? PROFILE_ACCESS[account.profile.access] : undefined}
+                profile={[account.profile ? PROFILE_ACCESS[account.profile.access] : undefined,
+                  account.providerReadiness ? providerReadinessSentence(account.providerReadiness, online && runner.agentsRefreshed === true) : undefined].filter(Boolean).join(" ") || undefined}
                 lease={leaseActions && leases[account.id]?.state === "stale" ? {
                   label: "Recovery Needed",
                   title: providerHomeLeaseDescription(leases[account.id]!) ?? "An earlier Wollipog runner left this account locked. Choose Recover Account in its menu to try unlocking it.",

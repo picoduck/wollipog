@@ -203,6 +203,7 @@ import {
   skillReconciliationProviderAccountPlan,
 } from "./provider-accounts.js";
 import { providerHomeLaunchRefusal } from "./provider-home-launch-refusal.js";
+import { providerReadinessObservation } from "./provider-readiness.js";
 import { inheritProviderPlugins, pluginProviderForDriver } from "./provider-plugins.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
 import {
@@ -704,6 +705,7 @@ function withMediaReviewerCapabilities<T extends AgentDefinition>(agents: T[]): 
 }
 
 const providerAccountAuthStatus = new Map<string, ProviderAccountDefinition["authStatus"]>();
+const providerAccountReadiness = new Map<string, NonNullable<ProviderAccountDefinition["providerReadiness"]>>();
 /** How each account's provider status check says it bills, from its latest probe (#4353). */
 const providerAccountBilling = new Map<string, import("@wollipog/protocol").ProviderAccountBilling>();
 /** Assigned once the session store opens; an inventory sent before then has no cooldowns to report. */
@@ -714,6 +716,7 @@ function providerAccountsForControlPlane() {
   // profile-bearing account, which it could not use (#3239).
   return providerProfileGrants.project(config.providerAccounts, (account) => ({
     ...providerAccountDefinition(account),
+    ...(providerAccountReadiness.has(account.id) ? { providerReadiness: providerAccountReadiness.get(account.id)! } : {}),
     ...(providerAccountAuthStatus.has(account.id)
       ? { authStatus: providerAccountAuthStatus.get(account.id)! }
       : {}),
@@ -2276,10 +2279,19 @@ async function discoverAndPublish(refreshModels: boolean, refreshSubscriptionUsa
       if (billing) providerAccountBilling.set(account.id, billing);
     }),
     failed: (account) => log(`${account.provider} provider-account authentication probe failed`),
+    observed: (account, report) => providerAccountReadiness.set(account.id, report),
   });
   for (const [accountId, status] of accountStatus) providerAccountAuthStatus.set(accountId, status);
   metadata.agents = projectProviderAccountDiscoveryReadiness(metadata.agents, config.providerAccounts, accountStatus,
     (account) => providerProfileGrants.usable(account));
+  metadata.agents = metadata.agents.map((agent) => {
+    if (agent.driver !== "claude-code" && agent.driver !== "codex-app-server") return agent;
+    const installationReport = agent.providerReadiness ?? providerReadinessObservation(agent, agent.authStatus ?? "unknown");
+    const accountId = agent.defaultProviderAccountId ?? agent.providerAccountReadiness?.defaultAccountId;
+    const accountReport = accountId ? providerAccountReadiness.get(accountId) : undefined;
+    return { ...agent, providerReadiness: accountReport
+      ? { ...accountReport, installation: installationReport.installation } : installationReport };
+  });
   log(JSON.stringify({ event: "provider_discovery_completed", runnerId: config.runnerId,
     nativeProbeHome: "isolated", agents: metadata.agents.length,
     available: metadata.agents.filter((agent) => agent.available === true).length,
