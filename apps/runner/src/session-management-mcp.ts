@@ -1520,7 +1520,8 @@ export const TOOLS: McpTool[] = [
   {
     name: "request_campaign_repository_addition",
     description: "Ask your campaign's owner to add one Location of the campaign's Project, and so its repository, to the campaign, " +
-      "when recorded work needs a Project repository the campaign does not cover (most often a follow-up in another repository). " +
+      "when recorded work needs a Project repository the campaign does not cover (most often a follow-up in another repository), " +
+      "or its launch repository after the owner's first message limited the campaign to others (name one of its Locations, even a listed one). " +
       "Name the Location by id (list it with get_campaign or the Project), a one-line reason, and the recorded follow-up or work item " +
       "that needs it. The control plane inspects that Location first; one outside the Project or failing inspection is refused before " +
       "the owner sees it. The decision is always the owner's, in Full Control and Custom: nobody acting for the campaign can approve it. " +

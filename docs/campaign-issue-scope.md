@@ -315,7 +315,15 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
   in it, none of its gates (a merge, a branch deletion, an issue closure, a follow-up publication) is the
   Orchestrator's to decide, no campaign review runs on it, and no agent adds its issues. What remains is
   the root's own process, which keeps running in that checkout under its provider's permissions, and the
-  owner's own decisions, which stay the owner's.
+  owner's own decisions, which stay the owner's. The owner brings it back the same way as any other
+  repository: an approved `campaign_repository_addition` naming one of its Locations, even one already
+  listed, adds it to the limit. Nothing joins, because its Locations are already listed. The boundary
+  still takes a new revision, as a join does, because who decides that repository's gates changes: every
+  unconsumed decision is revoked, so a gate the limit routed to the owner is asked again, never left to
+  fail when answered. In Custom, which has no revision, it records no list and no join, and revokes that
+  repository's gates instead, as any Custom addition the limit left out does. The request is refused
+  when that Location now reads as another repository, or when the limit took the repository in while the
+  Location was being inspected.
 - **Repositories the limit left out.** Their Locations show in Campaign Status as Available but Not in
   This Campaign. A Location of a repository with no entry never joins while a limit stands, whether the
   owner added it, its runner reconnected, the owner used Include in Campaign, or an enable found it.
