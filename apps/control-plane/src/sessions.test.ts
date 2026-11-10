@@ -2025,13 +2025,13 @@ test("a stopped campaign child with a final report can still be verified, and ar
     svc.onSessionStatus(silentHelper, "stopped");
     const silentEvent = db.appendEvent(silentHelper, { kind: "stderr", text: "died" }, Date.now()).seq;
     assert.match(verify(silentHelper, silentEvent).error ?? "",
-      /must be idle, completed, or stopped with a final report/,
+      /campaign child is stopped; verification requires/,
       "a stopped helper that never posted a report cannot be verified");
 
     const supersededReport = report(silentHelper, "Helper report");
     db.appendEvent(silentHelper, { kind: "user_message", text: "Also check the logs" }, Date.now());
     assert.match(verify(silentHelper, supersededReport).error ?? "",
-      /must be idle, completed, or stopped with a final report/,
+      /campaign child is stopped; verification requires/,
       "and a report a later assignment superseded is not its last word either");
 
     const freshReport = report(silentHelper, "Helper report after the follow-up");

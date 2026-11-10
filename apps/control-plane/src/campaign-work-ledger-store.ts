@@ -1612,8 +1612,8 @@ export class CampaignWorkLedgerStore {
 
   /** The child's attempt on this item whose event window holds the exact report, or the refusal.
    * Any attempt the child had counts, open or closed as reassigned, superseded or delivered; one the
-   * Orchestrator abandoned does not. Failed attempts additionally need service-level finality proof. A window whose history was replaced since
-   * (another event epoch) proves nothing. */
+   * Orchestrator abandoned does not. Failed attempts additionally need service-level finality proof.
+   * A window whose history was replaced since (another event epoch) proves nothing. */
   reportAttempt(
     campaignId: string,
     workItemId: string,

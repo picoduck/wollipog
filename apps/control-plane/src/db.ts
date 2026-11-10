@@ -23035,8 +23035,6 @@ export class ControlPlaneDb {
         this.campaignContinuationAuthorityDigest(input.campaignSessionId) ?? null,
         input.attemptCount, input.now, input.now, input.now,
       );
-      this.stmt("INSERT OR IGNORE INTO session_system_notice_commands (command_id,session_id) VALUES (?,?)")
-        .run(input.commandId, input.campaignSessionId);
       this.db.exec("COMMIT");
       return this.campaignContinuationForCommand(input.commandId);
     } catch (error) {
@@ -23188,6 +23186,13 @@ export class ControlPlaneDb {
               AND trim(json_extract(later.payload, '$.text'))!=''
               AND json_type(later.payload, '$.parentToolUseId') IS NULL)
            )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM session_prompt_commands command
+           WHERE command.session_id=target.session_id AND command.created_at>target.ts
+             AND command.state IN ('pending','sent','accepted','queued','started','uncertain')
+             AND NOT EXISTS (SELECT 1 FROM session_system_notice_commands notice
+               WHERE notice.command_id=command.command_id AND notice.session_id=command.session_id)
          )
          AND NOT EXISTS (
            SELECT 1 FROM campaign_work_attempts assignment
@@ -24893,7 +24898,7 @@ export class ControlPlaneDb {
       if (!current || current.resume_state !== input.from) {
         throw new Error("workflow decision resume changed before it could be staged");
       }
-      const staged = this.stageSessionPromptCommand({ ...input.command, systemNotice: true });
+      const staged = this.stageSessionPromptCommand(input.command);
       this.stmt(
         `UPDATE workflow_decisions SET resume_state='delivering', resume_command_id=?, resume_updated_at=?
          WHERE occurrence_id=?`,
@@ -25165,7 +25170,7 @@ export class ControlPlaneDb {
   }): SessionPromptCommandRecord {
     this.db.exec("BEGIN");
     try {
-      const staged = this.stageSessionPromptCommand({ ...input.command, systemNotice: true });
+      const staged = this.stageSessionPromptCommand(input.command);
       this.pullRequestWatches.bindWakes(input.command.sessionId, input.watchIds, staged.commandId, input.command.now);
       this.db.exec("COMMIT");
       return staged;
@@ -25203,7 +25208,7 @@ export class ControlPlaneDb {
           FROM review_sessions r WHERE r.requester_session_id=review_sessions.requester_session_id))
          WHERE review_session_id=? AND requester_session_id=? AND continuation_state='held'`,
       );
-      const staged = this.stageSessionPromptCommand({ ...input.command, systemNotice: true });
+      const staged = this.stageSessionPromptCommand(input.command);
       for (const id of input.reviewSessionIds) {
         if (Number(update.run(staged.commandId, input.command.now, id, input.command.sessionId).changes) !== 1) {
           throw new Error("review continuation changed before it could be staged");

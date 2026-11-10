@@ -63,8 +63,8 @@ for (const later of ["none", "notice", "prompt", "unknown_notice", "assignment",
       const seq = later === "no_report" ? 1 : h.report("child");
       if (later === "notice") {
         // Server staging, not a payload flag or a recognizable notice string, establishes origin.
-        h.db.stageSessionPromptCommand({ commandId: "notice", sessionId: "child", runnerId: "r",
-          payloadJson: "{}", payloadSha256: "test", now: Date.now(), expiresAt: Date.now() + 1000, systemNotice: true });
+        h.db.stageRestartNotice({ occurrenceIds: [], command: { commandId: "notice", sessionId: "child", runnerId: "r",
+          payloadJson: "{}", payloadSha256: "test", now: Date.now(), expiresAt: Date.now() + 1000 } });
       }
       if (["notice", "prompt", "unknown_notice"].includes(later)) h.db.appendEvent("child", {
         kind: "user_message", text: "Identical notice-looking text", commandId: later === "notice" ? "notice" : "unknown",
@@ -80,11 +80,11 @@ for (const later of ["none", "notice", "prompt", "unknown_notice", "assignment",
       assert.equal(h.db.campaignChildReportVerified("root", "child"), acceptable);
       const record = () => h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery,
         report: { childSessionId: "child", reportEventSeq: seq } });
-      if (!acceptable) assert.equal((await record()).ok, false);
+      if (!acceptable && later !== "assignment") assert.equal((await record()).ok, false);
       if (later !== "assignment") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.delivery, endAttempt: { reason: "failed" } }).ok);
       const recorded = await record();
-      assert.equal(recorded.ok, acceptable, recorded.error ?? "delivery result");
-      assert.equal(h.db.campaignWorkLedger.detail("root", h.delivery, Date.now())!.primaryState === "delivered", acceptable);
+      assert.equal(recorded.ok, acceptable || later === "assignment", recorded.error ?? "delivery result");
+      assert.equal(h.db.campaignWorkLedger.detail("root", h.delivery, Date.now())!.primaryState === "delivered", acceptable || later === "assignment");
     } finally { h.db.close(); }
   });
 }
@@ -318,6 +318,35 @@ function reusedChild() {
   h.db.updateSessionStatus("root", "idle", Date.now());
   return { ...h, draftReport, firstReport, laterReport };
 }
+
+for (const terminal of ["stopped", "failed"] as const) test(`closed-attempt delivery survives later ${terminal} status (#4400)`, async () => {
+  const h = reusedChild();
+  try {
+    if (terminal === "stopped") h.db.updateSessionStatus("child", "stopped", Date.now(), { cause: "requested" });
+    else h.db.updateSessionStatus("child", "failed", Date.now());
+    const result = await h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery,
+      report: { childSessionId: "child", reportEventSeq: h.firstReport } });
+    assert.ok(result.ok, result.error ?? "closed-attempt delivery refused");
+    assert.equal(result.data!.item.primaryState, "delivered");
+  } finally { h.db.close(); }
+});
+
+test("a work-carrying review continuation still supersedes a verified report (#4400)", () => {
+  const h = fixture();
+  try {
+    const seq = h.report("child");
+    h.db.updateSessionStatus("child", "idle", Date.now());
+    assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: seq, followUpsAccounted: true }).ok);
+    h.db.stageReviewContinuation({ reviewSessionIds: [], command: { commandId: "review", sessionId: "child", runnerId: "r",
+      payloadJson: "{}", payloadSha256: "test", now: Date.now(), expiresAt: Date.now() + 1000 } });
+    const message = { kind: "user_message" as const, text: "Handle the review", commandId: "review" };
+    h.db.appendEvent("child", message, Date.now());
+    h.db.invalidateCampaignReportsForLiveEvent("child", message, Date.now());
+    h.db.updateSessionStatus("child", "failed", Date.now());
+    assert.equal(h.db.durableFinalReportSeq("child"), null);
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
+  } finally { h.db.close(); }
+});
 
 test("the Orchestrator records delivery after reuse from the child's exact report inside the reassigned attempt", async () => {
   const h = reusedChild();
