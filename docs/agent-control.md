@@ -377,7 +377,9 @@ consent, checked at admission and again by the runner against the implementing s
 
 The round budget applies to all harnesses (1–32 valid rounds, default four). A review run pins its
 initial budget; changing settings does not expand an existing run, whose additional rounds still
-require the exact typed extension. The Project selector creates a personal project override by
+require the exact typed extension. Campaign review-setting changes affect future children only;
+raising campaign, personal or project budgets cannot repair a running child's pinned run.
+The extension cap stays unchanged for real code changes. The Project selector creates a personal project override by
 copying the user's current settings. That document replaces all user defaults for the user's
 sessions in that project; Reset to User Settings removes it. Missing settings rows retain the
 original opposite-family, high-effort, four-round launch without new configuration fields.
@@ -516,7 +518,8 @@ attempt, mode, base and the files in scope):
   control plane). The runner proves strictly that a head's only change since the last valid round
   is one merge of the moved base: a two-parent merge whose first parent is the last valid head,
   whose second is a commit of the pull request's current base that head did not contain, and whose
-  tree differs from Git's own merge only inside its conflicted hunks. Such a head gets a
+  tree differs from Git's own merge only inside its conflicted hunks or by a proven protocol
+  renumber (runner v352, #4399). Such a head gets a
   base-merge round (`round.baseMerge`): a delta round scoped to the merge's effect on the pull
   request's own diff, which does not count against the epoch's budget and needs no extension. When
   the last valid round was an upvote and the merge leaves the pull request's own diff byte-identical
@@ -525,10 +528,18 @@ attempt, mode, base and the files in scope):
   upvote and its findings, and a `pr_merge` decision may cite it. The control plane checks the
   claim against the run's current epoch and last valid head before recording it. An octopus
   merge, a merged parent outside the base branch, a path-level conflict, a change outside a
-  conflict block, a second merge before the first one's review, any commit after the merge, or a
-  requested full review is an ordinary commit and counts as before. That includes a protocol
-  renumber made inside the merge, which rewrites text outside any conflict block: the slotted ledger
-  (#975) removes the version-line conflict, but not the renumber when main passes a claim. A
+  conflict block other than the proven renumber, a second merge before the first one's review, any
+  commit after the merge, or a requested full review is an ordinary commit and counts as before.
+  The renumber proof reads the old and new ledger declarations without executing repository code.
+  Outside conflict blocks it accepts only exact replacements of the previous declared version with
+  the head's declared version, including moving that exact ledger entry to its new slot. Other
+  numbers, mixed edits, modes, types and unsupported declarations fail closed. Generated output
+  needs reproduction: the runner reproduces text-only built-in skills with its trusted renderer
+  against both trees. Binary skill sources, output mismatches and unsupported generators stay
+  ordinary commits; no generator from the pull request is executed.
+  Equivalence permits that same proven renumber in PR-side blobs and compares ledger entries
+  added or removed by the PR, excluding unchanged entries inherited from the base. Other changed
+  base-side blobs still require a reviewer. Except for that exact ledger-entry renumber, a
   conflict block's resolution is never equivalent; its round always has a reviewer, who gets the
   pull request's diff of the scoped files both before and after the merge, so a change the
   resolution dropped is visible. Each diff is capped per file, so one oversized file cannot hide the

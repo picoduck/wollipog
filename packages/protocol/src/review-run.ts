@@ -24,8 +24,10 @@ export type ReviewRoundMode = "full" | "delta" | "rebase" | "equivalent";
  * What the runner proved about a head relative to the epoch's last valid head (v277): it is a single
  * two-parent merge whose first parent is that head and whose second is a moved commit of the pull
  * request's base branch, and the merge's tree differs from Git's own merge only inside conflicted
- * hunks. `equivalent` also proves the pull request's own diff is unchanged, file for file and byte
- * for byte; `resolution` is every other such merge.
+ * hunks or, on v352 runners (#4399), by a proven renumber of the previous declared protocol version
+ * to the head's declared version. Unreproduced generated output fails closed. `equivalent` also
+ * proves the pull request's own diff is unchanged, byte for byte modulo that proven renumber;
+ * `resolution` is every other such merge.
  */
 export type ReviewBaseMerge = "equivalent" | "resolution";
 

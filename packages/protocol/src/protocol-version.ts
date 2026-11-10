@@ -1416,6 +1416,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 351: Runner-verifiable failed campaign run evidence for follow-up relatedness (#4401).
   351,
   // v352 slot
+  // 352: Runner-proven protocol renumbers in free base-merge review rounds (#4399).
+  352,
   // v353 slot
   // v354 slot
   // v355 slot
