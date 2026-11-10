@@ -715,3 +715,19 @@ test("GitLab summary shows base/head, mergeability and named job links with safe
     assert.match(harness.container.textContent!, /Named checks are unavailable/);
   } finally { await harness.unmount(); }
 });
+
+test("MR pipeline status stays distinct from jobs, including a successful empty job read (#1270)", async () => {
+  const pr = { ...openPr, kind: "merge_request" as const, provider: "gitlab" as const };
+  const checks = { ...failingChecks, passing: 0, pending: 0, failing: 1, jobs: [
+    { name: "unit", state: "failing" as const, url: null },
+    { name: "typecheck", state: "passing" as const, url: null },
+  ] };
+  const harness = await mountReview({ forgeFacts: { pr, checks } });
+  try {
+    assert.equal(harness.container.querySelector(".review-request-checks summary")?.textContent, "Checks (Pipeline Failing)");
+    assert.match(harness.container.textContent!, /typecheck — Passing/);
+    await harness.render({ forgeFacts: { pr, checks: { ...checks, jobs: [] } } });
+    assert.match(harness.container.textContent!, /No named jobs were returned/);
+    assert.doesNotMatch(harness.container.textContent!, /Named checks are unavailable/);
+  } finally { await harness.unmount(); }
+});

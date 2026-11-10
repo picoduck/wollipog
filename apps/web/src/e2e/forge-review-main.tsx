@@ -101,7 +101,7 @@ function Fixture() {
                   baseRef: "release", headRef: "feature/gitlab", mergeability: "ci_must_pass",
                 },
                 checks: {
-                  passing: 1, failing: 1, pending: 1, failingNames: ["unit"],
+                  passing: 0, failing: 1, pending: 0, failingNames: ["Pipeline #7"],
                   url: "https://gitlab.example.test/team/sub/wollipog/-/pipelines/7",
                   jobs: [
                     { name: "unit", state: "failing", url: "https://gitlab.example.test/team/sub/wollipog/-/jobs/11" },

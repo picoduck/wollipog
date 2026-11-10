@@ -6,6 +6,7 @@ test("MR context and named checks stay beside the existing thread bundle pipelin
   await expect(request).toContainText("Base");
   await expect(request).toContainText("release");
   await expect(request).toContainText("feature/gitlab");
+  await expect(request.locator("summary")).toHaveText("Checks (Pipeline Failing)");
   await request.locator("summary").click();
   await expect(request.getByRole("link", { name: "unit", exact: true })).toHaveAttribute("href", /\/jobs\/11$/);
   await expect(request).toContainText("unit — Failing");

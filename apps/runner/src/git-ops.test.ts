@@ -4,6 +4,8 @@ import type { AgentContext } from "@wollipog/protocol";
 import {
   namedCheckContexts,
   parseGitLabJobs,
+  gitlabNamedChecks,
+  ghPrSummary,
   anchorForkRef,
   anchorTurnRef,
   deleteTurnRefs,
@@ -1628,4 +1630,35 @@ test("GitLab named jobs preserve statuses and enforce host provenance and bounds
   assert.throws(() => parseGitLabJobs([{ ...job, web_url: "https://evil.test/job" }], remote));
   assert.throws(() => parseGitLabJobs(Array(101).fill(job), remote));
   assert.equal(parseGitLabJobs(Array(100).fill(job), remote).jobsIncomplete, true);
+});
+
+test("GitLab job-read failures preserve pipeline status and safe URL", async () => {
+  const remote = parseForgeRemote("https://gitlab.com/group/repo.git")!;
+  const pipeline = { id: 91, status: "failed", web_url: "https://gitlab.com/group/repo/-/pipelines/91" };
+  for (const result of ["throw", "bad json", "{}", '[{"name":"unit","status":"success","web_url":"https://evil.test/job"}]']) {
+    const summary = await gitlabNamedChecks("/repo", remote, pipeline, async (cwd, host, args) => {
+      assert.equal(cwd, "/repo");
+      assert.equal(host, "gitlab.com");
+      assert.deepEqual(args, ["api", "projects/group%2Frepo/pipelines/91/jobs?per_page=100&include_retried=false"]);
+      if (result === "throw") throw new Error("unavailable");
+      return result;
+    });
+    assert.deepEqual(summary, { failing: 1, pending: 0, passing: 0, failingNames: ["Pipeline #91"], url: pipeline.web_url, jobsIncomplete: true });
+  }
+  assert.deepEqual(await gitlabNamedChecks("/repo", remote, pipeline, async () => "[]"), {
+    failing: 1, pending: 0, passing: 0, failingNames: ["Pipeline #91"], url: pipeline.web_url, jobs: [], jobsIncomplete: false,
+  });
+});
+
+test("GitHub summary requests and forwards forge context and named check results", async () => {
+  const summary = await ghPrSummary("/repo-1270-summary", async (_context, command, args) => {
+    assert.equal(command, "gh");
+    assert.deepEqual(args, ["pr", "view", "--json", "number,title,url,state,statusCheckRollup,baseRefName,headRefName,mergeable"]);
+    return { stdout: JSON.stringify({ number: 7, title: "Feature", url: "https://github.com/org/repo/pull/7", state: "OPEN", baseRefName: "release", headRefName: "feature", mergeable: "CONFLICTING", statusCheckRollup: [{ name: "unit", status: "COMPLETED", conclusion: "FAILURE", detailsUrl: "https://github.com/org/repo/actions/runs/1" }] }), stderr: "" };
+  });
+  assert.equal(summary.pr?.baseRef, "release");
+  assert.equal(summary.pr?.headRef, "feature");
+  assert.equal(summary.pr?.mergeability, "CONFLICTING");
+  assert.equal(summary.checks?.failing, 1);
+  assert.deepEqual(summary.checks?.jobs, [{ name: "unit", state: "failing", url: "https://github.com/org/repo/actions/runs/1" }]);
 });

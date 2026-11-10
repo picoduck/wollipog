@@ -1856,13 +1856,13 @@ export function summarizeGitLabPipeline(pipeline: unknown, remote: ForgeRemote):
 }
 
 /** A failed job read preserves the authoritative pipeline rollup. No mutations are made. */
-async function gitlabNamedChecks(cwd: string, remote: ForgeRemote, pipeline: unknown): Promise<GitChecksSummary | null> {
+export async function gitlabNamedChecks(cwd: string, remote: ForgeRemote, pipeline: unknown, read: typeof runGlab = runGlab): Promise<GitChecksSummary | null> {
   const summary = summarizeGitLabPipeline(pipeline, remote);
   if (!summary) return null;
   const id = jsonInt(jsonObject(pipeline)?.id);
   if (id == null || id < 1) return { ...summary, jobsIncomplete: true };
   try {
-    const raw = await runGlab(cwd, remote.host, ["api", `projects/${encodeURIComponent(remote.project)}/pipelines/${id}/jobs?per_page=100&include_retried=false`]);
+    const raw = await read(cwd, remote.host, ["api", `projects/${encodeURIComponent(remote.project)}/pipelines/${id}/jobs?per_page=100&include_retried=false`]);
     return { ...summary, ...parseGitLabJobs(JSON.parse(raw), remote) };
   } catch {
     return { ...summary, jobsIncomplete: true };
@@ -2151,7 +2151,7 @@ async function forgeReviewSync(cwd: string): Promise<ForgeReviewSyncInfo> {
 
 /** The PR + checks for the branch checked out in `cwd`, via gh. Null when gh is missing,
  * unauthenticated, the repo isn't on GitHub, or the branch has no PR — never a throw. */
-async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; checks: GitChecksSummary | null }> {
+export async function ghPrSummary(cwd: string, runCommand: typeof runContextCommand = runContextCommand): Promise<{ pr: GitPrSummary | null; checks: GitChecksSummary | null }> {
   const context = executionContext.getStore() ?? { kind: "native" as const };
   const cacheKey = `${context.kind === "wsl" ? `wsl:${context.distro}` : "native"}:${cwd}`;
   const hit = ghPrCache.get(cacheKey);
@@ -2159,7 +2159,7 @@ async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; chec
   let pr: GitPrSummary | null = null;
   let checks: GitChecksSummary | null = null;
   try {
-    const { stdout } = await runContextCommand(context, "gh", ["pr", "view", "--json", "number,title,url,state,statusCheckRollup,baseRefName,headRefName,mergeable"], {
+    const { stdout } = await runCommand(context, "gh", ["pr", "view", "--json", "number,title,url,state,statusCheckRollup,baseRefName,headRefName,mergeable"], {
       cwd,
       timeoutMs: GH_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,

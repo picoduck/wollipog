@@ -165,7 +165,9 @@ function PullRequestRow({ session, pr, checks, canPrompt }: {
       )}
       {checks && (
         <details className="review-request-checks">
-          <summary>Checks ({checks.passing} Passing, {checks.pending} Pending, {checks.failing} Failing)</summary>
+          <summary>{mergeRequest
+            ? `Checks (Pipeline ${checks.failing > 0 ? "Failing" : checks.pending > 0 ? "Pending" : checks.passing > 0 ? "Passing" : "Status Unknown"})`
+            : `Checks (${checks.passing} Passing, ${checks.pending} Pending, ${checks.failing} Failing)`}</summary>
           {checks.jobs && checks.jobs.length > 0 ? (
             <ul>
               {checks.jobs.map((job, index) => {
@@ -176,7 +178,9 @@ function PullRequestRow({ session, pr, checks, canPrompt }: {
                 </li>;
               })}
             </ul>
-          ) : <p>Named checks are unavailable from this machine.</p>}
+          ) : <p>{checks.jobs
+            ? "No named jobs were returned. Open the forge for pipeline details."
+            : "Named checks are unavailable from this machine."}</p>}
           {checks.jobsIncomplete && <p>Some checks are unavailable. Open the forge for the complete list.</p>}
           {safeExternalHref(checks.url) && <a className="link" href={safeExternalHref(checks.url)!} target="_blank" rel="noreferrer">Open Checks</a>}
         </details>
