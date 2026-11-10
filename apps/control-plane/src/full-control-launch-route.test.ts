@@ -8603,12 +8603,11 @@ test("Campaign Status reports a limited launch Location live, and a routed follo
     assert.match(view().limitedLocations![0]!.reason, new RegExp(`protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer`, "u"));
 
     const child = childAt(f, c.rootId, "r2", "a");
+    // Every place of owner/repo is now on a runner below the floor, so the request itself is refused
+    // by name (#4319 follow-on A), before a person could approve it.
     const asked = await ask(f, child, publicationIn("owner/repo"));
-    assert.equal(asked.ok, true, asked.error ?? "");
-    assert.equal(personApproves(f, c.rootId, child, asked.data!.occurrenceId).ok, true);
-    const executed = await f.sessions.executeWorkflowDecision(child, asked.data!.occurrenceId, { resourceDigest: asked.data!.resourceDigest }, () => true);
-    assert.equal(executed.ok, false);
-    assert.match(executed.error!, /no other login stands in/u);
+    assert.equal(asked.ok, false);
+    assert.match(asked.error!, /owner\/repo can't be acted on: every Location of it in this campaign \(Fixture Repo\) is on a runner that can't perform its gates.*no other login stands in/su);
 
     registerRoot(PROTOCOL_VERSION);
     assert.equal(view().limitedLocations, undefined, "it clears as soon as the root updates");
@@ -10256,5 +10255,110 @@ test("a malformed consent mark is dropped and never drops an unread record (#431
     assert.equal(c.policy().unreadByConsent, undefined);
     f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({ ...c.policy(), unreadByConsent: ["pl_kept", "pl_gone"] }), c.rootId);
     assert.deepEqual(c.policy().unreadByConsent, ["pl_kept"], "a mark for a Location that isn't unread is dropped");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+/* The child's follow-ons to #4415 (#4319): a repository in the boundary whose every Location's runner
+   can't perform the gates, the own-Location exemption going stale, and a malformed exclusion list. */
+
+/** Registers the second machine again at `protocolVersion`, as an update or a rollback does. */
+function registerSecondMachine(f: ReturnType<typeof fixture>, protocolVersion: number): void {
+  f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: SECOND_MACHINE_AGENTS, runtime: { ...runtime, campaignLaunchInspection: { version: 3 } },
+    workspaces: [{ id: "a", name: "r2 a", path: "/fixture/two/other" }, { id: "b", name: "r2 b", path: "/fixture/two/repository" }] }, Date.now(), protocolVersion);
+}
+const ENTRY_BELOW = /other\/repo can't be acted on: every Location of it in this campaign \(r2 a\) is on a runner that can't perform its gates\. Update and restart that runner to protocol version \d+ or newer\. Until then no other login stands in, and nothing was performed\./u;
+
+test("a repository in the boundary whose every Location's runner drops below the gates' floor refuses merges and deletions by name, except in that Location (#4319 follow-on A)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    assert.ok(m.boundary().repositories!.some((entry) => entry.repository === "other/repo"), "other/repo holds an entry");
+    // Approved while r2 could perform the gates.
+    const earlier = await ask(f, m.child, mergeIn("other/repo"), "other-merge-earlier");
+    assert.equal(earlier.ok, true, earlier.error ?? "");
+    assert.equal(personApproves(f, m.rootId, m.child, earlier.data!.occurrenceId).ok, true);
+    registerSecondMachine(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+    for (const [snapshot, id] of [[mergeIn("other/repo"), "other-merge"], [deletionIn("other/repo"), "other-deletion"]] as const) {
+      const refused = await ask(f, m.child, snapshot, id);
+      assert.equal(refused.ok, false, `${id}: the requester's login doesn't stand in`);
+      assert.match(refused.error!, ENTRY_BELOW, id);
+    }
+    const arming = await f.sessions.consumeWorkflowDecision(m.child, earlier.data!.occurrenceId, { resourceSnapshot: earlier.data!.resourceSnapshot,
+      action: { kind: "pr_merge_enqueue", command: "gh pr merge https://github.com/other/repo/pull/8 --squash --match-head-commit " + "b".repeat(40) } });
+    assert.equal(arming.ok, false, "an approval made earlier can't be armed while it lasts");
+    assert.match(arming.error!, ENTRY_BELOW);
+    // A requester in that very Location acts on its own runner, the Location's own login.
+    const inLocation = childAt(f, m.rootId, "r2", "a", "child-in-other");
+    const own = await ask(f, inLocation, mergeIn("other/repo"), "own-merge");
+    assert.equal(own.ok, true, own.error ?? "");
+    // The runner updates: the repository can perform its gates again.
+    registerSecondMachine(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    const again = await ask(f, m.child, mergeIn("other/repo"), "other-merge-again");
+    assert.equal(again.ok, true, again.error ?? "");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("an armed merge in a boundary repository whose runners all drop below the floor is blocked at the hook, which says what lifts it (#4319 follow-on A)", async () => {
+  const f = fixture();
+  const m = await mergeHeldAtPreflight(f);
+  try {
+    const asked = await ask(f, m.child, mergeIn("other/repo"), "other-merge-to-arm");
+    assert.equal(asked.ok, true, asked.error ?? "");
+    assert.equal(personApproves(f, m.rootId, m.child, asked.data!.occurrenceId).ok, true);
+    const armed = await f.sessions.consumeWorkflowDecision(m.child, asked.data!.occurrenceId, { resourceSnapshot: asked.data!.resourceSnapshot,
+      action: { kind: "pr_merge_enqueue", command: "gh pr merge https://github.com/other/repo/pull/8 --squash --match-head-commit " + "b".repeat(40) } });
+    assert.equal(armed.ok, true, armed.error ?? "");
+    registerSecondMachine(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+    const hook = childHook(f, m.child, "entry-below").data;
+    assert.equal(hook?.decision, "deny");
+    assert.match(hook?.reason ?? "", /Otherwise this lifts when a runner of a Location of that repository is updated and restarted to protocol version \d+ or newer/u);
+    registerSecondMachine(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+    assert.notEqual(childHook(f, m.child, "entry-current").data?.decision, "deny");
+  } finally { await m.server.close(); f.db.close(); }
+});
+
+test("a revived Location's requester is no longer exempt for the repository an earlier read named, since its folder may now hold another (#4319 follow-on B)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    const inBelow = childAt(f, c.rootId, "below", "z", "child-in-below");
+    const exempt = await ask(f, inBelow, publicationIn("below/repo"), "exempt-before");
+    assert.equal(exempt.ok, true, "the Location's own requester acts in its own repository");
+    // Detached and revived: same id, a folder that may hold another repository now, and no read since.
+    f.db.deleteRunner("below");
+    f.db.registerRunner({ runnerId: "below", hostname: "below", os: "linux", version: "test", agents: [], runtime: { ...runtime, campaignLaunchInspection: { version: 4 } },
+      workspaces: [{ id: "z", name: "below z", path: "/fixture/below-moved" }] }, Date.now(), CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+    assert.equal(f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId }).id, below.id);
+    // Removing the runner removed its sessions; a requester starts there again.
+    const revived = childAt(f, c.rootId, "below", "z", "child-in-revived");
+    const stale = await ask(f, revived, publicationIn("below/repo"), "exempt-after-revival");
+    assert.equal(stale.ok, false, "nothing shows the revived folder still holds below/repo");
+    assert.match(stale.error!, NAMED_REFUSAL);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a malformed exclusion list keeps its well-formed refusals, and a malformed item of a Location counts as unread (#4319 follow-on C)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  registerBelow(f);
+  try {
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    const second = f.db.createWorkspace("below", { name: "below y", path: "/fixture/below-y" }, f.scope);
+    const other = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: second.id, addedByUserId: f.human.userId });
+    // As corrupt data would leave it: a named refusal not yet in the durable record, beside an item that doesn't parse.
+    const { refusedRepositories: _none, ...policy } = c.policy();
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({ ...policy,
+      excludedLocations: [belowExclusion(below.id), { locationId: other.id, name: "below y", failure: "not-a-failure", reason: 7 }] }), c.rootId);
+    assert.deepEqual(c.policy().excludedLocations, [belowExclusion(below.id)], "the well-formed item is kept");
+    assert.deepEqual(c.policy().unreadLocations?.map((item) => item.locationId), [other.id], "the malformed one counts as unread");
+    const child = childAt(f, c.rootId, "r", "w");
+    await stillRefused(f, c.rootId, child, "beside a malformed item");
+    const elsewhere = await ask(f, child, publicationIn("elsewhere/repo"), "beside-malformed-elsewhere");
+    assert.equal(elsewhere.ok, false);
+    assert.match(elsewhere.error!, /no read has named the repository it holds/u);
   } finally { await c.server.close(); f.db.close(); }
 });

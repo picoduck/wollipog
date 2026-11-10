@@ -36248,10 +36248,27 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       first.state === "established" && digest(first.messageDigest) && Number.isSafeInteger(first.establishedAt) && context(first.contextIssueNumbers)))) return null;
   if (value.issueNumbersSource !== undefined && value.issueNumbersSource !== "human_launch_request") return null;
   // Informational only (#4117): a malformed list is dropped instead of discarding the policy.
-  if (value.excludedLocations !== undefined && !validExcludedLocations(value.excludedLocations)) delete value.excludedLocations;
-  // Each reason reads as today's fixed sentence, so stored text never reaches a person, and a raised
-  // version floor (#4319) names the new version rather than dropping the list its reconnects retry.
-  else if (value.excludedLocations) value.excludedLocations = value.excludedLocations.map((item) => ({ ...item, reason: PROJECT_LOCATION_INSPECTION_FAILURES[item.failure] }));
+  // Each item stands alone (#4319 follow-on C): a malformed one no longer drops the rest, with any
+  // refusal they hold that the durable record hasn't copied yet. A malformed item that still names a
+  // Location fails closed: nothing shows which repository it holds, so it counts as unread.
+  if (value.excludedLocations !== undefined) {
+    const items: unknown[] = Array.isArray(value.excludedLocations) ? value.excludedLocations : [];
+    const valid = items.filter((item) => validExcludedLocations([item])) as CampaignExcludedLocation[];
+    const unread = items.filter((item) => !validExcludedLocations([item])).flatMap((item) => {
+      const entry = item as Record<string, unknown> | null;
+      const locationId = entry && typeof entry === "object" ? entry.locationId : undefined;
+      if (typeof locationId !== "string" || !locationId || locationId.length > 256) return [];
+      return [{ locationId, name: typeof entry!.name === "string" && entry!.name.length <= 256 ? entry!.name : "a Location" }];
+    });
+    if (unread.length) {
+      const recorded = Array.isArray(value.unreadLocations) ? value.unreadLocations : [];
+      value.unreadLocations = [...recorded, ...unread.filter((item) => !recorded.some((other) => (other as { locationId?: unknown })?.locationId === item.locationId))];
+    }
+    // Each reason reads as today's fixed sentence, so stored text never reaches a person, and a raised
+    // version floor (#4319) names the new version rather than dropping the list its reconnects retry.
+    if (valid.length) value.excludedLocations = valid.map((item) => ({ ...item, reason: PROJECT_LOCATION_INSPECTION_FAILURES[item.failure] }));
+    else delete value.excludedLocations;
+  }
   if (value.refusedRepositories !== undefined) {
     const refused = validRefusedRepositories(value.refusedRepositories);
     if (refused.length) value.refusedRepositories = refused; else delete value.refusedRepositories;
