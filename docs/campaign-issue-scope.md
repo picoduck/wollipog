@@ -694,8 +694,9 @@ A delegated closure is still created `pending`: the root approves it itself with
 authorization there), then executes it with `close_github_issue`. Executing it while pending refuses
 with that exact step; a pending human-owned closure refuses with a statement that a person must
 approve it. Approval at creation was considered and rejected, because it would bypass the
-resolution-time authority recheck and start the 30-minute expiry before the root acts.
-Existing issue/PR inspection, audience, assignment digests, exact snapshot, expiry, scope synchronization,
+resolution-time authority recheck. An approved closure does not expire on age alone: its bindings
+must remain unchanged, and execution re-reads forge evidence. Older control planes retain their age cutoff.
+Existing issue/PR inspection, audience, assignment digests, exact snapshot, scope synchronization,
 guardrails, durable dispatch fence and uncertain-result reconciliation continue to apply. Changed
 delivery/disposition invalidates execution. Inspect uncertain outcomes; never replay a close or comment.
 At the runner mutation fence, bounded closure rechecks its synchronized authority contract and
