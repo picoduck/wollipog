@@ -210,7 +210,10 @@ assignment supersedes it. A system notice that produced no completed response do
 it only when durable server-recorded command provenance proves it was an informational restart
 notice. Decision resumes, review continuations, PR-watch wakes and campaign continuations can
 carry work, so they still supersede reports. Unknown legacy
-provenance fails closed; notice-looking text is never proof. A confirmed stopped child follows
+provenance fails closed; notice-looking text is never proof. Active commands are ordered using
+server-recorded stage/send event boundaries, not CP/runner clocks. A command sent before the
+report does not become a later assignment merely because its receipt is delayed; a retry after
+the report or unknown/replaced-epoch ordering remains blocked. A confirmed stopped child follows
 the same rule. A provisional stop still needs the runner's confirmation.
 
 `record_campaign_work_item_delivery` accepts that report inside its attempt, including an attempt
