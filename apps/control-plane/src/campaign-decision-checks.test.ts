@@ -123,7 +123,7 @@ test("follow-up relatedness: an unrelated follow-up is refused back to the Orche
   } finally { h.db.close(); }
 });
 
-for (const scenario of ["owned failure", "another PR", "passed run", "no evidence", "old runner", "wrong head", "unverified review", "unsafe payload"] as const) {
+for (const scenario of ["owned failure", "another PR", "passed run", "no evidence", "old runner", "wrong head", "unverified review", "read timeout", "unsafe payload"] as const) {
   test(`follow-up relatedness: forge evidence ${scenario}`, async () => {
     const h = harness();
     try {
@@ -142,6 +142,8 @@ for (const scenario of ["owned failure", "another PR", "passed run", "no evidenc
       h.hub.requestFromRunner = async (runner, id, message, timeout) => {
         if (message.type === "campaign_issue_scope" && message.operation === "failed_run_inspect") {
           inspections++;
+          assert.ok(timeout! <= 5_000, "each lookup stays within the shared admission deadline");
+          if (scenario === "read timeout") throw new Error("request timed out");
           return { type: "campaign_issue_scope_result", requestId: id, sessionId: message.sessionId, ok: true, repository: "team/repo",
             ...(scenario === "passed run" ? {} : { failedRun: scenario === "wrong head" ? { ...message.evidence, headSha: "b".repeat(40) } : message.evidence }) };
         }
@@ -162,7 +164,13 @@ for (const scenario of ["owned failure", "another PR", "passed run", "no evidenc
         assert.equal(h.calls("follow_up_relatedness").length, scenario === "owned failure" ? 0 : 1);
         const snapshot = result.data!.resourceSnapshot;
         assert.ok(snapshot.category === "follow_up_issue_publication");
-        assert.equal(snapshot.issueAdmission?.relatedness?.basis, scenario === "owned failure" ? "failed_campaign_run" : "decision_model");
+        assert.equal(snapshot.issueAdmission?.relatedness?.basis, scenario === "old runner" ? undefined
+          : scenario === "owned failure" ? "failed_campaign_run" : "decision_model");
+        assert.ok(h.svc.resolveWorkflowDecision("root", "child", result.data!.occurrenceId, { outcome: "approve" },
+          "orchestrator", { kind: "agent", id: "root" }, () => true).ok);
+        const consumed = await h.svc.consumeWorkflowDecision("child", result.data!.occurrenceId, { resourceSnapshot: snapshot });
+        assert.ok(consumed.ok, consumed.error ?? "consume publication");
+        if (scenario === "read timeout") assert.equal(inspections, 1, "a failed read goes straight to the ordinary check");
       }
     } finally { h.db.close(); }
   });

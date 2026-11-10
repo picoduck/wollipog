@@ -12835,7 +12835,10 @@ export class SessionsService {
     // After the structural floor, the Decision Model checks the follow-up belongs to the work the
     // owner asked for (#4104). It can only refuse: unrelated goes back to the requester with the
     // model's reason, and an uncertain or failed check makes the publication the owner's.
-    const failedRun = await failedCampaignRun(this.db, this.hub, root, snapshot.sanitizedBody, evidence.recommendation);
+    // An older requester's strict consume schema cannot echo the added admission metadata.
+    const supportsRelatedness = runnerSupportsProtocol(this.db.getRunner(caller.runnerId)?.protocolVersion, "campaignFailedRunEvidence");
+    const failedRun = supportsRelatedness
+      ? await failedCampaignRun(this.db, this.hub, root, snapshot.sanitizedBody, evidence.recommendation) : null;
     if (!failedRun) {
       const related = await this.followUpRelatedness(root, sessionId, snapshot, evidence);
       if (related.outcome === "refused") return refused("unrelated_follow_up", boundaryRevision, related.reason);
@@ -12850,7 +12853,7 @@ export class SessionsService {
     this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "publication_proposal", sessionId, requestId: request.requestId,
       controllingSessionId: root.id, boundaryRevision: evidence.boundaryRevision, scopeRevision: evidence.scopeRevision, recommendationId: snapshot.recommendationId, outcome: "admitted", relatedness }));
     return this.createWorkflowDecision(sessionId, { ...request, resourceKey: `publication:${snapshot.recommendationId}`,
-      resourceSnapshot: { ...snapshot, issueAdmission: { relatedness, boundaryRevision: evidence.boundaryRevision,
+      resourceSnapshot: { ...snapshot, issueAdmission: { ...(supportsRelatedness ? { relatedness } : {}), boundaryRevision: evidence.boundaryRevision,
         evidenceDigest: issueEvidenceDigest({ evidence, publicationDigest }),
         publicationAuthority: { authorizedByUserId: boundary.authorizedByUserId, objectiveDigest: issueEvidenceDigest(boundary.objective) } } } }, canAccess,
       { trustedPublication: true, requestedResourceKey: request.resourceKey });

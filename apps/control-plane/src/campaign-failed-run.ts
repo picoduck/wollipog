@@ -12,6 +12,7 @@ export async function failedCampaignRun(db: ControlPlaneDb, hub: Hub, root: Sess
   const hints = [...body.matchAll(/https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/actions\/runs\/([1-9][0-9]*)(?=[\s/#?)\]]|$)/gu)].slice(0, 4);
   if (!hints.length) return null;
   let reads = 0;
+  const deadline = Date.now() + 20_000;
   for (const id of recommendation.originWorkItemIds) {
     const item = db.campaignWorkLedger.detail(root.id, id, Date.now());
     if (!item) continue;
@@ -35,13 +36,15 @@ export async function failedCampaignRun(db: ControlPlaneDb, hub: Hub, root: Sess
         const evidence = { repository: head.repository, pullRequest: head.pullRequest, headSha: head.headSha, runId: Number(hint[2]) };
         if (!Number.isSafeInteger(evidence.runId)) continue;
         if (++reads > 8) return null;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return null;
         const requestId = `failed_run_${randomUUID()}`;
         try {
           const result = await hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope",
-            operation: "failed_run_inspect", sessionId: root.id, requestId, evidence }, 60_000);
+            operation: "failed_run_inspect", sessionId: root.id, requestId, evidence }, Math.min(5_000, remaining));
           if (result.type === "campaign_issue_scope_result" && result.requestId === requestId && result.sessionId === root.id &&
               result.ok && result.repository === head.repository && issueEvidenceDigest(result.failedRun) === issueEvidenceDigest(evidence)) return evidence;
-        } catch { /* Unverifiable evidence retains the ordinary model check. */ }
+        } catch { return null; /* A failed read retains the ordinary model check without more waits. */ }
       }
     }
   }

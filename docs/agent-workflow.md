@@ -151,7 +151,12 @@ whose run names that PR/head. Only relatedness skips the Decision Model. Structu
 safe-payload/duplicate inspection remain mandatory. Unknown ownership, unrelated/passing runs,
 unreadable evidence and older runners retain the ordinary check and its existing outcomes.
 The server-created admission records `failed_campaign_run` with the exact PR/head/run, or
-`decision_model`. No agent-written claim or supplied admission can establish this basis.
+`decision_model`. Requesters on older runners retain their original snapshot shape and the model
+basis remains in the admission log. Lookup has a shared 20-second deadline, with at most five seconds
+per read; a failed read immediately returns to the ordinary check. No agent-written claim or
+supplied admission can establish this basis. This proves the campaign's CI failure link, not a
+semantic comparison between the proposed defect and the run's logs; the accepted recommendation
+and unchanged structural floors remain required.
 Scope and closure use their dedicated exact typed routes. Current hosts without eligible issue
 authority retain human review even when the campaign requests Full Control. Use non-closing PR
 references in campaigns so merge cannot bypass the closure gate: write "Refs #N", and never put
