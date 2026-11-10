@@ -5990,6 +5990,29 @@ function sessionHistoryRetentionView(
  * an unread refusal (#4319). The caller settles it as the person whose action led to it (#3916). */
 export type UnreadReleaseSettle = (root: SessionView, revoked: WorkflowDecisionView[]) => void;
 
+/** A removal or Project deletion refused while a session of a campaign runs on an unread Location it
+ * holds (#4319). Its own message names no session. A caller that knows who asked names, through
+ * `describe`, only the sessions that person can see, and counts the rest: the sessions are found by
+ * runner and workspace, so they may be outside what the remover may read. */
+export class OccupiedUnreadLocationError extends Error {
+  constructor(readonly locationNames: string[], readonly sessions: Array<{ id: string; title: string }>) {
+    super(OccupiedUnreadLocationError.sentence(locationNames, [], sessions.length));
+  }
+
+  describe(canSee: (sessionId: string) => boolean): string {
+    const shown = this.sessions.filter((session) => canSee(session.id))
+      .map((session) => session.title === session.id ? session.id : `${session.title} (${session.id})`);
+    return OccupiedUnreadLocationError.sentence(this.locationNames, shown, this.sessions.length - shown.length);
+  }
+
+  private static sentence(locationNames: readonly string[], shown: readonly string[], hidden: number): string {
+    const others = hidden ? `${shown.length ? " and " : ""}${hidden} ${hidden === 1 ? "session" : "sessions"} you can't see` : "";
+    return `${locationNames.join(", ")} can't be removed while a session of its campaign runs there: ${shown.join(", ")}${others}. ` +
+      "No read has named the repository it holds, and with it gone nothing could. " +
+      "Stop those sessions, or update and restart its runner so it can be read, then try again.";
+  }
+}
+
 export class ControlPlaneDb {
   private readonly providerPublications: ProviderProfilePublicationStore;
   readonly campaignBudgets: CampaignBudgetLedger;
@@ -10314,11 +10337,8 @@ export class ControlPlaneDb {
   private refuseOccupiedUnreadRemoval(locationIds: readonly string[]): void {
     const occupied = this.unreadLocationsOccupied(locationIds);
     if (occupied.length) {
-      const sessions = [...new Map(occupied.flatMap((item) => item.sessions).map((session) => [session.id, session])).values()]
-        .map((session) => session.title === session.id ? session.id : `${session.title} (${session.id})`);
-      throw new Error(`${[...new Set(occupied.map((item) => item.name))].join(", ")} can't be removed while a session of its campaign runs there: ` +
-        `${sessions.join(", ")}. No read has named the repository it holds, and with it gone nothing could. ` +
-        "Stop those sessions, or update and restart its runner so it can be read, then try again.");
+      throw new OccupiedUnreadLocationError([...new Set(occupied.map((item) => item.name))],
+        [...new Map(occupied.flatMap((item) => item.sessions).map((session) => [session.id, session])).values()]);
     }
   }
 

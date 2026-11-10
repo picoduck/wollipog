@@ -9,7 +9,7 @@ import {
   type CampaignWorkItemDetail, type ControlPlaneToRunner, type ExecutionTargetDefinition, type CreateSessionRequest, type FullControlFirstMessageScope, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
   type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
-import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
+import { ControlPlaneDb, OccupiedUnreadLocationError, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
 import { canonicalPrMergeEnqueueCommand, SessionsService } from "./sessions.js";
 import { DECISION_MAX_ATTEMPTS, type DecisionRuntime } from "./decision-runtime.js";
@@ -9961,9 +9961,17 @@ test("an unread Location a campaign session runs on can't be removed, nor its Pr
       }
       assert.deepEqual(f.db.unreadLocationsOccupied([locationId]).map((item) => item.rootId), [rootId], `${sits}: occupied`);
       assert.throws(() => f.db.removeProjectLocation(locationId), /can't be removed while a session of its campaign runs there/u, `${sits}: removal refused`);
-      // It names the sessions that hold it, and that stopping them clears the way.
-      assert.throws(() => f.db.removeProjectLocation(locationId), (error: Error) => error.message.includes(child) &&
-        (sits === "Full Control member" || error.message.includes(rootId)) && /Stop those sessions/u.test(error.message), `${sits}: names them`);
+      // It names the sessions that hold it, to someone who can see them, and that stopping them clears
+      // the way; its own message names none, since they may be outside what the remover may read.
+      assert.throws(() => f.db.removeProjectLocation(locationId), (error: unknown) => {
+        assert.ok(error instanceof OccupiedUnreadLocationError);
+        assert.ok(!error.message.includes(child), "its own message names no session");
+        const seen = error.describe(() => true);
+        assert.ok(seen.includes(child) && (sits === "Full Control member" || seen.includes(rootId)) && /Stop those sessions/u.test(seen), seen);
+        const unseen = error.describe(() => false);
+        assert.ok(!unseen.includes(child) && /\d+ sessions? you can't see/u.test(unseen), unseen);
+        return true;
+      }, `${sits}: names them to whoever may see them`);
       assert.throws(() => f.db.deleteProject(projectId), /can't be removed while a session of its campaign runs there/u, `${sits}: deletion refused`);
       assert.ok(f.db.getProjectLocation(locationId), `${sits}: nothing removed`);
       const refused = await ask(f, child, publicationIn("elsewhere/repo"), `${sits}-still`);

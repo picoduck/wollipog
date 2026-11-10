@@ -227,7 +227,7 @@ import { MergeClosureWatcher } from "./merge-closure-watch.js";
 import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
 import { ProviderPublicationUnavailable, type PublicationObservation } from "./provider-profile-publication-store.js";
 import { readSshConfigHosts } from "./ssh-config.js";
-import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS, TeamMemberContainmentError } from "./db.js";
+import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS, OccupiedUnreadLocationError, TeamMemberContainmentError } from "./db.js";
 import { registerIdentityTeamRoutes, TEAM_NAME_TAKEN } from "./identity-team-route.js";
 import { logWalCheckpointerEvent } from "./wal-checkpointer.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
@@ -2632,7 +2632,8 @@ app.delete("/api/projects/:id", async (req, reply) => {
   try {
     deleted = db.deleteProject(id, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
   } catch (error) {
-    return reply.code(409).send({ error: (error as Error).message });
+    // Only the sessions this person can see are named (#4319).
+    return reply.code(409).send({ error: error instanceof OccupiedUnreadLocationError ? error.describe((sessionId) => db.canAccessSession(principal, sessionId)) : (error as Error).message });
   }
   if (!deleted) return reply.code(404).send({ error: "project not found" });
   hub.projectRemoved(id);
@@ -2764,7 +2765,7 @@ app.delete("/api/projects/:id/locations/:locationId", async (req, reply) => {
   try {
     db.removeProjectLocation(locationId, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
   } catch (error) {
-    return reply.code(409).send({ error: (error as Error).message });
+    return reply.code(409).send({ error: error instanceof OccupiedUnreadLocationError ? error.describe((sessionId) => db.canAccessSession(principal, sessionId)) : (error as Error).message });
   }
   const project = db.getProject(id)!;
   hub.projectChanged(project);
