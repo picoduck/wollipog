@@ -37,9 +37,41 @@ test("fixed native profile creation preserves admission and detects pinned compo
   assert.throws(() => createManagedProviderProfileHome(join(adapterHome, "arbitrary"), id, "linux", { create }), /could not be verified/u);
   assert.throws(() => createManagedProviderProfileHome(managedProviderProfileRoot(adapterHome), id, "darwin", { create }), /could not be verified/u);
   const linkedHome = join(fixture, "linked-os-home"); symlinkSync(adapterHome, linkedHome);
-  assert.equal(managedProviderProfileRoot(linkedHome), managedProviderProfileRoot(adapterHome), "trusted OS-home aliases resolve before owned components are appended");
+  assert.equal(managedProviderProfileRoot(linkedHome), join(linkedHome, ".agent-manager", "profiles"), "configured spelling remains stable for account classification");
   const linkedId = "7f1c2d3e-4a5b-4c6d-8e7f-001122334455";
-  assert.equal(createManagedProviderProfileHome(managedProviderProfileRoot(linkedHome), linkedId, "linux", { create }), join(adapterHome, ".agent-manager", "profiles", linkedId));
+  assert.equal(createManagedProviderProfileHome(managedProviderProfileRoot(linkedHome), linkedId, "linux", { create }), join(linkedHome, ".agent-manager", "profiles", linkedId));
+  assert.ok(existsSync(join(adapterHome, ".agent-manager", "profiles", linkedId)));
+  const replacement = join(fixture, "replacement-home"); mkdirSync(replacement, { mode: 0o700 });
+  const racedId = "8f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+  assert.throws(() => createManagedProviderProfileHome(managedProviderProfileRoot(linkedHome), racedId, "linux", {
+    create: (home, identity) => {
+      assert.equal(home, adapterHome, "only the canonical OS home enters the no-follow helper");
+      rmSync(linkedHome); symlinkSync(replacement, linkedHome);
+      return create(home, identity);
+    },
+  }), (error: unknown) => {
+    assert.deepEqual(JSON.parse(JSON.stringify(error)), { code: "managed_profile_directory", component: "os_home", reason: "may_have_changed", failureReason: "identity_changed" });
+    return true;
+  });
+  assert.ok(existsSync(join(adapterHome, ".agent-manager", "profiles", racedId)), "canonical creation is preserved after alias replacement");
+  assert.deepEqual(readdirSync(replacement), [], "no creation is redirected through the alias");
+  // A helper refusal remains primary even if alias verification would also fail.
+  rmSync(linkedHome); symlinkSync(adapterHome, linkedHome);
+  assert.throws(() => createManagedProviderProfileHome(managedProviderProfileRoot(linkedHome), racedId, "linux", {
+    create: () => { rmSync(linkedHome); return { ok: false, component: "profiles_root", reason: "unsupported_acl" }; },
+  }), (error: unknown) => JSON.stringify(error) === JSON.stringify({ code: "managed_profile_directory", component: "profiles_root", reason: "unsupported_acl" }));
+  symlinkSync(adapterHome, linkedHome);
+  const movedHome = join(fixture, "moved-adapter-home"), movedId = "9f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+  assert.throws(() => createManagedProviderProfileHome(managedProviderProfileRoot(linkedHome), movedId, "linux", {
+    create: (home, identity) => {
+      const result = create(home, identity);
+      renameSync(adapterHome, movedHome); mkdirSync(adapterHome, { mode: 0o700 });
+      return result;
+    },
+  }), (error: unknown) => JSON.stringify(error).includes('"failureReason":"identity_changed"'));
+  assert.deepEqual(readdirSync(adapterHome), [], "same-path replacement must not look unchanged merely because realpath's string matches");
+  assert.ok(existsSync(join(movedHome, ".agent-manager", "profiles", movedId)), "post-helper replacement preserves the original creation");
+  rmSync(adapterHome, { recursive: true }); renameSync(movedHome, adapterHome);
   // A first, definitely failed mkdir is a clean refusal. No broader mutation is attempted.
   const readOnlyHome = join(fixture, "read-only-home"); mkdirSync(readOnlyHome, { mode: 0o500 });
   const denied = run(readOnlyHome);

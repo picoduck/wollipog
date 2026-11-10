@@ -9,8 +9,11 @@ leases; refusing temporary-directory execution alone must not disable account cr
 
 The runner supplies its trusted OS-home context and a generated lowercase UUID v4, never a
 remote or CLI path. The only possible layout is `.agent-manager/profiles/<profileId>`. The trusted
-OS-home alias is canonicalized before owned components are appended; aliases among the owned
-components are still refused. Each component is opened relative to its pinned parent with no
+OS-home context is canonicalized for the helper before owned components are appended; configured
+account paths keep their spelling so existing managed identity and substitution guards remain
+unchanged. The original OS-home alias is rechecked before returning success; a changed or lost
+binding reports uncertainty while preserving creations and any primary helper failure. Aliases
+among owned components are still refused. Each component is opened relative to its pinned parent with no
 symlink following, checked for expected
 UID, directory type, group/other write bits and unsupported ACLs, and rechecked before the next
 mkdir and before success. Existing `0750` and `0755` roots remain accepted; `0775` roots remain

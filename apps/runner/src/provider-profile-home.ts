@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync, type Stats } from "node:fs";
+import { lstatSync, realpathSync, type BigIntStats, type Stats } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isProviderProfileId } from "./provider-profile.js";
@@ -12,9 +12,7 @@ import { runManagedProfileCreationHelper, withLeaseIoOptions, type ProfileCreati
  * Existing account homes keep their paths.
  */
 export function managedProviderProfileRoot(home = homedir()): string {
-  // Canonicalize only the trusted OS-home context, before appending the owned components.
-  // Do not resolve .agent-manager/profiles: their links must still be refused by the helper.
-  try { home = realpathSync(home); } catch { /* Missing/unavailable OS home is diagnosed by creation. */ }
+  // Keep the configured spelling: persisted accounts and substitution/retirement guards use it.
   return join(home, ".agent-manager", "profiles");
 }
 
@@ -76,9 +74,27 @@ export function createManagedProviderProfileHome(root: string, profileId: string
   const osHome = dirname(dirname(root));
   if (!isAbsolute(root) || root !== resolve(root) || root !== managedProviderProfileRoot(osHome) || !isProviderProfileId(profileId))
     throw new ManagedProfileDirectoryError("profile_home", "unsupported_layout");
+  // Canonicalize ONLY the trusted OS-home context for native no-follow traversal. Never resolve
+  // owned components or rewrite persisted account paths, which would change their classification.
+  let canonicalOsHome: string;
+  let homeIdentity: BigIntStats;
+  try { canonicalOsHome = realpathSync(osHome); homeIdentity = lstatSync(canonicalOsHome, { bigint: true }); }
+  catch { throw new ManagedProfileDirectoryError("os_home", "unavailable"); }
+  if (!homeIdentity.isDirectory() || homeIdentity.isSymbolicLink()) throw new ManagedProfileDirectoryError("os_home", "identity_changed");
   const result = withLeaseIoOptions({ ...(options.helperDataDir === undefined ? {} : { helperDataDir: options.helperDataDir }),
-    providerHome: join(root, profileId) }, () => (options.create ?? runManagedProfileCreationHelper)(osHome, profileId));
+    providerHome: join(managedProviderProfileRoot(canonicalOsHome), profileId) },
+  () => (options.create ?? runManagedProfileCreationHelper)(canonicalOsHome, profileId));
   if (!result.ok) throw new ManagedProfileDirectoryError(result.component, result.reason === "created" ? "may_have_changed" : result.reason, result.failureReason);
+  // A concurrent alias rename cannot claim a clean refusal: the canonical target may now hold
+  // new directories. Keep the primary helper failure above if one was reported.
+  let currentOsHome: string;
+  let currentIdentity: BigIntStats;
+  try { currentOsHome = realpathSync(osHome); currentIdentity = lstatSync(currentOsHome, { bigint: true }); }
+  catch { throw new ManagedProfileDirectoryError("os_home", "may_have_changed", "unavailable"); }
+  if (currentOsHome !== canonicalOsHome || !currentIdentity.isDirectory() || currentIdentity.isSymbolicLink() ||
+      currentIdentity.dev !== homeIdentity.dev || currentIdentity.ino !== homeIdentity.ino ||
+      currentIdentity.uid !== homeIdentity.uid || currentIdentity.mode !== homeIdentity.mode)
+    throw new ManagedProfileDirectoryError("os_home", "may_have_changed", "identity_changed");
   return join(root, profileId);
 }
 
