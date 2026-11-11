@@ -18,6 +18,8 @@ const instances: Awaited<ReturnType<typeof start>>[] = [];
 async function start(name: string) {
   const db = ControlPlaneDb.open(":memory:");
   const app = Fastify({ logger: false });
+  const responseCodes: number[] = [];
+  app.addHook("onResponse", async (_request, reply) => { responseCodes.push(reply.statusCode); });
   try {
     const local = db.localIdentityContext();
     const owner = db.operatingHumanPrincipal(local.userId, local.organizationId)!;
@@ -26,7 +28,7 @@ async function start(name: string) {
     const operations = createAssistantOperations(db);
     registerAssistantRoutes(app, { db, operations, requestHuman: () => null });
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
-    return { db, app, issued, url: `${address}/assistant/mcp` };
+    return { db, app, issued, responseCodes, url: `${address}/assistant/mcp` };
   } catch (error) { await app.close(); db.close(); throw error; }
 }
 
@@ -72,11 +74,15 @@ try {
   console.log("PASS REAL HTTP operation routing: discovery identities match the selected control plane and connection. No model routing exercised.");
 
   const rotated = alpha.db.assistantConnections.rotate(alpha.issued.connection.id);
+  alpha.responseCodes.length = 0;
   await probe("wollipog-alpha", false);
+  assert.ok(alpha.responseCodes.includes(401), "Rotation refusal must reach the real Assistant endpoint.");
   credentials.WOLLIPOG_ALPHA_TOKEN = rotated;
   await probe("wollipog-alpha");
   alpha.db.assistantConnections.revoke(alpha.issued.connection.id);
+  alpha.responseCodes.length = 0;
   await probe("wollipog-alpha", false);
+  assert.ok(alpha.responseCodes.includes(401), "Revocation refusal must reach the real Assistant endpoint.");
   await probe("wollipog-beta");
   console.log("PASS REAL OpenClaw: old credential refused after rotation, replacement accepted, revoked credential refused, second connection unaffected.");
 
