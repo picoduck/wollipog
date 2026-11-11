@@ -174,6 +174,19 @@ test("an approved deletion is offered as Delete Merged Branches and performed th
   } finally { h.db.close(); }
 });
 
+test("approved branch cleanup rechecks transport authority before the existing forge action", async () => {
+  const h = await fixture({approveDeletion: true});
+  try {
+    observe(h, observed("a".repeat(40)), 100);
+    let allowed = true, checked = 0;
+    const result = await h.svc.deleteApprovedMergedBranches("root", () => allowed, async () => {checked++; allowed = false;});
+    assert.equal(checked, 1);
+    assert.equal(result.data?.performed, 0);
+    assert.equal(result.data?.refused, 1);
+    assert.equal(h.runnerRequests.filter(message => message.type === "forge_decision_action").length, 0);
+  } finally {h.db.close();}
+});
+
 test("an idle campaign with undelivered work and nothing scheduled reads Campaign Stuck, never Active (#4146)", async () => {
   const h = await fixture({ verify: false });
   try {

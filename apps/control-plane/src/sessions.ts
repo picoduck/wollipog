@@ -7621,7 +7621,8 @@ export class SessionsService {
    * approved `merged_branch_deletion` of this campaign it still can, through the existing forge
    * action and under every check the requester's own request gets. It grants nothing: a branch
    * without an approved deletion is left alone and keeps its exact command. */
-  async deleteApprovedMergedBranches(campaignId: string, canAccess: (sessionId: string) => boolean):
+  async deleteApprovedMergedBranches(campaignId: string, canAccess: (sessionId: string) => boolean,
+    beforeAction?: () => Promise<unknown>):
     Promise<ServiceResult<{ performed: number; refused: number; projection: OrchestratorCampaignProjection | null }>> {
     if (!canAccess(campaignId) || this.db.resolvedCampaignSessionId(campaignId) !== campaignId) return fail("campaign not found", 404);
     // The whole cleanup list, never the projection's bounded one: every approved deletion counts.
@@ -7632,6 +7633,7 @@ export class SessionsService {
       if (item.kind !== "merged_branch" || item.action.kind !== "delete_merged_branches") continue;
       const decision = this.db.workflowDecisionByOccurrence(item.action.occurrenceId);
       if (!decision) { refused += 1; continue; }
+      if (beforeAction) await beforeAction();
       const result = await this.executeWorkflowDecision(decision.sessionId, decision.occurrenceId,
         { resourceDigest: decision.resourceDigest }, canAccess);
       const outcome = result.ok ? result.data?.forgeAction?.outcome : undefined;

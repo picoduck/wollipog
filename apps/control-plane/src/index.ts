@@ -1,3 +1,5 @@
+import { createCampaignReviewManagement } from "./campaign-review-management.js";
+import { registerAssistantCampaignManagement } from "./assistant-campaign-management.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { providerLoginStartFailure } from "./provider-login-start-failure.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
@@ -1165,7 +1167,7 @@ const refreshCampaignForge = (campaignId: string, refs: readonly CampaignPullReq
 });
 svc.campaignForgeRefresh = refreshCampaignForge;
 svc.campaignForgeReadNow = (campaignId, refs) => campaignForgeObserver.readNow(campaignId, refs);
-registerCampaignStatusRoutes(app, {
+const campaignStatusManagement = registerCampaignStatusRoutes(app, {
   db,
   requestPrincipal,
   refreshForge: refreshCampaignForge,
@@ -4152,15 +4154,6 @@ app.post("/api/sessions/:id/parent-control-policy", async (req, reply) => {
 // A running campaign's Child Harness, Model, Effort, Follow-Ups and Completion (#3580): a person's
 // compare-and-set on the campaign's own behavior revision. No agent allowlist entry exists for these
 // endpoints, so neither the Orchestrator nor any child can read the form or change the values.
-app.get("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const human = requestHuman(req);
-  if (!human) return reply.code(403).send({ error: "only an authenticated human may change campaign behavior" });
-  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
-  reply.header("cache-control", "no-store");
-  return respond(reply, svc.campaignBehaviorView(id, (behavior, exactRow) => orchestratorSettings.campaignCapabilities(human, behavior, exactRow)));
-});
-
 app.post("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const human = requestHuman(req);
@@ -4170,18 +4163,8 @@ app.post("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) 
     (behavior, exactRow) => orchestratorSettings.campaignBehaviorError(human, behavior, exactRow)));
 });
 
-// #4146: Campaign Status's **Delete Merged Branches**. Wollipog performs the campaign's approved
-// merged_branch_deletion decisions it still can, through the existing forge action and its checks;
-// a person who can read the root and each requester asks. It approves nothing, so a branch without
-// an approved deletion keeps its exact command. No agent allowlist entry exists for this endpoint.
-app.post("/api/sessions/:id/orchestrator-campaign/cleanup/delete-merged-branches", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const human = requestHuman(req);
-  if (!human) return reply.code(403).send({ error: "only an authenticated human may ask Wollipog to delete merged branches" });
-  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
-  return respond(reply, await svc.deleteApprovedMergedBranches(id, (sessionId) => db.canAccessSession(human, sessionId)));
-});
-
+// The Orchestrator's own protocol projection; owner inspection and approved branch cleanup
+// use the shared campaign management services registered below.
 app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = requestPrincipal(req);
@@ -4357,22 +4340,6 @@ app.post("/api/sessions/:id/waits", async (req, reply) => {
   if (!principal) return reply;
   return respond(reply, svc.reportSessionWait(id, req.body, (sessionId) => db.canAccessSession(principal, sessionId)));
 });
-app.get("/api/sessions/:id/review-sessions", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
-  const query = req.query as { limit?: string; afterReviewSessionId?: string };
-  reply.header("cache-control", "no-store");
-  return respond(reply, svc.reviewSessionsPage(id, {
-    ...(query.limit === undefined ? {} : { limit: Number(query.limit) }),
-    ...(query.afterReviewSessionId === undefined ? {} : { afterReviewSessionId: query.afterReviewSessionId }),
-  }));
-});
-app.get("/api/sessions/:id/review-sessions/:reviewSessionId", async (req, reply) => {
-  const { id, reviewSessionId } = req.params as { id: string; reviewSessionId: string };
-  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
-  reply.header("cache-control", "no-store");
-  return respond(reply, svc.reviewSessionView(id, reviewSessionId));
-});
 app.post("/api/sessions/:id/review-sessions/:reviewSessionId/cancel", async (req, reply) => {
   const { id, reviewSessionId } = req.params as { id: string; reviewSessionId: string };
   if (!sessionReviewRequester(req, reply, id)) return reply;
@@ -4488,7 +4455,14 @@ app.post("/api/sessions/:id/orchestrator-campaign/recommendations/:recommendatio
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
-registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
+const campaignScopeManagement = registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
+const campaignReviewManagement = createCampaignReviewManagement({db, svc,
+  behaviorView: (id, human) => svc.campaignBehaviorView(id, (behavior, exactRow) => orchestratorSettings.campaignCapabilities(human, behavior, exactRow)),
+  holdReader: principal => target => sessionHoldReaderFor(db, principal, target),
+});
+campaignReviewManagement.registerHttp(app, requestPrincipal);
+registerAssistantCampaignManagement(assistantOperations, {db, svc, receipts: assistantCommandReceipts,
+  services: [campaignStatusManagement, campaignScopeManagement, campaignReviewManagement]});
 registerAutomationCreationRoutes(app, { service: new AutomationCreationService(db, svc, hub, scheduledCampaigns), requestPrincipal });
 registerCampaignRepositoryAdditionRoutes(app, { requestPrincipal, additions: new CampaignRepositoryAdditions({ db, hub, sessions: svc,
   // The same verified-Location inspection as a launch (#4117), on a runner that can hold the boundary.
@@ -4549,38 +4523,6 @@ app.post("/api/sessions/:id/workflow-decisions", async (req, reply) => {
     req.body as CreateWorkflowDecisionRequest,
     (sessionId) => db.canAccessSession(principal, sessionId),
   ));
-});
-
-// Read authority does not grant resolution or consumption authority. The target may be self,
-// or an accessible descendant of an Orchestrator's own credential session.
-function canInspectWorkflowDecisions(req: FastifyRequest, id: string): boolean {
-  const principal = requestPrincipal(req);
-  if (!principal || !db.canAccessSession(principal, id)) return false;
-  return principal.kind !== "agent" || principal.credentialSessionId === id ||
-    (principal.orchestrator === true && typeof principal.credentialSessionId === "string" &&
-      db.canAccessSession(principal, principal.credentialSessionId) &&
-      db.isSessionDescendant(principal.credentialSessionId, id));
-}
-
-app.get("/api/sessions/:id/workflow-decisions", async (req, reply) => {
-  const { id } = req.params as { id: string };
-  if (!canInspectWorkflowDecisions(req, id)) return reply.code(404).send({ error: "session not found" });
-  const query = req.query as { cursor?: string; limit?: string };
-  const limit = query.limit === undefined ? 50 : Number(query.limit);
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
-      (query.cursor !== undefined && !validParentControlCoordinate(query.cursor))) {
-    return reply.code(400).send({ error: "invalid workflow decision page" });
-  }
-  reply.header("cache-control", "no-store");
-  return respond(reply, svc.workflowDecisions(id, query.cursor, limit));
-});
-
-app.get("/api/sessions/:id/workflow-decisions/:occurrenceId", async (req, reply) => {
-  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
-  if (!canInspectWorkflowDecisions(req, id)) return reply.code(404).send({ error: "session not found" });
-  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
-  reply.header("cache-control", "no-store");
-  return respond(reply, svc.workflowDecision(id, occurrenceId));
 });
 
 app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/consume", async (req, reply) => {
@@ -4700,25 +4642,6 @@ app.post("/api/sessions/:id/campaign/decisions/:occurrenceId/classify", async (r
   if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
   return respond(reply, svc.classifyCampaignDecision(id, occurrenceId, req.body as ClassifyCampaignDecisionRequest,
     { kind: "human", id: humanActorId(req) }, (sessionId) => db.canAccessSession(human, sessionId)));
-});
-
-app.get("/api/sessions/:id/descendant-requests", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestPrincipal(req);
-  if (!principal) return reply.code(403).send({ error: "authentication required" });
-  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
-  if (principal.kind === "agent" && principal.credentialSessionId !== id) {
-    return reply.code(404).send({ error: "session not found" });
-  }
-  return respond(reply, svc.descendantRequests(
-    id,
-    (sessionId) => db.canAccessSession(principal, sessionId),
-    principal.kind === "agent" ? "orchestrator" : "human",
-    true,
-    // A descendant is never the credential's own session, so Strict Project Isolation, which only
-    // refuses an Orchestrator's own worktrees, has no policy to read here.
-    (target) => sessionHoldReaderFor(db, principal, target),
-  ));
 });
 
 app.post("/api/sessions/:id/descendant-requests/resolve", async (req, reply) => {
@@ -5199,24 +5122,6 @@ app.delete("/api/sessions/:id/transcript-shares/:shareId", async (req, reply) =>
 
 // Exact auth-gate exception: this read still requires its independent share capability.
 registerPublicTranscriptShareRoute(app, { db });
-
-app.get("/api/sessions/:id/review-findings", async (req, reply) =>
-  respond(reply, svc.reviewFindings((req.params as { id: string }).id)),
-);
-
-app.post("/api/sessions/:id/review-findings", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  return respond(reply, svc.createReviewFinding(id, req.body, { kind: "human", id: humanActorId(req) }));
-});
-
-app.patch("/api/sessions/:id/review-findings/:findingId", async (req, reply) => {
-  const { id, findingId } = req.params as { id: string; findingId: string };
-  return respond(reply, svc.updateReviewFinding(id, findingId, req.body, { kind: "human", id: humanActorId(req) }));
-});
-
-app.post("/api/sessions/:id/review-findings/bundle", async (req, reply) =>
-  respond(reply, svc.bundleReviewFindings((req.params as { id: string }).id, req.body)),
-);
 
 app.post("/api/sessions", async (req, reply) => {
   const principal = requestHuman(req);

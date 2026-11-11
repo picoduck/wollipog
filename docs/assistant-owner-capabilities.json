@@ -88,22 +88,34 @@
     ]
   },
   "GET /api/assistant-connections": {
-    "tools": ["connection_list"]
+    "tools": [
+      "connection_list"
+    ]
   },
   "GET /api/assistant-connections/:id/activity": {
-    "tools": ["connection_activity"]
+    "tools": [
+      "connection_activity"
+    ]
   },
   "GET /api/assistant-connections/:id/destination-bindings": {
-    "tools": ["dest_list"]
+    "tools": [
+      "dest_list"
+    ]
   },
   "GET /api/assistant-connections/:id/event-subscriptions": {
-    "tools": ["sub_list"]
+    "tools": [
+      "sub_list"
+    ]
   },
   "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId": {
-    "tools": ["sub_get"]
+    "tools": [
+      "sub_get"
+    ]
   },
   "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId/deliveries": {
-    "tools": ["delivery_list"]
+    "tools": [
+      "delivery_list"
+    ]
   },
   "GET /api/automations": {
     "tools": [
@@ -181,22 +193,34 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/campaign/decisions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_decisions"
+    ]
   },
   "GET /api/sessions/:id/campaign/issue-scope": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_scope"
+    ]
   },
   "GET /api/sessions/:id/campaign/recommendations": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_recs"
+    ]
   },
   "GET /api/sessions/:id/campaign/summary": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_summary"
+    ]
   },
   "GET /api/sessions/:id/campaign/work-items": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_items"
+    ]
   },
   "GET /api/sessions/:id/campaign/work-items/:itemId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_item"
+    ]
   },
   "GET /api/sessions/:id/child-sessions": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -211,7 +235,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/descendant-requests": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "desc_request_list"
+    ]
   },
   "GET /api/sessions/:id/events": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -242,7 +268,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/orchestrator-campaign/behavior": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_behavior"
+    ]
   },
   "GET /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -278,13 +306,19 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/review-findings": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "review_find_list"
+    ]
   },
   "GET /api/sessions/:id/review-sessions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "review_list"
+    ]
   },
   "GET /api/sessions/:id/review-sessions/:reviewSessionId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "review_get"
+    ]
   },
   "GET /api/sessions/:id/role": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -321,10 +355,14 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/workflow-decisions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "decision_list"
+    ]
   },
   "GET /api/sessions/:id/workflow-decisions/:occurrenceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "decision_get"
+    ]
   },
   "GET /api/sessions/:id/workspace-references/search": {
     "exclusion": "interactive_workspace_io",
@@ -396,7 +434,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PATCH /api/sessions/:id/review-findings/:findingId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "review_find_set"
+    ]
   },
   "PATCH /api/skill-assignments/:id": {
     "tools": [
@@ -432,7 +472,9 @@
     "remedy": "Use the authenticated owner's connection event-subscription configuration path."
   },
   "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/resume": {
-    "tools": ["delivery_resume"]
+    "tools": [
+      "delivery_resume"
+    ]
   },
   "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/rotate": {
     "exclusion": "human_authority",
@@ -450,7 +492,9 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/assistant-connections/installation": {
-    "tools": ["install_name"]
+    "tools": [
+      "install_name"
+    ]
   },
   "POST /api/automations": {
     "tools": [
@@ -628,13 +672,19 @@
     ]
   },
   "POST /api/sessions/:id/campaign/decisions/:occurrenceId/classify": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Only the actual campaign owner may classify an uncertain credential or scope screen. Assistant text cannot supply that human authority.",
+    "remedy": "Use the campaign owner’s classification in Campaign Status."
   },
   "POST /api/sessions/:id/campaign/issue-scope/proposals": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "The human proposal branch supplies owner scope provenance and bypasses agent seed and lineage constraints. An Assistant cannot assert this provenance, even though the proposal first creates a typed decision.",
+    "remedy": "Use the owner’s Campaign Status scope proposal, or let the genuine root Orchestrator propose within its existing boundary."
   },
   "POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_forge_refresh"
+    ]
   },
   "POST /api/sessions/:id/cancel": {
     "tools": [
@@ -710,19 +760,29 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/behavior": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Changing Child Harness, Model, Effort, Follow-Ups or Completion changes the human-controlled durable campaign execution policy.",
+    "remedy": "Use the authenticated campaign behavior settings and current behavior revision."
   },
   "POST /api/sessions/:id/orchestrator-campaign/budget-allocations": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Cost allocations remain outside Assistant authority. This route also rejects owner HTTP and requires the matching Orchestrator credential with a separately human-established budget envelope.",
+    "remedy": "The owner establishes the budget boundary; the genuine Orchestrator may allocate only inside that existing envelope."
   },
   "POST /api/sessions/:id/orchestrator-campaign/cleanup/delete-merged-branches": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_branch_clean"
+    ]
   },
   "POST /api/sessions/:id/orchestrator-campaign/control": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Control-mode changes mint or revoke campaign authority, budget and evidence boundaries and require the authenticated campaign owner.",
+    "remedy": "Use the owner’s campaign control settings with the current policy revision."
   },
   "POST /api/sessions/:id/orchestrator-campaign/follow-up-limit": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Changing the follow-up limit remints human campaign authority and revokes affected decisions.",
+    "remedy": "Use the campaign owner’s follow-up limit settings."
   },
   "POST /api/sessions/:id/orchestrator-campaign/follow-ups": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -738,7 +798,9 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/sessions/:id/orchestrator-campaign/locations/:locationId/include": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Including a Location widens the campaign repository boundary and requires its actual owner’s consent and Location reinspection.",
+    "remedy": "Use the campaign owner’s Include in Campaign action."
   },
   "POST /api/sessions/:id/orchestrator-campaign/plan": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -756,10 +818,14 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/scope-grant/selection-count": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Changing the selection count remints a human-established issue selection grant.",
+    "remedy": "Use the campaign owner’s selection-count settings with the current policy revision."
   },
   "POST /api/sessions/:id/orchestrator-campaign/slots/release": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Manual slot release is a person’s attestation that the exact provider generation ended when automatic proof is unavailable. It is explicitly outside agent and delegated authority.",
+    "remedy": "The campaign owner must verify provider termination and release that generation in Campaign Status with a reason."
   },
   "POST /api/sessions/:id/orchestrator-campaign/verify-child": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -840,10 +906,14 @@
     ]
   },
   "POST /api/sessions/:id/review-findings": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "review_find_add"
+    ]
   },
   "POST /api/sessions/:id/review-findings/bundle": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "review_find_send"
+    ]
   },
   "POST /api/sessions/:id/review-sessions": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."

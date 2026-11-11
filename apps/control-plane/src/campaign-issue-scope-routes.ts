@@ -4,32 +4,38 @@ import type { AuthPrincipal } from "./identity.js";
 import type { SessionsService } from "./sessions.js";
 import { scopeView } from "./campaign-issue-scope.js";
 import { failureBody } from "./capability-refusal.js";
+import { OwnerManagement } from "./owner-management.js";
 
 export function registerCampaignIssueScopeRoutes(app: FastifyInstance, deps: {
   db: ControlPlaneDb; svc: SessionsService; requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
-}): void {
+}): OwnerManagement<AuthPrincipal> {
   const { db, svc, requestPrincipal } = deps;
   // A runner-floor refusal keeps its versions beside the sentence (#3254).
   const respond = (reply: { code(n:number): {send(value:unknown):unknown} }, result: Parameters<typeof failureBody>[0] & {ok:boolean;status:number;data?:unknown}) =>
     reply.code(result.status).send(result.ok ? result.data : failureBody(result));
-app.get("/api/sessions/:id/campaign/issue-scope", async (req, reply) => {
+const management = new OwnerManagement<AuthPrincipal>();
+management.define("GET", "/api/sessions/:id/campaign/issue-scope", async (req, reply) => {
   const { id } = req.params as { id: string };
-  const principal = requestPrincipal(req);
-  if (!principal || !db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  const principal = req.principal;
+  const canAccess = (sessionId: string) => db.canAccessSession(principal, sessionId) && (!req.access || req.access.session(sessionId));
+  if (!principal || !canAccess(id)) return reply.code(404).send({ error: "session not found" });
   const rootId = db.campaignRootForMember(id);
-  if (!rootId || !db.canAccessSession(principal, rootId) || principal.kind === "agent" &&
+  if (!rootId || !canAccess(rootId) || principal.kind === "agent" &&
       (!principal.orchestrator || db.resolvedCampaignSessionId(principal.credentialSessionId ?? "") !== rootId)) return reply.code(403).send({ error: "campaign scope requires access to its Orchestrator" });
   const root = db.getSession(rootId)!;
-  if (principal.kind !== "agent" && !db.canAccessRunner(principal, root.runnerId)) {
+  if (principal.kind !== "agent" && (!db.canAccessRunner(principal, root.runnerId) || req.access && !req.access.runner(root.runnerId))) {
     return reply.send(scopeView(db, root, root.orchestratorPolicy?.issueScope?.repository ?? ""));
   }
   const epicRaw = (req.query as { epic?: string }).epic;
   const epic = epicRaw === undefined ? undefined : /^[1-9][0-9]*$/u.test(epicRaw) ? Number(epicRaw) : Number.NaN;
   const repository = (req.query as { repository?: string }).repository;
-  const result = await svc.campaignIssueScope(id, epic, (sessionId) => db.canAccessSession(principal, sessionId), true, repository);
+  await req.recheck?.();
+  const result = await svc.campaignIssueScope(id, epic, canAccess, true, repository);
+  await req.recheck?.();
   if (result.ok && result.data) result.data.canPropose = principal.kind !== "agent" && principal.role !== "viewer" && db.isSessionOwner(principal, rootId);
   return respond(reply, result);
 });
+management.registerHttp(app, requestPrincipal, {status: 404, error: "session not found"});
 
 app.post("/api/sessions/:id/campaign/issue-scope/proposals", async (req, reply) => {
   const { id } = req.params as { id: string };
@@ -46,4 +52,5 @@ app.post("/api/sessions/:id/campaign/issue-scope/proposals", async (req, reply) 
 });
 
 
+  return management;
 }
