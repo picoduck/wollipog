@@ -6,6 +6,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { OwnerManagementInventory, type OwnerOperationCoverage } from "./owner-management-inventory.js";
 import { ASSISTANT_CONNECTION_OPERATIONS } from "./assistant-connection-operations.js";
+import { ASSISTANT_CAMPAIGN_MANAGEMENT, ASSISTANT_CAMPAIGN_HUMAN_ROUTES } from "./assistant-campaign-management.js";
+import { CAMPAIGN_SESSION_PROTOCOL_ROUTES } from "./campaign-session-protocol.js";
 
 test("parity gate observes generated owner routes and fails unregistered or undocumented operations", async () => {
   const app = Fastify(), inventory = new OwnerManagementInventory();
@@ -49,7 +51,7 @@ test("session-protocol classification cannot absorb an owner route or omit its r
   try {
     inventory.assertComplete(coverage, registered);
     coverage["POST /api/sessions/:id/config"] = protocol;
-    assert.throws(() => inventory.assertComplete(coverage, registered), /restricted to the two adjudicated/);
+    assert.throws(() => inventory.assertComplete(coverage, registered), /explicitly adjudicated session-credential/);
     coverage["POST /api/sessions/:id/config"] = {tools: ["session_config"]};
     assert.throws(() => inventory.assertComplete(coverage, new Set(["session_config"])), /read counterpart session_watch_get is not registered/);
     coverage["POST /api/sessions/:id/waits"] = {...protocol, ownerTools: []};
@@ -87,6 +89,16 @@ test("production composition inventory is exhaustive; unresolved gaps cannot cou
     assert.ok(snapshot.tools.includes(tool), `${tool}: production lost a group-5 connection operation`);
     assert.deepEqual(manifest[route], {tools: [tool]}, `${route}: group-5 audit drift`);
   }
+  for (const [tool, route] of ASSISTANT_CAMPAIGN_MANAGEMENT) {
+    assert.ok(snapshot.tools.includes(tool), `${tool}: production lost a group-7 operation`);
+    assert.deepEqual(manifest[route], {tools: [tool]}, `${route}: group-7 audit drift`);
+  }
+  const group7Routes = new Set<string>([...ASSISTANT_CAMPAIGN_MANAGEMENT.map(([, route]) => route), ...ASSISTANT_CAMPAIGN_HUMAN_ROUTES, ...CAMPAIGN_SESSION_PROTOCOL_ROUTES]);
+  const group7 = Object.entries(manifest).filter(([route]) => group7Routes.has(route));
+  assert.equal(group7.length, 57);
+  assert.equal(group7.filter(([, entry]) => "tools" in entry).length, 18);
+  assert.equal(group7.filter(([, entry]) => "exclusion" in entry && entry.exclusion === "human_authority").length, 9);
+  assert.equal(group7.filter(([, entry]) => "exclusion" in entry && entry.exclusion === "session_protocol").length, 30);
   assert.deepEqual(snapshot.routes, Object.keys(manifest).sort(), "An owner-route candidate was added/removed: classify it explicitly; never regenerate to hide a gap.");
   const inventory = new OwnerManagementInventory();
   const app = Fastify();
@@ -97,12 +109,59 @@ test("production composition inventory is exhaustive; unresolved gaps cannot cou
   }
   const coverage = Object.fromEntries(Object.entries(manifest).filter(([, entry]) => !("gap" in entry))) as Record<string, OwnerOperationCoverage>;
   const gaps = inventory.gaps(coverage, new Set(snapshot.tools));
+  assert.deepEqual(gaps.filter(gap => /campaign|workflow-decision|review-session|review-finding|descendant-request/u.test(gap.route)), [],
+    "Every group-7 owner capability or exclusion must satisfy the actual production audit guard");
   for (const [route, entry] of Object.entries(manifest)) {
     if ("gap" in entry) assert.ok(gaps.some(gap => gap.route === route), `${route}: an unresolved gap was silently counted as coverage`);
   }
   // This is the audit contract test, not a claim of full parity. The strict acceptance command
   // calls assertComplete against this same production inventory and must fail until gaps land.
   if (gaps.length) assert.throws(() => inventory.assertComplete(coverage, new Set(snapshot.tools)), /parity is incomplete/);
+});
+
+test("campaign protocol accepts only its exact no-owner-equivalent entries and rejects owner read routes", async () => {
+  const app = Fastify(), inventory = new OwnerManagementInventory();
+  inventory.attach(app);
+  const manifest = JSON.parse(readFileSync(new URL("../../../docs/assistant-owner-capabilities.json", import.meta.url), "utf8"));
+  const coverage: Record<string, OwnerOperationCoverage> = {};
+  for (const route of CAMPAIGN_SESSION_PROTOCOL_ROUTES) {
+    const [method, url] = route.split(" ") as ["GET" | "POST", string];
+    app.route({method, url, handler: () => ({})});
+    coverage[route] = manifest[route];
+  }
+  try {
+    inventory.assertComplete(coverage, new Set());
+    const route = CAMPAIGN_SESSION_PROTOCOL_ROUTES[0];
+    coverage[route] = {...manifest[route], ownerTools: ["session_watch_get"]};
+    assert.throws(() => inventory.assertComplete(coverage, new Set(["session_watch_get"])), /must not claim an equivalent owner tool/);
+    coverage[route] = manifest[route];
+    app.get("/api/sessions/:id/review-sessions", () => ({}));
+    coverage["GET /api/sessions/:id/review-sessions"] = manifest[route];
+    assert.throws(() => inventory.assertComplete(coverage, new Set()), /explicitly adjudicated session-credential/);
+  } finally {await app.close();}
+});
+
+test("every campaign protocol classification is explicitly allowlisted and proved owner-403 in production HTTP", {timeout: 30_000}, () => {
+  assert.equal(CAMPAIGN_SESSION_PROTOCOL_ROUTES.length, 30, "Only the 30 adjudicated group-7 routes are admitted");
+  assert.equal(new Set(CAMPAIGN_SESSION_PROTOCOL_ROUTES).size, 30);
+  const child = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../test-support/owner-parity-snapshot.ts", import.meta.url)), "--verify-campaign-protocol"],
+    {encoding: "utf8", timeout: 25_000, maxBuffer: 1024 * 1024});
+  assert.equal(child.status, 0, "Isolated production protocol authorization test failed; raw logs withheld.");
+  const line = child.stdout.split("\n").find(value => value.startsWith("OWNER_CAMPAIGN_PROTOCOL_FENCES "));
+  assert.ok(line, "Missing production owner-403 evidence");
+  const evidence = JSON.parse(line.slice("OWNER_CAMPAIGN_PROTOCOL_FENCES ".length));
+  assert.equal(evidence.ownerRead, 200);
+  assert.equal(evidence.effects, 0);
+  assert.deepEqual(evidence.ownerDeniedRoutes.sort(), [...CAMPAIGN_SESSION_PROTOCOL_ROUTES].sort());
+  const manifest = JSON.parse(readFileSync(new URL("../../../docs/assistant-owner-capabilities.json", import.meta.url), "utf8"));
+  const admitted = new Set<string>(CAMPAIGN_SESSION_PROTOCOL_ROUTES);
+  const verified = new Set<string>(evidence.ownerDeniedRoutes);
+  for (const [route, entry] of Object.entries(manifest) as [string, {exclusion?: string; ownerTools?: string[]}][]) {
+    if (entry.exclusion !== "session_protocol" || route === "POST /api/sessions/:id/waits" || route === "POST /api/sessions/:id/pull-request-watch") continue;
+    assert.ok(admitted.has(route) && verified.has(route), `${route}: classification lacks exact production owner-403 proof`);
+    assert.equal(entry.ownerTools, undefined, `${route}: do not claim an owner equivalent for session protocol`);
+  }
+  for (const route of admitted) assert.equal(manifest[route]?.exclusion, "session_protocol", `${route}: protocol audit drift`);
 });
 
 test("real owner HTTP and Assistant MCP cannot write runtime wait/watch state under another identity", {timeout: 30_000}, () => {

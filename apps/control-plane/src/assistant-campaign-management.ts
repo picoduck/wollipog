@@ -28,6 +28,19 @@ export const ASSISTANT_CAMPAIGN_MANAGEMENT = [
   ["decision_get", "GET /api/sessions/:id/workflow-decisions/:occurrenceId"],
 ] as const;
 
+/** Exact group-7 human boundaries; these are audit entries, never tool registrations. */
+export const ASSISTANT_CAMPAIGN_HUMAN_ROUTES = [
+  "POST /api/sessions/:id/campaign/decisions/:occurrenceId/classify",
+  "POST /api/sessions/:id/campaign/issue-scope/proposals",
+  "POST /api/sessions/:id/orchestrator-campaign/behavior",
+  "POST /api/sessions/:id/orchestrator-campaign/budget-allocations",
+  "POST /api/sessions/:id/orchestrator-campaign/control",
+  "POST /api/sessions/:id/orchestrator-campaign/follow-up-limit",
+  "POST /api/sessions/:id/orchestrator-campaign/locations/:locationId/include",
+  "POST /api/sessions/:id/orchestrator-campaign/scope-grant/selection-count",
+  "POST /api/sessions/:id/orchestrator-campaign/slots/release",
+] as const;
+
 const str = {type: "string"}, obj = {type: "object"};
 const descriptions: Record<string, string> = {
   campaign_summary: "Read campaign progress, obligations and visible cost totals. Requires access to every Project represented in the aggregate.",
@@ -147,7 +160,11 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
         const commandId = coordinate(args.commandId, "commandId"), {confirmationId, ...request} = args;
         const identity = {controlPlaneId: db.instanceId(), connectionId: ctx.connection.id, operationId: commandId, operation: name,
           argumentsDigest: assistantRequestDigest(request), grantRevision: revision, target: target(args)};
-        if (receipts.get(ctx.connection.id, commandId)) return {receipt: receipts.reserve(identity).receipt};
+        const prior = receipts.get(ctx.connection.id, commandId);
+        if (prior) {
+          operations.authorize(ctx.connection.id, name, prior.target);
+          return {receipt: receipts.reserve(identity).receipt};
+        }
         const impact = name === "review_find_set" ? db.listReviewFindings(params.id).filter(finding => finding.findingId === args.findingId)
           .map(({findingId, updatedAt, status, required}) => ({findingId, updatedAt, status, required}))
           : name === "campaign_branch_clean" ? (db.campaignLeftovers(params.id)?.cleanup ?? []).flatMap(item => {

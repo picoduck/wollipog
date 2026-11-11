@@ -3,6 +3,8 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { CAMPAIGN_SESSION_PROTOCOL_ROUTES } from "../src/campaign-session-protocol.js";
 // Runs only in a child process with a new fixture database. Never import the hosting instance.
 const root = mkdtempSync(join(tmpdir(), "owner-parity-"));
 const listener = createServer();
@@ -19,7 +21,7 @@ const connection = {id: "inventory-fixture", name: "Fixture", ownerUserId: "fixt
   revision: 1, revoked: false, grant: {operations: "all" as const, projects: "all" as const}};
 const tools = assistantOperations.list(connection).map(op => op.name).sort();
 console.log("OWNER_PARITY_SNAPSHOT " + JSON.stringify({routes: ownerManagementInventory.list(), tools}));
-if (process.argv.includes("--verify-runtime-identity")) {
+if (process.argv.includes("--verify-runtime-identity") || process.argv.includes("--verify-campaign-protocol")) {
   // This is the same brand-new fixture DB as the isolated production process, never hosting
   // state. Read back through real HTTP/MCP to prove the owner has access but no session identity.
   const {ControlPlaneDb} = await import("../src/db.js");
@@ -43,6 +45,27 @@ if (process.argv.includes("--verify-runtime-identity")) {
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     assert.equal(ownerRead?.statusCode, 200);
+    if (process.argv.includes("--verify-campaign-protocol")) {
+      // Snapshot only these isolated fixture's protocol-domain tables, never credential tables
+      // or hosting state. Auth refusal audits are expected; application protocol effects are not.
+      const tables = (fixture.raw().prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as {name: string}[])
+        .map(row => row.name).filter(name => /^(?:workflow_decisions$|review_|campaign_|delegated_image_|assistant_command_receipts$)/u.test(name));
+      const domainState = () => Object.fromEntries(tables.map(name => [name,
+        createHash("sha256").update(JSON.stringify(fixture.raw().prepare(`SELECT * FROM "${name.replaceAll('"', '""')}"`).all()
+          .map(row => JSON.stringify(row)).sort())).digest("hex")]));
+      const before = domainState(), verified = [];
+      for (const route of CAMPAIGN_SESSION_PROTOCOL_ROUTES) {
+        assert.ok(ownerManagementInventory.list().includes(route), "Protocol route must exist in the production composition");
+        const [method, pattern] = route.split(" ") as ["GET" | "POST", string];
+        const url = pattern.replace(/:([A-Za-z]+)/gu, (_match, key) => key === "id" ? "s_runtime_fence" : `fixture_${key}`);
+        const response = await app.inject({method, url, headers: ownerHeaders, ...(method === "POST" ? {payload: {}} : {})});
+        assert.equal(response.statusCode, 403, `${route}: an authenticated owner must not acquire session identity`);
+        assert.match(response.json().error, /matching .*credential is required/u, `${route}: prove the identity fence, not an unrelated refusal`);
+        verified.push(route);
+      }
+      assert.deepEqual(domainState(), before, "Owner identity refusals must have no protocol-domain effects");
+      console.log("OWNER_CAMPAIGN_PROTOCOL_FENCES " + JSON.stringify({ownerRead: 200, ownerDeniedRoutes: verified, effects: 0}));
+    }
     const writes = [
       {path: "pull-request-watch", name: "session_watch", commandId: "forged-watch", body: {repository: "fixture/repo", number: 7, headSha: "a".repeat(40)}},
       {path: "waits", name: "session_wait_report", commandId: "forged-progress", body: {waitId: "wait_fixture0001", kind: "wait_pull_request", state: "active",

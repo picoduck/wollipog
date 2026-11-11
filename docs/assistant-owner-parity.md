@@ -40,6 +40,21 @@ No external technical limitation is claimed by this slice. The inventory support
 only with a concrete reason and supported remedy. The parent authorized staged delivery through
 the recorded scope clarification; all remaining gaps block final #4468 acceptance.
 
+Group 7 adds exactly the 30 campaign/review protocol routes enumerated in
+`apps/control-plane/src/campaign-session-protocol.ts` to the `session_protocol` classification.
+The controlling Orchestrator adjudicated these exact routes after the discovery report:
+owner HTTP returns 403 because they require matching self/parent/Orchestrator credentials.
+Unlike wait/watch writes, these entries make no equivalent-owner-tool claim. Historical
+campaign-review-job and repository-addition protocol reads have no asserted owner equivalent;
+their remedy is the genuine credential protocol. New legacy review-job creation stays retired.
+The inventory rejects every route outside the two original wait/watch entries and these 30
+explicit entries. A production HTTP test exercises every added route with an authenticated owner
+who can read the target session, requires the credential-specific 403 and no protocol-domain
+effects, and checks every campaign classification against that verified set. There is no prefix
+or category exemption. The two original wait/watch entries retain their exact registered
+`session_watch_get` requirement. The 18 owner capabilities and nine human-authority boundaries
+are described in [Assistant Campaign and Review Management](assistant-campaign-management.md).
+
 Run the audit contract and new behavior tests:
 
 ```sh

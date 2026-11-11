@@ -123,6 +123,18 @@ test("selected Project grants cannot disclose an aggregate after a descendant mo
   } finally {await h.close();}
 });
 
+test("a duplicate mutation cannot recover its original receipt through a newly granted Project", async () => {
+  const h = await fixture();
+  try {
+    const args = {commandId: "original-project", payload: finding};
+    assert.equal((await h.call("review_find_add", args)).receipt.status, "succeeded");
+    for (const id of ["root", "worker"]) h.db.setSessionProject(id, h.other.id, h.otherLocation.id);
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: [h.other.id]});
+    await assert.rejects(h.call("review_find_add", args), /excluded/);
+    assert.equal(h.db.listReviewFindings("root").length, 1);
+  } finally {await h.close();}
+});
+
 test("review mutations share owner validation, attribution and prompt dispatch; receipts never replay", async () => {
   const h = await fixture();
   try {
