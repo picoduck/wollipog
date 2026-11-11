@@ -19,7 +19,8 @@ import {
   runnerCapabilityRequirementError,
   runnerSupportsProtocol,
   validSkillName,
-  type SkillInvocationPolicy,
+  type OrphanedSkillCopy,
+  type OrphanedSkillCopyRef,
 } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { SkillImportConflictError, type ControlPlaneDb } from "./db.js";
@@ -41,35 +42,6 @@ import {
 const KEPT_ASIDE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PREVIEW_TTL_MS = 10 * 60_000;
 const MAX_PREVIEWS = 8;
-
-export type OrphanedSkillCopyRef =
-  | { kind: "kept_aside"; id: string }
-  | { kind: "deleted_skill"; name: string; digest: string; variant: SkillInvocationPolicy };
-
-/** One orphaned copy as the Skills view lists it for a machine. */
-export interface OrphanedSkillCopy {
-  kind: OrphanedSkillCopyRef["kind"];
-  /** kept_aside: the runner's opaque store entry id. */
-  id?: string;
-  /** Skill name; absent only for an unidentified kept-aside copy. */
-  name?: string;
-  /** Version the copy was published as; absent when the runner did not record it. */
-  digest?: string;
-  variant?: SkillInvocationPolicy;
-  keptAsideAt?: number;
-  /** Content digest while the copy is readable skill content. */
-  observedDigest?: string;
-  /** kept_aside: the fingerprint of every entry, which a discard must name. */
-  observedFingerprint?: string;
-  /** deleted_skill: the runner's links still serve this copy. */
-  held?: boolean;
-  /** deleted_skill: when the library deleted the skill with this name; absent when the deletion
-   * predates the record, or from an older control plane. */
-  skillDeletedAt?: number;
-  detail?: string;
-  /** kept_aside: the accessible library skill with the copy's name, which an import updates. */
-  skillId?: string;
-}
 
 /** Orphaned copies on one machine that this principal may see. A kept-aside copy of a skill the
  * principal cannot access is omitted; a drifted copy is orphaned only while no skill has its name. */
