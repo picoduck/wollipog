@@ -109,7 +109,8 @@ export function registerAssistantSessionContent(operations: AssistantOperations,
   adapter.register({name: "reminder_get", description: "Read the granting owner's reminder for this authorized session, including indefinite Someday reminders.",
     run: (a, ctx) => ({status: 200, body: {reminder: db.getSessionReminder(text(a, "sessionId"), ctx.owner.userId)}})});
   adapter.register({name: "reminder_set", description: "Set the granting owner's session reminder through the owner service, preserving schedule and optimistic-revision validation.",
-    properties: {reminder: {type: "object"}}, required: ["reminder"], mutate: true,
+    properties: {reminder: {type: "object"}}, required: ["reminder"], mutate: true, destructive: true,
+    impact: (a, ctx) => db.getSessionReminder(text(a, "sessionId"), ctx.owner.userId),
     run: (a, ctx) => result(svc.setReminder(text(a, "sessionId"), ctx.owner.userId, obj(a.reminder)))});
   adapter.register({name: "reminder_remove", description: "Remove the granting owner's exact reminder using optional revision/reminder identity fences; cannot alter another user's reminder.",
     properties: {revision: integer, reminderId: str}, mutate: true, destructive: true,

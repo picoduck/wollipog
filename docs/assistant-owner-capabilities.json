@@ -1,1262 +1,305 @@
 {
-  "DELETE /api/assistant-connections/:id/destination-bindings/:bindingId": {
-    "exclusion": "human_authority",
-    "reason": "Revokes the owner's standing requester/destination authorization binding.",
-    "remedy": "Use the authenticated owner's destination-binding configuration path."
-  },
-  "DELETE /api/assistant-connections/:id/discord-connectors/:connectorId": {
-    "exclusion": "human_authority",
-    "reason": "Revokes an owner-issued trusted Discord connector credential and its standing command/destination authority.",
-    "remedy": "Use this exact authenticated connection-owner API to revoke the connector; ordinary Assistant commands cannot change connector credentials or standing grants."
-  },
-  "DELETE /api/assistant-connections/:id/event-subscriptions/:subscriptionId": {
-    "exclusion": "human_authority",
-    "reason": "Revokes owner-established standing callback delivery authority and its signing credential.",
-    "remedy": "Use the authenticated owner's connection event-subscription configuration path."
-  },
-  "DELETE /api/automations/:id": {
-    "tools": [
-      "auto_delete"
-    ]
-  },
-  "DELETE /api/automations/:id/triggers/:triggerId": {
-    "tools": [
-      "auto_trigger_remove"
-    ]
-  },
-  "DELETE /api/orphaned-skill-copies/:id": {
-    "tools": [
-      "skill_orphan_preview_discard"
-    ]
-  },
-  "DELETE /api/projects/:id": {
-    "tools": [
-      "project_delete"
-    ]
-  },
-  "DELETE /api/projects/:id/locations/:locationId": {
-    "tools": [
-      "location_remove"
-    ]
-  },
-  "DELETE /api/runners/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "DELETE /api/runners/:id/provider-accounts/:accountId": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "DELETE /api/runners/:id/provider-logins/:operationId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "DELETE /api/runners/:runnerId/workspaces/:workspaceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "DELETE /api/sessions/:id": {
-    "tools": [
-      "session_delete"
-    ]
-  },
-  "DELETE /api/sessions/:id/reminder": {
-    "tools": [
-      "reminder_remove"
-    ]
-  },
-  "DELETE /api/sessions/:id/shells/:shellId": {
-    "tools": [
-      "shell_close"
-    ]
-  },
-  "DELETE /api/sessions/:id/transcript-shares/:shareId": {
-    "exclusion": "human_authority",
-    "reason": "Revokes the owner's independently issued transcript-share bearer capability; credential lifecycle remains on the authenticated owner path.",
-    "remedy": "Use this exact authenticated owner transcript-sharing API/UI for capability issuance or revocation. The Assistant can inspect share metadata through transcript_shares and read authorized cached content through session_export without issuing credentials or publishing it."
-  },
-  "DELETE /api/skill-assignments/:id": {
-    "tools": [
-      "skill_unassign"
-    ]
-  },
-  "DELETE /api/skill-drift/:id": {
-    "tools": [
-      "skill_drift_discard"
-    ]
-  },
-  "DELETE /api/skill-git/preview/:id": {
-    "tools": [
-      "skill_git_preview_discard"
-    ]
-  },
-  "DELETE /api/skill-groups/:id": {
-    "tools": [
-      "skill_group_remove"
-    ]
-  },
-  "DELETE /api/skill-groups/:id/assignments/:assignmentId": {
-    "tools": [
-      "skill_group_unassign"
-    ]
-  },
-  "DELETE /api/skill-machine/:id": {
-    "tools": [
-      "skill_machine_discard"
-    ]
-  },
-  "DELETE /api/skills/:id": {
-    "tools": [
-      "skill_remove"
-    ]
-  },
-  "GET /api/assistant-connections": {
-    "tools": ["connection_list"]
-  },
-  "GET /api/assistant-connections/:id/activity": {
-    "tools": ["connection_activity"]
-  },
-  "GET /api/assistant-connections/:id/destination-bindings": {
-    "tools": ["dest_list"]
-  },
-  "GET /api/assistant-connections/:id/event-subscriptions": {
-    "tools": ["sub_list"]
-  },
-  "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId": {
-    "tools": ["sub_get"]
-  },
-  "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId/deliveries": {
-    "tools": ["delivery_list"]
-  },
-  "GET /api/automations": {
-    "tools": [
-      "auto_list"
-    ]
-  },
-  "GET /api/automations/:id": {
-    "tools": [
-      "auto_get"
-    ]
-  },
-  "GET /api/automations/:id/triggers": {
-    "tools": [
-      "auto_triggers"
-    ]
-  },
-  "GET /api/projects": {
-    "tools": [
-      "project_list"
-    ]
-  },
-  "GET /api/projects/:id": {
-    "tools": [
-      "project_list"
-    ]
-  },
-  "GET /api/projects/:id/access-scope": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/projects/:id/locations/:locationId/worktree-setup": {
-    "tools": [
-      "location_setup_get"
-    ]
-  },
-  "GET /api/runners": {
-    "tools": [
-      "runner_list"
-    ]
-  },
-  "GET /api/runners/:id/external-sessions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/runners/:id/list-directory": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/runners/:id/provider-account-selection": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/runners/:id/provider-accounts/:accountId/home-lease": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/runners/:id/skills": {
-    "tools": [
-      "skill_machine_state"
-    ]
-  },
-  "GET /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions": {
-    "tools": [
-      "session_list"
-    ]
-  },
-  "GET /api/sessions/:id": {
-    "tools": [
-      "session_get",
-      "session_config_get",
-      "worktree_get"
-    ]
-  },
-  "GET /api/sessions/:id/artifacts": {
-    "tools": [
-      "session_artifacts"
-    ]
-  },
-  "GET /api/sessions/:id/authentication/accounts": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/automation-proposals/:occurrenceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/campaign/decisions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/campaign/issue-scope": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/campaign/recommendations": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/campaign/summary": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/campaign/work-items": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/campaign/work-items/:itemId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/child-sessions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/cross-model-reviews": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/cross-model-reviews/:jobId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/cross-model-reviews/:jobId/artifacts": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/descendant-requests": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/events": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/export": {
-    "tools": [
-      "session_export"
-    ]
-  },
-  "GET /api/sessions/:id/file": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "GET /api/sessions/:id/files": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "GET /api/sessions/:id/governance-audit": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/history-preview": {
-    "tools": [
-      "history_preview"
-    ]
-  },
-  "GET /api/sessions/:id/location-switch-requests/:occurrenceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/behavior": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/review-jobs": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/review-jobs/:jobId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/review-jobs/:jobId/report": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/work-items": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/work-items/:itemId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/prompt-history": {
-    "tools": [
-      "prompt_history"
-    ]
-  },
-  "GET /api/sessions/:id/provider-accounts": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/queued/:promptId/edit": {
-    "tools": [
-      "queue_get"
-    ]
-  },
-  "GET /api/sessions/:id/reminder": {
-    "tools": [
-      "reminder_get"
-    ]
-  },
-  "GET /api/sessions/:id/retained-attachment-events": {
-    "tools": [
-      "attachment_history"
-    ]
-  },
-  "GET /api/sessions/:id/review-findings": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/review-sessions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/review-sessions/:reviewSessionId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/role": {
-    "tools": [
-      "session_role_get"
-    ]
-  },
-  "GET /api/sessions/:id/shells": {
-    "tools": [
-      "shell_list"
-    ]
-  },
-  "GET /api/sessions/:id/shells/:shellId/history": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "GET /api/sessions/:id/side-chat": {
-    "tools": [
-      "side_chat_get"
-    ]
-  },
-  "GET /api/sessions/:id/steering": {
-    "tools": [
-      "steering_list"
-    ]
-  },
-  "GET /api/sessions/:id/steering/:submissionId": {
-    "tools": [
-      "steering_get"
-    ]
-  },
-  "GET /api/sessions/:id/transcript-shares": {
-    "tools": [
-      "transcript_shares"
-    ]
-  },
-  "GET /api/sessions/:id/usage": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/workflow-decisions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/workflow-decisions/:occurrenceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/workspace-references/search": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "GET /api/sessions/:id/worktrees/operations": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/archive-page": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/lookup/by-id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/skill-assignments": {
-    "tools": [
-      "skill_assignments"
-    ]
-  },
-  "GET /api/skill-groups": {
-    "tools": [
-      "skill_groups"
-    ]
-  },
-  "GET /api/skill-groups/:id/assignments": {
-    "tools": [
-      "skill_group_assignments"
-    ]
-  },
-  "GET /api/skills": {
-    "tools": [
-      "skill_list"
-    ]
-  },
-  "GET /api/skills/:id": {
-    "tools": [
-      "skill_get"
-    ]
-  },
-  "GET /api/skills/:id/built-in-version": {
-    "tools": [
-      "skill_builtin_get"
-    ]
-  },
-  "GET /api/skills/:id/machines/:runnerId/version": {
-    "tools": [
-      "skill_pin_get"
-    ]
-  },
-  "GET /api/skills/:id/machines/:runnerId/version-policy": {
-    "tools": [
-      "skill_pin_get"
-    ]
-  },
-  "GET /api/skills/:id/versions": {
-    "tools": [
-      "skill_versions"
-    ]
-  },
-  "GET /api/skills/:id/versions/:versionId": {
-    "tools": [
-      "skill_version_get"
-    ]
-  },
-  "PATCH /api/projects/:id": {
-    "tools": [
-      "project_update"
-    ]
-  },
-  "PATCH /api/projects/:id/locations/:locationId": {
-    "tools": [
-      "location_rename"
-    ]
-  },
-  "PATCH /api/runners/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PATCH /api/sessions/:id/review-findings/:findingId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PATCH /api/skill-assignments/:id": {
-    "tools": [
-      "skill_assign_update"
-    ]
-  },
-  "PATCH /api/skill-groups/:id/assignments/:assignmentId": {
-    "tools": [
-      "skill_group_assignment_edit"
-    ]
-  },
-  "POST /api/assistant-connections": {
-    "exclusion": "human_authority",
-    "reason": "Creates an Assistant bearer credential and installs owner-selected standing operation/project grants and confirmation policy. The Assistant cannot issue its own authority.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/assistant-connections/:id/configure": {
-    "exclusion": "human_authority",
-    "reason": "Changes a connection's standing operation/project grants and destructive-confirmation policy, potentially expanding future authority. This mixed authority-edit route remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/assistant-connections/:id/destination-bindings": {
-    "exclusion": "human_authority",
-    "reason": "Creates standing authorization for the exact requester and private destination. An Assistant must not authorize its own recipients.",
-    "remedy": "Use the authenticated owner's destination-binding configuration path."
-  },
-  "POST /api/assistant-connections/:id/discord-connectors": {
-    "exclusion": "human_authority",
-    "reason": "Issues a trusted Discord connector credential with owner-selected destination binding and allowed command operations; this establishes persistent access.",
-    "remedy": "Use this exact authenticated connection-owner API, then configure the credential privately in the dedicated connector profile."
-  },
-  "POST /api/assistant-connections/:id/event-subscriptions": {
-    "exclusion": "human_authority",
-    "reason": "Establishes standing callback authority, issues a signing credential, and can configure an exact private-network permission exception.",
-    "remedy": "Use the authenticated owner's connection event-subscription configuration path."
-  },
-  "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/resume": {
-    "tools": ["delivery_resume"]
-  },
-  "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/rotate": {
-    "exclusion": "human_authority",
-    "reason": "Rotates the owner's event-signing credential; credential establishment remains human controlled.",
-    "remedy": "Use the authenticated owner's connection event-subscription rotation path."
-  },
-  "POST /api/assistant-connections/:id/revoke": {
-    "exclusion": "human_authority",
-    "reason": "Revokes an owner-issued Assistant bearer credential and its standing grants. Credential lifecycle and authority removal stay on the authenticated owner's connection path.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/assistant-connections/:id/rotate": {
-    "exclusion": "human_authority",
-    "reason": "Issues a replacement Assistant bearer credential and invalidates the previous credential. Establishing or transferring credential access remains human controlled.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/assistant-connections/installation": {
-    "tools": ["install_name"]
-  },
-  "POST /api/automations": {
-    "tools": [
-      "auto_create"
-    ]
-  },
-  "POST /api/automations/:id/triggers": {
-    "exclusion": "human_authority",
-    "reason": "Issues a new standing inbound webhook/ChatOps signing credential and delivery authorization. Credential establishment remains human-only.",
-    "remedy": "Create the trigger through the authenticated owner's automation settings; the Assistant may inspect trigger metadata and remove it under current authority."
-  },
-  "POST /api/automations/:id/triggers/:triggerId/rotate": {
-    "exclusion": "human_authority",
-    "reason": "Rotates and discloses a standing inbound signing credential. Assistant arguments cannot supply human credential authority.",
-    "remedy": "Rotate the trigger through the authenticated owner's automation settings, then inspect metadata with auto_triggers."
-  },
-  "POST /api/orphaned-skill-copies/:id/import": {
-    "tools": [
-      "skill_orphan_import"
-    ]
-  },
-  "POST /api/projects": {
-    "tools": [
-      "project_create"
-    ]
-  },
-  "POST /api/projects/:id/archive-sessions": {
-    "tools": [
-      "project_archive_sessions"
-    ]
-  },
-  "POST /api/projects/:id/locations": {
-    "tools": [
-      "location_add"
-    ]
-  },
-  "POST /api/projects/:id/locations/:locationId/default": {
-    "tools": [
-      "location_default"
-    ]
-  },
-  "POST /api/projects/:id/locations/:locationId/worktree-setup": {
-    "tools": [
-      "location_setup_generate"
-    ]
-  },
-  "POST /api/projects/:id/locations/move": {
-    "tools": [
-      "location_move"
-    ]
-  },
-  "POST /api/projects/:id/locations/new": {
-    "tools": [
-      "location_create"
-    ]
-  },
-  "POST /api/runners/:id/acp-registry/:agentId/approval": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/runners/:id/orphaned-skill-copies/discard": {
-    "tools": [
-      "skill_orphan_discard"
-    ]
-  },
-  "POST /api/runners/:id/orphaned-skill-copies/preview": {
-    "tools": [
-      "skill_orphan_preview"
-    ]
-  },
-  "POST /api/runners/:id/provider-accounts/:accountId/adopt-profile": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/runners/:id/provider-accounts/:accountId/recover-lease": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:id/provider-accounts/:accountId/revoke-profile-access": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/runners/:id/provider-imports": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/runners/:id/provider-logins": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/runners/:id/provider-logins/:operationId/code": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/runners/:id/rediscover": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:id/skill-adoption-recovery": {
-    "tools": [
-      "skill_recovery_list"
-    ]
-  },
-  "POST /api/runners/:id/skill-adoption-recovery/:operationId/restore": {
-    "tools": [
-      "skill_recovery_restore"
-    ]
-  },
-  "POST /api/runners/:id/skill-drift/preview": {
-    "tools": [
-      "skill_drift_preview"
-    ]
-  },
-  "POST /api/runners/:id/skill-drift/restore": {
-    "tools": [
-      "skill_drift_restore"
-    ]
-  },
-  "POST /api/runners/:id/skill-snapshots": {
-    "tools": [
-      "skill_machine_discover"
-    ]
-  },
-  "POST /api/runners/:id/skills/sync": {
-    "tools": [
-      "skill_sync"
-    ]
-  },
-  "POST /api/runners/:runnerId/host-action": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:runnerId/workspaces": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:runnerId/workspaces/:workspaceId/rename": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:runnerId/workspaces/register": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions": {
-    "tools": [
-      "session_launch"
-    ]
-  },
-  "POST /api/sessions/:id/answer": {
-    "exclusion": "human_authority",
-    "reason": "The handler calls answerQuestion with an authenticated human actor and can answer credential prompts and required owner gates; an Assistant must not manufacture that actor.",
-    "remedy": "Open the supported question or typed-decision UI and have its exact owner answer it; a Discord notice can link there."
-  },
-  "POST /api/sessions/:id/approve": {
-    "exclusion": "human_authority",
-    "reason": "Supplies a required human approval or creates an owner decision. Ordinary Assistant text cannot impersonate the owner or satisfy a typed gate.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/sessions/:id/archive": {
-    "tools": [
-      "session_archive",
-      "session_unarchive"
-    ]
-  },
-  "POST /api/sessions/:id/artifacts/screenshots": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Transfers actual image/video file bytes from an execution workspace or the owner's file picker into private artifact storage. This is binary workspace/file-upload I/O, not work-management or evidence approval; metadata inspection remains an Assistant management operation.",
-    "remedy": "Use an authorized session's existing attach_session_artifact tool or owner file-upload path to transfer the exact file under current upload/provider-disclosure authority. Then use session_artifacts and attachment_history for management/readback. Attaching/listing does not inspect bytes or approve evidence."
-  },
-  "POST /api/sessions/:id/artifacts/videos": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Transfers actual image/video file bytes from an execution workspace or the owner's file picker into private artifact storage. This is binary workspace/file-upload I/O, not work-management or evidence approval; metadata inspection remains an Assistant management operation.",
-    "remedy": "Use an authorized session's existing attach_session_artifact tool or owner file-upload path to transfer the exact file under current upload/provider-disclosure authority. Then use session_artifacts and attachment_history for management/readback. Attaching/listing does not inspect bytes or approve evidence."
-  },
-  "POST /api/sessions/:id/authentication/account": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/sessions/:id/authentication/current-identity": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/sessions/:id/automation-proposals": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/background-deliveries/:continuationId/acknowledge-retry-exhaustion": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/background-deliveries/acknowledge-blocked-results": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/background-jobs/:jobId/stop": {
-    "tools": [
-      "session_job_stop"
-    ]
-  },
-  "POST /api/sessions/:id/campaign/decisions/:occurrenceId/classify": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/campaign/issue-scope/proposals": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/cancel": {
-    "tools": [
-      "session_cancel"
-    ]
-  },
-  "POST /api/sessions/:id/cancel-queued": {
-    "tools": [
-      "queue_cancel"
-    ]
-  },
-  "POST /api/sessions/:id/column": {
-    "tools": [
-      "session_column"
-    ]
-  },
-  "POST /api/sessions/:id/command-invocations": {
-    "tools": [
-      "session_invoke"
-    ]
-  },
-  "POST /api/sessions/:id/config": {
-    "tools": [
-      "session_config"
-    ]
-  },
-  "POST /api/sessions/:id/cross-model-reviews": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/cross-model-reviews/:jobId/cancel": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/delegated-image-review/acknowledge": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/delegated-image-review/image": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/delegated-image-review/verdict": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/descendant-requests/delegated-image-review": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/descendant-requests/delegated-image-review/get": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/descendant-requests/resolve": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/descendant-requests/review-ui-evidence": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/descendant-requests/review-ui-evidence/acknowledge": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/fork": {
-    "tools": [
-      "session_fork"
-    ]
-  },
-  "POST /api/sessions/:id/git": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/github-issue-closures": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/github-issue-closures/:occurrenceId/execute": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/host-action": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/location-switch-requests": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/location-switch-requests/:occurrenceId/execute": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/logout-agent": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/behavior": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/budget-allocations": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/cleanup/delete-merged-branches": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/control": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/follow-up-limit": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/follow-ups": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/full-control": {
-    "exclusion": "human_authority",
-    "reason": "Establishes a human Full Control objective/scope or its authority boundary; Assistant-authored text is not a human boundary.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/full-control/preflight": {
-    "exclusion": "human_authority",
-    "reason": "Establishes a human Full Control objective/scope or its authority boundary; Assistant-authored text is not a human boundary.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/locations/:locationId/include": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/plan": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/recommendations/:recommendationId/adjudicate": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/repository-additions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId/execute": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/review-jobs": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/scope-grant/selection-count": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/slots/release": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/verify-child": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/assign": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/delivery": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/owner-decisions": {
-    "exclusion": "human_authority",
-    "reason": "Supplies a required human approval or creates an owner decision. Ordinary Assistant text cannot impersonate the owner or satisfy a typed gate.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/sessions/:id/parent-control": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/parent-control-policy": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/pending-prompts/:commandId/resolve": {
-    "tools": [
-      "session_pending_resolve"
-    ]
-  },
-  "POST /api/sessions/:id/policy-hook": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/project": {
-    "tools": [
-      "session_project"
-    ]
-  },
-  "POST /api/sessions/:id/prompt": {
-    "tools": [
-      "session_prompt"
-    ]
-  },
-  "POST /api/sessions/:id/prompt-images": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/provider-account": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/pull-request-watch": {
-    "exclusion": "session_protocol",
-    "reason": "This exact route requires the matching session's own runner-issued credential; owner HTTP is refused with 403. It attests runtime watch ownership or observed wait progress, rather than an owner app-management capability. An owner Assistant grant cannot supply that identity.",
-    "remedy": "Use session_watch_get for the owner-facing read counterpart. The managed session itself uses park_on_pull_request or its real wait_session/wait_pull_request runtime tools with its own credential; never pass that credential to the Assistant or infer it from sessionId.",
-    "ownerTools": [
-      "session_watch_get"
-    ]
-  },
-  "POST /api/sessions/:id/queue-hold/release": {
-    "tools": [
-      "session_hold_release"
-    ]
-  },
-  "POST /api/sessions/:id/queued/:promptId/edit": {
-    "tools": [
-      "queue_edit"
-    ]
-  },
-  "POST /api/sessions/:id/reprocess": {
-    "tools": [
-      "session_reprocess"
-    ]
-  },
-  "POST /api/sessions/:id/restart": {
-    "tools": [
-      "session_restart"
-    ]
-  },
-  "POST /api/sessions/:id/result/acknowledge": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/result/handoff": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/retitle": {
-    "tools": [
-      "session_retitle"
-    ]
-  },
-  "POST /api/sessions/:id/retry-stop": {
-    "tools": [
-      "session_retry_stop"
-    ]
-  },
-  "POST /api/sessions/:id/review-findings": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/review-findings/bundle": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/review-sessions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/review-sessions/:reviewSessionId/cancel": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/rewind": {
-    "tools": [
-      "session_rewind"
-    ]
-  },
-  "POST /api/sessions/:id/role": {
-    "tools": [
-      "session_role"
-    ]
-  },
-  "POST /api/sessions/:id/shells": {
-    "tools": [
-      "shell_open"
-    ]
-  },
-  "POST /api/sessions/:id/shells/:shellId/input": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "POST /api/sessions/:id/shells/:shellId/resize": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "POST /api/sessions/:id/side-chat": {
-    "tools": [
-      "side_chat_create"
-    ]
-  },
-  "POST /api/sessions/:id/steer": {
-    "tools": [
-      "session_steer"
-    ]
-  },
-  "POST /api/sessions/:id/steering/:submissionId/resolve": {
-    "tools": [
-      "steering_resolve"
-    ]
-  },
-  "POST /api/sessions/:id/stop": {
-    "tools": [
-      "session_stop"
-    ]
-  },
-  "POST /api/sessions/:id/title": {
-    "tools": [
-      "session_title"
-    ]
-  },
-  "POST /api/sessions/:id/transcript-shares": {
-    "exclusion": "human_authority",
-    "reason": "Issues a separate bearer capability authorizing public reads of a frozen private transcript. Credential issuance and new disclosure authority require the authenticated owner.",
-    "remedy": "Use this exact authenticated owner transcript-sharing API/UI for capability issuance or revocation. The Assistant can inspect share metadata through transcript_shares and read authorized cached content through session_export without issuing credentials or publishing it."
-  },
-  "POST /api/sessions/:id/unarchive-and-restart": {
-    "tools": [
-      "session_unarchive_restart"
-    ]
-  },
-  "POST /api/sessions/:id/video-evidence-review/acknowledge": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/video-evidence-review/acknowledge-frames": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/video-evidence-review/frame": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/video-evidence-review/frames": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/video-evidence-review/prepare": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/video-evidence-review/provenance": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/video-evidence-review/verdict": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/waits": {
-    "exclusion": "session_protocol",
-    "reason": "This exact route requires the matching session's own runner-issued credential; owner HTTP is refused with 403. It attests runtime watch ownership or observed wait progress, rather than an owner app-management capability. An owner Assistant grant cannot supply that identity.",
-    "remedy": "Use session_watch_get for the owner-facing read counterpart. The managed session itself uses park_on_pull_request or its real wait_session/wait_pull_request runtime tools with its own credential; never pass that credential to the Assistant or infer it from sessionId.",
-    "ownerTools": [
-      "session_watch_get"
-    ]
-  },
-  "POST /api/sessions/:id/workflow-decisions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/consume": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/reconcile": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/workspace": {
-    "tools": [
-      "session_workspace"
-    ]
-  },
-  "POST /api/sessions/:id/workspace-references": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "POST /api/sessions/:id/worktrees": {
-    "tools": [
-      "worktree_create"
-    ]
-  },
-  "POST /api/sessions/:id/worktrees/attach": {
-    "tools": [
-      "worktree_attach"
-    ]
-  },
-  "POST /api/sessions/:id/worktrees/delete-refs": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/worktrees/discard": {
-    "tools": [
-      "worktree_discard"
-    ]
-  },
-  "POST /api/sessions/:id/worktrees/generate-setup": {
-    "tools": [
-      "worktree_generate_setup"
-    ]
-  },
-  "POST /api/sessions/:id/worktrees/retry-setup": {
-    "tools": [
-      "worktree_retry_setup"
-    ]
-  },
-  "POST /api/sessions/:id/worktrees/select": {
-    "tools": [
-      "worktree_select"
-    ]
-  },
-  "POST /api/sessions/adopt": {
-    "tools": [
-      "session_adopt"
-    ]
-  },
-  "POST /api/skill-assignments": {
-    "tools": [
-      "skill_assign"
-    ]
-  },
-  "POST /api/skill-drift/:id/import": {
-    "tools": [
-      "skill_drift_import"
-    ]
-  },
-  "POST /api/skill-git/import": {
-    "tools": [
-      "skill_git_import"
-    ]
-  },
-  "POST /api/skill-git/preview": {
-    "tools": [
-      "skill_git_preview"
-    ]
-  },
-  "POST /api/skill-groups": {
-    "tools": [
-      "skill_group_create"
-    ]
-  },
-  "POST /api/skill-groups/:id/assignments": {
-    "tools": [
-      "skill_group_assign"
-    ]
-  },
-  "POST /api/skill-groups/:id/convert": {
-    "exclusion": "human_authority",
-    "reason": "Accepts ownership of a legacy unowned group and establishes persistent resource/deployment authority. Standing ownership grants remain human-only.",
-    "remedy": "Review and accept legacy group ownership through the authenticated owner's Skill Library, then use the ordinary Assistant group and assignment operations."
-  },
-  "POST /api/skill-machine/:id/adopt": {
-    "tools": [
-      "skill_machine_adopt"
-    ]
-  },
-  "POST /api/skill-machine/:id/adoption-preflight": {
-    "tools": [
-      "skill_adoption_preflight"
-    ]
-  },
-  "POST /api/skill-machine/:id/import": {
-    "tools": [
-      "skill_machine_import"
-    ]
-  },
-  "POST /api/skill-machine/:id/preview": {
-    "tools": [
-      "skill_machine_preview"
-    ]
-  },
-  "POST /api/skills": {
-    "tools": [
-      "skill_create"
-    ]
-  },
-  "POST /api/skills/:id/built-in-version": {
-    "tools": [
-      "skill_builtin_apply"
-    ]
-  },
-  "POST /api/skills/:id/restore": {
-    "tools": [
-      "skill_restore"
-    ]
-  },
-  "POST /api/skills/:id/versions": {
-    "tools": [
-      "skill_version_add"
-    ]
-  },
-  "PUT /api/automations/:id": {
-    "tools": [
-      "auto_update",
-      "auto_enable",
-      "auto_pause"
-    ]
-  },
-  "PUT /api/projects/:id/access-scope": {
-    "exclusion": "human_authority",
-    "reason": "Changes a persistent resource access audience and requires the authenticated owner access-scope confirmation.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "PUT /api/projects/:id/worktree-setup-notice/dismiss": {
-    "tools": [
-      "project_notice_dismiss"
-    ]
-  },
-  "PUT /api/runners/:id/automatic-account-switching": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PUT /api/runners/:id/capacity": {
-    "tools": [
-      "runner_capacity"
-    ]
-  },
-  "PUT /api/runners/:id/harness-installation": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PUT /api/runners/:id/provider-account-defaults/:provider": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PUT /api/runners/:id/provider-account-policies/:provider": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PUT /api/runners/:id/provider-logins/:operationId/dismiss": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PUT /api/runners/:id/reviewer-security": {
-    "exclusion": "human_authority",
-    "reason": "Changes trusted reviewer security policy, a human-controlled persistent permission boundary.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "PUT /api/runners/:id/target-harness-installation": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PUT /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {
-    "exclusion": "human_authority",
-    "reason": "Changes a persistent resource access audience and requires the authenticated owner access-scope confirmation.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "PUT /api/sessions/:id/reminder": {
-    "tools": [
-      "reminder_set"
-    ]
-  },
-  "PUT /api/skills/:id": {
-    "tools": [
-      "skill_update"
-    ]
-  },
-  "PUT /api/skills/:id/git-auto-update": {
-    "exclusion": "human_authority",
-    "reason": "Establishes or revokes unattended authority to fetch using the control plane's ambient Git credentials. This persistent credential-use opt-in remains human-only.",
-    "remedy": "The instance owner configures automatic Git updates in authenticated Skill Library settings; Assistant preview/import uses already-authorized owner access without changing that opt-in."
-  },
-  "PUT /api/skills/:id/machines/:runnerId/version": {
-    "tools": [
-      "skill_pin_set"
-    ]
-  },
-  "PUT /api/skills/:id/recommendation": {
-    "tools": [
-      "skill_recommendation"
-    ]
-  }
+  "DELETE /api/assistant-connections/:id/destination-bindings/:bindingId": {"exclusion":"human_authority","reason":"Revokes the owner's standing requester/destination authorization binding.","remedy":"Use the authenticated owner's destination-binding configuration path."},
+  "DELETE /api/assistant-connections/:id/discord-connectors/:connectorId": {"exclusion":"human_authority","reason":"Revokes an owner-issued trusted Discord connector credential and its standing command/destination authority.","remedy":"Use this exact authenticated connection-owner API to revoke the connector; ordinary Assistant commands cannot change connector credentials or standing grants."},
+  "DELETE /api/assistant-connections/:id/event-subscriptions/:subscriptionId": {"exclusion":"human_authority","reason":"Revokes owner-established standing callback delivery authority and its signing credential.","remedy":"Use the authenticated owner's connection event-subscription configuration path."},
+  "DELETE /api/automations/:id": {"tools":["auto_delete"]},
+  "DELETE /api/automations/:id/triggers/:triggerId": {"tools":["auto_trigger_remove"]},
+  "DELETE /api/orphaned-skill-copies/:id": {"tools":["skill_orphan_preview_discard"]},
+  "DELETE /api/projects/:id": {"tools":["project_delete"]},
+  "DELETE /api/projects/:id/locations/:locationId": {"tools":["location_remove"]},
+  "DELETE /api/runners/:id": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "DELETE /api/runners/:id/provider-accounts/:accountId": {"exclusion":"human_authority","reason":"Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "DELETE /api/runners/:id/provider-logins/:operationId": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "DELETE /api/runners/:runnerId/workspaces/:workspaceId": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "DELETE /api/sessions/:id": {"tools":["session_delete"]},
+  "DELETE /api/sessions/:id/reminder": {"tools":["reminder_remove"]},
+  "DELETE /api/sessions/:id/shells/:shellId": {"tools":["shell_close"]},
+  "DELETE /api/sessions/:id/transcript-shares/:shareId": {"exclusion":"human_authority","reason":"Revokes the owner's independently issued transcript-share bearer capability; credential lifecycle remains on the authenticated owner path.","remedy":"Use this exact authenticated owner transcript-sharing API/UI for capability issuance or revocation. The Assistant can inspect share metadata through transcript_shares and read authorized cached content through session_export without issuing credentials or publishing it."},
+  "DELETE /api/skill-assignments/:id": {"tools":["skill_unassign"]},
+  "DELETE /api/skill-drift/:id": {"tools":["skill_drift_discard"]},
+  "DELETE /api/skill-git/preview/:id": {"tools":["skill_git_preview_discard"]},
+  "DELETE /api/skill-groups/:id": {"tools":["skill_group_remove"]},
+  "DELETE /api/skill-groups/:id/assignments/:assignmentId": {"tools":["skill_group_unassign"]},
+  "DELETE /api/skill-machine/:id": {"tools":["skill_machine_discard"]},
+  "DELETE /api/skills/:id": {"tools":["skill_remove"]},
+  "GET /api/assistant-connections": {"tools":["connection_list"]},
+  "GET /api/assistant-connections/:id/activity": {"tools":["connection_activity"]},
+  "GET /api/assistant-connections/:id/destination-bindings": {"tools":["dest_list"]},
+  "GET /api/assistant-connections/:id/event-subscriptions": {"tools":["sub_list"]},
+  "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId": {"tools":["sub_get"]},
+  "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId/deliveries": {"tools":["delivery_list"]},
+  "GET /api/automations": {"tools":["auto_list"]},
+  "GET /api/automations/:id": {"tools":["auto_get"]},
+  "GET /api/automations/:id/triggers": {"tools":["auto_triggers"]},
+  "GET /api/projects": {"tools":["project_list"]},
+  "GET /api/projects/:id": {"tools":["project_list"]},
+  "GET /api/projects/:id/access-scope": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "GET /api/projects/:id/locations/:locationId/worktree-setup": {"tools":["location_setup_get"]},
+  "GET /api/runners": {"tools":["runner_list"]},
+  "GET /api/runners/:id/external-sessions": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "GET /api/runners/:id/list-directory": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "GET /api/runners/:id/provider-account-selection": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "GET /api/runners/:id/provider-accounts/:accountId/home-lease": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "GET /api/runners/:id/skills": {"tools":["skill_machine_state"]},
+  "GET /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "GET /api/sessions": {"tools":["session_list"]},
+  "GET /api/sessions/:id": {"tools":["session_get","session_config_get","worktree_get","session_status"]},
+  "GET /api/sessions/:id/artifacts": {"tools":["session_artifacts"]},
+  "GET /api/sessions/:id/authentication/accounts": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "GET /api/sessions/:id/automation-proposals/:occurrenceId": {"tools":["decision_get"]},
+  "GET /api/sessions/:id/campaign/decisions": {"tools":["campaign_decisions"]},
+  "GET /api/sessions/:id/campaign/issue-scope": {"tools":["campaign_scope"]},
+  "GET /api/sessions/:id/campaign/recommendations": {"tools":["campaign_recommendations"]},
+  "GET /api/sessions/:id/campaign/summary": {"tools":["campaign_status"]},
+  "GET /api/sessions/:id/campaign/work-items": {"tools":["campaign_items"]},
+  "GET /api/sessions/:id/campaign/work-items/:itemId": {"tools":["campaign_item"]},
+  "GET /api/sessions/:id/child-sessions": {"tools":["session_children"]},
+  "GET /api/sessions/:id/cross-model-reviews": {"tools":["review_jobs"]},
+  "GET /api/sessions/:id/cross-model-reviews/:jobId": {"tools":["review_job"]},
+  "GET /api/sessions/:id/cross-model-reviews/:jobId/artifacts": {"tools":["review_job_artifacts"]},
+  "GET /api/sessions/:id/descendant-requests": {"tools":["request_list"]},
+  "GET /api/sessions/:id/events": {"tools":["session_events"]},
+  "GET /api/sessions/:id/export": {"tools":["session_export"]},
+  "GET /api/sessions/:id/file": {"exclusion":"interactive_workspace_io","reason":"Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "GET /api/sessions/:id/files": {"exclusion":"interactive_workspace_io","reason":"Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "GET /api/sessions/:id/governance-audit": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "GET /api/sessions/:id/history-preview": {"tools":["session_history","history_preview"]},
+  "GET /api/sessions/:id/location-switch-requests/:occurrenceId": {"tools":["decision_get"]},
+  "GET /api/sessions/:id/orchestrator-campaign": {"tools":["campaign_get"]},
+  "GET /api/sessions/:id/orchestrator-campaign/behavior": {"tools":["campaign_behavior"]},
+  "GET /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId": {"tools":["decision_get"]},
+  "GET /api/sessions/:id/orchestrator-campaign/review-jobs": {"tools":["campaign_review_jobs"]},
+  "GET /api/sessions/:id/orchestrator-campaign/review-jobs/:jobId": {"tools":["campaign_review_job"]},
+  "GET /api/sessions/:id/orchestrator-campaign/review-jobs/:jobId/report": {"tools":["campaign_review_report"]},
+  "GET /api/sessions/:id/orchestrator-campaign/work-items": {"tools":["campaign_work_items"]},
+  "GET /api/sessions/:id/orchestrator-campaign/work-items/:itemId": {"tools":["campaign_work_item"]},
+  "GET /api/sessions/:id/prompt-history": {"tools":["prompt_history"]},
+  "GET /api/sessions/:id/provider-accounts": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "GET /api/sessions/:id/queued/:promptId/edit": {"tools":["queue_get"]},
+  "GET /api/sessions/:id/reminder": {"tools":["reminder_get"]},
+  "GET /api/sessions/:id/retained-attachment-events": {"tools":["attachment_history"]},
+  "GET /api/sessions/:id/review-findings": {"tools":["review_findings"]},
+  "GET /api/sessions/:id/review-sessions": {"tools":["review_list"]},
+  "GET /api/sessions/:id/review-sessions/:reviewSessionId": {"tools":["review_get"]},
+  "GET /api/sessions/:id/role": {"tools":["session_role_get"]},
+  "GET /api/sessions/:id/shells": {"tools":["shell_list"]},
+  "GET /api/sessions/:id/shells/:shellId/history": {"exclusion":"interactive_workspace_io","reason":"Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "GET /api/sessions/:id/side-chat": {"tools":["side_chat_get"]},
+  "GET /api/sessions/:id/steering": {"tools":["steering_list"]},
+  "GET /api/sessions/:id/steering/:submissionId": {"tools":["steering_get"]},
+  "GET /api/sessions/:id/transcript-shares": {"tools":["transcript_shares"]},
+  "GET /api/sessions/:id/usage": {"tools":["session_usage"]},
+  "GET /api/sessions/:id/workflow-decisions": {"tools":["decision_list"]},
+  "GET /api/sessions/:id/workflow-decisions/:occurrenceId": {"tools":["decision_get"]},
+  "GET /api/sessions/:id/workspace-references/search": {"exclusion":"interactive_workspace_io","reason":"Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "GET /api/sessions/:id/worktrees/operations": {"tools":["worktree_ops"]},
+  "GET /api/sessions/archive-page": {"tools":["session_archive_list"]},
+  "GET /api/sessions/lookup/by-id": {"tools":["session_lookup"]},
+  "GET /api/skill-assignments": {"tools":["skill_assignments"]},
+  "GET /api/skill-groups": {"tools":["skill_groups"]},
+  "GET /api/skill-groups/:id/assignments": {"tools":["skill_group_assignments"]},
+  "GET /api/skills": {"tools":["skill_list"]},
+  "GET /api/skills/:id": {"tools":["skill_get"]},
+  "GET /api/skills/:id/built-in-version": {"tools":["skill_builtin_get"]},
+  "GET /api/skills/:id/machines/:runnerId/version": {"tools":["skill_pin_get"]},
+  "GET /api/skills/:id/machines/:runnerId/version-policy": {"tools":["skill_pin_get"]},
+  "GET /api/skills/:id/versions": {"tools":["skill_versions"]},
+  "GET /api/skills/:id/versions/:versionId": {"tools":["skill_version_get"]},
+  "PATCH /api/projects/:id": {"tools":["project_update"]},
+  "PATCH /api/projects/:id/locations/:locationId": {"tools":["location_rename"]},
+  "PATCH /api/runners/:id": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "PATCH /api/sessions/:id/review-findings/:findingId": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "PATCH /api/skill-assignments/:id": {"tools":["skill_assign_update"]},
+  "PATCH /api/skill-groups/:id/assignments/:assignmentId": {"tools":["skill_group_assignment_edit"]},
+  "POST /api/assistant-connections": {"exclusion":"human_authority","reason":"Creates an Assistant bearer credential and installs owner-selected standing operation/project grants and confirmation policy. The Assistant cannot issue its own authority.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/assistant-connections/:id/configure": {"exclusion":"human_authority","reason":"Changes a connection's standing operation/project grants and destructive-confirmation policy, potentially expanding future authority. This mixed authority-edit route remains with the authenticated owner.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/assistant-connections/:id/destination-bindings": {"exclusion":"human_authority","reason":"Creates standing authorization for the exact requester and private destination. An Assistant must not authorize its own recipients.","remedy":"Use the authenticated owner's destination-binding configuration path."},
+  "POST /api/assistant-connections/:id/discord-connectors": {"exclusion":"human_authority","reason":"Issues a trusted Discord connector credential with owner-selected destination binding and allowed command operations; this establishes persistent access.","remedy":"Use this exact authenticated connection-owner API, then configure the credential privately in the dedicated connector profile."},
+  "POST /api/assistant-connections/:id/event-subscriptions": {"exclusion":"human_authority","reason":"Establishes standing callback authority, issues a signing credential, and can configure an exact private-network permission exception.","remedy":"Use the authenticated owner's connection event-subscription configuration path."},
+  "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/resume": {"tools":["delivery_resume"]},
+  "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/rotate": {"exclusion":"human_authority","reason":"Rotates the owner's event-signing credential; credential establishment remains human controlled.","remedy":"Use the authenticated owner's connection event-subscription rotation path."},
+  "POST /api/assistant-connections/:id/revoke": {"exclusion":"human_authority","reason":"Revokes an owner-issued Assistant bearer credential and its standing grants. Credential lifecycle and authority removal stay on the authenticated owner's connection path.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/assistant-connections/:id/rotate": {"exclusion":"human_authority","reason":"Issues a replacement Assistant bearer credential and invalidates the previous credential. Establishing or transferring credential access remains human controlled.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/assistant-connections/installation": {"tools":["install_name"]},
+  "POST /api/automations": {"tools":["auto_create"]},
+  "POST /api/automations/:id/triggers": {"exclusion":"human_authority","reason":"Issues a new standing inbound webhook/ChatOps signing credential and delivery authorization. Credential establishment remains human-only.","remedy":"Create the trigger through the authenticated owner's automation settings; the Assistant may inspect trigger metadata and remove it under current authority."},
+  "POST /api/automations/:id/triggers/:triggerId/rotate": {"exclusion":"human_authority","reason":"Rotates and discloses a standing inbound signing credential. Assistant arguments cannot supply human credential authority.","remedy":"Rotate the trigger through the authenticated owner's automation settings, then inspect metadata with auto_triggers."},
+  "POST /api/orphaned-skill-copies/:id/import": {"tools":["skill_orphan_import"]},
+  "POST /api/projects": {"tools":["project_create"]},
+  "POST /api/projects/:id/archive-sessions": {"tools":["project_archive_sessions"]},
+  "POST /api/projects/:id/locations": {"tools":["location_add"]},
+  "POST /api/projects/:id/locations/:locationId/default": {"tools":["location_default"]},
+  "POST /api/projects/:id/locations/:locationId/worktree-setup": {"tools":["location_setup_generate"]},
+  "POST /api/projects/:id/locations/move": {"tools":["location_move"]},
+  "POST /api/projects/:id/locations/new": {"tools":["location_create"]},
+  "POST /api/runners/:id/acp-registry/:agentId/approval": {"exclusion":"human_authority","reason":"Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/runners/:id/orphaned-skill-copies/discard": {"tools":["skill_orphan_discard"]},
+  "POST /api/runners/:id/orphaned-skill-copies/preview": {"tools":["skill_orphan_preview"]},
+  "POST /api/runners/:id/provider-accounts/:accountId/adopt-profile": {"exclusion":"human_authority","reason":"Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/runners/:id/provider-accounts/:accountId/recover-lease": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/runners/:id/provider-accounts/:accountId/revoke-profile-access": {"exclusion":"human_authority","reason":"Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/runners/:id/provider-imports": {"exclusion":"human_authority","reason":"Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/runners/:id/provider-logins": {"exclusion":"human_authority","reason":"Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/runners/:id/provider-logins/:operationId/code": {"exclusion":"human_authority","reason":"Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/runners/:id/rediscover": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/runners/:id/skill-adoption-recovery": {"tools":["skill_recovery_list"]},
+  "POST /api/runners/:id/skill-adoption-recovery/:operationId/restore": {"tools":["skill_recovery_restore"]},
+  "POST /api/runners/:id/skill-drift/preview": {"tools":["skill_drift_preview"]},
+  "POST /api/runners/:id/skill-drift/restore": {"tools":["skill_drift_restore"]},
+  "POST /api/runners/:id/skill-snapshots": {"tools":["skill_machine_discover"]},
+  "POST /api/runners/:id/skills/sync": {"tools":["skill_sync"]},
+  "POST /api/runners/:runnerId/host-action": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/runners/:runnerId/workspaces": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/runners/:runnerId/workspaces/:workspaceId/rename": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/runners/:runnerId/workspaces/register": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions": {"tools":["session_launch"]},
+  "POST /api/sessions/:id/answer": {"exclusion":"human_authority","reason":"The handler calls answerQuestion with an authenticated human actor and can answer credential prompts and required owner gates; an Assistant must not manufacture that actor.","remedy":"Open the supported question or typed-decision UI and have its exact owner answer it; a Discord notice can link there."},
+  "POST /api/sessions/:id/approve": {"exclusion":"human_authority","reason":"Supplies a required human approval or creates an owner decision. Ordinary Assistant text cannot impersonate the owner or satisfy a typed gate.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/sessions/:id/archive": {"tools":["session_archive","session_unarchive"]},
+  "POST /api/sessions/:id/artifacts/screenshots": {"exclusion":"interactive_workspace_io","reason":"Transfers actual image/video file bytes from an execution workspace or the owner's file picker into private artifact storage. This is binary workspace/file-upload I/O, not work-management or evidence approval; metadata inspection remains an Assistant management operation.","remedy":"Use an authorized session's existing attach_session_artifact tool or owner file-upload path to transfer the exact file under current upload/provider-disclosure authority. Then use session_artifacts and attachment_history for management/readback. Attaching/listing does not inspect bytes or approve evidence."},
+  "POST /api/sessions/:id/artifacts/videos": {"exclusion":"interactive_workspace_io","reason":"Transfers actual image/video file bytes from an execution workspace or the owner's file picker into private artifact storage. This is binary workspace/file-upload I/O, not work-management or evidence approval; metadata inspection remains an Assistant management operation.","remedy":"Use an authorized session's existing attach_session_artifact tool or owner file-upload path to transfer the exact file under current upload/provider-disclosure authority. Then use session_artifacts and attachment_history for management/readback. Attaching/listing does not inspect bytes or approve evidence."},
+  "POST /api/sessions/:id/authentication/account": {"exclusion":"human_authority","reason":"Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/sessions/:id/authentication/current-identity": {"exclusion":"human_authority","reason":"Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/sessions/:id/automation-proposals": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result": {"tools":["result_missing_ack"]},
+  "POST /api/sessions/:id/background-deliveries/:continuationId/acknowledge-retry-exhaustion": {"tools":["result_retry_ack"]},
+  "POST /api/sessions/:id/background-deliveries/acknowledge-blocked-results": {"tools":["result_blocked_ack"]},
+  "POST /api/sessions/:id/background-jobs/:jobId/stop": {"tools":["session_job_stop"]},
+  "POST /api/sessions/:id/campaign/decisions/:occurrenceId/classify": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/campaign/issue-scope/proposals": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/cancel": {"tools":["session_cancel"]},
+  "POST /api/sessions/:id/cancel-queued": {"tools":["queue_cancel"]},
+  "POST /api/sessions/:id/column": {"tools":["session_column"]},
+  "POST /api/sessions/:id/command-invocations": {"tools":["session_invoke"]},
+  "POST /api/sessions/:id/config": {"tools":["session_config"]},
+  "POST /api/sessions/:id/cross-model-reviews": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/cross-model-reviews/:jobId/cancel": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/delegated-image-review/acknowledge": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/delegated-image-review/image": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/delegated-image-review/verdict": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/descendant-requests/delegated-image-review": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/descendant-requests/delegated-image-review/get": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/descendant-requests/resolve": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/descendant-requests/review-ui-evidence": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/descendant-requests/review-ui-evidence/acknowledge": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/fork": {"tools":["session_fork"]},
+  "POST /api/sessions/:id/git": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/github-issue-closures": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/github-issue-closures/:occurrenceId/execute": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/host-action": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/location-switch-requests": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/location-switch-requests/:occurrenceId/execute": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/logout-agent": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/behavior": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/budget-allocations": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/cleanup/delete-merged-branches": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/control": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/follow-up-limit": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/follow-ups": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/full-control": {"exclusion":"human_authority","reason":"Establishes a human Full Control objective/scope or its authority boundary; Assistant-authored text is not a human boundary.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/sessions/:id/orchestrator-campaign/full-control/preflight": {"exclusion":"human_authority","reason":"Establishes a human Full Control objective/scope or its authority boundary; Assistant-authored text is not a human boundary.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/sessions/:id/orchestrator-campaign/locations/:locationId/include": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/plan": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/recommendations/:recommendationId/adjudicate": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/repository-additions": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId/execute": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/review-jobs": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/scope-grant/selection-count": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/slots/release": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/verify-child": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/assign": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/delivery": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/owner-decisions": {"exclusion":"human_authority","reason":"Supplies a required human approval or creates an owner decision. Ordinary Assistant text cannot impersonate the owner or satisfy a typed gate.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/sessions/:id/parent-control": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/parent-control-policy": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/pending-prompts/:commandId/resolve": {"tools":["session_pending_resolve"]},
+  "POST /api/sessions/:id/policy-hook": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/project": {"tools":["session_project"]},
+  "POST /api/sessions/:id/prompt": {"tools":["session_prompt"]},
+  "POST /api/sessions/:id/prompt-images": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/provider-account": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/pull-request-watch": {"exclusion":"session_protocol","reason":"This exact route requires the matching session's own runner-issued credential; owner HTTP is refused with 403. It attests runtime watch ownership or observed wait progress, rather than an owner app-management capability. An owner Assistant grant cannot supply that identity.","remedy":"Use session_watch_get for the owner-facing read counterpart. The managed session itself uses park_on_pull_request or its real wait_session/wait_pull_request runtime tools with its own credential; never pass that credential to the Assistant or infer it from sessionId.","ownerTools":["session_watch_get"]},
+  "POST /api/sessions/:id/queue-hold/release": {"tools":["session_hold_release"]},
+  "POST /api/sessions/:id/queued/:promptId/edit": {"tools":["queue_edit"]},
+  "POST /api/sessions/:id/reprocess": {"tools":["session_reprocess"]},
+  "POST /api/sessions/:id/restart": {"tools":["session_restart"]},
+  "POST /api/sessions/:id/result/acknowledge": {"tools":["result_ack"]},
+  "POST /api/sessions/:id/result/handoff": {"tools":["result_handoff"]},
+  "POST /api/sessions/:id/retitle": {"tools":["session_retitle"]},
+  "POST /api/sessions/:id/retry-stop": {"tools":["session_retry_stop"]},
+  "POST /api/sessions/:id/review-findings": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/review-findings/bundle": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/review-sessions": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/review-sessions/:reviewSessionId/cancel": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/rewind": {"tools":["session_rewind"]},
+  "POST /api/sessions/:id/role": {"tools":["session_role"]},
+  "POST /api/sessions/:id/shells": {"tools":["shell_open"]},
+  "POST /api/sessions/:id/shells/:shellId/input": {"exclusion":"interactive_workspace_io","reason":"Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "POST /api/sessions/:id/shells/:shellId/resize": {"exclusion":"interactive_workspace_io","reason":"Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "POST /api/sessions/:id/side-chat": {"tools":["side_chat_create"]},
+  "POST /api/sessions/:id/steer": {"tools":["session_steer"]},
+  "POST /api/sessions/:id/steering/:submissionId/resolve": {"tools":["steering_resolve"]},
+  "POST /api/sessions/:id/stop": {"tools":["session_stop"]},
+  "POST /api/sessions/:id/title": {"tools":["session_title"]},
+  "POST /api/sessions/:id/transcript-shares": {"exclusion":"human_authority","reason":"Issues a separate bearer capability authorizing public reads of a frozen private transcript. Credential issuance and new disclosure authority require the authenticated owner.","remedy":"Use this exact authenticated owner transcript-sharing API/UI for capability issuance or revocation. The Assistant can inspect share metadata through transcript_shares and read authorized cached content through session_export without issuing credentials or publishing it."},
+  "POST /api/sessions/:id/unarchive-and-restart": {"tools":["session_unarchive_restart"]},
+  "POST /api/sessions/:id/video-evidence-review/acknowledge": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/video-evidence-review/acknowledge-frames": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/video-evidence-review/frame": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/video-evidence-review/frames": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/video-evidence-review/prepare": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/video-evidence-review/provenance": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/video-evidence-review/verdict": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/waits": {"exclusion":"session_protocol","reason":"This exact route requires the matching session's own runner-issued credential; owner HTTP is refused with 403. It attests runtime watch ownership or observed wait progress, rather than an owner app-management capability. An owner Assistant grant cannot supply that identity.","remedy":"Use session_watch_get for the owner-facing read counterpart. The managed session itself uses park_on_pull_request or its real wait_session/wait_pull_request runtime tools with its own credential; never pass that credential to the Assistant or infer it from sessionId.","ownerTools":["session_watch_get"]},
+  "POST /api/sessions/:id/workflow-decisions": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/consume": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/reconcile": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/workspace": {"tools":["session_workspace"]},
+  "POST /api/sessions/:id/workspace-references": {"exclusion":"interactive_workspace_io","reason":"Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "POST /api/sessions/:id/worktrees": {"tools":["worktree_create"]},
+  "POST /api/sessions/:id/worktrees/attach": {"tools":["worktree_attach"]},
+  "POST /api/sessions/:id/worktrees/delete-refs": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "POST /api/sessions/:id/worktrees/discard": {"tools":["worktree_discard"]},
+  "POST /api/sessions/:id/worktrees/generate-setup": {"tools":["worktree_generate_setup"]},
+  "POST /api/sessions/:id/worktrees/retry-setup": {"tools":["worktree_retry_setup"]},
+  "POST /api/sessions/:id/worktrees/select": {"tools":["worktree_select"]},
+  "POST /api/sessions/adopt": {"tools":["session_adopt"]},
+  "POST /api/skill-assignments": {"tools":["skill_assign"]},
+  "POST /api/skill-drift/:id/import": {"tools":["skill_drift_import"]},
+  "POST /api/skill-git/import": {"tools":["skill_git_import"]},
+  "POST /api/skill-git/preview": {"tools":["skill_git_preview"]},
+  "POST /api/skill-groups": {"tools":["skill_group_create"]},
+  "POST /api/skill-groups/:id/assignments": {"tools":["skill_group_assign"]},
+  "POST /api/skill-groups/:id/convert": {"exclusion":"human_authority","reason":"Accepts ownership of a legacy unowned group and establishes persistent resource/deployment authority. Standing ownership grants remain human-only.","remedy":"Review and accept legacy group ownership through the authenticated owner's Skill Library, then use the ordinary Assistant group and assignment operations."},
+  "POST /api/skill-machine/:id/adopt": {"tools":["skill_machine_adopt"]},
+  "POST /api/skill-machine/:id/adoption-preflight": {"tools":["skill_adoption_preflight"]},
+  "POST /api/skill-machine/:id/import": {"tools":["skill_machine_import"]},
+  "POST /api/skill-machine/:id/preview": {"tools":["skill_machine_preview"]},
+  "POST /api/skills": {"tools":["skill_create"]},
+  "POST /api/skills/:id/built-in-version": {"tools":["skill_builtin_apply"]},
+  "POST /api/skills/:id/restore": {"tools":["skill_restore"]},
+  "POST /api/skills/:id/versions": {"tools":["skill_version_add"]},
+  "PUT /api/automations/:id": {"tools":["auto_update","auto_enable","auto_pause"]},
+  "PUT /api/projects/:id/access-scope": {"exclusion":"human_authority","reason":"Changes a persistent resource access audience and requires the authenticated owner access-scope confirmation.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "PUT /api/projects/:id/worktree-setup-notice/dismiss": {"tools":["project_notice_dismiss"]},
+  "PUT /api/runners/:id/automatic-account-switching": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "PUT /api/runners/:id/capacity": {"tools":["runner_capacity"]},
+  "PUT /api/runners/:id/harness-installation": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "PUT /api/runners/:id/provider-account-defaults/:provider": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "PUT /api/runners/:id/provider-account-policies/:provider": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "PUT /api/runners/:id/provider-logins/:operationId/dismiss": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "PUT /api/runners/:id/reviewer-security": {"exclusion":"human_authority","reason":"Changes trusted reviewer security policy, a human-controlled persistent permission boundary.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "PUT /api/runners/:id/target-harness-installation": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
+  "PUT /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {"exclusion":"human_authority","reason":"Changes a persistent resource access audience and requires the authenticated owner access-scope confirmation.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "PUT /api/sessions/:id/reminder": {"tools":["reminder_set"]},
+  "PUT /api/skills/:id": {"tools":["skill_update"]},
+  "PUT /api/skills/:id/git-auto-update": {"exclusion":"human_authority","reason":"Establishes or revokes unattended authority to fetch using the control plane's ambient Git credentials. This persistent credential-use opt-in remains human-only.","remedy":"The instance owner configures automatic Git updates in authenticated Skill Library settings; Assistant preview/import uses already-authorized owner access without changing that opt-in."},
+  "PUT /api/skills/:id/machines/:runnerId/version": {"tools":["skill_pin_set"]},
+  "PUT /api/skills/:id/recommendation": {"tools":["skill_recommendation"]}
 }

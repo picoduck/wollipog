@@ -14244,6 +14244,7 @@ export class ControlPlaneDb {
   archiveSessionCandidatePageForPrincipal(
     principal: AuthPrincipal,
     query: ArchiveSessionPageQuery,
+    projectIds?: readonly string[],
   ): {
     sessions: ArchiveSessionCandidate[];
     transcriptSessionIds: string[];
@@ -14252,6 +14253,12 @@ export class ControlPlaneDb {
     const window = archiveSessionCursorWindow(query);
     if ("error" in window) return window;
     const authorization = this.sessionAuthorizationSql(principal);
+    // Assistant project restrictions participate in both pagination and facets; filtering the
+    // returned page would leak counts/facets and could skip authorized rows behind hidden ones.
+    if (projectIds !== undefined) {
+      authorization.sql = `(${authorization.sql}) AND session.project_id IN (${projectIds.map(() => "?").join(",") || "NULL"})`;
+      authorization.params.push(...projectIds);
+    }
     const projectSql = "COALESCE(project.name, CASE WHEN session.project_id IS NOT NULL THEN 'Unknown Project' ELSE 'No Project' END)";
     const locationSql = `COALESCE(location.name, workspace_override.display_name, workspace.name,
       workspace_extra.name, session.workspace_id, 'No Location')`;
