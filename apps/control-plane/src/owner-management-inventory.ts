@@ -12,7 +12,7 @@ export class OwnerManagementInventory {
   private readonly routes = new Set<string>();
   attach(app: FastifyInstance): void {
     app.addHook("onRoute", route => {
-      if (!/^\/api\/(?:sessions|projects|runners|automations|skills|skill-[\w-]+|assistant-connections)(?:\/|$)/.test(route.url)) return;
+      if (!/^\/api\/(?:sessions|projects|runners|automations|skills|skill-[\w-]+|orphaned-skill-copies|assistant-connections)(?:\/|$)/.test(route.url)) return;
       for (const method of Array.isArray(route.method) ? route.method : [route.method]) {
         if (method !== "HEAD" && method !== "OPTIONS") this.routes.add(`${method} ${route.url}`);
       }

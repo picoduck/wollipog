@@ -1,6 +1,7 @@
 /** Shared skill application operations. REST and Assistant adapters pass an explicit principal;
  * no credential forwarding, HTTP injection, or duplicate validation. */
 import type { AuthPrincipal } from "./identity.js";
+import type { FastifyInstance } from "fastify";
 import type { SkillsRouteDeps } from "./skills-route.js";
 import type { SkillAssignmentView } from "./db.js";
 import { SkillImportConflictError } from "./db.js";
@@ -16,16 +17,51 @@ export interface SkillApplicationInput {
   params: unknown;
   body?: unknown;
   query: unknown;
+  /** Assistant authority/revision fence after asynchronous inspection, before later effects. */
+  recheck?: () => Promise<unknown>;
+  /** Final synchronous fence immediately before a write or destructive runner dispatch. */
+  beforeEffect?: () => void;
 }
 export interface SkillApplicationResult { status: number; body: unknown }
 type Handler = (input: SkillApplicationInput, reply: SkillApplicationReply) => Promise<unknown>;
-class SkillApplicationReply {
+export class SkillApplicationReply {
   status = 200;
+  sent = false;
+  body: unknown;
   code(status: number): this { this.status = status; return this; }
-  send(body?: unknown): unknown { return body; }
+  send(body?: unknown): unknown { this.sent = true; this.body = body; return body; }
 }
 export class SkillApplicationService {
   readonly handlers = new Map<string, Handler>();
+  readonly closeHandlers: Array<() => Promise<void>> = [];
+  /** Opaque previews resolve to their server-held source, never a caller-selected Machine. */
+  reference: (id: string) => {runnerId?: string; skillId?: string | null} | undefined = () => undefined;
+  addHook(_hook: "onClose", close: () => Promise<void>): void { this.closeHandlers.push(close); }
+  route(input: {method: string; url: string; handler: Handler}): void {
+    this.handlers.set(`${input.method} ${input.url}`, input.handler);
+  }
+  include(service: SkillApplicationService): void {
+    for (const [key, handler] of service.handlers) {
+      if (this.handlers.has(key)) throw new Error("Duplicate skill application operation");
+      this.handlers.set(key, handler);
+    }
+    this.closeHandlers.push(...service.closeHandlers);
+    const prior = this.reference;
+    this.reference = id => prior(id) ?? service.reference(id);
+  }
+  registerHttp(app: FastifyInstance, deps: SkillsRouteDeps): void {
+    for (const key of this.handlers.keys()) {
+      const [method, url] = key.split(" ");
+      app.route({method: method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE", url: url!, handler: async (req, reply) => {
+        // Preserve owner routes' live identity callbacks across runner/network awaits.
+        const result = await this.execute(key, {get principal() {
+          return method === "GET" ? deps.requestPrincipal(req) : deps.requestHuman(req);
+        }, params: req.params, body: req.body, query: req.query});
+        return reply.code(result.status).send(result.body);
+      }});
+    }
+    app.addHook("onClose", async () => { for (const close of this.closeHandlers) await close(); });
+  }
   get(path: string, handler: Handler): void { this.handlers.set(`GET ${path}`, handler); }
   post(path: string, handler: Handler): void { this.handlers.set(`POST ${path}`, handler); }
   put(path: string, handler: Handler): void { this.handlers.set(`PUT ${path}`, handler); }
@@ -36,7 +72,7 @@ export class SkillApplicationService {
     if (!handler) throw new Error("Unknown skill application operation");
     const reply = new SkillApplicationReply();
     const body = await handler(input, reply);
-    return {status: reply.status, body};
+    return {status: reply.status, body: reply.sent ? reply.body : body};
   }
 }
 

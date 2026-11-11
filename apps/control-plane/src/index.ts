@@ -347,6 +347,10 @@ import { makeSkillsSyncPusher, registerSkillRoutes } from "./skills-route.js";
 import { assistantRequestDigest } from "./assistant-command-receipts.js";
 import { ManagementMutations } from "./assistant-management-command.js";
 import { registerAssistantSkills } from "./assistant-skills.js";
+import { registerAssistantTriggerParity } from "./assistant-trigger-parity.js";
+import { AssistantCommandConfirmations } from "./assistant-command-confirmations.js";
+import { registerAssistantSkillParity } from "./assistant-skill-parity.js";
+import { createExtendedSkillsManagement } from "./skill-extended-management.js";
 import { registerAssistantAutomations } from "./assistant-automations.js";
 import { builtInSkills, seedBuiltInSkills } from "./built-in-skills.js";
 import { repairLegacySkillDescriptions } from "./skills.js";
@@ -2551,9 +2555,14 @@ export const assistantOperations = createAssistantOperations(db);
 registerAssistantWorkOperations(db, assistantOperations);
 const assistantCommandReceipts = registerAssistantSessionOperations(assistantOperations, db, svc);
 const assistantManagementMutations = new ManagementMutations(assistantCommandReceipts, db.instanceId(), assistantRequestDigest,
-  id => db.assistantConnections.get(id)!, id => db.assistantConnections.destructiveConfirmation(id));
+  id => db.assistantConnections.get(id)!, id => db.assistantConnections.destructiveConfirmation(id),
+  new AssistantCommandConfirmations(db.raw()));
 registerAssistantAutomations(assistantOperations, db, automations, assistantManagementMutations);
+registerAssistantTriggerParity(assistantOperations, db, automations, assistantManagementMutations);
 registerAssistantSkills(assistantOperations, {db, hub, requestHuman, requestPrincipal, pushSkillsSync}, assistantManagementMutations);
+const extendedSkillsDeps = {db, hub, requestHuman, requestPrincipal, pushSkillsSync, builtInSkills: builtInSkills()};
+const extendedSkillsManagement = createExtendedSkillsManagement(extendedSkillsDeps);
+registerAssistantSkillParity(assistantOperations, extendedSkillsDeps, extendedSkillsManagement, assistantManagementMutations);
 registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });
 registerAssistantWorkOwnerRoutes(app, { db, outboundEvents, requestHuman });
 
@@ -2579,6 +2588,7 @@ try {
 }
 registerSkillRoutes(app, {
   db, hub, requestHuman, requestPrincipal, pushSkillsSync, builtInSkills: releaseBuiltInSkills,
+  extendedManagement: extendedSkillsManagement,
 });
 db.skillGitAutoUpdateIntervalMs = skillGitAutoUpdateIntervalMs(process.env.CONTROL_PLANE_SKILL_GIT_UPDATE_INTERVAL_MS);
 const skillGitAutoUpdater = new SkillGitAutoUpdater({ db, intervalMs: db.skillGitAutoUpdateIntervalMs, pushSkillsSync });

@@ -53,8 +53,10 @@ Automation/skill PR #4477 is merged. Twenty exact owner-route entries now name i
 production operations, including the machine-version read and its policy-only projection through
 `skill_pin_get`. The production-composition test verifies these tools are registered alongside
 owner/session operations. Automation update, enable and pause share the owner update service.
-Remaining automation/skill candidates stay explicit gaps for the residual-parity work item;
-merging this dependency does not establish complete Skill Library or automation parity.
+The group-6 [automation and Skill Library parity delivery](assistant-skill-parity.md) registers
+the remaining ordinary management paths and documents four exact human-authority routes. Its
+group-specific gate checks actual production registration and refuses remaining group-6 gaps.
+Other groups' unresolved candidates still block the global strict acceptance gate.
 
 ## Delivered Operations
 

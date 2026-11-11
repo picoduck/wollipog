@@ -15,7 +15,14 @@
     ]
   },
   "DELETE /api/automations/:id/triggers/:triggerId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "auto_trigger_remove"
+    ]
+  },
+  "DELETE /api/orphaned-skill-copies/:id": {
+    "tools": [
+      "skill_orphan_preview_discard"
+    ]
   },
   "DELETE /api/projects/:id": {
     "tools": [
@@ -63,19 +70,29 @@
     ]
   },
   "DELETE /api/skill-drift/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_drift_discard"
+    ]
   },
   "DELETE /api/skill-git/preview/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_git_preview_discard"
+    ]
   },
   "DELETE /api/skill-groups/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_group_remove"
+    ]
   },
   "DELETE /api/skill-groups/:id/assignments/:assignmentId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_group_unassign"
+    ]
   },
   "DELETE /api/skill-machine/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_machine_discard"
+    ]
   },
   "DELETE /api/skills/:id": {
     "tools": [
@@ -111,7 +128,9 @@
     ]
   },
   "GET /api/automations/:id/triggers": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "auto_triggers"
+    ]
   },
   "GET /api/projects": {
     "tools": [
@@ -149,7 +168,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/runners/:id/skills": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_machine_state"
+    ]
   },
   "GET /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -336,13 +357,19 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/skill-assignments": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_assignments"
+    ]
   },
   "GET /api/skill-groups": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_groups"
+    ]
   },
   "GET /api/skill-groups/:id/assignments": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_group_assignments"
+    ]
   },
   "GET /api/skills": {
     "tools": [
@@ -355,7 +382,9 @@
     ]
   },
   "GET /api/skills/:id/built-in-version": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_builtin_get"
+    ]
   },
   "GET /api/skills/:id/machines/:runnerId/version": {
     "tools": [
@@ -399,7 +428,9 @@
     ]
   },
   "PATCH /api/skill-groups/:id/assignments/:assignmentId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_group_assignment_edit"
+    ]
   },
   "POST /api/assistant-connections": {
     "exclusion": "human_authority",
@@ -445,10 +476,19 @@
     ]
   },
   "POST /api/automations/:id/triggers": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Issues a new standing inbound webhook/ChatOps signing credential and delivery authorization. Credential establishment remains human-only.",
+    "remedy": "Create the trigger through the authenticated owner's automation settings; the Assistant may inspect trigger metadata and remove it under current authority."
   },
   "POST /api/automations/:id/triggers/:triggerId/rotate": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Rotates and discloses a standing inbound signing credential. Assistant arguments cannot supply human credential authority.",
+    "remedy": "Rotate the trigger through the authenticated owner's automation settings, then inspect metadata with auto_triggers."
+  },
+  "POST /api/orphaned-skill-copies/:id/import": {
+    "tools": [
+      "skill_orphan_import"
+    ]
   },
   "POST /api/projects": {
     "tools": [
@@ -491,10 +531,14 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/runners/:id/orphaned-skill-copies/discard": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_orphan_discard"
+    ]
   },
   "POST /api/runners/:id/orphaned-skill-copies/preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_orphan_preview"
+    ]
   },
   "POST /api/runners/:id/provider-accounts/:accountId/adopt-profile": {
     "exclusion": "human_authority",
@@ -528,22 +572,34 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:id/skill-adoption-recovery": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_recovery_list"
+    ]
   },
   "POST /api/runners/:id/skill-adoption-recovery/:operationId/restore": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_recovery_restore"
+    ]
   },
   "POST /api/runners/:id/skill-drift/preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_drift_preview"
+    ]
   },
   "POST /api/runners/:id/skill-drift/restore": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_drift_restore"
+    ]
   },
   "POST /api/runners/:id/skill-snapshots": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_machine_discover"
+    ]
   },
   "POST /api/runners/:id/skills/sync": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_sync"
+    ]
   },
   "POST /api/runners/:runnerId/host-action": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -982,34 +1038,54 @@
     ]
   },
   "POST /api/skill-drift/:id/import": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_drift_import"
+    ]
   },
   "POST /api/skill-git/import": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_git_import"
+    ]
   },
   "POST /api/skill-git/preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_git_preview"
+    ]
   },
   "POST /api/skill-groups": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_group_create"
+    ]
   },
   "POST /api/skill-groups/:id/assignments": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_group_assign"
+    ]
   },
   "POST /api/skill-groups/:id/convert": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Accepts ownership of a legacy unowned group and establishes persistent resource/deployment authority. Standing ownership grants remain human-only.",
+    "remedy": "Review and accept legacy group ownership through the authenticated owner's Skill Library, then use the ordinary Assistant group and assignment operations."
   },
   "POST /api/skill-machine/:id/adopt": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_machine_adopt"
+    ]
   },
   "POST /api/skill-machine/:id/adoption-preflight": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_adoption_preflight"
+    ]
   },
   "POST /api/skill-machine/:id/import": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_machine_import"
+    ]
   },
   "POST /api/skill-machine/:id/preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_machine_preview"
+    ]
   },
   "POST /api/skills": {
     "tools": [
@@ -1017,7 +1093,9 @@
     ]
   },
   "POST /api/skills/:id/built-in-version": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_builtin_apply"
+    ]
   },
   "POST /api/skills/:id/restore": {
     "tools": [
@@ -1088,7 +1166,9 @@
     ]
   },
   "PUT /api/skills/:id/git-auto-update": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Establishes or revokes unattended authority to fetch using the control plane's ambient Git credentials. This persistent credential-use opt-in remains human-only.",
+    "remedy": "The instance owner configures automatic Git updates in authenticated Skill Library settings; Assistant preview/import uses already-authorized owner access without changing that opt-in."
   },
   "PUT /api/skills/:id/machines/:runnerId/version": {
     "tools": [
@@ -1096,6 +1176,8 @@
     ]
   },
   "PUT /api/skills/:id/recommendation": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_recommendation"
+    ]
   }
 }
