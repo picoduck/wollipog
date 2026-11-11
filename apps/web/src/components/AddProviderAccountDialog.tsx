@@ -8,6 +8,8 @@ import { Modal } from "./common.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { FieldError } from "./FieldError.js";
 import { Notice } from "./Notice.js";
+import { providerLoginStartFailure } from "../provider-login-start-failure.js";
+import { ProviderLoginStartFailure } from "./ProviderLoginStartFailure.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { ChoiceList, SegmentedControl } from "./ui/ChoiceControls.js";
 
@@ -27,8 +29,8 @@ type LabelError = { kind: "empty" } | { kind: "on_machine" | "running"; provider
 
 /** The runner's own refusals for a new label, mapped to the field's sentences. */
 function runnerLabelError(message: string, provider: Provider, label: string): LabelError | null {
-  if (/account with this label is already on this Machine/iu.test(message)) return { kind: "on_machine", provider, label };
-  if (/sign-in for an account with this label is already running/iu.test(message)) return { kind: "running", provider, label };
+  if (message === `A ${providerName(provider)} account with this label is already on this Machine. Use Sign In on that account to refresh its login.`) return { kind: "on_machine", provider, label };
+  if (message === "A sign-in for an account with this label is already running.") return { kind: "running", provider, label };
   return null;
 }
 
@@ -93,7 +95,7 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
   const [sourceKey, setSourceKey] = useState<string | null>(importOffer?.available ? importOffer.sources[0]?.key ?? null : null);
   const [label, setLabel] = useState("");
   const [error, setError] = useState<LabelError | null>(null);
-  const [failure, setFailure] = useState<{ title: string; body: string } | null>(null);
+  const [failure, setFailure] = useState<{ title: string; body: ReactNode } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
 
@@ -165,10 +167,12 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
       onClose();
       return;
     } catch (cause) {
-      const message = (cause as Error).message;
+      const startFailure = source ? null : providerLoginStartFailure(cause);
+      const message = startFailure?.message ?? (cause as Error).message;
       const mapped = runnerLabelError(message, provider, trimmed);
       if (mapped) refuse(mapped);
-      else setFailure({ title: source ? "Couldn't Copy the Sign-In" : "Couldn't Start the Sign-In", body: message });
+      else setFailure({ title: source ? "Couldn't Copy the Sign-In" : "Couldn't Start the Sign-In",
+        body: startFailure ? <ProviderLoginStartFailure failure={startFailure} /> : message });
     }
     submittingRef.current = false;
     setSubmitting(false);

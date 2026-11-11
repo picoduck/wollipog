@@ -1048,10 +1048,63 @@ test("Add Account maps the runner's duplicate refusals to the field, and other f
     assert.equal(add.fieldError(), null);
     const notice = add.dialog.querySelector<HTMLElement>('.notice[role="alert"]')!;
     assert.equal(notice.querySelector(".notice-title")?.textContent, "Couldn't Start the Sign-In");
-    assert.match(notice.textContent ?? "", /The runner did not answer\./);
+    assert.match(notice.textContent ?? "", /The runner did not answer in time\./);
   } finally {
     await ui.unmount();
   }
+});
+
+test("control-plane start admission failures stay useful in Add Account", async () => {
+  for (const [cause, expected] of [
+    [new ApiError("runner is offline", 409), /Machine is offline/],
+    [new ApiError("This machine needs a newer runner for provider sign-in. Update and restart the runner.", 409), /Update and restart/],
+    [new ApiError("secret", 503, "PROVIDER_PUBLICATION_UNAVAILABLE"), /control plane.*storage/],
+  ] as const) {
+    const api = client({ login: async () => { throw cause; } });
+    const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+    try {
+      const add = await openAdd(ui);
+      await add.type("Draft");
+      await add.submit();
+      assert.match(add.dialog.textContent ?? "", expected);
+      assert.doesNotMatch(add.dialog.textContent ?? "", /Preserve any existing profile directories|secret/);
+    } finally { await ui.unmount(); }
+  }
+});
+
+test("an existing account's Sign In uses the same sanitized start failure seam", async () => {
+  const api = client({ login: async () => { throw new ApiError("secret /private", 409, undefined, {
+    directoryDiagnostic: { code: "managed_profile_directory", component: "profile_home", reason: "unavailable" },
+  }); } });
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+  try {
+    await act(async () => ui.button(ui.row("Personal"), "Sign In").click());
+    await ui.settle();
+    assert.match(ui.notice()?.textContent ?? "", /the account directory could not be inspected/);
+    assert.doesNotMatch(ui.notice()?.textContent ?? "", /secret|\/private/);
+    assert.equal(api.calls.length, 1);
+  } finally { await ui.unmount(); }
+});
+
+test("Add Account keeps the draft and provider on structured start refusal without further requests", async () => {
+  const api = client({ login: async () => { throw new ApiError("secret /private", 409, undefined, {
+    directoryDiagnostic: { code: "managed_profile_directory", component: "manager_root", reason: "wrong_owner", path: "/private" },
+  }); } });
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+  try {
+    const add = await openAdd(ui);
+    await add.type("Draft");
+    await add.submit();
+    assert.match(add.dialog.textContent ?? "", /Wollipog's main directory belongs to a different OS user/);
+    assert.doesNotMatch(add.dialog.textContent ?? "", /secret|\/private/);
+    assert.equal(add.dialog.querySelector("input")?.value, "Draft");
+    assert.equal(api.calls.length, 1);
+    await ui.settle();
+    assert.equal(api.calls.length, 1);
+    await act(async () => ui.button(add.dialog, "Cancel").click());
+    await ui.settle();
+    assertNoDomNode(ui.dialog());
+  } finally { await ui.unmount(); }
 });
 
 test("a label held by a running new-account sign-in is refused without a request", async () => {
