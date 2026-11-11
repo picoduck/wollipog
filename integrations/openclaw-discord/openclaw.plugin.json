@@ -1,0 +1,16 @@
+{
+  "id": "wollipog-assistant-discord",
+  "name": "Wollipog Assistant Discord",
+  "description": "Bind native Discord commands to explicit Wollipog requester and conversation authority.",
+  "categories": ["developer-tools"],
+  "activation": { "onStartup": true },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "profile": { "type": "string" },
+      "configPath": { "type": "string" }
+    },
+    "required": ["profile", "configPath"]
+  }
+}

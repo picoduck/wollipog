@@ -1,0 +1,13 @@
+{
+  "name": "@wollipog/openclaw-assistant-discord",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "peerDependencies": { "openclaw": "2026.11.3" },
+  "openclaw": {
+    "extensions": ["./index.mjs"],
+    "runtimeExtensions": ["./index.mjs"],
+    "compat": { "pluginApi": "2026.11.3", "minGatewayVersion": "2026.11.3" },
+    "build": { "openclawVersion": "2026.11.3", "pluginSdkVersion": "2026.11.3" }
+  }
+}

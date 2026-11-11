@@ -78,9 +78,11 @@ This correlated ingress currently supports launch/prompt only and bounds request
 Other Assistant management operations remain in the general authorized MCP inventory, but a shared
 Discord deployment must not expose them until its trusted requester-aware adapter covers them too.
 This is an explicit remaining integration limitation, not evidence that a generic MCP bearer
-authenticates Discord users. #4466 must wire this HTTP ingress from trusted OpenClaw-native context;
-the current native MCP setup alone does not supply that context. Hook admission and Discord reply
-receipt integration below remain separate from accepting a work command.
+authenticates Discord users. The [native Discord command component](../integrations/openclaw-discord/README.md)
+now selects the capability from host-authenticated sender/account/conversation facts and calls this
+ingress without exposing credentials to model tools. #4466 links its isolated-profile setup; generic
+MCP setup alone does not supply that context. Hook admission and Discord reply receipt integration
+below remain separate from accepting a work command.
 
 ## Work and Session Command Integration
 
