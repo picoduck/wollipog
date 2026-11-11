@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import { useApi } from "../api-context.js";
 import { useInstanceScope } from "../instance-scope.js";
 import type { AssistantActivity, AssistantConnection, AssistantConnectionsView, AssistantGrant } from "../assistant-connections.js";
@@ -49,6 +49,22 @@ export function AssistantConnectionsDialog({onClose}: {onClose(): void}) {
   const update = (connection: AssistantConnection) => setView(current => current ? {...current, connections: [...current.connections.filter(c => c.id !== connection.id), connection]} : current);
   const connection = view?.connections.find(c => c.id === selected);
   const leave = () => { setSelected(null); setActivity(null); setConfirm(null); setSecret(null); setReveal(false); setNotice(""); };
+  const copyText = async (value: string, credential = false) => {
+    setError("");
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(value);
+      if (mounted.current) setNotice(credential ? "Credential copied. Keep it private." : "ID copied.");
+    } catch {
+      if (mounted.current) setError(credential ? "Couldn't copy the credential. Choose Show Credential, then select the text and copy it manually." : "Couldn't copy the ID. Select the ID field and copy it manually.");
+    }
+  };
+  const editor = view && (selected === "new" || connection) && <ConnectionEditor key={selected} connection={connection} view={view} busy={busy} onSave={(name, grant) => void run(async () => {
+    const response = connection ? await api.configureAssistantConnection(connection.id, {name, grant, expectedRevision: connection.revision}) : await api.createAssistantConnection({name, grant});
+    if (!mounted.current) return;
+    update(response.connection); setSelected(response.connection.id); setNotice(connection ? "Connection saved. The next authorization check uses these grants." : "Connection created.");
+    if ("token" in response && typeof response.token === "string") { setSecret(response.token); setReveal(false); }
+  })} />;
   return <Modal title="Assistant Connections" description="Standing access issued by your organization owner on this server." size="lg" phoneSheet="full" onClose={onClose}
     footer={<button type="button" className="btn" onClick={onClose}>Done</button>}>
     {error && <Notice tone="danger" role="alert">{error}</Notice>}
@@ -59,15 +75,15 @@ export function AssistantConnectionsDialog({onClose}: {onClose(): void}) {
     {secret ? <>
       <Notice tone="warning" title="Save Your Credential">This credential is available only now. Store it securely in your assistant's connection configuration. Closing this dialog or dismissing it removes it from this window.</Notice>
       <label className="field"><span>Assistant Credential</span><input autoComplete="off" spellCheck={false} readOnly type={reveal ? "text" : "password"} value={secret} /></label>
-      <div className="field-row"><button type="button" className="btn" onClick={() => setReveal(v => !v)}>{reveal ? "Hide Credential" : "Show Credential"}</button>
-        <button type="button" className="btn" onClick={() => void run(async () => { await navigator.clipboard.writeText(secret); if (mounted.current) setNotice("Credential copied. Keep it private."); })}>Copy Credential</button>
+      <div className="field-row"><button type="button" className="btn" onClick={() => { setReveal(v => !v); setError(""); }}>{reveal ? "Hide Credential" : "Show Credential"}</button>
+        <button type="button" className="btn" onClick={() => void copyText(secret, true)}>Copy Credential</button>
         <button type="button" className="btn primary" onClick={() => { setSecret(null); setReveal(false); setNotice(""); }}>Dismiss Credential</button></div>
     </> : view && <>
       {selected === null ? <>
         <SettingsGroup title="Control Plane" scope="This Installation">
-          <ValueRow title="Installation ID" value={view.installation.id} mono wrap />
           <ValueRow title="Installation Name" value={view.installation.name} />
         </SettingsGroup>
+        <IdentityField title="Installation ID" value={view.installation.id} onCopy={() => void copyText(view.installation.id)} />
         {view.installation.canRename && <InstallationName key={view.installation.name} initial={view.installation.name} busy={busy} onSave={name => void run(async () => { const installation = await api.renameAssistantInstallation(name); if (mounted.current) { setView(current => current ? {...current, installation: {...current.installation, ...installation}} : current); setNotice("Installation name saved."); } })} />}
         <SettingsGroup title="Your Connections" action={<button className="btn sm" disabled={busy} type="button" onClick={() => { setSelected("new"); setNotice(""); }}>New Connection</button>}>
           {view.connections.length === 0 ? <StaticRow title="No Connections" description="Create a separately named connection for each assistant or installation relationship." /> : view.connections.map(c => <LinkRow key={c.id} title={c.name} trailing={c.revoked ? "Revoked" : "Active"} description={`${c.grant.operations === "all" ? "Full Access" : "Configured Access"} · ${c.grant.projects === "all" ? "All Projects" : `${c.grant.projects.length} Selected Projects`}`} disabled={busy} onClick={() => { setSelected(c.id); setActivity(null); setNotice(""); }} />)}
@@ -76,16 +92,11 @@ export function AssistantConnectionsDialog({onClose}: {onClose(): void}) {
       </> : <>
         <button type="button" className="btn ghost" disabled={busy} onClick={leave}>Back to Connections</button>
         {connection && <SettingsGroup title={connection.name}>
-          <ValueRow title="Connection ID" value={connection.id} mono wrap />
           <ValueRow title="Status" value={connection.revoked ? "Revoked" : "Active"} />
           <ValueRow title="Grant Revision" value={String(connection.revision)} />
         </SettingsGroup>}
-        {(selected === "new" || connection) && <ConnectionEditor key={selected} connection={connection} view={view} busy={busy} onSave={(name, grant) => void run(async () => {
-          const response = connection ? await api.configureAssistantConnection(connection.id, {name, grant}) : await api.createAssistantConnection({name, grant});
-          if (!mounted.current) return;
-          update(response.connection); setSelected(response.connection.id); setNotice(connection ? "Connection saved. The next authorization check uses these grants." : "Connection created.");
-          if ("token" in response && typeof response.token === "string") { setSecret(response.token); setReveal(false); }
-        })} />}
+        {connection && <IdentityField title="Connection ID" value={connection.id} onCopy={() => void copyText(connection.id)} />}
+        {connection?.revoked ? <details className="disclosure"><summary>Inspect Revoked Grants</summary>{editor}</details> : editor}
         {connection && !connection.revoked && <div className="field-row">
           <button type="button" className="btn" disabled={busy} onClick={() => setConfirm("rotate")}>Rotate Credential</button>
           <button type="button" className="btn danger" disabled={busy} onClick={() => setConfirm("revoke")}>Revoke Connection</button>
@@ -100,11 +111,16 @@ export function AssistantConnectionsDialog({onClose}: {onClose(): void}) {
           <button type="button" className="btn sm" disabled={busy} onClick={() => setConfirm(null)}>Cancel</button>
         </>}>{confirm === "rotate" ? "The old credential stops working immediately. Update the assistant with the new credential shown once after rotation." : "This permanently disables the connection. Already completed actions are retained; create a new connection to restore access."}</Notice>}
         {connection && <SettingsGroup title="Activity" intro="Latest 100 actions; this server retains up to 1,000 per connection. No credentials or tool arguments are recorded." action={<button type="button" className="btn sm" disabled={busy} onClick={() => void run(async () => { const result = await api.assistantConnectionActivity(connection.id); if (mounted.current) setActivity(result.activity); })}>Refresh Activity</button>}>
-          {activity === null ? <StaticRow title="Activity Not Loaded" /> : activity.length === 0 ? <StaticRow title="No Activity" /> : activity.map((item, i) => <ValueRow key={i} title={operationTitle(item.operation)} value={operationTitle(item.outcome)} description={<>{new Date(item.created_at).toLocaleString()} · Grant {item.grant_revision}<br /><code>{item.target_json}</code></>} />)}
+          {activity === null ? <StaticRow title="Activity Not Loaded" /> : activity.length === 0 ? <StaticRow title="No Activity" /> : activity.map((item, i) => <ValueRow key={i} title={operationTitle(item.operation)} value={operationTitle(item.outcome)} description={<><span>Assistant: {item.assistant.name}</span><br /><span>Target: {item.targetLabel}</span><br />{new Date(item.created_at).toLocaleString()} · Grant {item.grant_revision}</>} />)}
         </SettingsGroup>}
       </>}
     </>}
   </Modal>;
+}
+
+function IdentityField({title, value, onCopy}: {title: string; value: string; onCopy(): void}) {
+  const id = useId();
+  return <div className="field"><label className="field-label" htmlFor={id}>{title}</label><div className="assistant-id-control"><input id={id} readOnly value={value} /><button className="btn" type="button" aria-label={`Copy ${title}`} onClick={onCopy}>Copy ID</button></div></div>;
 }
 
 function operationTitle(value: string): string {

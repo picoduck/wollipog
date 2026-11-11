@@ -12358,6 +12358,17 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: 0;
   font: var(--type-section);
 }
+.assistant-id-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.assistant-id-control > input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+}
 /* Field anatomy (§8.1): the parts stack 8px apart, which puts the label 8px above the control.
    The helper sits 4px under the control: it, the error that replaces it (§8.5) and a
    `.field-foot` pull up by --space-1 (rule below, with the other field parts). */

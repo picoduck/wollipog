@@ -2,9 +2,9 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { randomBytes } from "node:crypto";
-import { ControlPlaneDb } from "../db.js";
-import { createAssistantOperations, registerAssistantRoutes } from "../assistant-routes.js";
-import { registerAuthGate } from "../http-auth.js";
+import { ControlPlaneDb } from "../src/db.js";
+import { createAssistantOperations, registerAssistantRoutes } from "../src/assistant-routes.js";
+import { registerAuthGate } from "../src/http-auth.js";
 
 export async function assistantUiServer() {
   const db = ControlPlaneDb.open(":memory:");

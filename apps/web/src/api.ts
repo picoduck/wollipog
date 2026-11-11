@@ -1770,7 +1770,7 @@ export function createApiClient(transport: ApiTransport) {
   listDevices: () => req<{ devices: DeviceView[] }>("/api/devices"),
   assistantConnections: () => req<AssistantConnectionsView>("/api/assistant-connections"),
   createAssistantConnection: (body: {name: string; grant: AssistantGrant}) => req<{connection: AssistantConnection; token: string}>("/api/assistant-connections", {method: "POST", body: JSON.stringify(body)}),
-  configureAssistantConnection: (id: string, body: {name: string; grant: AssistantGrant}) => req<{connection: AssistantConnection}>(`/api/assistant-connections/${encodeURIComponent(id)}/configure`, {method: "POST", body: JSON.stringify(body)}),
+  configureAssistantConnection: (id: string, body: {name: string; grant: AssistantGrant; expectedRevision: number}) => req<{connection: AssistantConnection}>(`/api/assistant-connections/${encodeURIComponent(id)}/configure`, {method: "POST", body: JSON.stringify(body)}),
   rotateAssistantConnection: (id: string) => req<{connection: AssistantConnection; token: string}>(`/api/assistant-connections/${encodeURIComponent(id)}/rotate`, {method: "POST", body: "{}"}),
   revokeAssistantConnection: (id: string) => req<{connection: AssistantConnection}>(`/api/assistant-connections/${encodeURIComponent(id)}/revoke`, {method: "POST", body: "{}"}),
   assistantConnectionActivity: (id: string) => req<{activity: AssistantActivity[]}>(`/api/assistant-connections/${encodeURIComponent(id)}/activity`),

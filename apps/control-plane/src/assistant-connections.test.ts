@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import Fastify from "fastify";
-import { ASSISTANT_ACTIVITY_LIMIT, AssistantConnections, AssistantOperations } from "./assistant-connections.js";
+import { ASSISTANT_ACTIVITY_LIMIT, AssistantConnections, AssistantOperations, AssistantConflict } from "./assistant-connections.js";
 import type { HumanPrincipal } from "./identity.js";
 import { ControlPlaneDb } from "./db.js";
-import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
+import { assistantActivityTargetLabel, createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
 import { hashToken, isAgentControlApiRouteAllowed } from "./auth.js";
 import { registerAuthGate } from "./http-auth.js";
 
@@ -82,6 +82,25 @@ test("queued work rechecks grants, owner access, rotation and revocation", async
   } finally { db.close(); }
 });
 
+test("revision-aware grant edits refuse stale widening; names reject hidden controls without rejecting Unicode text", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    AssistantConnections.install(db);
+    const store = new AssistantConnections(db);
+    const connection = store.create(owner, "東京 Workbench", full).connection;
+    const narrow = {operations: ["assistant_discover"], projects: ["p"]};
+    store.configure(connection.id, narrow, "Renamed", connection.revision);
+    assert.throws(() => store.configure(connection.id, full, "Stale Rename", connection.revision), AssistantConflict);
+    assert.deepEqual(store.get(connection.id)!.grant.operations, narrow.operations);
+    assert.equal(store.get(connection.id)!.name, "Renamed");
+    for (const name of ["A\u202eevil", "X\u200b", "X\u0085"]) {
+      assert.throws(() => store.configure(connection.id, full, name));
+      assert.throws(() => store.renameInstallation(name));
+    }
+    assert.equal(store.get(connection.id)!.name, "Renamed");
+  } finally { db.close(); }
+});
+
 test("rotation refuses inactive IDs without notifications; activity is bounded and indexed per connection", () => {
   const db = new DatabaseSync(":memory:");
   try {
@@ -134,12 +153,26 @@ test("real Fastify MCP discovery, owner lifecycle API, credential separation and
     assert.equal(discovery.controlPlane.id, db.instanceId());
     assert.equal(discovery.controlPlane.name, "Remote Workbench");
     assert.equal(discovery.connection.id, connection.id);
+    const activity = (await app.inject({method: "GET", url: `/api/assistant-connections/${connection.id}/activity`, headers: {authorization: "Bearer owner-fixture"}})).json().activity[0];
+    assert.equal(activity.targetLabel, "Control Plane · Remote Workbench");
+    assert.deepEqual(activity.assistant, {id: connection.id, name: connection.name});
+    assert.equal(assistantActivityTargetLabel(db, human, "malformed"), "Target Unavailable");
+    const canAccessSession = db.canAccessSession, getSession = db.getSession;
+    db.canAccessSession = () => false;
+    db.getSession = () => { throw new Error("must not read unauthorized current title"); };
+    assert.equal(assistantActivityTargetLabel(db, human, JSON.stringify({kind: "session", id: "private"})), "Session (Unavailable)");
+    db.canAccessSession = canAccessSession; db.getSession = getSession;
     assert.equal((await call("tools/list", {}, "owner-fixture")).statusCode, 401);
     assert.equal((await call("tools/list", {}, "session-fixture")).statusCode, 401);
     assert.equal(db.deviceByTokenHash(hashToken(token)), null);
     assert.equal(isAgentControlApiRouteAllowed("POST", "/api/assistant-connections", "orchestrator"), false);
     assert.equal((await app.inject({method: "GET", url: "/api/assistant-connections", headers: {authorization: `Bearer ${token}`}})).statusCode, 401);
     const configure = (grant: unknown) => app.inject({method: "POST", url: `/api/assistant-connections/${connection.id}/configure`, headers: {authorization: "Bearer owner-fixture"}, payload: {grant}});
+    const expectedRevision = db.assistantConnections.get(connection.id)!.revision;
+    const versioned = (grant: unknown) => app.inject({method: "POST", url: `/api/assistant-connections/${connection.id}/configure`, headers: {authorization: "Bearer owner-fixture"}, payload: {grant, name: "Current Name", expectedRevision}});
+    assert.equal((await versioned({operations: [], projects: "all"})).statusCode, 200);
+    assert.equal((await versioned(full)).statusCode, 409);
+    assert.deepEqual(db.assistantConnections.get(connection.id)!.grant.operations, []);
     assert.equal((await configure({...full, destructiveConfirmation: "confirm"})).statusCode, 200);
     assert.equal((await configure(full)).json().connection.grant.destructiveConfirmation, "confirm");
     assert.equal((await configure({...full, destructiveConfirmation: "none"})).json().connection.grant.destructiveConfirmation, "none");

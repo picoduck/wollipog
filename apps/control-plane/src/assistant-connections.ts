@@ -34,10 +34,15 @@ export interface AssistantOperationReceipt {
   resourceId?: string;
 }
 export class AssistantRefusal extends Error {}
+export class AssistantConflict extends AssistantRefusal {}
+export interface AssistantActivityRecord {
+  connection_id: string; grant_revision: number; operation: string;
+  target_json: string; outcome: string; created_at: number;
+}
 export const ASSISTANT_ACTIVITY_LIMIT = 1_000;
 const secret = () => `wollipoga_${randomBytes(32).toString("base64url")}`;
 function displayName(value: unknown): string {
-  if (typeof value !== "string" || !value.trim() || value.length > 80 || /[\u0000-\u001f\u007f]/.test(value)) throw new AssistantRefusal("Name must contain 1–80 characters without control characters.");
+  if (typeof value !== "string" || !value.trim() || value.length > 80 || /[\p{Cc}\p{Cf}]/u.test(value)) throw new AssistantRefusal("Name must contain 1–80 characters without control or hidden formatting characters.");
   return value.trim();
 }
 
@@ -92,10 +97,12 @@ export class AssistantConnections {
     this.db.prepare("INSERT INTO assistant_connections VALUES (?,?,?,?,?,1,?,0)").run(id, name.trim(), owner.userId, owner.organizationId, JSON.stringify(assistantGrant(grant)), hashToken(token));
     return { connection: this.get(id)!, token };
   }
-  configure(id: string, grant: unknown, name?: unknown): void {
+  configure(id: string, grant: unknown, name?: unknown, expectedRevision?: number): void {
     const normalized = assistantGrant(grant, this.destructiveConfirmation(id));
     const nextName = name === undefined ? null : displayName(name);
-    this.db.prepare("UPDATE assistant_connections SET grant_json=?,name=COALESCE(?,name),revision=revision+1 WHERE id=?").run(JSON.stringify(normalized), nextName, id);
+    if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)) throw new AssistantRefusal("Expected revision must be a positive integer. Refresh the connection before saving.");
+    const updated = this.db.prepare("UPDATE assistant_connections SET grant_json=?,name=COALESCE(?,name),revision=revision+1 WHERE id=? AND (? IS NULL OR revision=?)").run(JSON.stringify(normalized), nextName, id, expectedRevision ?? null, expectedRevision ?? null);
+    if (updated.changes === 0) throw new AssistantConflict("This connection changed in another window. Refresh and inspect the current grant before saving again.");
     this.changed(id);
   }
   rotate(id: string): string {
@@ -129,7 +136,7 @@ export class AssistantConnections {
     if (!connection || connection.revoked) throw new AssistantRefusal("Assistant connection is missing or revoked. Create a new connection instead.");
     return connection.grant.destructiveConfirmation ?? "none";
   }
-  activity(id: string): unknown[] { return this.db.prepare("SELECT connection_id,grant_revision,operation,target_json,outcome,created_at FROM assistant_activity WHERE connection_id=? ORDER BY id DESC LIMIT 100").all(id); }
+  activity(id: string): AssistantActivityRecord[] { return this.db.prepare("SELECT connection_id,grant_revision,operation,target_json,outcome,created_at FROM assistant_activity WHERE connection_id=? ORDER BY id DESC LIMIT 100").all(id) as unknown as AssistantActivityRecord[]; }
   record(connection: AssistantConnection, operation: string, target: AssistantTarget, outcome: "succeeded" | "refused" | "failed"): void {
     // Only registered names and resolved resource identifiers. Never arguments or exception messages.
     this.db.prepare("INSERT INTO assistant_activity(connection_id,grant_revision,operation,target_json,outcome,created_at) VALUES (?,?,?,?,?,?)").run(connection.id, connection.revision, operation, JSON.stringify(target), outcome, Date.now());

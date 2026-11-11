@@ -16,6 +16,11 @@ or refresh its latest activity. Selected-project grants exclude resources withou
 discovery metadata is separately described in the registry contract below. Changes affect the
 next authorization check, including queued work's execution check.
 
+The dashboard sends the grant revision it inspected on every save. A stale save receives HTTP
+409 and cannot overwrite a grant changed by another owner window. Refresh and inspect the current
+grant before submitting again. API clients can send `expectedRevision` for the same compare-and-set
+protection; legacy calls that omit it retain their explicit whole-grant replacement behavior.
+
 Create and rotate return a credential once. It starts masked; use **Show Credential** or
 **Copy Credential** to transfer it securely to the Assistant. **Dismiss Credential** removes it
 from this dialog. It is never written to local/session storage or included in management reads.
@@ -23,6 +28,11 @@ Rotation immediately invalidates the old credential; revocation permanently disa
 connection. Both actions require a local confirmation in the owner UI. If a mutation's response
 is lost, refresh and inspect its state before repeating it; a credential whose response was lost
 can be replaced through explicit rotation.
+
+IDs use a full-width selectable field with a copy control. If clipboard access is unavailable,
+select the field and copy manually; credential copy failures offer Show Credential as the fallback.
+Activity shows the Assistant identity and a readable target name, resolving current target titles
+only when the owner still has access. Revoked grants remain available under Inspect Revoked Grants.
 
 The Installation ID and Connection ID remain stable when display names change. Owners of the
 personal installation organization can rename the shared installation; another organization's

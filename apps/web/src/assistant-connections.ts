@@ -17,4 +17,6 @@ export interface AssistantConnectionsView {
 export interface AssistantActivity {
   connection_id: string; grant_revision: number; operation: string;
   target_json: string; outcome: string; created_at: number;
+  assistant: {id: string; name: string};
+  targetLabel: string;
 }
