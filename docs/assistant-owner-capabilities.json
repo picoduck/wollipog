@@ -54,20 +54,24 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "DELETE /api/sessions/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_delete"
+    ]
   },
   "DELETE /api/sessions/:id/reminder": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "reminder_remove"
+    ]
   },
   "DELETE /api/sessions/:id/shells/:shellId": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
+    "tools": [
+      "shell_close"
+    ]
   },
   "DELETE /api/sessions/:id/transcript-shares/:shareId": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Owner transcript-share UI: choose/export conversation content and manage its sharing UI. This is conversation-content I/O rather than work lifecycle management.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
+    "exclusion": "human_authority",
+    "reason": "Revokes the owner's independently issued transcript-share bearer capability; credential lifecycle remains on the authenticated owner path.",
+    "remedy": "Use this exact authenticated owner transcript-sharing API/UI for capability issuance or revocation. The Assistant can inspect share metadata through transcript_shares and read authorized cached content through session_export without issuing credentials or publishing it."
   },
   "DELETE /api/skill-assignments/:id": {
     "tools": [
@@ -193,7 +197,9 @@
     ]
   },
   "GET /api/sessions/:id/artifacts": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_artifacts"
+    ]
   },
   "GET /api/sessions/:id/authentication/accounts": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -238,7 +244,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/export": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_export"
+    ]
   },
   "GET /api/sessions/:id/file": {
     "exclusion": "interactive_workspace_io",
@@ -254,7 +262,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/history-preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "history_preview"
+    ]
   },
   "GET /api/sessions/:id/location-switch-requests/:occurrenceId": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -284,19 +294,27 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/prompt-history": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "prompt_history"
+    ]
   },
   "GET /api/sessions/:id/provider-accounts": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/queued/:promptId/edit": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "queue_get"
+    ]
   },
   "GET /api/sessions/:id/reminder": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "reminder_get"
+    ]
   },
   "GET /api/sessions/:id/retained-attachment-events": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "attachment_history"
+    ]
   },
   "GET /api/sessions/:id/review-findings": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -308,12 +326,14 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/role": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_role_get"
+    ]
   },
   "GET /api/sessions/:id/shells": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
+    "tools": [
+      "shell_list"
+    ]
   },
   "GET /api/sessions/:id/shells/:shellId/history": {
     "exclusion": "interactive_workspace_io",
@@ -321,7 +341,9 @@
     "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
   },
   "GET /api/sessions/:id/side-chat": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "side_chat_get"
+    ]
   },
   "GET /api/sessions/:id/steering": {
     "tools": [
@@ -334,9 +356,9 @@
     ]
   },
   "GET /api/sessions/:id/transcript-shares": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Owner transcript-share UI: choose/export conversation content and manage its sharing UI. This is conversation-content I/O rather than work lifecycle management.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
+    "tools": [
+      "transcript_shares"
+    ]
   },
   "GET /api/sessions/:id/usage": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -648,10 +670,14 @@
     ]
   },
   "POST /api/sessions/:id/artifacts/screenshots": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "interactive_workspace_io",
+    "reason": "Transfers actual image/video file bytes from an execution workspace or the owner's file picker into private artifact storage. This is binary workspace/file-upload I/O, not work-management or evidence approval; metadata inspection remains an Assistant management operation.",
+    "remedy": "Use an authorized session's existing attach_session_artifact tool or owner file-upload path to transfer the exact file under current upload/provider-disclosure authority. Then use session_artifacts and attachment_history for management/readback. Attaching/listing does not inspect bytes or approve evidence."
   },
   "POST /api/sessions/:id/artifacts/videos": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "interactive_workspace_io",
+    "reason": "Transfers actual image/video file bytes from an execution workspace or the owner's file picker into private artifact storage. This is binary workspace/file-upload I/O, not work-management or evidence approval; metadata inspection remains an Assistant management operation.",
+    "remedy": "Use an authorized session's existing attach_session_artifact tool or owner file-upload path to transfer the exact file under current upload/provider-disclosure authority. Then use session_artifacts and attachment_history for management/readback. Attaching/listing does not inspect bytes or approve evidence."
   },
   "POST /api/sessions/:id/authentication/account": {
     "exclusion": "human_authority",
@@ -698,13 +724,19 @@
     ]
   },
   "POST /api/sessions/:id/cancel-queued": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "queue_cancel"
+    ]
   },
   "POST /api/sessions/:id/column": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_column"
+    ]
   },
   "POST /api/sessions/:id/command-invocations": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_invoke"
+    ]
   },
   "POST /api/sessions/:id/config": {
     "tools": [
@@ -742,7 +774,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/fork": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_fork"
+    ]
   },
   "POST /api/sessions/:id/git": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -849,7 +883,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/project": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_project"
+    ]
   },
   "POST /api/sessions/:id/prompt": {
     "tools": [
@@ -863,7 +899,12 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/pull-request-watch": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "This exact route requires the matching session's own runner-issued credential; owner HTTP is refused with 403. It attests runtime watch ownership or observed wait progress, rather than an owner app-management capability. An owner Assistant grant cannot supply that identity.",
+    "remedy": "Use session_watch_get for the owner-facing read counterpart. The managed session itself uses park_on_pull_request or its real wait_session/wait_pull_request runtime tools with its own credential; never pass that credential to the Assistant or infer it from sessionId.",
+    "ownerTools": [
+      "session_watch_get"
+    ]
   },
   "POST /api/sessions/:id/queue-hold/release": {
     "tools": [
@@ -871,10 +912,14 @@
     ]
   },
   "POST /api/sessions/:id/queued/:promptId/edit": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "queue_edit"
+    ]
   },
   "POST /api/sessions/:id/reprocess": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_reprocess"
+    ]
   },
   "POST /api/sessions/:id/restart": {
     "tools": [
@@ -888,7 +933,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/retitle": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_retitle"
+    ]
   },
   "POST /api/sessions/:id/retry-stop": {
     "tools": [
@@ -908,15 +955,19 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/rewind": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_rewind"
+    ]
   },
   "POST /api/sessions/:id/role": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_role"
+    ]
   },
   "POST /api/sessions/:id/shells": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
+    "tools": [
+      "shell_open"
+    ]
   },
   "POST /api/sessions/:id/shells/:shellId/input": {
     "exclusion": "interactive_workspace_io",
@@ -929,10 +980,14 @@
     "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
   },
   "POST /api/sessions/:id/side-chat": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "side_chat_create"
+    ]
   },
   "POST /api/sessions/:id/steer": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_steer"
+    ]
   },
   "POST /api/sessions/:id/steering/:submissionId/resolve": {
     "tools": [
@@ -950,9 +1005,9 @@
     ]
   },
   "POST /api/sessions/:id/transcript-shares": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Owner transcript-share UI: choose/export conversation content and manage its sharing UI. This is conversation-content I/O rather than work lifecycle management.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
+    "exclusion": "human_authority",
+    "reason": "Issues a separate bearer capability authorizing public reads of a frozen private transcript. Credential issuance and new disclosure authority require the authenticated owner.",
+    "remedy": "Use this exact authenticated owner transcript-sharing API/UI for capability issuance or revocation. The Assistant can inspect share metadata through transcript_shares and read authorized cached content through session_export without issuing credentials or publishing it."
   },
   "POST /api/sessions/:id/unarchive-and-restart": {
     "tools": [
@@ -981,7 +1036,12 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/waits": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "This exact route requires the matching session's own runner-issued credential; owner HTTP is refused with 403. It attests runtime watch ownership or observed wait progress, rather than an owner app-management capability. An owner Assistant grant cannot supply that identity.",
+    "remedy": "Use session_watch_get for the owner-facing read counterpart. The managed session itself uses park_on_pull_request or its real wait_session/wait_pull_request runtime tools with its own credential; never pass that credential to the Assistant or infer it from sessionId.",
+    "ownerTools": [
+      "session_watch_get"
+    ]
   },
   "POST /api/sessions/:id/workflow-decisions": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -1002,7 +1062,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/workspace": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_workspace"
+    ]
   },
   "POST /api/sessions/:id/workspace-references": {
     "exclusion": "interactive_workspace_io",
@@ -1043,7 +1105,9 @@
     ]
   },
   "POST /api/sessions/adopt": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_adopt"
+    ]
   },
   "POST /api/skill-assignments": {
     "tools": [
@@ -1171,7 +1235,9 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "PUT /api/sessions/:id/reminder": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "reminder_set"
+    ]
   },
   "PUT /api/skills/:id": {
     "tools": [
