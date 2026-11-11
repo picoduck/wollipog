@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -95,5 +97,40 @@ test("timeout kills a wrapper's ordinary descendants and bounds inherited pipes"
   } finally {
     if (descendant) { try { process.kill(descendant, "SIGKILL"); } catch { /* already retired */ } }
     await rm(scratch, { recursive: true, force: true });
+  }
+});
+
+test("Ctrl-C and SIGTERM retire a detached probe and clean the smoke profile", { skip: process.platform !== "linux", timeout: 20000 }, async () => {
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    const scratch = await mkdtemp(path.join(tmpdir(), "openclaw-interrupt-test-"));
+    const marker = path.join(scratch, "probe.json");
+    const binary = path.join(scratch, "fixture-openclaw");
+    let controller;
+    let probe;
+    try {
+      // Fixture-only runtime: no credentials, provider, Discord or real OpenClaw evidence.
+      await writeFile(binary, `#!${process.execPath}\nimport {writeFileSync} from 'node:fs';\nif(process.argv.includes('--version')) console.log('2026.11.3');\nelse { writeFileSync(${JSON.stringify(marker)}, JSON.stringify({pid:process.pid, root:process.env.OPENCLAW_HOME})); setInterval(()=>{},1000); }\n`, { mode: 0o700 });
+      controller = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/scripts/openclaw-assistant-smoke.ts", binary], {
+        cwd: fileURLToPath(new URL("..", import.meta.url)), env: { PATH: process.env.PATH, TMPDIR: scratch }, stdio: "ignore",
+      });
+      const completed = new Promise(resolve => controller.once("exit", (code, receivedSignal) => resolve({ code, signal: receivedSignal })));
+      for (let attempt = 0; attempt < 100; attempt++) {
+        probe = await readFile(marker, "utf8").then(JSON.parse).catch(() => null);
+        if (probe) break;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      assert.ok(probe, "The fixture probe must start before the interrupt.");
+      controller.kill(signal);
+      const result = await completed;
+      assert.deepEqual(result, { code: signal === "SIGINT" ? 130 : 143, signal: null });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const proc = await readFile(`/proc/${probe.pid}/stat`, "utf8").catch(() => null);
+      assert.ok(proc === null || /^.*\) Z /.test(proc), "The detached probe must stop.");
+      await assert.rejects(stat(probe.root), { code: "ENOENT" });
+    } finally {
+      controller?.kill("SIGKILL");
+      if (probe?.pid) { try { process.kill(probe.pid, "SIGKILL"); } catch { /* already retired */ } }
+      await rm(scratch, { recursive: true, force: true });
+    }
   }
 });

@@ -79,7 +79,7 @@ export function runOpenClaw(binary, args, profile, credentials = {}, { timeoutMs
     const finish = (code, signal) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
+      cleanup();
       resolve({ code, output, outcome: failure ?? (signal ? "signal" : "exit") });
     };
     const stop = reason => {
@@ -90,6 +90,24 @@ export function runOpenClaw(binary, args, profile, credentials = {}, { timeoutMs
       finish(null, null);
     };
     const timeout = setTimeout(() => stop("timeout"), timeoutMs);
+    const interrupt = signal => {
+      if (settled) return;
+      process.exitCode = signal === "SIGINT" ? 130 : 143;
+      killGroup();
+      child.stdout.destroy(); child.stderr.destroy();
+      settled = true;
+      cleanup();
+      reject(new OpenClawSetupError("OpenClaw probe interrupted; the child process group was stopped. Reconcile accepted work before retrying."));
+    };
+    const onInterrupt = () => interrupt("SIGINT");
+    const onTerminate = () => interrupt("SIGTERM");
+    const cleanup = () => {
+      clearTimeout(timeout);
+      process.off("SIGINT", onInterrupt);
+      process.off("SIGTERM", onTerminate);
+    };
+    process.once("SIGINT", onInterrupt);
+    process.once("SIGTERM", onTerminate);
     const collect = (chunk, stdout) => {
       bytes += chunk.length;
       if (bytes > maxOutputBytes) { stop("output-limit"); return; }
@@ -97,7 +115,7 @@ export function runOpenClaw(binary, args, profile, credentials = {}, { timeoutMs
     };
     child.stdout.on("data", chunk => collect(chunk, true));
     child.stderr.on("data", chunk => collect(chunk, false));
-    child.on("error", () => { clearTimeout(timeout); settled = true; reject(new OpenClawSetupError("OpenClaw could not start. Check the executable path and runtime prerequisites.")); });
+    child.on("error", () => { if (settled) return; cleanup(); settled = true; reject(new OpenClawSetupError("OpenClaw could not start. Check the executable path and runtime prerequisites.")); });
     child.on("exit", () => killGroup());
     child.on("close", (code, signal) => finish(code, signal));
   });

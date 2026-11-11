@@ -100,7 +100,7 @@ try {
 } catch (error) {
   if (error instanceof OpenClawSetupError) console.error(error.message);
   console.error("FAIL OpenClaw Assistant smoke test. Raw diagnostics are withheld to protect credentials. Check the isolated runtime version, transport contract and local networking; no mutation should be blindly replayed.");
-  process.exitCode = 1;
+  process.exitCode ||= 1;
 } finally {
   for (const instance of instances) { await instance.app.close(); instance.db.close(); }
   await rm(scratch, { recursive: true, force: true });

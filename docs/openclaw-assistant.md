@@ -158,6 +158,8 @@ environment. Timeouts and output-limit failures are distinct from normal CLI exi
 as unavailable-peer evidence; that check requires a named `ECONNREFUSED` diagnostic. Process-group
 cleanup covers ordinary wrapper descendants, not deliberate session/group escapes; the test runner
 is not an OS sandbox for untrusted executables.
+Interrupting an active probe with Ctrl-C or SIGTERM stops its process group, lets the smoke test
+close its test listeners and remove its temporary profile, and exits with status 130 or 143.
 
 Evidence boundaries: prefixed discovery is real OpenClaw integration; explicit discovery tool
 calls use HTTP directly, not model tool selection. This test does not execute a provider/model,
