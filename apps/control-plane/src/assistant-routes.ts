@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { extractBearer } from "./auth.js";
-import type { HumanPrincipal } from "./identity.js";
+import { PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
 import { assistantGrant, AssistantOperations, AssistantRefusal } from "./assistant-connections.js";
 
@@ -34,7 +34,22 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
   app.get("/api/assistant-connections", async (req, reply) => {
     const principal = owner(req);
     if (!principal) return reply.code(403).send({ error: "Only an organization owner can manage Assistant Connections." });
-    return { connections: store.list(principal) };
+    return { connections: store.list(principal),
+      installation: { id: deps.db.instanceId(), name: store.installationName(), canRename: principal.organizationId === PERSONAL_ORGANIZATION_ID },
+      operations: deps.operations.inventory(),
+      projects: deps.db.listProjectsForPrincipal(principal).map(({id, name}) => ({id, name})),
+    };
+  });
+  app.post("/api/assistant-connections/installation", async (req, reply) => {
+    const principal = owner(req);
+    if (!principal || principal.organizationId !== PERSONAL_ORGANIZATION_ID) return reply.code(403).send({ error: "Only an owner of the installation's personal organization can rename this control plane." });
+    try {
+      store.renameInstallation((req.body as {name?: unknown} | null)?.name);
+      return { id: deps.db.instanceId(), name: store.installationName() };
+    } catch (error) {
+      if (error instanceof AssistantRefusal) return reply.code(400).send({error: error.message});
+      throw error;
+    }
   });
   app.post("/api/assistant-connections", async (req, reply) => {
     const principal = owner(req);
@@ -57,7 +72,10 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
       reply.header("cache-control", "no-store");
       try {
         if (action === "activity") return { activity: store.activity(id) };
-        if (action === "configure") store.configure(id, (req.body as {grant?: unknown} | null)?.grant);
+        if (action === "configure") {
+          const body = req.body as {grant?: unknown; name?: unknown} | null;
+          store.configure(id, body?.grant, body?.name);
+        }
         if (action === "revoke") store.revoke(id);
         if (action === "rotate") {
           if (connection.revoked) throw new AssistantRefusal("This connection is revoked. Create a new connection instead.");

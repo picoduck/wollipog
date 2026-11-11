@@ -19,6 +19,13 @@ test("broad grants include new registrations; selected projects and operations r
     const store = new AssistantConnections(db);
     const issued = store.create(owner, "Remote Assistant", full);
     const credential = store.authenticate(issued.token)!;
+    const identity = issued.connection.id;
+    store.configure(identity, full, "Renamed Assistant");
+    assert.equal(store.get(identity)!.name, "Renamed Assistant");
+    assert.equal(store.get(identity)!.id, identity);
+    assert.throws(() => store.configure(identity, {operations: false, projects: "all"}, "Must Not Be Saved"));
+    assert.equal(store.get(identity)!.name, "Renamed Assistant");
+    assert.throws(() => store.configure(identity, full, "bad\nname"));
     assert.equal(store.destructiveConfirmation(issued.connection.id), "none");
     store.configure(issued.connection.id, {...full, destructiveConfirmation: "confirm"});
     assert.equal(store.destructiveConfirmation(issued.connection.id), "confirm");
@@ -112,12 +119,20 @@ test("real Fastify MCP discovery, owner lifecycle API, credential separation and
     assert.equal(created.statusCode, 201);
     assert.equal(created.headers["cache-control"], "no-store");
     const {token, connection} = created.json();
+    const metadata = (await app.inject({method: "GET", url: "/api/assistant-connections", headers: {authorization: "Bearer owner-fixture"}})).json();
+    assert.equal(metadata.installation.id, db.instanceId());
+    assert.equal(metadata.installation.canRename, true);
+    assert.ok(metadata.operations.some((o: {name: string}) => o.name === "assistant_discover"));
+    const rename = await app.inject({method: "POST", url: "/api/assistant-connections/installation", headers: {authorization: "Bearer owner-fixture"}, payload: {name: "Remote Workbench"}});
+    assert.equal(rename.statusCode, 200);
+    assert.equal(rename.json().id, db.instanceId());
     const second = db.assistantConnections.create(human, "OpenClaw Two", full);
     const call = (method: string, params: unknown = {}, bearer = token) => app.inject({method: "POST", url: "/assistant/mcp", headers: {authorization: `Bearer ${bearer}`}, payload: {jsonrpc: "2.0", id: 1, method, params}});
     assert.equal((await call("initialize")).json().result.protocolVersion, "2025-06-18");
     assert.equal((await call("tools/list")).json().result.tools[0].name, "assistant_discover");
     const discovery = JSON.parse((await call("tools/call", {name: "assistant_discover"})).json().result.content[0].text);
     assert.equal(discovery.controlPlane.id, db.instanceId());
+    assert.equal(discovery.controlPlane.name, "Remote Workbench");
     assert.equal(discovery.connection.id, connection.id);
     assert.equal((await call("tools/list", {}, "owner-fixture")).statusCode, 401);
     assert.equal((await call("tools/list", {}, "session-fixture")).statusCode, 401);
@@ -158,5 +173,26 @@ test("real Fastify MCP discovery, owner lifecycle API, credential separation and
       assert.equal(refused.result, undefined);
     }
     db.operatingHumanPrincipal = operatingHuman;
+  } finally { await app.close(); db.close(); }
+});
+
+test("other-organization owners cannot rename installation or manage another owner's connection", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const app = Fastify();
+  try {
+    const local = db.localIdentityContext();
+    const localOwner = db.operatingHumanPrincipal(local.userId, local.organizationId)!;
+    const issued = db.assistantConnections.create(localOwner, "Private", full);
+    registerAssistantRoutes(app, {db, operations: createAssistantOperations(db), requestHuman: () => owner});
+    const metadata = (await app.inject({method: "GET", url: "/api/assistant-connections"})).json();
+    assert.equal(metadata.connections.length, 0);
+    assert.equal(metadata.installation.canRename, false);
+    assert.equal((await app.inject({method: "POST", url: "/api/assistant-connections/installation", payload: {name: "No"}})).statusCode, 403);
+    for (const action of ["configure", "rotate", "revoke", "activity"]) {
+      const response = await app.inject({method: action === "activity" ? "GET" : "POST", url: `/api/assistant-connections/${issued.connection.id}/${action}`, ...(action === "activity" ? {} : {payload: {grant: full, name: "No"}})});
+      assert.equal(response.statusCode, 404);
+    }
+    assert.equal(db.assistantConnections.get(issued.connection.id)!.name, "Private");
+    assert.ok(db.assistantConnections.authenticate(issued.token));
   } finally { await app.close(); db.close(); }
 });

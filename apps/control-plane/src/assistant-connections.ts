@@ -36,6 +36,10 @@ export interface AssistantOperationReceipt {
 export class AssistantRefusal extends Error {}
 export const ASSISTANT_ACTIVITY_LIMIT = 1_000;
 const secret = () => `wollipoga_${randomBytes(32).toString("base64url")}`;
+function displayName(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 80 || /[\u0000-\u001f\u007f]/.test(value)) throw new AssistantRefusal("Name must contain 1–80 characters without control characters.");
+  return value.trim();
+}
 
 export function assistantGrant(value: unknown, defaultConfirmation: "none" | "confirm" = "none"): AssistantGrant {
   const input = value as Partial<AssistantGrant> | null;
@@ -83,14 +87,15 @@ export class AssistantConnections {
   }
   create(owner: HumanPrincipal, name: string, grant: AssistantGrant): { connection: AssistantConnection; token: string } {
     if (owner.kind !== "human" || owner.role !== "owner") throw new AssistantRefusal("Only an organization owner can issue standing Assistant authority.");
-    if (!name.trim() || name.length > 80) throw new AssistantRefusal("Connection name must contain 1–80 characters.");
+    name = displayName(name);
     const id = `asst_${randomUUID()}`, token = secret();
     this.db.prepare("INSERT INTO assistant_connections VALUES (?,?,?,?,?,1,?,0)").run(id, name.trim(), owner.userId, owner.organizationId, JSON.stringify(assistantGrant(grant)), hashToken(token));
     return { connection: this.get(id)!, token };
   }
-  configure(id: string, grant: unknown): void {
+  configure(id: string, grant: unknown, name?: unknown): void {
     const normalized = assistantGrant(grant, this.destructiveConfirmation(id));
-    this.db.prepare("UPDATE assistant_connections SET grant_json=?,revision=revision+1 WHERE id=?").run(JSON.stringify(normalized), id);
+    const nextName = name === undefined ? null : displayName(name);
+    this.db.prepare("UPDATE assistant_connections SET grant_json=?,name=COALESCE(?,name),revision=revision+1 WHERE id=?").run(JSON.stringify(normalized), nextName, id);
     this.changed(id);
   }
   rotate(id: string): string {
@@ -116,6 +121,7 @@ export class AssistantConnections {
     return this.get(credential.connectionId)!;
   }
   installationName(): string { return (this.db.prepare("SELECT name FROM assistant_installation WHERE singleton=1").get() as {name: string}).name; }
+  renameInstallation(name: unknown): void { this.db.prepare("UPDATE assistant_installation SET name=? WHERE singleton=1").run(displayName(name)); }
   /** Read live policy immediately before a destructive operation or its confirmation preview.
    * Sibling operation services implement preview + short-lived confirmation IDs for confirm. */
   destructiveConfirmation(connectionId: string): "none" | "confirm" {
@@ -155,6 +161,9 @@ export class AssistantOperations {
   }
   list(connection: AssistantConnection): AssistantOperation[] {
     return [...this.operations.values()].filter(o => connection.grant.operations === "all" || connection.grant.operations.includes(o.name));
+  }
+  inventory(): { name: string; description: string }[] {
+    return [...this.operations.values()].map(({name, description}) => ({name, description}));
   }
   /** Background delivery/result reads use connection identity, not a retained bearer secret.
    * This rechecks current owner authority, grant and resource access. No campaign ancestry. */

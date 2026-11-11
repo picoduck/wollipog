@@ -1,4 +1,5 @@
 import type { WorkflowEventRetentionView, UpdateWorkflowEventRetentionRequest } from "@wollipog/protocol";
+import type { AssistantConnectionsView, AssistantConnection, AssistantGrant, AssistantActivity } from "./assistant-connections.js";
 import type { OrchestratorCampaignBehaviorView, UpdateOrchestratorCampaignBehaviorRequest } from "@wollipog/protocol";
 import type {
   CampaignForgeRefreshResponse,
@@ -1767,6 +1768,13 @@ export function createApiClient(transport: ApiTransport) {
 
   /* Paired devices (revocable bearer credentials for dashboards). */
   listDevices: () => req<{ devices: DeviceView[] }>("/api/devices"),
+  assistantConnections: () => req<AssistantConnectionsView>("/api/assistant-connections"),
+  createAssistantConnection: (body: {name: string; grant: AssistantGrant}) => req<{connection: AssistantConnection; token: string}>("/api/assistant-connections", {method: "POST", body: JSON.stringify(body)}),
+  configureAssistantConnection: (id: string, body: {name: string; grant: AssistantGrant}) => req<{connection: AssistantConnection}>(`/api/assistant-connections/${encodeURIComponent(id)}/configure`, {method: "POST", body: JSON.stringify(body)}),
+  rotateAssistantConnection: (id: string) => req<{connection: AssistantConnection; token: string}>(`/api/assistant-connections/${encodeURIComponent(id)}/rotate`, {method: "POST", body: "{}"}),
+  revokeAssistantConnection: (id: string) => req<{connection: AssistantConnection}>(`/api/assistant-connections/${encodeURIComponent(id)}/revoke`, {method: "POST", body: "{}"}),
+  assistantConnectionActivity: (id: string) => req<{activity: AssistantActivity[]}>(`/api/assistant-connections/${encodeURIComponent(id)}/activity`),
+  renameAssistantInstallation: (name: string) => req<{id: string; name: string}>("/api/assistant-connections/installation", {method: "POST", body: JSON.stringify({name})}),
   /** Loopback-only: mints a device token, returned exactly once, plus whether a clickable
    * pairing link can work here (bundle served + bound beyond loopback). */
   pairDevice: (name: string, userId?: string) =>

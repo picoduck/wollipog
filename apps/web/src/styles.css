@@ -12346,6 +12346,18 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   flex-direction: column;
   gap: 14px;
 }
+/* Assistant grant groups keep native fieldset disabling without the browser's default border. */
+.assistant-fields {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.assistant-fields > legend {
+  margin-bottom: var(--space-3);
+  padding: 0;
+  font: var(--type-section);
+}
 /* Field anatomy (§8.1): the parts stack 8px apart, which puts the label 8px above the control.
    The helper sits 4px under the control: it, the error that replaces it (§8.5) and a
    `.field-foot` pull up by --space-1 (rule below, with the other field parts). */

@@ -145,7 +145,8 @@ test("in a browser Network shows the server this window uses, with Copy and the 
       "Set up secure remote access on the computer running this server.",
     );
     const groupTitles = [...view.container.querySelectorAll(".settings-group-title")].map((title) => title.textContent);
-    assert.deepEqual(groupTitles, ["Connection", "Remote Access"], "a browser shows secure setup guidance without a Tailnet switch");
+    assert.deepEqual(groupTitles, ["Connection", "Remote Access", "Assistants"], "a browser shows secure setup and Assistant management without a Tailnet switch");
+    assert.equal(view.row("Manage Assistant Connections")?.getAttribute("aria-haspopup"), "dialog");
     assert.equal(view.container.querySelector(".settings-group-scope")?.textContent, "This Window");
     assertNoDomNode(view.switch(), "nothing to switch in a browser");
     assert.equal(view.row("Manage Instances"), undefined, "a browser has no Instances to manage");
@@ -215,9 +216,9 @@ test("Tailnet Access is a noun-titled switch whose sentence follows its value", 
   const view = await render(tailnet());
   try {
     const groupTitles = [...view.container.querySelectorAll(".settings-group-title")].map((title) => title.textContent);
-    assert.deepEqual(groupTitles, ["Connection", "Remote Access", "Tailnet"]);
+    assert.deepEqual(groupTitles, ["Connection", "Remote Access", "Assistants", "Tailnet"]);
     assert.deepEqual([...view.container.querySelectorAll(".settings-group-scope")].map((scope) => scope.textContent),
-      ["This Window", "This Server", "This Machine"]);
+      ["This Window", "This Server", "This Server", "This Machine"]);
     assertNoDomNode(view.container.querySelector(".settings-group-foot"), "the desktop app needs no pointer to itself");
     const control = view.switch()!;
     assert.equal(control.querySelector(".setting-row-title")?.textContent, "Tailnet Access");
