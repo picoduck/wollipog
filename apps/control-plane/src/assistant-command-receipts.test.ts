@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { AssistantCommandReceipts, assistantRequestDigest } from "./assistant-command-receipts.js";
 
 test("durable reservation deduplicates, binds operation/content and atomically associates work", () => {
@@ -27,6 +28,11 @@ test("durable reservation deduplicates, binds operation/content and atomically a
     assert.equal(store.reserve(request).receipt.status, "uncertain");
     assert.equal(store.settle("connection", "event:1", "succeeded").status, "uncertain");
   } finally { sql.close(); }
+});
+
+test("request digest uses locale-independent code-unit key order", () => {
+  const expected = createHash("sha256").update('{"aB":2,"a_b":1,"ab":3}').digest("hex");
+  assert.equal(assistantRequestDigest({ab: 3, a_b: 1, aB: 2}), expected);
 });
 
 test("a process interruption leaves its reservation durable after SQLite reopen, without replay permission", () => {

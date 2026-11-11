@@ -5,6 +5,7 @@ import { AssistantOperations, AssistantRefusal, type AssistantOperation, type As
 import { AssistantCommandReceipts, assistantRequestDigest, type AssistantCommandReceipt } from "./assistant-command-receipts.js";
 import type { AssistantWorkOriginStore, AssistantSessionWorkOrigin, AuthenticatedAssistantWorkOrigin } from "./assistant-work-origin.js";
 import { AssistantCommandConfirmations } from "./assistant-command-confirmations.js";
+import { OrchestratorSettings } from "./orchestrator-settings.js";
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new AssistantRefusal("Supply an object of tool arguments.");
@@ -37,6 +38,7 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
   const receipts = new AssistantCommandReceipts(db.raw());
   AssistantCommandConfirmations.install(db.raw());
   const confirmations = new AssistantCommandConfirmations(db.raw());
+  const orchestratorSettings = new OrchestratorSettings(db);
   const workStore = () => (db as ControlPlaneDb & {assistantWork?: AssistantWorkOriginStore}).assistantWork;
   const sessionTarget = (value: unknown): AssistantTarget => {
     const s = db.getSession(text(object(value), "sessionId"));
@@ -158,7 +160,9 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
         ...(typeof args.useWorktree === "boolean" ? {useWorktree: args.useWorktree} : {}),
         ...(args.config && typeof args.config === "object" && !Array.isArray(args.config) ? {config: args.config} : {})};
       return svc.createSession(request, undefined, db.projectScope(location.projectId) ?? undefined, false, false, false,
-        {defaultOwnerUserId: owner.userId, launcherUserId: owner.userId, ...(assistantWorkOrigin ? {assistantWorkOrigin} : {})});
+        {defaultOwnerUserId: owner.userId, launcherUserId: owner.userId, ...(assistantWorkOrigin ? {assistantWorkOrigin} : {}),
+          orchestratorDefaults: orchestratorSettings.view(owner),
+          validateOrchestratorDefaults: defaults => orchestratorSettings.compatibilityError(owner, defaults)});
     });
   mutation("session_prompt", "Send a follow-up to any authorized session. Reconcile commandId before retrying a lost response.",
     schema({...commandProperties, text: string}, ["commandId", "sessionId", "text"]), sessionTarget,
@@ -175,6 +179,16 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
     execute: (args, ctx) => {
       const receipt = receipts.get(ctx.connection.id, text(object(args), "commandId"));
       if (!receipt) return {receipt: null};
+      if (receipt.target.kind === "session" && !db.getSession(receipt.target.id)) {
+        // Reconcile only this connection's content-free command verdict after source deletion.
+        // Original project access remains mandatory; never substitute a live result or transcript.
+        operations.authorize(ctx.connection.id, receipt.operation, receipt.target.projectId
+          ? {kind: "project", id: receipt.target.projectId, projectId: receipt.target.projectId}
+          : {kind: "receipt", id: receipt.operationId});
+        return {resourceDeleted: true, receipt: {operationId: receipt.operationId, operation: receipt.operation,
+          status: receipt.status, createdAt: receipt.createdAt, updatedAt: receipt.updatedAt},
+          recovery: "The source session was deleted. This is the retained command verdict only; do not replay the original command."};
+      }
       const target = receipt.target.kind === "session" ? sessionTarget({sessionId: receipt.target.id}) : receipt.target;
       operations.authorize(ctx.connection.id, receipt.operation, target);
       if (receipt.resourceId && db.getSession(receipt.resourceId)) {

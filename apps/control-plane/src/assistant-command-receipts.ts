@@ -13,7 +13,7 @@ export interface AssistantCommandReceipt extends AssistantOperationReceipt {
 export function assistantRequestDigest(value: unknown): string {
   const canonical = (v: unknown): unknown => {
     if (Array.isArray(v)) return v.map(canonical);
-    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)).map(([k, item]) => [k, canonical(item)]));
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([k, item]) => [k, canonical(item)]));
     return v;
   };
   return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");

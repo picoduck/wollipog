@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
-import { PROTOCOL_VERSION, type RunnerMetadata } from "@wollipog/protocol";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, type RunnerMetadata } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
@@ -297,5 +297,54 @@ test("owner-selected destructive confirmation previews without effects, rejects 
     assert.deepEqual((await h.call("session_archive", args)).receipt, result.receipt);
     const stop = await h.call("session_stop", {commandId: "confirmed-stop", sessionId: "unrelated-1"});
     assert.equal(stop.confirmationRequired, true);
+  } finally {h.close();}
+});
+
+test("launch passes the owner's saved Orchestrator defaults and shared compatibility validator", async () => {
+  const h = harness();
+  try {
+    const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+    defaults.execution.strictProjectIsolation = true;
+    h.db.setOrchestratorDefaults(h.owner.userId, defaults);
+    const create = h.svc.createSession.bind(h.svc);
+    h.svc.createSession = (...args) => {
+      const context = args[6]!;
+      assert.equal(context.orchestratorDefaults?.source, "user_default");
+      assert.equal(context.orchestratorDefaults?.defaults.execution.strictProjectIsolation, true);
+      assert.equal(typeof context.validateOrchestratorDefaults, "function");
+      return create(...args);
+    };
+    const result = await h.call("session_launch", {commandId: "saved-defaults", locationId: h.locations[0]!.id, agentId: "agent", useWorktree: false});
+    assert.equal(result.receipt.status, "succeeded", JSON.stringify(result));
+  } finally {h.close();}
+});
+
+test("deleted source returns only command verdict under current original-project and operation access", async () => {
+  const h = harness();
+  try {
+    await h.call("session_stop", {commandId: "deleted-source", sessionId: "unrelated-0"});
+    h.db.deleteSession("unrelated-0");
+    const result = await h.call("command_get", {commandId: "deleted-source"});
+    assert.equal(result.resourceDeleted, true);
+    assert.equal(result.receipt.operation, "session_stop");
+    assert.equal(result.receipt.target, undefined);
+    assert.equal(result.receipt.resourceId, undefined);
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: [h.projects[1]!.id]});
+    await assert.rejects(h.call("command_get", {commandId: "deleted-source"}), /project is excluded/);
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: ["command_get"], projects: "all"});
+    await assert.rejects(h.call("command_get", {commandId: "deleted-source"}), /session_stop is excluded/);
+  } finally {h.close();}
+});
+
+test("Assistant management never impersonates the human-only campaign authority paths", async () => {
+  const h = harness();
+  try {
+    h.svc.promptFromHuman = async () => assert.fail("Assistant text is not a human boundary-establishing message");
+    h.svc.restoreHumanCampaignAuthority = () => assert.fail("Assistant must not attribute authority repair to a human");
+    const prompt = await h.call("session_prompt", {commandId: "not-human-prompt", sessionId: "unrelated-1", text: "Fixture follow-up"});
+    assert.equal(prompt.receipt.status, "succeeded");
+    h.db.updateSessionStatus("unrelated-0", "completed", Date.now());
+    const restart = await h.call("session_restart", {commandId: "not-human-restart", sessionId: "unrelated-0"});
+    assert.equal(restart.receipt.status, "succeeded");
   } finally {h.close();}
 });
