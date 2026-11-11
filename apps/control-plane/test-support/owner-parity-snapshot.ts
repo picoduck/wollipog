@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { once } from "node:events";
 // Runs only in a child process with a new fixture database. Never import the hosting instance.
 const root = mkdtempSync(join(tmpdir(), "owner-parity-"));
 const listener = createServer();
@@ -14,6 +15,13 @@ Object.assign(process.env, {CONTROL_PLANE_HOST: "127.0.0.1", CONTROL_PLANE_PORT:
   CONTROL_PLANE_TOKEN: "owner-parity-fixture-token", CONTROL_PLANE_USAGE_PRICING_URL: "off"});
 const {app, ownerManagementInventory, assistantOperations} = await import("../src/index.js");
 await app.ready();
+if (process.argv.includes("--verify-status")) {
+  if (!app.server.listening) await once(app.server, "listening");
+  // The production startup promise settles its database and opens the readiness gate after listen.
+  await new Promise<void>(resolve => setImmediate(resolve));
+  const {verifyStatus} = await import("./assistant-status-scenario.js");
+  await verifyStatus(app, assistantOperations, join(root, "fixture.db"));
+}
 const connection = {id: "inventory-fixture", name: "Fixture", ownerUserId: "fixture", organizationId: "fixture",
   revision: 1, revoked: false, grant: {operations: "all" as const, projects: "all" as const}};
 const tools = assistantOperations.list(connection).map(op => op.name).sort();

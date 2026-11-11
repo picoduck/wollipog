@@ -10,14 +10,14 @@
     "remedy": "Use the authenticated owner's connection event-subscription configuration path."
   },
   "DELETE /api/automations/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "auto_delete"
     ],
     "dependency": "#4477"
   },
   "DELETE /api/automations/:id/triggers/:triggerId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "DELETE /api/projects/:id": {
     "tools": [
@@ -30,7 +30,7 @@
     ]
   },
   "DELETE /api/runners/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "DELETE /api/runners/:id/provider-accounts/:accountId": {
     "exclusion": "human_authority",
@@ -38,16 +38,18 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "DELETE /api/runners/:id/provider-logins/:operationId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "DELETE /api/runners/:runnerId/workspaces/:workspaceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "DELETE /api/sessions/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "DELETE /api/sessions/:id/reminder": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "reminder_remove"
+    ]
   },
   "DELETE /api/sessions/:id/shells/:shellId": {
     "exclusion": "interactive_workspace_io",
@@ -60,68 +62,68 @@
     "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
   },
   "DELETE /api/skill-assignments/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_unassign"
     ],
     "dependency": "#4477"
   },
   "DELETE /api/skill-drift/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "DELETE /api/skill-git/preview/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "DELETE /api/skill-groups/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "DELETE /api/skill-groups/:id/assignments/:assignmentId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "DELETE /api/skill-machine/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "DELETE /api/skills/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_remove"
     ],
     "dependency": "#4477"
   },
   "GET /api/assistant-connections": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/assistant-connections/:id/activity": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/assistant-connections/:id/destination-bindings": {
-    "gap": "Standing-binding inspection has no equivalent authorized Assistant management read yet. This remains an app-management read gap."
+    "gap": "NOT-YET-SUPPORTED blocker: Standing-binding inspection has no equivalent authorized Assistant management read yet. This remains an app-management read gap."
   },
   "GET /api/assistant-connections/:id/event-subscriptions": {
-    "gap": "Subscription inventory has no equivalent authorized Assistant management read yet. This remains an app-management read gap."
+    "gap": "NOT-YET-SUPPORTED blocker: Subscription inventory has no equivalent authorized Assistant management read yet. This remains an app-management read gap."
   },
   "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId": {
-    "gap": "Subscription state inspection has no equivalent authorized Assistant management read yet. This remains an app-management read gap."
+    "gap": "NOT-YET-SUPPORTED blocker: Subscription state inspection has no equivalent authorized Assistant management read yet. This remains an app-management read gap."
   },
   "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId/deliveries": {
-    "gap": "Delivery-journal inspection has no equivalent authorized Assistant management read yet. This remains a result-delivery troubleshooting gap."
+    "gap": "NOT-YET-SUPPORTED blocker: Delivery-journal inspection has no equivalent authorized Assistant management read yet. This remains a result-delivery troubleshooting gap."
   },
   "GET /api/automations": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "auto_list"
     ],
     "dependency": "#4477"
   },
   "GET /api/automations/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "auto_get"
     ],
     "dependency": "#4477"
   },
   "GET /api/automations/:id/triggers": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/projects": {
     "tools": [
@@ -134,7 +136,7 @@
     ]
   },
   "GET /api/projects/:id/access-scope": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/projects/:id/locations/:locationId/worktree-setup": {
     "tools": [
@@ -147,22 +149,22 @@
     ]
   },
   "GET /api/runners/:id/external-sessions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/runners/:id/list-directory": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/runners/:id/provider-account-selection": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/runners/:id/provider-accounts/:accountId/home-lease": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/runners/:id/skills": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions": {
     "tools": [
@@ -171,58 +173,82 @@
   },
   "GET /api/sessions/:id": {
     "tools": [
-      "session_get",
-      "session_config_get",
-      "worktree_get"
+      "session_status"
     ]
   },
   "GET /api/sessions/:id/artifacts": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/authentication/accounts": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/automation-proposals/:occurrenceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "decision_get"
+    ]
   },
   "GET /api/sessions/:id/campaign/decisions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_decisions"
+    ]
   },
   "GET /api/sessions/:id/campaign/issue-scope": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_scope"
+    ]
   },
   "GET /api/sessions/:id/campaign/recommendations": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_recommendations"
+    ]
   },
   "GET /api/sessions/:id/campaign/summary": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_status"
+    ]
   },
   "GET /api/sessions/:id/campaign/work-items": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_items"
+    ]
   },
   "GET /api/sessions/:id/campaign/work-items/:itemId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_item"
+    ]
   },
   "GET /api/sessions/:id/child-sessions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_children"
+    ]
   },
   "GET /api/sessions/:id/cross-model-reviews": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "review_jobs"
+    ]
   },
   "GET /api/sessions/:id/cross-model-reviews/:jobId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "review_job"
+    ]
   },
   "GET /api/sessions/:id/cross-model-reviews/:jobId/artifacts": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "review_job_artifacts"
+    ]
   },
   "GET /api/sessions/:id/descendant-requests": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "request_list"
+    ]
   },
   "GET /api/sessions/:id/events": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_events"
+    ]
   },
   "GET /api/sessions/:id/export": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/file": {
     "exclusion": "interactive_workspace_io",
@@ -235,64 +261,92 @@
     "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
   },
   "GET /api/sessions/:id/governance-audit": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/history-preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_history"
+    ]
   },
   "GET /api/sessions/:id/location-switch-requests/:occurrenceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "decision_get"
+    ]
   },
   "GET /api/sessions/:id/orchestrator-campaign": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_get"
+    ]
   },
   "GET /api/sessions/:id/orchestrator-campaign/behavior": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_behavior"
+    ]
   },
   "GET /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "decision_get"
+    ]
   },
   "GET /api/sessions/:id/orchestrator-campaign/review-jobs": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_review_jobs"
+    ]
   },
   "GET /api/sessions/:id/orchestrator-campaign/review-jobs/:jobId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_review_job"
+    ]
   },
   "GET /api/sessions/:id/orchestrator-campaign/review-jobs/:jobId/report": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_review_report"
+    ]
   },
   "GET /api/sessions/:id/orchestrator-campaign/work-items": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_work_items"
+    ]
   },
   "GET /api/sessions/:id/orchestrator-campaign/work-items/:itemId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "campaign_work_item"
+    ]
   },
   "GET /api/sessions/:id/prompt-history": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/provider-accounts": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/queued/:promptId/edit": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/reminder": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "reminder_get"
+    ]
   },
   "GET /api/sessions/:id/retained-attachment-events": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/review-findings": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "review_findings"
+    ]
   },
   "GET /api/sessions/:id/review-sessions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "review_list"
+    ]
   },
   "GET /api/sessions/:id/review-sessions/:reviewSessionId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "review_get"
+    ]
   },
   "GET /api/sessions/:id/role": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/shells": {
     "exclusion": "interactive_workspace_io",
@@ -305,7 +359,7 @@
     "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
   },
   "GET /api/sessions/:id/side-chat": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/steering": {
     "tools": [
@@ -323,13 +377,19 @@
     "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
   },
   "GET /api/sessions/:id/usage": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_usage"
+    ]
   },
   "GET /api/sessions/:id/workflow-decisions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "decision_list"
+    ]
   },
   "GET /api/sessions/:id/workflow-decisions/:occurrenceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "decision_get"
+    ]
   },
   "GET /api/sessions/:id/workspace-references/search": {
     "exclusion": "interactive_workspace_io",
@@ -337,59 +397,65 @@
     "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
   },
   "GET /api/sessions/:id/worktrees/operations": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "worktree_ops"
+    ]
   },
   "GET /api/sessions/archive-page": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_archive_list"
+    ]
   },
   "GET /api/sessions/lookup/by-id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_lookup"
+    ]
   },
   "GET /api/skill-assignments": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/skill-groups": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/skill-groups/:id/assignments": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/skills": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_list"
     ],
     "dependency": "#4477"
   },
   "GET /api/skills/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_get"
     ],
     "dependency": "#4477"
   },
   "GET /api/skills/:id/built-in-version": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/skills/:id/machines/:runnerId/version": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/skills/:id/machines/:runnerId/version-policy": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_pin_get"
     ],
     "dependency": "#4477"
   },
   "GET /api/skills/:id/versions": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_versions"
     ],
     "dependency": "#4477"
   },
   "GET /api/skills/:id/versions/:versionId": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_version_get"
     ],
@@ -406,20 +472,20 @@
     ]
   },
   "PATCH /api/runners/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PATCH /api/sessions/:id/review-findings/:findingId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PATCH /api/skill-assignments/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_assign_update"
     ],
     "dependency": "#4477"
   },
   "PATCH /api/skill-groups/:id/assignments/:assignmentId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/assistant-connections": {
     "exclusion": "human_authority",
@@ -442,7 +508,7 @@
     "remedy": "Use the authenticated owner's connection event-subscription configuration path."
   },
   "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/resume": {
-    "gap": "Resuming an already owner-authorized callback is delivery lifecycle management with no Assistant operation yet; this is not an authority exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Resuming an already owner-authorized callback is delivery lifecycle management with no Assistant operation yet; this is not an authority exclusion."
   },
   "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/rotate": {
     "exclusion": "human_authority",
@@ -460,17 +526,17 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/automations": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "auto_create"
     ],
     "dependency": "#4477"
   },
   "POST /api/automations/:id/triggers": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/automations/:id/triggers/:triggerId/rotate": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/projects": {
     "tools": [
@@ -513,10 +579,10 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/runners/:id/orphaned-skill-copies/discard": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:id/orphaned-skill-copies/preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:id/provider-accounts/:accountId/adopt-profile": {
     "exclusion": "human_authority",
@@ -524,7 +590,7 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/runners/:id/provider-accounts/:accountId/recover-lease": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:id/provider-accounts/:accountId/revoke-profile-access": {
     "exclusion": "human_authority",
@@ -547,37 +613,37 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/runners/:id/rediscover": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:id/skill-adoption-recovery": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:id/skill-adoption-recovery/:operationId/restore": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:id/skill-drift/preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:id/skill-drift/restore": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:id/skill-snapshots": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:id/skills/sync": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:runnerId/host-action": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:runnerId/workspaces": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:runnerId/workspaces/:workspaceId/rename": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:runnerId/workspaces/register": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions": {
     "tools": [
@@ -601,10 +667,10 @@
     ]
   },
   "POST /api/sessions/:id/artifacts/screenshots": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/artifacts/videos": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/authentication/account": {
     "exclusion": "human_authority",
@@ -617,19 +683,25 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/sessions/:id/automation-proposals": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "result_missing_ack"
+    ]
   },
   "POST /api/sessions/:id/background-deliveries/:continuationId/acknowledge-retry-exhaustion": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "result_retry_ack"
+    ]
   },
   "POST /api/sessions/:id/background-deliveries/acknowledge-blocked-results": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "result_blocked_ack"
+    ]
   },
   "POST /api/sessions/:id/background-jobs/:jobId/stop": {
     "tools": [
@@ -637,13 +709,13 @@
     ]
   },
   "POST /api/sessions/:id/campaign/decisions/:occurrenceId/classify": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/campaign/issue-scope/proposals": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/cancel": {
     "tools": [
@@ -651,13 +723,13 @@
     ]
   },
   "POST /api/sessions/:id/cancel-queued": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/column": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/command-invocations": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/config": {
     "tools": [
@@ -665,76 +737,76 @@
     ]
   },
   "POST /api/sessions/:id/cross-model-reviews": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/cross-model-reviews/:jobId/cancel": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/delegated-image-review/acknowledge": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/delegated-image-review/image": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/delegated-image-review/verdict": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/descendant-requests/delegated-image-review": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/descendant-requests/delegated-image-review/get": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/descendant-requests/resolve": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/descendant-requests/review-ui-evidence": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/descendant-requests/review-ui-evidence/acknowledge": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/fork": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/git": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/github-issue-closures": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/github-issue-closures/:occurrenceId/execute": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/host-action": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/location-switch-requests": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/location-switch-requests/:occurrenceId/execute": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/logout-agent": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/behavior": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/budget-allocations": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/cleanup/delete-merged-branches": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/control": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/follow-up-limit": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/follow-ups": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/full-control": {
     "exclusion": "human_authority",
@@ -747,40 +819,40 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/sessions/:id/orchestrator-campaign/locations/:locationId/include": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/plan": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/recommendations/:recommendationId/adjudicate": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/repository-additions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId/execute": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/review-jobs": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/scope-grant/selection-count": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/slots/release": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/verify-child": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/assign": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/delivery": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/owner-decisions": {
     "exclusion": "human_authority",
@@ -788,10 +860,10 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/sessions/:id/parent-control": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/parent-control-policy": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/pending-prompts/:commandId/resolve": {
     "tools": [
@@ -799,10 +871,10 @@
     ]
   },
   "POST /api/sessions/:id/policy-hook": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/project": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/prompt": {
     "tools": [
@@ -810,13 +882,13 @@
     ]
   },
   "POST /api/sessions/:id/prompt-images": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/provider-account": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/pull-request-watch": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/queue-hold/release": {
     "tools": [
@@ -824,10 +896,10 @@
     ]
   },
   "POST /api/sessions/:id/queued/:promptId/edit": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/reprocess": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/restart": {
     "tools": [
@@ -835,13 +907,17 @@
     ]
   },
   "POST /api/sessions/:id/result/acknowledge": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "result_ack"
+    ]
   },
   "POST /api/sessions/:id/result/handoff": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "result_handoff"
+    ]
   },
   "POST /api/sessions/:id/retitle": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/retry-stop": {
     "tools": [
@@ -849,22 +925,22 @@
     ]
   },
   "POST /api/sessions/:id/review-findings": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/review-findings/bundle": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/review-sessions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/review-sessions/:reviewSessionId/cancel": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/rewind": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/role": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/shells": {
     "exclusion": "interactive_workspace_io",
@@ -882,10 +958,10 @@
     "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
   },
   "POST /api/sessions/:id/side-chat": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/steer": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/steering/:submissionId/resolve": {
     "tools": [
@@ -913,49 +989,49 @@
     ]
   },
   "POST /api/sessions/:id/video-evidence-review/acknowledge": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/video-evidence-review/acknowledge-frames": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/video-evidence-review/frame": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/video-evidence-review/frames": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/video-evidence-review/prepare": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/video-evidence-review/provenance": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/video-evidence-review/verdict": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/waits": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/workflow-decisions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/consume": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/reconcile": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/workspace": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/workspace-references": {
     "exclusion": "interactive_workspace_io",
@@ -973,7 +1049,7 @@
     ]
   },
   "POST /api/sessions/:id/worktrees/delete-refs": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/worktrees/discard": {
     "tools": [
@@ -996,71 +1072,71 @@
     ]
   },
   "POST /api/sessions/adopt": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skill-assignments": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_assign"
     ],
     "dependency": "#4477"
   },
   "POST /api/skill-drift/:id/import": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skill-git/import": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skill-git/preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skill-groups": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skill-groups/:id/assignments": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skill-groups/:id/convert": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skill-machine/:id/adopt": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skill-machine/:id/adoption-preflight": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skill-machine/:id/import": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skill-machine/:id/preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skills": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_create"
     ],
     "dependency": "#4477"
   },
   "POST /api/skills/:id/built-in-version": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skills/:id/restore": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_restore"
     ],
     "dependency": "#4477"
   },
   "POST /api/skills/:id/versions": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_version_add"
     ],
     "dependency": "#4477"
   },
   "PUT /api/automations/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "auto_update"
     ],
@@ -1077,7 +1153,7 @@
     ]
   },
   "PUT /api/runners/:id/automatic-account-switching": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PUT /api/runners/:id/capacity": {
     "tools": [
@@ -1085,16 +1161,16 @@
     ]
   },
   "PUT /api/runners/:id/harness-installation": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PUT /api/runners/:id/provider-account-defaults/:provider": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PUT /api/runners/:id/provider-account-policies/:provider": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PUT /api/runners/:id/provider-logins/:operationId/dismiss": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PUT /api/runners/:id/reviewer-security": {
     "exclusion": "human_authority",
@@ -1102,7 +1178,7 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "PUT /api/runners/:id/target-harness-installation": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PUT /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {
     "exclusion": "human_authority",
@@ -1110,26 +1186,28 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "PUT /api/sessions/:id/reminder": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "reminder_set"
+    ]
   },
   "PUT /api/skills/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_update"
     ],
     "dependency": "#4477"
   },
   "PUT /api/skills/:id/git-auto-update": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PUT /api/skills/:id/machines/:runnerId/version": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
+    "gap": "NOT-YET-SUPPORTED blocker: Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
     "plannedTools": [
       "skill_pin_set"
     ],
     "dependency": "#4477"
   },
   "PUT /api/skills/:id/recommendation": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "gap": "NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   }
 }

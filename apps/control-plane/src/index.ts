@@ -304,6 +304,8 @@ import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
 import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
 import { createSessionWorktreeManagement } from "./session-worktree-management.js";
+import { OwnerManagement, type OwnerManagementReply } from "./owner-management.js";
+import { registerAssistantStatusOperations } from "./assistant-status-operations.js";
 import { registerAssistantOwnerManagement } from "./assistant-owner-management.js";
 import { createOwnerRunnerManagement } from "./owner-runner-management.js";
 import { createOwnerProjectManagement } from "./owner-project-management.js";
@@ -1159,7 +1161,7 @@ const refreshCampaignForge = (campaignId: string, refs: readonly CampaignPullReq
 });
 svc.campaignForgeRefresh = refreshCampaignForge;
 svc.campaignForgeReadNow = (campaignId, refs) => campaignForgeObserver.readNow(campaignId, refs);
-registerCampaignStatusRoutes(app, {
+const ownerCampaignStatus = registerCampaignStatusRoutes(app, {
   db,
   requestPrincipal,
   refreshForge: refreshCampaignForge,
@@ -3505,9 +3507,11 @@ app.get("/api/sessions/:id/files", async (req, reply) => {
   return r.data;
 });
 
+const ownerSessionStatus = new OwnerManagement<AuthPrincipal>();
+
 // Per-session usage split by the model that produced it. Route access already resolved through
 // canAccessSession; the ledger stores only bounded model ids and counts.
-app.get("/api/sessions/:id/usage", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/usage", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (!db.getSession(id)) return reply.code(404).send({ error: "session not found" });
   return { sessionId: id, ...db.sessionUsageByModel(id), pricing: usagePricing.status() };
@@ -4063,15 +4067,15 @@ app.get("/api/sessions", async (req,reply) => {
     : '{"sessions":[]}');
 });
 
-app.get("/api/sessions/archive-page", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/archive-page", async (req, reply) => {
   const raw = req.query as Record<string, unknown>;
   const query = parseArchiveSessionPageQuery(raw);
   if ("error" in query) return reply.code(400).send(query);
   const q = (query.q ?? "").trim();
   if (q.length > 256) return reply.code(400).send({ error: "q is too long (max 256 characters)" });
-  const principal = requestPrincipal(req);
+  const principal = req.principal;
   const candidatePage = principal
-    ? db.archiveSessionCandidatePageForPrincipal(principal, query)
+    ? db.archiveSessionCandidatePageForPrincipal(principal, query, req.projectIds)
     : { sessions: [], transcriptSessionIds: [], facets: { projects: [], locations: [], agents: [] } };
   if ("error" in candidatePage) return reply.code(400).send(candidatePage);
   const page = archiveSessionPage({
@@ -4099,11 +4103,11 @@ app.get("/api/sessions/archive-page", async (req, reply) => {
 
 registerSessionLookupRoute(app, { db, requestPrincipal,withQueue: (session) => hub.withQueue(session,true) });
 
-app.get("/api/sessions/:id", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const session = db.getSession(id);
   if (!session) return reply.code(404).send({ error: "session not found" });
-  return { session: withSessionCommandPermissions(db, requestPrincipals.get(req) ?? requestPrincipal(req), session) };
+  return { session: withSessionCommandPermissions(db, req.principal, session) };
 });
 
 registerSessionRoleRoutes(app, {
@@ -4141,9 +4145,9 @@ app.post("/api/sessions/:id/parent-control-policy", async (req, reply) => {
 // A running campaign's Child Harness, Model, Effort, Follow-Ups and Completion (#3580): a person's
 // compare-and-set on the campaign's own behavior revision. No agent allowlist entry exists for these
 // endpoints, so neither the Orchestrator nor any child can read the form or change the values.
-app.get("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const human = requestHuman(req);
+  const human = (req.principal.kind === "human" ? req.principal : null);
   if (!human) return reply.code(403).send({ error: "only an authenticated human may change campaign behavior" });
   if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
   reply.header("cache-control", "no-store");
@@ -4171,12 +4175,7 @@ app.post("/api/sessions/:id/orchestrator-campaign/cleanup/delete-merged-branches
   return respond(reply, await svc.deleteApprovedMergedBranches(id, (sessionId) => db.canAccessSession(human, sessionId)));
 });
 
-app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestPrincipal(req);
-  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
-    return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
-  }
+async function readCampaignProjection(id: string, principal: AuthPrincipal, reply: OwnerManagementReply) {
   // #4067: a pending merged branch is read again (rate-limited, bounded wait) so a deletion shows.
   const campaignId = db.resolvedCampaignSessionId(id);
   const pendingBranches = campaignId ? db.campaignMergedBranches(campaignId).filter((row) => row.state === "pending") : [];
@@ -4195,6 +4194,15 @@ app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
       ...(modelMachines ? { childModelMachines: modelMachines } : {}),
     } }
     : projection);
+}
+
+app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
+    return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
+  }
+  return readCampaignProjection(id, principal, reply);
 });
 
 app.post("/api/sessions/:id/orchestrator-campaign/follow-ups", async (req, reply) => {
@@ -4282,8 +4290,7 @@ function sessionReviewRequester(req: FastifyRequest, reply: FastifyReply, id: st
   }
   return principal;
 }
-function canReadSessionReviews(req: FastifyRequest, id: string): boolean {
-  const principal = requestPrincipal(req);
+function canReadSessionReviews(principal: AuthPrincipal, id: string): boolean {
   return Boolean(principal && db.canAccessSession(principal, id) &&
     (principal.kind !== "agent" || principal.credentialSessionId === id));
 }
@@ -4294,9 +4301,9 @@ app.post("/api/sessions/:id/cross-model-reviews", async (req, reply) => {
   return respond(reply, svc.requestSessionReviewJob(id, req.body as SessionReviewJobRequest,
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
-app.get("/api/sessions/:id/cross-model-reviews", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/cross-model-reviews", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
+  if (!canReadSessionReviews(req.principal, id)) return reply.code(404).send({ error: "session not found" });
   const query = req.query as { limit?: string; afterJobId?: string };
   reply.header("cache-control", "no-store");
   return respond(reply, svc.sessionReviewJobs(id, {
@@ -4304,15 +4311,15 @@ app.get("/api/sessions/:id/cross-model-reviews", async (req, reply) => {
     ...(query.afterJobId === undefined ? {} : { afterJobId: query.afterJobId }),
   }));
 });
-app.get("/api/sessions/:id/cross-model-reviews/:jobId", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/cross-model-reviews/:jobId", async (req, reply) => {
   const { id, jobId } = req.params as { id: string; jobId: string };
-  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
+  if (!canReadSessionReviews(req.principal, id)) return reply.code(404).send({ error: "session not found" });
   reply.header("cache-control", "no-store");
   return respond(reply, svc.sessionReviewJob(id, jobId));
 });
-app.get("/api/sessions/:id/cross-model-reviews/:jobId/artifacts", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/cross-model-reviews/:jobId/artifacts", async (req, reply) => {
   const { id, jobId } = req.params as { id: string; jobId: string };
-  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
+  if (!canReadSessionReviews(req.principal, id)) return reply.code(404).send({ error: "session not found" });
   reply.header("cache-control", "no-store");
   return respond(reply, svc.sessionReviewJobArtifacts(id, jobId));
 });
@@ -4346,9 +4353,9 @@ app.post("/api/sessions/:id/waits", async (req, reply) => {
   if (!principal) return reply;
   return respond(reply, svc.reportSessionWait(id, req.body, (sessionId) => db.canAccessSession(principal, sessionId)));
 });
-app.get("/api/sessions/:id/review-sessions", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/review-sessions", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
+  if (!canReadSessionReviews(req.principal, id)) return reply.code(404).send({ error: "session not found" });
   const query = req.query as { limit?: string; afterReviewSessionId?: string };
   reply.header("cache-control", "no-store");
   return respond(reply, svc.reviewSessionsPage(id, {
@@ -4356,9 +4363,9 @@ app.get("/api/sessions/:id/review-sessions", async (req, reply) => {
     ...(query.afterReviewSessionId === undefined ? {} : { afterReviewSessionId: query.afterReviewSessionId }),
   }));
 });
-app.get("/api/sessions/:id/review-sessions/:reviewSessionId", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/review-sessions/:reviewSessionId", async (req, reply) => {
   const { id, reviewSessionId } = req.params as { id: string; reviewSessionId: string };
-  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
+  if (!canReadSessionReviews(req.principal, id)) return reply.code(404).send({ error: "session not found" });
   reply.header("cache-control", "no-store");
   return respond(reply, svc.reviewSessionView(id, reviewSessionId));
 });
@@ -4477,7 +4484,7 @@ app.post("/api/sessions/:id/orchestrator-campaign/recommendations/:recommendatio
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
-registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
+const ownerCampaignScope = registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
 registerAutomationCreationRoutes(app, { service: new AutomationCreationService(db, svc, hub, scheduledCampaigns), requestPrincipal });
 registerCampaignRepositoryAdditionRoutes(app, { requestPrincipal, additions: new CampaignRepositoryAdditions({ db, hub, sessions: svc,
   // The same verified-Location inspection as a launch (#4117), on a runner that can hold the boundary.
@@ -4542,8 +4549,7 @@ app.post("/api/sessions/:id/workflow-decisions", async (req, reply) => {
 
 // Read authority does not grant resolution or consumption authority. The target may be self,
 // or an accessible descendant of an Orchestrator's own credential session.
-function canInspectWorkflowDecisions(req: FastifyRequest, id: string): boolean {
-  const principal = requestPrincipal(req);
+function canInspectWorkflowDecisions(principal: AuthPrincipal, id: string): boolean {
   if (!principal || !db.canAccessSession(principal, id)) return false;
   return principal.kind !== "agent" || principal.credentialSessionId === id ||
     (principal.orchestrator === true && typeof principal.credentialSessionId === "string" &&
@@ -4551,9 +4557,9 @@ function canInspectWorkflowDecisions(req: FastifyRequest, id: string): boolean {
       db.isSessionDescendant(principal.credentialSessionId, id));
 }
 
-app.get("/api/sessions/:id/workflow-decisions", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/workflow-decisions", async (req, reply) => {
   const { id } = req.params as { id: string };
-  if (!canInspectWorkflowDecisions(req, id)) return reply.code(404).send({ error: "session not found" });
+  if (!canInspectWorkflowDecisions(req.principal, id)) return reply.code(404).send({ error: "session not found" });
   const query = req.query as { cursor?: string; limit?: string };
   const limit = query.limit === undefined ? 50 : Number(query.limit);
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
@@ -4564,9 +4570,9 @@ app.get("/api/sessions/:id/workflow-decisions", async (req, reply) => {
   return respond(reply, svc.workflowDecisions(id, query.cursor, limit));
 });
 
-app.get("/api/sessions/:id/workflow-decisions/:occurrenceId", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/workflow-decisions/:occurrenceId", async (req, reply) => {
   const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
-  if (!canInspectWorkflowDecisions(req, id)) return reply.code(404).send({ error: "session not found" });
+  if (!canInspectWorkflowDecisions(req.principal, id)) return reply.code(404).send({ error: "session not found" });
   if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
   reply.header("cache-control", "no-store");
   return respond(reply, svc.workflowDecision(id, occurrenceId));
@@ -4691,9 +4697,9 @@ app.post("/api/sessions/:id/campaign/decisions/:occurrenceId/classify", async (r
     { kind: "human", id: humanActorId(req) }, (sessionId) => db.canAccessSession(human, sessionId)));
 });
 
-app.get("/api/sessions/:id/descendant-requests", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/descendant-requests", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const principal = requestPrincipal(req);
+  const principal = req.principal;
   if (!principal) return reply.code(403).send({ error: "authentication required" });
   if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
   if (principal.kind === "agent" && principal.credentialSessionId !== id) {
@@ -4857,7 +4863,7 @@ app.post("/api/sessions/:id/delegated-image-review/verdict", async (req, reply) 
   return respond(reply, svc.submitDelegatedImageVerdict(id, body?.report, (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
-app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/child-sessions", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const query = req.query as { after?: string; limit?: string; eventEpoch?: string };
   const after = query.after === undefined ? 0 : Number(query.after);
@@ -4969,7 +4975,7 @@ app.get("/api/sessions/:id/retained-attachment-events", async (req, reply) => {
 
 const historyPreviews = new HistoryPreviewReader(db, hub);
 
-app.get("/api/sessions/:id/history-preview", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/history-preview", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const query = req.query as Record<string, string | undefined>;
   const values: Record<string, number> = {};
@@ -4998,7 +5004,7 @@ app.get("/api/sessions/:id/history-preview", async (req, reply) => {
   return { preview: await historyPreviews.read(id, values.eventEpoch!, read) };
 });
 
-app.get("/api/sessions/:id/events", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/events", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const query = req.query as {
     after?: string;
@@ -5084,7 +5090,7 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
   // Installed old CLI/MCP readers use exactly this fallback shape, then slice the response as if
   // it contained the whole log. Their later tail probe can mark a first page as the true newest
   // window. Fence that identifiable agent call instead of silently supplying misleading rows.
-  const principal = requestPrincipal(req);
+  const principal = req.principal;
   if (query.limit === undefined && query.after !== undefined && query.eventEpoch === undefined &&
       principal?.kind === "agent" && principal.credentialSessionId) {
     const actor = db.getSession(principal.credentialSessionId);
@@ -5189,7 +5195,7 @@ app.delete("/api/sessions/:id/transcript-shares/:shareId", async (req, reply) =>
 // Exact auth-gate exception: this read still requires its independent share capability.
 registerPublicTranscriptShareRoute(app, { db });
 
-app.get("/api/sessions/:id/review-findings", async (req, reply) =>
+ownerSessionStatus.define("GET", "/api/sessions/:id/review-findings", async (req, reply) =>
   respond(reply, svc.reviewFindings((req.params as { id: string }).id)),
 );
 
@@ -5307,10 +5313,10 @@ app.post("/api/sessions/:id/prompt", async (req, reply) => {
     : result);
 });
 
-app.post("/api/sessions/:id/result/handoff", async (req, reply) => {
+ownerSessionStatus.define("POST", "/api/sessions/:id/result/handoff", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const session = db.getSession(id);
-  const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
+  const principal = req.principal;
   if (!session || !principal || !db.canAccessSession(principal, id)) {
     return reply.code(404).send({ error: "session not found" });
   }
@@ -5328,9 +5334,9 @@ app.post("/api/sessions/:id/result/handoff", async (req, reply) => {
   return { handedOff, session: withSessionCommandPermissions(db, principal, db.getSession(id)!) };
 });
 
-app.post("/api/sessions/:id/result/acknowledge", async (req, reply) => {
+ownerSessionStatus.define("POST", "/api/sessions/:id/result/acknowledge", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const human = requestHuman(req);
+  const human = (req.principal.kind === "human" ? req.principal : null);
   if (!human) return reply.code(403).send({ error: "human identity is required" });
   if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
   const revision = (req.body as { revision?: unknown } | null)?.revision;
@@ -5750,7 +5756,7 @@ app.post("/api/sessions/:id/worktrees", async (req, reply) => {
 
 // Read-only view of this session's unconsumed progress-aware creates, so a reloaded client can
 // rejoin one by repeating its exact coordinates. It never starts, retries, or releases work.
-app.get("/api/sessions/:id/worktrees/operations", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/worktrees/operations", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (!db.getSession(id)) return reply.code(404).send({ error: "session not found" });
   return { operations: worktreeCreates.listForSession(id) };
@@ -6469,17 +6475,17 @@ app.post("/api/sessions/:id/workspace", async (req, reply) => {
   return respond(reply, svc.setWorkspace(id, body.workspaceId ?? null));
 });
 
-app.put("/api/sessions/:id/reminder", async (req, reply) => {
+ownerSessionStatus.define("PUT", "/api/sessions/:id/reminder", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const human = requestHuman(req);
+  const human = (req.principal.kind === "human" ? req.principal : null);
   if (!human) return reply.code(403).send({ error: "session reminders require a human user" });
   return respond(reply, svc.setReminder(id, human.userId,
     (req.body ?? {}) as Partial<SetSessionReminderRequest>));
 });
 
-app.get("/api/sessions/:id/reminder", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/reminder", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const human = requestHuman(req);
+  const human = (req.principal.kind === "human" ? req.principal : null);
   if (!human) return reply.code(403).send({ error: "session reminders require a human user" });
   // The central authorization gate has already required access to this exact session. The user id
   // remains part of the database key so an organization peer can never observe the owner's row.
@@ -6498,9 +6504,9 @@ app.get("/api/sessions/:id/reminder", async (req, reply) => {
   return { reminder };
 });
 
-app.delete("/api/sessions/:id/reminder", async (req, reply) => {
+ownerSessionStatus.define("DELETE", "/api/sessions/:id/reminder", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const human = requestHuman(req);
+  const human = (req.principal.kind === "human" ? req.principal : null);
   if (!human) return reply.code(403).send({ error: "session reminders require a human user" });
   const rawRevision = (req.query as { revision?: string }).revision;
   const revision = rawRevision === undefined ? undefined : Number(rawRevision);
@@ -6544,7 +6550,7 @@ app.post("/api/sessions/:id/retry-stop", async (req, reply) => {
   return respond(reply, svc.retryStop(id));
 });
 
-app.post("/api/sessions/:id/background-deliveries/acknowledge-blocked-results", async (req, reply) => {
+ownerSessionStatus.define("POST", "/api/sessions/:id/background-deliveries/acknowledge-blocked-results", async (req, reply) => {
   const { id } = req.params as { id: string };
   const body = req.body as { targets?: unknown } | null;
   if (!body || !Array.isArray(body.targets) || body.targets.length < 1 || body.targets.length > 32 ||
@@ -6557,12 +6563,12 @@ app.post("/api/sessions/:id/background-deliveries/acknowledge-blocked-results", 
   if (!db.getSession(id)) return reply.code(404).send({ error: "session not found" });
   const changed = db.acknowledgeBackgroundBlockedResults(id, body.targets, Date.now());
   if (changed) hub.sessionChangedById(id);
-  req.log.info({ event: "background_blocked_results_acknowledged", sessionId: id, changed,
-    requested: body.targets.length, entryPoint: "dashboard" }, "Blocked-result acknowledgement completed");
+  app.log.info({ event: "background_blocked_results_acknowledged", sessionId: id, changed,
+    requested: body.targets.length }, "Blocked-result acknowledgement completed");
   return db.getSession(id);
 });
 
-app.post("/api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result", async (req, reply) => {
+ownerSessionStatus.define("POST", "/api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result", async (req, reply) => {
   const { id, continuationId } = req.params as { id: string; continuationId: string };
   const changed = db.acknowledgeBackgroundMissingResult(id, continuationId, Date.now());
   const session = db.getSession(id);
@@ -6576,7 +6582,7 @@ app.post("/api/sessions/:id/background-deliveries/:continuationId/acknowledge-mi
   return session;
 });
 
-app.post("/api/sessions/:id/background-deliveries/:continuationId/acknowledge-retry-exhaustion", async (req, reply) => {
+ownerSessionStatus.define("POST", "/api/sessions/:id/background-deliveries/:continuationId/acknowledge-retry-exhaustion", async (req, reply) => {
   const { id, continuationId } = req.params as { id: string; continuationId: string };
   const changed = db.acknowledgeBackgroundRetryExhaustion(id, continuationId, Date.now());
   const session = db.getSession(id);
@@ -6595,6 +6601,34 @@ app.post("/api/sessions/:id/config", async (req, reply) => {
   const body = (req.body ?? {}) as import("@wollipog/protocol").SessionConfig;
   return respond(reply, svc.setConfig(id, body, workflowActor(req)));
 });
+
+const assistantStatusReads = new OwnerManagement<AuthPrincipal>();
+assistantStatusReads.define("GET", "/api/sessions/:id/orchestrator-campaign", (req, reply) =>
+  readCampaignProjection((req.params as {id: string}).id, req.principal, reply));
+for (const suffix of ["review-jobs", "review-jobs/:jobId", "review-jobs/:jobId/report"] as const) {
+  assistantStatusReads.define("GET", `/api/sessions/:id/orchestrator-campaign/${suffix}`, (req, reply) => {
+    const {id, jobId} = req.params as {id: string; jobId?: string};
+    const query = req.query as {limit?: string; afterJobId?: string; workItemId?: string};
+    const canSee = (sessionId: string) => db.canAccessSession(req.principal, sessionId);
+    return respond(reply, suffix.endsWith("/report") ? svc.campaignReviewReport(id, jobId!, canSee)
+      : jobId ? svc.campaignReviewJob(id, jobId, canSee)
+      : svc.campaignReviewJobs(id, {...query, ...(query.limit === undefined ? {} : {limit: Number(query.limit)})} as {limit?: number; afterJobId?: string; workItemId?: string}, canSee));
+  });
+}
+for (const suffix of ["work-items", "work-items/:itemId"] as const) {
+  assistantStatusReads.define("GET", `/api/sessions/:id/orchestrator-campaign/${suffix}`, (req, reply) => {
+    const {id, itemId} = req.params as {id: string; itemId?: string};
+    const query = req.query as Record<string, string>;
+    return respond(reply, svc.campaignWorkItems(id, itemId ? {workItemId: itemId} : {
+      ...query, ...(query.limit === undefined ? {} : {limit: /^\d{1,4}$/u.test(query.limit) ? Number(query.limit) : Number.NaN}),
+      includeRecommendations: query.includeRecommendations === "true",
+    } as Parameters<SessionsService["campaignWorkItems"]>[1], sessionId => db.canAccessSession(req.principal, sessionId)));
+  });
+}
+// These explicit service adapters are for owner-delegated READ status only. They are not HTTP
+// routes, and leave the existing session-protocol request/execute gates untouched.
+ownerSessionStatus.registerHttp(app, requestPrincipal);
+registerAssistantStatusOperations(assistantOperations, {db, svc, hub, receipts: assistantCommandReceipts, status: ownerSessionStatus, campaign: ownerCampaignStatus, scope: ownerCampaignScope, additional: assistantStatusReads});
 
 app.delete("/api/sessions/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;

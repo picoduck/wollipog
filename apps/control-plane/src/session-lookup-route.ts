@@ -3,6 +3,19 @@ import type { AuthPrincipal } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { SessionView } from "@wollipog/protocol";
 import { withSessionCommandPermissions } from "./session-command-permissions.js";
+import type { OwnerManagementResult } from "./owner-management.js";
+
+type LookupDb = Pick<ControlPlaneDb, "canAccessSession" | "getSession" | "isSessionOwner" | "isSessionDescendant" | "sessionHoldRecords">;
+
+/** Shared opaque-id read. Validate the query before authentication just as the owner API does. */
+export function lookupSessionById(db: LookupDb, principal: AuthPrincipal | null, id: unknown,
+  withQueue?: (session: SessionView) => SessionView): OwnerManagementResult {
+  if (typeof id !== "string" || !id.trim() || id.length > 256) return {status: 400, body: {error: "id must be one nonblank string of at most 256 characters"}};
+  if (!principal || !db.canAccessSession(principal, id)) return {status: 404, body: {error: "session not found"}};
+  const session = db.getSession(id);
+  return session ? {status: 200, body: {session: withSessionCommandPermissions(db, principal, withQueue?.(session) ?? session)}}
+    : {status: 404, body: {error: "session not found"}};
+}
 
 export function registerSessionLookupRoute(
   app: FastifyInstance,
@@ -18,14 +31,8 @@ export function registerSessionLookupRoute(
   // and repeats the normal fail-closed authorization check explicitly.
   app.get("/api/sessions/lookup/by-id", async (req, reply) => {
     const id = (req.query as { id?: unknown }).id;
-    if (typeof id !== "string" || !id.trim() || id.length > 256) {
-      return reply.code(400).send({ error: "id must be one nonblank string of at most 256 characters" });
-    }
     const principal = deps.requestPrincipal(req);
-    if (!principal || !deps.db.canAccessSession(principal, id)) {
-      return reply.code(404).send({ error: "session not found" });
-    }
-    const session = deps.db.getSession(id);
-    return session ? { session: withSessionCommandPermissions(deps.db, principal, deps.withQueue?.(session) ?? session) } : reply.code(404).send({ error: "session not found" });
+    const result = lookupSessionById(deps.db, principal, id, deps.withQueue);
+    return reply.code(result.status).send(result.body);
   });
 }

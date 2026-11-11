@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ControlPlaneDb } from "./db.js";
+import { OwnerManagement } from "./owner-management.js";
 import type { AuthPrincipal } from "./identity.js";
 import type { SessionsService } from "./sessions.js";
 import { scopeView } from "./campaign-issue-scope.js";
@@ -7,14 +8,15 @@ import { failureBody } from "./capability-refusal.js";
 
 export function registerCampaignIssueScopeRoutes(app: FastifyInstance, deps: {
   db: ControlPlaneDb; svc: SessionsService; requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
-}): void {
+}): OwnerManagement<AuthPrincipal> {
   const { db, svc, requestPrincipal } = deps;
+  const management = new OwnerManagement<AuthPrincipal>();
   // A runner-floor refusal keeps its versions beside the sentence (#3254).
   const respond = (reply: { code(n:number): {send(value:unknown):unknown} }, result: Parameters<typeof failureBody>[0] & {ok:boolean;status:number;data?:unknown}) =>
     reply.code(result.status).send(result.ok ? result.data : failureBody(result));
-app.get("/api/sessions/:id/campaign/issue-scope", async (req, reply) => {
+management.define("GET", "/api/sessions/:id/campaign/issue-scope", async (req, reply) => {
   const { id } = req.params as { id: string };
-  const principal = requestPrincipal(req);
+  const principal = req.principal;
   if (!principal || !db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
   const rootId = db.campaignRootForMember(id);
   if (!rootId || !db.canAccessSession(principal, rootId) || principal.kind === "agent" &&
@@ -46,4 +48,6 @@ app.post("/api/sessions/:id/campaign/issue-scope/proposals", async (req, reply) 
 });
 
 
+  management.registerHttp(app, requestPrincipal);
+  return management;
 }

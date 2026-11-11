@@ -115,3 +115,78 @@ with synthetic owner credentials and fixture runner transport. The inventory boo
 production composition in an isolated test process. This is **automated/mocked execution evidence**,
 not real OpenClaw model use, Discord delivery, SSH execution, remote TLS or hosting deployment.
 Those remain Phase 2b. No rendered application UI changes in this slice.
+
+## Status, Results and Read Status
+
+The follow-on status slice provides 41 exact route mappings through 38 status tools. The HTTP adapter and Assistant
+adapter execute the same explicit application handlers, with a current owner principal. They do
+not inject HTTP, fabricate a session credential, or borrow an Orchestrator's ancestry. HTTP auth
+and agent-only mutation routes retain their existing gates. The shared HTTP adapter preserves
+response headers, including `no-store`. MCP applies the same shared reader-specific projections.
+
+| Purpose | Operations |
+| --- | --- |
+| Status and History | `session_status`, `session_lookup`, `session_archive_list`, `session_usage`, `session_events`, `session_history`, `session_children`, `worktree_ops` |
+| Results | `result_ack`, `result_handoff`, `result_blocked_ack`, `result_missing_ack`, `result_retry_ack` |
+| Reminders | `reminder_get`, `reminder_set`, `reminder_remove` |
+| Review Reads | `review_list`, `review_get`, `review_findings`, `review_jobs`, `review_job`, `review_job_artifacts` |
+| Request Reads | `decision_list`, `decision_get`, `request_list` |
+| Campaign Reads | `campaign_status`, `campaign_decisions`, `campaign_items`, `campaign_item`, `campaign_recommendations`, `campaign_scope`, `campaign_behavior` |
+| Session-Protocol Campaign Reads | `campaign_get`, `campaign_work_items`, `campaign_work_item`, `campaign_review_jobs`, `campaign_review_job`, `campaign_review_report` |
+
+Use `sessionId` plus the exact route coordinate (`reviewSessionId`, `jobId`, `occurrenceId`,
+`itemId` or `continuationId`) where required. `session_lookup` accepts opaque IDs directly; a
+supplied `query.id` must match the authorized `sessionId`. Optional `query` carries the owner
+API's string-valued cursors, epochs and filters. Numeric paging values are strings in `query`.
+The shared handlers keep their limits and stale-cursor refusals. `session_events` exposes full
+authorized event pages; `session_messages` remains the bounded text-only projection. Preserve
+`cacheComplete`/epoch information and do not treat partial history as the full result.
+
+Mutations also take `commandId` and the owner's request fields in `payload`. `result_ack` and
+`result_handoff` require an exact `payload.revision`; acknowledgement affects only the granting
+owner's presentation state and grants no approval or execution authority. Handoff requires that
+owner to own the controlling Orchestrator, with both sessions covered by the current grant.
+For blocked results, supply `payload.targets` containing exact `parentTurnId`/`revision` pairs;
+missing-result and retry-exhaustion acknowledgements use their exact `continuationId`. The shared
+service refuses an absent or non-terminal delivery. These actions never resubmit background work.
+
+`reminder_set` uses the existing schedule kind, instant, time zone, wake policy and optimistic
+revision fields. A reminder belongs to the granting user, including in a shared organization;
+another user's reminder is never read or changed. For removal, put the exact `reminderId` and
+`revision` in `query`. Timed and Someday schedules use the same owner validation. All status-slice
+mutations honor the connection's destructive-confirmation policy, including reminder replacement.
+Receipt reconciliation precedes recomputing effects, so an already completed removal remains
+reconcilable after its reminder disappears. Accepted/uncertain commands are never redispatched.
+
+Archive project constraints apply inside the shared database query before pagination and facet
+computation. A campaign/request aggregate refuses before disclosure if any contributing root,
+descendant or retained attempt session is outside the current grant. Authority is checked again
+after asynchronous reads; narrowing a grant while history loads withholds the response. Campaign
+reads retain owner cost/forge visibility rules and do not create proposals, expand scope, resolve
+decisions, start reviews or act on approvals.
+
+`decision_get` also reads the exact stored status of automation proposals, Location switch requests
+and repository-addition requests. Their existing read adapters select the same session-bound
+workflow-decision row; the common service also performs proposal expiry and attaches verified
+merge-review evidence where relevant. No proposal-specific execution path is exposed. The full
+`campaign_get` projection includes installation-wide Machine/model capabilities and requires an
+all-project connection; selected-project connections use the scoped `campaign_status` and detail
+reads. Legacy review-ledger reads report their actual stored/unavailable state. They do not launch
+the retired reviewer bridge or supply a native fallback. Existing session-protocol HTTP read gates
+remain intact; the Assistant calls explicit shared read services as its current granting owner.
+
+The audit still contains **178 NOT-YET-SUPPORTED route candidates** on this local stack:
+93 session routes, 30 Machine routes, 9 automation routes, 38 Skill Library routes, 7 connection
+routes and 1 Project route. This count is not a count of unique missing tools. The exact remaining
+entries stay in `assistant-owner-capabilities.json`, and none was reclassified as an exclusion.
+They include the broader session work-management, Machine/workspace registration, connection,
+automation and Skill Library groups awaiting the owner's scope decision. Planned #4477 registrations remain unsupported until
+merged and reconciled. The strict acceptance gate therefore still fails intentionally.
+
+The production-composition scenario boots a fresh loopback control plane and synthetic database,
+then compares owner HTTP responses with Assistant reads and exercises actual MCP transport,
+acknowledgements, background recovery, reminders, confirmations, receipts and project restrictions.
+Fault-injection tests separately cover a grant narrowed during a read and an uncertain service
+response. These are **AUTOMATED/MOCKED** acceptance evidence at the runner/provider boundary.
+They do not establish REAL OpenClaw model use, Discord delivery, SSH execution, remote TLS or
+hosting deployment. No application UI is changed, so this slice has no screenshot claim.
