@@ -18,6 +18,7 @@ import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
  */
 
 import { DatabaseSync } from "node:sqlite";
+import { AssistantConnections } from "./assistant-connections.js";
 import { runnerRetryConnection } from "./runner-persistence.js";
 import { AUTOMATION_APPROVAL_TTL_MS } from "./automation-creation-lifecycle.js";
 import {
@@ -6025,6 +6026,7 @@ export class OccupiedUnreadLocationError extends Error {
 }
 
 export class ControlPlaneDb {
+  readonly assistantConnections: AssistantConnections;
   private readonly providerPublications: ProviderProfilePublicationStore;
   readonly campaignBudgets: CampaignBudgetLedger;
   readonly campaignReviewJobs: CampaignReviewJobs;
@@ -6070,6 +6072,7 @@ export class ControlPlaneDb {
   ) {
     this.db = db = runnerRetryConnection(db);
     if (!attached) {
+      AssistantConnections.install(db);
       CampaignBudgetLedger.install(db);
       CampaignReviewJobs.install(db);
       SessionReviewJobs.install(db);
@@ -6078,6 +6081,7 @@ export class ControlPlaneDb {
       PullRequestWatches.install(db);
       ReviewSettingsStore.install(db);
     }
+    this.assistantConnections = new AssistantConnections(db);
     this.providerPublications = new ProviderProfilePublicationStore(db, controlPlaneInstanceId);
     this.campaignBudgets = new CampaignBudgetLedger(db);
     this.campaignReviewJobs = new CampaignReviewJobs(db,this.campaignBudgets,(rootId)=>{
