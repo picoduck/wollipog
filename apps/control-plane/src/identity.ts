@@ -38,6 +38,12 @@ export interface AgentPrincipal {
 
 export type AuthPrincipal = HumanPrincipal | AgentPrincipal;
 
+/** Bounded runner-owned job/hold/decision coordinate, shared by owner and Assistant callers. */
+export function validParentControlCoordinate(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 &&
+    !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
 /** Preserve the authenticated principal when domain workflow records require a compact actor. */
 export function workflowActorForPrincipal(
   principal: AuthPrincipal | null,

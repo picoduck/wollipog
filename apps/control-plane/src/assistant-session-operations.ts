@@ -179,15 +179,18 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
     execute: (args, ctx) => {
       const receipt = receipts.get(ctx.connection.id, text(object(args), "commandId"));
       if (!receipt) return {receipt: null};
-      if (receipt.target.kind === "session" && !db.getSession(receipt.target.id)) {
+      if ((receipt.target.kind === "session" && !db.getSession(receipt.target.id)) ||
+          (receipt.target.kind === "project" && !db.getProject(receipt.target.id))) {
         // Reconcile only this connection's content-free command verdict after source deletion.
         // Original project access remains mandatory; never substitute a live result or transcript.
-        operations.authorize(ctx.connection.id, receipt.operation, receipt.target.projectId
-          ? {kind: "project", id: receipt.target.projectId, projectId: receipt.target.projectId}
-          : {kind: "receipt", id: receipt.operationId});
+        operations.authorize(ctx.connection.id, receipt.operation, receipt.target.kind === "project"
+          ? {kind: "receipt", id: receipt.operationId, projectId: receipt.target.id}
+          : receipt.target.projectId
+            ? {kind: "project", id: receipt.target.projectId, projectId: receipt.target.projectId}
+            : {kind: "receipt", id: receipt.operationId});
         return {resourceDeleted: true, receipt: {operationId: receipt.operationId, operation: receipt.operation,
           status: receipt.status, createdAt: receipt.createdAt, updatedAt: receipt.updatedAt},
-          recovery: "The source session was deleted. This is the retained command verdict only; do not replay the original command."};
+          recovery: "The source resource was deleted. This is the retained command verdict only; do not replay the original command."};
       }
       const target = receipt.target.kind === "session" ? sessionTarget({sessionId: receipt.target.id}) : receipt.target;
       operations.authorize(ctx.connection.id, receipt.operation, target);
