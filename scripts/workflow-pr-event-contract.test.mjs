@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import test from "node:test";
 import vm from "node:vm";
 
@@ -662,7 +664,8 @@ test("both Playwright installs time out and retry once after clearing the stalle
       "        continue-on-error: true",
       "        timeout-minutes: 6",
       "        env:",
-      `          SYSTEM_CACHE_HIT: \${{ steps.playwright-${browser}-packages-cache.outcome == 'success' && steps.playwright-${browser}-packages-cache.outputs.cache-hit || 'false' }}`,
+      `          SYSTEM_CACHE_HIT: \${{ steps.playwright-${browser}-packages-cache.outcome == 'success' && steps.playwright-${browser}-packages-cache.outputs.cache-matched-key != '' }}`,
+      `          SYSTEM_CACHE_FALLBACK: \${{ steps.playwright-${browser}-packages-resolve.outputs.key == '' }}`,
       `        run: bash scripts/playwright-system-packages.sh install ${browser} ${cacheHit === "!=" ? "browser" : "system"}`,
     ].join("\n"), `${name}: first attempt must be bounded and allow one retry`);
     assert.equal(steps[index + 1], [
@@ -699,6 +702,9 @@ test("Playwright system package caches pin exact keys, optional failures and ver
       `Verify ${label} Launch`, `Collect ${label} System Packages`, `Save ${label} System Packages`];
     const first = steps.findIndex((step) => step.startsWith(`${names[0]}\n`));
     assert.ok(first >= 0);
+    assert.match(steps.find((step) => step.startsWith("Resolve Playwright Version\n")),
+      /echo "image=\$\{ImageOS:\?\}-\$\{ImageVersion:\?\}" >> "\$GITHUB_OUTPUT"/,
+      "the image prefix must be available before apt can fail or time out");
     assert.deepEqual(steps.slice(first, first + names.length).map((step) => step.split("\n")[0]), names);
     const afterSetup = first + names.length;
     if (browser === "chromium") {
@@ -710,10 +716,12 @@ test("Playwright system package caches pin exact keys, optional failures and ver
       [names[0], `        id: ${id}-resolve`, "        continue-on-error: true", "        timeout-minutes: 2",
         "        env:", "          PLAYWRIGHT_VERSION: \${{ steps.playwright-version.outputs.version }}",
         `        run: bash scripts/playwright-system-packages.sh resolve ${browser}`],
-      [names[1], `        id: ${id}-cache`, `        if: steps.${id}-resolve.outputs.key != ''`,
+      [names[1], `        id: ${id}-cache`,
         "        continue-on-error: true", "        timeout-minutes: 2",
         `        uses: actions/cache/restore@${action} # v6.1.0`, "        with:",
-        `          path: ${path}`, `          key: ${key}`],
+        `          path: ${path}`,
+        `          key: \${{ steps.${id}-resolve.outputs.key || format('playwright-system-v1-${browser}-{0}-{1}-unresolved', steps.playwright-version.outputs.image, steps.playwright-version.outputs.version) }}`,
+        `          restore-keys: \${{ steps.${id}-resolve.outputs.key == '' && format('playwright-system-v1-${browser}-{0}-{1}-', steps.playwright-version.outputs.image, steps.playwright-version.outputs.version) || '' }}`],
       [names[6], "        timeout-minutes: 1", `        run: node scripts/verify-playwright-browser.mjs ${browser}`],
       [names[7], `        id: ${id}-collect`,
         `        if: steps.${id}-resolve.outputs.key != '' && (steps.${id}-cache.outcome != 'success' || steps.${id}-cache.outputs.cache-hit != 'true')`,
@@ -768,6 +776,9 @@ test("the unit-test job's video decoder install is cached, retries once, and eve
     "Save Isolated Video Decoder Packages",
   ];
   const first = steps.findIndex((step) => step.startsWith(`${names[0]}\n`));
+  assert.match(steps.find((step) => step.startsWith("Install Dependencies\n")),
+    /id: apt-cache-image[\s\S]*echo "image=\$\{ImageOS:\?\}-\$\{ImageVersion:\?\}" >> "\$GITHUB_OUTPUT"/,
+    "the image prefix must be available independently of apt resolution");
   assert.notEqual(first, -1, `${names[0]}: step is missing from the unit-test job`);
   const decoder = steps.slice(first, first + names.length);
   assert.deepEqual(decoder.map((step) => step.split("\n")[0]), names,
@@ -806,27 +817,32 @@ test("the unit-test job's video decoder install is cached, retries once, and eve
   assert.equal(restoreStep, [
     names[1],
     "        id: video-decoder-cache",
-    "        if: steps.video-decoder-packages.outputs.key != ''",
     "        continue-on-error: true",
     `        timeout-minutes: ${restoreBound}`,
     `        uses: actions/cache/restore@${cacheAction[1]} # ${cacheAction[2]}`,
     "        with:",
     `          path: ${path}`,
-    `          key: ${key}`,
-  ].join("\n"), `${names[1]}: must restore only an exact key match and never fail the job`);
+    "          key: ${{ steps.video-decoder-packages.outputs.key || format('video-decoder-{0}-unresolved', steps.apt-cache-image.outputs.image) }}",
+    "          restore-keys: ${{ steps.video-decoder-packages.outputs.key == '' && format('video-decoder-{0}-', steps.apt-cache-image.outputs.image) || '' }}",
+  ].join("\n"), `${names[1]}: must prefer an exact key and use an image prefix only when resolution failed`);
   assert.equal(steps[index], [
     name,
     "        id: video-decoder",
     "        continue-on-error: true",
     `        timeout-minutes: ${attempts[0]}`,
     "        env:",
-    "          CACHE_HIT: ${{ steps.video-decoder-cache.outputs.cache-hit }}",
+    "          CACHE_HIT: ${{ steps.video-decoder-cache.outcome == 'success' && steps.video-decoder-cache.outputs.cache-matched-key != '' }}",
+    "          CACHE_FALLBACK: ${{ steps.video-decoder-packages.outputs.key == '' }}",
     "        run: |",
+    "          sudo pkill -KILL -x apt-get || true",
     '          if [ "$CACHE_HIT" = true ]; then',
     `            sudo cp ${path}/*.deb /var/cache/apt/archives/`,
-    "            sudo apt-get install -y --no-install-recommends --no-download bubblewrap ffmpeg",
+    "            archives=()",
+    '            if [ "$CACHE_FALLBACK" = true ]; then',
+    "              archives=(~/.cache/video-decoder-packages/*.deb)",
+    "            fi",
+    '            sudo apt-get install -y --no-install-recommends --no-download --no-remove bubblewrap ffmpeg "${archives[@]}"',
     "          else",
-    "            sudo pkill -KILL -x apt-get || true",
     "            sudo apt-get update -qq",
     "            sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg",
     "          fi",
@@ -877,6 +893,48 @@ test("the unit-test job's video decoder install is cached, retries once, and eve
   // Every decoder step running to its bound, including both install attempts, must still leave the
   // Unit Tests step its whole bound, or a stall the retry recovers from cancels the unit tests anyway,
   // which is the failure #2328 removed. The next test checks that, with every other step's bound too.
+});
+
+test("video prefix-cache installs clear the resolver lock and reject incomplete archives without downloading", { skip: process.platform !== "linux" }, () => {
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
+  const step = ci.split("      - name: Install Isolated Video Decoder for Unit Tests\n")[1].split("      - name:")[0];
+  const shell = step.split("        run: |\n")[1].trimEnd().split("\n").map((line) => line.slice(10)).join("\n");
+  const dir = mkdtempSync(resolve(tmpdir(), "video-cache-test-"));
+  try {
+    const cache = resolve(dir, ".cache/video-decoder-packages");
+    mkdirSync(cache, { recursive: true });
+    const archive = resolve(cache, "ffmpeg_1_amd64.deb");
+    writeFileSync(archive, "inert cached archive");
+    writeFileSync(resolve(dir, "sudo"), `#!/bin/bash
+printf '%s\\n' "$*" >> "$CACHE_TEST_CALLS"
+if [[ "$1" == pkill ]]; then exit 1; fi
+if [[ "$1" == cp ]]; then exit 0; fi
+if [[ "$*" == *--no-download* ]]; then exit "$CACHE_TEST_OFFLINE_STATUS"; fi
+exit 0
+`, { mode: 0o755 });
+    for (const [cacheHit, cacheFallback] of [["true", "true"], ["true", "false"], ["false", "true"]]) {
+      for (const offlineStatus of ["0", "23"]) {
+        const callsPath = resolve(dir, "calls");
+        writeFileSync(callsPath, "");
+        const result = spawnSync("bash", ["-e", "-c", shell], { encoding: "utf8", env: {
+          ...process.env, HOME: dir, PATH: `${dir}:${process.env.PATH}`, CACHE_HIT: cacheHit, CACHE_FALLBACK: cacheFallback,
+          CACHE_TEST_CALLS: callsPath, CACHE_TEST_OFFLINE_STATUS: offlineStatus,
+        } });
+        assert.equal(result.error, undefined);
+        assert.equal(result.status, cacheHit === "true" ? Number(offlineStatus) : 0);
+        const calls = readFileSync(callsPath, "utf8").trim().split("\n");
+        assert.equal(calls[0], "pkill -KILL -x apt-get");
+        if (cacheHit === "true") {
+          assert.equal(calls.at(-1), `apt-get install -y --no-install-recommends --no-download --no-remove bubblewrap ffmpeg${cacheFallback === "true" ? ` ${archive}` : ""}`);
+          assert.ok(!calls.some((call) => call.startsWith("apt-get update")));
+        } else {
+          assert.deepEqual(calls.slice(1), ["apt-get update -qq", "apt-get install -y --no-install-recommends bubblewrap ffmpeg"]);
+        }
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("the unit and checks jobs name the step that exceeds its budget (#3770)", () => {

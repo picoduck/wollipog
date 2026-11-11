@@ -420,9 +420,18 @@ test.describe("with a touch pointer", () => {
     const about = toolbar.getByRole("button", { name: "About These Numbers" });
     await expect(range).toHaveText("30 Days, Daily");
     await expect(about).toHaveText("");
-    // One row, in this order; DejaVu on CI is wider than this host's face, so only the order and
-    // the row are pinned, not exact widths.
-    const boxes = await Promise.all([metric, range, about].map(async (locator) => (await locator.boundingBox())!));
+    // Initial usage loading can scroll the whole toolbar. Separate boundingBox calls can
+    // straddle that scroll and invent a second row. Wait for the overview and fonts, then
+    // take one synchronous snapshot of all controls in the same coordinate space.
+    await expect(page.locator(".usage-headline-value")).toBeVisible();
+    await toolbar.evaluate(() => document.fonts.ready.then(() => undefined));
+    const controls = metric.or(range).or(about);
+    await expect(controls).toHaveCount(3);
+    const boxes = await controls.evaluateAll((elements) => elements.map((element) => {
+      const { x, y, width, height } = element.getBoundingClientRect();
+      return { x, y, width, height };
+    }));
+    // DejaVu on CI is wider than this host's face, so pin the row and order, not exact widths.
     expect(new Set(boxes.map((box) => Math.round(box.y + box.height / 2))).size).toBe(1);
     expect(boxes[0]!.x + boxes[0]!.width).toBeLessThanOrEqual(boxes[1]!.x);
     expect(boxes[1]!.x + boxes[1]!.width).toBeLessThanOrEqual(boxes[2]!.x);
