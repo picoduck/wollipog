@@ -37,6 +37,9 @@ import {
 import { nextCronFire, parseCron, validateTimeZone } from "@wollipog/protocol/cron-schedule";
 import { automationCommandDigest, AutomationCommandOutbox } from "./automation-command-outbox.js";
 import { validAutomationCampaign, type ScheduledCampaignRuntime } from "./scheduled-campaigns.js";
+import { authorizeAssistantAutomation, scheduledAssistantOwner,
+  auditAssistantAutomationOccurrence, type AssistantAutomationOperation } from "./assistant-automation-authority.js";
+import { AssistantRefusal } from "./assistant-connections.js";
 import {
   automationTriggerBodySha256,
   newAutomationTriggerSecret,
@@ -68,7 +71,9 @@ function automationDeliveryWindowMs(schedule: AutomationSchedule, scheduledFor: 
 /** The sessions an automation creates are launched by its human creator (#3898), from its durable
  * audit trail and never its action payload or the execution's schedule, and only while no one else
  * has changed the definition or its triggers. Creation records them only while a member. */
-function automationLauncher(db: ControlPlaneDb, automation: AutomationSchedule): { launcherUserId: string } | undefined {
+function automationLauncher(db: ControlPlaneDb, automation: AutomationSchedule, executionId: string): { launcherUserId: string } | undefined {
+  const assistant = scheduledAssistantOwner(db, automation, executionId);
+  if (assistant) return {launcherUserId: assistant.owner.userId};
   const creator = db.automationSoleHumanAuthor(automation.automationId);
   return creator ? { launcherUserId: creator } : undefined;
 }
@@ -622,6 +627,7 @@ export class AutomationsService {
     automation: AutomationSchedule;
     executions: AutomationExecution[];
     events: AutomationAuditEvent[];
+    assistantAuthorizations: unknown[];
   }> {
     const automation = this.db.getAutomation(automationId);
     if (!automation) return fail("automation not found", 404);
@@ -635,14 +641,21 @@ export class AutomationsService {
         return { ...view, ...(campaignSessionId ? { campaignSessionId } : {}), ...(campaignStatus ? { campaignStatus } : {}) };
       }),
       events: this.db.listAutomationEvents(automationId),
+      assistantAuthorizations: this.db.raw().prepare("SELECT execution_id,connection_id,grant_revision,owner_user_id,operation,outcome,reason,created_at FROM assistant_automation_occurrence_audit WHERE automation_id=? ORDER BY id DESC LIMIT 100").all(automationId),
     });
   }
 
-  create(input: CreateAutomationRequest, actor: GovernanceActor, now = Date.now()): ServiceResult<AutomationSchedule> {
+  create(input: CreateAutomationRequest, actor: GovernanceActor, now = Date.now(),
+    assistantOperation: "auto_create" = "auto_create"): ServiceResult<AutomationSchedule> {
     const parsed = validateAutomationSpec(input);
     if (!parsed.ok) return fail(parsed.error ?? "automation request is malformed", parsed.status);
     const spec = pinAutomationSpec(this.db, parsed.data!);
-    const campaignError = this.campaignError(spec, actor);
+    const assistant = actor.kind === "agent" && actor.id?.startsWith("asst_");
+    if (assistant) {
+      try { authorizeAssistantAutomation(this.db, actor.id!, assistantOperation, spec); }
+      catch (error) { if (error instanceof AssistantRefusal) return fail(error.message, 403); throw error; }
+    }
+    const campaignError = this.campaignError(spec, actor, assistantOperation);
     if (campaignError) return fail(campaignError, 409);
     const capabilityError = automationCapabilityError(this.db, this.sessions, spec);
     if (capabilityError) return fail(capabilityError, 409);
@@ -652,7 +665,11 @@ export class AutomationsService {
     } catch (error) {
       return fail((error as Error).message);
     }
-    return ok(this.db.createAutomation({ automationId: shortId("auto_"), spec, nextFireAt, actor, now }), 201);
+    try {
+      const saved = this.db.createAutomation({ automationId: shortId("auto_"), spec, nextFireAt, actor, now,
+        ...(assistant ? {assistantAuthorization: {connectionId: actor.id!, operation: assistantOperation}} : {}) });
+      return ok(saved, 201);
+    } catch (error) { if (error instanceof AssistantRefusal) return fail(error.message, 403); throw error; }
   }
 
   update(
@@ -660,17 +677,23 @@ export class AutomationsService {
     input: UpdateAutomationRequest,
     actor: GovernanceActor,
     now = Date.now(),
+    assistantOperation: Exclude<AssistantAutomationOperation, "auto_create"> = "auto_update",
   ): ServiceResult<AutomationSchedule> {
     const previous = this.db.getAutomation(automationId);
     if (!previous) return fail("automation not found", 404);
     const parsed = validateAutomationSpec(input);
     if (!parsed.ok) return fail(parsed.error ?? "automation request is malformed", parsed.status);
     const spec = pinAutomationSpec(this.db, parsed.data!, previous);
+    const assistant = actor.kind === "agent" && actor.id?.startsWith("asst_");
+    if (assistant) {
+      try { authorizeAssistantAutomation(this.db, actor.id!, assistantOperation, spec); }
+      catch (error) { if (error instanceof AssistantRefusal) return fail(error.message, 403); throw error; }
+    }
     if (spec.enabled && spec.action.kind === "create_session" && spec.action.request.campaign &&
-        (actor.kind !== "human" || this.db.automationSoleHumanAuthor(automationId, true) !== actor.id)) {
+        !assistant && (actor.kind !== "human" || this.db.automationSoleHumanAuthor(automationId, true) !== actor.id)) {
       return fail("This schedule has another author or an untrusted edit. Recreate it to authorize a campaign with these settings.", 409);
     }
-    const campaignError = spec.enabled ? this.campaignError(spec, actor) : null;
+    const campaignError = spec.enabled ? this.campaignError(spec, actor, assistantOperation) : null;
     if (campaignError) return fail(campaignError, 409);
     // Always allow disabling so capability drift cannot trap a failing automation in the enabled state.
     const capabilityError = spec.enabled ? automationCapabilityError(this.db, this.sessions, spec) : null;
@@ -681,7 +704,11 @@ export class AutomationsService {
     } catch (error) {
       return fail((error as Error).message);
     }
-    return ok(this.db.updateAutomation({ automationId, spec, nextFireAt, actor, now })!);
+    try {
+      const saved = this.db.updateAutomation({ automationId, spec, nextFireAt, actor, now,
+        ...(assistant ? {assistantAuthorization: {connectionId: actor.id!, operation: assistantOperation}} : {}) })!;
+      return ok(saved);
+    } catch (error) { if (error instanceof AssistantRefusal) return fail(error.message, 403); throw error; }
   }
 
   delete(automationId: string, actor: GovernanceActor, now = Date.now()): ServiceResult<{ deleted: true }> {
@@ -689,9 +716,9 @@ export class AutomationsService {
     return ok({ deleted: true });
   }
 
-  private campaignError(spec: AutomationSpec, actor: GovernanceActor): string | null {
+  private campaignError(spec: AutomationSpec, actor: GovernanceActor, operation?: AssistantAutomationOperation): string | null {
     if (spec.action.kind !== "create_session" || !spec.action.request.campaign) return null;
-    return this.campaigns ? this.campaigns.validate(spec, actor) : "Scheduled campaigns are unavailable on this server";
+    return this.campaigns ? this.campaigns.validate(spec, actor, operation) : "Scheduled campaigns are unavailable on this server";
   }
 
   triggers(automationId: string): ServiceResult<{ triggers: AutomationTriggerView[] }> {
@@ -1802,6 +1829,24 @@ export class AutomationsService {
       this.executeCampaign(automation, execution, target, now, commandSnapshots);
       return;
     }
+    try {
+      if (scheduledAssistantOwner(this.db, automation, execution.executionId)) {
+        auditAssistantAutomationOccurrence(this.db, automation.automationId, execution.executionId, "authorized");
+      }
+    } catch (error) {
+      if (!(error instanceof AssistantRefusal)) throw error;
+      auditAssistantAutomationOccurrence(this.db, automation.automationId, execution.executionId, "refused", error.message);
+      const commands = this.db.listAutomationCommands(execution.executionId);
+      if (commands.length) {
+        for (const command of commands) if (command.state === "staged") this.db.rejectAutomationCommand(command.commandId, error.message, now);
+        this.reconcileExecution(execution.executionId, now);
+      } else {
+        const failed = this.db.settleAutomationExecution({executionId: execution.executionId, status: "failed",
+          actor: {kind: "system", id: `automation:${automation.automationId}`}, error: error.message, now});
+        if (failed) this.emit(automation, failed, "failed");
+      }
+      return;
+    }
     let result: ServiceResult<unknown>;
     let controlPlaneWorkflow: { runId: string; workflowInstanceId: string; status: string } | undefined;
     if (automation.action.kind === "create_session") {
@@ -1815,7 +1860,7 @@ export class AutomationsService {
           maxToolCalls: automation.limits.maxToolCalls,
         },
       }, this.deliveryOptions(automation, execution, { sessionId: `s_auto_${execution.executionId}` }, now, target, commandSnapshots),
-      undefined, false, false, false, automationLauncher(this.db, automation));
+      undefined, false, false, false, automationLauncher(this.db, automation, execution.executionId));
       result = created;
     } else if (automation.action.kind === "prompt_session") {
       const session = this.db.getSession(automation.action.sessionId)!;
@@ -1853,7 +1898,7 @@ export class AutomationsService {
         runId: `r_auto_${execution.executionId}`,
         workflowInstanceId: `wfi_auto_${execution.executionId}`,
         memberSessionId: (index) => `s_auto_${execution.executionId}_${String(index).padStart(3, "0")}`,
-      }, now, target, commandSnapshots), automationLauncher(this.db, automation));
+      }, now, target, commandSnapshots), automationLauncher(this.db, automation, execution.executionId));
       result = launched;
       if (launched.data) {
         controlPlaneWorkflow = {

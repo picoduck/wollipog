@@ -99,6 +99,7 @@ test("commands staged before Codex exec was retired are rejected instead of reac
   const sent: string[] = [];
   const db = {
     getRunner: () => ({ protocolVersion: PROTOCOL_VERSION }),
+    getAutomationExecution: () => null, // This isolated transport fixture has no persisted schedule.
     getSession: (id: string) => id === "legacy-exec" ? { id, driver: "codex" } : undefined,
     expireAutomationCommands: () => [],
     dueAutomationCommands: () => Object.entries(commands).map(([commandId, command]) => ({

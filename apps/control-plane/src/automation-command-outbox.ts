@@ -15,6 +15,8 @@ import {
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import { isTransientProviderError } from "./provider-error.js";
+import { scheduledAssistantOwner, auditAssistantAutomationOccurrence } from "./assistant-automation-authority.js";
+import { AssistantRefusal } from "./assistant-connections.js";
 
 type Logger = { warn: (message: string) => void };
 type Receipt = DurableSessionCommandResultMessage | DurableSessionCommandUpdateMessage;
@@ -89,6 +91,21 @@ export class AutomationCommandOutbox {
       if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, "automationCommandReceipts")) {
         this.failForCapabilityLoss(row, now);
         continue;
+      }
+      const execution = this.db.getAutomationExecution(row.executionId);
+      const schedule = execution && this.db.getAutomation(execution.automationId, true);
+      if (schedule) {
+        try { scheduledAssistantOwner(this.db, {...schedule, ...execution?.specSnapshot}, row.executionId); }
+        catch (error) {
+          if (!(error instanceof AssistantRefusal)) throw error;
+          auditAssistantAutomationOccurrence(this.db, schedule.automationId, row.executionId, "refused", error.message);
+          const possiblyDelivered = ["sent", "accepted", "started"].includes(row.state);
+          const applied = this.db.recordAutomationCommandReceipt({commandId: row.commandId, runnerId: row.runnerId,
+            sessionId: row.sessionId, state: possiblyDelivered ? "uncertain" : "rejected", revision: row.revision + 1,
+            error: error.message, now});
+          if (applied?.advanced) this.changed(row.executionId, now);
+          continue;
+        }
       }
       let command: DurableSessionCommand;
       try {
