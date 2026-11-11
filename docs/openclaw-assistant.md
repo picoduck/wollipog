@@ -96,6 +96,14 @@ must stay associated with the discovered installation and connection. A conversa
 explicit authorized connection binding; shared Discord membership does not grant Full Access.
 The full originating-conversation event/reply integration is tracked in #4467.
 
+Discord-originated commands correlate with work only through #4467's trusted ingress. At
+composition, that ingress supplies `hooks.authenticatedOrigin(receipt)` after authenticating the
+requester and binding the connection, operation, argument digest and resolved target. Model-supplied
+tool arguments, conversation IDs, requester IDs or JSON origin fields cannot establish this binding.
+Do not ask the model to copy an origin into a tool call as a substitute for authenticated ingress.
+Plain MCP commands remain valid without Discord correlation; the smoke test below deliberately
+uses this uncorrelated path and does not claim originating-conversation delivery evidence.
+
 ## Equivalent Remote Setup
 
 Use the same descriptor/profile and bearer header on the other machine, changing the endpoint to
