@@ -45,16 +45,19 @@ function harness() {
   return {db, owner, project, other, hub, svc, operations, receipts, issued, call, sent};
 }
 
-test("watch management uses shared durable registration, validates the pinned head and deduplicates", async () => {
+test("Assistant reads a genuine runtime watch but cannot replace it under a session identity", async () => {
   const h = harness();
   try {
     for (const tool of Object.values(ASSISTANT_SESSION_CONTENT_ROUTES)) assert.ok(h.operations.inventory().some(t => t.name === tool && tool.length <= 32));
     const args = {commandId: "watch", repository: "fixture/repo", number: 7, headSha: "a".repeat(40)};
-    assert.equal((await h.call("session_watch", args)).receipt.status, "succeeded");
+    const {commandId: _commandId, ...request} = args;
+    assert.equal(h.svc.requestPullRequestWatch("s", request).ok, true);
     assert.equal((await h.call("session_watch_get")).watch.headSha, args.headSha);
-    const before = h.sent.length; await h.call("session_watch", args); assert.equal(h.sent.length, before);
-    await assert.rejects(h.call("session_watch", {...args, commandId: "invalid", headSha: "abbreviated"}), /headSha/);
-    assert.equal(h.receipts.get(h.issued.connection.id, "invalid")!.status, "failed");
+    const before = h.sent.length, watch = h.db.pullRequestWatches.visibleFor("s");
+    await assert.rejects(h.call("session_watch", {...args, headSha: "b".repeat(40)}), /not registered/);
+    assert.equal(h.sent.length, before);
+    assert.deepEqual(h.db.pullRequestWatches.visibleFor("s"), watch);
+    assert.equal(h.receipts.get(h.issued.connection.id, "watch"), null);
   } finally {h.db.close();}
 });
 
@@ -74,21 +77,21 @@ test("terminal process management exposes metadata/open/close, confirms deletion
   } finally {h.db.close();}
 });
 
-test("wait reports check both sessions, preserve masked targets and do not pretend to block or poll", async () => {
+test("Assistant observes masked runtime waits but cannot manufacture progress or end their reports", async () => {
   const h = harness();
   try {
     h.db.updateSessionStatus("s", "running", Date.now());
     const report = {waitId: "wait_fixture0001", kind: "wait_session", state: "active", target: {kind: "session", sessionId: "target", states: ["idle"]}, elapsedMs: 0, remainingMs: 10000, intervalMs: 1000};
+    assert.equal(h.svc.reportSessionWait("s", report).ok, true);
+    const before = h.db.sessionWaits.views("s");
     h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: [h.project.id]});
-    await assert.rejects(h.call("session_wait_report", {commandId: "unseen", report}), /watched session not found/);
-    assert.equal(h.db.sessionWaits.views("s"), undefined);
-    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: "all"});
-    const started = await h.call("session_wait_report", {commandId: "start", report});
-    assert.equal(started.receipt.status, "succeeded");
-    assert.deepEqual(started.result.waits[0].target, {kind: "session", child: false});
-    assert.equal(h.sent.length, 0, "reporting telemetry neither polls a runner nor starts a watch");
-    await h.call("session_wait_report", {commandId: "end", report: {...report, state: "ended"}});
-    assert.equal((await h.call("session_watch_get")).waits.length, 0);
+    assert.deepEqual((await h.call("session_watch_get")).waits[0].target, {kind: "session", child: false});
+    await assert.rejects(h.call("session_wait_report", {commandId: "progress", report: {...report, elapsedMs: 1000}}), /not registered/);
+    await assert.rejects(h.call("session_wait_report", {commandId: "end", report: {...report, state: "ended"}}), /not registered/);
+    assert.deepEqual(h.db.sessionWaits.views("s"), before);
+    assert.equal(h.receipts.get(h.issued.connection.id, "progress"), null);
+    assert.equal(h.receipts.get(h.issued.connection.id, "end"), null);
+    assert.equal(h.sent.length, 0);
   } finally {h.db.close();}
 });
 

@@ -18,8 +18,6 @@ export const ASSISTANT_SESSION_CONTENT_ROUTES = {
   "GET /api/sessions/:id/shells": "shell_list",
   "POST /api/sessions/:id/shells": "shell_open",
   "DELETE /api/sessions/:id/shells/:shellId": "shell_close",
-  "POST /api/sessions/:id/pull-request-watch": "session_watch",
-  "POST /api/sessions/:id/waits": "session_wait_report",
   "GET /api/sessions/:id/side-chat": "side_chat_get",
   "POST /api/sessions/:id/side-chat": "side_chat_create",
   "GET /api/sessions/:id/prompt-history": "prompt_history",
@@ -63,12 +61,6 @@ export function registerAssistantSessionContent(operations: AssistantOperations,
     run: a => deps.shells.close(text(a, "sessionId"), text(a, "shellId"))});
   adapter.register({name: "session_watch_get", description: "Inspect a session's durable PR watch and classified wait state. Watched-session identities stay masked by the owner service.",
     run: a => ({status: 200, body: {watch: db.pullRequestWatches.visibleFor(text(a, "sessionId")), waits: db.sessionWaits.views(text(a, "sessionId")) ?? []}})});
-  adapter.register({name: "session_watch", description: "Park authorized work on an exact GitHub PR head using the durable owner/session watch service. Replaces a previous watch; never merges or grants merge approval.",
-    properties: {repository: str, number: {type: "integer", minimum: 1}, headSha: str}, required: ["repository", "number", "headSha"], mutate: true,
-    run: (a, ctx) => result(svc.requestPullRequestWatch(text(a, "sessionId"), {repository: a.repository, number: a.number, headSha: a.headSha}, id => accessible(ctx, "session_watch", id)))});
-  adapter.register({name: "session_wait_report", description: "Record an observed wait's progress or end through the shared service. Telemetry only: this does not block, poll, create a wake or prove a remote call ran. Report actual measured durations, never invented progress.",
-    properties: {report: {type: "object"}}, required: ["report"], mutate: true,
-    run: (a, ctx) => result(svc.reportSessionWait(text(a, "sessionId"), a.report, id => accessible(ctx, "session_wait_report", id)))});
   const sideAccess = (name: string, a: Record<string, unknown>, ctx: SessionManagementContext) => {
     const child = db.getSideChat(text(a, "sessionId"))?.childSessionId;
     if (child && !accessible(ctx, name, child)) throw new AssistantRefusal("The side-chat session is outside current access.");

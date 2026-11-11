@@ -74,9 +74,7 @@ with fixture runner transport. Real provider execution and hosting deployment re
 
 | Tool | Management Operation |
 | --- | --- |
-| `session_watch` | Register or replace the durable PR watch on an exact head; completion wakes the managed session. |
 | `session_watch_get` | Read current PR-watch and masked wait-health state. |
-| `session_wait_report` | Report observed wait progress/end through the shared wait registry. |
 | `shell_list`, `shell_open`, `shell_close` | Inspect, open or close terminal processes through the owner's registry/runner service. |
 | `side_chat_get`, `side_chat_create` | Read/create/reuse an auxiliary work session; check both sides of the relationship. |
 | `prompt_history`, `history_preview` | Read bounded recall or authoritative windows with exact epoch/cursor fences. |
@@ -86,12 +84,18 @@ with fixture runner transport. Real provider execution and hosting deployment re
 | `transcript_shares` | Inspect existing share metadata without returning bearer capabilities. |
 | `reminder_get`, `reminder_set`, `reminder_remove` | Manage only the granting owner's reminder row with existing optimistic revision rules. |
 
-Wait reporting is telemetry, not a blocking wait, a runner poll, a wake or proof that a remote
-operation ran. Only report actual observed durations/progress. Every progress report uses its own
-durable command ID; repeating that ID reconciles without inventing a fresh successful poll. The
-shared registry is deliberately ephemeral across control-plane restart. A real ongoing call reports
-fresh observations after reconnect rather than replaying old timing. PR watches are durable and
-use the runner's existing read-only forge watcher; they confer no merge authority.
+Wait reporting and PR-watch registration are runtime protocol writes requiring the matching
+session's own runner-issued credential. Owner HTTP refuses both with 403, and owner-equivalent
+Assistant grants cannot supply that session identity. The Assistant provides `session_watch_get`
+for authorized state inspection; it cannot replace a runtime watch, forge progress, end a wait
+or mint receipts under a session's identity. The genuine session uses its own `park_on_pull_request`,
+`wait_session` or `wait_pull_request` runtime tools. Never pass its credential into Assistant
+arguments or infer identity from a `sessionId`. These two exact routes are classified as
+`session_protocol`, with a guard preventing the classification from absorbing any owner route.
+
+The runtime wait registry is deliberately ephemeral across control-plane restart. A real ongoing
+call reports fresh observations after reconnect rather than replaying old timing. PR watches are
+durable and use the runner's existing read-only forge watcher; they confer no merge authority.
 
 Terminal inventory/open/close are management paths, including the supported Native TUI opening
 path and its existing provider-home/protocol gates. Raw terminal input, resize and output history

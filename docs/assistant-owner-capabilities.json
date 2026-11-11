@@ -843,8 +843,11 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/pull-request-watch": {
-    "tools": [
-      "session_watch"
+    "exclusion": "session_protocol",
+    "reason": "This exact route requires the matching session's own runner-issued credential; owner HTTP is refused with 403. It attests runtime watch ownership or observed wait progress, rather than an owner app-management capability. An owner Assistant grant cannot supply that identity.",
+    "remedy": "Use session_watch_get for the owner-facing read counterpart. The managed session itself uses park_on_pull_request or its real wait_session/wait_pull_request runtime tools with its own credential; never pass that credential to the Assistant or infer it from sessionId.",
+    "ownerTools": [
+      "session_watch_get"
     ]
   },
   "POST /api/sessions/:id/queue-hold/release": {
@@ -977,8 +980,11 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/waits": {
-    "tools": [
-      "session_wait_report"
+    "exclusion": "session_protocol",
+    "reason": "This exact route requires the matching session's own runner-issued credential; owner HTTP is refused with 403. It attests runtime watch ownership or observed wait progress, rather than an owner app-management capability. An owner Assistant grant cannot supply that identity.",
+    "remedy": "Use session_watch_get for the owner-facing read counterpart. The managed session itself uses park_on_pull_request or its real wait_session/wait_pull_request runtime tools with its own credential; never pass that credential to the Assistant or infer it from sessionId.",
+    "ownerTools": [
+      "session_watch_get"
     ]
   },
   "POST /api/sessions/:id/workflow-decisions": {
