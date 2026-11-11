@@ -1438,6 +1438,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 361: Disclose runner-enforced provider/command credential-home write separation (#3922).
   361,
   // v362 slot
+  // 362: Optional closed managed-profile directory diagnostic on provider-login start failures (#4437).
+  362,
   // v363 slot
   // v364 slot
   // v365 slot

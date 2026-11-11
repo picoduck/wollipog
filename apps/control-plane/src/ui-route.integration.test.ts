@@ -11,6 +11,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
   PROTOCOL_VERSION,
+  PROVIDER_LOGIN_START_FAILURE,
+  PROVIDER_LOGIN_START_UNCERTAIN,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   type ResourceScope,
@@ -775,6 +777,39 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     body: JSON.stringify({ provider: "claude", label: "Work" }),
   });
   assert.equal(ordinaryProviderLogin.status, 403, "an ordinary member cannot mutate Machine credentials");
+  const diagnostic = { code: "managed_profile_directory", component: "profiles_root", reason: "group_or_other_write" };
+  const uncertainDiagnostic = { code: "managed_profile_directory", component: "os_home",
+    reason: "may_have_changed", failureReason: "identity_changed" };
+  const startFailures = [
+    { peer: { error: "secret /private", directoryDiagnostic: { ...diagnostic, path: "/private", cause: "secret" } },
+      expected: { error: PROVIDER_LOGIN_START_FAILURE, directoryDiagnostic: diagnostic } },
+    { peer: { error: "secret /private", directoryDiagnostic: { ...uncertainDiagnostic, source: "secret" } },
+      expected: { error: PROVIDER_LOGIN_START_UNCERTAIN, directoryDiagnostic: uncertainDiagnostic } },
+    { peer: { error: "secret /private", directoryDiagnostic: { ...uncertainDiagnostic, failureReason: "may_have_changed" } },
+      expected: { error: PROVIDER_LOGIN_START_FAILURE } },
+    { peer: { error: "ENOENT /private secret" }, expected: { error: PROVIDER_LOGIN_START_FAILURE } },
+    { peer: {}, expected: { error: PROVIDER_LOGIN_START_FAILURE } },
+    { peer: { error: "Account label must contain 1 to 100 characters." },
+      expected: { error: "Account label must contain 1 to 100 characters." } },
+    { peer: { error: "Codex plugin inheritance could not identify a supported launcher form. Use a supported Codex launcher form; see docs/codex-plugin-launchers.md." },
+      expected: { error: "Codex plugin inheritance could not identify a supported launcher form. Use a supported Codex launcher form; see docs/codex-plugin-launchers.md." } },
+    { peer: { error: "Codex plugin inheritance could not read /private secret" },
+      expected: { error: PROVIDER_LOGIN_START_FAILURE } },
+  ];
+  for (const [index, fixture] of startFailures.entries()) {
+    const label = `Diagnostic Fixture ${index}`;
+    const pendingResponse = fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-logins`, ownerToken, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "claude", label }),
+    });
+    const command = await runnerInbox.take((message) => message.type === "start_provider_login");
+    assert.equal(command.label, label, "the earlier unauthorized request dispatched no runner command");
+    runner.send(JSON.stringify({ type: "provider_login_result", requestId: command.requestId,
+      action: "start", ok: false, ...fixture.peer }));
+    const response = await pendingResponse;
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), fixture.expected);
+  }
+  assert.equal(runnerInbox.has((message) => message.type === "start_provider_login"), false);
   const unknownAccountLogin = await fetchWithBearer(
     `${httpBase}/api/runners/runner-ui-route/provider-logins`,
     ownerToken,
