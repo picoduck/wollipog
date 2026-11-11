@@ -49,9 +49,12 @@ The fixture starts only a new temporary test control plane/database with a reser
 port and pricing-network access disabled, then closes it and removes its state. It never imports
 the hosting database or inherits its registered SSH Machines or unrelated sessions.
 
-Automation/skill coverage owned by #4477 remains a gap until those operations are actually
-registered on main. Its planned operation names are recorded without claiming delivery. Once it
-lands, merge main, verify its actual production registry and update those exact entries.
+Automation/skill PR #4477 is merged. Twenty exact owner-route entries now name its actual
+production operations, including the machine-version read and its policy-only projection through
+`skill_pin_get`. The production-composition test verifies these tools are registered alongside
+owner/session operations. Automation update, enable and pause share the owner update service.
+Remaining automation/skill candidates stay explicit gaps for the residual-parity work item;
+merging this dependency does not establish complete Skill Library or automation parity.
 
 ## Delivered Operations
 

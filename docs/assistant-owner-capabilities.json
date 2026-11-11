@@ -10,11 +10,9 @@
     "remedy": "Use the authenticated owner's connection event-subscription configuration path."
   },
   "DELETE /api/automations/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "auto_delete"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "DELETE /api/automations/:id/triggers/:triggerId": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -60,11 +58,9 @@
     "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
   },
   "DELETE /api/skill-assignments/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_unassign"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "DELETE /api/skill-drift/:id": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -82,11 +78,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "DELETE /api/skills/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_remove"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "GET /api/assistant-connections": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -107,18 +101,14 @@
     "gap": "Delivery-journal inspection has no equivalent authorized Assistant management read yet. This remains a result-delivery troubleshooting gap."
   },
   "GET /api/automations": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "auto_list"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "GET /api/automations/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "auto_get"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "GET /api/automations/:id/triggers": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -355,45 +345,37 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/skills": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_list"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "GET /api/skills/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_get"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "GET /api/skills/:id/built-in-version": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/skills/:id/machines/:runnerId/version": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "skill_pin_get"
+    ]
   },
   "GET /api/skills/:id/machines/:runnerId/version-policy": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_pin_get"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "GET /api/skills/:id/versions": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_versions"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "GET /api/skills/:id/versions/:versionId": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_version_get"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "PATCH /api/projects/:id": {
     "tools": [
@@ -412,11 +394,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PATCH /api/skill-assignments/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_assign_update"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "PATCH /api/skill-groups/:id/assignments/:assignmentId": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -460,11 +440,9 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/automations": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "auto_create"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "POST /api/automations/:id/triggers": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -999,11 +977,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skill-assignments": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_assign"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "POST /api/skill-drift/:id/import": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -1036,35 +1012,29 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skills": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_create"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "POST /api/skills/:id/built-in-version": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/skills/:id/restore": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_restore"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "POST /api/skills/:id/versions": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_version_add"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "PUT /api/automations/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
-      "auto_update"
-    ],
-    "dependency": "#4477"
+    "tools": [
+      "auto_update",
+      "auto_enable",
+      "auto_pause"
+    ]
   },
   "PUT /api/projects/:id/access-scope": {
     "exclusion": "human_authority",
@@ -1113,21 +1083,17 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PUT /api/skills/:id": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_update"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "PUT /api/skills/:id/git-auto-update": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PUT /api/skills/:id/machines/:runnerId/version": {
-    "gap": "Awaiting #4477 production registration; a sibling PR is not delivered coverage.",
-    "plannedTools": [
+    "tools": [
       "skill_pin_set"
-    ],
-    "dependency": "#4477"
+    ]
   },
   "PUT /api/skills/:id/recommendation": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
