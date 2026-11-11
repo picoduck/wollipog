@@ -8,6 +8,8 @@ export const NODE_TEST_GLOBS = [
   "packages/**/src/**/*.test.tsx", "scripts/**/*.test.mjs",
 ];
 export const profile = JSON.parse(readFileSync(new URL("../docs/ci-node-profile-2026-10-23.json", import.meta.url), "utf8"));
+// Scheduling costs can be refreshed independently of the fast/remaining membership profile.
+export const schedulingProfile = JSON.parse(readFileSync(new URL("../docs/ci-node-shard-profile-2026-11-10.json", import.meta.url), "utf8"));
 
 export async function discoverNodeTests(cwd = process.cwd()) {
   const files = new Set();
@@ -22,7 +24,7 @@ export async function discoverNodeTests(cwd = process.cwd()) {
 export function planNodeTests(files, suite = "full") {
   if (!["full", "fast", "remaining"].includes(suite)) throw new Error(`Unknown Node suite: ${suite}`);
   const fast = new Set(profile.fastFiles);
-  const costs = new Map(profile.slowestFiles.map(({ file, durationMs }) => [file, durationMs]));
+  const costs = new Map(schedulingProfile.slowestFiles.map(({ file, durationMs }) => [file, durationMs]));
   return [...new Set(files)].filter((file) => suite === "full" || (suite === "fast" ? fast.has(file) : !fast.has(file)))
     .sort((a, b) => (costs.get(b) ?? 0) - (costs.get(a) ?? 0) || a.localeCompare(b, "en"));
 }

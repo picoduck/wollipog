@@ -1,0 +1,261 @@
+{
+  "version": 1,
+  "source": {
+    "repository": "picoduck/wollipog",
+    "runId": 42915746591,
+    "attempt": 1,
+    "testedSha": "dabb5b8943f6981034ad09339830fe39416c1bb2",
+    "jobIds": [
+      130177707331,
+      130177707335,
+      130177707400
+    ],
+    "stepSeconds": [
+      1081,
+      842,
+      829
+    ]
+  },
+  "slowestFiles": [
+    {
+      "file": "apps/control-plane/src/sessions.test.ts",
+      "durationMs": 464647.94736
+    },
+    {
+      "file": "apps/control-plane/src/runner-channel.integration.test.ts",
+      "durationMs": 407581.709304
+    },
+    {
+      "file": "apps/control-plane/src/prepared-media-session-delegated.integration.test.ts",
+      "durationMs": 396747.660164
+    },
+    {
+      "file": "apps/control-plane/src/prepared-media-session-integration.test.ts",
+      "durationMs": 258692.1786140001
+    },
+    {
+      "file": "apps/runner/src/provider-home-lease-checkpoint.test.ts",
+      "durationMs": 230163.07899100005
+    },
+    {
+      "file": "apps/control-plane/src/full-control-launch-route.test.ts",
+      "durationMs": 223223.46878799985
+    },
+    {
+      "file": "apps/runner/src/session-manager-location-switch-setup.test.ts",
+      "durationMs": 198135.34922999996
+    },
+    {
+      "file": "apps/control-plane/src/campaign-issue-authority.test.ts",
+      "durationMs": 165185.69747399996
+    },
+    {
+      "file": "apps/control-plane/src/db.test.ts",
+      "durationMs": 143270.67090400006
+    },
+    {
+      "file": "apps/web/src/components/UsageView.dom.test.tsx",
+      "durationMs": 125942.999526
+    },
+    {
+      "file": "apps/runner/src/worktree.test.ts",
+      "durationMs": 121661.33137799999
+    },
+    {
+      "file": "apps/runner/src/control-plane-runner-pipeline.integration.test.ts",
+      "durationMs": 101042.27186099997
+    },
+    {
+      "file": "scripts/workflow-ci-routing.test.mjs",
+      "durationMs": 86903.93866699998
+    },
+    {
+      "file": "apps/runner/src/provider-home-retirement-state.test.ts",
+      "durationMs": 84707.122202
+    },
+    {
+      "file": "apps/control-plane/src/campaign-recovery.integration.test.ts",
+      "durationMs": 76161.34934799999
+    },
+    {
+      "file": "apps/runner/src/provider-home-lease.test.ts",
+      "durationMs": 69615.28070199999
+    },
+    {
+      "file": "apps/control-plane/src/archived-history-retention.size.test.ts",
+      "durationMs": 67058.36912
+    },
+    {
+      "file": "apps/control-plane/src/registration-reconciliation.test.ts",
+      "durationMs": 61577.32720500002
+    },
+    {
+      "file": "apps/runner/src/policy-hook-mode-switch.integration.test.ts",
+      "durationMs": 60361.942469
+    },
+    {
+      "file": "apps/control-plane/src/review-sessions.test.ts",
+      "durationMs": 59993.66558399996
+    },
+    {
+      "file": "apps/control-plane/src/video-evidence-preparation.test.ts",
+      "durationMs": 58892.618602
+    },
+    {
+      "file": "apps/runner/src/provider-home-lease-async.test.ts",
+      "durationMs": 58498.443483
+    },
+    {
+      "file": "apps/control-plane/src/automations.test.ts",
+      "durationMs": 53849.78735300002
+    },
+    {
+      "file": "apps/control-plane/src/session-tool-call-counter.test.ts",
+      "durationMs": 53094.8386
+    },
+    {
+      "file": "apps/runner/src/provider-home-lease-heartbeat.test.ts",
+      "durationMs": 44748.842286
+    },
+    {
+      "file": "apps/control-plane/src/claude-cost-recovery.test.ts",
+      "durationMs": 44527.99090199998
+    },
+    {
+      "file": "apps/runner/src/provider-home-lease-portable.test.ts",
+      "durationMs": 42402.911684000006
+    },
+    {
+      "file": "apps/control-plane/src/campaign-budget.test.ts",
+      "durationMs": 41604.57645799999
+    },
+    {
+      "file": "apps/runner/src/provider-home-lease-io.test.ts",
+      "durationMs": 36908.15894
+    },
+    {
+      "file": "scripts/browser-shards.test.mjs",
+      "durationMs": 34557.856658000004
+    },
+    {
+      "file": "apps/control-plane/src/wal-checkpointer.test.ts",
+      "durationMs": 33621.796190999994
+    },
+    {
+      "file": "scripts/workflow-ci-aggregation.test.mjs",
+      "durationMs": 33436.288337000005
+    },
+    {
+      "file": "apps/runner/src/session-manager-resume.test.ts",
+      "durationMs": 32210.942870000006
+    },
+    {
+      "file": "apps/runner/src/wsl-skills-helper.test.ts",
+      "durationMs": 30940.976013
+    },
+    {
+      "file": "apps/web/src/components/SessionDetail.transcript-recovery.dom.test.tsx",
+      "durationMs": 28607.718875000006
+    },
+    {
+      "file": "apps/control-plane/src/campaign-issue-scope-seed.test.ts",
+      "durationMs": 27124.529050999994
+    },
+    {
+      "file": "apps/control-plane/src/campaign-merge-dependencies.integration.test.ts",
+      "durationMs": 25853.35025899999
+    },
+    {
+      "file": "apps/web/src/components/SessionDetail.composer-focus.dom.test.tsx",
+      "durationMs": 25514.432425000003
+    },
+    {
+      "file": "apps/runner/src/codex-probe-boundary.test.ts",
+      "durationMs": 25268.925187999997
+    },
+    {
+      "file": "apps/control-plane/src/archived-history-retention.test.ts",
+      "durationMs": 25157.831919
+    },
+    {
+      "file": "apps/runner/src/provider-home-lease-upgrade.test.ts",
+      "durationMs": 24801.665825999997
+    },
+    {
+      "file": "apps/control-plane/src/campaign-authority.test.ts",
+      "durationMs": 24707.244723999996
+    },
+    {
+      "file": "apps/web/src/components/CampaignStatusPanel.dom.test.tsx",
+      "durationMs": 24072.212147
+    },
+    {
+      "file": "apps/control-plane/src/full-control-standing-response.integration.test.ts",
+      "durationMs": 23818.475480999998
+    },
+    {
+      "file": "apps/runner/src/session-manager-campaign-slot-proof.test.ts",
+      "durationMs": 23781.356033
+    },
+    {
+      "file": "apps/web/src/stylesheet-guardrails.test.ts",
+      "durationMs": 23582.979564999994
+    },
+    {
+      "file": "scripts/ci-pr-browser-inventory.test.mjs",
+      "durationMs": 23562.71408
+    },
+    {
+      "file": "apps/control-plane/src/campaign-follow-up-limit-route.integration.test.ts",
+      "durationMs": 23473.118036
+    },
+    {
+      "file": "apps/web/src/desktop-bundle.test.ts",
+      "durationMs": 22753.693957
+    },
+    {
+      "file": "apps/runner/src/policy-hook-credential-reregistration.integration.test.ts",
+      "durationMs": 22031.305529999998
+    },
+    {
+      "file": "apps/control-plane/src/instance-route.integration.test.ts",
+      "durationMs": 20852.592502
+    },
+    {
+      "file": "apps/control-plane/src/campaign-handoffs.integration.test.ts",
+      "durationMs": 20720.152603999995
+    },
+    {
+      "file": "scripts/harness-assumptions.test.mjs",
+      "durationMs": 20256.667476000006
+    },
+    {
+      "file": "apps/control-plane/src/credential-screen.test.ts",
+      "durationMs": 19739.576267000004
+    },
+    {
+      "file": "apps/web/src/components/InboxView.dom.test.tsx",
+      "durationMs": 18736.832091999997
+    },
+    {
+      "file": "apps/control-plane/src/session-list.test.ts",
+      "durationMs": 18443.064408999995
+    },
+    {
+      "file": "apps/web/src/components/AutomationsView.dom.test.tsx",
+      "durationMs": 18422.16222
+    },
+    {
+      "file": "apps/control-plane/src/decision-kinds-migrated.test.ts",
+      "durationMs": 17745.312885999996
+    },
+    {
+      "file": "apps/runner/src/wsl-skill-adoption.test.ts",
+      "durationMs": 17745.031132
+    },
+    {
+      "file": "apps/runner/src/session-store-lock.test.ts",
+      "durationMs": 16554.68371
+    }
+  ]
+}

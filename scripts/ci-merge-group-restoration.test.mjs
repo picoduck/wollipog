@@ -24,7 +24,7 @@ function fullRun(id, createdAt = "2026-10-27T13:00:00Z", headSha = "d".repeat(40
   const jobs = [
     job("PR Suite Routing", [], "skipped"),
     job("Typecheck & Bundles", CHECK_STEPS.map((name) => step(name))),
-    ...[1, 2, 3].map((shard) => job(`Unit Tests (${shard})`, [step("Unit Tests")])),
+    ...[1, 2, 3, 4].map((shard) => job(`Unit Tests (${shard})`, [step("Unit Tests")])),
     ...Array.from({ length: 10 }, (_, i) => i + 1).map((shard) => job(`Browser End-to-End Tests (${shard})`, [step("Remote-Instance Browser End-to-End Tests"),
       step("Rendered Production Browser Smoke", shard === 1 ? "success" : "skipped")])),
     job("WebKit End-to-End Tests", [step("WebKit Browser End-to-End Tests")]),
@@ -46,8 +46,8 @@ const edit = (fixture, change) => {
 const named = (fixture, name) => fixture.listing.jobs.find((job) => job.name === name);
 
 test("the verifier's job inventory is the rolling full inventory and its steps exist in ci.yml", () => {
-  assert.equal(FULL_JOBS.length, 19);
-  assert.deepEqual(FULL_JOBS.filter((name) => name.startsWith("Unit Tests")), ["Unit Tests (1)", "Unit Tests (2)", "Unit Tests (3)"]);
+  assert.equal(FULL_JOBS.length, 20);
+  assert.deepEqual(FULL_JOBS.filter((name) => name.startsWith("Unit Tests")), ["Unit Tests (1)", "Unit Tests (2)", "Unit Tests (3)", "Unit Tests (4)"]);
   assert.ok(FULL_JOBS.includes("Delegated Pipeline Recovery"));
   assert.ok(FULL_JOBS.includes(REQUIRED_CONTEXT));
   const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
@@ -90,7 +90,7 @@ test("reduced, partial, unfinished, gate-active or mis-identified runs are never
     refuse((copy) => { named(copy, "Typecheck & Bundles").steps.find((item) => item.name === name).conclusion = "skipped"; },
       `step-not-successful:Typecheck & Bundles/${name}`);
   }
-  for (const shard of [1, 2, 3]) {
+  for (const shard of [1, 2, 3, 4]) {
     refuse((copy) => { named(copy, `Unit Tests (${shard})`).steps[0].conclusion = "skipped"; },
       `step-not-successful:Unit Tests (${shard})/Unit Tests`);
     refuse((copy) => { copy.listing.jobs = copy.listing.jobs.filter((job) => job.name !== `Unit Tests (${shard})`); },
