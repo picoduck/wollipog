@@ -94,7 +94,7 @@ test("protected Claude namespace retains tasks across provider exits and reaps d
     const sessionId = "11111111-1111-4111-8111-111111111111";
     const key = claudeProjectPathKey(worktree);
     const providerTask = `/tmp/claude/${key}/${sessionId}/tasks/task-1.output`;
-    const script = `require('node:child_process').spawn('/bin/sh',['-c',${JSON.stringify(`sleep .2; mkdir -p /tmp/claude/${key}/${sessionId}/tasks; echo done > ${providerTask}`)}],{detached:true,stdio:'ignore'}).unref(); process.stdout.write('first')`;
+    const script = `require('node:child_process').spawn('/bin/sh',['-c',${JSON.stringify(`sleep .2; mkdir -p /tmp/claude/${key}/${sessionId}/tasks; echo done > ${providerTask}.tmp; mv ${providerTask}.tmp ${providerTask}`)}],{detached:true,stdio:'ignore'}).unref(); process.stdout.write('first')`;
     const first = launch(owner, script);
     const firstPid = first.pid;
     const firstResult = await closed(first);

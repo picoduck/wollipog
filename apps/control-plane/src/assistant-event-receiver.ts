@@ -79,6 +79,7 @@ export function registerAssistantEventReceiver(app: FastifyInstance, config: {
   /** Reload owner configuration on every attempt so rotation/revocation takes effect. */
   currentSecret(): string | null;
   inbox: AssistantEventInbox;
+  diagnostic?(fields: {reason: string; durationMs: number; duplicate?: boolean}): void;
 }): void {
   app.addContentTypeParser(WOLLIPOG_OUTBOUND_EVENT_MEDIA_TYPE, {parseAs: "buffer", bodyLimit: 16 * 1024}, (_req, bytes, done) => done(null, bytes));
   app.post("/wollipog/events", {bodyLimit: 16 * 1024}, async (req, reply) => {
@@ -88,6 +89,8 @@ export function registerAssistantEventReceiver(app: FastifyInstance, config: {
         reason, durationMs: Math.max(0, Date.now() - startedAt),
         ...(eventId ? {eventFingerprint: createHash("sha256").update(eventId).digest("hex")} : {}),
         ...(duplicate === undefined ? {} : {duplicate})};
+      try {config.diagnostic?.({reason, durationMs: fields.durationMs, ...(duplicate === undefined ? {} : {duplicate})});}
+      catch { /* A diagnostic sink cannot change durable acceptance or signature refusal. */ }
       if (reason === "accepted") req.log.info(fields, "Assistant event accepted");
       else req.log.warn(fields, "Assistant event refused");
     };

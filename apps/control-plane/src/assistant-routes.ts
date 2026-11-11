@@ -1,9 +1,26 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { extractBearer } from "./auth.js";
-import type { HumanPrincipal } from "./identity.js";
+import { PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
-import { assistantGrant, AssistantOperations, AssistantRefusal } from "./assistant-connections.js";
+import { assistantGrant, AssistantOperations, AssistantRefusal, AssistantConflict } from "./assistant-connections.js";
 import {ManagementUncertainOutcome} from "./assistant-management-command.js";
+
+/** Resolve current labels only after owner access checks. Removed/inaccessible targets reveal no
+ * current title, and malformed historical metadata is never displayed as raw JSON. */
+export function assistantActivityTargetLabel(db: ControlPlaneDb, owner: HumanPrincipal, raw: string): string {
+  let target: {kind?: unknown; id?: unknown};
+  try { target = JSON.parse(raw); } catch { return "Target Unavailable"; }
+  if (!target || typeof target.kind !== "string" || typeof target.id !== "string") return "Target Unavailable";
+  if (target.kind === "control_plane") return target.id === db.instanceId() ? `Control Plane · ${db.assistantConnections.installationName()}` : "Control Plane (Unavailable)";
+  if (target.kind === "session") return db.canAccessSession(owner, target.id) ? `Session · ${db.getSession(target.id)?.title ?? "Untitled Session"}` : "Session (Unavailable)";
+  if (target.kind === "project") return db.canAccessProject(owner, target.id) ? `Project · ${db.getProject(target.id)?.name ?? "Unnamed Project"}` : "Project (Unavailable)";
+  if (target.kind === "runner") {
+    if (!db.canAccessRunner(owner, target.id)) return "Runner (Unavailable)";
+    const runner = db.getRunner(target.id);
+    return runner ? `Runner · ${runner.displayName ?? runner.hostname}` : "Runner (Unavailable)";
+  }
+  return "Target Unavailable";
+}
 
 export function createAssistantOperations(db: ControlPlaneDb): AssistantOperations {
   const operations = new AssistantOperations(db.assistantConnections, (user, organization) => db.operatingHumanPrincipal(user, organization));
@@ -35,7 +52,22 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
   app.get("/api/assistant-connections", async (req, reply) => {
     const principal = owner(req);
     if (!principal) return reply.code(403).send({ error: "Only an organization owner can manage Assistant Connections." });
-    return { connections: store.list(principal) };
+    return { connections: store.list(principal),
+      installation: { id: deps.db.instanceId(), name: store.installationName(), canRename: principal.organizationId === PERSONAL_ORGANIZATION_ID },
+      operations: deps.operations.inventory(),
+      projects: deps.db.listProjectsForPrincipal(principal).map(({id, name}) => ({id, name})),
+    };
+  });
+  app.post("/api/assistant-connections/installation", async (req, reply) => {
+    const principal = owner(req);
+    if (!principal || principal.organizationId !== PERSONAL_ORGANIZATION_ID) return reply.code(403).send({ error: "Only an owner of the installation's personal organization can rename this control plane." });
+    try {
+      store.renameInstallation((req.body as {name?: unknown} | null)?.name);
+      return { id: deps.db.instanceId(), name: store.installationName() };
+    } catch (error) {
+      if (error instanceof AssistantRefusal) return reply.code(400).send({error: error.message});
+      throw error;
+    }
   });
   app.post("/api/assistant-connections", async (req, reply) => {
     const principal = owner(req);
@@ -57,8 +89,14 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
       if (!principal || !connection || connection.ownerUserId !== principal.userId || connection.organizationId !== principal.organizationId) return reply.code(404).send({ error: "Assistant connection not found for this owner." });
       reply.header("cache-control", "no-store");
       try {
-        if (action === "activity") return { activity: store.activity(id) };
-        if (action === "configure") store.configure(id, (req.body as {grant?: unknown} | null)?.grant);
+        if (action === "activity") return { activity: store.activity(id).map(row => ({...row,
+          assistant: {id: connection.id, name: connection.name},
+          targetLabel: assistantActivityTargetLabel(deps.db, principal, row.target_json),
+        })) };
+        if (action === "configure") {
+          const body = req.body as {grant?: unknown; name?: unknown; expectedRevision?: number} | null;
+          store.configure(id, body?.grant, body?.name, body?.expectedRevision);
+        }
         if (action === "revoke") store.revoke(id);
         if (action === "rotate") {
           if (connection.revoked) throw new AssistantRefusal("This connection is revoked. Create a new connection instead.");
@@ -67,6 +105,7 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
         }
         return { connection: store.get(id) };
       } catch (error) {
+        if (error instanceof AssistantConflict) return reply.code(409).send({error: error.message});
         if (error instanceof AssistantRefusal) return reply.code(400).send({ error: error.message });
         throw error;
       }

@@ -1,11 +1,17 @@
 # Assistant Work and Conversation Events
 
-Refs #4467. This foundation extends the [Assistant connection contract](assistant-connections.md)
-and [signed outbound transport](outbound-events.md). It implements protected correlation records,
-tracked-work wakeups, current-authority checks, state reconciliation, an external receiver library,
-and reply receipt primitives. It does not claim a configured OpenClaw/Discord installation or a
-complete Discord sender. The production connector and session-management integration must use the
-interfaces below; library tests do not establish their deployment or real Discord permissions.
+The complete trusted connector composition and the opt-in OpenClaw production status sender are
+documented in [OpenClaw Native Discord Ingress](../integrations/openclaw-discord/README.md#durable-work-updates).
+The sender runs inside the isolated OpenClaw profile and retains Discord credentials there.
+Its bounded reconciliation, real-message readback and live permission checks are covered by
+automated integration tests. Real Discord/Gateway/account authentication remains an owner setup
+and acceptance requirement; no fixture result establishes it.
+
+Refs #4467. This implementation extends the [Assistant connection contract](assistant-connections.md)
+and [signed outbound transport](outbound-events.md). It provides protected correlation, trusted
+command composition, tracked-work wakeups, current-authority checks, reconciliation, the signed
+receiver and an opt-in status sender. Automated tests establish code behavior, while deployment,
+configured OpenClaw/Discord execution and real Discord permissions remain unverified.
 
 ## Ownership and Conversation Bindings
 
@@ -33,6 +39,59 @@ and mention policy, then match the owner-issued requester binding. Model-supplie
 are not trusted ingress identity. Never put owner credentials into a shared-channel agent context.
 The work-tracking MCP tools grant no session mutation authority.
 
+## Trusted Discord Command Ingress
+
+The default control-plane composition uses `createAssistantManagement(db,svc)` from
+`assistant-composition.ts`. It creates one operation registry and wires
+`AssistantDiscordIngress.authenticatedOrigin` into the real session-command registration. The
+combined tests use this same composition, not a test-only callback or mock work store.
+
+The trusted OpenClaw connector uses `POST /assistant/discord/commands` for correlated launch and
+follow-up commands. It presents BOTH a current Assistant bearer and a separate
+`X-Wollipog-Connector-Token` header. The latter is a capability for exactly one owner-issued
+destination/requester binding and an explicit subset of `session_launch` and `session_prompt`.
+The separate `work_updates` capability authorizes binding-scoped work reads and reply receipts;
+it is never inferred from a command capability or exposed as a model tool.
+Only the connection owner can issue it through
+`POST /api/assistant-connections/:id/discord-connectors` with `{bindingId,operations}`. The response
+shows the token once; only its hash is stored. Revoke it with
+`DELETE /api/assistant-connections/:id/discord-connectors/:connectorId`. Revoking the underlying
+binding or connection also invalidates it. Tests issue credentials only in isolated fixture
+databases; this work does not issue live credentials against the running installation.
+
+The command body is `{operation,arguments,workId}`. The server supplies `workOriginId` to the session
+operation from the authenticated envelope, rejecting a conflicting value. Requester identity and
+destination are never accepted in this body. `AsyncLocalStorage` carries an immutable expected
+connection, operation, command ID, canonical argument digest, resolved target and origin into the
+synchronous receipt callback. Each field must match; a changed context throws instead of falling
+back to an uncorrelated command. The callback also rechecks the live connector/binding and the
+connection's current grant/credential. Receipt reservation and work-origin reservation commit in
+one savepoint; creation attaches work before `session.created` is staged and before runner IO.
+
+The connector must authenticate native Discord ingress and compare its real account, author and
+conversation with the selected binding BEFORE using this capability. The control plane verifies
+the owner-issued capability, not Discord's Gateway event independently. Keep connector tokens and
+the broad Assistant bearer in trusted runtime code outside model arguments, prompts and tool
+configuration. Never offer the generic owner MCP connection directly to untrusted/shared Discord
+contexts as a substitute for this ingress; that would bypass requester binding checks.
+
+Use stable command IDs and reconcile uncertain outcomes through
+`GET /assistant/discord/commands/:commandId` with both credentials. Receipt reads recheck the
+binding, operation and current source project, and refuse another binding's command. Replays after
+restart return the retained receipt without dispatch. A follow-up may use the same work ID/session/
+binding with a new command ID; it adds a command-origin record without creating a second work
+correlation or silently changing the conversation. The original launch operation remains the anchor.
+
+This correlated ingress currently supports launch/prompt only and bounds request bodies to 64 KiB.
+Other Assistant management operations remain in the general authorized MCP inventory, but a shared
+Discord deployment must not expose them until its trusted requester-aware adapter covers them too.
+This is an explicit remaining integration limitation, not evidence that a generic MCP bearer
+authenticates Discord users. The [native Discord command component](../integrations/openclaw-discord/README.md)
+now selects the capability from host-authenticated sender/account/conversation facts and calls this
+ingress without exposing credentials to model tools. #4466 links its isolated-profile setup; generic
+MCP setup alone does not supply that context. Hook admission and Discord reply receipt integration
+below remain separate from accepting a work command.
+
 ## Work and Session Command Integration
 
 `db.assistantWork` owns the SQLite records. Register its operations on the single Assistant registry
@@ -42,8 +101,8 @@ with `registerAssistantWorkOperations(db, assistantOperations)` before listening
 - `assistant_work_read`: `{sessionId, workId}` returns current work and supported resolution paths.
 - `assistant_work_reconcile`: `{projectId?, after?, limit?}` returns `{items,nextAfter}`.
 
-Work IDs are client-generated canonical identifiers, unique per connection. Reusing an ID with
-different session, binding or operation correlation is refused. Each result includes installation
+Work IDs are client-generated canonical identifiers, unique per connection. Tracking cannot replace
+an existing work's session, binding or original operation. Each result includes installation
 and connection IDs. Use those IDs to distinguish named installations, never names or MCP prefixes.
 The read grant is also required when tracking work; project grants and owner resource access are
 checked from current session placement. Work snapshots contain no results or destination coordinates.
@@ -64,6 +123,8 @@ For #4464's receipt service:
    in the same transaction. Do not expose this internal input directly as an unauthenticated request
    field. For an existing session, use `attachAcceptedOrigin(origin,sessionId)` in the reservation
    transaction before dispatching the follow-up.
+   The current default composition and session services now implement this seam together. The
+   authenticated callback is supplied by trusted ingress; it is absent for ordinary MCP calls.
 4. Recheck the actual operation and destination binding before runner dispatch. This origin helper
    does not replace command-service authorization, credential rotation checks, or runner receipts.
 5. Reconcile an uncertain launch through its command receipt. Do not allocate another work or
@@ -122,10 +183,11 @@ same attention occurrence does not produce an additional wake through each produ
 
 ## Local and Remote Transport
 
-The narrow receiver is in `apps/control-plane/src/assistant-event-receiver.ts`. Run it beside the
-external Assistant in a separately authorized process with its own protected SQLite database, not
-inside a hosted agent session or by restarting the hosting stack. This foundation exports library
-composition; it does not install or start a daemon.
+The narrow receiver is in `apps/control-plane/src/assistant-event-receiver.ts`. The opt-in native
+service bundles it with `assistant-discord-bridge.ts` and runs inside the isolated OpenClaw profile,
+using its own protected SQLite database. It requires explicit owner configuration and starts no
+process in a hosted agent session or hosting stack. Standalone library consumers can also compose
+the receiver below; installation, reachability and TLS remain operator responsibilities.
 
 Create a Fastify instance, install `AssistantEventInbox` on that database, then register
 `registerAssistantEventReceiver` with the exact installation, connection, subscription, current
@@ -151,7 +213,7 @@ their original restrictions. This configuration adds no inbound reachability or 
 
 ## Receiver, Hook and Reply State Machines
 
-The connector drains the inbox's bounded `pending()` pages. `dispatchAssistantWake` requires a
+Standalone consumers drain the inbox's bounded `pending()` pages. `dispatchAssistantWake` requires a
 trusted preparation step that reads the current work, checks its binding against protected local
 configuration, and rechecks live Discord account/channel/thread/DM access. Its final synchronous
 recheck must cover connection/binding changes during preparation. A stale or unavailable permission
@@ -167,9 +229,10 @@ The dedicated agent's tool policy must also prevent direct Discord/message-tool 
 the trusted sender. Do not enable result delivery until that policy and the sender integration are
 verified; `deliver:false` alone does not constrain arbitrary tools an agent already possesses.
 
-The Discord sender must be wired separately to the trusted connector. Before rendering and again
-before sending, recheck current source access, requester binding and live destination access.
-Use the reply-intent service with a logical work revision:
+The native bridge adds a durable logical wake fence per work revision, so reconciliation and a
+signed hint share one hook admission. Its source and destination preparation includes live Discord
+permissions and current OpenClaw route policy; a retained run ID identifies admission only.
+The production status sender uses the reply-intent service with a logical work revision:
 
 1. `beginReply` durably changes a new intent to uncertain before entering Discord. Only a returned
    `state:"send"` permits a new send. Existing uncertain/confirmed intents never authorize another.
@@ -178,10 +241,11 @@ Use the reply-intent service with a logical work revision:
 3. If a send response is lost, reconcile through Discord-supported message lookup or retain the
    uncertain state for explicit review. Do not promise exactly-once delivery or resend by default.
 
-The current foundation exposes these as service primitives, not model-callable tools: a model must
-not forge confirmed sends. A remote production sender still needs an authenticated connector receipt
-transport and actual Discord permission/reconciliation integration. Those are remaining #4467 work,
-not evidence supplied by this foundation.
+The receipt transport requires the separate binding-scoped `work_updates` connector capability
+alongside the current Assistant bearer. It is not model-callable. Discord credentials stay inside
+the isolated OpenClaw service, which verifies the actual message author/channel, exact notice digest and ID before
+confirming. Uncertain sends use bounded message readback, never blind retry. See the native setup
+guide for supported policy subsets, DM/thread checks, build instructions and recovery limitations.
 
 ## Verification Boundary
 
@@ -206,3 +270,7 @@ OpenClaw execution, live Discord access changes, remote TLS, multiple machines, 
 full Discord request/response workflow. Model authentication, Discord bot configuration, Assistant
 credentials and authorized test destinations must be configured through the owner's supported paths
 before real acceptance can be recorded. Never replace unavailable integration evidence with mocks.
+Combined session-ingress tests use the real `SessionsService` and transaction/outbox paths with a
+stubbed runner transport. They verify origin/event ordering, exact envelope binding, concurrent
+requester separation, response-loss reconciliation across reopen, and duplicate launch/prompt
+suppression. They do not execute a real local or SSH agent process or authenticate a real Discord user.
