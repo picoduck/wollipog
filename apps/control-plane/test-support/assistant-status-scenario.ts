@@ -55,22 +55,21 @@ export async function verifyStatus(app: FastifyInstance, operations: AssistantOp
     assert.equal((await call("session_events", {sessionId: "status-visible", query: {eventEpoch: "999"}})).status, 409);
     assert.equal((await call("session_history", {sessionId: "status-visible", query: {limit: "201"}})).status, 400);
 
-    const reminderArgs = {sessionId: "status-visible", commandId: "reminder-once", payload: {
+    const reminderArgs = {sessionId: "status-visible", commandId: "reminder-once", reminder: {
       scheduleKind: "timed", scheduledFor: Date.now() + 86_400_000, timeZone: "UTC", originalExpression: "Tomorrow", wakePolicy: "until_activity"}};
     const saved = await call("reminder_set", reminderArgs);
     assert.equal(saved.receipt.status, "succeeded");
-    const reminder = (await call("reminder_get", {sessionId: "status-visible"})).body.reminder;
+    const reminder = (await call("reminder_get", {sessionId: "status-visible"})).reminder;
     assert.equal(reminder.reminderId, db.getSessionReminder("status-visible", owner.userId)!.reminderId);
     db.raw().prepare("INSERT INTO identity_users(user_id,display_name,created_at,updated_at) VALUES ('status-peer','Peer',1,1)").run();
     db.setSessionReminder({sessionId: "status-visible", userId: "status-peer", scheduleKind: "someday", originalExpression: "Someday", wakePolicy: "until_activity", now: Date.now()});
-    assert.equal((await call("reminder_get", {sessionId: "status-visible"})).body.reminder.reminderId, reminder.reminderId);
+    assert.equal((await call("reminder_get", {sessionId: "status-visible"})).reminder.reminderId, reminder.reminderId);
     assert.deepEqual((await call("reminder_set", reminderArgs)).receipt, saved.receipt);
     assert.equal(db.getSessionReminder("status-visible", owner.userId)!.revision, reminder.revision);
-    await assert.rejects(call("reminder_set", {...reminderArgs, payload: {...reminderArgs.payload, originalExpression: "Changed"}}), /different|digest|arguments/i);
-    const conflict = await call("reminder_set", {...reminderArgs, commandId: "stale-reminder", payload: {...reminderArgs.payload, expectedRevision: reminder.revision + 1}});
-    assert.equal(conflict.status, 409);
-    assert.equal(conflict.receipt.status, "failed");
-    assert.deepEqual((await call("reminder_get", {sessionId: "status-visible"})).body, await get("/reminder"));
+    await assert.rejects(call("reminder_set", {...reminderArgs, reminder: {...reminderArgs.reminder, originalExpression: "Changed"}}), /different|digest|arguments/i);
+    await assert.rejects(call("reminder_set", {...reminderArgs, commandId: "stale-reminder", reminder: {...reminderArgs.reminder, expectedRevision: reminder.revision + 1}}), /revision|changed|reminder|conflict/i);
+    assert.equal(new AssistantCommandReceipts(db.raw()).get(issued.connection.id, "stale-reminder")!.status, "failed");
+    assert.deepEqual(await call("reminder_get", {sessionId: "status-visible"}), await get("/reminder"));
 
     const ack = {sessionId: "status-visible", commandId: "ack-first", payload: {revision: first}};
     assert.equal((await call("result_ack", ack)).body.acknowledged, true);
@@ -122,7 +121,7 @@ export async function verifyStatus(app: FastifyInstance, operations: AssistantOp
     assert.equal(db.getSession("status-visible")!.attention!.result!.revision, second);
     complete("Changed after preview");
     await assert.rejects(call("result_ack", {...confirmed, confirmationId: preview.confirmationId}), /confirmation/i);
-    const remove = {sessionId: "status-visible", commandId: "remove-reminder", query: {revision: String(reminder.revision), reminderId: reminder.reminderId}};
+    const remove = {sessionId: "status-visible", commandId: "remove-reminder", revision: reminder.revision, reminderId: reminder.reminderId};
     const removal = await call("reminder_remove", remove);
     assert.equal(removal.confirmationRequired, true);
     assert.equal((await call("reminder_remove", {...remove, confirmationId: removal.confirmationId})).receipt.status, "succeeded");

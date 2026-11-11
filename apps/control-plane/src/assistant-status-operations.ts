@@ -3,7 +3,6 @@ import type { ControlPlaneDb } from "./db.js";
 import type { SessionsService } from "./sessions.js";
 import type { Hub } from "./hub.js";
 import type { FastifyBaseLogger } from "fastify";
-import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { OwnerManagement } from "./owner-management.js";
 import { AssistantRefusal, type AssistantOperations, type AssistantOperation, type AssistantTarget } from "./assistant-connections.js";
 import { AssistantCommandReceipts, assistantRequestDigest } from "./assistant-command-receipts.js";
@@ -21,9 +20,6 @@ export const ASSISTANT_STATUS_ROUTES = [
   ["session_history", "GET /api/sessions/:id/history-preview"],
   ["session_children", "GET /api/sessions/:id/child-sessions"],
   ["worktree_ops", "GET /api/sessions/:id/worktrees/operations"],
-  ["reminder_get", "GET /api/sessions/:id/reminder"],
-  ["reminder_set", "PUT /api/sessions/:id/reminder"],
-  ["reminder_remove", "DELETE /api/sessions/:id/reminder"],
   ["result_ack", "POST /api/sessions/:id/result/acknowledge"],
   ["result_handoff", "POST /api/sessions/:id/result/handoff"],
   ["result_blocked_ack", "POST /api/sessions/:id/background-deliveries/acknowledge-blocked-results"],
@@ -99,7 +95,6 @@ export function registerAssistantStatusOperations(operations: AssistantOperation
         const body = args.payload === undefined ? {} : object(args.payload);
         const query = args.query === undefined ? {} : {...object(args.query)};
         if (Object.values(query).some(v => typeof v !== "string")) throw new AssistantRefusal("Query values must be strings.");
-        if (name === "reminder_get" && query.protocolVersion === undefined) query.protocolVersion = String(PROTOCOL_VERSION);
         // Lookup uses an opaque query id on HTTP. It must never differ from the authorized target.
         if (name === "session_lookup") {
           if (query.id !== undefined && query.id !== args.sessionId) throw new AssistantRefusal("Lookup id must match sessionId.");

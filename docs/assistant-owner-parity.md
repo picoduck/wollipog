@@ -25,6 +25,16 @@ Each exact route has one classification:
   classification. A gap is never an allowed exclusion. This deliberately overinclusive audit also
   exposes session-credential-only protocol endpoints; those need explicit owner-counterpart
   classification rather than being silently discarded.
+- `exclusion: session_protocol`: restricted to exactly `POST /api/sessions/:id/waits` and
+  `POST /api/sessions/:id/pull-request-watch`. Actual owner HTTP receives 403: these writes
+  require the matching session's own credential to attest runtime progress/watch ownership.
+  They are not owner capabilities. Each entry records this fence, the registered owner-facing
+  read counterpart `session_watch_get`, and the supported remedy: the genuine session runtime
+  performs these writes. The audit rejects this classification for every other route, requires
+  the read counterpart to be registered, and tests both real owner HTTP and Assistant MCP
+  denial. This narrow contract extension was approved by the controlling Orchestrator in
+  clarification `workflow_37bd52c7276345768122bfe742ceadb6`; it does not exempt ordinary work
+  management or allow an Assistant to impersonate a session from its `sessionId`.
 
 No external technical limitation is claimed by this slice. The inventory supports such an entry
 only with a concrete reason and supported remedy. The parent authorized staged delivery through
@@ -117,8 +127,10 @@ Automation/skill PR #4477 is merged. Twenty exact owner-route entries now name i
 production operations, including the machine-version read and its policy-only projection through
 `skill_pin_get`. The production-composition test verifies these tools are registered alongside
 owner/session operations. Automation update, enable and pause share the owner update service.
-Remaining automation/skill candidates stay explicit gaps for the residual-parity work item;
-merging this dependency does not establish complete Skill Library or automation parity.
+The group-6 [automation and Skill Library parity delivery](assistant-skill-parity.md) registers
+the remaining ordinary management paths and documents four exact human-authority routes. Its
+group-specific gate checks actual production registration and refuses remaining group-6 gaps.
+Other groups' unresolved candidates still block the global strict acceptance gate.
 
 Discord/work PR #4479 is merged. Production now builds the session/work registry through
 `createAssistantManagement`, preserving its authenticated Discord-origin seam and sharing the
@@ -133,12 +145,14 @@ human-authority entries in the audit. The five `/assistant/discord/...` endpoint
 credential-scoped connector protocol, not owner management routes: command dispatch/receipt
 reconciliation and work list/read/reply receipts. They require both current Assistant and connector
 credentials, and do not substitute for owner management capabilities. The inventory now
-contains 301 owner-route candidates. PR #4476 also added installation renaming; it was recorded
+contains 303 owner-route candidates. PR #4476 also added installation renaming; it was recorded
 as an explicit app-management gap. Merged PR #4497 now delivers `install_name` along with
 connection, binding, subscription and delivery diagnostics/recovery operations. All eight exact
 route mappings and its refined credential/standing-authority exclusions are preserved beside
 the status mappings. These shared registrations use the same receipt store. The first slice left
-199 unresolved candidates; the combined status and connection slices reduce that count below.
+199 unresolved candidates; the combined status, session-work, connection and group-6 slices
+reduce that count below. Establishing or changing credentials, grants, bindings and subscription
+configuration retains human authority.
 
 ## Delivered Operations
 
@@ -205,7 +219,8 @@ Those remain Phase 2b. No rendered application UI changes in this slice.
 
 ## Status, Results and Read Status
 
-The follow-on status slice provides 41 exact route mappings through 38 status tools. The HTTP adapter and Assistant
+The follow-on status slice covers 41 exact route mappings through 35 new status tools and the
+three reminder tools already delivered with session content. The HTTP adapter and Assistant
 adapter execute the same explicit application handlers, with a current owner principal. They do
 not inject HTTP, fabricate a session credential, or borrow an Orchestrator's ancestry. HTTP auth
 and agent-only mutation routes retain their existing gates. The shared HTTP adapter preserves
@@ -237,10 +252,12 @@ For blocked results, supply `payload.targets` containing exact `parentTurnId`/`r
 missing-result and retry-exhaustion acknowledgements use their exact `continuationId`. The shared
 service refuses an absent or non-terminal delivery. These actions never resubmit background work.
 
-`reminder_set` uses the existing schedule kind, instant, time zone, wake policy and optimistic
-revision fields. A reminder belongs to the granting user, including in a shared organization;
-another user's reminder is never read or changed. For removal, put the exact `reminderId` and
-`revision` in `query`. Timed and Someday schedules use the same owner validation. All status-slice
+The reminder operations retain their published session-content schemas: `reminder_set` takes the
+owner schedule fields in `reminder`; `reminder_remove` takes top-level `reminderId` and numeric
+`revision`; `reminder_get` returns `{reminder}` directly. They are registered once, reuse the same
+owner services/receipts, and are not renamed or shadowed by the status adapter. A reminder belongs
+to the granting user, including in a shared organization; another user's reminder is never read
+or changed. Timed and Someday schedules use the same owner validation. All status-slice
 mutations honor the connection's destructive-confirmation policy, including reminder replacement.
 Receipt reconciliation precedes recomputing effects, so an already completed removal remains
 reconcilable after its reminder disappears. Accepted/uncertain commands are never redispatched.
@@ -269,14 +286,15 @@ reads. Legacy review-ledger reads report their actual stored/unavailable state. 
 the retired reviewer bridge or supply a native fallback. Existing session-protocol HTTP read gates
 remain intact; the Assistant calls explicit shared read services as its current granting owner.
 
-The audit still contains **151 NOT-YET-SUPPORTED route candidates** on this slice:
-93 session routes, 30 Machine routes, 4 automation routes, 23 Skill Library routes and 1 Project
+The audit still contains **89 NOT-YET-SUPPORTED route candidates** on this slice:
+67 session routes, 21 Machine routes and 1 Project
 route. This count is not a count of unique missing tools. The exact remaining
 entries stay in `assistant-owner-capabilities.json`, and none was reclassified as an exclusion.
 They include the broader session work-management, Machine/workspace registration, connection,
-automation and Skill Library groups assigned to the other campaign work items. The 20 delivered
-#4477 route mappings are now reconciled with the production registry; its remaining residuals
-stay unsupported. The strict acceptance gate therefore still fails intentionally.
+campaign/protocol groups assigned to the other campaign work items. The delivered #4499 session
+work and #4488 automation/Skill Library mappings, including the two exact session-runtime protocol
+classifications, are preserved with their production registry guards. Group 6 has no remaining
+audit gaps. The strict acceptance gate therefore still fails intentionally.
 
 The production-composition scenario boots a fresh loopback control plane and synthetic database,
 then compares owner HTTP responses with Assistant reads and exercises actual MCP transport,

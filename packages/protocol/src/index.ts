@@ -1,4 +1,5 @@
 export * from "./assistant-connections.js";
+export type {OrphanedSkillCopy, OrphanedSkillCopyRef} from "./orphaned-skill-copies.js";
 export * from "./shared-predicates.js";
 export * from "./provider-command-home-write-separation.js";
 import type { ProviderCommandHomeWriteSeparation } from "./provider-command-home-write-separation.js";

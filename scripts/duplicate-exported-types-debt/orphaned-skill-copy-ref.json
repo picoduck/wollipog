@@ -1,7 +1,0 @@
-{
-  "reason": "Pre-existing orphan-copy discriminated reference union independently declared by server preview/import/discard routes and the skills client. Both represent the same wire reference. Awaiting shared protocol ownership.",
-  "declarations": [
-    { "path": "apps/control-plane/src/skill-orphan-route.ts", "symbol": "OrphanedSkillCopyRef" },
-    { "path": "apps/web/src/skills.ts", "symbol": "OrphanedSkillCopyRef" }
-  ]
-}
