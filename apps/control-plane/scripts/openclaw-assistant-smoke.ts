@@ -119,9 +119,12 @@ try {
   assert.ok(alpha.transport.sent.some(command => command.type === "start_session"));
   alpha.db.updateSessionStatus(sessionId, "idle", Date.now()); // Simulated runner state, not execution evidence.
   const promptArgs = {commandId: "smoke-follow-up", sessionId, text: "Synthetic follow-up"};
-  assert.equal((await call("session_prompt", promptArgs)).receipt.status, "succeeded");
+  const followUp = await call("session_prompt", promptArgs);
+  assert.equal(followUp.receipt.status, "succeeded");
+  assert.equal(followUp.receipt.operationId, promptArgs.commandId);
   const count = alpha.transport.sent.length;
-  await call("session_prompt", promptArgs);
+  const duplicateFollowUp = await call("session_prompt", promptArgs);
+  assert.deepEqual(duplicateFollowUp.receipt, followUp.receipt, "Duplicate follow-up must return the original succeeded receipt.");
   assert.equal(alpha.transport.sent.length, count, "Duplicate command must not redispatch.");
   alpha.db.appendEvent(sessionId, {kind: "agent_message", text: "Synthetic runner result", final: true}, Date.now());
   alpha.db.appendEvent(sessionId, {kind: "agent_response_completed"}, Date.now());

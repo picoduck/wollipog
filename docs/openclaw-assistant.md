@@ -122,13 +122,16 @@ the exact bot account and thread/channel/DM destination; DMs require
 `session.dmScope: per-account-channel-peer`. Test with authorized dedicated destinations. Membership
 in a shared Discord channel does not inherit the connection owner's Full Access grant.
 
-The native connector authenticates the actual Discord account, author and conversation before
-selecting a binding-scoped connector credential. Correlated launch/follow-up requests use
-`/assistant/discord/commands` with both the Assistant bearer and `X-Wollipog-Connector-Token`.
-That connector credential stays in protected native runtime configuration, outside model prompts,
-arguments and generic MCP tool configuration. The control plane binds the command, digest and
-resolved target through trusted ingress. Model-authored requester IDs, origin fields or tool
-arguments cannot establish that binding. Plain MCP remains valid **uncorrelated**, as tested below.
+The following is the planned contract for #4467's next slice, **not an available setup path**:
+once it lands, the native connector will authenticate the actual Discord account, author and
+conversation before selecting a binding-scoped connector credential. Correlated launch/follow-up
+requests are planned to use `/assistant/discord/commands` with both the Assistant bearer and
+`X-Wollipog-Connector-Token`. Neither that route nor header is implemented in this slice. Verify
+the merged connector's instructions before configuring either. Its credential must stay in
+protected native runtime configuration, outside model prompts, arguments and generic MCP tool
+configuration. Trusted ingress must bind the command, digest and resolved target outside model
+arguments. Model-authored requester IDs or origin fields cannot establish that binding.
+Plain MCP remains valid **uncorrelated**, as tested below.
 Required owner approvals retain their authenticated Wollipog resolution path.
 
 ## Equivalent Remote Setup
