@@ -1,4 +1,5 @@
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
+import { providerLoginStartFailure } from "./provider-login-start-failure.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
 import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js";
@@ -3381,7 +3382,7 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
     }
     if (!result.ok || !result.login) {
       settleProfileGrant({ started: false });
-      return reply.code(409).send({ error: result.error ?? "Provider sign-in could not be started" });
+      return reply.code(409).send(providerLoginStartFailure(result));
     }
     settleProfileGrant({ started: true, accountId: result.login.accountId });
     return reply.code(201).send({ login: result.login });

@@ -1,6 +1,8 @@
 export * from "./shared-predicates.js";
 export * from "./provider-account-selection.js";
 export * from "./provider-readiness.js";
+export * from "./managed-profile-directory-diagnostic.js";
+import type { ManagedProfileDirectoryDiagnostic } from "./managed-profile-directory-diagnostic.js";
 import { isProviderHomeRecoveryCause, PROVIDER_HOME_RECOVERY_CAUSE_CODES, type ProviderHomeRecoveryCause, type ProviderHomeBlockingProcess } from "./provider-home-recovery.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } from "./orchestrator-review-policy.js";
 export * from "./orchestrator-review-policy.js";
@@ -10275,6 +10277,8 @@ export interface ProviderLoginResultMessage {
   ok: boolean;
   login?: ProviderLoginView;
   error?: string;
+  /** v362: optional path-free start failure observation. Older peers omit/ignore it. */
+  directoryDiagnostic?: ManagedProfileDirectoryDiagnostic;
 }
 
 export interface RemoveProviderAccountResultMessage {

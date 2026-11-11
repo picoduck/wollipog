@@ -179,6 +179,7 @@ import { providerCredentialImportHostSupported } from "./provider-credential-imp
 import { inspectProviderHomeLeaseCommand, recoverProviderHomeLeaseCommand, type ProviderHomeLeaseCommandDeps } from "./provider-home-lease-commands.js";
 import { ProviderProfileGrants } from "./provider-profile-grants.js";
 import { managedProviderProfileRoot } from "./provider-profile-home.js";
+import { providerLoginStartFailure } from "./provider-login-start-failure.js";
 import { createProviderProfileLoginSettlement } from "./provider-profile-login-settlement.js";
 import { runnerCredentialRoots, setCampaignCredentialRoots } from "./campaign-operation-evidence.js";
 import {
@@ -3307,7 +3308,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         requestId: msg.requestId,
         action: "start",
         ok: false,
-        error: errText(error),
+        ...providerLoginStartFailure(error),
       })));
       break;
     case "import_provider_credential": {
