@@ -37,13 +37,13 @@ export class AssistantRefusal extends Error {}
 export const ASSISTANT_ACTIVITY_LIMIT = 1_000;
 const secret = () => `wollipoga_${randomBytes(32).toString("base64url")}`;
 
-export function assistantGrant(value: unknown): AssistantGrant {
+export function assistantGrant(value: unknown, defaultConfirmation: "none" | "confirm" = "none"): AssistantGrant {
   const input = value as Partial<AssistantGrant> | null;
   const valid = (v: unknown): v is "all" | string[] => v === "all" ||
     (Array.isArray(v) && v.length <= 500 && v.every(x => typeof x === "string" && /^[\w.:-]{1,128}$/.test(x)));
   if (!input || !valid(input.operations) || !valid(input.projects)) throw new AssistantRefusal("Specify exact operations and projects, or all, in the owner's connection settings.");
   if (input.destructiveConfirmation !== undefined && input.destructiveConfirmation !== "none" && input.destructiveConfirmation !== "confirm") throw new AssistantRefusal("Destructive confirmation must be none or confirm in the owner's connection settings.");
-  return { operations: input.operations, projects: input.projects, destructiveConfirmation: input.destructiveConfirmation ?? "none" };
+  return { operations: input.operations, projects: input.projects, destructiveConfirmation: input.destructiveConfirmation ?? defaultConfirmation };
 }
 
 /** Separate credential namespace/table: never accepted as a human, runner or session. */
@@ -88,8 +88,9 @@ export class AssistantConnections {
     this.db.prepare("INSERT INTO assistant_connections VALUES (?,?,?,?,?,1,?,0)").run(id, name.trim(), owner.userId, owner.organizationId, JSON.stringify(assistantGrant(grant)), hashToken(token));
     return { connection: this.get(id)!, token };
   }
-  configure(id: string, grant: AssistantGrant): void {
-    this.db.prepare("UPDATE assistant_connections SET grant_json=?,revision=revision+1 WHERE id=?").run(JSON.stringify(assistantGrant(grant)), id);
+  configure(id: string, grant: unknown): void {
+    const normalized = assistantGrant(grant, this.destructiveConfirmation(id));
+    this.db.prepare("UPDATE assistant_connections SET grant_json=?,revision=revision+1 WHERE id=?").run(JSON.stringify(normalized), id);
     this.changed(id);
   }
   rotate(id: string): string {

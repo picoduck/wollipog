@@ -23,6 +23,10 @@ test("broad grants include new registrations; selected projects and operations r
     store.configure(issued.connection.id, {...full, destructiveConfirmation: "confirm"});
     assert.equal(store.destructiveConfirmation(issued.connection.id), "confirm");
     assert.equal(store.get(issued.connection.id)!.grant.destructiveConfirmation, "confirm");
+    store.configure(issued.connection.id, full);
+    assert.equal(store.destructiveConfirmation(issued.connection.id), "confirm");
+    store.configure(issued.connection.id, {...full, destructiveConfirmation: "none"});
+    assert.equal(store.destructiveConfirmation(issued.connection.id), "none");
     const operations = new AssistantOperations(store, () => owner);
     operations.register({name: "session_stop", description: "Stop", inputSchema: {}, resolveTarget: () => ({kind: "session", id: "unrelated", projectId: "other"}), ownerCanAccess: p => p.userId === owner.userId, execute: () => "stopped"});
     assert.equal(await operations.call(credential, "session_stop", {}), "stopped");
@@ -120,6 +124,10 @@ test("real Fastify MCP discovery, owner lifecycle API, credential separation and
     assert.equal(db.deviceByTokenHash(hashToken(token)), null);
     assert.equal(isAgentControlApiRouteAllowed("POST", "/api/assistant-connections", "orchestrator"), false);
     assert.equal((await app.inject({method: "GET", url: "/api/assistant-connections", headers: {authorization: `Bearer ${token}`}})).statusCode, 401);
+    const configure = (grant: unknown) => app.inject({method: "POST", url: `/api/assistant-connections/${connection.id}/configure`, headers: {authorization: "Bearer owner-fixture"}, payload: {grant}});
+    assert.equal((await configure({...full, destructiveConfirmation: "confirm"})).statusCode, 200);
+    assert.equal((await configure(full)).json().connection.grant.destructiveConfirmation, "confirm");
+    assert.equal((await configure({...full, destructiveConfirmation: "none"})).json().connection.grant.destructiveConfirmation, "none");
     db.assistantConnections.configure(connection.id, {operations: [], projects: "all"});
     assert.equal((await call("tools/call", {name: "assistant_discover"})).json().result.isError, true);
     assert.equal((await call("tools/list")).json().result.tools.length, 0);

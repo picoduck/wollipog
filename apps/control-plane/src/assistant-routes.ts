@@ -57,7 +57,7 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
       reply.header("cache-control", "no-store");
       try {
         if (action === "activity") return { activity: store.activity(id) };
-        if (action === "configure") store.configure(id, assistantGrant((req.body as {grant?: unknown} | null)?.grant));
+        if (action === "configure") store.configure(id, (req.body as {grant?: unknown} | null)?.grant);
         if (action === "revoke") store.revoke(id);
         if (action === "rotate") {
           if (connection.revoked) throw new AssistantRefusal("This connection is revoked. Create a new connection instead.");
