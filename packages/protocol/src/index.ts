@@ -9556,15 +9556,24 @@ export type OutboundEventKind =
   | "cost.checkpoint"
   | "cost.budget_exhausted";
 
+/** The content-minimized Assistant transport and receiver share this lifecycle contract. */
+export const ASSISTANT_WORK_EVENT_KINDS: readonly OutboundEventKind[] = [
+  "session.created", "session.input_required", "session.idle", "session.completed",
+  "session.failed", "session.stopped",
+];
+
 export type OutboundEventSubscriptionScope =
   | { kind: "project"; projectId: string }
-  | { kind: "automation"; automationId: string };
+  | { kind: "automation"; automationId: string }
+  | { kind: "assistant"; connectionId: string };
 
 export type OutboundEventSubscriptionState = "active" | "paused";
 
 export interface OutboundEventSubscriptionView {
   subscriptionId: string;
   callbackUrl: string;
+  /** Owner-visible exact-address policy; never included in event envelopes or journals. */
+  privateAddresses?: string[];
   scope: OutboundEventSubscriptionScope;
   eventKinds: OutboundEventKind[];
   includeSessionName: boolean;
@@ -9618,6 +9627,7 @@ export interface OutboundEventDeliveryView {
 
 export interface OutboundEventEnvelope {
   version: "v1";
+  assistant?: { controlPlaneId: string; connectionId: string; work: { workId: string; revision: number; attentionRevision: number }[] };
   eventId: string;
   kind: OutboundEventKind;
   occurredAt: number;

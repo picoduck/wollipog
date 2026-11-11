@@ -1,8 +1,10 @@
 # Outbound events
 
 Outbound event subscriptions send durable, signed lifecycle facts from Wollipog to an external
-HTTPS callback. A subscription belongs to one Project or one automation and selects its event
-kinds explicitly. Manage subscriptions in the Automations view or through the paired-device API.
+HTTPS callback. A subscription belongs to one Project, one automation, or one Assistant connection
+and selects its event kinds explicitly. Manage Project/automation subscriptions in the Automations
+view or through the paired-device API. Connection-owned tracked-work subscriptions use the separate
+owner routes in [Assistant Work and Conversation Events](assistant-work-events.md).
 Creation and rotation return a 256-bit HMAC secret once; copy it immediately because list, detail,
 and delivery-journal reads never return it.
 
@@ -147,6 +149,10 @@ pinned for that request while TLS still verifies the original hostname, preventi
 lookup from bypassing validation. Creation gives the lookup the same 10-second bound as a delivery
 attempt: a hostname that does not resolve in time fails creation with `callback hostname could not
 be resolved`, and nothing is persisted. Redirects are not followed, so they cannot cross the boundary.
+
+Assistant callbacks additionally support an owner-configured, exact-target private-address exception;
+see [the bounded configuration contract](assistant-work-events.md#local-and-remote-transport).
+This does not change the default address policy for Project, automation or unconfigured callbacks.
 
 The worker emits structured, secret-free attempt logs keyed by delivery, subscription, event, kind,
 attempt, disposition, HTTP status, duration, and whether the durable receipt was recorded. Operators
