@@ -3,7 +3,8 @@ import { test } from "node:test";
 import Fastify from "fastify";
 import { ControlPlaneDb } from "./db.js";
 import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
-import { AssistantCommandReceipts, assistantRequestDigest } from "./assistant-command-receipts.js";
+import { assistantRequestDigest } from "./assistant-command-receipts.js";
+import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
 import { ManagementMutations } from "./assistant-management-command.js";
 import { registerAssistantSkills } from "./assistant-skills.js";
 import { registerAssistantAutomations } from "./assistant-automations.js";
@@ -19,8 +20,7 @@ async function fixture() {
   const owner = db.operatingHumanPrincipal(identity.userId, identity.organizationId)!;
   const issued = db.assistantConnections.create(owner, "Test Assistant", {operations: "all", projects: "all"});
   const operations = createAssistantOperations(db);
-  AssistantCommandReceipts.install(db.raw());
-  const receipts = new AssistantCommandReceipts(db.raw());
+  const receipts = registerAssistantSessionOperations(operations, db, {} as SessionsService);
   const mutations = new ManagementMutations(receipts, db.instanceId(), assistantRequestDigest, id => db.assistantConnections.get(id)!,
     id => db.assistantConnections.destructiveConfirmation(id));
   const hub = {isRunnerOnline: () => false, sendToRunner: () => true, requestFromRunner: async () => {throw new Error("Offline");}} as SkillsHub;
@@ -48,6 +48,7 @@ test("real MCP/SQLite skill creation, version edits, conflict fencing, duplicate
   const created = await f.call("skill_create", {operationId: "create-1", payload: payload()});
   const skillId = created.result.skill.id;
   assert.equal(created.receipt.resourceId, skillId);
+  assert.equal((await f.call("command_get", {commandId: "create-1"})).receipt.resourceId, skillId);
   assert.equal(f.db.listSkills().length, 1);
   const duplicate = await f.call("skill_create", {payload: payload(), operationId: "create-1"});
   assert.equal(duplicate.receipt.status, "succeeded");
@@ -121,6 +122,7 @@ test("automation pause/resume/edit/delete use the real shared service with revis
   await f.call("auto_delete", {automationId: schedule.automationId, expectedRevision: paused.result.revision, operationId: "delete"});
   assert.equal(f.db.getAutomation(schedule.automationId), null);
   assert.equal(f.receipts.get(f.issued.connection.id, "delete")?.status, "succeeded");
+  assert.equal((await f.call("command_get", {commandId: "delete"})).receipt.status, "succeeded");
   assert.equal((await f.call("auto_delete", {automationId: schedule.automationId, expectedRevision: paused.result.revision, operationId: "delete"})).receipt.status, "succeeded");
 });
 
@@ -166,6 +168,7 @@ test("skill removal keeps version and assignment evidence in the shared deletion
   await f.call("skill_remove", {...request, confirmationId: preview.confirmationId});
   assert.equal(f.db.getSkill(skillId), null);
   assert.equal((await f.call("skill_remove", request)).receipt.status, "succeeded");
+  assert.equal((await f.call("command_get", {commandId: "remove"})).receipt.status, "succeeded");
   const row = f.db.raw().prepare("SELECT snapshot_json FROM skill_removal_history WHERE skill_id=?").get(skillId) as {snapshot_json: string};
   const snapshot = JSON.parse(row.snapshot_json);
   const archived = f.db.raw().prepare("SELECT record_json FROM skill_removed_records WHERE skill_id=? AND source_table='skill_versions'").all(skillId) as Array<{record_json: string}>;
