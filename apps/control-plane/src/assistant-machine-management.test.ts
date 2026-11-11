@@ -14,6 +14,8 @@ import { AssistantCommandReceipts } from "./assistant-command-receipts.js";
 import { createOwnerMachineManagement } from "./owner-machine-management.js";
 import { ASSISTANT_MACHINE_MANAGEMENT, registerAssistantMachineManagement } from "./assistant-machine-management.js";
 import { renameAssistantInstallation } from "./owner-installation-management.js";
+import { registerAssistantConnectionOperations } from "./assistant-connection-operations.js";
+import { OutboundEventsService } from "./outbound-events.js";
 
 function harness(path = ":memory:") {
   const db = ControlPlaneDb.open(path), identity = db.localIdentityContext();
@@ -100,6 +102,24 @@ test("installation rename shares owner validation and preserves identity, grants
     h.db.assistantConnections.configure(h.issued.connection.id, {operations: ["command_get"], projects: "all"});
     await assert.rejects(h.call("installation_rename", {commandId: "revoked", payload: {name: "Denied"}}), /excluded/);
   } finally {await app.close(); h.db.close();}
+});
+
+test("installation rename aliases retain one command namespace and the same owner service", async () => {
+  const h = harness(), app = Fastify(), outbound = new OutboundEventsService(h.db, {info() {}, warn() {}});
+  registerAssistantConnectionOperations(h.operations, {db: h.db, outbound, receipts: h.receipts});
+  registerAssistantRoutes(app, {db: h.db, operations: h.operations, requestHuman: () => h.owner});
+  try {
+    const first = await h.call("installation_rename", {commandId: "machine-alias", payload: {name: "Machine Alias"}});
+    assert.equal(first.receipt.status, "succeeded");
+    const second = await h.call("install_name", {commandId: "connection-alias", name: "Connection Alias"});
+    assert.equal(second.receipt.status, "succeeded");
+    assert.equal(h.db.assistantConnections.installationName(), "Connection Alias");
+    const response = await app.inject({method: "POST", url: "/api/assistant-connections/installation", payload: {name: "HTTP Label"}});
+    assert.equal(response.statusCode, 200);
+    assert.equal(h.db.assistantConnections.installationName(), "HTTP Label");
+    await assert.rejects(h.call("installation_rename", {commandId: "connection-alias", payload: {name: "Must Not Apply"}}), /already bound/);
+    assert.equal(h.db.assistantConnections.installationName(), "HTTP Label");
+  } finally {await app.close(); await outbound.close(); h.db.close();}
 });
 
 test("account preview uses the real selection service but returns only opaque account references", async () => {

@@ -15,7 +15,8 @@ test("group-4 audit operations are present in actual production HTTP/MCP registr
   const audit = JSON.parse(readFileSync(new URL("../../../docs/assistant-owner-capabilities.json", import.meta.url), "utf8")) as Record<string, {tools?: string[]; exclusion?: string; reason?: string; remedy?: string}>;
   for (const [operation, route] of ASSISTANT_MACHINE_MANAGEMENT) {
     assert.ok(snapshot.routes.includes(route), `${route} is absent from the production owner API`);
-    assert.deepEqual(audit[route]?.tools, [operation]);
+    const expected = route === "POST /api/assistant-connections/installation" ? [operation, "install_name"] : [operation];
+    assert.deepEqual(audit[route]?.tools, expected);
     assert.ok(snapshot.tools.includes(operation), `${operation} is absent from production MCP`);
   }
   for (const route of [

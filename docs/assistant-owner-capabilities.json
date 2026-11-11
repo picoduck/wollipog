@@ -94,22 +94,22 @@
     ]
   },
   "GET /api/assistant-connections": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": ["connection_list"]
   },
   "GET /api/assistant-connections/:id/activity": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": ["connection_activity"]
   },
   "GET /api/assistant-connections/:id/destination-bindings": {
-    "gap": "Standing-binding inspection has no equivalent authorized Assistant management read yet. This remains an app-management read gap."
+    "tools": ["dest_list"]
   },
   "GET /api/assistant-connections/:id/event-subscriptions": {
-    "gap": "Subscription inventory has no equivalent authorized Assistant management read yet. This remains an app-management read gap."
+    "tools": ["sub_list"]
   },
   "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId": {
-    "gap": "Subscription state inspection has no equivalent authorized Assistant management read yet. This remains an app-management read gap."
+    "tools": ["sub_get"]
   },
   "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId/deliveries": {
-    "gap": "Delivery-journal inspection has no equivalent authorized Assistant management read yet. This remains a result-delivery troubleshooting gap."
+    "tools": ["delivery_list"]
   },
   "GET /api/automations": {
     "tools": [
@@ -428,12 +428,12 @@
   },
   "POST /api/assistant-connections": {
     "exclusion": "human_authority",
-    "reason": "Issues, expands, rotates or revokes standing Assistant authority; the connection cannot authorize its own standing grant changes.",
+    "reason": "Creates an Assistant bearer credential and installs owner-selected standing operation/project grants and confirmation policy. The Assistant cannot issue its own authority.",
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/assistant-connections/:id/configure": {
     "exclusion": "human_authority",
-    "reason": "Issues, expands, rotates or revokes standing Assistant authority; the connection cannot authorize its own standing grant changes.",
+    "reason": "Changes a connection's standing operation/project grants and destructive-confirmation policy, potentially expanding future authority. This mixed authority-edit route remains with the authenticated owner.",
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/assistant-connections/:id/discord-connectors": {
@@ -452,7 +452,7 @@
     "remedy": "Use the authenticated owner's connection event-subscription configuration path."
   },
   "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/resume": {
-    "gap": "Resuming an already owner-authorized callback is delivery lifecycle management with no Assistant operation yet; this is not an authority exclusion."
+    "tools": ["delivery_resume"]
   },
   "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/rotate": {
     "exclusion": "human_authority",
@@ -461,17 +461,18 @@
   },
   "POST /api/assistant-connections/:id/revoke": {
     "exclusion": "human_authority",
-    "reason": "Issues, expands, rotates or revokes standing Assistant authority; the connection cannot authorize its own standing grant changes.",
+    "reason": "Revokes an owner-issued Assistant bearer credential and its standing grants. Credential lifecycle and authority removal stay on the authenticated owner's connection path.",
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/assistant-connections/:id/rotate": {
     "exclusion": "human_authority",
-    "reason": "Issues, expands, rotates or revokes standing Assistant authority; the connection cannot authorize its own standing grant changes.",
+    "reason": "Issues a replacement Assistant bearer credential and invalidates the previous credential. Establishing or transferring credential access remains human controlled.",
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/assistant-connections/installation": {
     "tools": [
-      "installation_rename"
+      "installation_rename",
+      "install_name"
     ]
   },
   "POST /api/automations": {

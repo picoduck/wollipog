@@ -180,6 +180,15 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
     execute: (args, ctx) => {
       const receipt = receipts.get(ctx.connection.id, text(object(args), "commandId"));
       if (!receipt) return {receipt: null};
+      if (receipt.target.kind === "assistant_connection" && db.assistantConnections.get(receipt.target.id)?.revoked) {
+        // Reconcile only the caller's retained verdict, never revoked connection metadata.
+        // The original operation still validates its grant, all-project scope and exact owner.
+        // This server-only target cannot be selected by ordinary mutation arguments.
+        operations.authorize(ctx.connection.id, receipt.operation, {kind: "assistant_connection_receipt", id: receipt.target.id});
+        return {resourceRevoked: true, receipt: {operationId: receipt.operationId, operation: receipt.operation,
+          status: receipt.status, createdAt: receipt.createdAt, updatedAt: receipt.updatedAt},
+          recovery: "The target connection was revoked. This is the retained command verdict only; do not replay the command."};
+      }
       if ((receipt.target.kind === "runner" && !db.getRunner(receipt.target.id) && !db.boxIdForRunner(receipt.target.id)) ||
           (receipt.target.kind === "workspace" && !db.workspaceSource(...machineWorkspaceCoordinates(receipt.target)))) {
         // Group-4 removals retain a content-free verdict, never old workspace/Machine metadata.

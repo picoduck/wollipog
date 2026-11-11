@@ -87,7 +87,9 @@ choices reuse the exact owner service, retaining discovered-candidate and protoc
 not install, trust or authenticate new harnesses. The preview uses the existing agent projection;
 account IDs, account labels and credential HOME paths are withheld. Account creation and recovery,
 sign-in, credentials and lasting account policies remain human-only with explicit audit reasons.
-Installation renaming shares the owner service and retains the personal-organization owner check;
+Installation renaming shares `AssistantConnectionManagement.rename` with the owner API and the
+`install_name` tool; both `installation_rename` and `install_name` remain registered aliases.
+It retains the personal-organization owner check;
 it changes only the display name, without changing installation ID or Assistant authority.
 
 Tests use actual SQLite, Fastify HTTP/MCP registration, production inventory composition and

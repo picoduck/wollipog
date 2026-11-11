@@ -2,6 +2,36 @@ import { test, expect } from "@playwright/test";
 import { assistantUiServer } from "../../control-plane/test-support/assistant-ui-server.js";
 
 for (const theme of ["dark", "light"] as const) {
+  test(`connection management activity labels owned targets in ${theme}`, async ({page}) => {
+    const server = await assistantUiServer();
+    try {
+      const local = server.db.localIdentityContext();
+      const owner = server.db.operatingHumanPrincipal(local.userId, local.organizationId)!;
+      const observer = server.db.assistantConnections.create(owner, "Fixture Observer", {operations: "all", projects: "all"});
+      const destination = server.db.assistantConnections.create(owner, "Fixture Destination", {operations: "all", projects: "all"});
+      // Synthetic activity through the real store/owner HTTP/React path, not live model work.
+      server.db.assistantConnections.record(observer.connection, "dest_list", {kind: "assistant_connection", id: destination.connection.id}, "succeeded");
+      await page.addInitScript(({origin, ownerCredential}) => { (window as unknown as {assistantTest: unknown}).assistantTest = {origin, ownerCredential}; },
+        {origin: server.origin, ownerCredential: server.ownerCredential});
+      await page.goto(`/assistant-connections-e2e.html?theme=${theme}`);
+      await page.getByRole("button", {name: /Manage Assistant Connections/}).click();
+      await page.getByRole("button", {name: /Fixture Observer/}).click();
+      await page.getByRole("button", {name: "Refresh Activity"}).click();
+      const label = page.getByText("Target: Assistant Connection · Fixture Destination", {exact: true});
+      await expect(label).toBeVisible();
+      await label.scrollIntoViewIfNeeded();
+      await expect(label).toBeInViewport();
+      if (process.env.ASSISTANT_EVIDENCE_DIR) {
+        await page.evaluate(() => {
+          const banner = document.createElement("div");
+          banner.textContent = "Synthetic Fixture · Owner Activity Label · No Live Integration";
+          Object.assign(banner.style, {position: "fixed", top: "0", left: "0", zIndex: "99999", padding: "8px 12px", background: "#173d66", color: "white", font: "14px sans-serif"});
+          document.body.append(banner);
+        });
+        await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/group5-activity-${theme}.png`, animations: "disabled"});
+      }
+    } finally {await server.close();}
+  });
   test(`owner connection lifecycle uses real HTTP routes in ${theme}`, async ({page}, testInfo) => {
     const server = await assistantUiServer();
     try {
