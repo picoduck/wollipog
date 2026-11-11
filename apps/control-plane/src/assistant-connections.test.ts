@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import Fastify from "fastify";
-import { AssistantConnections, AssistantOperations } from "./assistant-connections.js";
+import { ASSISTANT_ACTIVITY_LIMIT, AssistantConnections, AssistantOperations } from "./assistant-connections.js";
 import type { HumanPrincipal } from "./identity.js";
 import { ControlPlaneDb } from "./db.js";
 import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
@@ -19,6 +19,14 @@ test("broad grants include new registrations; selected projects and operations r
     const store = new AssistantConnections(db);
     const issued = store.create(owner, "Remote Assistant", full);
     const credential = store.authenticate(issued.token)!;
+    assert.equal(store.destructiveConfirmation(issued.connection.id), "none");
+    store.configure(issued.connection.id, {...full, destructiveConfirmation: "confirm"});
+    assert.equal(store.destructiveConfirmation(issued.connection.id), "confirm");
+    assert.equal(store.get(issued.connection.id)!.grant.destructiveConfirmation, "confirm");
+    store.configure(issued.connection.id, full);
+    assert.equal(store.destructiveConfirmation(issued.connection.id), "confirm");
+    store.configure(issued.connection.id, {...full, destructiveConfirmation: "none"});
+    assert.equal(store.destructiveConfirmation(issued.connection.id), "none");
     const operations = new AssistantOperations(store, () => owner);
     operations.register({name: "session_stop", description: "Stop", inputSchema: {}, resolveTarget: () => ({kind: "session", id: "unrelated", projectId: "other"}), ownerCanAccess: p => p.userId === owner.userId, execute: () => "stopped"});
     assert.equal(await operations.call(credential, "session_stop", {}), "stopped");
@@ -67,6 +75,28 @@ test("queued work rechecks grants, owner access, rotation and revocation", async
   } finally { db.close(); }
 });
 
+test("rotation refuses inactive IDs without notifications; activity is bounded and indexed per connection", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    AssistantConnections.install(db);
+    const store = new AssistantConnections(db);
+    const first = store.create(owner, "First", full).connection;
+    const second = store.create(owner, "Second", full).connection;
+    store.record(second, "read", {kind: "project", id: "other"}, "succeeded");
+    for (let i = 0; i < ASSISTANT_ACTIVITY_LIMIT + 2; i++) store.record(first, "read", {kind: "project", id: String(i)}, "succeeded");
+    assert.equal((db.prepare("SELECT count(*) AS n FROM assistant_activity WHERE connection_id=?").get(first.id) as {n: number}).n, ASSISTANT_ACTIVITY_LIMIT);
+    assert.equal(store.activity(second.id).length, 1);
+    assert.match(JSON.stringify(db.prepare("EXPLAIN QUERY PLAN SELECT * FROM assistant_activity WHERE connection_id=? ORDER BY id DESC LIMIT 100").all(first.id)), /assistant_activity_connection/);
+    store.revoke(first.id);
+    assert.throws(() => store.destructiveConfirmation(first.id), /missing or revoked/);
+    let changes = 0;
+    store.onChange(() => { changes++; });
+    assert.throws(() => store.rotate(first.id), /missing or revoked/);
+    assert.throws(() => store.rotate("unknown"), /missing or revoked/);
+    assert.equal(changes, 0);
+  } finally { db.close(); }
+});
+
 test("real Fastify MCP discovery, owner lifecycle API, credential separation and multi-connection isolation", async () => {
   const db = ControlPlaneDb.open(":memory:");
   const app = Fastify();
@@ -76,6 +106,7 @@ test("real Fastify MCP discovery, owner lifecycle API, credential separation and
     const requestHuman = (req: {headers: {authorization?: string}}) => req.headers.authorization === "Bearer owner-fixture" ? human : null;
     registerAuthGate(app, {authenticate: req => requestHuman(req) ? {id: "fixture", name: "Owner", principal: human} : null, isAllowedOrigin: () => false});
     const operations = createAssistantOperations(db);
+    operations.register({name: "void_mutation", description: "Void test", inputSchema: {}, metadata: true, resolveTarget: () => ({kind: "control_plane", id: db.instanceId()}), ownerCanAccess: () => true, execute: () => undefined});
     registerAssistantRoutes(app, {db, operations, requestHuman});
     const created = await app.inject({method: "POST", url: "/api/assistant-connections", headers: {authorization: "Bearer owner-fixture"}, payload: {name: "OpenClaw One", grant: full}});
     assert.equal(created.statusCode, 201);
@@ -93,10 +124,15 @@ test("real Fastify MCP discovery, owner lifecycle API, credential separation and
     assert.equal(db.deviceByTokenHash(hashToken(token)), null);
     assert.equal(isAgentControlApiRouteAllowed("POST", "/api/assistant-connections", "orchestrator"), false);
     assert.equal((await app.inject({method: "GET", url: "/api/assistant-connections", headers: {authorization: `Bearer ${token}`}})).statusCode, 401);
+    const configure = (grant: unknown) => app.inject({method: "POST", url: `/api/assistant-connections/${connection.id}/configure`, headers: {authorization: "Bearer owner-fixture"}, payload: {grant}});
+    assert.equal((await configure({...full, destructiveConfirmation: "confirm"})).statusCode, 200);
+    assert.equal((await configure(full)).json().connection.grant.destructiveConfirmation, "confirm");
+    assert.equal((await configure({...full, destructiveConfirmation: "none"})).json().connection.grant.destructiveConfirmation, "none");
     db.assistantConnections.configure(connection.id, {operations: [], projects: "all"});
     assert.equal((await call("tools/call", {name: "assistant_discover"})).json().result.isError, true);
     assert.equal((await call("tools/list")).json().result.tools.length, 0);
-    assert.equal((await call("tools/list", {}, second.token)).json().result.tools.length, 1);
+    assert.equal((await call("tools/list", {}, second.token)).json().result.tools.length, 2);
+    assert.equal((await call("tools/call", {name: "void_mutation"}, second.token)).json().result.content[0].text, "null");
     const rotated = await app.inject({method: "POST", url: `/api/assistant-connections/${connection.id}/rotate`, headers: {authorization: "Bearer owner-fixture"}, payload: {}});
     assert.equal(rotated.statusCode, 200);
     assert.equal((await call("tools/list")).statusCode, 401);
@@ -113,5 +149,14 @@ test("real Fastify MCP discovery, owner lifecycle API, credential separation and
     const foreignOrigin = await app.inject({method: "POST", url: "/assistant/mcp", headers: {authorization: `Bearer ${second.token}`, origin: "https://foreign.invalid"}, payload: {jsonrpc: "2.0", id: 1, method: "tools/list"}});
     assert.equal(foreignOrigin.statusCode, 403);
     assert.equal((await app.inject({method: "POST", url: "/assistant/mcp", headers: {authorization: `Bearer ${second.token}`, "mcp-protocol-version": "unsupported"}, payload: {jsonrpc: "2.0", id: 1, method: "tools/list"}})).statusCode, 400);
+    const operatingHuman = db.operatingHumanPrincipal;
+    db.operatingHumanPrincipal = () => ({...human, role: "viewer"});
+    for (const method of ["initialize", "tools/list", "ping"]) {
+      const refused = (await call(method, {}, second.token)).json();
+      assert.equal(refused.error.code, -32001);
+      assert.match(refused.error.message, /granting owner is no longer active/);
+      assert.equal(refused.result, undefined);
+    }
+    db.operatingHumanPrincipal = operatingHuman;
   } finally { await app.close(); db.close(); }
 });
