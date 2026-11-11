@@ -69,6 +69,8 @@ test("owner HTTP and MCP share connection, destination, subscription and deliver
   assert.equal((await invoke("dest_list", {connectionId: f.second.connection.id})).bindings[0].id, f.binding.id);
   const activity = await invoke("connection_activity", {connectionId: f.issued.connection.id});
   assert.ok(activity.activity.some((row: any) => row.operation === "connection_list"));
+  assert.equal(activity.activity.find((row: any) => row.operation === "dest_list").targetLabel,
+    "Assistant Connection · Fixture Second Connection");
   assert.ok(activity.activity.every((row: any) => typeof row.targetLabel === "string" && !Object.hasOwn(row, "arguments")));
   assert.ok(ASSISTANT_CONNECTION_OPERATIONS.every(([name]) => f.operations.inventory().some(op => op.name === name && name.length <= 32)));
   for (const forbidden of ["connection_create", "connection_configure", "connection_rotate", "connector_create", "sub_create", "sub_rotate", "dest_create"]) {
@@ -210,4 +212,51 @@ test("installation rename matches owner validation and keeps a content-free dura
   assert.equal((await f.call("install_name", {name: "Fixture Renamed", commandId: "rename-fixture"})).receipt.status, "succeeded");
   assert.equal(f.db.assistantConnections.installationName(), "Owner Later");
   assert.equal((await f.call("install_name", {name: "\u0000bad", commandId: "invalid-name"})).receipt.status, "failed");
+});
+
+test("delivery errors expose fixed codes to Assistant callers and retain raw diagnostics only on owner HTTP", async t => {
+  const f = fixture(), app = Fastify();
+  let transportFailure = true;
+  const worker = new OutboundEventsService(f.db, quiet, (async () => [{address: "93.184.216.34", family: 4}]) as never,
+    async () => {
+      if (transportFailure) throw new Error("connect ECONNREFUSED synthetic-private-host.invalid:443");
+      return {statusCode: 503};
+    });
+  t.after(async () => {await app.close(); await worker.close(); await f.outbound.close(); f.db.close();});
+  f.db.registerRunner({runnerId: "runner-error", hostname: "fixture", os: "linux", version: "fixture", agents: [], workspaces: []}, 1);
+  f.db.createSession({id: "session-error", runnerId: "runner-error", workspaceId: "workspace-error", agentId: "agent-error",
+    title: "Synthetic Error Fixture", config: {}, driver: "acp", useWorktree: false, now: 2});
+  f.db.assistantWork.track(f.operations, f.second.connection.id, {workId: "work-error", sessionId: "session-error", bindingId: f.binding.id});
+  worker.resume(f.args.subscriptionId);
+  f.db.updateSessionStatus("session-error", "completed", 3);
+  await worker.tick();
+  const rows = await f.call("delivery_list", f.args);
+  assert.equal(rows[0].error, "delivery_transport_or_policy_error");
+  assert.ok(!JSON.stringify(rows).includes("synthetic-private-host"));
+  registerAssistantWorkOwnerRoutes(app, {db: f.db, outboundEvents: worker, requestHuman: () => f.owner});
+  const owner = await app.inject({method: "GET", url: `/api/assistant-connections/${f.second.connection.id}/event-subscriptions/${f.args.subscriptionId}/deliveries`});
+  assert.match(owner.json()[0].error, /synthetic-private-host/);
+  transportFailure = false;
+  await worker.tick(Date.now() + 120_000);
+  const retry = await f.call("delivery_list", f.args);
+  assert.equal(retry[0].statusCode, 503);
+  assert.equal(retry[0].error, "callback_http_error");
+});
+
+test("revoked-target command recovery returns only its verdict under current original-operation authority", async t => {
+  const f = fixture(), original = f.outbound.resume.bind(f.outbound);
+  t.after(async () => {await f.outbound.close(); f.db.close();});
+  f.outbound.resume = subscriptionId => {original(subscriptionId); throw new Error("synthetic uncertain outcome");};
+  const input = {...f.args, commandId: "revoked-target-recovery"};
+  assert.equal((await f.call("delivery_resume", input)).receipt.status, "uncertain");
+  f.db.assistantConnections.revoke(f.second.connection.id);
+  const recovered = await f.call("command_get", {commandId: input.commandId});
+  assert.equal(recovered.resourceRevoked, true);
+  assert.equal(recovered.receipt.status, "uncertain");
+  assert.deepEqual(Object.keys(recovered.receipt).sort(), ["operationId", "operation", "status", "createdAt", "updatedAt"].sort());
+  await assert.rejects(f.call("delivery_resume", input), /cannot access/);
+  f.db.assistantConnections.configure(f.issued.connection.id, {operations: "all", projects: ["selected-fixture"]});
+  await assert.rejects(f.call("command_get", {commandId: input.commandId}), /excluded/);
+  f.db.assistantConnections.configure(f.issued.connection.id, {operations: ["command_get"], projects: "all"});
+  await assert.rejects(f.call("command_get", {commandId: input.commandId}), /excluded/);
 });

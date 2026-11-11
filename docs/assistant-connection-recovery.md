@@ -20,6 +20,10 @@ this metadata into a selected-project read. The granting user and organization m
 target connection; organization ownership alone cannot inspect another user's connections.
 Current credentials, active owner authority and operation/project grants are rechecked on every
 call and before returning data. The tools do not alter their own standing authority.
+`delivery_list` replaces stored free-form transport diagnostics with fixed codes:
+`callback_http_error` when an HTTP status was recorded, otherwise `delivery_transport_or_policy_error`.
+Use status, attempt count and retry time for model-side triage; raw host/TLS details stay on the
+authenticated owner's delivery-journal path.
 
 Connections and activity may describe a revoked target connection, for diagnosis. Destination,
 subscription and delivery inspection/resume require a non-revoked target connection. Subscription
@@ -53,6 +57,9 @@ not prove a webhook arrived, an OpenClaw run executed, or Discord received a mes
 delivery resumes through the existing scheduler; inspect later journal state for actual progress.
 Connection activity records completion/refusal of the tool call; inspect the durable command
 receipt to distinguish an accepted application change from an uncertain service outcome.
+After the target connection is revoked, `command_get` can still return this caller's content-free
+resume verdict, requiring the original operation, all-project grant and exact target ownership.
+It returns no revoked connection metadata and cannot authorize another resume.
 
 ## Human Authority Paths
 

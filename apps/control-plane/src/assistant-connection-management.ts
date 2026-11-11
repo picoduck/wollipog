@@ -16,6 +16,11 @@ export function assistantActivityTargetLabel(db: ControlPlaneDb, owner: HumanPri
     const runner = db.getRunner(target.id);
     return runner ? `Runner · ${runner.displayName ?? runner.hostname}` : "Runner (Unavailable)";
   }
+  if (target.kind === "assistant_connection") {
+    const connection = db.assistantConnections.get(target.id);
+    return connection && connection.ownerUserId === owner.userId && connection.organizationId === owner.organizationId
+      ? `Assistant Connection · ${connection.name}` : "Assistant Connection (Unavailable)";
+  }
   return "Target Unavailable";
 }
 

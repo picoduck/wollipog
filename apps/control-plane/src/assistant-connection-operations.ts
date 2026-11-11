@@ -61,6 +61,9 @@ export function registerAssistantConnectionOperations(operations: AssistantOpera
       ownerCanAccess: (owner, resource) => {
         if (resource.kind === "control_plane") return resource.id === db.instanceId();
         const connection = db.assistantConnections.get(resource.id);
+        if (resource.kind === "assistant_connection_receipt") return name === "delivery_resume" && !!connection?.revoked &&
+          connection.ownerUserId === owner.userId && connection.organizationId === owner.organizationId;
+        if (resource.kind !== "assistant_connection") return false;
         return !!connection && (name === "connection_activity" || !connection.revoked) &&
           connection.ownerUserId === owner.userId && connection.organizationId === owner.organizationId;
       },
@@ -76,7 +79,8 @@ export function registerAssistantConnectionOperations(operations: AssistantOpera
           if (name === "dest_list") return management.bindings(ctx.owner, connectionId);
           if (name === "sub_list") return management.subscriptions(ctx.owner, connectionId);
           if (name === "sub_get") return management.subscription(ctx.owner, connectionId, subscriptionId);
-          if (name === "delivery_list") return management.deliveries(ctx.owner, connectionId, subscriptionId, outbound);
+          if (name === "delivery_list") return management.deliveries(ctx.owner, connectionId, subscriptionId, outbound)?.map(({error, ...row}) => ({...row,
+            ...(error ? {error: row.statusCode === undefined ? "delivery_transport_or_policy_error" : "callback_http_error"} : {})}));
           throw new AssistantRefusal("Unknown connection-management read.");
         };
         if (!mutation) {
