@@ -80,7 +80,7 @@ export function machinesOverviewAttention(
 ): MachinesOverviewAttentionItem[] {
   return machineListOrder(entries).flatMap((entry) => {
     const counted = entry.runner ? machineAttentionReason(entry.runner, activeSessions) : null;
-    if (!machineNeedsAttention(entry.status) && counted === null) return [];
+    if (!entry.readinessNeedsAttention && !machineNeedsAttention(entry.attentionStatus ?? entry.status) && counted === null) return [];
     const action = machineAttentionAction(entry, canManage);
     return [{ entry, action, reason: machineAttentionSentence(entry, counted, activeSessions, action, now) }];
   });
@@ -113,7 +113,8 @@ function machineAttentionSentence(
   const runner = entry.runner;
   const agents = runner?.agents ?? [];
   const name = (agent: (typeof agents)[number]) => agentDisplayName(agent, agents);
-  switch (entry.status) {
+  if (entry.readinessNeedsAttention) return "Its SSH connection is online, but provider readiness needs attention. Review its Agents and Provider Accounts.";
+  switch (entry.attentionStatus ?? entry.status) {
     case "unreachable":
       return `Wollipog couldn't reach it over SSH. ${reconnectHint(action, entry.kind, true)}`;
     case "failed":

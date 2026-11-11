@@ -411,7 +411,7 @@ test.describe("responsive Project and Agent controls", () => {
     await expect(page.getByRole("combobox", { name: "Search Agent Options" })).toBeFocused();
 
     const options = page.getByRole("listbox", { name: "Agent" }).getByRole("option")
-      .filter({ hasNotText: "Set Up Agents in Connections" });
+      .filter({ hasNotText: "Account Setup…" });
     // Claude Code, Codex App Server, and Pi; the retired Codex exec agent is never listed (#3259).
     await expect(options).toHaveCount(3);
     await expect(options.filter({ hasText: /Non-Interactive|codex exec/ })).toHaveCount(0);
@@ -444,7 +444,7 @@ test.describe("the tap-only Agent list at phone width with a mouse", () => {
     await page.getByRole("button", { name: /^Agent:/ }).click();
     // The searchable list's scroll box is its panel, which holds the filter above the listbox.
     const list = page.locator(".menu.listbox");
-    // Claude Code, Pi, Codex App Server, and the Set Up Agents in Connections footer row.
+    // Claude Code, Pi, Codex App Server, and the Account Setup… footer row.
     await expect(list.getByRole("option")).toHaveCount(4);
     const description = list.getByRole("option", { name: /Codex App Server/ }).locator(".ui-select-option-reason");
     const descriptionLines = await description.evaluate((element) => {
@@ -780,8 +780,8 @@ test.describe("increased text size", () => {
     expect(listBox.y).toBeGreaterThanOrEqual(0);
     expect(listBox.x + listBox.width).toBeLessThanOrEqual(390);
     expect(listBox.y + listBox.height).toBeLessThanOrEqual(780);
-    // The last agent, above the Set Up Agents in Connections footer row (#2953).
-    const lastOption = list.getByRole("option").filter({ hasNotText: "Set Up Agents in Connections" }).last();
+    // The last agent, above the Account Setup… footer row (#2953).
+    const lastOption = list.getByRole("option").filter({ hasNotText: "Account Setup…" }).last();
     await lastOption.scrollIntoViewIfNeeded();
     await lastOption.click();
     await expect(agent).toHaveAccessibleName(/Agent: Pi RPC/);
@@ -979,10 +979,10 @@ test.describe("searchable pickers at 1440px (#1951)", () => {
       await page.getByRole("combobox", { name: field }).focus();
       // Project's list stays closed on focus (#2952).
       if (field === "Project") await page.keyboard.press("ArrowDown");
-      // The footer action (New Project…, Set Up Agents in Connections) is a row to act on, not a
+      // The footer action (New Project…, Account Setup…) is a row to act on, not a
       // choice with a description.
       const options = page.getByRole("listbox", { name: `${field} Options` }).getByRole("option")
-        .filter({ hasNotText: /^(New Project…|Set Up Agents in Connections)$/ });
+        .filter({ hasNotText: /^(New Project…|Account Setup…)$/ });
       await expect(options.first()).toBeVisible();
       if (process.env.EVIDENCE_DIR) {
         await page.mouse.move(0, 0);
@@ -1116,7 +1116,7 @@ test.describe("searchable touch pickers at 390px (#1951)", () => {
 test.describe("Agent's Ready and Needs Setup groups on a phone (#2953)", () => {
   test.use({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
 
-  test("at 390px the touch sheet shows both groups and a 44px Set Up Agents in Connections row", async ({ page }) => {
+  test("at 390px the touch sheet shows both groups and a 44px Account Setup… row", async ({ page }) => {
     await openDialog(page, "?agentSetup=1&savedAgent=pi");
     const agent = page.getByRole("button", { name: /^Agent:/ });
     await expect(agent).toHaveAccessibleName("Agent: Pi RPC");
@@ -1135,7 +1135,7 @@ test.describe("Agent's Ready and Needs Setup groups on a phone (#2953)", () => {
       /^OpenCode.*Sign in before the session can start\.$/,
     ]);
     const rows = list.getByRole("option");
-    await expect(rows.last()).toHaveText("Set Up Agents in Connections");
+    await expect(rows.last()).toHaveText("Account Setup…");
     await rows.last().scrollIntoViewIfNeeded();
     expect(Math.round((await rows.last().boundingBox())!.height), "the footer row is a 44px touch row").toBeGreaterThanOrEqual(44);
   });

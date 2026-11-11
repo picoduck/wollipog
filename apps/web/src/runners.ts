@@ -161,6 +161,9 @@ export function machineStatus(runner: MachineStatusRunner | undefined, box: Mach
     if (!runner) return "connecting";
   }
   if (!runner || runner.status !== "online") return "offline";
+  // An SSH connection's badge describes transport health. Provider availability is presented in
+  // Agents and Provider Accounts, separately from a replacement's readiness verification.
+  if (box?.status === "online") return "online";
   const has = (status: AgentStatus) => machineAgentsWithStatus(runner.agents, status).length > 0;
   if (runnerOutdated(runner.protocolVersion) || has("update_required")) return "update_required";
   if (has("approval_required")) return "approval_required";
@@ -185,6 +188,9 @@ export interface MachineListEntry {
   name: string;
   kind: "native" | "ssh";
   status: MachineStatus;
+  /** Provider/runner attention is independent of the SSH connection badge. */
+  attentionStatus?: MachineStatus;
+  readinessNeedsAttention?: boolean;
   /** Its runner is connected. */
   online: boolean;
   /** Runner Capacity as the runner reports it; null when it reports none. */
@@ -197,15 +203,15 @@ export interface MachineListEntry {
  * The Machines list's order (#2985): what needs the person first, then online machines, then by
  * name. `[attentionRank, online ? 0 : 1, displayName]`.
  */
-export function machineSortKey(entry: Pick<MachineListEntry, "status" | "online" | "name">): [number, number, string] {
-  return [machineNeedsAttention(entry.status) ? 0 : 1, entry.online ? 0 : 1, entry.name];
+export function machineSortKey(entry: Pick<MachineListEntry, "status" | "online" | "name" | "attentionStatus" | "readinessNeedsAttention">): [number, number, string] {
+  return [entry.readinessNeedsAttention || machineNeedsAttention(entry.attentionStatus ?? entry.status) ? 0 : 1, entry.online ? 0 : 1, entry.name];
 }
 
 const MACHINE_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 export function compareMachines(
-  a: Pick<MachineListEntry, "status" | "online" | "name" | "runnerId">,
-  b: Pick<MachineListEntry, "status" | "online" | "name" | "runnerId">,
+  a: Pick<MachineListEntry, "status" | "online" | "name" | "runnerId" | "attentionStatus" | "readinessNeedsAttention">,
+  b: Pick<MachineListEntry, "status" | "online" | "name" | "runnerId" | "attentionStatus" | "readinessNeedsAttention">,
 ): number {
   const [aRank, aOnline, aName] = machineSortKey(a);
   const [bRank, bOnline, bName] = machineSortKey(b);
@@ -230,11 +236,14 @@ export function machineListEntries(runners: ReadonlyMap<string, RunnerView>, box
 
 function machineEntry(runner: RunnerView | undefined, box: BoxView | undefined, runnerId: string): MachineListEntry {
   const capacity = runner?.capacity;
+  const providerStatus = box?.status === "online" && runner?.status === "online" ? machineStatus(runner, undefined) : undefined;
   return {
     runnerId,
     name: runnerDisplay(runner, box, runnerId).name,
     kind: box ? "ssh" : "native",
     status: machineStatus(runner, box),
+    ...(providerStatus && machineNeedsAttention(providerStatus) ? { attentionStatus: providerStatus } : {}),
+    ...(box?.status === "online" && runner?.status === "online" && box.harnessReadiness?.state === "failed" ? { readinessNeedsAttention: true } : {}),
     online: runner?.status === "online",
     capacity: capacity
       ? { configuredUnits: capacity.configuredUnits, ...(capacity.usedUnits === undefined ? {} : { usedUnits: capacity.usedUnits }) }
@@ -269,15 +278,16 @@ const MACHINE_GROUPS: ReadonlyArray<{ key: MachineGroupKey; label: string }> = [
 ];
 
 /** Offline machines have a group of their own; Connecting sits with Online, where it is going. */
-export function machineGroup(status: MachineStatus): MachineGroupKey {
+export function machineGroup(status: MachineStatus, additionalAttention = false): MachineGroupKey {
   if (status === "offline") return "offline";
-  return machineNeedsAttention(status) ? "needs_attention" : "online";
+  return additionalAttention || machineNeedsAttention(status) ? "needs_attention" : "online";
 }
 
 /** The sorted entries under their group labels, in group order, leaving out empty groups. */
 export function groupMachineList(entries: readonly MachineListEntry[]): MachineListGroup[] {
   return MACHINE_GROUPS
-    .map(({ key, label }) => ({ key, label, entries: entries.filter((entry) => machineGroup(entry.status) === key) }))
+    .map(({ key, label }) => ({ key, label, entries: entries.filter((entry) => machineGroup(entry.status,
+      entry.readinessNeedsAttention || (entry.attentionStatus !== undefined && machineNeedsAttention(entry.attentionStatus))) === key) }))
     .filter((group) => group.entries.length > 0);
 }
 

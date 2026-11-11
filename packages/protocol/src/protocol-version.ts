@@ -1427,12 +1427,14 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 356: Audit byte-verified UI evidence receipt reuse across approval occurrences.
   356,
   // v357 slot
+  // 357: Timestamped provider setup observations and transport-independent SSH readiness (#4438).
+  357,
   // v358 slot
   // v359 slot
-  // 359: Disclose runner-enforced provider/command credential-home write separation (#3922).
-  359,
   // v360 slot
   // v361 slot
+  // 361: Disclose runner-enforced provider/command credential-home write separation (#3922).
+  361,
   // v362 slot
   // v363 slot
   // v364 slot

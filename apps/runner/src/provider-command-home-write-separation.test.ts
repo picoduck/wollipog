@@ -24,6 +24,7 @@ test("production catalog merge replaces stale claims while retaining unrelated r
   for (const driver of ["claude-code", "codex-app-server", "pi", "acp"] as const) {
     const configured = { ...agent(driver), installation: { id: "fixture", path: "/inert", via: "path" as const },
       providerAccountReadiness: { defaultAuthStatus: "authenticated" as const, readyAccountIds: ["account"] },
+      providerReadiness: { checkedAt: 123, installation: "compatible" as const, authentication: "unknown" as const, reason: "in_use" as const },
       providerCommandHomeWriteSeparation: { version: 999, status: "protected", reason: "configured" },
     } as unknown as AgentDefinition;
     const projected = mergeAgents([configured], [])[0]!;
@@ -35,6 +36,7 @@ test("production catalog merge replaces stale claims while retaining unrelated r
       assert.deepEqual(report, { version: 1, status: "unavailable", reason: "unsupported_host" });
     }
     assert.deepEqual(projected.providerAccountReadiness, configured.providerAccountReadiness);
+    assert.deepEqual(projected.providerReadiness, configured.providerReadiness);
     assert.deepEqual(projected.installation, configured.installation);
     assert.equal(configured.providerCommandHomeWriteSeparation?.status, "protected", "input was not mutated");
   }

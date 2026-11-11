@@ -1058,7 +1058,7 @@ launch is left out of the turn's roots.
 
 ### Codex's Sandbox Inside This Boundary
 
-Protocol v359 catalogs `AgentDefinition.providerCommandHomeWriteSeparation`, and launches log
+Protocol v361 catalogs `AgentDefinition.providerCommandHomeWriteSeparation`, and launches log
 the fixed `provider_command_home_write_separation` diagnostic to the runner log without adding
 session-history events. Remote-target launch diagnostics remain unknown. Both describe only runner-enforced
 separation of provider credential-home writes from model command subprocess writes. Current native
