@@ -9558,7 +9558,8 @@ export type OutboundEventKind =
 
 export type OutboundEventSubscriptionScope =
   | { kind: "project"; projectId: string }
-  | { kind: "automation"; automationId: string };
+  | { kind: "automation"; automationId: string }
+  | { kind: "assistant"; connectionId: string };
 
 export type OutboundEventSubscriptionState = "active" | "paused";
 
@@ -9618,6 +9619,7 @@ export interface OutboundEventDeliveryView {
 
 export interface OutboundEventEnvelope {
   version: "v1";
+  assistant?: { controlPlaneId: string; connectionId: string; work: { workId: string; revision: number; attentionRevision: number }[] };
   eventId: string;
   kind: OutboundEventKind;
   occurredAt: number;

@@ -116,10 +116,28 @@ export function validateOutboundCallbackUrl(raw: string): ServiceResult<URL> {
   return ok(url);
 }
 
-export async function resolveOutboundTarget(raw: string, lookup: Lookup = dnsLookup): Promise<ServiceResult<ResolvedTarget>> {
+/** Owner-configured exceptions are exact IP sets for one persisted target, never host suffixes
+ * or CIDRs. Metadata/link-local and reserved destinations remain forbidden. */
+export function validatePrivateCallbackAddresses(value: unknown): value is string[] {
+  if (!Array.isArray(value) || !value.length || value.length > 8 || new Set(value).size !== value.length) return false;
+  const privateNetworks = new BlockList();
+  privateNetworks.addSubnet("10.0.0.0", 8, "ipv4");
+  privateNetworks.addSubnet("172.16.0.0", 12, "ipv4");
+  privateNetworks.addSubnet("192.168.0.0", 16, "ipv4");
+  privateNetworks.addSubnet("100.64.0.0", 10, "ipv4");
+  privateNetworks.addSubnet("fc00::", 7, "ipv6");
+  return value.every(address => typeof address === "string" && address !== "100.100.100.200" && !address.toLowerCase().startsWith("::ffff:") &&
+    (isIP(address) === 4 ? privateNetworks.check(address, "ipv4") :
+      isIP(address) === 6 && privateNetworks.check(address, "ipv6")));
+}
+
+export async function resolveOutboundTarget(raw: string, lookup: Lookup = dnsLookup, privateAddresses?: string[]): Promise<ServiceResult<ResolvedTarget>> {
   const parsed = validateOutboundCallbackUrl(raw);
   if (!parsed.ok || !parsed.data) return fail(parsed.error ?? "callback URL is invalid", parsed.status);
   const url = parsed.data;
+  if (privateAddresses && (!validatePrivateCallbackAddresses(privateAddresses) || url.protocol !== "https:")) {
+    return fail("private callback exceptions require HTTPS and one to eight explicit private addresses");
+  }
   const literalLoopback = isLiteralLoopback(url.hostname);
   const lookupHostname = url.hostname.startsWith("[") && url.hostname.endsWith("]")
     ? url.hostname.slice(1, -1)
@@ -133,13 +151,14 @@ export async function resolveOutboundTarget(raw: string, lookup: Lookup = dnsLoo
     return fail("callback hostname could not be resolved");
   }
   if (addresses.length === 0) return fail("callback hostname did not resolve to an address");
-  if (addresses.some(({ address }) => literalLoopback
+  const allowedPrivate = (address: string) => privateAddresses?.includes(address) === true;
+  if (addresses.some(({ address }) => privateAddresses ? !allowedPrivate(address) : literalLoopback
     ? !isLoopbackAddress(address)
     : isBlockedOutboundAddress(address))) {
     return fail("callback hostname resolves to a private, loopback, link-local, or reserved address");
   }
   const selected = addresses.find(({ address, family }) =>
-    (family === 4 || family === 6) && (literalLoopback
+    (family === 4 || family === 6) && (privateAddresses ? allowedPrivate(address) : literalLoopback
       ? isLoopbackAddress(address)
       : !isBlockedOutboundAddress(address)));
   return selected
@@ -210,6 +229,7 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 export class OutboundEventsService {
   private readonly active = new Map<string, Set<AbortController>>();
   private activeTick?: Promise<void>;
+  private readonly unsubscribeAssistantChanges?: () => void;
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -217,12 +237,24 @@ export class OutboundEventsService {
     private readonly lookup: Lookup = dnsLookup,
     private readonly transport: Transport = defaultTransport,
     private readonly requestTimeoutMs = OUTBOUND_EVENT_REQUEST_TIMEOUT_MS,
-  ) {}
+  ) {
+    // Notifications cancel promptly; the live checks in deliver remain authoritative after a
+    // restart or a missed notification. Do not retain any Assistant bearer in queued work.
+    this.unsubscribeAssistantChanges = db.assistantConnections?.onChange(connectionId => {
+      const rows = db.raw().prepare("SELECT subscription_id FROM outbound_event_subscriptions WHERE assistant_connection_id=? AND revoked_at IS NULL")
+        .all(connectionId) as {subscription_id: string}[];
+      for (const row of rows) {
+        if (db.assistantConnections.get(connectionId)?.revoked) this.revoke(row.subscription_id);
+        else this.abortSubscription(row.subscription_id, "rotation");
+      }
+    });
+  }
 
   async create(
     request: CreateOutboundEventSubscriptionRequest,
     actor: GovernanceActor,
     now = Date.now(),
+    privateAddresses?: string[],
   ): Promise<ServiceResult<OutboundEventSubscriptionCredential>> {
     if (!request || typeof request !== "object" || !request.scope ||
         !Array.isArray(request.eventKinds) || request.eventKinds.length === 0 ||
@@ -234,9 +266,15 @@ export class OutboundEventsService {
         (request.includeQuestionTitle !== undefined && typeof request.includeQuestionTitle !== "boolean") ||
         (request.scope.kind === "project" && typeof request.scope.projectId !== "string") ||
         (request.scope.kind === "automation" && typeof request.scope.automationId !== "string") ||
-        (request.scope.kind !== "project" && request.scope.kind !== "automation")) {
+        (request.scope.kind === "assistant" && typeof request.scope.connectionId !== "string") ||
+        (request.scope.kind !== "project" && request.scope.kind !== "automation" && request.scope.kind !== "assistant")) {
       return fail("outbound event subscription is malformed");
     }
+    if (request.scope.kind === "assistant") {
+      const connection = this.db.assistantConnections.get(request.scope.connectionId);
+      if (!connection || connection.revoked || actor.kind !== "human" || actor.id !== connection.ownerUserId ||
+          request.includeSessionName || request.includeQuestionTitle) return fail("Only the connection owner can configure a content-minimized Assistant callback", 403);
+    } else if (privateAddresses) return fail("Private callback exceptions require an owner-configured Assistant target", 403);
     // Bound the callback-host lookup as deliveries do, well inside the web client's request
     // deadline: the one-time secret exists only in this reply, so creation must answer (with the
     // subscription or with nothing persisted) before the client gives up on it. A lookup that
@@ -246,7 +284,7 @@ export class OutboundEventsService {
     timeout.unref?.();
     let target: ServiceResult<ResolvedTarget>;
     try {
-      target = await abortable(resolveOutboundTarget(request.callbackUrl, this.lookup), controller.signal);
+      target = await abortable(resolveOutboundTarget(request.callbackUrl, this.lookup, privateAddresses), controller.signal);
     } catch {
       return fail("callback hostname could not be resolved");
     } finally {
@@ -264,6 +302,7 @@ export class OutboundEventsService {
       includeQuestionTitle: request.includeQuestionTitle === true,
       actor,
       now,
+      ...(privateAddresses ? {privateAddresses} : {}),
     });
     return subscription ? ok({ subscription, secret }, 201) : fail("subscription scope was not found", 404);
   }
@@ -318,6 +357,7 @@ export class OutboundEventsService {
   }
 
   async close(): Promise<void> {
+    this.unsubscribeAssistantChanges?.();
     for (const subscriptionId of [...this.active.keys()]) this.abortSubscription(subscriptionId, "shutdown");
     try {
       await this.activeTick;
@@ -392,8 +432,17 @@ export class OutboundEventsService {
     let error: string | undefined;
     const startedAt = Date.now();
     try {
-      const target = await abortable(resolveOutboundTarget(delivery.callbackUrl, this.lookup), controller.signal);
+      if (delivery.assistantConnectionId && !this.db.assistantWork.authorizeDelivery(delivery.assistantConnectionId, delivery.payloadJson)) {
+        statusCode = 403;
+        throw new Error("Assistant work or destination authority is no longer available");
+      }
+      const target = await abortable(resolveOutboundTarget(delivery.callbackUrl, this.lookup, delivery.privateAddresses), controller.signal);
       if (!target.ok || !target.data) throw new Error(target.error ?? "Callback target is invalid");
+      // DNS resolution is asynchronous: grants and bindings may have changed during it.
+      if (delivery.assistantConnectionId && !this.db.assistantWork.authorizeDelivery(delivery.assistantConnectionId, delivery.payloadJson)) {
+        statusCode = 403;
+        throw new Error("Assistant work or destination authority is no longer available");
+      }
       const response = await this.transport(target.data, delivery, controller.signal);
       statusCode = response.statusCode;
     } catch (caught) {
