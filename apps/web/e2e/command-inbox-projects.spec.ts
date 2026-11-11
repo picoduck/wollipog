@@ -791,8 +791,8 @@ for (const reducedMotion of ["reduce", "no-preference"] as const) {
 
 for (const fault of ["row transition", "observer jump"] as const) {
   test(`the painted-frame row recorder sees injected row movement (${fault})`, async ({ page }) => {
-    // Negative controls for the paging tests above. "row transition" puts back the transition #2426
-    // removed, which paints a scroll correction a frame before the rows it compensates for.
+    // Negative controls for the paging tests above. "row transition" puts back the transform
+    // transition #2426 removed and gives the landed row a known transform change to animate.
     // "observer jump" moves the reader in a ResizeObserver callback, before paint, in the first frame
     // after the page lands, and moves it back straight after that paint.
     await page.emulateMedia({ reducedMotion: "reduce" });
@@ -808,36 +808,47 @@ for (const fault of ["row transition", "observer jump"] as const) {
     await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
     await page.locator(".inbox-list").focus();
     await settledPreviewScrollMetrics(page);
-    if (fault === "observer jump") {
-      await reader.evaluate((element) => {
-        const landedFrom = element.scrollTop;
-        // In the first frame after the page lands, resize a box this fault owns. Its observer,
-        // created before the recorder's, moves the reader in that frame's first delivery, after the
-        // frame's rAF reads; the move back runs after the paint and before the next rAF, so only
-        // the recorder's observer-phase read can see the frame.
-        const trigger = document.createElement("div");
-        trigger.style.cssText = "position: fixed; top: 0; left: 0; height: 0; width: 1px; visibility: hidden;";
-        document.body.append(trigger);
-        let armed = false;
-        const jump = new ResizeObserver(() => {
-          if (!armed) return;
-          jump.disconnect();
-          trigger.remove();
+    await reader.evaluate((element, injectedFault) => {
+      const landedFrom = element.scrollTop;
+      // In the first frame after the page lands, resize a box this fault owns. Its observer,
+      // created before the recorder's, injects movement after the frame's rAF baseline reads.
+      const trigger = document.createElement("div");
+      trigger.style.cssText = "position: fixed; top: 0; left: 0; height: 0; width: 1px; visibility: hidden;";
+      document.body.append(trigger);
+      let armed = false;
+      const jump = new ResizeObserver(() => {
+        if (!armed) return;
+        jump.disconnect();
+        trigger.remove();
+        if (injectedFault === "row transition") {
+          const viewport = element.getBoundingClientRect();
+          const row = [...element.querySelectorAll<HTMLElement>("[data-virtual-row]")].find((candidate) => {
+            const rect = candidate.getBoundingClientRect();
+            return rect.bottom > viewport.top && rect.top < viewport.bottom;
+          });
+          if (!row) throw new Error("The landed row is missing from the transition control.");
+          // Enabling transitions alone is insufficient: this row can already be mounted with
+          // its final measured transform before paging, leaving nothing to animate (#4491).
+          // Start a known change inside rendering, after the recorder has read the baseline;
+          // task-time geometry reads could otherwise consume a short transition before sampling.
+          row.style.setProperty("transform", `${row.style.transform} translateY(20px)`, "important");
+        } else {
+          // Move back after paint and before the next rAF: only an observer-phase read sees it.
           element.scrollTop -= 20;
           setTimeout(() => { element.scrollTop += 20; }, 0);
-        });
-        jump.observe(trigger);
-        const watch = () => {
-          if (Math.abs(element.scrollTop - landedFrom) < 1) {
-            requestAnimationFrame(watch);
-            return;
-          }
-          armed = true;
-          trigger.style.width = "2px";
-        };
-        requestAnimationFrame(watch);
+        }
       });
-    }
+      jump.observe(trigger);
+      const watch = () => {
+        if (Math.abs(element.scrollTop - landedFrom) < 1) {
+          requestAnimationFrame(watch);
+          return;
+        }
+        armed = true;
+        trigger.style.width = "2px";
+      };
+      requestAnimationFrame(watch);
+    }, fault);
     const samples = await recordRowOffsets(page, reader, () => page.keyboard.press("Shift+Space"));
     expect(rowDrift(samples), JSON.stringify(samples)).toBeGreaterThan(2);
   });
