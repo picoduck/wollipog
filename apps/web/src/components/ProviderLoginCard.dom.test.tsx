@@ -56,6 +56,29 @@ async function mount(element: React.ReactElement, client: Partial<ApiClient> = {
   };
 }
 
+test("a refused restart uses structured local copy and leaves Dismiss available without automatic retry", async () => {
+  const calls: string[] = [];
+  const view = await mount(<ProviderSignIn runnerId="remote" login={{ ...login, status: "failed", error: "Sign-in failed." }} restart={{ accountId: "work" }} />, {
+    startProviderLogin: async () => {
+      calls.push("start");
+      throw new ApiError("secret /private", 409, undefined, {
+        directoryDiagnostic: { code: "managed_profile_directory", component: "profile_home", reason: "may_have_changed" },
+      });
+    },
+    dismissProviderLoginNotice: async () => { calls.push("dismiss"); return { dismissed: true }; },
+  });
+  try {
+    await act(async () => view.button("Try Again").click());
+    await view.settle();
+    assert.match(view.container.textContent ?? "", /Preserve them.*Do not retry automatically/);
+    assert.doesNotMatch(view.container.textContent ?? "", /secret|\/private/);
+    assert.deepEqual(calls, ["start"]);
+    await act(async () => view.button("Dismiss").click());
+    await view.settle();
+    assert.deepEqual(calls, ["start", "dismiss"]);
+  } finally { await view.unmount(); }
+});
+
 test("an authorization-code sign-in is two steps: Open Claude Sign-In in a new tab, then the code field and Submit Code", async () => {
   const submitted: string[] = [];
   const view = await mount(<ProviderSignIn runnerId="runner-1" login={login} />, {

@@ -10,6 +10,8 @@ import { CopyButton, Spinner } from "./common.js";
 import { FieldError } from "./FieldError.js";
 import { ExternalLinkIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
+import { providerLoginStartFailure, type ProviderLoginStartFailure as StartFailure } from "../provider-login-start-failure.js";
+import { ProviderLoginStartFailure } from "./ProviderLoginStartFailure.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { Steps } from "./Steps.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -73,6 +75,7 @@ export function ProviderSignIn({ runnerId, login, restart }: {
   const [running, setRunning] = useState<"submit" | "restart" | "dismiss" | null>(null);
   const [codeError, setCodeError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [startFailure, setStartFailure] = useState<StartFailure | null>(null);
   const provider = providerName(login.provider);
 
   const submit = async () => {
@@ -112,10 +115,11 @@ export function ProviderSignIn({ runnerId, login, restart }: {
     if (running || !restart) return;
     setRunning("restart");
     setActionError(null);
+    setStartFailure(null);
     try {
       await api.startProviderLogin(runnerId, restart);
     } catch (cause) {
-      setActionError((cause as Error).message);
+      setStartFailure(providerLoginStartFailure(cause));
       setRunning(null);
       return;
     }
@@ -153,7 +157,8 @@ export function ProviderSignIn({ runnerId, login, restart }: {
         )}
       </>
     );
-    const failure = actionError && <p className="notice-error" role="alert">{actionError}</p>;
+    const failure = <>{actionError && <p className="notice-error" role="alert">{actionError}</p>}
+      {startFailure && <div role="alert"><ProviderLoginStartFailure failure={startFailure} /></div>}</>;
     return (
       <div className="signin" data-provider-login-status={login.status}>
         {alreadyOnMachine ? (
