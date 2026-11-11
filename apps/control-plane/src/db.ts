@@ -8,6 +8,9 @@ import { CAMPAIGN_CLEANUP_ITEMS_LIMIT, CAMPAIGN_LIVE_WORK_KINDS, CAMPAIGN_STUCK_
   worktreeRefusalAction, cleanupReasonSentence, PROTOCOL_VERSION, type CampaignActivityView, type CampaignCleanupItem, type CampaignLiveWorkKind,
   type CampaignRepairView, type CampaignStuckItem, type OrchestratorCampaignHandoff } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
+import { preserveSkillRemoval } from "./skill-removal-history.js";
+import { installSkillManagementRevisions } from "./skill-management-revisions.js";
+import { installAssistantAutomationAuthority, bindAssistantAutomation, type AssistantAutomationOperation } from "./assistant-automation-authority.js";
 import { safeProviderReadiness } from "@wollipog/protocol";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
@@ -6081,6 +6084,8 @@ export class ControlPlaneDb {
     this.db = db = runnerRetryConnection(db);
     if (!attached) {
       AssistantConnections.install(db);
+      installAssistantAutomationAuthority(db);
+      installSkillManagementRevisions(db);
       installAssistantOutboundScope(db);
       AssistantWorkStore.install(db);
       CampaignBudgetLedger.install(db);
@@ -11296,6 +11301,7 @@ export class ControlPlaneDb {
 
   deleteSkill(skillId: string, now = Date.now()): boolean {
     return this.atomic(() => {
+      preserveSkillRemoval(this.db, skillId, now);
       this.stmt("DELETE FROM skill_machine_versions WHERE skill_id=?").run(skillId);
       this.stmt("DELETE FROM skill_machine_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
       this.stmt("DELETE FROM skill_git_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
@@ -34053,6 +34059,7 @@ export class ControlPlaneDb {
     spec: AutomationSpec;
     nextFireAt: number | null;
     actor: GovernanceActor;
+    assistantAuthorization?: {connectionId: string; operation: AssistantAutomationOperation};
     now: number;
   }): AutomationSchedule {
     const { spec } = input;
@@ -34082,6 +34089,9 @@ export class ControlPlaneDb {
         detail: { enabled: spec.enabled, nextFireAt: input.nextFireAt,
           ...(input.approval ? { occurrenceId: input.approval.occurrenceId, resourceDigest: input.approval.resourceDigest } : {}) }, now: input.now,
       });
+      if (input.assistantAuthorization) bindAssistantAutomation(this, this.getAutomation(input.automationId)!,
+        input.assistantAuthorization.connectionId, input.assistantAuthorization.operation);
+      else this.stmt("DELETE FROM assistant_automation_authority WHERE automation_id=?").run(input.automationId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -34095,6 +34105,7 @@ export class ControlPlaneDb {
     spec: AutomationSpec;
     nextFireAt: number | null;
     actor: GovernanceActor;
+    assistantAuthorization?: {connectionId: string; operation: AssistantAutomationOperation};
     now: number;
   }): AutomationSchedule | null {
     const current = this.getAutomation(input.automationId);
@@ -34133,6 +34144,9 @@ export class ControlPlaneDb {
         automationId: input.automationId, kind, actor: input.actor,
         detail: { enabled: spec.enabled, nextFireAt: input.nextFireAt }, now: input.now,
       });
+      if (input.assistantAuthorization) bindAssistantAutomation(this, this.getAutomation(input.automationId)!,
+        input.assistantAuthorization.connectionId, input.assistantAuthorization.operation);
+      else this.stmt("DELETE FROM assistant_automation_authority WHERE automation_id=?").run(input.automationId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -34170,9 +34184,9 @@ export class ControlPlaneDb {
     }
   }
 
-  getAutomation(automationId: string): AutomationSchedule | null {
-    const row = this.stmt("SELECT * FROM automations WHERE automation_id=? AND deleted_at IS NULL")
-      .get(automationId) as unknown as AutomationRow | undefined;
+  getAutomation(automationId: string, includeDeleted = false): AutomationSchedule | null {
+    const row = this.stmt("SELECT * FROM automations WHERE automation_id=? AND (deleted_at IS NULL OR ?=1)")
+      .get(automationId, includeDeleted ? 1 : 0) as unknown as AutomationRow | undefined;
     return row ? this.automation(row) : null;
   }
 

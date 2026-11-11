@@ -348,6 +348,10 @@ import { registerWorkflowArtifactExportRoute } from "./artifact-export-route.js"
 import { registerRunnerCredentialRoutes } from "./runner-credential-route.js";
 import { SessionRoleConversions, registerSessionRoleRoutes } from "./session-role-conversion.js";
 import { makeSkillsSyncPusher, registerSkillRoutes } from "./skills-route.js";
+import { assistantRequestDigest } from "./assistant-command-receipts.js";
+import { ManagementMutations } from "./assistant-management-command.js";
+import { registerAssistantSkills } from "./assistant-skills.js";
+import { registerAssistantAutomations } from "./assistant-automations.js";
 import { builtInSkills, seedBuiltInSkills } from "./built-in-skills.js";
 import { repairLegacySkillDescriptions } from "./skills.js";
 import { SKILL_GIT_AUTO_UPDATE_SWEEP_MS, SkillGitAutoUpdater, skillGitAutoUpdateIntervalMs } from "./skill-git-auto-update.js";
@@ -2960,7 +2964,11 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
 });
 
 registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
-const {operations: assistantOperations, ingress: assistantDiscordIngress} = createAssistantManagement(db, svc);
+const {operations: assistantOperations, ingress: assistantDiscordIngress, receipts: assistantCommandReceipts} = createAssistantManagement(db, svc);
+const assistantManagementMutations = new ManagementMutations(assistantCommandReceipts, db.instanceId(), assistantRequestDigest,
+  id => db.assistantConnections.get(id)!, id => db.assistantConnections.destructiveConfirmation(id));
+registerAssistantAutomations(assistantOperations, db, automations, assistantManagementMutations);
+registerAssistantSkills(assistantOperations, {db, hub, requestHuman, requestPrincipal, pushSkillsSync}, assistantManagementMutations);
 registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });
 registerAssistantWorkOwnerRoutes(app, { db, outboundEvents, requestHuman });
 registerAssistantDiscordIngress(app, { db, ingress: assistantDiscordIngress, requestHuman });
