@@ -43,6 +43,12 @@ text, provider errors or private result bodies. Inspect `command_get` and curren
 an accepted or uncertain outcome. A known service success retains its receipt even if access
 changes before the response; private results remain withheld.
 
+Campaign behavior capability choices and installation counts also intersect the current runner
+access of the connection's granted Projects; the owner HTTP view retains the owner's full catalog.
+A known authority refusal before any service effect settles the reserved command as `failed`
+and returns an MCP error with refused activity. Once a service effect could have started, an
+unknown or partial outcome remains `uncertain`; it is never relabeled safe to redispatch.
+
 When `destructiveConfirmation` is `confirm`, finding resolve/dismiss and branch cleanup return
 an affected-scope preview. Repeat unchanged arguments and command ID with the short-lived
 `confirmationId`. Finding revisions, deletion decision snapshots and grant revisions bind the

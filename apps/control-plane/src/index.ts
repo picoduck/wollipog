@@ -4355,7 +4355,7 @@ app.post("/api/sessions/:id/orchestrator-campaign/recommendations/:recommendatio
 
 const campaignScopeManagement = registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
 const campaignReviewManagement = createCampaignReviewManagement({db, svc,
-  behaviorView: (id, human) => svc.campaignBehaviorView(id, (behavior, exactRow) => orchestratorSettings.campaignCapabilities(human, behavior, exactRow)),
+  behaviorView: (id, human, access) => svc.campaignBehaviorView(id, (behavior, exactRow) => orchestratorSettings.campaignCapabilities(human, behavior, exactRow, access?.runner)),
   holdReader: principal => target => sessionHoldReaderFor(db, principal, target),
 });
 campaignReviewManagement.registerHttp(app, requestPrincipal);

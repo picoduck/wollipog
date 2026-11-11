@@ -12,6 +12,8 @@ export interface OwnerManagementInput<P extends AuthPrincipal = HumanPrincipal> 
   recheck?: () => Promise<P>;
   /** Server-created intersection with transport grants, never supplied in a request body. */
   access?: { session(id: string): boolean; runner(id: string): boolean };
+  /** Service-owned boundary: immediately before a call that could apply an effect. */
+  beforeEffect?: () => void;
 }
 export interface OwnerManagementReply {
   code(status: number): OwnerManagementReply;

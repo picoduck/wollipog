@@ -9,7 +9,7 @@ import { OwnerManagement, type OwnerManagementInput, type OwnerManagementReply }
  * The registry never accepts a credential or an asserted session actor in its arguments. */
 export function createCampaignReviewManagement(deps: {
   db: ControlPlaneDb; svc: SessionsService;
-  behaviorView(id: string, human: HumanPrincipal): ReturnType<SessionsService["campaignBehaviorView"]>;
+  behaviorView(id: string, human: HumanPrincipal, access?: OwnerManagementInput["access"]): ReturnType<SessionsService["campaignBehaviorView"]>;
   holdReader(principal: AuthPrincipal): Parameters<SessionsService["descendantRequests"]>[4];
 }): OwnerManagement<AuthPrincipal> {
   const {db, svc} = deps, management = new OwnerManagement<AuthPrincipal>();
@@ -40,7 +40,7 @@ export function createCampaignReviewManagement(deps: {
     if (input.principal.kind !== "human") return reply.code(403).send({error: "only an authenticated human may change campaign behavior"});
     if (!visible(input, reply)) return;
     reply.header("cache-control", "no-store");
-    return respond(reply, deps.behaviorView(sessionId(input), input.principal));
+    return respond(reply, deps.behaviorView(sessionId(input), input.principal, input.access));
   });
   management.define("GET", "/api/sessions/:id/descendant-requests", (input, reply) => {
     if (!visible(input, reply)) return;
@@ -92,6 +92,7 @@ export function createCampaignReviewManagement(deps: {
     await input.recheck?.();
     if (!visible(input, reply)) return;
     const id = sessionId(input), actor = {kind: "human" as const, id: input.principal.userId};
+    input.beforeEffect?.();
     return respond(reply, operation === "create" ? svc.createReviewFinding(id, input.body, actor)
       : operation === "update" ? svc.updateReviewFinding(id, (input.params as {findingId: string}).findingId, input.body, actor)
         : svc.bundleReviewFindings(id, input.body));
@@ -99,7 +100,11 @@ export function createCampaignReviewManagement(deps: {
   management.define("POST", "/api/sessions/:id/orchestrator-campaign/cleanup/delete-merged-branches", async (input, reply) => {
     if (input.principal.kind !== "human" || input.principal.role === "viewer") return reply.code(403).send({error: "only an authenticated human may ask Wollipog to delete merged branches"});
     if (!visible(input, reply)) return;
-    return respond(reply, await svc.deleteApprovedMergedBranches(sessionId(input), id => canAccess(input, id), input.recheck));
+    const beforeAction = input.recheck || input.beforeEffect ? async () => {
+      await input.recheck?.();
+      input.beforeEffect?.();
+    } : undefined;
+    return respond(reply, await svc.deleteApprovedMergedBranches(sessionId(input), id => canAccess(input, id), beforeAction));
   });
   return management;
 }

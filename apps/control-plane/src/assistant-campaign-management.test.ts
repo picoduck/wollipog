@@ -5,7 +5,7 @@ import {DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCO
 import {ControlPlaneDb} from "./db.js";
 import {Hub} from "./hub.js";
 import {SessionsService} from "./sessions.js";
-import {resolveOrchestratorCampaignPolicy} from "./orchestrator-settings.js";
+import {OrchestratorSettings, resolveOrchestratorCampaignPolicy} from "./orchestrator-settings.js";
 import {registerCampaignStatusRoutes} from "./campaign-status-routes.js";
 import {registerCampaignIssueScopeRoutes} from "./campaign-issue-scope-routes.js";
 import {createCampaignReviewManagement} from "./campaign-review-management.js";
@@ -13,6 +13,7 @@ import {createAssistantOperations, registerAssistantRoutes} from "./assistant-ro
 import {registerAssistantSessionOperations} from "./assistant-session-operations.js";
 import {ASSISTANT_CAMPAIGN_MANAGEMENT, registerAssistantCampaignManagement} from "./assistant-campaign-management.js";
 import {sessionHoldReaderFor} from "./session-command-permissions.js";
+import {AssistantRefusal} from "./assistant-connections.js";
 
 async function fixture() {
   const db = ControlPlaneDb.open(":memory:"), local = db.localIdentityContext();
@@ -51,8 +52,9 @@ async function fixture() {
   const app = Fastify();
   const status = registerCampaignStatusRoutes(app, {db, requestPrincipal: () => owner});
   const scope = registerCampaignIssueScopeRoutes(app, {db, svc, requestPrincipal: () => owner});
+  const settings = new OrchestratorSettings(db);
   const review = createCampaignReviewManagement({db, svc,
-    behaviorView: id => svc.campaignBehaviorView(id, () => ({models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available"})),
+    behaviorView: (id, human, access) => svc.campaignBehaviorView(id, (behavior, exactRow) => settings.campaignCapabilities(human, behavior, exactRow, access?.runner)),
     holdReader: principal => target => sessionHoldReaderFor(db, principal, target)});
   review.registerHttp(app, () => owner);
   const operations = createAssistantOperations(db), receipts = registerAssistantSessionOperations(operations, db, svc);
@@ -236,5 +238,57 @@ test("known success keeps its receipt but withholds private results after in-fli
     assert.equal(result.receipt.status, "succeeded");
     assert.ok(!JSON.stringify(result).includes(finding.body));
     assert.equal(h.db.listReviewFindings("root").length, 1);
+  } finally {await h.close();}
+});
+
+test("campaign behavior capabilities exclude installations and models outside the Project grant", async () => {
+  const h = await fixture();
+  try {
+    h.db.registerRunner({runnerId: "excluded-runner", hostname: "Excluded Machine", os: "linux", version: "fixture",
+      workspaces: [{id: "private-repo", name: "Excluded", path: "/excluded"}],
+      agents: [{id: "excluded-agent", name: "Excluded Agent", driver: "acp", command: "fixture", args: [], env: {}, available: true,
+        capabilities: {models: [{id: "excluded-only-model"}], effortLevels: ["high"], slashCommands: [], supportsImages: false, supportsApprovals: true}}]}, Date.now(), PROTOCOL_VERSION);
+    h.db.addProjectLocation(h.other.id, {runnerId: "excluded-runner", workspaceId: "private-repo"});
+    const http = await h.app.inject({method: "GET", url: "/api/sessions/root/orchestrator-campaign/behavior"});
+    assert.ok(JSON.stringify(http.json()).includes("excluded-only-model"), "The owner can inspect the excluded Project's installation");
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: [h.project.id]});
+    const assistant = await h.mcp("campaign_behavior");
+    assert.equal(assistant.body.capabilities.installations, 0);
+    assert.ok(!JSON.stringify(assistant).includes("excluded-only-model"));
+    assert.ok(!JSON.stringify(assistant).includes("Excluded Machine"));
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: "all"});
+    assert.deepEqual((await h.mcp("campaign_behavior")).body, http.json(), "Full Access keeps the owner capability catalog");
+  } finally {await h.close();}
+});
+
+test("a known refusal after reservation but before dispatch is failed and recorded as refused", async () => {
+  const h = await fixture();
+  try {
+    const reserve = h.receipts.reserve.bind(h.receipts);
+    h.receipts.reserve = (...args) => {
+      const result = reserve(...args);
+      if (result.created) h.db.assistantConnections.revoke(h.issued.connection.id);
+      return result;
+    };
+    const response = await h.app.inject({method: "POST", url: "/assistant/mcp", headers: {authorization: `Bearer ${h.issued.token}`},
+      payload: {jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "review_find_add",
+        arguments: {sessionId: "root", commandId: "refused-before-effect", payload: finding}}}});
+    assert.equal(response.json().result.isError, true);
+    assert.match(response.json().result.content[0].text, /revoked/);
+    assert.equal(h.receipts.get(h.issued.connection.id, "refused-before-effect")?.status, "failed");
+    assert.equal(h.db.listReviewFindings("root").length, 0);
+    assert.equal(h.db.assistantConnections.activity(h.issued.connection.id)[0]?.outcome, "refused");
+  } finally {await h.close();}
+});
+
+test("a refusal after a possible partial cleanup remains uncertain rather than becoming failed", async () => {
+  const h = await fixture();
+  try {
+    h.svc.deleteApprovedMergedBranches = async (_id, _access, beforeAction) => {
+      await beforeAction?.();
+      throw new AssistantRefusal("Fixture refusal after an effect boundary");
+    };
+    const result = await h.call("campaign_branch_clean", {commandId: "partial-cleanup"});
+    assert.equal(result.receipt.status, "uncertain");
   } finally {await h.close();}
 });

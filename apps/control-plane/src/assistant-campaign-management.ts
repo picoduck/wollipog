@@ -151,7 +151,9 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
               db.listProjectsForPrincipal(principal, true).some(project => grant.projects.includes(project.id) && project.locations.some(location => location.runnerId === id && location.availability !== "runner_removed")));
           },
         };
-        const execute = () => service.execute(route, {principal: owner, params, body, query, recheck, access});
+        let effectStarted = false;
+        const execute = () => service.execute(route, {principal: owner, params, body, query, recheck, access,
+          beforeEffect: () => {effectStarted = true;}});
         if (!mutation) {
           const result = await execute();
           await recheck();
@@ -190,7 +192,11 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
           const receipt = receipts.settle(ctx.connection.id, commandId, result.status < 400 ? "succeeded" : result.status >= 500 ? "uncertain" : "failed");
           await recheck();
           return {receipt, ...result, meaning: "Application service accepted or refused the command; inspect current state. Never redispatch an accepted or uncertain receipt."};
-        } catch {
+        } catch (error) {
+          if (error instanceof AssistantRefusal && !effectStarted) {
+            receipts.settle(ctx.connection.id, commandId, "failed");
+            throw error;
+          }
           return {receipt: receipts.settle(ctx.connection.id, commandId, "uncertain"), recovery: "Result unavailable or outcome uncertain. Inspect command_get under current authority; do not replay."};
         }
       }});
