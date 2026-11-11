@@ -13,6 +13,16 @@ provider authentication belong to OpenClaw. A model is necessary for conversatio
 only in the dedicated profile using OpenClaw's supported authentication flow. Do not copy
 Wollipog session credentials or the owner's OpenClaw credentials into it.
 
+After selecting the dedicated paths below, the owner can inspect `openclaw models list` and
+`openclaw models status --check`. For the selected provider, use its supported interactive
+`openclaw models auth login --provider <provider>` flow or supply its API key through a protected
+runtime secret source, then select `openclaw models set <provider/model>`. Do this on the machine
+running the OpenClaw runtime, with the intended agent selected when multiple agents exist.
+`models status` is configuration/auth-state evidence; `models status --probe` makes a live provider
+request and can incur charges. The no-model smoke below does not perform either login or probing.
+Keep OpenClaw provider credentials, Wollipog Assistant credentials, connector credentials and
+webhook signing keys separate; none substitutes for another.
+
 An authenticated Wollipog organization owner issues a connection using
 `POST /api/assistant-connections` with a display name and grant. The connection API returns
 the credential once; use the owner's authenticated client, not an Assistant credential, for
@@ -98,6 +108,29 @@ Keep the generic MCP connection restricted to owner-trusted contexts. Discord co
 requester-aware command ingress remain separate work in #4467. This first slice does not expose
 the connection to shared Discord contexts or claim originating-conversation delivery evidence.
 
+## Discord Setup Boundary
+
+Follow #4467's [Assistant work and conversation setup](assistant-work-events.md) and its native
+`integrations/openclaw-discord` component for Discord commands, sender policy and signed event
+delivery. That component is being delivered separately; do not substitute this generic MCP setup
+for it. This guide neither installs nor duplicates the connector. Once that component lands,
+follow its version-specific installation/configuration instructions in the dedicated profile.
+
+Before enabling it, the owner configures the Discord channel plugin and bot credentials, DM
+pairing/allowlists, guild/channel restrictions and explicit requester/destination bindings. Use
+the exact bot account and thread/channel/DM destination; DMs require
+`session.dmScope: per-account-channel-peer`. Test with authorized dedicated destinations. Membership
+in a shared Discord channel does not inherit the connection owner's Full Access grant.
+
+The native connector authenticates the actual Discord account, author and conversation before
+selecting a binding-scoped connector credential. Correlated launch/follow-up requests use
+`/assistant/discord/commands` with both the Assistant bearer and `X-Wollipog-Connector-Token`.
+That connector credential stays in protected native runtime configuration, outside model prompts,
+arguments and generic MCP tool configuration. The control plane binds the command, digest and
+resolved target through trusted ingress. Model-authored requester IDs, origin fields or tool
+arguments cannot establish that binding. Plain MCP remains valid **uncorrelated**, as tested below.
+Required owner approvals retain their authenticated Wollipog resolution path.
+
 ## Equivalent Remote Setup
 
 Use the same descriptor/profile and bearer header on the other machine, changing the endpoint to
@@ -115,6 +148,13 @@ verification to manufacture a passing remote test.
 OpenClaw's `gateway.remote.*` settings connect clients to an OpenClaw Gateway; they do not select
 the Wollipog MCP endpoint. If the Gateway is on another machine, put the MCP configuration and
 environment secrets on the machine actually owning its runtime.
+
+For remote event replies, follow the connector's separate signed-receiver setup. Public callbacks
+require HTTPS. Private/tailnet delivery requires an owner-issued, target-specific subscription
+exception as documented in [Assistant work events](assistant-work-events.md); it does not change
+MCP authority or provision networking. Proxy only the intended callback path, preserve signed raw
+bytes, and keep administrative OpenClaw Gateway interfaces private. The generic OpenClaw hooks
+endpoint does not verify Wollipog signatures; the dedicated receiver must verify them first.
 
 ## Recovery Without Credential Disclosure
 
@@ -135,6 +175,27 @@ for authoritative receipts. Generic OpenClaw hook replay keys reset on restart a
 for durable work tracking. Signed Wollipog event ingress and destination authorization belong to
 #4467, not to an unauthenticated generic-hook mapping.
 
+### Reconnect and Command Receipts
+
+Before each session mutation, durably retain its selected installation/connection, operation,
+arguments and caller-generated `commandId` outside the model's transient conversation state.
+Use [`command_get`](assistant-session-management.md) with that ID after timeout, restart or lost
+response. A missing local response is not evidence that the command failed. Do not route receipt
+lookup to another installation or generate a new ID as a transport retry.
+
+| Receipt State | Next Action |
+| --- | --- |
+| `succeeded` | The service accepted the command. Read `session_get` and `session_messages` for current execution status and results. This is not proof of model completion. |
+| `failed` | Inspect the recorded refusal and owner-controlled remedy. A new intentional command after correction needs its own ID. |
+| `accepted`, `running` or `uncertain` | Inspect the target and supported lifecycle/command recovery. Reusing the same ID reconciles without dispatch; a new ID would create new work. |
+| Missing Receipt | Recheck the exact connection/ID and the source control plane. Only after authoritative lookup succeeds and confirms no reservation may the original command be submitted with the same ID. |
+
+Read result pages with their returned cursor even if a filtered page is empty. Retain the session's
+event epoch with progress; if it changes, discard the old event cursor and reconcile the current
+session before reading again. Result sharing still requires current source and destination access.
+For Discord work, use the connector's own durable reconciliation and reply receipts; do not infer
+Discord delivery from a hook admission, model assertion or a session's completed state.
+
 ## Reproducible Verification
 
 From this worktree, with dependencies already installed:
@@ -145,12 +206,14 @@ node --import tsx apps/control-plane/scripts/openclaw-assistant-smoke.ts /absolu
 ```
 
 The smoke script starts two **test control planes** using the production Assistant Fastify routes,
-operation registry and independent in-memory SQLite databases. It binds only ephemeral loopback
+operation registry and independent temporary on-disk SQLite databases. It binds only ephemeral loopback
 ports, issues synthetic test credentials in memory, creates isolated temporary OpenClaw state,
-and invokes the installed OpenClaw `mcp probe`. It exercises real MCP initialization/discovery,
-distinct prefixed catalogs, direct HTTP discovery calls/identity routing, credential rotation,
+and invokes the installed OpenClaw `mcp probe`. It also invokes that installed version's native
+MCP runtime for launch, follow-up, status/result reads and command receipt lookup. It closes and
+reopens the test control plane/SQLite, rediscovers tools and reconciles an uncertain command without
+redispatch. It also covers distinct prefixed catalogs, explicit identity routing, credential rotation,
 revocation, unavailable endpoints and incompatible-protocol refusal. It closes both listeners
-and removes its temporary profile. It neither starts nor modifies the hosting stack.
+and removes its temporary profile and databases. It neither starts nor modifies the hosting stack.
 
 The smoke runner requires a POSIX host for process-group cleanup. It overrides the child's home,
 XDG and temporary directories as well as OpenClaw's paths, without changing the invoking shell's
@@ -161,16 +224,26 @@ is not an OS sandbox for untrusted executables.
 Interrupting an active probe with Ctrl-C or SIGTERM stops its process group, lets the smoke test
 close its test listeners and remove its temporary profile, and exits with status 130 or 143.
 
-Evidence boundaries: prefixed discovery is real OpenClaw integration; explicit discovery tool
-calls use HTTP directly, not model tool selection. This test does not execute a provider/model,
-Discord, remote TLS, remote host or SSH runner. It is a test assembly of production routes,
-not a deployed full-stack installation. It prints categorical outcomes and withholds raw runtime
-output because diagnostics may contain secrets.
+Evidence boundaries: CLI discovery and native runtime tool calls are real installed OpenClaw
+integration. Explicit discovery also uses HTTP directly to cross-check identity. The test uses
+real session services and receipt storage, but its runner transport, result text and response-loss
+fault are **MOCKED**. No agent executable or model is started. A `succeeded` command receipt proves
+service acceptance only. This is a test assembly of production routes, not a deployed full stack.
+Discord, remote TLS/host and SSH execution remain for #4468 after owner setup. Raw runtime output
+is withheld because diagnostics may contain secrets.
 
-Session launch, follow-up, status/result retrieval, configuration mutation and durable receipt
-reconciliation are **pending #4464/#4465 integration**. Those steps must be added to this smoke
-test as their production registrations land; the current script explicitly reports them pending.
-Do not treat discovery success as completion of those acceptance criteria.
+`scripts/openclaw-assistant-call.mjs` is a no-model smoke adapter to the installed version's
+`dist/agents/agent-bundle-mcp-runtime.js` (`createSessionMcpRuntime`, catalog and `callTool`).
+This is an **internal, version-pinned OpenClaw interface**, not a production connector contract.
+It supplies only the generated native server config to avoid unrelated plugin discovery; the
+client, listing and transport code remain OpenClaw's installed implementation. It refuses another
+package/version or missing export without substituting a mock/SDK fallback. Supply the real
+OpenClaw executable, resolving to its package's `openclaw.mjs`, rather than an unrelated wrapper.
+This adapter does not establish model tool selection, Gateway policy enforcement or native Discord
+admission; its direct runtime API exercise is separate from the real CLI probe.
+
+Configuration mutation is pending #4465's merged registrations. The current script reports that
+step pending; it must be integrated before claiming the full smoke acceptance criterion.
 
 ## OpenClaw References
 
@@ -179,6 +252,7 @@ Version-matched documentation inspected from the installed 2026.11.3 package:
 - `docs/tools/mcp.md` and `docs/cli/mcp/registry.md`: client discovery, caching, policy and refresh.
 - `docs/cli/mcp/transports.md`: Streamable HTTP, bearer headers, environment references and TLS.
 - `docs/help/environment.md`: profile/state/workspace environment contracts.
+- `docs/cli/models.md`: provider selection, authentication and probe evidence limits.
 - `docs/gateway/config-hooks.md`: hook auth, routing and limited replay cache.
 - `docs/channels/discord/messaging.md` and `access-control.md`: conversation identity and admission.
 
