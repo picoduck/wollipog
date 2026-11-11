@@ -21,7 +21,8 @@ async function fixture() {
   const operations = createAssistantOperations(db);
   AssistantCommandReceipts.install(db.raw());
   const receipts = new AssistantCommandReceipts(db.raw());
-  const mutations = new ManagementMutations(receipts, db.instanceId(), assistantRequestDigest, id => db.assistantConnections.get(id)!);
+  const mutations = new ManagementMutations(receipts, db.instanceId(), assistantRequestDigest, id => db.assistantConnections.get(id)!,
+    id => db.assistantConnections.destructiveConfirmation(id));
   const hub = {isRunnerOnline: () => false, sendToRunner: () => true, requestFromRunner: async () => {throw new Error("Offline");}} as SkillsHub;
   registerAssistantSkills(operations, {db, hub, requestHuman: () => owner, requestPrincipal: () => owner,
     pushSkillsSync: makeSkillsSyncPusher({db, hub})}, mutations);
@@ -120,13 +121,15 @@ test("automation pause/resume/edit/delete use the real shared service with revis
   await f.call("auto_delete", {automationId: schedule.automationId, expectedRevision: paused.result.revision, operationId: "delete"});
   assert.equal(f.db.getAutomation(schedule.automationId), null);
   assert.equal(f.receipts.get(f.issued.connection.id, "delete")?.status, "succeeded");
+  assert.equal((await f.call("auto_delete", {automationId: schedule.automationId, expectedRevision: paused.result.revision, operationId: "delete"})).receipt.status, "succeeded");
 });
 
 test("destructive confirmation binds current grant, arguments and impact; uncertain outcomes never replay", async t => {
   const f = await fixture();
   t.after(async () => {await f.app.close(); f.db.close();});
   const connection = {...f.issued.connection, grant: {...f.issued.connection.grant, destructiveConfirmation: "confirm" as const}};
-  const mutations = new ManagementMutations(f.receipts, f.db.instanceId(), assistantRequestDigest, () => connection);
+  const mutations = new ManagementMutations(f.receipts, f.db.instanceId(), assistantRequestDigest, () => connection,
+    () => connection.grant.destructiveConfirmation);
   let effects = 0;
   let revision = 1;
   const input = {connection, operation: "skill_remove", args: {operationId: "confirm"} as Record<string, unknown>,
@@ -155,10 +158,68 @@ test("skill removal keeps version and assignment evidence in the shared deletion
   t.after(async () => {await f.app.close(); f.db.close();});
   const created = await f.call("skill_create", {operationId: "create", payload: payload()});
   const skillId = created.result.skill.id;
-  await f.call("skill_remove", {skillId, operationId: "remove", expectedRevision: created.result.revision});
+  f.db.assistantConnections.configure(f.issued.connection.id, {operations: "all", projects: "all", destructiveConfirmation: "confirm"});
+  const request = {skillId, operationId: "remove", expectedRevision: created.result.revision};
+  const preview = await f.call("skill_remove", request);
+  assert.equal(preview.confirmationRequired, true);
+  assert.ok(f.db.getSkill(skillId));
+  await f.call("skill_remove", {...request, confirmationId: preview.confirmationId});
   assert.equal(f.db.getSkill(skillId), null);
+  assert.equal((await f.call("skill_remove", request)).receipt.status, "succeeded");
   const row = f.db.raw().prepare("SELECT snapshot_json FROM skill_removal_history WHERE skill_id=?").get(skillId) as {snapshot_json: string};
   const snapshot = JSON.parse(row.snapshot_json);
   assert.equal(snapshot.versions.length, 1);
   assert.equal(snapshot.skill.id, skillId);
+});
+
+test("automation scope checks every alternate and rejects spoofed Project Location labels", async t => {
+  const f = await fixture();
+  t.after(async () => {await f.app.close(); f.db.close();});
+  f.db.registerRunner({runnerId: "scope-runner", hostname: "scope-runner", os: "linux", version: "test", agents: [], workspaces: []}, 1, 400);
+  const allowed = f.db.createProject({name: "Allowed"});
+  const excluded = f.db.createProject({name: "Excluded"});
+  const placement = (projectId: string, name: string) => {
+    const workspace = f.db.createProjectWorkspace(projectId, "scope-runner", {name, path: `/projects/${name}`});
+    const location = f.db.findProjectLocationForProject(projectId, "scope-runner", workspace.id)!;
+    return {runnerId: "scope-runner", workspaceId: workspace.id, projectId, projectLocationId: location.id, agentId: "agent"};
+  };
+  const primary = placement(allowed.id, "allowed");
+  const other = placement(excluded.id, "excluded");
+  const configuration: AutomationSpec = {name: "Scoped", cron: "0 9 * * *", timezone: "UTC", enabled: false,
+    action: {kind: "create_session", request: {...primary, prompt: "Work"}}, misfirePolicy: {kind: "skip"}, runnerPolicy: {kind: "wait"},
+    concurrencyPolicy: "skip", limits: {maxCostUsd: 1, maxToolCalls: 10}, notifications: {pushEvents: []}};
+  const all = await f.call("auto_create", {operationId: "other", payload: {...configuration, action: {kind: "create_session", request: other}}});
+  assert.ok(all.result.automationId);
+  f.db.assistantConnections.configure(f.issued.connection.id, {operations: "all", projects: [allowed.id]});
+  const created = await f.call("auto_create", {operationId: "allowed", payload: configuration});
+  assert.equal((await f.call("auto_get", {automationId: created.result.automationId})).automation.name, "Scoped");
+  assert.equal((await f.call("auto_list")).automations.length, 1);
+  await assert.rejects(f.call("auto_get", {automationId: all.result.automationId}), /project is excluded/);
+  await assert.rejects(f.call("auto_create", {operationId: "alternate", payload: {...configuration,
+    action: {kind: "create_session", request: {runnerId: primary.runnerId, workspaceId: primary.workspaceId, agentId: primary.agentId}},
+    runnerPolicy: {kind: "alternate", targets: [{runnerId: other.runnerId, workspaceId: other.workspaceId, agentId: other.agentId}]}}}), /outside the selected projects/);
+  await assert.rejects(f.call("auto_create", {operationId: "spoofed", payload: {...configuration,
+    action: {kind: "create_session", request: {...other, projectId: allowed.id}}}}), /does not match/);
+  assert.equal(f.db.listAutomations().length, 2);
+  for (const operation of f.operations.list(f.issued.connection)) {
+    assert.ok(`installation_with_thirty_chars__${operation.name}`.length <= 64);
+    assert.equal(operation.inputSchema.type, "object");
+  }
+});
+
+test("skill revisions detect same-timestamp change/revert writes without conflicting unrelated skill edits", async t => {
+  const f = await fixture();
+  t.after(async () => {await f.app.close(); f.db.close();});
+  const created = await f.call("skill_create", {operationId: "create", payload: payload()});
+  const skillId = created.result.skill.id;
+  const read = await f.call("skill_get", {skillId});
+  await f.call("skill_create", {operationId: "unrelated", payload: payload("unrelated")});
+  assert.equal((await f.call("skill_get", {skillId})).revision, read.revision);
+  const before = f.db.getSkill(skillId);
+  // Keep the entire visible state and timestamp identical after two intervening SQL writes.
+  f.db.raw().prepare("UPDATE skills SET description='intervening' WHERE id=?").run(skillId);
+  f.db.raw().prepare("UPDATE skills SET description=? WHERE id=?").run(before!.description, skillId);
+  assert.deepEqual(f.db.getSkill(skillId), before);
+  assert.notEqual((await f.call("skill_get", {skillId})).revision, read.revision);
+  await assert.rejects(f.call("skill_update", {skillId, operationId: "stale", expectedRevision: read.revision, payload: {description: "Overwrite"}}), /revision changed/);
 });

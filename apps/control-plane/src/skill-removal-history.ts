@@ -1,4 +1,12 @@
 import type { DatabaseSync } from "node:sqlite";
+import type { HumanPrincipal } from "./identity.js";
+
+/** Receipt reconciliation may prove the former ownership without exposing removed content. */
+export function canReconcileSkillRemoval(db: DatabaseSync, owner: HumanPrincipal, skillId: string): boolean {
+  if (owner.role !== "owner" || !db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='skill_removal_history'").get()) return false;
+  const row = db.prepare("SELECT json_extract(snapshot_json, '$.ownership[0].organization_id') AS organization FROM skill_removal_history WHERE skill_id=?").get(skillId) as {organization: string} | undefined;
+  return row?.organization === owner.organizationId;
+}
 
 /** Removal changes the desired library, not the historical evidence. Called inside deleteSkill's
  * transaction so a failed deletion cannot leave a spurious historical removal. No tool exposes

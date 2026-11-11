@@ -33,7 +33,8 @@ automation proposals and their exact human approval contract are unchanged.
 
 All mutations also require a caller-generated `operationId`. Supply skill `expectedRevision` as the
 opaque string from `skill_get` or a successful mutation. It covers metadata, latest version,
-assignments, group deployment impact and machine pins; it is not a wall-clock timestamp.
+assignments, group deployment impact and machine pins, with a persistent per-skill write counter
+that detects same-timestamp change/revert races; it is not a wall-clock timestamp.
 Conflicting edits refuse before writing. Normal update/restore creates or preserves immutable
 versions. Library removal preserves a private internal historical snapshot in
 `skill_removal_history`, including versions, assignments, policies and provenance; removed content
@@ -89,7 +90,7 @@ integration tests, not real OpenClaw, Discord, remote-host or SSH evidence. Exis
 tests verify owner API behavior after extraction.
 
 Pending delivery dependencies: the shared receipt module must land with the session-management
-unit, and the grant policy must land with the connection unit. Scheduled campaign automation
+unit, and the implemented grant policy must land with the connection unit. Scheduled campaign automation
 authoring currently encounters the existing sole-human-author requirement; Assistant parity for
 that surface remains an explicit implementation gap until its shared runtime is extended and
 verified. Regular session/workflow automations use their shared owner services. Remote proxy/TLS,

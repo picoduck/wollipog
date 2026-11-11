@@ -7,6 +7,8 @@ import { resolveDesiredSkillSnapshot } from "./skills.js";
 import { skillStateResponse } from "./skill-edited-copy.js";
 import { ManagementMutations } from "./assistant-management-command.js";
 import { assistantRequestDigest } from "./assistant-command-receipts.js";
+import { skillPayloadSchema } from "./assistant-management-schemas.js";
+import { canReconcileSkillRemoval } from "./skill-removal-history.js";
 
 function args(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new AssistantRefusal("An argument object is required.");
@@ -19,7 +21,8 @@ function id(value: unknown): string {
 
 /** Includes the entire read/modify/write surface, rather than a millisecond timestamp. */
 export function skillManagementRevision(db: ControlPlaneDb, skillId: string): string {
-  return assistantRequestDigest({skill: db.getSkill(skillId), assignments: db.listSkillAssignments(skillId),
+  const counter = db.raw().prepare("SELECT revision FROM skill_management_revisions WHERE skill_id=?").get(skillId);
+  return assistantRequestDigest({counter, skill: db.getSkill(skillId), assignments: db.listSkillAssignments(skillId),
     impact: db.skillDeploymentImpact(skillId)});
 }
 
@@ -64,17 +67,24 @@ export function registerAssistantSkills(operations: AssistantOperations, deps: S
       inputSchema: {type: "object", properties: {skillId: {type: "string"}, assignmentId: {type: "string"},
         runnerId: {type: "string"}, versionId: {type: "string"}, before: {type: "string"},
         operationId: {type: "string"}, confirmationId: {type: "string"}, expectedRevision: {type: "string"},
-        payload: {type: "object", description: "The corresponding owner API request body; see the operation coverage documentation."}},
-        required: mutation ? ["operationId", ...(name === "skill_create" ? [] : ["expectedRevision"])] : []},
+        payload: skillPayloadSchema(name)},
+        required: [...(name === "skill_list" || name === "skill_create" ? [] : [assignment ? "assignmentId" : "skillId"]),
+          ...(name === "skill_version_get" ? ["versionId"] : []), ...(name.startsWith("skill_pin_") ? ["runnerId"] : []),
+          ...(mutation ? ["operationId", ...(name === "skill_create" ? [] : ["expectedRevision"]),
+            ...(name === "skill_remove" || name === "skill_unassign" ? [] : ["payload"])] : [])]},
       // A list is metadata only at authorization, then every result is separately filtered.
       metadata: name === "skill_list",
       resolveTarget: target,
-      ownerCanAccess: (owner, t) => name === "skill_list" || name === "skill_create" || db.canAccessSkill(owner, t.id),
+      ownerCanAccess: (owner, t) => name === "skill_list" || name === "skill_create" || db.canAccessSkill(owner, t.id) ||
+        (name === "skill_remove" && canReconcileSkillRemoval(db.raw(), owner, t.id)),
       execute: async (value, context) => {
         const a = args(value), resolved = skillId(a);
         const current = db.assistantConnections.get(context.connection.id)!;
         const scope = () => {
-          if (!resolved) return impact(null);
+          if (!resolved) {
+            const affected = impact(null);
+            return {...affected, targets: affected.targets.filter(r => db.canAccessRunner(context.owner, r.runnerId))};
+          }
           if (mutation && a.expectedRevision !== skillManagementRevision(db, resolved)) throw new AssistantRefusal("Skill revision changed. Inspect the skill and deployment scope again before editing.");
           const affected = impact(resolved);
           if (affected.targets.some(r => !db.canAccessRunner(context.owner, r.runnerId))) throw new AssistantRefusal("The granting owner cannot access every affected machine.");
@@ -119,6 +129,15 @@ export function registerAssistantSkills(operations: AssistantOperations, deps: S
         .filter(r => db.canAccessRunner(context.owner, r.runnerId))
         .map(r => ({runnerId: r.runnerId, online: hub.isRunnerOnline(r.runnerId),
           desired: resolveDesiredSkillSnapshot(db, r.runnerId).filter(s => s.name === db.getSkill(skillId)?.name).map(({name, versionDigest, targets}) => ({name, versionDigest, targets})),
-          reported: skillStateResponse(db.getRunnerSkillState(r.runnerId))}))};
+          reported: (() => {
+            const state = skillStateResponse(db.getRunnerSkillState(r.runnerId));
+            if (!state) return null;
+            const name = db.getSkill(skillId)?.name;
+            return {updatedAt: state.updatedAt, hasError: !!state.error,
+              deployed: state.deployed.filter(s => s.name === name).map(s => ({name: s.name, digest: s.digest,
+                hasError: !!s.error, links: s.links.map(({agentId, status}) => ({agentId, status}))})),
+              drift: state.drift.filter(s => s.name === name).map(s => ({name: s.name})),
+            };
+          })()}))};
     }});
 }

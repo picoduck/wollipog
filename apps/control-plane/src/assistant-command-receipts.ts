@@ -64,8 +64,8 @@ export class AssistantCommandReceipts {
     if (!receipt) throw new Error("Assistant command reservation missing");
     if (receipt.status !== "accepted" && receipt.status !== "running") return receipt;
     const settled = { ...receipt, status, updatedAt: Date.now(), ...(resultReference ? {resultReference, resourceId: resultReference} : {}) };
-    this.db.prepare("UPDATE assistant_command_receipts SET receipt_json=? WHERE connection_id=? AND command_id=?")
+    this.db.prepare("UPDATE assistant_command_receipts SET receipt_json=? WHERE connection_id=? AND command_id=? AND json_extract(receipt_json, '$.status') IN ('accepted','running')")
       .run(JSON.stringify(settled), connectionId, commandId);
-    return settled;
+    return this.get(connectionId, commandId)!;
   }
 }

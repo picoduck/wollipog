@@ -9,6 +9,7 @@ import { CAMPAIGN_CLEANUP_ITEMS_LIMIT, CAMPAIGN_LIVE_WORK_KINDS, CAMPAIGN_STUCK_
   type CampaignRepairView, type CampaignStuckItem, type OrchestratorCampaignHandoff } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { preserveSkillRemoval } from "./skill-removal-history.js";
+import { installSkillManagementRevisions } from "./skill-management-revisions.js";
 import { safeProviderReadiness } from "@wollipog/protocol";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
@@ -6074,6 +6075,7 @@ export class ControlPlaneDb {
     this.db = db = runnerRetryConnection(db);
     if (!attached) {
       AssistantConnections.install(db);
+      installSkillManagementRevisions(db);
       CampaignBudgetLedger.install(db);
       CampaignReviewJobs.install(db);
       SessionReviewJobs.install(db);
@@ -34155,9 +34157,9 @@ export class ControlPlaneDb {
     }
   }
 
-  getAutomation(automationId: string): AutomationSchedule | null {
-    const row = this.stmt("SELECT * FROM automations WHERE automation_id=? AND deleted_at IS NULL")
-      .get(automationId) as unknown as AutomationRow | undefined;
+  getAutomation(automationId: string, includeDeleted = false): AutomationSchedule | null {
+    const row = this.stmt("SELECT * FROM automations WHERE automation_id=? AND (deleted_at IS NULL OR ?=1)")
+      .get(automationId, includeDeleted ? 1 : 0) as unknown as AutomationRow | undefined;
     return row ? this.automation(row) : null;
   }
 

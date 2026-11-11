@@ -12,7 +12,8 @@ export class ManagementMutations {
   private confirmations = new Map<string, {digest: string; expires: number}>();
   constructor(private readonly commands: ManagementCommands, private readonly controlPlaneId: string,
     private readonly digest: (args: unknown) => string,
-    private readonly currentConnection: (id: string) => AssistantConnection) {}
+    private readonly currentConnection: (id: string) => AssistantConnection,
+    private readonly confirmationPolicy: (id: string) => "none" | "confirm") {}
   async run(input: {
     connection: AssistantConnection; operation: string; args: Record<string, unknown>; target: AssistantTarget;
     impact(): unknown; destructive?: boolean; recheck(): Promise<unknown>;
@@ -31,7 +32,7 @@ export class ManagementMutations {
     await input.recheck();
     connection = this.currentConnection(connection.id);
     const impact = input.impact();
-    const currentPolicy = (connection.grant as typeof connection.grant & {destructiveConfirmation?: "none" | "confirm"}).destructiveConfirmation ?? "none";
+    const currentPolicy = this.confirmationPolicy(connection.id);
     if (input.destructive && currentPolicy === "confirm") {
       const digest = this.digest({connectionId: connection.id, revision: connection.revision, argumentsDigest, impact});
       const confirmation = typeof args.confirmationId === "string" ? this.confirmations.get(args.confirmationId) : undefined;

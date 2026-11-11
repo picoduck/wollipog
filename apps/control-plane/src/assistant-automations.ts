@@ -4,6 +4,7 @@ import type { ControlPlaneDb } from "./db.js";
 import { AutomationsService, validateAutomationSpec } from "./automations.js";
 import { AssistantOperations, AssistantRefusal, type AssistantTarget } from "./assistant-connections.js";
 import type { ManagementMutations } from "./assistant-management-command.js";
+import { automationPayloadSchema } from "./assistant-management-schemas.js";
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new AssistantRefusal("An argument object is required.");
@@ -46,28 +47,31 @@ export function registerAssistantAutomations(operations: AssistantOperations, db
       .every(t => db.canAccessRunner(owner, t.runnerId) && db.canAccessWorkspace(owner, t.runnerId, t.workspaceId) &&
         (!t.projectId || db.canAccessProject(owner, t.projectId)));
   };
-  const load = (a: Record<string, unknown>): AutomationSchedule => {
-    const schedule = typeof a.automationId === "string" ? db.getAutomation(a.automationId) : null;
+  const load = (a: Record<string, unknown>, includeDeleted = false): AutomationSchedule => {
+    const schedule = typeof a.automationId === "string" ? db.getAutomation(a.automationId, includeDeleted) : null;
     if (!schedule) throw new AssistantRefusal("Automation not found.");
     return schedule;
   };
   for (const name of ["auto_list", "auto_get", "auto_create", "auto_update", "auto_enable", "auto_pause", "auto_delete"] as const) {
     const mutation = name !== "auto_list" && name !== "auto_get";
     const proposed = (a: Record<string, unknown>): AutomationSpec => name === "auto_create" || name === "auto_update"
-      ? spec(a.payload) : specOf(load(a));
+      ? spec(a.payload) : specOf(load(a, name === "auto_delete"));
     const target = (value: unknown): AssistantTarget => {
       if (name === "auto_list") return {kind: "automation", id: "list"};
       const a = object(value), targets = automationManagementTargets(db, proposed(a));
-      return {kind: "automation", id: name === "auto_create" ? "new" : load(a).automationId, projectId: targets[0]?.projectId};
+      return {kind: "automation", id: name === "auto_create" ? "new" : load(a, name === "auto_delete").automationId, projectId: targets[0]?.projectId};
     };
     operations.register({name, description: ({auto_list: "List accessible automations and latest execution status.", auto_get: "Inspect configuration, revision, execution status and affected targets.",
       auto_create: "Create an automation using the owner's standing grant.", auto_update: "Replace an automation configuration with an expectedRevision.",
       auto_enable: "Enable or resume an automation with an expectedRevision.", auto_pause: "Pause an automation with an expectedRevision.", auto_delete: "Delete an automation under the owner's confirmation policy."})[name],
       inputSchema: {type: "object", properties: {automationId: {type: "string"}, expectedRevision: {type: "integer"},
-        operationId: {type: "string"}, confirmationId: {type: "string"}, payload: {type: "object", description: "Complete AutomationSpec, identical to the owner API body."}},
-        required: mutation ? ["operationId", ...(name === "auto_create" ? ["payload"] : ["automationId", "expectedRevision"])] : []},
+        operationId: {type: "string"}, confirmationId: {type: "string"}, payload: automationPayloadSchema},
+        required: [...(name === "auto_create" || name === "auto_list" ? [] : ["automationId"]),
+          ...(mutation ? ["operationId", ...(name === "auto_create" ? [] : ["expectedRevision"]),
+            ...(name === "auto_create" || name === "auto_update" ? ["payload"] : [])] : [])]},
       metadata: name === "auto_list", resolveTarget: target,
-      ownerCanAccess: (owner, t) => name === "auto_list" || name === "auto_create" || (!!db.getAutomation(t.id) && accessible(owner, db.getAutomation(t.id)!)),
+      ownerCanAccess: (owner, t) => name === "auto_list" || name === "auto_create" ||
+        (!!db.getAutomation(t.id, name === "auto_delete") && accessible(owner, db.getAutomation(t.id, name === "auto_delete")!)),
       execute: async (value, context) => {
         const a = object(value);
         const authorize = (configuration: AutomationSpec) => {

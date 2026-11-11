@@ -2956,7 +2956,7 @@ registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
 const assistantOperations = createAssistantOperations(db);
 AssistantCommandReceipts.install(db.raw());
 const assistantManagementMutations = new ManagementMutations(new AssistantCommandReceipts(db.raw()), db.instanceId(), assistantRequestDigest,
-  id => db.assistantConnections.get(id)!);
+  id => db.assistantConnections.get(id)!, id => db.assistantConnections.destructiveConfirmation(id));
 registerAssistantAutomations(assistantOperations, db, automations, assistantManagementMutations);
 registerAssistantSkills(assistantOperations, {db, hub, requestHuman, requestPrincipal, pushSkillsSync}, assistantManagementMutations);
 registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });

@@ -7,16 +7,14 @@ import { createSkillsManagement } from "./skills-management.js";
  */
 
 import { randomUUID } from "node:crypto";
-import { SkillImportConflictError } from "./db.js";
 import { registerSkillVersionPolicyRoutes } from "./skill-version-policy-route.js";
 import { registerSkillGitRoutes } from "./skill-git-route.js";
 import { registerMachineSkillRoutes } from "./skill-machine-route.js";
 import { registerSkillDriftRoutes } from "./skill-drift-route.js";
-import { registerSkillBuiltInRoutes, withSkillRecommendation } from "./skill-built-in-route.js";
+import { registerSkillBuiltInRoutes } from "./skill-built-in-route.js";
 import type { BuiltInSkill } from "./built-in-skills.js";
 import { listOrphanedSkillCopies } from "./skill-orphan-route.js";
 import { skillStateResponse } from "./skill-edited-copy.js";
-import { deploymentImpactRefusal } from "./skill-deployment-impact.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   SKILL_MAX_TOTAL_BYTES,
@@ -31,7 +29,6 @@ import {
 } from "@wollipog/protocol";
 import type {
   ControlPlaneDb,
-  SkillAssignmentScopeKind,
   SkillAssignmentView,
 } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -43,7 +40,6 @@ import {
   resolveDesiredSkills,
   SKILLS_SYNC_MAX_TOTAL_BYTES,
   skillsSyncMessageBytes,
-  validateSkillPayload,
 } from "./skills.js";
 
 /** The narrow hub surface the skill routes need (mockable in tests). */
@@ -317,18 +313,9 @@ function defaultSkillScope(principal: HumanPrincipal): ResourceScope {
   };
 }
 
-/** The one refusal for an invalid selector, on create and on update alike. */
-const AGENT_SELECTOR_ERROR = "agentSelector must be {kind:'all'}, {kind:'driver',driver}, or {kind:'agent',agentId}";
-
 function parseInvocation(value: unknown): SkillInvocationPolicy | null | undefined {
   if (value === undefined) return undefined;
   return value === "agent" || value === "manual" ? value : null;
-}
-
-function parseNote(value: unknown): string | null | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string" || value.length > 2000) return null;
-  return value;
 }
 
 export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps): void {
@@ -350,14 +337,6 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     for (const runner of db.listRunners()) pushSkillsSync(runner.runnerId);
   };
 
-  /** An assignment is visible and mutable only to principals who can access the referenced skill
-   * AND, for runner-scoped rows, that runner — otherwise a skill-visible assignment would leak
-   * (and let a caller redeploy against) a machine the principal cannot access. */
-  const canAccessAssignment = (principal: AuthPrincipal, assignment: SkillAssignmentView): boolean =>
-    db.canAccessSkill(principal, assignment.skillId) &&
-    (assignment.scopeKind !== "runner" || !assignment.runnerId ||
-      db.canAccessRunner(principal, assignment.runnerId));
-
   /* ------------------------------ Skill library ------------------------------ */
 
   // Per-resource authorization mirrors /api/projects exactly: listings filter to the caller's
@@ -368,7 +347,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
   for (const key of management.handlers.keys()) {
     const [method, url] = key.split(" ");
     app.route({ method: method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE", url: url!, handler: async (req, reply) => {
-      const principal = deps.requestPrincipal(req);
+      const principal = method === "GET" ? deps.requestPrincipal(req) : deps.requestHuman(req);
       const result = await management.execute(key, {principal, params: req.params, body: req.body, query: req.query});
       return reply.code(result.status).send(result.body);
     }});
