@@ -1,0 +1,109 @@
+# Assistant Owner-Capability Parity
+
+Refs #4468 and #4462. This is the first staged parity delivery, not full Assistant acceptance.
+
+## Inventory and Gate
+
+`assistant-owner-capabilities.json` records every registered route candidate in the session,
+worktree, Project/Location, Machine, automation, Skill Library and connection families. The
+inventory observes actual Fastify registration, including generated routes and shared-service
+registrars. It records only route patterns and tool names, never requests, resource identifiers,
+credentials or results. A new/removed route fails the audit contract test until classified.
+
+Each exact route has one classification:
+
+- `tools`: the equivalent Assistant operations are registered in production. Tests compare the
+  names with the actual registry, not a second handwritten list of supposed registrations.
+- `exclusion: human_authority`: the entry names the human authority involved and its supported
+  authenticated owner path. Credentials, standing access changes, required approvals and Full
+  Control first-message authority cannot be supplied by Assistant text.
+- `exclusion: interactive_workspace_io`: terminal streams, in-session file/reference browsing,
+  and transcript-sharing UI are conversation/workspace I/O rather than app administration.
+  Launch or prompt a session to perform workspace work, or use the owner's interactive UI.
+  This does not exempt lifecycle/recovery, Location registration, results or status management.
+- `gap`: unresolved app-management parity or a route candidate needing further owner/protocol
+  classification. A gap is never an allowed exclusion. This deliberately overinclusive audit also
+  exposes session-credential-only protocol endpoints; those need explicit owner-counterpart
+  classification rather than being silently discarded.
+
+No external technical limitation is claimed by this slice. The inventory supports such an entry
+only with a concrete reason and supported remedy. The parent authorized staged delivery through
+the recorded scope clarification; all remaining gaps block final #4468 acceptance.
+
+Run the audit contract and new behavior tests:
+
+```sh
+node --import tsx --test apps/control-plane/src/owner-management-inventory.test.ts apps/control-plane/src/assistant-owner-management.test.ts
+```
+
+Run the **strict acceptance gate**:
+
+```sh
+node --import tsx apps/control-plane/test-support/owner-parity-snapshot.ts --require-complete
+```
+
+The strict gate exits nonzero for any gap, absent tool registration, or undocumented exclusion.
+It is intentionally **failing** at this staged delivery. Passing the audit contract tests means
+the inventory detects missing coverage; it does not mean the strict acceptance gate passed.
+The fixture starts only a new temporary test control plane/database with a reserved loopback
+port and pricing-network access disabled, then closes it and removes its state. It never imports
+the hosting database or inherits its registered SSH Machines or unrelated sessions.
+
+Automation/skill coverage owned by #4477 remains a gap until those operations are actually
+registered on main. Its planned operation names are recorded without claiming delivery. Once it
+lands, merge main, verify its actual production registry and update those exact entries.
+
+## Delivered Operations
+
+All mutation tools take a stable `commandId`; use `command_get` after a lost response. Arguments
+are hashed and the receipt is reserved before the shared service executes. Repeated IDs never
+redispatch, including after uncertain results. IDs are installation/connection scoped. Read current
+resources through their authorized read tools; receipts contain no cached private response body.
+
+| Family | Operations |
+| --- | --- |
+| Session Configuration | `session_config_get`, `session_config` (model, effort, service tier), `session_title` |
+| Lifecycle Recovery | `session_retry_stop`, `session_cancel`, `session_unarchive`, `session_unarchive_restart`, `session_job_stop`, `session_hold_release`, `session_pending_resolve` |
+| Steering Recovery | `steering_list`, `steering_get`, `steering_resolve` |
+| Worktrees | `worktree_get`, `worktree_create`, `worktree_attach`, `worktree_select`, `worktree_discard`, `worktree_retry_setup`, `worktree_generate_setup` |
+| Projects | `project_create`, `project_update`, `project_delete`, `project_notice_dismiss`, `project_archive_sessions` |
+| Locations | `location_add`, `location_create`, `location_move`, `location_remove`, `location_rename`, `location_default`, `location_setup_get`, `location_setup_generate` |
+| Machine Capacity | `runner_capacity_get`, `runner_capacity` |
+
+Project/Location tools use `projectId`, optional `locationId` for exact Location routes, and
+`payload` with the corresponding owner API fields. Location moves carry the source `locationId`
+in `payload` and require both source and destination project grants. Installation-wide creation
+and Machine capacity require an all-project grant; they cannot be reached by inventing a project
+label. Capacity changes carry `configuredUnits` and `expectedRevision`; reread on a conflict.
+Session configuration keeps permission, budget and guardrail changes on authenticated owner paths.
+Ordinary configuration does not impersonate human campaign authority or restore a stale boundary.
+Project `childSessionDefaults` also changes persistent child budget/tool guardrails and remains on
+authenticated owner Project settings. Resource `owner` selection remains on the owner access-scope
+path; an Assistant create inherits the granting owner's ordinary default organization scope.
+
+Destructive deletion/removal, archive/Stop/cancel, job/hold release, and pending/steering recovery
+honor `destructiveConfirmation`. Under `confirm`, first inspect the target/affected-scope preview,
+then repeat unchanged arguments and command ID with its short-lived `confirmationId`. A changed
+grant or affected scope invalidates the preview. Confirmation consumption and receipt reservation
+share a transaction. Under `none`, standing authority applies without another approval.
+
+## Recovery and Evidence
+
+The owner HTTP and Assistant adapters share extracted Project/Location and capacity services and
+the same worktree runner path. Validation, resource ownership, campaign boundary settlement,
+notifications, offline/protocol refusals, dirty-worktree preservation and managed retirement stay
+in those services. Creating a Location rechecks authority after asynchronous directory inspection,
+before registering the workspace. Current-source access is checked again before returning private
+results from asynchronous operations.
+
+`succeeded` means the application service accepted the command, not that a provider finished,
+capacity was released, a worktree retired, or a skill reached a Machine. `accepted`/`uncertain`
+never permits blind replay or failover to another installation. After project deletion,
+`command_get` returns only the content-free verdict under current operation/original-project
+access. Preserve dirty/unpushed work and follow the runner's concrete recovery message.
+
+Coverage uses actual SQLite, Fastify MCP, HTTP owner adapters and shared application services,
+with synthetic owner credentials and fixture runner transport. The inventory boots the actual
+production composition in an isolated test process. This is **automated/mocked execution evidence**,
+not real OpenClaw model use, Discord delivery, SSH execution, remote TLS or hosting deployment.
+Those remain Phase 2b. No rendered application UI changes in this slice.
