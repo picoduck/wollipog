@@ -2,12 +2,17 @@
  * No provider, Discord, remote host or runner execution is implied by this test.
  */
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import Fastify from "fastify";
 import { ControlPlaneDb } from "../src/db.js";
 import { createAssistantOperations, registerAssistantRoutes } from "../src/assistant-routes.js";
+import { Hub } from "../src/hub.js";
+import { SessionsService } from "../src/sessions.js";
+import { registerAssistantSessionOperations } from "../src/assistant-session-operations.js";
+import { PROTOCOL_VERSION, type RunnerMetadata, type ControlPlaneToRunner } from "@wollipog/protocol";
 import { checkOpenClawVersion, isConnectionRefusal, OpenClawSetupError, runOpenClaw, writeIsolatedProfile } from "../../../scripts/openclaw-assistant.mjs";
 
 const binary = process.argv[2];
@@ -15,8 +20,8 @@ if (!binary || !path.isAbsolute(binary)) throw new Error("Pass the absolute Open
 const scratch = await mkdtemp(path.join(tmpdir(), "wollipog-openclaw-smoke-"));
 const instances: Awaited<ReturnType<typeof start>>[] = [];
 
-async function start(name: string) {
-  const db = ControlPlaneDb.open(":memory:");
+async function start(name: string, previous?: { issued: {token: string; connection: {id: string}}; port: number; transport: {sent: ControlPlaneToRunner[]; uncertain: boolean} }) {
+  const db = ControlPlaneDb.open(path.join(scratch, `${name}.sqlite`));
   const app = Fastify({ logger: false });
   const responseCodes: number[] = [];
   app.addHook("onResponse", async (_request, reply) => { responseCodes.push(reply.statusCode); });
@@ -24,16 +29,35 @@ async function start(name: string) {
     const local = db.localIdentityContext();
     const owner = db.operatingHumanPrincipal(local.userId, local.organizationId)!;
     // Test-only issuance, never a live owner grant or a copied session credential.
-    const issued = db.assistantConnections.create(owner, name, { operations: "all", projects: "all" });
+    const issued = previous?.issued ?? db.assistantConnections.create(owner, name, { operations: "all", projects: "all" });
+    const metadata: RunnerMetadata = { runnerId: "smoke-fixture", hostname: "fixture", os: "linux", version: "synthetic",
+      agents: [{id: "fixture", name: "Simulated Agent", command: "inert", args: [], env: {}, driver: "acp", available: true,
+        capabilities: {models: [{id: "fixture", default: true}], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true}}],
+      workspaces: [{id: "fixture", name: "Simulated Workspace", path: "/synthetic/never-executed"}] };
+    db.registerRunner(metadata, Date.now(), PROTOCOL_VERSION);
+    const project = db.listProjects().find(item => item.name === "Smoke Fixture") ?? db.createProject({name: "Smoke Fixture"});
+    const location = db.listProjects().find(item => item.id === project.id)!.locations[0] ?? db.addProjectLocation(project.id, {runnerId: metadata.runnerId, workspaceId: "fixture"});
+    const transport = previous?.transport ?? {sent: [] as ControlPlaneToRunner[], uncertain: false};
+    const hub = new Hub(db);
+    hub.isRunnerOnline = () => true;
+    hub.sendToRunner = (_id, command) => {
+      transport.sent.push(command);
+      if (transport.uncertain && command.type === "prompt_session") throw new Error("synthetic response loss after simulated acceptance");
+      return true;
+    };
+    const svc = new SessionsService(db, hub, {info() {}, warn() {}, error() {}});
     const operations = createAssistantOperations(db);
+    registerAssistantSessionOperations(operations, db, svc);
     registerAssistantRoutes(app, { db, operations, requestHuman: () => null });
-    const address = await app.listen({ host: "127.0.0.1", port: 0 });
-    return { db, app, issued, responseCodes, url: `${address}/assistant/mcp` };
+    const address = await app.listen({ host: "127.0.0.1", port: previous?.port ?? 0 });
+    let closed = false;
+    return { db, app, issued, responseCodes, transport, location, port: Number(new URL(address).port), url: `${address}/assistant/mcp`,
+      async close() { if (!closed) { closed = true; await app.close(); db.close(); } } };
   } catch (error) { await app.close(); db.close(); throw error; }
 }
 
 try {
-  const alpha = await start("Alpha"); instances.push(alpha);
+  let alpha = await start("Alpha"); instances.push(alpha);
   const beta = await start("Beta"); instances.push(beta);
   const profile = await writeIsolatedProfile(path.join(scratch, "profile"), [
     { name: "wollipog-alpha", url: alpha.url, tokenEnv: "WOLLIPOG_ALPHA_TOKEN" },
@@ -75,6 +99,56 @@ try {
   assert.equal(b.connection.id, beta.issued.connection.id);
   console.log("PASS REAL HTTP operation routing: discovery identities match the selected control plane and connection. No model routing exercised.");
 
+  // Exercise the installed OpenClaw client, not a replacement SDK or a model simulator.
+  const installation = path.dirname(await realpath(binary));
+  const call = async (name: string, args: unknown = {}, server = "wollipog-alpha") => {
+    const request = path.join(profile.cwd, "native-call.json");
+    await writeFile(request, JSON.stringify({server, name, arguments: args}), {mode: 0o600});
+    const result = await runOpenClaw(process.execPath, [fileURLToPath(new URL("../../../scripts/openclaw-assistant-call.mjs", import.meta.url)), installation, request], profile, credentials);
+    assert.equal(result.outcome, "exit", "Native runtime call must complete normally.");
+    assert.equal(result.code, 0, `Native OpenClaw ${name} failed; raw diagnostics withheld.`);
+    return JSON.parse(result.output);
+  };
+  assert.equal((await call("assistant_discover")).controlPlane.id, a.controlPlane.id);
+  assert.equal((await call("assistant_discover", {}, "wollipog-beta")).controlPlane.id, b.controlPlane.id);
+  const launchArgs = {commandId: "smoke-launch", locationId: alpha.location.id, agentId: "fixture", prompt: "Synthetic smoke task", useWorktree: false};
+  const launch = await call("session_launch", launchArgs);
+  assert.equal(launch.receipt.status, "succeeded");
+  const sessionId = launch.sessionId;
+  assert.equal(alpha.db.getSession(sessionId)?.parentSessionId, null);
+  assert.ok(alpha.transport.sent.some(command => command.type === "start_session"));
+  alpha.db.updateSessionStatus(sessionId, "idle", Date.now()); // Simulated runner state, not execution evidence.
+  const promptArgs = {commandId: "smoke-follow-up", sessionId, text: "Synthetic follow-up"};
+  const followUp = await call("session_prompt", promptArgs);
+  assert.equal(followUp.receipt.status, "succeeded");
+  assert.equal(followUp.receipt.operationId, promptArgs.commandId);
+  const count = alpha.transport.sent.length;
+  const duplicateFollowUp = await call("session_prompt", promptArgs);
+  assert.deepEqual(duplicateFollowUp.receipt, followUp.receipt, "Duplicate follow-up must return the original succeeded receipt.");
+  assert.equal(alpha.transport.sent.length, count, "Duplicate command must not redispatch.");
+  alpha.db.appendEvent(sessionId, {kind: "agent_message", text: "Synthetic runner result", final: true}, Date.now());
+  alpha.db.appendEvent(sessionId, {kind: "agent_response_completed"}, Date.now());
+  alpha.db.updateSessionStatus(sessionId, "completed", Date.now());
+  assert.equal((await call("session_get", {sessionId})).session.status, "completed");
+  assert.ok((await call("session_messages", {sessionId})).events.some((event: {text?: string}) => event.text === "Synthetic runner result"));
+  assert.equal((await call("command_get", {commandId: launchArgs.commandId})).receipt.resourceId, sessionId);
+  assert.equal(alpha.db.raw().prepare("SELECT COUNT(*) AS n FROM assistant_work").get()!.n, 0, "Plain MCP must stay uncorrelated with Discord work.");
+
+  alpha.db.updateSessionStatus(sessionId, "idle", Date.now());
+  alpha.transport.uncertain = true;
+  const uncertainArgs = {commandId: "smoke-uncertain", sessionId, text: "Synthetic uncertain follow-up"};
+  assert.equal((await call("session_prompt", uncertainArgs)).receipt.status, "uncertain");
+  const uncertainCount = alpha.transport.sent.length;
+  const previous = {issued: alpha.issued, port: alpha.port, transport: alpha.transport};
+  await alpha.close();
+  alpha = await start("Alpha", previous); instances.push(alpha);
+  await probe("wollipog-alpha");
+  assert.equal((await call("command_get", {commandId: uncertainArgs.commandId})).receipt.status, "uncertain");
+  assert.equal((await call("session_prompt", uncertainArgs)).receipt.status, "uncertain");
+  assert.equal(alpha.transport.sent.length, uncertainCount, "Reopen and duplicate uncertain command must not redispatch.");
+  assert.equal((await call("command_get", {commandId: launchArgs.commandId})).receipt.resourceId, sessionId);
+  console.log("PASS REAL installed OpenClaw MCP runtime: launch, follow-up, status, transcript/result reads and durable receipt reconciliation after control-plane reopen. MOCKED runner dispatch, result and response loss; no model execution.");
+
   const rotated = alpha.db.assistantConnections.rotate(alpha.issued.connection.id);
   alpha.responseCodes.length = 0;
   await probe("wollipog-alpha", false);
@@ -96,12 +170,12 @@ try {
   await beta.app.close();
   assert.ok(isConnectionRefusal(await probe("wollipog-beta", false), "wollipog-beta"), "Unavailable-peer evidence requires a named ECONNREFUSED diagnostic.");
   console.log("PASS REAL HTTP incompatible-protocol refusal; REAL OpenClaw unavailable-control-plane refusal.");
-  console.log("PENDING: session launch, follow-up, status/result retrieval, configuration mutation and receipt reconciliation await #4464/#4465 contracts. Model, Discord, remote TLS/host and SSH evidence remain unverified.");
+  console.log("PENDING: configuration mutation awaits #4465. Model, Discord, remote TLS/host and SSH evidence remain unverified.");
 } catch (error) {
   if (error instanceof OpenClawSetupError) console.error(error.message);
   console.error("FAIL OpenClaw Assistant smoke test. Raw diagnostics are withheld to protect credentials. Check the isolated runtime version, transport contract and local networking; no mutation should be blindly replayed.");
   process.exitCode ||= 1;
 } finally {
-  for (const instance of instances) { await instance.app.close(); instance.db.close(); }
+  for (const instance of instances) await instance.close();
   await rm(scratch, { recursive: true, force: true });
 }
