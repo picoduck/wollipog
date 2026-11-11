@@ -47,7 +47,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "DELETE /api/sessions/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_delete"
+    ]
   },
   "DELETE /api/sessions/:id/reminder": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -289,7 +291,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/role": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_role_get"
+    ]
   },
   "GET /api/sessions/:id/shells": {
     "exclusion": "interactive_workspace_io",
@@ -649,7 +653,9 @@
     ]
   },
   "POST /api/sessions/:id/column": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_column"
+    ]
   },
   "POST /api/sessions/:id/command-invocations": {
     "tools": [
@@ -692,7 +698,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/fork": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_fork"
+    ]
   },
   "POST /api/sessions/:id/git": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -799,7 +807,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/project": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_project"
+    ]
   },
   "POST /api/sessions/:id/prompt": {
     "tools": [
@@ -826,7 +836,9 @@
     ]
   },
   "POST /api/sessions/:id/reprocess": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_reprocess"
+    ]
   },
   "POST /api/sessions/:id/restart": {
     "tools": [
@@ -840,7 +852,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/retitle": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_retitle"
+    ]
   },
   "POST /api/sessions/:id/retry-stop": {
     "tools": [
@@ -860,10 +874,14 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/rewind": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_rewind"
+    ]
   },
   "POST /api/sessions/:id/role": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_role"
+    ]
   },
   "POST /api/sessions/:id/shells": {
     "exclusion": "interactive_workspace_io",
@@ -956,7 +974,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/workspace": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_workspace"
+    ]
   },
   "POST /api/sessions/:id/workspace-references": {
     "exclusion": "interactive_workspace_io",
@@ -997,7 +1017,9 @@
     ]
   },
   "POST /api/sessions/adopt": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_adopt"
+    ]
   },
   "POST /api/skill-assignments": {
     "tools": [

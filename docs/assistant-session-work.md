@@ -42,3 +42,29 @@ Assistant steering cannot acknowledge a human's reviewed result revision.
 Tests use real isolated SQLite, Fastify HTTP/MCP and session/queue services with synthetic owners
 and mocked runner transport. This is **MOCKED integration evidence**. No real model, Discord,
 SSH, remote OpenClaw, remote TLS or hosting deployment is demonstrated by this slice.
+
+## Lifecycle and Placement
+
+Group 3 slice 2 adds `session_project`, `session_workspace`, `session_column`, `session_retitle`,
+`session_fork`, `session_rewind`, `session_reprocess`, `session_delete`, `session_adopt`,
+`session_role_get` and `session_role`. Existing `session_title` provides explicit naming.
+Project/workspace changes preserve the execution directory and require both source and destination
+grants. Unassigning work or importing an external session requires all-project authority; a model
+cannot label an arbitrary Machine folder as an allowed Project to gain access.
+
+Fork, rewind and grouping share the owner's application operation. Fork validates the runner's
+requested target identity, owns cleanup tombstones for ambiguous targets, inherits source ownership,
+and rechecks authorization before materializing the returned snapshot. Handoff can choose an
+already available harness and model/effort/service tier; provider permission, budget and standing
+access changes remain on the owner's settings path. Reprocess replaces the cached history only
+after a current-grant check. A known successful deletion returns a content-free verdict; reconcile
+it through `command_get` after the target is gone. Side-chat deletion requires access to both sessions.
+
+Delete, rewind, reprocess and role conversion honor `destructiveConfirmation`. Their previews bind
+the affected sessions, Project placement and relevant lifecycle/history coordinates. Role conversion
+uses the same durable prepare/commit service, preserving provider permissions and existing campaign
+constraints. It accepts saved owner defaults, with no standing policy overrides or first-message
+authority from Assistant text. The owner's role settings UI remains the path for those policy changes.
+
+These additions remain MOCKED integration evidence: real isolated shared services and durable state,
+with fixture runner transport. Real provider execution and hosting deployment remain unverified.
