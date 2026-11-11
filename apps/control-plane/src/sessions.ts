@@ -1,4 +1,6 @@
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
+import { scheduledAssistantOwner, type AssistantAutomationAuthorization } from "./assistant-automation-authority.js";
+import { AssistantRefusal } from "./assistant-connections.js";
 import { normalizeDeliveryVerificationFailure, publishedIssueFailure, type PublishedIssueFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import { failedCampaignRun } from "./campaign-failed-run.js";
@@ -4757,6 +4759,7 @@ export class SessionsService {
       /** Internal scheduled launch, bound to an approved immutable automation occurrence. */
       scheduledCampaign?: {
         automationId: string; executionId: string;
+        assistantAuthorization?: AssistantAutomationAuthorization;
         budget: import("@wollipog/protocol").CampaignBudgetAuthority;
         tasks: import("@wollipog/protocol").AutomationCampaign["tasks"];
       };
@@ -5650,11 +5653,27 @@ export class SessionsService {
     const scheduled = creationContext?.scheduledCampaign;
     if (scheduled) {
       const occurrence = this.db.getAutomationExecution(scheduled.executionId);
+      let authorizingOwner = this.db.automationSoleHumanAuthor(scheduled.automationId, true);
+      if (scheduled.assistantAuthorization) {
+        const current = this.db.getAutomation(scheduled.automationId);
+        try {
+          const assistant = current && current.revision === occurrence?.automationRevision
+            ? scheduledAssistantOwner(this.db, current, scheduled.executionId) : null;
+          if (!assistant || assistant.authorization.connectionId !== scheduled.assistantAuthorization.connectionId ||
+              assistant.authorization.grantRevision !== scheduled.assistantAuthorization.grantRevision) {
+            return fail("assistant_campaign_admission_changed: Assistant authority changed before campaign admission. Inspect the schedule and re-authorize it.", 409);
+          }
+          authorizingOwner = assistant.owner.userId;
+        } catch (error) {
+          if (error instanceof AssistantRefusal) return fail(error.message, 403);
+          throw error;
+        }
+      }
       if (!delivery || delivery.automationOrigin?.executionId !== scheduled.executionId ||
           delivery.automationOrigin.automationId !== scheduled.automationId ||
           occurrence?.automationId !== scheduled.automationId || occurrence.status !== "dispatching" ||
           occurrence.specSnapshot?.action.kind !== "create_session" || !occurrence.specSnapshot.action.request.campaign ||
-          this.db.automationSoleHumanAuthor(scheduled.automationId, true) !== creationContext.defaultOwnerUserId ||
+          authorizingOwner !== creationContext.defaultOwnerUserId ||
           parentSessionId || !orchestratorPolicy) return fail("Scheduled campaign admission is invalid", 409);
     }
     if (humanLaunch) {

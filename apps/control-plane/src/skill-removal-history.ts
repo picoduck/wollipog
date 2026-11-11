@@ -17,13 +17,25 @@ export function preserveSkillRemoval(db: DatabaseSync, skillId: string, now: num
   const snapshot = {
     skill,
     ownership: db.prepare("SELECT * FROM skill_ownership WHERE skill_id=?").all(skillId),
-    versions: db.prepare("SELECT * FROM skill_versions WHERE skill_id=?").all(skillId),
-    assignments: db.prepare("SELECT * FROM skill_assignments WHERE skill_id=?").all(skillId),
-    policies: db.prepare("SELECT * FROM skill_machine_versions WHERE skill_id=?").all(skillId),
-    machineProvenance: db.prepare("SELECT * FROM skill_machine_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").all(skillId),
-    gitProvenance: db.prepare("SELECT * FROM skill_git_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").all(skillId),
-    builtInProvenance: db.prepare("SELECT * FROM skill_built_in_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").all(skillId),
   };
   db.exec("CREATE TABLE IF NOT EXISTS skill_removal_history (skill_id TEXT PRIMARY KEY, removed_at INTEGER NOT NULL, snapshot_json TEXT NOT NULL)");
+  db.exec(`CREATE TABLE IF NOT EXISTS skill_removed_records (
+    skill_id TEXT NOT NULL, source_table TEXT NOT NULL, record_id TEXT NOT NULL, record_json TEXT NOT NULL,
+    PRIMARY KEY(skill_id, source_table, record_id));`);
+  // Copy history in SQLite, one row per record. Loading every immutable version into a JavaScript
+  // array would make removing a long-lived skill require unbounded memory or one enormous JSON row.
+  for (const [table, where] of [
+    ["skill_versions", "skill_id=?"], ["skill_assignments", "skill_id=?"], ["skill_machine_versions", "skill_id=?"],
+    ["skill_group_assignments", "group_id IN (SELECT group_id FROM skills WHERE id=?)"],
+    ["skill_machine_provenance", "version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)"],
+    ["skill_git_provenance", "version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)"],
+    ["skill_built_in_provenance", "version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)"],
+  ] as const) {
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{name: string}>;
+    // Identifiers come from the application schema, never user input.
+    const fields = columns.map(({name}) => `'${name.replaceAll("'", "''")}',"${name.replaceAll('"', '""')}"`).join(",");
+    db.prepare(`INSERT INTO skill_removed_records SELECT ?,?,CAST(rowid AS TEXT),json_object(${fields}) FROM ${table} WHERE ${where}`)
+      .run(skillId, table, skillId);
+  }
   db.prepare("INSERT INTO skill_removal_history VALUES (?,?,?)").run(skillId, now, JSON.stringify(snapshot));
 }

@@ -168,7 +168,9 @@ test("skill removal keeps version and assignment evidence in the shared deletion
   assert.equal((await f.call("skill_remove", request)).receipt.status, "succeeded");
   const row = f.db.raw().prepare("SELECT snapshot_json FROM skill_removal_history WHERE skill_id=?").get(skillId) as {snapshot_json: string};
   const snapshot = JSON.parse(row.snapshot_json);
-  assert.equal(snapshot.versions.length, 1);
+  const archived = f.db.raw().prepare("SELECT record_json FROM skill_removed_records WHERE skill_id=? AND source_table='skill_versions'").all(skillId) as Array<{record_json: string}>;
+  assert.equal(archived.length, 1);
+  assert.equal(JSON.parse(archived[0]!.record_json).skill_id, skillId);
   assert.equal(snapshot.skill.id, skillId);
 });
 

@@ -5,6 +5,7 @@ import { AutomationsService, validateAutomationSpec } from "./automations.js";
 import { AssistantOperations, AssistantRefusal, type AssistantTarget } from "./assistant-connections.js";
 import type { ManagementMutations } from "./assistant-management-command.js";
 import { automationPayloadSchema } from "./assistant-management-schemas.js";
+import { automationManagementTargets, ownerCanAccessAutomation } from "./assistant-automation-authority.js";
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new AssistantRefusal("An argument object is required.");
@@ -20,32 +21,10 @@ function specOf(schedule: AutomationSchedule): AutomationSpec {
   return {name, cron, timezone, enabled, misfirePolicy, runnerPolicy, concurrencyPolicy, limits, notifications, action};
 }
 
-/** Resolve every primary/alternate target from current records. Caller project labels are verified. */
-export function automationManagementTargets(db: ControlPlaneDb, value: AutomationSpec): AssistantTarget[] {
-  const action = value.action;
-  if (action.kind === "prompt_session") {
-    const session = db.getSession(action.sessionId);
-    if (!session) throw new AssistantRefusal("Automation target session is unavailable.");
-    return [{kind: "session", id: session.id, projectId: session.projectId ?? undefined}];
-  }
-  return [action.request, ...(value.runnerPolicy.kind === "alternate" ? value.runnerPolicy.targets : [])].map(t => {
-    const location = t.projectLocationId ? db.getProjectLocation(t.projectLocationId)
-      : t.projectId ? db.findProjectLocationForProject(t.projectId, t.runnerId, t.workspaceId)
-      : db.findProjectLocation(t.runnerId, t.workspaceId);
-    if ((t.projectId || t.projectLocationId) && (!location || location.projectId !== t.projectId || location.runnerId !== t.runnerId || location.workspaceId !== t.workspaceId)) {
-      throw new AssistantRefusal("Automation Project Location does not match its current Machine and workspace. Select it again.");
-    }
-    return {kind: "workspace", id: `${t.runnerId}/${t.workspaceId}`, projectId: location?.projectId};
-  });
-}
-
 export function registerAssistantAutomations(operations: AssistantOperations, db: ControlPlaneDb,
   service: AutomationsService, mutations: ManagementMutations): void {
   const accessible = (owner: HumanPrincipal, value: AutomationSpec) => {
-    if (value.action.kind === "prompt_session") return db.canAccessSession(owner, value.action.sessionId);
-    return [value.action.request, ...(value.runnerPolicy.kind === "alternate" ? value.runnerPolicy.targets : [])]
-      .every(t => db.canAccessRunner(owner, t.runnerId) && db.canAccessWorkspace(owner, t.runnerId, t.workspaceId) &&
-        (!t.projectId || db.canAccessProject(owner, t.projectId)));
+    return ownerCanAccessAutomation(db, owner, value);
   };
   const load = (a: Record<string, unknown>, includeDeleted = false): AutomationSchedule => {
     const schedule = typeof a.automationId === "string" ? db.getAutomation(a.automationId, includeDeleted) : null;
@@ -100,10 +79,10 @@ export function registerAssistantAutomations(operations: AssistantOperations, db
           execute: () => {
             const actor = {kind: "agent" as const, id: context.connection.id};
             resultId = name === "auto_create" ? undefined : load(a).automationId;
-            const result = name === "auto_create" ? service.create(proposed(a), actor)
+            const result = name === "auto_create" ? service.create(proposed(a), actor, undefined, name)
               : name === "auto_delete" ? service.delete(load(a).automationId, actor)
               : service.update(load(a).automationId, name === "auto_update" ? proposed(a)
-                : {...specOf(load(a)), enabled: name === "auto_enable"}, actor);
+                : {...specOf(load(a)), enabled: name === "auto_enable"}, actor, undefined, name);
             if (!result.ok) throw new AssistantRefusal(result.error ?? "Automation change refused.");
             if (name === "auto_create") resultId = (result.data as AutomationSchedule).automationId;
             return result.data;

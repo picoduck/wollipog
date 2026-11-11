@@ -37,7 +37,9 @@ assignments, group deployment impact and machine pins, with a persistent per-ski
 that detects same-timestamp change/revert races; it is not a wall-clock timestamp.
 Conflicting edits refuse before writing. Normal update/restore creates or preserves immutable
 versions. Library removal preserves a private internal historical snapshot in
-`skill_removal_history`, including versions, assignments, policies and provenance; removed content
+`skill_removal_history` and row-based `skill_removed_records`, including versions, assignments,
+policies and provenance; removal copies records within SQLite without aggregating all version
+content into application memory. Removed content
 is not exposed through live-resource tools.
 
 `payload` is the corresponding owner API request body, never a bearer credential. Automation
@@ -64,6 +66,17 @@ grant revision or deployment impact invalidate the preview. Confirmation is an A
 interaction; it cannot create owner approval or expand standing authority. A control-plane restart
 invalidates pending confirmations safely.
 
+Assistant-authored automations retain a durable binding to the connection, granting owner and
+authorizing operation. Each scheduled campaign occurrence checks the current grant and owner at
+admission, after repository inspection, and immediately before durable command delivery/retry.
+The occurrence retains its original Assistant identity even after another connection re-authorizes
+the schedule. Revocation, narrowed operations/projects, lost owner authority or lost target access
+refuse with an `assistant_*` reason and an owner-controlled remedy. Previously sent commands whose
+acknowledgment may have been lost become uncertain; they are never reported as safely unsent.
+`auto_get.assistantAuthorizations` exposes the secret-free occurrence audit (Assistant, owner,
+grant revision, operation and outcome). Ordinary human-author and session-proposal rules remain
+unchanged. The owner directed this scheduled-campaign extension through the campaign parent.
+
 Skill impact reports potentially affected machines within the skill's ownership audience, including
 offline targets. Reported state is the last runner report, not a promise that an offline machine
 has synchronized. Shared push-on-change logic sends the desired state to online compatible runners;
@@ -80,6 +93,24 @@ shared command-receipt lookup rather than replaying the resource mutation. Accep
 receipts require reconciliation and never imply that a timeout undid a mutation. Receipt rows and
 activity records contain identifiers/digests, not skill content, prompts, credentials or raw errors.
 
+## Operational Evidence
+
+The existing HTTP request logging and automation lifecycle events remain the transport and timing
+signals; these tools add no new HTTP endpoint or external dependency. The indexed occurrence audit
+answers three operational questions without logging request bodies:
+
+- Why did a scheduled Assistant action refuse? Read the execution's named error and the matching
+  `auto_get.assistantAuthorizations` row by execution ID.
+- Which Assistant, owner and live grant authorized it? Read the connection ID, owner ID, operation
+  and grant revision in that row; inspect the owner's current connection settings for the remedy.
+- Could a retry have reached the runner? Inspect the execution's durable command state and its
+  command receipt. `uncertain` means delivery may already have happened; an authority refusal stops
+  further sends rather than inventing proof that an earlier send did not arrive.
+
+The automated tests induce these refusals, inspect the persisted audit and assert that credentials
+are absent. They verify telemetry shape and attribution under mocked transport, not production
+traffic or a live runner/provider.
+
 ## Verification and Remaining Integration Work
 
 `assistant-management.test.ts` uses the real Fastify MCP route and SQLite application services.
@@ -90,9 +121,9 @@ integration tests, not real OpenClaw, Discord, remote-host or SSH evidence. Exis
 tests verify owner API behavior after extraction.
 
 Pending delivery dependencies: the shared receipt module must land with the session-management
-unit, and the implemented grant policy must land with the connection unit. Scheduled campaign automation
-authoring currently encounters the existing sole-human-author requirement; Assistant parity for
-that surface remains an explicit implementation gap until its shared runtime is extended and
-verified. Regular session/workflow automations use their shared owner services. Remote proxy/TLS,
+unit, and the implemented grant policy must land with the connection unit. Scheduled campaign tests
+exercise the real shared campaign admission, database, allowance and durable outbox, with mocked
+repository inspection and runner transport; they do not launch a real provider. Regular
+session/workflow automations use their shared owner services. Remote proxy/TLS,
 provider login, Discord setup and unavailable machines remain external integration prerequisites;
 they must be verified by the campaign acceptance unit without treating mocks as real delivery.
