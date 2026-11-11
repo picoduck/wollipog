@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { after, test } from "node:test";
+import { runInNewContext } from "node:vm";
 import { claudeProjectPathKey } from "./claude-background-work.js";
 import { ClaudeCodeDriver } from "./drivers/claude-code.js";
 import type { DriverCallbacks, DriverOptions } from "./drivers/driver.js";
@@ -49,7 +50,9 @@ writeFileSync(fakeProvider, [
   "      return;",
   "    }",
   "    if (text.includes('next')) {",
-  `      fs.writeFileSync(${JSON.stringify(gatedResume)}, process.argv.includes('--resume') ? sessionId : 'missing-resume');`,
+  // Publish only after the payload is complete: existence is the reader's readiness signal.
+  `      fs.writeFileSync(${JSON.stringify(gatedResume + ".tmp")}, process.argv.includes('--resume') ? sessionId : 'missing-resume');`,
+  `      fs.renameSync(${JSON.stringify(gatedResume + ".tmp")}, ${JSON.stringify(gatedResume)});`,
   "      const timer = setInterval(() => {",
   "        if (!fs.existsSync(output) || fs.readFileSync(output, 'utf8') !== 'complete') return;",
   "        clearInterval(timer);",
@@ -137,6 +140,43 @@ async function waitForFile(path: string): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+test("fixture publishes the complete resume marker and preserves missing-resume failures", () => {
+  for (const resumed of [true, false]) {
+    rmSync(gatedResume, { force: true });
+    let checkedDuringWrite = false;
+    runInNewContext(readFileSync(fakeProvider, "utf8"), {
+      require: (name: string) => {
+        assert.equal(name === "node:fs" || name === "node:child_process", true);
+        return name === "node:fs" ? {
+          writeFileSync: (path: string, content: string) => {
+            // Pause at the exact race window: the file exists but has no payload yet.
+            writeFileSync(path, "");
+            assert.equal(existsSync(gatedResume), false, "the reader cannot see an unfinished marker");
+            checkedDuringWrite = true;
+            writeFileSync(path, content);
+          },
+          renameSync,
+        } : {};
+      },
+      process: {
+        argv: ["node", fakeProvider, resumed ? "--resume" : "--session-id", "fixture-session"],
+        stdin: {
+          setEncoding: () => {},
+          on: (event: string, callback: (chunk: string) => void) => {
+            if (event === "data") callback("next gated\n");
+          },
+        },
+      },
+      setInterval: () => {},
+    });
+    assert.equal(checkedDuringWrite, true);
+    const marker = readFileSync(gatedResume, "utf8");
+    assert.equal(marker, resumed ? "fixture-session" : "missing-resume");
+    if (!resumed) assert.notEqual(marker, "fixture-session", "the resume assertion must still reject a fresh session");
+    rmSync(gatedResume, { force: true });
+  }
+});
 
 test("real bwrap Claude driver completes a held background task only after one-shot resume", {
   skip: !available, timeout: 30_000,
