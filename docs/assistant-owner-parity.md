@@ -63,8 +63,10 @@ Automation/skill PR #4477 is merged. Twenty exact owner-route entries now name i
 production operations, including the machine-version read and its policy-only projection through
 `skill_pin_get`. The production-composition test verifies these tools are registered alongside
 owner/session operations. Automation update, enable and pause share the owner update service.
-Remaining automation/skill candidates stay explicit gaps for the residual-parity work item;
-merging this dependency does not establish complete Skill Library or automation parity.
+The group-6 [automation and Skill Library parity delivery](assistant-skill-parity.md) registers
+the remaining ordinary management paths and documents four exact human-authority routes. Its
+group-specific gate checks actual production registration and refuses remaining group-6 gaps.
+Other groups' unresolved candidates still block the global strict acceptance gate.
 
 Discord/work PR #4479 is merged. Production now builds the session/work registry through
 `createAssistantManagement`, preserving its authenticated Discord-origin seam and sharing the
@@ -78,11 +80,10 @@ The two new owner APIs for issuing/revoking Discord connector credentials are ex
 human-authority entries in the audit. The five `/assistant/discord/...` endpoints are the
 credential-scoped connector protocol, not owner management routes: command dispatch/receipt
 reconciliation and work list/read/reply receipts. They require both current Assistant and connector
-credentials, and do not substitute for missing owner management capabilities. Connection binding,
-subscription and delivery observability remain their existing explicit gaps. The inventory now
-contains 301 owner-route candidates. PR #4476 also added installation renaming; its new audit
-entry is an explicit app-management gap, not a human-authority exclusion. The 199 unresolved
-candidates still block full acceptance and include this connection-management follow-on.
+credentials, and do not substitute for missing owner management capabilities. PR #4497 adds owner-scoped connection, binding, subscription and delivery observability plus
+fenced delivery resume and installation renaming through shared owner services. Establishing or
+changing credentials, grants, bindings and subscription configuration retains human authority. The inventory now
+contains 303 owner-route candidates. The 125 unresolved candidates in other groups still block full acceptance.
 
 ## Delivered Operations
 

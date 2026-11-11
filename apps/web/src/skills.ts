@@ -11,6 +11,8 @@ import {
   validSkillName,
   type AgentDefinition,
   type AgentContext,
+  type OrphanedSkillCopy,
+  type OrphanedSkillCopyRef,
   type DeployedSkillState,
   type ResourceScope,
   type RunnerView,
@@ -21,6 +23,7 @@ import {
   type SkillSyncTarget,
   type UnmanagedSkillInfo,
 } from "@wollipog/protocol";
+export type {OrphanedSkillCopy, OrphanedSkillCopyRef} from "@wollipog/protocol";
 // A cycle (the matrix reads invocationLabel and skillEligibleAgents from here) that only function
 // declarations cross, so neither module reads the other while it is still evaluating.
 import { skillDeploymentErrorSummary, skillMachineErrors, type SkillDeploymentErrorSummary } from "./skill-assignment-matrix.js";
@@ -271,31 +274,6 @@ export function reportedSkillDrift(reported: ReportedSkillsState | null | undefi
   if (!Array.isArray(reported?.drift)) return [];
   return reported.drift.filter((entry) => entry && entry.name === skillName && typeof entry.digest === "string" &&
     (entry.variant === "agent" || entry.variant === "manual"));
-}
-
-/** How the resolution routes address one orphaned copy. */
-export type OrphanedSkillCopyRef =
-  | { kind: "kept_aside"; id: string }
-  | { kind: "deleted_skill"; name: string; digest: string; variant: SkillInvocationPolicy };
-
-/** An edited copy a machine keeps that no library skill page shows: a copy a restore kept aside, or
- * an edited copy of a skill deleted from the library. */
-export interface OrphanedSkillCopy {
-  kind: OrphanedSkillCopyRef["kind"];
-  id?: string;
-  name?: string;
-  digest?: string;
-  variant?: SkillInvocationPolicy;
-  keptAsideAt?: number;
-  observedDigest?: string;
-  observedFingerprint?: string;
-  held?: boolean;
-  /** deleted_skill: when the library deleted the skill (#2289); absent when the deletion predates the
-   * record, or from an older control plane. */
-  skillDeletedAt?: number;
-  detail?: string;
-  /** The accessible library skill with this name, which an import adds a version to. */
-  skillId?: string;
 }
 
 export interface OrphanedSkillCopyPreview {
