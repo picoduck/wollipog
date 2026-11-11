@@ -12,6 +12,10 @@ import { createAssistantOperations, registerAssistantRoutes } from "../src/assis
 import { Hub } from "../src/hub.js";
 import { SessionsService } from "../src/sessions.js";
 import { registerAssistantSessionOperations } from "../src/assistant-session-operations.js";
+import { assistantRequestDigest } from "../src/assistant-command-receipts.js";
+import { ManagementMutations } from "../src/assistant-management-command.js";
+import { registerAssistantSkills } from "../src/assistant-skills.js";
+import { makeSkillsSyncPusher } from "../src/skills-route.js";
 import { PROTOCOL_VERSION, type RunnerMetadata, type ControlPlaneToRunner } from "@wollipog/protocol";
 import { checkOpenClawVersion, isConnectionRefusal, OpenClawSetupError, runOpenClaw, writeIsolatedProfile } from "../../../scripts/openclaw-assistant.mjs";
 
@@ -47,7 +51,11 @@ async function start(name: string, previous?: { issued: {token: string; connecti
     };
     const svc = new SessionsService(db, hub, {info() {}, warn() {}, error() {}});
     const operations = createAssistantOperations(db);
-    registerAssistantSessionOperations(operations, db, svc);
+    const receipts = registerAssistantSessionOperations(operations, db, svc);
+    const mutations = new ManagementMutations(receipts, db.instanceId(), assistantRequestDigest,
+      id => db.assistantConnections.get(id)!, id => db.assistantConnections.destructiveConfirmation(id));
+    registerAssistantSkills(operations, {db, hub, requestHuman: () => null, requestPrincipal: () => null,
+      pushSkillsSync: makeSkillsSyncPusher({db, hub})}, mutations);
     registerAssistantRoutes(app, { db, operations, requestHuman: () => null });
     const address = await app.listen({ host: "127.0.0.1", port: previous?.port ?? 0 });
     let closed = false;
@@ -134,6 +142,27 @@ try {
   assert.equal((await call("command_get", {commandId: launchArgs.commandId})).receipt.resourceId, sessionId);
   assert.equal(alpha.db.raw().prepare("SELECT COUNT(*) AS n FROM assistant_work").get()!.n, 0, "Plain MCP must stay uncorrelated with Discord work.");
 
+  // Real configuration writes in the disposable library; no assignment or deployment.
+  const initialContent = "---\nname: smoke-only\ndescription: Synthetic configuration smoke\n---\nSynthetic version one.\n";
+  const createSkill = await call("skill_create", {operationId: "smoke-skill-create", payload: {
+    name: "smoke-only", files: [{path: "SKILL.md", encoding: "utf8", content: initialContent}],
+  }});
+  assert.equal(createSkill.receipt.status, "succeeded");
+  const skillId = createSkill.result.skill.id;
+  assert.equal(createSkill.receipt.resourceId, skillId);
+  const originalSkill = await call("skill_get", {skillId});
+  const updatedContent = initialContent.replace("version one", "version two");
+  const configArgs = {skillId, operationId: "smoke-skill-version", expectedRevision: originalSkill.revision,
+    payload: {files: [{path: "SKILL.md", encoding: "utf8", content: updatedContent}]}};
+  const configuration = await call("skill_version_add", configArgs);
+  assert.equal(configuration.receipt.status, "succeeded");
+  assert.equal(configuration.receipt.operationId, configArgs.operationId);
+  assert.equal(configuration.receipt.resourceId, skillId);
+  assert.notEqual(configuration.result.revision, originalSkill.revision);
+  assert.deepEqual((await call("skill_version_add", configArgs)).receipt, configuration.receipt);
+  assert.equal((await call("skill_versions", {skillId})).versions.length, 2, "A duplicate mutation must not create another immutable version.");
+  assert.deepEqual((await call("command_get", {commandId: configArgs.operationId})).receipt, configuration.receipt);
+
   alpha.db.updateSessionStatus(sessionId, "idle", Date.now());
   alpha.transport.uncertain = true;
   const uncertainArgs = {commandId: "smoke-uncertain", sessionId, text: "Synthetic uncertain follow-up"};
@@ -147,7 +176,15 @@ try {
   assert.equal((await call("session_prompt", uncertainArgs)).receipt.status, "uncertain");
   assert.equal(alpha.transport.sent.length, uncertainCount, "Reopen and duplicate uncertain command must not redispatch.");
   assert.equal((await call("command_get", {commandId: launchArgs.commandId})).receipt.resourceId, sessionId);
+  assert.deepEqual((await call("command_get", {commandId: configArgs.operationId})).receipt, configuration.receipt);
+  assert.equal((await call("skill_get", {skillId})).revision, configuration.result.revision);
+  const persistedVersions = await call("skill_versions", {skillId});
+  assert.equal(persistedVersions.versions.length, 2);
+  const persistedVersion = await call("skill_version_get", {skillId, versionId: configuration.result.version.id});
+  assert.ok(JSON.stringify(persistedVersion).includes("Synthetic version two."), "Configuration content must persist across control-plane reopen.");
+  assert.equal(alpha.db.listSkillAssignments(skillId).length, 0, "This smoke must not deploy the fixture skill.");
   console.log("PASS REAL installed OpenClaw MCP runtime: launch, follow-up, status, transcript/result reads and durable receipt reconciliation after control-plane reopen. MOCKED runner dispatch, result and response loss; no model execution.");
+  console.log("PASS REAL installed OpenClaw MCP runtime and SQLite: skill configuration creation/version mutation, readback and receipt deduplication survive control-plane reopen. No skill assignment or runner deployment.");
 
   const rotated = alpha.db.assistantConnections.rotate(alpha.issued.connection.id);
   alpha.responseCodes.length = 0;
@@ -170,7 +207,7 @@ try {
   await beta.app.close();
   assert.ok(isConnectionRefusal(await probe("wollipog-beta", false), "wollipog-beta"), "Unavailable-peer evidence requires a named ECONNREFUSED diagnostic.");
   console.log("PASS REAL HTTP incompatible-protocol refusal; REAL OpenClaw unavailable-control-plane refusal.");
-  console.log("PENDING: configuration mutation awaits #4465. Model, Discord, remote TLS/host and SSH evidence remain unverified.");
+  console.log("PENDING acceptance environment: model, Discord, remote TLS/host and SSH execution remain unverified.");
 } catch (error) {
   if (error instanceof OpenClawSetupError) console.error(error.message);
   console.error("FAIL OpenClaw Assistant smoke test. Raw diagnostics are withheld to protect credentials. Check the isolated runtime version, transport contract and local networking; no mutation should be blindly replayed.");
