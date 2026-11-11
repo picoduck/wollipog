@@ -10,6 +10,7 @@ import {
   forkProjectAssignment,
   forkSnapshotIdentityError,
   mutationAuthorizationError,
+  isOrganizationAdministrationRoute,
   providerForkCleanupTarget,
   providerForkNeedsCleanup,
   providerForkSnapshotIdError,
@@ -18,6 +19,16 @@ import {
   type AgentPrincipal,
   type HumanPrincipal,
 } from "./identity.js";
+
+test("Assistant administration belongs to the authenticated organization with exact route boundaries", () => {
+  for (const route of ["/api/assistant-connections", "/api/assistant-connections/:id/configure", "/api/assistant-connections/:id/rotate", "/api/assistant-connections/:id/revoke", "/api/assistant-connections/:id/activity"]) {
+    assert.equal(isOrganizationAdministrationRoute(route), true);
+    assert.equal(mutationAuthorizationError("POST", route, human("owner")), null);
+    assert.match(mutationAuthorizationError("POST", route, human("viewer"))!, /read-only/);
+  }
+  assert.equal(isOrganizationAdministrationRoute("/api/assistant-connections-foreign"), false);
+  assert.equal(isOrganizationAdministrationRoute("/api/automations"), false);
+});
 
 function human(role: HumanPrincipal["role"]): HumanPrincipal {
   return {

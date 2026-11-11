@@ -311,6 +311,7 @@ import {
 import { videoFrameValidationSessionId } from "./video-frame-validation.js";
 import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
+import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
 import { sessionCredentialRefusal } from "./session-credential-refusal.js";
 import { pushDecision } from "./push-decision.js";
 import { automationPushMessage } from "./automation-push-decision.js";
@@ -381,6 +382,7 @@ import {
   providerForkCleanupTarget,
   providerForkSnapshotIdError,
   canAdministerIdentity,
+  isOrganizationAdministrationRoute,
   isMutationMethod,
   PERSONAL_ORGANIZATION_ID,
   mutationAuthorizationError,
@@ -791,9 +793,7 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
     routePath === "/api/runners/:runnerId/host-action" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/rename" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/access-scope";
-  const organizationAdminRoute = routePath === "/api/identity" || routePath.startsWith("/api/identity/") ||
-    routePath === "/api/runner-credentials" || routePath.startsWith("/api/runner-credentials/") ||
-    routePath === "/api/devices" || routePath.startsWith("/api/devices/");
+  const organizationAdminRoute = isOrganizationAdministrationRoute(routePath);
   const organizationAdmin = principal.kind === "human" && (principal.role === "owner" || principal.role === "admin");
   if (principal.kind === "human") {
     if (!organizationAdmin && req.method === "POST" && routePath === "/api/projects/:id/locations/new") {
@@ -2949,6 +2949,8 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
 });
 
 registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
+const assistantOperations = createAssistantOperations(db);
+registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });
 
 /* ------------------------------- Skills ---------------------------------- */
 
