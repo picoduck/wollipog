@@ -361,8 +361,11 @@ jobs:
           cache: pnpm
 
       - name: Install Dependencies
+        id: apt-cache-image
         timeout-minutes: 4
-        run: pnpm install --frozen-lockfile
+        run: |
+          echo "image=${ImageOS:?}-${ImageVersion:?}" >> "$GITHUB_OUTPUT"
+          pnpm install --frozen-lockfile
 
       # FFmpeg brings 73 packages (46.7 MB) from the Ubuntu mirror. Across 615 successful jobs from
       # 2026-09-28 to 2026-10-01 this took a median of 26 seconds and a p99 of 413, the slowest 607,
@@ -382,12 +385,11 @@ jobs:
       # and is fetched and cached again. On a hit the first attempt installs with --no-download,
       # which fails rather than touch the mirror if anything is missing, and the retry then fetches
       # as before. The cache steps cannot fail the job: each continues on error, and a resolve or
-      # restore that fails, times out or misses falls back to the two bounded attempts. A resolve
-      # that timed out leaves its root apt-get holding the lists lock, so a miss clears it first.
+      # restore that fails or misses falls back to the two bounded attempts. Without an exact key,
+      # restore the newest archives for this image. A partial set fails --no-download and retries.
+      # A timed-out resolve leaves root apt-get holding the lists lock; clear it on hits too.
       # Main saves what pull requests and merge groups restore, right after the install so a later
-      # test failure or a cancelled main run still keeps it. The Playwright installs in the browser
-      # job are not cached: Playwright owns their package list, and their 18.4 MB of archives fits
-      # both six-minute attempts down to about 26 kB/s.
+      # test failure or a cancelled main run still keeps it.
       - name: Resolve Isolated Video Decoder Packages
         id: video-decoder-packages
         continue-on-error: true
@@ -402,25 +404,25 @@ jobs:
           echo "key=video-decoder-$ImageOS-$ImageVersion-$digest" >> "$GITHUB_OUTPUT"
       - name: Restore Isolated Video Decoder Packages
         id: video-decoder-cache
-        if: steps.video-decoder-packages.outputs.key != ''
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/video-decoder-packages
-          key: ${{ steps.video-decoder-packages.outputs.key }}
+          key: ${{ steps.video-decoder-packages.outputs.key || format('video-decoder-{0}-unresolved', steps.apt-cache-image.outputs.image) }}
+          restore-keys: ${{ steps.video-decoder-packages.outputs.key == '' && format('video-decoder-{0}-', steps.apt-cache-image.outputs.image) || '' }}
       - name: Install Isolated Video Decoder for Unit Tests
         id: video-decoder
         continue-on-error: true
         timeout-minutes: 7
         env:
-          CACHE_HIT: ${{ steps.video-decoder-cache.outputs.cache-hit }}
+          CACHE_HIT: ${{ steps.video-decoder-cache.outcome == 'success' && steps.video-decoder-cache.outputs.cache-matched-key != '' }}
         run: |
+          sudo pkill -KILL -x apt-get || true
           if [ "$CACHE_HIT" = true ]; then
             sudo cp ~/.cache/video-decoder-packages/*.deb /var/cache/apt/archives/
             sudo apt-get install -y --no-install-recommends --no-download bubblewrap ffmpeg
           else
-            sudo pkill -KILL -x apt-get || true
             sudo apt-get update -qq
             sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg
           fi
@@ -596,6 +598,7 @@ jobs:
         run: |
           playwright_version="$(pnpm exec playwright --version)"
           echo "version=${playwright_version#Version }" >> "$GITHUB_OUTPUT"
+          echo "image=${ImageOS:?}-${ImageVersion:?}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Playwright Browser
         id: playwright-cache
@@ -607,6 +610,7 @@ jobs:
       # Cache Playwright's exact resolved archives as in #2345 (#3649). Keys follow the image,
       # Playwright version and archive names/sizes/checksums. Optional cache failures use #2123's
       # bounded install and retry; a broken offline install enters the network-enabled retry.
+      # Without an exact key, use the newest cache for this image and Playwright version.
       - name: Resolve Playwright Chromium System Packages
         id: playwright-chromium-packages-resolve
         continue-on-error: true
@@ -616,20 +620,20 @@ jobs:
         run: bash scripts/playwright-system-packages.sh resolve chromium
       - name: Restore Playwright Chromium System Packages
         id: playwright-chromium-packages-cache
-        if: steps.playwright-chromium-packages-resolve.outputs.key != ''
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/playwright-chromium-packages
-          key: ${{ steps.playwright-chromium-packages-resolve.outputs.key }}
+          key: ${{ steps.playwright-chromium-packages-resolve.outputs.key || format('playwright-system-v1-chromium-{0}-{1}-unresolved', steps.playwright-version.outputs.image, steps.playwright-version.outputs.version) }}
+          restore-keys: ${{ steps.playwright-chromium-packages-resolve.outputs.key == '' && format('playwright-system-v1-chromium-{0}-{1}-', steps.playwright-version.outputs.image, steps.playwright-version.outputs.version) || '' }}
       - name: Install Playwright Browser
         id: playwright-browser
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         timeout-minutes: 6
         env:
-          SYSTEM_CACHE_HIT: ${{ steps.playwright-chromium-packages-cache.outcome == 'success' && steps.playwright-chromium-packages-cache.outputs.cache-hit || 'false' }}
+          SYSTEM_CACHE_HIT: ${{ steps.playwright-chromium-packages-cache.outcome == 'success' && steps.playwright-chromium-packages-cache.outputs.cache-matched-key != '' }}
         run: bash scripts/playwright-system-packages.sh install chromium browser
       - name: Retry Install Playwright Browser
         if: ${{ !cancelled() && steps.playwright-browser.outcome == 'failure' }}
@@ -646,7 +650,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 6
         env:
-          SYSTEM_CACHE_HIT: ${{ steps.playwright-chromium-packages-cache.outcome == 'success' && steps.playwright-chromium-packages-cache.outputs.cache-hit || 'false' }}
+          SYSTEM_CACHE_HIT: ${{ steps.playwright-chromium-packages-cache.outcome == 'success' && steps.playwright-chromium-packages-cache.outputs.cache-matched-key != '' }}
         run: bash scripts/playwright-system-packages.sh install chromium system
       - name: Retry Install Playwright System Dependencies
         if: ${{ !cancelled() && steps.playwright-system-dependencies.outcome == 'failure' }}
@@ -926,6 +930,7 @@ jobs:
         run: |
           playwright_version="$(pnpm exec playwright --version)"
           echo "version=${playwright_version#Version }" >> "$GITHUB_OUTPUT"
+          echo "image=${ImageOS:?}-${ImageVersion:?}" >> "$GITHUB_OUTPUT"
 
       # Its own key: the browser job's cache holds only Chromium under the same directory.
       - name: Cache Playwright WebKit
@@ -938,6 +943,7 @@ jobs:
       # Cache Playwright's exact resolved archives as in #2345 (#3649). Keys follow the image,
       # Playwright version and archive names/sizes/checksums. Optional cache failures use #2123's
       # bounded install and retry; a broken offline install enters the network-enabled retry.
+      # Without an exact key, use the newest cache for this image and Playwright version.
       - name: Resolve Playwright WebKit System Packages
         id: playwright-webkit-packages-resolve
         continue-on-error: true
@@ -947,20 +953,20 @@ jobs:
         run: bash scripts/playwright-system-packages.sh resolve webkit
       - name: Restore Playwright WebKit System Packages
         id: playwright-webkit-packages-cache
-        if: steps.playwright-webkit-packages-resolve.outputs.key != ''
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/playwright-webkit-packages
-          key: ${{ steps.playwright-webkit-packages-resolve.outputs.key }}
+          key: ${{ steps.playwright-webkit-packages-resolve.outputs.key || format('playwright-system-v1-webkit-{0}-{1}-unresolved', steps.playwright-version.outputs.image, steps.playwright-version.outputs.version) }}
+          restore-keys: ${{ steps.playwright-webkit-packages-resolve.outputs.key == '' && format('playwright-system-v1-webkit-{0}-{1}-', steps.playwright-version.outputs.image, steps.playwright-version.outputs.version) || '' }}
       - name: Install Playwright WebKit
         id: playwright-webkit
         if: steps.playwright-webkit-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         timeout-minutes: 6
         env:
-          SYSTEM_CACHE_HIT: ${{ steps.playwright-webkit-packages-cache.outcome == 'success' && steps.playwright-webkit-packages-cache.outputs.cache-hit || 'false' }}
+          SYSTEM_CACHE_HIT: ${{ steps.playwright-webkit-packages-cache.outcome == 'success' && steps.playwright-webkit-packages-cache.outputs.cache-matched-key != '' }}
         run: bash scripts/playwright-system-packages.sh install webkit browser
       - name: Retry Install Playwright WebKit
         if: ${{ !cancelled() && steps.playwright-webkit.outcome == 'failure' }}
@@ -977,7 +983,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 6
         env:
-          SYSTEM_CACHE_HIT: ${{ steps.playwright-webkit-packages-cache.outcome == 'success' && steps.playwright-webkit-packages-cache.outputs.cache-hit || 'false' }}
+          SYSTEM_CACHE_HIT: ${{ steps.playwright-webkit-packages-cache.outcome == 'success' && steps.playwright-webkit-packages-cache.outputs.cache-matched-key != '' }}
         run: bash scripts/playwright-system-packages.sh install webkit system
       - name: Retry Install Playwright WebKit System Dependencies
         if: ${{ !cancelled() && steps.playwright-webkit-system-dependencies.outcome == 'failure' }}

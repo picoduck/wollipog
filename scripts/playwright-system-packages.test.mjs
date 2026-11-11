@@ -113,9 +113,11 @@ test("hits forbid apt archive downloads in both browser paths; misses preserve P
     for (const mode of ["system", "browser"]) {
       const hit = execute("install", browser, mode, { SYSTEM_CACHE_HIT: "true" });
       assert.equal(hit.status, 0, hit.stderr);
-      assert.match(hit.calls[0], /^sudo cp .*\.deb \/var\/cache\/apt\/archives\/$/);
-      assert.equal(hit.calls[1], "sudo apt-get install -y --no-install-recommends --no-download libexample1 example-data");
-      assert.deepEqual(hit.calls.slice(2), mode === "browser" ? [`pnpm exec playwright install ${browser}`] : []);
+      assert.equal(hit.calls[0], "sudo pkill -KILL -x apt-get");
+      assert.equal(hit.calls[1], `pnpm exec playwright install-deps --dry-run ${browser}`);
+      assert.match(hit.calls[2], /^sudo cp .*\.deb \/var\/cache\/apt\/archives\/$/);
+      assert.equal(hit.calls[3], "sudo apt-get install -y --no-install-recommends --no-download libexample1 example-data");
+      assert.deepEqual(hit.calls.slice(4), mode === "browser" ? [`pnpm exec playwright install ${browser}`] : []);
       for (const cacheHit of ["false", ""]) {
         const miss = execute("install", browser, mode, { SYSTEM_CACHE_HIT: cacheHit });
         assert.equal(miss.status, 0, miss.stderr);
@@ -127,6 +129,27 @@ test("hits forbid apt archive downloads in both browser paths; misses preserve P
         { SYSTEM_CACHE_HIT: "false", CACHE_TEST_INSTALL_STATUS: "31" }]) {
         assert.notEqual(execute("install", browser, mode, overrides).status, 0, "failure must reach the bounded retry");
       }
+    }
+  }
+}));
+
+test("prefix hits install offline after failed resolution without trusting a stale package list", linuxOnly, () => fixture(({ execute, dir }) => {
+  for (const browser of ["chromium", "webkit"]) {
+    const failed = execute("resolve", browser, "system", { CACHE_TEST_UPDATE_STATUS: "23" });
+    assert.notEqual(failed.status, 0);
+    assert.equal(failed.output, "");
+    rmSync(join(dir, `playwright-${browser}-packages.txt`), { force: true });
+    assert.equal(execute("install", browser, "system", { SYSTEM_CACHE_HIT: "true" }).status, 0,
+      "no package file survives a resolver timeout; regenerate it locally");
+    writeFileSync(join(dir, `playwright-${browser}-packages.txt`), "wrong-package\n");
+    const hit = execute("install", browser, "system", { SYSTEM_CACHE_HIT: "true" });
+    assert.equal(hit.status, 0, hit.stderr);
+    assert.equal(hit.calls[0], "sudo pkill -KILL -x apt-get");
+    assert.ok(hit.calls.includes("sudo apt-get install -y --no-install-recommends --no-download libexample1 example-data"));
+    assert.ok(!hit.calls.some((call) => call.includes("apt-get update") || call.includes("wrong-package")));
+    for (const overrides of [{ CACHE_TEST_OFFLINE_STATUS: "23" }, { CACHE_TEST_REPORT: "unexpected output" }]) {
+      assert.notEqual(execute("install", browser, "system", { SYSTEM_CACHE_HIT: "true", ...overrides }).status, 0,
+        "incomplete archives or unrecognized dependencies must fail into the network retry");
     }
   }
 }));

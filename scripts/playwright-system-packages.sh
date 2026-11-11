@@ -9,10 +9,8 @@ cache="$HOME/.cache/playwright-$browser-packages"
 manifest="$RUNNER_TEMP/playwright-$browser-archives.txt"
 packages_file="$RUNNER_TEMP/playwright-$browser-packages.txt"
 
-case "$phase" in
-  resolve)
-    : "${ImageOS:?}" "${ImageVersion:?}" "${PLAYWRIGHT_VERSION:?}"
-    sudo apt-get update -qq
+# The dry-run is local and works even when apt resolution failed or timed out.
+resolve_packages() {
     # Playwright 1.63's Linux dry-run exits 1 when packages are missing. Reject other
     # failures and validate its complete list before using it as apt arguments.
     report="$(pnpm exec playwright install-deps --dry-run "$browser")" || test "$?" -eq 1
@@ -20,6 +18,13 @@ case "$phase" in
     test "${#packages[@]}" -gt 0
     grep -qxF "Missing system dependencies (${#packages[@]}):" <<< "$report"
     printf '%s\n' "${packages[@]}" > "$packages_file"
+}
+
+case "$phase" in
+  resolve)
+    : "${ImageOS:?}" "${ImageVersion:?}" "${PLAYWRIGHT_VERSION:?}"
+    sudo apt-get update -qq
+    resolve_packages
     archives="$(sudo apt-get install -qq --print-uris --no-install-recommends "${packages[@]}")"
     test -n "$archives"
     printf '%s\n' "$archives" > "$manifest"
@@ -29,8 +34,10 @@ case "$phase" in
   install)
     mode="${3:?}"
     case "$mode" in browser|system) ;; *) exit 2 ;; esac
+    # A timed-out resolve can leave root apt holding the lists lock, even on a hit.
+    sudo pkill -KILL -x apt-get || true
     if [ "${SYSTEM_CACHE_HIT:-false}" = true ]; then
-      mapfile -t packages < "$packages_file"
+      resolve_packages
       test "${#packages[@]}" -gt 0
       sudo cp "$cache"/*.deb /var/cache/apt/archives/
       # No index update or archive fetch on a hit. Missing/corrupt archives fail this
@@ -40,8 +47,6 @@ case "$phase" in
         pnpm exec playwright install "$browser"
       fi
     else
-      # An optional resolve timeout can leave root apt holding the lists lock.
-      sudo pkill -KILL -x apt-get || true
       if [ "$mode" = browser ]; then
         pnpm exec playwright install --with-deps "$browser"
       else
