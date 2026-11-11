@@ -797,12 +797,6 @@ for (const fault of ["row transition", "observer jump"] as const) {
     // after the page lands, and moves it back straight after that paint.
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
-    if (fault === "row transition") {
-      // Give this synthetic fault an observable duration instead of inheriting reduced motion's
-      // 1ms, whose visibility depends on row geometry and frame timing. The observer-jump control
-      // below still checks a movement that lasts exactly one painted frame.
-      await page.addStyleTag({ content: "[data-virtual-row] { transition-property: transform !important; transition-duration: 200ms !important; }" });
-    }
     const reader = page.getByRole("region", { name: "Session Preview Activity" });
     await expect(reader.locator("[data-virtual-row]").first()).toBeVisible();
     await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
@@ -826,12 +820,36 @@ for (const fault of ["row transition", "observer jump"] as const) {
             const rect = candidate.getBoundingClientRect();
             return rect.bottom > viewport.top && rect.top < viewport.bottom;
           });
-          if (!row) throw new Error("The landed row is missing from the transition control.");
+          if (!row) return; // The fault-key assertion below reports a missing injection.
+          element.setAttribute("data-row-transition-key", row.dataset.virtualKey!);
           // Enabling transitions alone is insufficient: this row can already be mounted with
           // its final measured transform before paging, leaving nothing to animate (#4491).
           // Start a known change inside rendering, after the recorder has read the baseline;
           // task-time geometry reads could otherwise consume a short transition before sampling.
-          row.style.setProperty("transform", `${row.style.transform} translateY(20px)`, "important");
+          const originalTransform = row.style.transform;
+          // Enable only this injected transition, after the baseline. A global rule can animate
+          // natural paging corrections before the recorder starts and displace its first sample.
+          row.style.setProperty("transition-property", "transform", "important");
+          row.style.setProperty("transition-duration", "200ms", "important");
+          getComputedStyle(row).transform; // Establish the start style inside rendering.
+          row.style.setProperty("transform", `${originalTransform} translateY(20px)`, "important");
+          const transition = row.getAnimations().find((animation) =>
+            animation instanceof CSSTransition && animation.transitionProperty === "transform");
+          if (transition) {
+            // Hold a real CSS transition in flight for one painted frame. Wall-clock playback
+            // could finish between samples under load. Its midpoint must be measured, and its
+            // final resting geometry must return to the baseline, so an endpoint-only recorder
+            // cannot pass this control.
+            transition.pause();
+            transition.currentTime = 100;
+            element.setAttribute("data-row-transition-injected", "true");
+          }
+          const restore = () => {
+            row.style.setProperty("transition-property", "none", "important");
+            row.style.setProperty("transform", originalTransform);
+          };
+          if (transition) requestAnimationFrame(restore);
+          else restore();
         } else {
           // Move back after paint and before the next rAF: only an observer-phase read sees it.
           element.scrollTop -= 20;
@@ -850,6 +868,11 @@ for (const fault of ["row transition", "observer jump"] as const) {
       requestAnimationFrame(watch);
     }, fault);
     const samples = await recordRowOffsets(page, reader, () => page.keyboard.press("Shift+Space"));
+    if (fault === "row transition") {
+      await expect(reader).toHaveAttribute("data-row-transition-key", samples[0]!.key);
+      await expect(reader).toHaveAttribute("data-row-transition-injected", "true");
+      expectRowStill([samples[0]!, samples.at(-2)!, samples.at(-1)!]);
+    }
     expect(rowDrift(samples), JSON.stringify(samples)).toBeGreaterThan(2);
   });
 }
