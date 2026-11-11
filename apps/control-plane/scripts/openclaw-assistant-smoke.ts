@@ -8,7 +8,7 @@ import path from "node:path";
 import Fastify from "fastify";
 import { ControlPlaneDb } from "../src/db.js";
 import { createAssistantOperations, registerAssistantRoutes } from "../src/assistant-routes.js";
-import { checkOpenClawVersion, runOpenClaw, writeIsolatedProfile } from "../../../scripts/openclaw-assistant.mjs";
+import { checkOpenClawVersion, isConnectionRefusal, OpenClawSetupError, runOpenClaw, writeIsolatedProfile } from "../../../scripts/openclaw-assistant.mjs";
 
 const binary = process.argv[2];
 if (!binary || !path.isAbsolute(binary)) throw new Error("Pass the absolute OpenClaw executable path. No runtime is installed automatically.");
@@ -43,12 +43,14 @@ try {
   const version = await checkOpenClawVersion(binary, profile);
   const probe = async (name: string, success = true) => {
     const result = await runOpenClaw(binary, ["mcp", "probe", name, "--json"], profile, credentials);
+    assert.equal(result.outcome, "exit", "A timeout, signal or output-limit failure is not transport evidence.");
     assert.equal(result.code === 0, success, `OpenClaw probe ${name}: unexpected outcome (raw diagnostics withheld).`);
     if (success) {
       const report = JSON.parse(result.output);
       assert.deepEqual(report.diagnostics, []);
       assert.ok(report.tools.includes(`${name}__assistant_discover`), "Named tool discovery must preserve routing.");
     }
+    return result;
   };
   await probe("wollipog-alpha");
   await probe("wollipog-beta");
@@ -92,10 +94,11 @@ try {
   assert.equal(incompatible.status, 400);
   assert.match((await incompatible.json() as { error: string }).error, /Unsupported MCP version/);
   await beta.app.close();
-  await probe("wollipog-beta", false);
+  assert.ok(isConnectionRefusal(await probe("wollipog-beta", false), "wollipog-beta"), "Unavailable-peer evidence requires a named ECONNREFUSED diagnostic.");
   console.log("PASS REAL HTTP incompatible-protocol refusal; REAL OpenClaw unavailable-control-plane refusal.");
   console.log("PENDING: session launch, follow-up, status/result retrieval, configuration mutation and receipt reconciliation await #4464/#4465 contracts. Model, Discord, remote TLS/host and SSH evidence remain unverified.");
-} catch {
+} catch (error) {
+  if (error instanceof OpenClawSetupError) console.error(error.message);
   console.error("FAIL OpenClaw Assistant smoke test. Raw diagnostics are withheld to protect credentials. Check the isolated runtime version, transport contract and local networking; no mutation should be blindly replayed.");
   process.exitCode = 1;
 } finally {

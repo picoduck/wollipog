@@ -152,6 +152,13 @@ distinct prefixed catalogs, direct HTTP discovery calls/identity routing, creden
 revocation, unavailable endpoints and incompatible-protocol refusal. It closes both listeners
 and removes its temporary profile. It neither starts nor modifies the hosting stack.
 
+The smoke runner requires a POSIX host for process-group cleanup. It overrides the child's home,
+XDG and temporary directories as well as OpenClaw's paths, without changing the invoking shell's
+environment. Timeouts and output-limit failures are distinct from normal CLI exits and never count
+as unavailable-peer evidence; that check requires a named `ECONNREFUSED` diagnostic. Process-group
+cleanup covers ordinary wrapper descendants, not deliberate session/group escapes; the test runner
+is not an OS sandbox for untrusted executables.
+
 Evidence boundaries: prefixed discovery is real OpenClaw integration; explicit discovery tool
 calls use HTTP directly, not model tool selection. This test does not execute a provider/model,
 Discord, remote TLS, remote host or SSH runner. It is a test assembly of production routes,
