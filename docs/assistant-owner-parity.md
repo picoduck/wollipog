@@ -30,6 +30,66 @@ No external technical limitation is claimed by this slice. The inventory support
 only with a concrete reason and supported remedy. The parent authorized staged delivery through
 the recorded scope clarification; all remaining gaps block final #4468 acceptance.
 
+The owner has now selected full parity within this campaign. The #4468 main item owns groups 1–2,
+the shared audit and gate, and later REAL acceptance runs. Separate campaign work items own groups
+3–7. Their delivery is required before #4468 and #4462 can be completed. Staging controls PR size;
+it does not waive a remaining blocker.
+
+## Sibling Registration Contract
+
+1. **Name and source.** Use a short, unique `snake_case` operation name, at most 32 characters.
+   Keep each group's registrations in its own module and register it in the production composition.
+   Cite the exact owner route as `METHOD /api/.../:parameter` in an exported route-to-tool mapping
+   or beside the registration. Call the same application service or extracted shared handler as
+   that route. Document any equivalent canonical read adapter; a matching name alone is not parity.
+   Do not inject HTTP, impersonate a human/session credential, or invent parent/child ancestry.
+2. **Current authority.** Resolve the live target and check the connection's current operation and
+   Project grants plus the granting owner's current access. Check all affected source/destination
+   resources. Installation-wide management must not acquire access by accepting a Project label.
+   Recheck after asynchronous reads and before later effects; never return private data after a
+   grant is narrowed. Preserve the shared owner's validation, visibility, lifecycle and recovery
+   rules. An app-management confirmation never replaces an existing typed human approval.
+3. **Mutation identity.** Require a caller-stable `commandId` and reuse
+   `AssistantCommandReceipts` from `assistant-command-receipts.ts`, in the connection's existing
+   namespace. Bind installation, connection, operation, canonical argument digest, grant revision
+   and resolved target. Reserve before the effect. After current authorization, reconcile an
+   existing receipt through `reserve`'s operation/digest check before recomputing effects that may
+   already have removed the resource. A duplicate never redispatches; accepted/uncertain delivery
+   requires `command_get` and resource recovery. Retain content-free verdicts/references, not raw
+   errors, credentials or private response bodies. Service acceptance is not lifecycle completion.
+4. **Destructive confirmation.** Honor the current `destructiveConfirmation` policy. Under
+   `confirm`, return an authorized preview without reserving or dispatching; bind the exact
+   arguments, target and affected scope, operation, connection and grant revision using
+   `AssistantCommandConfirmations`. Repeat unchanged `commandId`/arguments with `confirmationId`.
+   Consume the one-shot confirmation inside the receipt reservation's same savepoint before any
+   effect. Changed/expired/used previews fail closed. Under `none`, the current standing grant
+   applies; other mandatory human gates still apply. Never expose inaccessible affected IDs in
+   a preview or silently act on resources filtered out of it.
+5. **Audit transition.** Merge main before review. Edit only your assigned group's exact entries
+   in `assistant-owner-capabilities.json`. Keep every unresolved entry as a `gap` whose reason
+   begins `NOT-YET-SUPPORTED blocker:`. Replace it with `{"tools":["actual_registered_name"]}`
+   only when the production registry contains the operation and tests exercise the equivalent
+   owner behavior, current-grant refusal and, for writes, receipt replay/uncertainty and applicable
+   confirmation behavior. A sibling PR or planned tool is not delivered coverage. Preserve all
+   other groups' classifications. Do not delete a candidate or turn a remaining gap into an
+   exclusion. Route removal or a newly discovered human gate needs explicit coordinated audit
+   handling; it is not a reason to hide an unresolved app-management operation.
+
+The audit stays a single JSON object, **one exact route entry per physical line**, sorted by route
+key using JavaScript's default string order. Values stay compact on their own line. Run:
+
+```sh
+node scripts/format-assistant-owner-capabilities.mjs
+node scripts/format-assistant-owner-capabilities.mjs --check
+node --import tsx --test apps/control-plane/src/owner-management-inventory.test.ts
+```
+
+The formatter changes layout only. It never discovers routes or invents registrations/exclusions.
+During conflicts, retain each group's intended exact entry, then run the formatter; do not replace
+the whole audit with one side. Run your behavior tests as well as the audit contract test. The
+strict gate below must eventually pass with no class-4 entries before final campaign acceptance;
+an ordinary audit-contract pass while gaps remain is not acceptance evidence.
+
 Run the audit contract and new behavior tests:
 
 ```sh
@@ -180,7 +240,7 @@ The audit still contains **178 NOT-YET-SUPPORTED route candidates** on this loca
 routes and 1 Project route. This count is not a count of unique missing tools. The exact remaining
 entries stay in `assistant-owner-capabilities.json`, and none was reclassified as an exclusion.
 They include the broader session work-management, Machine/workspace registration, connection,
-automation and Skill Library groups awaiting the owner's scope decision. Planned #4477 registrations remain unsupported until
+automation and Skill Library groups assigned to the other campaign work items. Planned #4477 registrations remain unsupported until
 merged and reconciled. The strict acceptance gate therefore still fails intentionally.
 
 The production-composition scenario boots a fresh loopback control plane and synthetic database,
