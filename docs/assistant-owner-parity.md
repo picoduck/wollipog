@@ -56,6 +56,24 @@ owner/session operations. Automation update, enable and pause share the owner up
 Remaining automation/skill candidates stay explicit gaps for the residual-parity work item;
 merging this dependency does not establish complete Skill Library or automation parity.
 
+Discord/work PR #4479 is merged. Production now builds the session/work registry through
+`createAssistantManagement`, preserving its authenticated Discord-origin seam and sharing the
+same command-receipt store with automation, skill and owner-management operations. The inventory
+test checks all these registration families, including `assistant_work_track`,
+`assistant_work_read` and `assistant_work_reconcile`. These work tools track existing authorized
+work, read attention coordinates and recover missed updates; they do not establish destination
+authority or approve pending human gates.
+
+The two new owner APIs for issuing/revoking Discord connector credentials are explicitly
+human-authority entries in the audit. The five `/assistant/discord/...` endpoints are the
+credential-scoped connector protocol, not owner management routes: command dispatch/receipt
+reconciliation and work list/read/reply receipts. They require both current Assistant and connector
+credentials, and do not substitute for missing owner management capabilities. Connection binding,
+subscription and delivery observability remain their existing explicit gaps. The inventory now
+contains 301 owner-route candidates. PR #4476 also added installation renaming; its new audit
+entry is an explicit app-management gap, not a human-authority exclusion. The 199 unresolved
+candidates still block full acceptance and include this connection-management follow-on.
+
 ## Delivered Operations
 
 All mutation tools take a stable `commandId`; use `command_get` after a lost response. Arguments

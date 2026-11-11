@@ -38,6 +38,12 @@ test("production composition inventory is exhaustive; unresolved gaps cannot cou
   const line = child.stdout.split("\n").find(value => value.startsWith("OWNER_PARITY_SNAPSHOT "));
   assert.ok(line, "Production composition did not return its route/registry inventory.");
   const snapshot = JSON.parse(line.slice("OWNER_PARITY_SNAPSHOT ".length)) as {routes: string[]; tools: string[]};
+  // The Discord composition must retain the authenticated-origin session seam and both
+  // management registration families. A conflict resolution must not silently drop one.
+  for (const tool of ["session_launch", "command_get", "assistant_work_track", "assistant_work_read",
+    "assistant_work_reconcile", "auto_list", "skill_pin_get", "session_config", "location_add"]) {
+    assert.ok(snapshot.tools.includes(tool), `${tool}: production composition lost a registration family`);
+  }
   const manifest = JSON.parse(readFileSync(new URL("../../../docs/assistant-owner-capabilities.json", import.meta.url), "utf8")) as
     Record<string, OwnerOperationCoverage | {gap: string}>;
   assert.deepEqual(snapshot.routes, Object.keys(manifest).sort(), "An owner-route candidate was added/removed: classify it explicitly; never regenerate to hide a gap.");

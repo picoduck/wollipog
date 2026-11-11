@@ -944,7 +944,8 @@ test("Network in a browser names this window's server and where Tailnet access i
   await expect(panel.getByRole("button", { name: "Copy Address" })).toBeVisible();
   await expect(panel.locator(".settings-group-foot"))
     .toHaveText("Set up secure remote access on the computer running this server.");
-  await expect(panel.locator(".settings-group-title")).toHaveText(["Connection"]);
+  await expect(panel.locator(".settings-group-title")).toHaveText(["Connection", "Assistants"]);
+  await expect(panel.getByRole("button", {name: /Manage Assistant Connections/})).toBeVisible();
   await expect(panel).not.toContainText(/not built yet|instance menu|control plane/i);
 });
 

@@ -14,7 +14,8 @@
     "rootDir": "../.."
   },
   "include": [
-    "src"
+    "src",
+    "test-support"
   ],
   "exclude": [
     "src/auth.test.ts",
