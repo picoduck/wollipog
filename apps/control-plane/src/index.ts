@@ -3129,8 +3129,6 @@ app.post("/api/runners/:id/acp-registry/:agentId/approval", async (req, reply) =
   }
 });
 
-// Remove a stale/offline runner (and its sessions/runs) from the dashboard. Online runners must be
-// stopped first — otherwise they'd just re-register.
 app.put("/api/runners/:id/harness-installation", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = requestPrincipal(req);
@@ -3395,8 +3393,6 @@ app.get("/api/runners/:id/provider-account-selection", async (req, reply) => {
     : preview);
 });
 
-// Phase 3: list external (CLI-started) sessions on a runner host, and adopt one into Wollipog.
-// Browse the runner machine's filesystem for the workspace directory picker.
 // Files panel: browse / read files under a session's root (worktree or repo, runner-resolved).
 // `?path=a&path=b` parses as an array — reject it here rather than shipping a non-string to the
 // runner (whose validator would throw an opaque TypeError back as a 502).
@@ -6127,8 +6123,6 @@ app.post("/api/sessions/:id/host-action", async (req, reply) => {
   }
 });
 
-// Create a project ("New project"). CP-owned workspace persisted in workspace_extras so it
-// survives runner re-registers. Requires the runner online — the path was browsed on its host.
 app.put("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (req, reply) => {
   const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
   const principal = requestHuman(req);
@@ -6168,12 +6162,6 @@ app.put("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (re
   }
 });
 
-// Rename a project (workspace display name). CP-owned override — the runner's own config
-// name stays untouched and the override survives re-registers. Empty name resets it.
-// Remove Workspace (#4123): unregister one Workspace from a Machine with the authority that
-// registers one (owners and admins). Nothing on disk is deleted. Anything that still uses the
-// Workspace refuses removal with what to resolve; a configured Workspace is removed by its runner,
-// which keeps it removed across restarts, and older runners are refused with an update hint.
 // Reveal a project root in the runner host's file manager ("Open in Explorer"). Only paths
 // the runner itself advertised as workspace roots are allowed — this endpoint must not be a
 // generic "open anything on the host" primitive.
