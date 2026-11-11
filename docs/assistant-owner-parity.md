@@ -134,9 +134,12 @@ credential-scoped connector protocol, not owner management routes: command dispa
 reconciliation and work list/read/reply receipts. They require both current Assistant and connector
 credentials, and do not substitute for missing owner management capabilities. Connection binding,
 subscription and delivery observability remain their existing explicit gaps. The inventory now
-contains 301 owner-route candidates. PR #4476 also added installation renaming; its new audit
-entry is an explicit app-management gap, not a human-authority exclusion, assigned to group 4.
-The first slice left 199 unresolved candidates; the status slice below reduces that count.
+contains 301 owner-route candidates. PR #4476 also added installation renaming; it was recorded
+as an explicit app-management gap. Merged PR #4497 now delivers `install_name` along with
+connection, binding, subscription and delivery diagnostics/recovery operations. All eight exact
+route mappings and its refined credential/standing-authority exclusions are preserved beside
+the status mappings. These shared registrations use the same receipt store. The first slice left
+199 unresolved candidates; the combined status and connection slices reduce that count below.
 
 ## Delivered Operations
 
@@ -267,9 +270,9 @@ reads. Legacy review-ledger reads report their actual stored/unavailable state. 
 the retired reviewer bridge or supply a native fallback. Existing session-protocol HTTP read gates
 remain intact; the Assistant calls explicit shared read services as its current granting owner.
 
-The audit still contains **159 NOT-YET-SUPPORTED route candidates** on this slice:
-93 session routes, 30 Machine routes, 4 automation routes, 23 Skill Library routes, 7 connection
-routes and 1 Project route, plus installation renaming assigned to group 4. This count is not a count of unique missing tools. The exact remaining
+The audit still contains **151 NOT-YET-SUPPORTED route candidates** on this slice:
+93 session routes, 30 Machine routes, 4 automation routes, 23 Skill Library routes and 1 Project
+route. This count is not a count of unique missing tools. The exact remaining
 entries stay in `assistant-owner-capabilities.json`, and none was reclassified as an exclusion.
 They include the broader session work-management, Machine/workspace registration, connection,
 automation and Skill Library groups assigned to the other campaign work items. The 20 delivered
