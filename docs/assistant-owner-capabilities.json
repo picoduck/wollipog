@@ -39,8 +39,8 @@
   },
   "DELETE /api/runners/:id/provider-accounts/:accountId": {
     "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
+    "reason": "Removes a provider credential account and its authentication state. Credential deletion remains with the authenticated owner.",
+    "remedy": "Use this exact authenticated owner API in the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."
   },
   "DELETE /api/runners/:id/provider-logins/:operationId": {
     "exclusion": "human_authority",
@@ -160,7 +160,9 @@
     ]
   },
   "GET /api/runners/:id/provider-account-selection": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "account_selection_get"
+    ]
   },
   "GET /api/runners/:id/provider-accounts/:accountId/home-lease": {
     "exclusion": "human_authority",
@@ -468,7 +470,9 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/assistant-connections/installation": {
-    "gap": "NOT-YET-SUPPORTED blocker: installation display-name changes are owner app management. No equivalent Assistant rename operation exists; the personal-organization restriction is not a human-authority exclusion."
+    "tools": [
+      "installation_rename"
+    ]
   },
   "POST /api/automations": {
     "tools": [
@@ -518,8 +522,8 @@
   },
   "POST /api/runners/:id/acp-registry/:agentId/approval": {
     "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
+    "reason": "Approves an untrusted ACP registry installation and establishes executable trust. Selecting an already trusted discovered installation does not grant this authority.",
+    "remedy": "Use this exact authenticated owner API in the Machine's agent trust approval UI; resume ordinary Assistant management after the owner completes it."
   },
   "POST /api/runners/:id/orphaned-skill-copies/discard": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -529,8 +533,8 @@
   },
   "POST /api/runners/:id/provider-accounts/:accountId/adopt-profile": {
     "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
+    "reason": "Adopts a provider credential HOME as a profile and establishes this control plane's credential-access grant. Provider access establishment requires the authenticated owner.",
+    "remedy": "Use this exact authenticated owner API in the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."
   },
   "POST /api/runners/:id/provider-accounts/:accountId/recover-lease": {
     "exclusion": "human_authority",
@@ -539,23 +543,23 @@
   },
   "POST /api/runners/:id/provider-accounts/:accountId/revoke-profile-access": {
     "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
+    "reason": "Revokes a persistent control-plane grant to a provider credential profile. Lasting provider-account access changes remain human-controlled.",
+    "remedy": "Use this exact authenticated owner API in the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."
   },
   "POST /api/runners/:id/provider-imports": {
     "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
+    "reason": "Imports provider credentials into an account. Supplying or importing authentication material requires the authenticated owner.",
+    "remedy": "Use this exact authenticated owner API in the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."
   },
   "POST /api/runners/:id/provider-logins": {
     "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
+    "reason": "Creates a provider sign-in transaction and its credential account. Sign-in and account creation remain human-controlled.",
+    "remedy": "Use this exact authenticated owner API in the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."
   },
   "POST /api/runners/:id/provider-logins/:operationId/code": {
     "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
+    "reason": "Submits a provider authentication code to complete sign-in. Assistant text cannot supply credentials or complete the owner's authentication transaction.",
+    "remedy": "Use this exact authenticated owner API in the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."
   },
   "POST /api/runners/:id/rediscover": {
     "tools": [
@@ -1102,7 +1106,9 @@
     ]
   },
   "PUT /api/runners/:id/harness-installation": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "harness_select"
+    ]
   },
   "PUT /api/runners/:id/provider-account-defaults/:provider": {
     "exclusion": "human_authority",
@@ -1125,7 +1131,9 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "PUT /api/runners/:id/target-harness-installation": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "target_harness_select"
+    ]
   },
   "PUT /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {
     "exclusion": "human_authority",

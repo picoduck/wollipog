@@ -1,4 +1,5 @@
-import type { ResourceScope } from "@wollipog/protocol";
+import { providerAccountSelectionPreviewForAgent, type ProviderAccountSelectionPreview, type ResourceScope } from "@wollipog/protocol";
+import { PERSONAL_ORGANIZATION_ID } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
 import { AssistantRefusal, type AssistantOperations, type AssistantOperation, type AssistantTarget } from "./assistant-connections.js";
 import { AssistantCommandReceipts, assistantRequestDigest } from "./assistant-command-receipts.js";
@@ -21,6 +22,10 @@ export function machineWorkspaceCoordinates(target: AssistantTarget): [string, s
   return parsed as [string, string];
 }
 export const ASSISTANT_MACHINE_MANAGEMENT = [
+  ["harness_select", "PUT /api/runners/:id/harness-installation", "runner", true, false],
+  ["target_harness_select", "PUT /api/runners/:id/target-harness-installation", "runner", true, false],
+  ["account_selection_get", "GET /api/runners/:id/provider-account-selection", "runner", false, false],
+  ["installation_rename", "POST /api/assistant-connections/installation", "control_plane", true, false],
   ["runner_rename", "PATCH /api/runners/:id", "runner", true, false],
   ["runner_remove", "DELETE /api/runners/:id", "runner", true, true],
   ["runner_rediscover", "POST /api/runners/:id/rediscover", "runner", true, false],
@@ -34,6 +39,10 @@ export const ASSISTANT_MACHINE_MANAGEMENT = [
   ["project_scope_get", "GET /api/projects/:id/access-scope", "project", false, false],
 ] as const;
 const descriptions: Record<typeof ASSISTANT_MACHINE_MANAGEMENT[number][0], string> = {
+  harness_select: "Select an already discovered harness installation, preserving owner trust and protocol checks. Requires all projects; never installs or authenticates a harness.",
+  target_harness_select: "Select an already discovered harness for an execution target through the same owner service. Requires all projects; never changes target trust.",
+  account_selection_get: "Read the existing account-selection preview through its opaque agent-safe projection. Requires all projects; never returns account names, credential paths or account IDs.",
+  installation_rename: "Rename this control plane display label as its personal-organization owner. Requires all projects; does not change standing authority or installation identity.",
   runner_rename: "Rename an authorized Machine. Requires all projects because its name is shared across projects.",
   runner_remove: "Remove an offline non-box runner through owner cleanup. Honors destructive confirmation; never stops a hosting stack. Reconcile commandId before retrying.",
   runner_rediscover: "Request fresh agent discovery on a Machine. Read runner_list for asynchronously reported capabilities.",
@@ -71,8 +80,10 @@ export function registerAssistantMachineManagement(operations: AssistantOperatio
       ...(body.blockers ? {blockers: body.blockers} : {}),
     }};
   };
-  const target = (kind: "runner" | "workspace" | "project", value: unknown): AssistantTarget => {
+  type Kind = typeof ASSISTANT_MACHINE_MANAGEMENT[number][2];
+  const target = (kind: Kind, value: unknown): AssistantTarget => {
     const args = object(value);
+    if (kind === "control_plane") return {kind, id: db.instanceId()};
     if (kind === "project") {
       const id = text(args, "projectId");
       return {kind: "project", id, projectId: id};
@@ -84,6 +95,7 @@ export function registerAssistantMachineManagement(operations: AssistantOperatio
   };
   const access: AssistantOperation["ownerCanAccess"] = (owner, resolved) => {
     if (resolved.kind === "receipt") return true; // Only server-owned command_get reconciliation uses this target.
+    if (resolved.kind === "control_plane") return resolved.id === db.instanceId() && owner.role === "owner" && owner.organizationId === PERSONAL_ORGANIZATION_ID;
     if (resolved.kind === "project") return db.canManageProject(owner, resolved.id);
     if (resolved.kind === "runner") return db.canManageRunner(owner, resolved.id);
     if (resolved.kind !== "workspace") return false;
@@ -91,7 +103,7 @@ export function registerAssistantMachineManagement(operations: AssistantOperatio
     return db.workspaceSource(runnerId, workspaceId) ? db.canManageWorkspace(owner, runnerId, workspaceId)
       : db.canManageRunner(owner, runnerId); // Absent sources expose only a prior receipt or content-free 404.
   };
-  const checkScope = (kind: "runner" | "workspace" | "project", args: Record<string, unknown>, ctx: Context) => {
+  const checkScope = (kind: Kind, args: Record<string, unknown>, ctx: Context) => {
     const connection = db.assistantConnections.get(ctx.connection.id)!;
     if (kind !== "workspace") return;
     const projects = db.projectIdsForWorkspace(text(args, "runnerId"), text(args, "workspaceId"));
@@ -101,7 +113,7 @@ export function registerAssistantMachineManagement(operations: AssistantOperatio
       }
     }
   };
-  const impact = (kind: "runner" | "workspace" | "project", args: Record<string, unknown>, ctx: Context) => {
+  const impact = (kind: Kind, args: Record<string, unknown>, ctx: Context) => {
     const runnerId = text(args, "runnerId"), runner = db.getRunner(runnerId);
     if (!runner) throw new AssistantRefusal("Runner not found. Refresh runner_list and select a current Machine.");
     if (kind === "workspace") {
@@ -118,7 +130,7 @@ export function registerAssistantMachineManagement(operations: AssistantOperatio
       sessions: sessions.map(session => session.id).sort(), projects: db.projectIdsForRunner(runnerId).sort()};
   };
   for (const [name, route, kind, mutate, destructive] of ASSISTANT_MACHINE_MANAGEMENT) {
-    const properties = kind === "project" ? {projectId: string} : {runnerId: string, ...(kind === "workspace" ? {workspaceId: string} : {})};
+    const properties = kind === "control_plane" ? {} : kind === "project" ? {projectId: string} : {runnerId: string, ...(kind === "workspace" ? {workspaceId: string} : {})};
     operations.register({name, description: descriptions[name], ownerCanAccess: access,
       inputSchema: {type: "object", additionalProperties: false, properties: {...properties, payload: {type: "object"},
         ...(mutate ? {commandId: string, confirmationId: string} : {})},
@@ -127,7 +139,7 @@ export function registerAssistantMachineManagement(operations: AssistantOperatio
         const args = object(value), payload = args.payload === undefined ? {} : object(args.payload);
         let owner = await ctx.recheck();
         checkScope(kind, args, {...ctx, owner});
-        const params = kind === "project" ? {id: text(args, "projectId")} : {id: text(args, "runnerId"), runnerId: text(args, "runnerId"),
+        const params = kind === "control_plane" ? {} : kind === "project" ? {id: text(args, "projectId")} : {id: text(args, "runnerId"), runnerId: text(args, "runnerId"),
           ...(kind === "workspace" ? {workspaceId: text(args, "workspaceId")} : {})};
         const execute = () => service.execute(route, {principal: owner, params, body: payload, query: payload});
         if (!mutate) {
@@ -142,6 +154,8 @@ export function registerAssistantMachineManagement(operations: AssistantOperatio
                 activeSessionCount: preview.activeSessionCount, totalSessionCount: preview.totalSessionCount}};
             }
           } else result = await execute();
+          if (name === "account_selection_get" && result.status < 400) result = {...result,
+            body: providerAccountSelectionPreviewForAgent(result.body as ProviderAccountSelectionPreview)};
           owner = await ctx.recheck();
           checkScope(kind, args, {...ctx, owner});
           return publicResult(result);

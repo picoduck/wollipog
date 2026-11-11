@@ -114,7 +114,6 @@ import {
   type VerifyOrchestratorChildRequest,
   type CreateWorkspaceReferenceRequest,
   providerAccountChoiceRequiredForAgent,
-  providerAccountSelectionPreviewForAgent,
   runnerViewForAgent,
   type GitActionRequest,
   type GovernancePolicy,
@@ -305,6 +304,7 @@ import { registerAssistantOwnerManagement } from "./assistant-owner-management.j
 import { registerAssistantMachineManagement } from "./assistant-machine-management.js";
 import { createOwnerRunnerManagement } from "./owner-runner-management.js";
 import { createOwnerMachineManagement } from "./owner-machine-management.js";
+import { readProviderAccountSelection } from "./owner-provider-selection.js";
 import { createOwnerProjectManagement } from "./owner-project-management.js";
 import { projectName, requestedAccessScope, accessScopeOwnerFromQuery,
   accessScopeTransitionError as sharedAccessScopeTransitionError,
@@ -3129,76 +3129,12 @@ app.post("/api/runners/:id/acp-registry/:agentId/approval", async (req, reply) =
   }
 });
 
-app.put("/api/runners/:id/harness-installation", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestPrincipal(req);
-  if (!principal || !db.canManageRunner(principal, id)) {
-    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
-  }
-  const body = req.body as { agentId?: unknown; installationId?: unknown } | undefined;
-  const agentId = body?.agentId;
-  const installationId = body?.installationId;
-  if (typeof agentId !== "string" || !agentId || agentId.length > 256) {
-    return reply.code(400).send({ error: "agentId must identify a discovered installation" });
-  }
-  if (typeof installationId !== "string" || !installationId || installationId.length > 256) {
-    return reply.code(400).send({ error: "installationId must match the installation shown" });
-  }
-  const runner = db.getRunner(id);
-  if (!runner) return reply.code(404).send({ error: "runner not found" });
-  if (!runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations")) {
-    return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "harnessInstallations", "harness installation selection"));
-  }
-  const selection = db.selectHarnessInstallation(id, agentId, installationId);
-  if (!selection) return reply.code(409).send({ error: "This installation is no longer available for selection" });
-  db.replaceSubscriptionUsageSnapshots(id, []);
-  const effectiveSwitching = automaticAccountSwitchForRunner(
-    db.machineAutomaticAccountSwitchConfiguration(id),
-    runner.protocolVersion,
-    db.getRunner(id)?.harnessSelections,
-  );
-  if (runner.status === "online" && effectiveSwitching && !effectiveSwitching.enabled) {
-    hub.sendToRunner(id, { type: "configure_automatic_account_switch", ...effectiveSwitching });
-  }
-  if (runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers")) {
-    hub.sendToRunner(id, {
-      type: "configure_harness_installation_choices",
-      choices: db.getRunner(id)?.harnessSelections?.map((item) => ({
-        family: item.family, context: item.context, installationId: item.installationId,
-      })) ?? [],
-    });
-  }
-  hub.runnerChanged(id);
-  return { selection };
-});
-
-app.put("/api/runners/:id/target-harness-installation", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestPrincipal(req);
-  if (!principal || !db.canManageRunner(principal, id)) {
-    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
-  }
-  const body = (req.body ?? {}) as { targetId?: unknown; agentId?: unknown; installationId?: unknown };
-  if (typeof body.targetId !== "string" || !body.targetId || body.targetId.length > 512 ||
-      typeof body.agentId !== "string" || !body.agentId || body.agentId.length > 128 ||
-      typeof body.installationId !== "string" || !/^[a-f0-9]{24}$/.test(body.installationId)) {
-    return reply.code(400).send({ error: "Target, agent, and installation must match a discovered candidate" });
-  }
-  const runner = db.getRunner(id);
-  if (!runner) return reply.code(404).send({ error: "runner not found" });
-  if (!runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations")) {
-    return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "targetHarnessInstallations", "target harness installation selection"));
-  }
-  const selection = db.selectTargetHarnessInstallation(id, body.targetId, body.agentId, body.installationId);
-  if (!selection) return reply.code(409).send({ error: "This target installation is no longer available for selection" });
-  hub.runnerChanged(id);
-  return { selection };
-});
 
 const ownerRunnerManagement = createOwnerRunnerManagement(db, hub);
 ownerRunnerManagement.registerHttp(app, requestHuman);
 const ownerMachineManagement = createOwnerMachineManagement(db, hub, svc);
-ownerMachineManagement.registerHttp(app, requestHuman);
+// This read retains its existing human/agent HTTP principal projection below.
+ownerMachineManagement.registerHttp(app, requestHuman, ["GET /api/runners/:id/provider-account-selection", "POST /api/assistant-connections/installation"]);
 
 registerReviewerSecurityRoutes(app, db, hub, requestPrincipal);
 
@@ -3354,43 +3290,9 @@ app.put("/api/runners/:id/provider-account-policies/:provider", async (req, repl
 });
 
 app.get("/api/runners/:id/provider-account-selection", async (req, reply) => {
-  const { id } = req.params as { id: string };
-  const principal = requestPrincipal(req);
-  if (!principal || !db.canAccessRunner(principal, id)) return reply.code(404).send({ error: "runner not found" });
-  const query = req.query as { agentId?: string; provider?: string; projectId?: string; workspaceId?: string; noProject?: string; model?: string };
-  if (query.provider !== undefined && query.provider !== "claude" && query.provider !== "codex") {
-    return reply.code(400).send({ error: "provider must be Claude or Codex" });
-  }
-  if (!query.agentId && !query.provider) return reply.code(400).send({ error: "agentId or provider is required" });
-  if (query.workspaceId && !db.canAccessWorkspace(principal, id, query.workspaceId)) {
-    return reply.code(404).send({ error: "workspace not found" });
-  }
-  // The project this caller's own launch would have. An agent's child follows its parent, as a human's
-  // session follows its choice or, when it names none, the workspace's Location.
-  const parentSessionId = principal.kind === "agent" ? principal.credentialSessionId : undefined;
-  let project: { projectId?: string | null; scope?: ResourceScope } = {};
-  if (principal.kind === "human") {
-    const named = query.noProject ? { projectId: null } : query.projectId ? { projectId: query.projectId } : {};
-    const ownership = query.workspaceId || "projectId" in named
-      ? resolveSessionCreationOwnership(db, principal, { runnerId: id, workspaceId: query.workspaceId ?? "", agentId: query.agentId ?? "", ...named })
-      : null;
-    if (ownership && !ownership.ok) return reply.code(ownership.status).send({ error: ownership.error });
-    if (ownership?.ok) {
-      project = { ...(ownership.body.projectId !== undefined ? { projectId: ownership.body.projectId } : {}),
-        ...(ownership.scope ? { scope: ownership.scope } : {}) };
-    }
-  }
-  const preview = svc.providerAccountSelectionPreview(id, {
-    ...(query.agentId ? { agentId: query.agentId } : {}),
-    ...(query.provider ? { provider: query.provider as "claude" | "codex" } : {}),
-    ...(query.workspaceId ? { workspaceId: query.workspaceId } : {}),
-    ...(parentSessionId ? { parentSessionId } : {}),
-    ...(query.model ? { model: query.model } : {}),
-    ...project,
-  });
-  return respond(reply, principal.kind === "agent" && preview.ok && preview.data
-    ? { ...preview, data: providerAccountSelectionPreviewForAgent(preview.data) }
-    : preview);
+  const result = readProviderAccountSelection(db, svc, requestPrincipal(req), (req.params as {id: string}).id,
+    req.query as Parameters<typeof readProviderAccountSelection>[4]);
+  return reply.code(result.status).send(result.body);
 });
 
 // Files panel: browse / read files under a session's root (worktree or repo, runner-resolved).

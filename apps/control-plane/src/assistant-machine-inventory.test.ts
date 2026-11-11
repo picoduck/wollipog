@@ -19,6 +19,9 @@ test("group-4 audit operations are present in actual production HTTP/MCP registr
     assert.ok(snapshot.tools.includes(operation), `${operation} is absent from production MCP`);
   }
   for (const route of [
+    "DELETE /api/runners/:id/provider-accounts/:accountId", "POST /api/runners/:id/acp-registry/:agentId/approval",
+    "POST /api/runners/:id/provider-accounts/:accountId/adopt-profile", "POST /api/runners/:id/provider-accounts/:accountId/revoke-profile-access",
+    "POST /api/runners/:id/provider-imports", "POST /api/runners/:id/provider-logins", "POST /api/runners/:id/provider-logins/:operationId/code",
     "DELETE /api/runners/:id/provider-logins/:operationId", "PUT /api/runners/:id/provider-logins/:operationId/dismiss",
     "GET /api/runners/:id/provider-accounts/:accountId/home-lease", "POST /api/runners/:id/provider-accounts/:accountId/recover-lease",
     "PUT /api/runners/:id/automatic-account-switching", "PUT /api/runners/:id/provider-account-defaults/:provider",

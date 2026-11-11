@@ -5,6 +5,10 @@ described in [Assistant Owner-Capability Parity](assistant-owner-parity.md).
 
 | Owner Capability | Assistant Tool | Input |
 | --- | --- | --- |
+| Select Discovered Harness | `harness_select` | `runnerId`, `commandId`, `payload.agentId`, `payload.installationId` |
+| Select Target Harness | `target_harness_select` | `runnerId`, `commandId`, `payload.targetId`, `payload.agentId`, `payload.installationId` |
+| Read Safe Account Selection | `account_selection_get` | `runnerId`, owner-preview query fields in `payload` |
+| Rename Installation | `installation_rename` | `commandId`, `payload.name` |
 | Rename Machine | `runner_rename` | `runnerId`, `commandId`, `payload.displayName` |
 | Remove Offline Machine | `runner_remove` | `runnerId`, `commandId`, optional `confirmationId` |
 | Rediscover Agents | `runner_rediscover` | `runnerId`, `commandId` |
@@ -74,8 +78,14 @@ Only group-4 audit classifications change here. Sign-in transactions, provider c
 recovery and persistent provider-account access policies remain explicit human-authority paths,
 with exact reasons and supported owner remedies in the audit. Host graphical editor/file-manager
 actions are interactive workspace I/O; directory selection for registration is implemented above.
-Already-trusted harness selection and the safe provider-account selection preview await the
-campaign's explicit classification answer; they are not silently declared covered.
+The campaign selected option 1: selecting already-trusted, already-discovered harness installations
+and reading the existing opaque account-selection preview are ordinary app management. Both harness
+choices reuse the exact owner service, retaining discovered-candidate and protocol checks. They do
+not install, trust or authenticate new harnesses. The preview uses the existing agent projection;
+account IDs, account labels and credential HOME paths are withheld. Account creation and recovery,
+sign-in, credentials and lasting account policies remain human-only with explicit audit reasons.
+Installation renaming shares the owner service and retains the personal-organization owner check;
+it changes only the display name, without changing installation ID or Assistant authority.
 
 Tests use actual SQLite, Fastify HTTP/MCP registration, production inventory composition and
 shared application services, with synthetic owner identity and fixture runner transport. Database

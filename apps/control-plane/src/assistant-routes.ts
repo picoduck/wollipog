@@ -3,6 +3,7 @@ import { extractBearer } from "./auth.js";
 import { PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
 import { assistantGrant, AssistantOperations, AssistantRefusal, AssistantConflict } from "./assistant-connections.js";
+import { renameAssistantInstallation } from "./owner-installation-management.js";
 
 /** Resolve current labels only after owner access checks. Removed/inaccessible targets reveal no
  * current title, and malformed historical metadata is never displayed as raw JSON. */
@@ -59,14 +60,9 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
   });
   app.post("/api/assistant-connections/installation", async (req, reply) => {
     const principal = owner(req);
-    if (!principal || principal.organizationId !== PERSONAL_ORGANIZATION_ID) return reply.code(403).send({ error: "Only an owner of the installation's personal organization can rename this control plane." });
-    try {
-      store.renameInstallation((req.body as {name?: unknown} | null)?.name);
-      return { id: deps.db.instanceId(), name: store.installationName() };
-    } catch (error) {
-      if (error instanceof AssistantRefusal) return reply.code(400).send({error: error.message});
-      throw error;
-    }
+    if (!principal) return reply.code(403).send({error: "Only an owner of the installation's personal organization can rename this control plane."});
+    const result = renameAssistantInstallation(deps.db, principal, (req.body as {name?: unknown} | null)?.name);
+    return reply.code(result.status).send(result.body);
   });
   app.post("/api/assistant-connections", async (req, reply) => {
     const principal = owner(req);

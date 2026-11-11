@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify from "fastify";
-import { PROTOCOL_VERSION, type RunnerMetadata } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type RunnerMetadata, type ExecutionTargetDefinition } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub, RunnerRequestNotSentError, RunnerRequestTimeoutError } from "./hub.js";
 import { SessionsService } from "./sessions.js";
@@ -13,6 +13,7 @@ import { registerAssistantSessionOperations } from "./assistant-session-operatio
 import { AssistantCommandReceipts } from "./assistant-command-receipts.js";
 import { createOwnerMachineManagement } from "./owner-machine-management.js";
 import { ASSISTANT_MACHINE_MANAGEMENT, registerAssistantMachineManagement } from "./assistant-machine-management.js";
+import { renameAssistantInstallation } from "./owner-installation-management.js";
 
 function harness(path = ":memory:") {
   const db = ControlPlaneDb.open(path), identity = db.localIdentityContext();
@@ -39,9 +40,100 @@ function harness(path = ":memory:") {
     offline: () => {online = false;}};
 }
 
-test("real owner HTTP and MCP share Machine/Workspace mutations, stable receipts and short names", async () => {
+test("discovered harness choices retain exact candidates, protocol fences and durable deduplication", async () => {
+  const h = harness();
+  const candidate = {id: "codex", name: "Codex", command: "/fixture/codex", args: [], env: {}, driver: "codex" as const, available: true,
+    installation: {id: "fixture-installation", path: "/fixture/codex", via: "path" as const}};
+  const target: ExecutionTargetDefinition = {id: "runner:fixture-runner:container:test", runnerId: h.metadata.runnerId, name: "Test",
+    kind: "container", adapter: "container", workspaceStrategy: "worktree",
+    boundaries: {filesystem: "container", network: "deny", secrets: "none", billing: "none"},
+    environment: {id: "test", revision: 1, image: `example/agent@sha256:${"a".repeat(64)}`, setupCheckDigest: "b".repeat(64)},
+    compatibleAgentIds: ["codex"], available: true,
+    harnessInstallations: [{agentId: "codex", id: "a".repeat(24), path: "/fixture/codex", provenance: "container-image",
+      authentication: "unknown", capability: "unknown", available: true}]};
+  const metadata = {...h.metadata, agents: [candidate], executionTargets: [target]};
+  try {
+    h.db.registerRunner(metadata, Date.now(), PROTOCOL_VERSION);
+    const args = {runnerId: h.metadata.runnerId, commandId: "harness", payload: {agentId: candidate.id, installationId: candidate.installation.id}};
+    const wrong = await h.call("harness_select", {...args, commandId: "wrong", payload: {...args.payload, installationId: "not-discovered"}});
+    assert.equal(wrong.receipt.status, "failed");
+    assert.deepEqual(h.db.getRunner(h.metadata.runnerId)?.harnessSelections, []);
+    const selected = await h.call("harness_select", args);
+    assert.equal(selected.receipt.status, "succeeded");
+    assert.equal(selected.body.selection.installationId, candidate.installation.id);
+    const dispatches = h.sent.length;
+    await h.call("harness_select", args);
+    assert.equal(h.sent.length, dispatches);
+    const targetArgs = {runnerId: h.metadata.runnerId, commandId: "target", payload: {targetId: target.id, agentId: "codex", installationId: "a".repeat(24)}};
+    assert.equal((await h.call("target_harness_select", {...targetArgs, commandId: "wrong-target", payload: {...targetArgs.payload, targetId: "absent"}})).receipt.status, "failed");
+    assert.equal((await h.call("target_harness_select", targetArgs)).receipt.status, "succeeded");
+    assert.equal(h.db.getRunner(h.metadata.runnerId)?.targetHarnessSelections?.[0]?.targetId, target.id);
+    h.db.registerRunner(metadata, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.harnessInstallations - 1);
+    const old = await h.call("harness_select", {...args, commandId: "old"});
+    assert.equal(old.receipt.status, "failed");
+    assert.equal(old.body.capabilityRequirement.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.harnessInstallations);
+    const oldTarget = await h.call("target_harness_select", {...targetArgs, commandId: "old-target"});
+    assert.equal(oldTarget.receipt.status, "failed");
+    assert.equal(oldTarget.body.capabilityRequirement.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.targetHarnessInstallations);
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: [h.project.id]});
+    await assert.rejects(h.call("harness_select", {...args, commandId: "scoped"}), /excluded/);
+  } finally {h.db.close();}
+});
+
+test("installation rename shares owner validation and preserves identity, grants and current authority", async () => {
+  const h = harness(), app = Fastify();
+  registerAssistantRoutes(app, {db: h.db, operations: h.operations, requestHuman: () => h.owner});
+  try {
+    const instanceId = h.db.instanceId(), grant = h.db.assistantConnections.get(h.issued.connection.id);
+    const owner = await app.inject({method: "POST", url: "/api/assistant-connections/installation", payload: {name: "Owner Label"}});
+    assert.equal(owner.statusCode, 200);
+    assert.equal(h.db.assistantConnections.installationName(), "Owner Label");
+    const args = {commandId: "label", payload: {name: "Assistant Label"}};
+    assert.equal((await h.call("installation_rename", args)).receipt.status, "succeeded");
+    assert.equal(h.db.assistantConnections.installationName(), "Assistant Label");
+    assert.equal(h.db.instanceId(), instanceId);
+    assert.deepEqual(h.db.assistantConnections.get(h.issued.connection.id), grant);
+    assert.equal(renameAssistantInstallation(h.db, {...h.owner, organizationId: "different"}, "Denied").status, 403);
+    assert.equal((await h.call("installation_rename", {commandId: "invalid", payload: {name: "\u0001"}})).receipt.status, "failed");
+    await h.call("installation_rename", args);
+    assert.equal(h.db.assistantConnections.installationName(), "Assistant Label");
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: ["command_get"], projects: "all"});
+    await assert.rejects(h.call("installation_rename", {commandId: "revoked", payload: {name: "Denied"}}), /excluded/);
+  } finally {await app.close(); h.db.close();}
+});
+
+test("account preview uses the real selection service but returns only opaque account references", async () => {
   const h = harness(), app = Fastify();
   h.service.registerHttp(app, () => h.owner);
+  const account = {id: "fixture-person-example-com", label: "fixture-person@example.com", provider: "claude" as const,
+    authStatus: "authenticated" as const, billing: "subscription" as const};
+  const agent = {id: "claude", name: "Claude", command: "/fixture/claude", args: [], env: {}, driver: "claude-code" as const,
+    available: true, version: "2.1.300"};
+  try {
+    h.db.registerRunner({...h.metadata, agents: [agent], providerAccounts: [account]}, Date.now(), PROTOCOL_VERSION);
+    assert.ok(h.db.setMachineProviderAccountPolicy(h.metadata.runnerId, "claude",
+      {mode: "priority", fixedAccountId: null, priorityAccountIds: [account.id]}, 0, Date.now()).ok);
+    const url = `/api/runners/${h.metadata.runnerId}/provider-account-selection?agentId=claude`;
+    const owner = await app.inject({method: "GET", url});
+    assert.equal(owner.statusCode, 200);
+    assert.equal(owner.json().accountId, account.id);
+    const result = await h.call("account_selection_get", {runnerId: h.metadata.runnerId, payload: {agentId: agent.id}});
+    assert.equal(result.status, 200);
+    assert.equal(result.body.status, "selected");
+    assert.equal(result.body.accountId, undefined);
+    assert.equal(result.body.candidates, undefined);
+    assert.ok(result.body.choices[0].accountRef);
+    assert.equal(JSON.stringify(result).includes(account.id), false);
+    assert.equal(JSON.stringify(result).includes(account.label), false);
+    assert.deepEqual(h.db.machineProviderAccountDefault(h.metadata.runnerId, "claude")?.priorityAccountIds, [account.id]);
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: [h.project.id]});
+    await assert.rejects(h.call("account_selection_get", {runnerId: h.metadata.runnerId, payload: {provider: "claude"}}), /excluded/);
+  } finally {await app.close(); h.db.close();}
+});
+
+test("real owner HTTP and MCP share Machine/Workspace mutations, stable receipts and short names", async () => {
+  const h = harness(), app = Fastify();
+  h.service.registerHttp(app, () => h.owner, ["POST /api/assistant-connections/installation"]);
   registerAssistantRoutes(app, {db: h.db, operations: h.operations, requestHuman: () => h.owner});
   try {
     assert.deepEqual(h.service.keys().sort(), ASSISTANT_MACHINE_MANAGEMENT.map(([, route]) => route).sort());

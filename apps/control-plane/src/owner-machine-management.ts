@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { automaticAccountSwitchForRunner } from "./automatic-account-switch-compatibility.js";
+import { readProviderAccountSelection } from "./owner-provider-selection.js";
+import { renameAssistantInstallation } from "./owner-installation-management.js";
 import { runnerCapabilityRequirementError, runnerSupportsProtocol, workspaceRemovalBlockedMessage, type ResourceScope } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { isRunnerRequestNotSentError, type Hub } from "./hub.js";
@@ -9,6 +12,79 @@ import { projectName, requestedAccessScope, accessScopeOwnerFromQuery, accessSco
 /** Machine/Workspace application services shared by owner HTTP and Assistant transports. */
 export function createOwnerMachineManagement(db: ControlPlaneDb, hub: Hub, svc: SessionsService) {
   const management = new OwnerManagement();
+  management.define("PUT", "/api/runners/:id/harness-installation", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const principal = req.principal;
+    if (!principal || !db.canManageRunner(principal, id)) {
+      return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+    }
+    const body = req.body as { agentId?: unknown; installationId?: unknown } | undefined;
+    const agentId = body?.agentId;
+    const installationId = body?.installationId;
+    if (typeof agentId !== "string" || !agentId || agentId.length > 256) {
+      return reply.code(400).send({ error: "agentId must identify a discovered installation" });
+    }
+    if (typeof installationId !== "string" || !installationId || installationId.length > 256) {
+      return reply.code(400).send({ error: "installationId must match the installation shown" });
+    }
+    const runner = db.getRunner(id);
+    if (!runner) return reply.code(404).send({ error: "runner not found" });
+    if (!runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations")) {
+      return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "harnessInstallations", "harness installation selection"));
+    }
+    const selection = db.selectHarnessInstallation(id, agentId, installationId);
+    if (!selection) return reply.code(409).send({ error: "This installation is no longer available for selection" });
+    db.replaceSubscriptionUsageSnapshots(id, []);
+    const effectiveSwitching = automaticAccountSwitchForRunner(
+      db.machineAutomaticAccountSwitchConfiguration(id),
+      runner.protocolVersion,
+      db.getRunner(id)?.harnessSelections,
+    );
+    if (runner.status === "online" && effectiveSwitching && !effectiveSwitching.enabled) {
+      hub.sendToRunner(id, { type: "configure_automatic_account_switch", ...effectiveSwitching });
+    }
+    if (runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers")) {
+      hub.sendToRunner(id, {
+        type: "configure_harness_installation_choices",
+        choices: db.getRunner(id)?.harnessSelections?.map((item) => ({
+          family: item.family, context: item.context, installationId: item.installationId,
+        })) ?? [],
+      });
+    }
+    hub.runnerChanged(id);
+    return { selection };
+  });
+
+  management.define("PUT", "/api/runners/:id/target-harness-installation", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const principal = req.principal;
+    if (!principal || !db.canManageRunner(principal, id)) {
+      return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+    }
+    const body = (req.body ?? {}) as { targetId?: unknown; agentId?: unknown; installationId?: unknown };
+    if (typeof body.targetId !== "string" || !body.targetId || body.targetId.length > 512 ||
+        typeof body.agentId !== "string" || !body.agentId || body.agentId.length > 128 ||
+        typeof body.installationId !== "string" || !/^[a-f0-9]{24}$/.test(body.installationId)) {
+      return reply.code(400).send({ error: "Target, agent, and installation must match a discovered candidate" });
+    }
+    const runner = db.getRunner(id);
+    if (!runner) return reply.code(404).send({ error: "runner not found" });
+    if (!runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations")) {
+      return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "targetHarnessInstallations", "target harness installation selection"));
+    }
+    const selection = db.selectTargetHarnessInstallation(id, body.targetId, body.agentId, body.installationId);
+    if (!selection) return reply.code(409).send({ error: "This target installation is no longer available for selection" });
+    hub.runnerChanged(id);
+    return { selection };
+  });
+  management.define("GET", "/api/runners/:id/provider-account-selection", (req, reply) => {
+    const result = readProviderAccountSelection(db, svc, req.principal, (req.params as {id: string}).id, req.query as Parameters<typeof readProviderAccountSelection>[4]);
+    return reply.code(result.status).send(result.body);
+  });
+  management.define("POST", "/api/assistant-connections/installation", (req, reply) => {
+    const result = renameAssistantInstallation(db, req.principal, (req.body as {name?: unknown} | null)?.name);
+    return reply.code(result.status).send(result.body);
+  });
   management.define("PATCH", "/api/runners/:id", (req, reply) => {
     const {id} = req.params as {id: string};
     if (!db.canManageRunner(req.principal, id)) return reply.code(403).send({error: "Machine owner or organization admin permission is required"});

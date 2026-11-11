@@ -36,8 +36,9 @@ export class OwnerManagement {
     const returned = await handler(input, reply);
     return {status, body: sent ? body : returned};
   }
-  registerHttp(app: FastifyInstance, principal: (request: FastifyRequest) => HumanPrincipal | null): void {
+  registerHttp(app: FastifyInstance, principal: (request: FastifyRequest) => HumanPrincipal | null, exclude: readonly string[] = []): void {
     for (const key of this.keys()) {
+      if (exclude.includes(key)) continue;
       const space = key.indexOf(" ");
       app.route({method: key.slice(0, space) as "GET" | "POST" | "PUT" | "PATCH" | "DELETE", url: key.slice(space + 1),
         handler: async (request, reply) => {
