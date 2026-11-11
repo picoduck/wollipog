@@ -228,7 +228,10 @@ test("trusted work origins reserve atomically and launch reaches server-only New
         assert.equal(input.projectId, h.locations[1]!.projectId);
         reservations++;
       },
-      attachAcceptedOrigin() {associations++;},
+      attachAcceptedOrigin() {
+        assert.equal(h.db.raw().isTransaction, true, "launch attachment belongs inside session creation");
+        associations++;
+      },
     };
     Object.assign(h.db, {assistantWork: store});
     const args = {commandId: "origin-launch", locationId: h.locations[1]!.id, agentId: "agent", useWorktree: false, workOriginId: "work-fixture"};
@@ -242,9 +245,10 @@ test("trusted work origins reserve atomically and launch reaches server-only New
       {connectionId: h.issued.connection.id, commandId: args.commandId});
     assert.equal((launchInput as {projectId: string}).projectId, h.locations[1]!.projectId);
     assert.equal(reservations, 1);
-    assert.equal(associations, 0, "launch attachment belongs inside #4467's db.createSession transaction");
+    assert.equal(associations, 1, "the work extension attaches once inside db.createSession");
     await h.call("session_launch", args);
     assert.equal(reservations, 1);
+    assert.equal(associations, 1, "duplicate receipt reservation never attaches or launches again");
     await assert.rejects(h.call("session_launch", {...args, commandId: "spoofed", requesterId: "model-claim"}), /authenticated requester envelope/);
     assert.equal(h.receipts.get(h.issued.connection.id, "spoofed"), null);
   } finally {h.close();}
@@ -253,6 +257,8 @@ test("trusted work origins reserve atomically and launch reaches server-only New
 test("authenticated origins fail closed without work extension and follow-ups attach before dispatch", async () => {
   const h = harness({authenticatedOrigin: () => ({requesterId: "authenticated-fixture", workId: "work-fixture", bindingId: "binding-fixture"})});
   try {
+    // The extension is now installed by default. Explicitly model an older/missing extension.
+    Object.assign(h.db, {assistantWork: undefined});
     const args = {commandId: "origin-prompt", sessionId: "unrelated-1", text: "Fixture follow-up"};
     await assert.rejects(h.call("session_prompt", args), /work tracking is unavailable/);
     assert.equal(h.receipts.get(h.issued.connection.id, args.commandId), null);

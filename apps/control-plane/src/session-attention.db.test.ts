@@ -195,12 +195,18 @@ test("attention fences survive timestamp ties, acknowledgments, reprocessing, an
   assert.ok(cleared.revision! > first.revision!);
   assert.ok(cleared.acknowledgmentRevision! > reviewed.acknowledgmentRevision!);
   assert.equal(cleared.acknowledgedRevision, null);
-  db.raw().exec("ALTER TABLE session_attention DROP COLUMN revision; ALTER TABLE session_result_acknowledgments DROP COLUMN revision");
+  // These newer Assistant triggers reference revision; they were absent in the legacy
+  // projection schema being reconstructed. Keep the old-schema fixture internally valid.
+  db.raw().exec(`DROP TRIGGER assistant_work_attention; DROP TRIGGER assistant_work_attention_initial;
+    ALTER TABLE session_attention DROP COLUMN revision; ALTER TABLE session_result_acknowledgments DROP COLUMN revision`);
   db.close();
   const migrated = ControlPlaneDb.open(path);
   try {
     assert.equal(migrated.getSession("s")!.attention!.revision, 0);
     assert.equal(migrated.sessionAttentionForUser(migrated.getSession("s")!, LOCAL_OWNER_USER_ID).attention!.acknowledgmentRevision, 1);
+    assert.deepEqual(migrated.raw().prepare(`SELECT name FROM sqlite_master WHERE type='trigger'
+      AND name IN ('assistant_work_attention','assistant_work_attention_initial') ORDER BY name`).all().map(row => row.name),
+    ["assistant_work_attention", "assistant_work_attention_initial"], "startup restores Assistant projections after legacy migration");
   } finally { migrated.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
