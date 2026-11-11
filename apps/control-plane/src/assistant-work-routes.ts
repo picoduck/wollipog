@@ -15,6 +15,18 @@ function text(value: unknown): string {
   return value;
 }
 
+/** Minimal source-checked notice, shared by MCP and the credential-scoped trusted sender. */
+export function assistantWorkView(db: ControlPlaneDb, operations: AssistantOperations, connectionId: string, workId: string) {
+  const work = db.assistantWork.authorize(operations, connectionId, workId);
+  const session = db.getSession(work.sessionId)!;
+  const requests = session.pendingApproval ? [session.pendingApproval, ...(session.pendingApproval.additionalRequests ?? [])] : [];
+  return {work, resolution: {kind: "wollipog_session", sessionId: session.id, eventEpoch: session.eventEpoch,
+    path: `/sessions/~${Buffer.from(session.id, "utf16le").toString("base64url")}`,
+    requests: requests.map(request => ({requestId: request.requestId, occurrenceId: request.occurrenceId, kind: request.kind,
+      path: `/sessions/~${Buffer.from(session.id, "utf16le").toString("base64url")}/attention/~${Buffer.from(request.requestId, "utf16le").toString("base64url")}?epoch=${session.eventEpoch ?? 0}`})),
+    ordinaryChatGrantsApproval: false}};
+}
+
 export function registerAssistantWorkOperations(db: ControlPlaneDb, operations: AssistantOperations): void {
   db.assistantWork.useOperations(operations);
   const target = (args: unknown) => {
@@ -39,13 +51,7 @@ export function registerAssistantWorkOperations(db: ControlPlaneDb, operations: 
       const input = record(args);
       const work = db.assistantWork.authorize(operations, context.connection.id, text(input.workId));
       if (work.sessionId !== input.sessionId) throw new AssistantRefusal("Work belongs to another session.");
-      const session = db.getSession(work.sessionId)!;
-      const requests = session.pendingApproval ? [session.pendingApproval, ...(session.pendingApproval.additionalRequests ?? [])] : [];
-      return {work, resolution: {kind: "wollipog_session", sessionId: session.id, eventEpoch: session.eventEpoch,
-        path: `/sessions/~${Buffer.from(session.id, "utf16le").toString("base64url")}`,
-        requests: requests.map(request => ({requestId: request.requestId, occurrenceId: request.occurrenceId,
-          kind: request.kind,
-          path: `/sessions/~${Buffer.from(session.id, "utf16le").toString("base64url")}/attention/~${Buffer.from(request.requestId, "utf16le").toString("base64url")}?epoch=${session.eventEpoch ?? 0}`})), ordinaryChatGrantsApproval: false}};
+      return assistantWorkView(db, operations, context.connection.id, work.workId);
     }});
   operations.register({name: "assistant_work_reconcile", description: "Page current authorized work after reconnect or missed webhooks. Persist each work revision and follow nextAfter, including empty filtered pages.",
     inputSchema: {type: "object", properties: {projectId: {type: "string"}, after: {type: "string"}, limit: {type: "integer", minimum: 1, maximum: 100}}, additionalProperties: false},

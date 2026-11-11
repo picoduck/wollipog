@@ -1,4 +1,9 @@
 {
+  "DELETE /api/assistant-connections/:id/discord-connectors/:connectorId": {
+    "exclusion": "human_authority",
+    "reason": "Revokes an owner-issued trusted Discord connector credential and its standing command/destination authority.",
+    "remedy": "Use this exact authenticated connection-owner API to revoke the connector; ordinary Assistant commands cannot change connector credentials or standing grants."
+  },
   "DELETE /api/assistant-connections/:id/destination-bindings/:bindingId": {
     "exclusion": "human_authority",
     "reason": "Revokes the owner's standing requester/destination authorization binding.",
@@ -429,6 +434,11 @@
     "reason": "Issues, expands, rotates or revokes standing Assistant authority; the connection cannot authorize its own standing grant changes.",
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
+  "POST /api/assistant-connections/:id/discord-connectors": {
+    "exclusion": "human_authority",
+    "reason": "Issues a trusted Discord connector credential with owner-selected destination binding and allowed command operations; this establishes persistent access.",
+    "remedy": "Use this exact authenticated connection-owner API, then configure the credential privately in the dedicated connector profile."
+  },
   "POST /api/assistant-connections/:id/destination-bindings": {
     "exclusion": "human_authority",
     "reason": "Creates standing authorization for the exact requester and private destination. An Assistant must not authorize its own recipients.",
@@ -456,6 +466,9 @@
     "exclusion": "human_authority",
     "reason": "Issues, expands, rotates or revokes standing Assistant authority; the connection cannot authorize its own standing grant changes.",
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
+  },
+  "POST /api/assistant-connections/installation": {
+    "gap": "NOT-YET-SUPPORTED blocker: installation display-name changes are owner app management. No equivalent Assistant rename operation exists; the personal-organization restriction is not a human-authority exclusion."
   },
   "POST /api/automations": {
     "tools": [

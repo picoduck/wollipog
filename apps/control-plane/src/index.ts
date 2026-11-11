@@ -299,7 +299,7 @@ import {
 import { videoFrameValidationSessionId } from "./video-frame-validation.js";
 import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
-import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
+import { registerAssistantRoutes } from "./assistant-routes.js";
 import { createSessionWorktreeManagement } from "./session-worktree-management.js";
 import { registerAssistantOwnerManagement } from "./assistant-owner-management.js";
 import { registerAssistantMachineManagement } from "./assistant-machine-management.js";
@@ -310,8 +310,9 @@ import { projectName, requestedAccessScope, accessScopeOwnerFromQuery,
   accessScopeTransitionError as sharedAccessScopeTransitionError,
   accessScopePreviewForPrincipal as sharedAccessScopePreviewForPrincipal } from "./project-management-validation.js";
 import { OwnerManagementInventory } from "./owner-management-inventory.js";
-import { registerAssistantWorkOperations, registerAssistantWorkOwnerRoutes } from "./assistant-work-routes.js";
-import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
+import { registerAssistantWorkOwnerRoutes } from "./assistant-work-routes.js";
+import { registerAssistantDiscordIngress } from "./assistant-discord-ingress.js";
+import { createAssistantManagement } from "./assistant-composition.js";
 import { sessionCredentialRefusal } from "./session-credential-refusal.js";
 import { pushDecision } from "./push-decision.js";
 import { automationPushMessage } from "./automation-push-decision.js";
@@ -2506,15 +2507,15 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
 });
 
 registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
-export const assistantOperations = createAssistantOperations(db);
-registerAssistantWorkOperations(db, assistantOperations);
-const assistantCommandReceipts = registerAssistantSessionOperations(assistantOperations, db, svc);
+const {operations: assistantOperations, ingress: assistantDiscordIngress, receipts: assistantCommandReceipts} = createAssistantManagement(db, svc);
+export { assistantOperations };
 const assistantManagementMutations = new ManagementMutations(assistantCommandReceipts, db.instanceId(), assistantRequestDigest,
   id => db.assistantConnections.get(id)!, id => db.assistantConnections.destructiveConfirmation(id));
 registerAssistantAutomations(assistantOperations, db, automations, assistantManagementMutations);
 registerAssistantSkills(assistantOperations, {db, hub, requestHuman, requestPrincipal, pushSkillsSync}, assistantManagementMutations);
 registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });
 registerAssistantWorkOwnerRoutes(app, { db, outboundEvents, requestHuman });
+registerAssistantDiscordIngress(app, { db, ingress: assistantDiscordIngress, requestHuman });
 
 /* ------------------------------- Skills ---------------------------------- */
 
