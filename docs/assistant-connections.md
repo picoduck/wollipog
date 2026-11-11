@@ -66,6 +66,15 @@ loss of active organization-owner status disables the connection until restored/
 Only the issuing owner can configure, rotate, revoke or read connection activity through
 `/api/assistant-connections`; Assistant credentials never reach these owner-only APIs.
 
+`grant.destructiveConfirmation` is owner-selectable `"none" | "confirm"`; omitted create inputs
+normalize to `"none"`, including Full Access. Configure preserves the current policy when this
+field is omitted; changing `"confirm"` to `"none"` requires an explicit value. Read current policy through
+`db.assistantConnections.destructiveConfirmation(connectionId)` immediately before destructive
+execution or preview. Under `"confirm"`, sibling services must implement an Assistant preview and
+short-lived confirmation ID bound to the connection, operation and exact target/arguments; a stale
+or changed grant requires rechecking. This slice exposes the policy/accessor, not destructive
+operations or confirmation persistence. The owner can change the field through the configure API.
+
 ## Operation Inventory Responsibilities
 
 Discovery is implemented here. The following families must register through this contract and
@@ -102,7 +111,8 @@ or expired MCP session never proves a mutation failed and must not trigger autom
 This PR defines the type; it does not claim durable mutation receipt implementation.
 
 Activity contains connection ID, authorizing grant revision, operation, resolved target, timestamp
-and outcome. No arguments, bearer credentials, token hashes or exception text are recorded.
+and outcome. Retention keeps the latest 1,000 entries per connection (the activity API shows 100);
+older entries are removed on insertion. No arguments, bearer credentials, token hashes or exception text are recorded.
 Operation services must return secret-free errors distinguishing unavailable runners/peers and
 unsupported versions. Generic unexpected errors disclose no internal exception text.
 

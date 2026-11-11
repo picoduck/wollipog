@@ -382,6 +382,7 @@ import {
   providerForkCleanupTarget,
   providerForkSnapshotIdError,
   canAdministerIdentity,
+  isOrganizationAdministrationRoute,
   isMutationMethod,
   PERSONAL_ORGANIZATION_ID,
   mutationAuthorizationError,
@@ -792,10 +793,7 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
     routePath === "/api/runners/:runnerId/host-action" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/rename" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/access-scope";
-  const organizationAdminRoute = routePath === "/api/identity" || routePath.startsWith("/api/identity/") ||
-    routePath === "/api/assistant-connections" || routePath.startsWith("/api/assistant-connections/") ||
-    routePath === "/api/runner-credentials" || routePath.startsWith("/api/runner-credentials/") ||
-    routePath === "/api/devices" || routePath.startsWith("/api/devices/");
+  const organizationAdminRoute = isOrganizationAdministrationRoute(routePath);
   const organizationAdmin = principal.kind === "human" && (principal.role === "owner" || principal.role === "admin");
   if (principal.kind === "human") {
     if (!organizationAdmin && req.method === "POST" && routePath === "/api/projects/:id/locations/new") {
