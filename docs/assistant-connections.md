@@ -1,7 +1,47 @@
 # Assistant Connection Contract
 
 Refs #4463 and #4462. This foundation exposes discovery; the session/runner, automation/skill,
-OpenClaw and event units add their operations to the same registry. Management UI is a later slice.
+OpenClaw and event units add their operations to the same registry.
+
+## Owner Management
+
+Open **Settings → Network → Manage Assistant Connections**. Only an active organization owner
+can load management controls. The dialog lists that owner's separately named connections on the
+current server; switching servers or closing the dialog discards any credential shown in memory.
+
+Create a connection with Full Access or exact allowed operations, all or selected projects, and
+an explicit destructive-confirmation choice. Full Access defaults to no extra confirmation.
+Inspect a connection to rename it, change grants, rotate its credential, permanently revoke it,
+or refresh its latest activity. Selected-project grants exclude resources without a project;
+discovery metadata is separately described in the registry contract below. Changes affect the
+next authorization check, including queued work's execution check.
+
+The dashboard sends the grant revision it inspected on every save. A stale save receives HTTP
+409 and cannot overwrite a grant changed by another owner window. Refresh and inspect the current
+grant before submitting again. API clients can send `expectedRevision` for the same compare-and-set
+protection; legacy calls that omit it retain their explicit whole-grant replacement behavior.
+
+Create and rotate return a credential once. It starts masked; use **Show Credential** or
+**Copy Credential** to transfer it securely to the Assistant. **Dismiss Credential** removes it
+from this dialog. It is never written to local/session storage or included in management reads.
+Rotation immediately invalidates the old credential; revocation permanently disables the
+connection. Both actions require a local confirmation in the owner UI. If a mutation's response
+is lost, refresh and inspect its state before repeating it; a credential whose response was lost
+can be replaced through explicit rotation.
+
+IDs use a full-width selectable field with a copy control. If clipboard access is unavailable,
+select the field and copy manually; credential copy failures offer Show Credential as the fallback.
+Activity shows the Assistant identity and a readable target name, resolving current target titles
+only when the owner still has access. Revoked grants remain available under Inspect Revoked Grants.
+
+The Installation ID and Connection ID remain stable when display names change. Owners of the
+personal installation organization can rename the shared installation; another organization's
+owner can inspect that identity but cannot rename the shared server. Each organization owner can
+rename only their own connections. Management metadata includes registered operation descriptions
+and only projects that the authenticated owner can access.
+
+The browser lifecycle test uses actual HTTP, Fastify and SQLite with synthetic owner
+authentication. It does not prove configured OpenClaw, TLS, SSH or Discord interoperability.
 
 ## Identity and Transport
 
@@ -26,7 +66,7 @@ The endpoint rejects foreign browser Origins. Existing device/session auth is un
 Call `assistant_discover` to obtain `controlPlane.id` (existing database instance ID),
 `controlPlane.name`, `connection.id`, current grant/revision and granted operation schemas.
 IDs, never editable names or tool prefixes, distinguish connections and installations. The initial
-installation display name is Wollipog. Owner-facing editing follows with connection management UI.
+installation display name is Wollipog and is editable through owner management.
 
 No MCP session or cached tool catalog grants authority. Every tool call rechecks the credential,
 grant, active owner's role and resource access. This first stateless adapter does not advertise
