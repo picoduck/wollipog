@@ -417,11 +417,16 @@ jobs:
         timeout-minutes: 7
         env:
           CACHE_HIT: ${{ steps.video-decoder-cache.outcome == 'success' && steps.video-decoder-cache.outputs.cache-matched-key != '' }}
+          CACHE_FALLBACK: ${{ steps.video-decoder-packages.outputs.key == '' }}
         run: |
           sudo pkill -KILL -x apt-get || true
           if [ "$CACHE_HIT" = true ]; then
             sudo cp ~/.cache/video-decoder-packages/*.deb /var/cache/apt/archives/
-            sudo apt-get install -y --no-install-recommends --no-download bubblewrap ffmpeg
+            archives=()
+            if [ "$CACHE_FALLBACK" = true ]; then
+              archives=(~/.cache/video-decoder-packages/*.deb)
+            fi
+            sudo apt-get install -y --no-install-recommends --no-download --no-remove bubblewrap ffmpeg "${archives[@]}"
           else
             sudo apt-get update -qq
             sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg
@@ -634,6 +639,7 @@ jobs:
         timeout-minutes: 6
         env:
           SYSTEM_CACHE_HIT: ${{ steps.playwright-chromium-packages-cache.outcome == 'success' && steps.playwright-chromium-packages-cache.outputs.cache-matched-key != '' }}
+          SYSTEM_CACHE_FALLBACK: ${{ steps.playwright-chromium-packages-resolve.outputs.key == '' }}
         run: bash scripts/playwright-system-packages.sh install chromium browser
       - name: Retry Install Playwright Browser
         if: ${{ !cancelled() && steps.playwright-browser.outcome == 'failure' }}
@@ -651,6 +657,7 @@ jobs:
         timeout-minutes: 6
         env:
           SYSTEM_CACHE_HIT: ${{ steps.playwright-chromium-packages-cache.outcome == 'success' && steps.playwright-chromium-packages-cache.outputs.cache-matched-key != '' }}
+          SYSTEM_CACHE_FALLBACK: ${{ steps.playwright-chromium-packages-resolve.outputs.key == '' }}
         run: bash scripts/playwright-system-packages.sh install chromium system
       - name: Retry Install Playwright System Dependencies
         if: ${{ !cancelled() && steps.playwright-system-dependencies.outcome == 'failure' }}
@@ -967,6 +974,7 @@ jobs:
         timeout-minutes: 6
         env:
           SYSTEM_CACHE_HIT: ${{ steps.playwright-webkit-packages-cache.outcome == 'success' && steps.playwright-webkit-packages-cache.outputs.cache-matched-key != '' }}
+          SYSTEM_CACHE_FALLBACK: ${{ steps.playwright-webkit-packages-resolve.outputs.key == '' }}
         run: bash scripts/playwright-system-packages.sh install webkit browser
       - name: Retry Install Playwright WebKit
         if: ${{ !cancelled() && steps.playwright-webkit.outcome == 'failure' }}
@@ -984,6 +992,7 @@ jobs:
         timeout-minutes: 6
         env:
           SYSTEM_CACHE_HIT: ${{ steps.playwright-webkit-packages-cache.outcome == 'success' && steps.playwright-webkit-packages-cache.outputs.cache-matched-key != '' }}
+          SYSTEM_CACHE_FALLBACK: ${{ steps.playwright-webkit-packages-resolve.outputs.key == '' }}
         run: bash scripts/playwright-system-packages.sh install webkit system
       - name: Retry Install Playwright WebKit System Dependencies
         if: ${{ !cancelled() && steps.playwright-webkit-system-dependencies.outcome == 'failure' }}

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import test from "node:test";
@@ -116,7 +116,7 @@ test("hits forbid apt archive downloads in both browser paths; misses preserve P
       assert.equal(hit.calls[0], "sudo pkill -KILL -x apt-get");
       assert.equal(hit.calls[1], `pnpm exec playwright install-deps --dry-run ${browser}`);
       assert.match(hit.calls[2], /^sudo cp .*\.deb \/var\/cache\/apt\/archives\/$/);
-      assert.equal(hit.calls[3], "sudo apt-get install -y --no-install-recommends --no-download libexample1 example-data");
+      assert.equal(hit.calls[3], "sudo apt-get install -y --no-install-recommends --no-download --no-remove libexample1 example-data");
       assert.deepEqual(hit.calls.slice(4), mode === "browser" ? [`pnpm exec playwright install ${browser}`] : []);
       for (const cacheHit of ["false", ""]) {
         const miss = execute("install", browser, mode, { SYSTEM_CACHE_HIT: cacheHit });
@@ -142,10 +142,14 @@ test("prefix hits install offline after failed resolution without trusting a sta
     assert.equal(execute("install", browser, "system", { SYSTEM_CACHE_HIT: "true" }).status, 0,
       "no package file survives a resolver timeout; regenerate it locally");
     writeFileSync(join(dir, `playwright-${browser}-packages.txt`), "wrong-package\n");
-    const hit = execute("install", browser, "system", { SYSTEM_CACHE_HIT: "true" });
+    const cache = join(dir, `.cache/playwright-${browser}-packages`);
+    mkdirSync(cache, { recursive: true });
+    writeFileSync(join(cache, "libexample1_2_amd64.deb"), "cached newer version");
+    const hit = execute("install", browser, "system", { SYSTEM_CACHE_HIT: "true", SYSTEM_CACHE_FALLBACK: "true" });
     assert.equal(hit.status, 0, hit.stderr);
     assert.equal(hit.calls[0], "sudo pkill -KILL -x apt-get");
-    assert.ok(hit.calls.includes("sudo apt-get install -y --no-install-recommends --no-download libexample1 example-data"));
+    assert.ok(hit.calls.includes(`sudo apt-get install -y --no-install-recommends --no-download --no-remove libexample1 example-data ${cache}/libexample1_2_amd64.deb`),
+      "prefix restoration must explicitly select cached versions instead of the image's stale candidates");
     assert.ok(!hit.calls.some((call) => call.includes("apt-get update") || call.includes("wrong-package")));
     for (const overrides of [{ CACHE_TEST_OFFLINE_STATUS: "23" }, { CACHE_TEST_REPORT: "unexpected output" }]) {
       assert.notEqual(execute("install", browser, "system", { SYSTEM_CACHE_HIT: "true", ...overrides }).status, 0,
@@ -162,4 +166,28 @@ test("collect keeps exactly the resolved archives and rejects an incomplete coll
   assert.throws(() => readFileSync(join(cache, "unrelated.deb")));
   rmSync(join(dir, "depot/libexample1_1_amd64.deb"));
   assert.notEqual(execute("collect").status, 0);
+}));
+
+test("apt's real dependency solver selects local cached versions over stale metadata without installing", {
+  skip: !existsSync("/usr/bin/apt-get") || !existsSync("/usr/bin/dpkg-deb") ? "Requires Debian apt tools" : false,
+}, () => fixture(({ dir }) => {
+  const controlDir = join(dir, "fixture", "DEBIAN");
+  mkdirSync(controlDir, { recursive: true });
+  const fields = "Package: wollipog-offline-fixture\nArchitecture: all\nMaintainer: Test <test@example.invalid>\nDescription: inert apt simulation fixture\n";
+  writeFileSync(join(controlDir, "control"), `${fields}Version: 2\n`);
+  const archive = join(dir, "fixture.deb");
+  const built = spawnSync("dpkg-deb", ["--build", join(dir, "fixture"), archive], { encoding: "utf8" });
+  assert.equal(built.status, 0, built.stderr);
+  const statusFile = join(dir, "dpkg-status");
+  writeFileSync(statusFile, `${fields}Version: 1\nStatus: install ok installed\n`);
+  const args = ["--simulate", "-o", `Dir::State::status=${statusFile}`, "install", "-y",
+    "--no-download", "--no-remove", "wollipog-offline-fixture"];
+  const stale = spawnSync("apt-get", args, { encoding: "utf8" });
+  assert.equal(stale.status, 0, stale.stderr);
+  assert.doesNotMatch(stale.stdout, /Inst wollipog-offline-fixture/);
+  const cached = spawnSync("apt-get", [...args, archive], { encoding: "utf8" });
+  assert.equal(cached.status, 0, cached.stderr);
+  assert.match(cached.stdout, /Inst wollipog-offline-fixture \[1\] \(2 local-deb/);
+  assert.equal(readFileSync(statusFile, "utf8"), `${fields}Version: 1\nStatus: install ok installed\n`,
+    "the solver simulation must not install or modify any package");
 }));

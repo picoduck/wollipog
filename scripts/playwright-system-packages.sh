@@ -40,9 +40,16 @@ case "$phase" in
       resolve_packages
       test "${#packages[@]}" -gt 0
       sudo cp "$cache"/*.deb /var/cache/apt/archives/
+      archives=()
+      if [ "${SYSTEM_CACHE_FALLBACK:-false}" = true ]; then
+        # The image's older lists may select versions absent from the restored set.
+        # Local operands select the cached versions; apt still checks dependencies,
+        # refuses removals/downgrades and fails if any required archive is missing.
+        archives=("$cache"/*.deb)
+      fi
       # No index update or archive fetch on a hit. Missing/corrupt archives fail this
       # attempt and enter the existing bounded, network-enabled Playwright retry.
-      sudo apt-get install -y --no-install-recommends --no-download "${packages[@]}"
+      sudo apt-get install -y --no-install-recommends --no-download --no-remove "${packages[@]}" "${archives[@]}"
       if [ "$mode" = browser ]; then
         pnpm exec playwright install "$browser"
       fi

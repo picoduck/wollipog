@@ -665,6 +665,7 @@ test("both Playwright installs time out and retry once after clearing the stalle
       "        timeout-minutes: 6",
       "        env:",
       `          SYSTEM_CACHE_HIT: \${{ steps.playwright-${browser}-packages-cache.outcome == 'success' && steps.playwright-${browser}-packages-cache.outputs.cache-matched-key != '' }}`,
+      `          SYSTEM_CACHE_FALLBACK: \${{ steps.playwright-${browser}-packages-resolve.outputs.key == '' }}`,
       `        run: bash scripts/playwright-system-packages.sh install ${browser} ${cacheHit === "!=" ? "browser" : "system"}`,
     ].join("\n"), `${name}: first attempt must be bounded and allow one retry`);
     assert.equal(steps[index + 1], [
@@ -831,11 +832,16 @@ test("the unit-test job's video decoder install is cached, retries once, and eve
     `        timeout-minutes: ${attempts[0]}`,
     "        env:",
     "          CACHE_HIT: ${{ steps.video-decoder-cache.outcome == 'success' && steps.video-decoder-cache.outputs.cache-matched-key != '' }}",
+    "          CACHE_FALLBACK: ${{ steps.video-decoder-packages.outputs.key == '' }}",
     "        run: |",
     "          sudo pkill -KILL -x apt-get || true",
     '          if [ "$CACHE_HIT" = true ]; then',
     `            sudo cp ${path}/*.deb /var/cache/apt/archives/`,
-    "            sudo apt-get install -y --no-install-recommends --no-download bubblewrap ffmpeg",
+    "            archives=()",
+    '            if [ "$CACHE_FALLBACK" = true ]; then',
+    "              archives=(~/.cache/video-decoder-packages/*.deb)",
+    "            fi",
+    '            sudo apt-get install -y --no-install-recommends --no-download --no-remove bubblewrap ffmpeg "${archives[@]}"',
     "          else",
     "            sudo apt-get update -qq",
     "            sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg",
@@ -907,7 +913,7 @@ exit 0
         const callsPath = resolve(dir, "calls");
         writeFileSync(callsPath, "");
         const result = spawnSync("bash", ["-e", "-c", shell], { encoding: "utf8", env: {
-          ...process.env, PATH: `${dir}:${process.env.PATH}`, CACHE_HIT: cacheHit,
+          ...process.env, PATH: `${dir}:${process.env.PATH}`, CACHE_HIT: cacheHit, CACHE_FALLBACK: "true",
           CACHE_TEST_CALLS: callsPath, CACHE_TEST_OFFLINE_STATUS: offlineStatus,
         } });
         assert.equal(result.error, undefined);
@@ -915,7 +921,7 @@ exit 0
         const calls = readFileSync(callsPath, "utf8").trim().split("\n");
         assert.equal(calls[0], "pkill -KILL -x apt-get");
         if (cacheHit === "true") {
-          assert.equal(calls.at(-1), "apt-get install -y --no-install-recommends --no-download bubblewrap ffmpeg");
+          assert.match(calls.at(-1), /^apt-get install -y --no-install-recommends --no-download --no-remove bubblewrap ffmpeg .*\.deb$/);
           assert.ok(!calls.some((call) => call.startsWith("apt-get update")));
         } else {
           assert.deepEqual(calls.slice(1), ["apt-get update -qq", "apt-get install -y --no-install-recommends bubblewrap ffmpeg"]);
