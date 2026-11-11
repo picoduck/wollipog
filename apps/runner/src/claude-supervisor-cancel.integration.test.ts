@@ -112,7 +112,7 @@ test("cancel after worker EXIT is queued emits one generation EXIT and preserves
   let stoppedSupervisor: number | undefined;
   try {
     await until(1, 0);
-    start(1, "require('node:child_process').spawn('/bin/sh',['-c','sleep .3; echo kept > /tmp/claude/earlier-task; sleep 8'],{detached:true,stdio:['ignore','inherit','inherit']}).unref()");
+    start(1, "require('node:child_process').spawn('/bin/sh',['-c','sleep .3; echo kept > /tmp/claude/earlier-task.tmp; mv /tmp/claude/earlier-task.tmp /tmp/claude/earlier-task; sleep 8'],{detached:true,stdio:['ignore','inherit','inherit']}).unref()");
     await until(12, 1);
     assert.equal((await until(9, 1)).data.readInt32BE(0), 0);
     const marker = `cancel-race-${process.pid}-${Date.now()}`;
