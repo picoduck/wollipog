@@ -69,3 +69,18 @@ test("the real API start409 seam retains the DTO for local normalization and per
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0], { path: "/api/runners/remote/provider-logins", method: "POST", body: JSON.stringify({ provider: "codex", label: "Draft" }) });
 });
+
+test("control-plane admission and publication refusals retain useful local guidance", () => {
+  for (const [message, expected] of [
+    ["runner is offline", /Machine is offline/],
+    ["This machine needs a newer runner for provider sign-in. Update and restart the runner.", /Update and restart/],
+    ["This runner cannot enforce the saved Harness Installation choice", /selected harness installation/],
+    ["The provider account is not available on this Machine.", /account is not available/],
+  ] as const) {
+    assert.match(providerLoginStartFailure(new ApiError(message, 409)).message, expected);
+    assert.equal(providerLoginStartFailure(new ApiError(`${message} /private`, 409)).message, PROVIDER_LOGIN_START_FAILURE);
+  }
+  assert.match(providerLoginStartFailure(new ApiError("secret", 503, "PROVIDER_PUBLICATION_UNAVAILABLE")).message, /control plane.*storage/);
+  assert.match(providerLoginStartFailure(new ApiError("secret", 400)).message, /request is invalid/);
+  assert.match(providerLoginStartFailure(new ApiError("secret", 502)).message, /unexpected sign-in response/);
+});

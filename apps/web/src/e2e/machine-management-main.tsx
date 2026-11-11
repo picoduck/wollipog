@@ -735,6 +735,9 @@ const client = {
   ) => {
     if (!runner) throw new Error("runner not found");
     // Add Account's request failure (#2995): a label of "Unreachable" is refused as a timeout.
+    const startRefusal = new URLSearchParams(window.location.search).get("startRefusal");
+    if (startRefusal === "offline") throw new ApiError("runner is offline", 409);
+    if (startRefusal === "publication") throw new ApiError("private storage exception", 503, "PROVIDER_PUBLICATION_UNAVAILABLE");
     const directoryFailure = new URLSearchParams(window.location.search).get("directoryFailure");
     if (directoryFailure) {
       const [component, reason] = directoryFailure.split(":");

@@ -1054,6 +1054,24 @@ test("Add Account maps the runner's duplicate refusals to the field, and other f
   }
 });
 
+test("control-plane start admission failures stay useful in Add Account", async () => {
+  for (const [cause, expected] of [
+    [new ApiError("runner is offline", 409), /Machine is offline/],
+    [new ApiError("This machine needs a newer runner for provider sign-in. Update and restart the runner.", 409), /Update and restart/],
+    [new ApiError("secret", 503, "PROVIDER_PUBLICATION_UNAVAILABLE"), /control plane.*storage/],
+  ] as const) {
+    const api = client({ login: async () => { throw cause; } });
+    const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+    try {
+      const add = await openAdd(ui);
+      await add.type("Draft");
+      await add.submit();
+      assert.match(add.dialog.textContent ?? "", expected);
+      assert.doesNotMatch(add.dialog.textContent ?? "", /Preserve any existing profile directories|secret/);
+    } finally { await ui.unmount(); }
+  }
+});
+
 test("an existing account's Sign In uses the same sanitized start failure seam", async () => {
   const api = client({ login: async () => { throw new ApiError("secret /private", 409, undefined, {
     directoryDiagnostic: { code: "managed_profile_directory", component: "profile_home", reason: "unavailable" },

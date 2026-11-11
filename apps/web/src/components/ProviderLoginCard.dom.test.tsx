@@ -73,6 +73,7 @@ test("a refused restart uses structured local copy and leaves Dismiss available 
     assert.match(view.container.textContent ?? "", /Preserve them.*Do not retry automatically/);
     assert.doesNotMatch(view.container.textContent ?? "", /secret|\/private/);
     assert.deepEqual(calls, ["start"]);
+    assert.equal(view.container.querySelectorAll('[role="alert"]').length, 1, "restart error does not nest live alerts");
     await act(async () => view.button("Dismiss").click());
     await view.settle();
     assert.deepEqual(calls, ["start", "dismiss"]);

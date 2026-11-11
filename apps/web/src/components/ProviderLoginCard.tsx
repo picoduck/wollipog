@@ -157,8 +157,9 @@ export function ProviderSignIn({ runnerId, login, restart }: {
         )}
       </>
     );
-    const failure = <>{actionError && <p className="notice-error" role="alert">{actionError}</p>}
-      {startFailure && <div role="alert"><ProviderLoginStartFailure failure={startFailure} /></div>}</>;
+    const failureRole = login.status === "failed" && !alreadyOnMachine ? undefined : "alert";
+    const failure = <>{actionError && <p className="notice-error" role={failureRole}>{actionError}</p>}
+      {startFailure && <div role={failureRole}><ProviderLoginStartFailure failure={startFailure} /></div>}</>;
     return (
       <div className="signin" data-provider-login-status={login.status}>
         {alreadyOnMachine ? (

@@ -59,3 +59,30 @@ for (const [variant, expected] of [
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
 });
+
+test("keyboard dismissal restores focus to Add Separate Sign-In after a start refusal", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?profiles&providerSetup=installed&machine=native-t14s&directoryFailure=profiles_root:unavailable");
+  const trigger = page.getByRole("button", { name: "Add Separate Sign-In…", exact: true });
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Add Account", exact: true });
+  await dialog.getByLabel("Account Label").fill("Draft");
+  await dialog.getByLabel("Account Label").press("Enter");
+  await expect(dialog.getByRole("alert")).toContainText("could not be inspected");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+});
+
+for (const [refusal, expected] of [["offline", "This Machine is offline"], ["publication", "control plane cannot record account access"]]) {
+  test(`control-plane ${refusal} refusal gives the right recovery guidance`, async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 900 });
+    await page.goto(`/machine-management-e2e.html?profiles&providerSetup=installed&machine=native-t14s&accounts=add-codex&startRefusal=${refusal}`);
+    const dialog = page.getByRole("dialog", { name: "Add Account", exact: true });
+    await dialog.getByLabel("Account Label").fill("Remote Work Draft");
+    await dialog.getByLabel("Account Label").press("Enter");
+    await expect(dialog.getByRole("alert")).toContainText(expected!);
+    await expect(dialog.getByRole("alert")).not.toContainText("private storage exception");
+    if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `admission-${refusal}.png`), animations: "disabled" });
+  });
+}
