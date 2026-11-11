@@ -312,6 +312,7 @@ import { videoFrameValidationSessionId } from "./video-frame-validation.js";
 import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
 import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
+import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
 import { sessionCredentialRefusal } from "./session-credential-refusal.js";
 import { pushDecision } from "./push-decision.js";
 import { automationPushMessage } from "./automation-push-decision.js";
@@ -345,7 +346,7 @@ import { registerWorkflowArtifactExportRoute } from "./artifact-export-route.js"
 import { registerRunnerCredentialRoutes } from "./runner-credential-route.js";
 import { SessionRoleConversions, registerSessionRoleRoutes } from "./session-role-conversion.js";
 import { makeSkillsSyncPusher, registerSkillRoutes } from "./skills-route.js";
-import { AssistantCommandReceipts, assistantRequestDigest } from "./assistant-command-receipts.js";
+import { assistantRequestDigest } from "./assistant-command-receipts.js";
 import { ManagementMutations } from "./assistant-management-command.js";
 import { registerAssistantSkills } from "./assistant-skills.js";
 import { registerAssistantAutomations } from "./assistant-automations.js";
@@ -2954,8 +2955,8 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
 
 registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
 const assistantOperations = createAssistantOperations(db);
-AssistantCommandReceipts.install(db.raw());
-const assistantManagementMutations = new ManagementMutations(new AssistantCommandReceipts(db.raw()), db.instanceId(), assistantRequestDigest,
+const assistantCommandReceipts = registerAssistantSessionOperations(assistantOperations, db, svc);
+const assistantManagementMutations = new ManagementMutations(assistantCommandReceipts, db.instanceId(), assistantRequestDigest,
   id => db.assistantConnections.get(id)!, id => db.assistantConnections.destructiveConfirmation(id));
 registerAssistantAutomations(assistantOperations, db, automations, assistantManagementMutations);
 registerAssistantSkills(assistantOperations, {db, hub, requestHuman, requestPrincipal, pushSkillsSync}, assistantManagementMutations);
