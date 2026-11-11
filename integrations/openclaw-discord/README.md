@@ -172,5 +172,136 @@ launch/follow-up association and duplicate suppression. Discord context in those
 
 No real Discord user, live bot/account, remote host or SSH execution was exercised. Model auth,
 Discord credentials/destinations and owner-issued integration credentials remain unconfigured in
-the supplied environment. The full delayed event/result sender and real Discord access/receipt
-integration remain separate acceptance work; this package does not claim that they passed.
+the supplied environment. The production status sender below has automated coverage. Real
+Discord access/receipt and the complete configured workflow remain unverified.
+
+## Durable Work Updates
+
+Build the sender bundle with `pnpm build:openclaw-discord` before loading this package. The build
+reuses the runner's esbuild toolchain and bundles the existing raw-byte signature verifier,
+receiver/inbox and OpenClaw hook client with Fastify; it adds no workspace runtime dependency to
+the OpenClaw installation. Keep the generated `dist/bridge.mjs` beside the package when copying
+it to an owner-managed isolated profile. This is an explicit build, not a managed installer or
+automatic upgrade. The native command can load without the bundle when updates are disabled.
+
+The optional `wollipog-assistant-updates` service uses OpenClaw's documented version-2 service
+scheduler. It opens no socket until the protected settings contain `bridge`. It binds only
+literal loopback, uses `private/wollipog-bridge.sqlite` beside those settings, and requires an
+owner-only containing directory and file. SQLite uses WAL and FULL synchronization. Service stop
+joins admitted work before closing the database. It never restarts the Gateway or the hosting stack.
+
+Add these fields to the **private** settings, using the placeholders only in this example:
+
+```json
+{
+  "bridge": {
+    "port": 28791,
+    "gatewayOrigin": "<this isolated Gateway's HTTPS or literal-loopback HTTP origin>",
+    "hookTokenEnv": "OPENCLAW_ASSISTANT_HOOK_TOKEN"
+  },
+  "connections": [{
+    "events": {
+      "subscriptionId": "<owner-created Assistant subscription ID>",
+      "path": "work-updates",
+      "signingSecretEnv": "WOLLIPOG_ASSISTANT_EVENT_SECRET"
+    },
+    "bindings": [{
+      "conversationId": "<exact server binding conversation ID>",
+      "sessionKey": "<exact server binding OpenClaw conversation key>",
+      "updates": {
+        "enabled": true,
+        "botTokenEnv": "OPENCLAW_DISCORD_BOT_TOKEN",
+        "botUserId": "<the same OpenClaw Discord account's bot user ID>",
+        "dmChannelId": "<only for a DM: its existing exact Discord channel ID>"
+      }
+    }]
+  }]
+}
+```
+
+This is a fragment: preserve the connection/binding fields in the full native-ingress example
+above. No tokens or real identifiers belong in source, prompts, screenshots or reports. Issue a
+binding-scoped connector credential with the explicit `work_updates` capability; launch/prompt
+credentials alone cannot read private routing or confirm replies. It may include the two command
+capabilities as well, or use a separate credential and dedicated binding/runtime as appropriate.
+The Assistant grant must currently allow `assistant_work_read` for the source project/session.
+
+Configure the signed subscription callback as
+`http://127.0.0.1:<port>/events/<path>/wollipog/events` for a control plane on the same host. For a
+remote control plane, use an owner-managed HTTPS reverse proxy/tunnel to that loopback route.
+The existing per-subscription exact-private-address exception supports private-network HTTPS
+targets; it creates neither reachability nor certificates. The signature covers the raw body,
+and the receiver checks the installation/connection/subscription and current signing key before
+durable acceptance. URL paths/installation routing are configuration, never event-provided targets.
+Topology changes require an owner-managed reload of this isolated profile; a changed topology
+fails closed in the old instance. Key revocation/rotation and binding policy are reloaded each call.
+
+Configure the Gateway's dedicated bearer-authenticated `/hooks/agent` endpoint and restrict its
+agent IDs/session-key prefixes to the bound agents/conversations. Admission carries only work
+references, explicit agent/account/session routing and `deliver:false`. The durable wake fence is
+per installation, connection, work and revision, so a signed callback and a reconciliation sweep
+do not cause two admissions for the same revision. A returned run ID proves admission only.
+Unknown admissions are retained and never replayed because OpenClaw's hook replay cache is volatile.
+
+The scheduler reconciles bounded current-work pages every 30 seconds, rotates through enabled
+bindings, advances persisted cursors even across filtered pages, and independently scans uncertain
+receipts and pending inbox entries. Full sweeps restart at the beginning; older work changes are
+observed too. Failed/revoked destinations do not monopolize the head of an inbox/reply queue.
+This recovers current state after missed callbacks, restart or temporary network outage; transient
+historical states are not an unlimited event history.
+
+Before preparing a notice, before entering Discord and before confirming its receipt, the service
+rechecks Wollipog source/grant/binding access, private routing configuration, current OpenClaw
+account/allowlist policy, current agent/conversation resolution, and live Discord access. The bot
+token must belong to the configured OpenClaw account. Guild membership/roles are fetched live;
+Discord's computed member-permission endpoint supplies current channel permissions. Both requester
+and bot must see/read the channel, and the bot must have the appropriate send permission. Private
+threads require explicit membership for both, and archived/locked threads are refused. DM delivery
+requires an existing exact DM channel with the sole bound recipient; no new DM is silently created.
+There is no fallback to a parent channel, default destination, or another installation.
+
+Delayed updates deliberately support an explicit-ID policy subset: a configured enabled account,
+`groupPolicy:allowlist`, exact guild/channel entries with `enabled:true`, and the requester listed
+in guild `users` (and channel `users` when present). Threads can inherit their configured parent's
+allowlist while retaining the exact thread binding. DMs require `dmPolicy:allowlist` and an explicit
+requester ID in effective `allowFrom`. Pairing-only, wildcard/name/role/dynamic-group policies do
+not silently extend standing background authority; configure explicit IDs through owner-controlled
+setup. Native inbound admission still uses OpenClaw's own `isAuthorizedSender`. Current route
+resolution must reproduce the exact bound agent, account and session key or the send is blocked.
+
+The sender emits fixed status/attention notices and supported Wollipog links, with mentions and
+automatic embeds disabled. It does not export transcripts, task text, arbitrary model output or
+result summaries. Attention notices explicitly require the supported Wollipog answer/approval
+path. They cannot answer an owner approval from ordinary chat.
+
+Reply reservation is centralized in Wollipog before any message send. A local durable journal
+records the channel and deterministic nonce before Discord. Only an actual matching Discord
+message ID can confirm a reply. A lost send response searches at most 100 recent messages for the
+exact nonce, bot and channel; an unresolved match remains uncertain and is never blindly resent.
+A known message ID survives a control-plane outage and is read back from Discord before retrying
+confirmation. The short Discord nonce window is supplemental, not an exactly-once guarantee.
+Readback that is unavailable, too old, ambiguous or no longer authorized requires explicit owner
+review; do not allocate a new reply/work ID to bypass uncertainty. Permission revocation cannot
+recall an already sent message, and cross-service checks cannot eliminate every last-moment race.
+A lost reply-reservation response, or a crash between CP reservation and the local journal write,
+also remains uncertain. The two databases and Discord do not share an atomic transaction; this
+implementation favors suppressing a possible duplicate over silently retrying an unproven send.
+
+Diagnostics contain bounded event/reason labels only. Inspect local wake/reply state and the
+control plane's bounded delivery journal privately; never publish raw rows, configuration, keys,
+message bodies or private destination coordinates. The binding-scoped APIs are:
+
+- `GET /assistant/discord/work?after=<returned cursor>`
+- `GET /assistant/discord/work/:workId`
+- `POST /assistant/discord/work/:workId/replies` with `action:begin` or `action:confirm`, the exact
+  revision, and a Discord message ID for confirmation.
+
+They require both current Assistant bearer and out-of-model connector credential. They are not
+model-callable receipt tools and grant no owner-approval authority.
+
+Discord protocol references: [channel member permissions](https://github.com/discord/discord-api-docs/blob/main/developers/resources/channel.mdx#get-channel-member-permissions),
+[thread access](https://github.com/discord/discord-api-docs/blob/main/developers/topics/threads.mdx),
+and [message nonce/receipts](https://github.com/discord/discord-api-docs/blob/main/developers/resources/message.mdx#create-message).
+Automated tests use synthetic Discord responses against the actual CP/store/receiver/sender code,
+including private threads, DMs, lost responses, confirmation outages, revocation and wrong routes.
+They do not establish live bot permissions or successful real Discord delivery.

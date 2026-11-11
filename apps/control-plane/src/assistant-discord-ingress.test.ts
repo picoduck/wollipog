@@ -205,6 +205,29 @@ test("authenticated envelope binds connection, operation, argument digest and re
   } finally {await h.close();}
 });
 
+test("work updates and reply receipts require a separate current binding-scoped capability outside model arguments", async () => {
+  const h = harness();
+  try {
+    assert.equal((await h.command({operation: "session_launch", arguments: h.args, workId: "work-fixture"})).statusCode, 200);
+    assert.throws(() => h.ingress.work(h.credential, h.connector.token, "work-fixture"), /not authorized/);
+    const issued = h.ingress.issue(h.owner, h.issued.connection.id, h.binding.id, ["work_updates"]);
+    const view = h.ingress.work(h.credential, issued.token, "work-fixture");
+    assert.equal(view.binding.id, h.binding.id);
+    assert.equal(view.resolution.ordinaryChatGrantsApproval, false);
+    const other = h.db.assistantWork.createBinding(h.owner, h.issued.connection.id, {requesterId: "other-requester-fixture", accountId: "account-fixture",
+      conversationId: "other-conversation-fixture", destination: "channel:456", agentId: "agent-fixture", sessionKey: "agent:agent-fixture:discord:channel:456", projects: "all"});
+    const unrelated = h.ingress.issue(h.owner, h.issued.connection.id, other.id, ["work_updates"]);
+    assert.throws(() => h.ingress.work(h.credential, unrelated.token, "work-fixture"), /another destination/);
+    assert.deepEqual(h.ingress.works(h.credential, unrelated.token).items, []);
+    const url = "/assistant/discord/work/work-fixture/replies", body = {action: "begin", revision: view.work.revision};
+    assert.equal((await h.app.inject({method: "POST", url, headers: {authorization: `Bearer ${h.issued.token}`}, payload: body})).statusCode, 401);
+    assert.equal((await h.app.inject({method: "POST", url, headers: h.headers, payload: body})).statusCode, 403);
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: ["session_prompt"], projects: "all"});
+    assert.throws(() => h.ingress.reply(h.credential, issued.token, "work-fixture", body), /excluded/);
+    assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM assistant_reply_intents").get()!.n, 0);
+  } finally {await h.close();}
+});
+
 test("accepted command, connector binding and work correlation reconcile after control-plane reopen without redispatch", async () => {
   const directory = mkdtempSync(join(tmpdir(), "assistant-connector-")), path = join(directory, "state.sqlite");
   const h = harness(path);

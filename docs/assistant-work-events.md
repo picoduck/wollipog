@@ -1,11 +1,17 @@
 # Assistant Work and Conversation Events
 
-Refs #4467. This foundation extends the [Assistant connection contract](assistant-connections.md)
-and [signed outbound transport](outbound-events.md). It implements protected correlation records,
-tracked-work wakeups, current-authority checks, state reconciliation, an external receiver library,
-and reply receipt primitives. It does not claim a configured OpenClaw/Discord installation or a
-complete Discord sender. The production connector and session-management integration must use the
-interfaces below; library tests do not establish their deployment or real Discord permissions.
+The complete trusted connector composition and the opt-in OpenClaw production status sender are
+documented in [OpenClaw Native Discord Ingress](../integrations/openclaw-discord/README.md#durable-work-updates).
+The sender runs inside the isolated OpenClaw profile and retains Discord credentials there.
+Its bounded reconciliation, real-message readback and live permission checks are covered by
+automated integration tests. Real Discord/Gateway/account authentication remains an owner setup
+and acceptance requirement; no fixture result establishes it.
+
+Refs #4467. This implementation extends the [Assistant connection contract](assistant-connections.md)
+and [signed outbound transport](outbound-events.md). It provides protected correlation, trusted
+command composition, tracked-work wakeups, current-authority checks, reconciliation, the signed
+receiver and an opt-in status sender. Automated tests establish code behavior, while deployment,
+configured OpenClaw/Discord execution and real Discord permissions remain unverified.
 
 ## Ownership and Conversation Bindings
 
@@ -44,6 +50,8 @@ The trusted OpenClaw connector uses `POST /assistant/discord/commands` for corre
 follow-up commands. It presents BOTH a current Assistant bearer and a separate
 `X-Wollipog-Connector-Token` header. The latter is a capability for exactly one owner-issued
 destination/requester binding and an explicit subset of `session_launch` and `session_prompt`.
+The separate `work_updates` capability authorizes binding-scoped work reads and reply receipts;
+it is never inferred from a command capability or exposed as a model tool.
 Only the connection owner can issue it through
 `POST /api/assistant-connections/:id/discord-connectors` with `{bindingId,operations}`. The response
 shows the token once; only its hash is stored. Revoke it with
@@ -175,10 +183,11 @@ same attention occurrence does not produce an additional wake through each produ
 
 ## Local and Remote Transport
 
-The narrow receiver is in `apps/control-plane/src/assistant-event-receiver.ts`. Run it beside the
-external Assistant in a separately authorized process with its own protected SQLite database, not
-inside a hosted agent session or by restarting the hosting stack. This foundation exports library
-composition; it does not install or start a daemon.
+The narrow receiver is in `apps/control-plane/src/assistant-event-receiver.ts`. The opt-in native
+service bundles it with `assistant-discord-bridge.ts` and runs inside the isolated OpenClaw profile,
+using its own protected SQLite database. It requires explicit owner configuration and starts no
+process in a hosted agent session or hosting stack. Standalone library consumers can also compose
+the receiver below; installation, reachability and TLS remain operator responsibilities.
 
 Create a Fastify instance, install `AssistantEventInbox` on that database, then register
 `registerAssistantEventReceiver` with the exact installation, connection, subscription, current
@@ -204,7 +213,7 @@ their original restrictions. This configuration adds no inbound reachability or 
 
 ## Receiver, Hook and Reply State Machines
 
-The connector drains the inbox's bounded `pending()` pages. `dispatchAssistantWake` requires a
+Standalone consumers drain the inbox's bounded `pending()` pages. `dispatchAssistantWake` requires a
 trusted preparation step that reads the current work, checks its binding against protected local
 configuration, and rechecks live Discord account/channel/thread/DM access. Its final synchronous
 recheck must cover connection/binding changes during preparation. A stale or unavailable permission
@@ -220,9 +229,10 @@ The dedicated agent's tool policy must also prevent direct Discord/message-tool 
 the trusted sender. Do not enable result delivery until that policy and the sender integration are
 verified; `deliver:false` alone does not constrain arbitrary tools an agent already possesses.
 
-The Discord sender must be wired separately to the trusted connector. Before rendering and again
-before sending, recheck current source access, requester binding and live destination access.
-Use the reply-intent service with a logical work revision:
+The native bridge adds a durable logical wake fence per work revision, so reconciliation and a
+signed hint share one hook admission. Its source and destination preparation includes live Discord
+permissions and current OpenClaw route policy; a retained run ID identifies admission only.
+The production status sender uses the reply-intent service with a logical work revision:
 
 1. `beginReply` durably changes a new intent to uncertain before entering Discord. Only a returned
    `state:"send"` permits a new send. Existing uncertain/confirmed intents never authorize another.
@@ -231,10 +241,11 @@ Use the reply-intent service with a logical work revision:
 3. If a send response is lost, reconcile through Discord-supported message lookup or retain the
    uncertain state for explicit review. Do not promise exactly-once delivery or resend by default.
 
-The current foundation exposes these as service primitives, not model-callable tools: a model must
-not forge confirmed sends. A remote production sender still needs an authenticated connector receipt
-transport and actual Discord permission/reconciliation integration. Those are remaining #4467 work,
-not evidence supplied by this foundation.
+The receipt transport requires the separate binding-scoped `work_updates` connector capability
+alongside the current Assistant bearer. It is not model-callable. Discord credentials stay inside
+the isolated OpenClaw service, which verifies the actual message author/channel/nonce and ID before
+confirming. Uncertain sends use bounded message readback, never blind retry. See the native setup
+guide for supported policy subsets, DM/thread checks, build instructions and recovery limitations.
 
 ## Verification Boundary
 

@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { constants, closeSync, fstatSync, openSync, readSync, realpathSync } from "node:fs";
+import { constants, closeSync, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { currentDiscordUpdateRoutePolicy } from "./policy.mjs";
 
 export const TESTED_OPENCLAW_VERSION = "2026.11.3";
 const HELP = "Use /wollipog launch <connection> <request-id> <target> <task>, prompt <connection> <request-id> <original-request-id> <text>, or status <connection> <request-id>.";
@@ -128,12 +129,17 @@ export async function executeNativeCommand(api, ctx, deps = {}) {
   const load = deps.loadSettings ?? (() => readNativeSettings(api.pluginConfig, env));
   if (api.runtime.version !== TESTED_OPENCLAW_VERSION) throw new Error("untested_host_version");
   const minimal = tools => tools?.profile === "minimal" && !tools.alsoAllow?.length && !tools.allow?.length;
-  if (!minimal(api.config?.tools) || Object.keys(api.config?.mcp?.servers ?? {}).length ||
-      api.config?.agents?.list?.some(agent => agent.tools && !minimal(agent.tools))) throw new Error("dedicated_native_profile_required");
+  const assertDedicated = () => {
+    const config = api.runtime.config?.current?.() ?? api.config;
+    if (!minimal(config?.tools) || Object.keys(config?.mcp?.servers ?? {}).length ||
+        config?.agents?.list?.some(agent => agent.tools && !minimal(agent.tools))) throw new Error("dedicated_native_profile_required");
+  };
+  assertDedicated();
   const parsed = parseNativeCommand(ctx.args);
   const initial = selectNativeBinding(load(), ctx, parsed.connection, env);
   const fingerprint = selected => digest(selected);
   const recheck = () => {
+    assertDedicated();
     const selected = selectNativeBinding(load(), ctx, parsed.connection, env);
     if (fingerprint(initial) !== fingerprint(selected)) throw new Error("configuration_changed");
     ctx.assertOwnerCurrent?.();
@@ -199,5 +205,37 @@ export function registerNativeCommand(api, deps) {
     }});
 }
 
+export function registerDiscordBridgeService(api) {
+  let bridge, sql;
+  api.registerService({id: "wollipog-assistant-updates", apiVersion: 2,
+    async start({scheduler}) {
+      if (api.runtime.version !== TESTED_OPENCLAW_VERSION) throw new Error("untested_host_version");
+      const settings = () => readNativeSettings(api.pluginConfig);
+      if (!settings().bridge) return; // No receiver, secret reads or sockets until owner opt-in.
+      if (!scheduler || typeof api.runtime.config?.current !== "function") throw new Error("unsupported_bridge_runtime");
+      const privateRoot = realpathSync(dirname(api.pluginConfig.configPath)), metadata = statSync(privateRoot);
+      if ((metadata.mode & 0o077) !== 0 || (typeof process.getuid === "function" && metadata.uid !== process.getuid())) throw new Error("private_state_required");
+      const path = join(privateRoot, "wollipog-bridge.sqlite");
+      const fd = openSync(path, constants.O_RDWR | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0), 0o600);
+      try {
+        const file = fstatSync(fd);
+        if (!file.isFile() || (file.mode & 0o077) !== 0 || (typeof process.getuid === "function" && file.uid !== process.getuid())) throw new Error("private_state_required");
+      } finally {closeSync(fd);}
+      const {DatabaseSync} = await import("node:sqlite");
+      sql = new DatabaseSync(path);
+      try {
+        const {startDiscordBridge} = await import("./dist/bridge.mjs");
+        bridge = await startDiscordBridge({sql, settings, secret: name => process.env[name],
+          currentPolicy: (binding, guildId, parentId, roles) => currentDiscordUpdateRoutePolicy(api, binding, guildId, parentId, roles),
+          diagnostic: reason => api.logger.warn(JSON.stringify({event: "wollipog_discord_bridge", reason})),
+        });
+        scheduler.schedule({id: "reconcile", delayMs: 0, everyMs: 30_000, run: () => bridge.tick()});
+      } catch {await bridge?.close(); sql.close(); sql = undefined; bridge = undefined; throw new Error("bridge_start_refused");}
+    },
+    async stop() {await bridge?.close(); sql?.close(); bridge = undefined; sql = undefined;},
+  });
+}
+
 export default {id: "wollipog-assistant-discord", name: "Wollipog Assistant Discord",
-  description: "Owner-bound Discord command ingress for Wollipog.", register: registerNativeCommand};
+  description: "Owner-bound Discord command ingress and durable work updates for Wollipog.",
+  register(api) {registerNativeCommand(api); registerDiscordBridgeService(api);}};

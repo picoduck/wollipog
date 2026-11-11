@@ -7,8 +7,10 @@ import { AssistantRefusal, type AssistantCredential, type AssistantOperations, t
 import type { AuthenticatedAssistantWorkOrigin } from "./assistant-work-origin.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
+import { assistantWorkView } from "./assistant-work-routes.js";
 
 type ConnectorOperation = "session_launch" | "session_prompt";
+type ConnectorCapability = ConnectorOperation | "work_updates";
 interface ConnectorRow {
   id: string; connection_id: string; binding_id: string; binding_revision: number;
   operations_json: string; revoked: number;
@@ -58,9 +60,9 @@ export class AssistantDiscordIngress {
   issue(owner: HumanPrincipal, connectionId: string, bindingId: string, operations: unknown): {id: string; token: string} {
     this.owner(owner, connectionId);
     const binding = this.db.assistantWork.binding(connectionId, bindingId);
-    if (!binding || binding.revoked || !Array.isArray(operations) || !operations.length || operations.length > 2 ||
-        new Set(operations).size !== operations.length || operations.some(name => name !== "session_launch" && name !== "session_prompt")) {
-      throw new AssistantRefusal("Select a current destination binding and explicit session_launch/session_prompt connector operations.");
+    if (!binding || binding.revoked || !Array.isArray(operations) || !operations.length || operations.length > 3 ||
+        new Set(operations).size !== operations.length || operations.some(name => !["session_launch", "session_prompt", "work_updates"].includes(name))) {
+      throw new AssistantRefusal("Select a current destination binding and explicit session_launch/session_prompt/work_updates connector capabilities.");
     }
     const id = `adc_${randomUUID()}`, token = `wollipogc_${randomBytes(32).toString("base64url")}`;
     this.db.raw().prepare("INSERT INTO assistant_discord_connectors VALUES (?,?,?,?,?,?,0)")
@@ -74,18 +76,55 @@ export class AssistantDiscordIngress {
       .run(`revoked:${randomUUID()}`, connectorId, connectionId);
   }
 
-  private connector(credential: AssistantCredential, connectorHash: string, operation: ConnectorOperation, target: AssistantTarget): AuthenticatedAssistantWorkOrigin {
+  private bindingFor(credential: AssistantCredential, connectorHash: string, operation: ConnectorCapability) {
     const connection = this.db.assistantConnections.current(credential);
     const row = this.db.raw().prepare("SELECT * FROM assistant_discord_connectors WHERE token_hash=? AND connection_id=? AND revoked=0")
       .get(connectorHash, connection.id) as ConnectorRow | undefined;
     const binding = row && this.db.assistantWork.binding(connection.id, row.binding_id);
     if (!row || !binding || binding.revoked || binding.revision !== row.binding_revision ||
         !(JSON.parse(row.operations_json) as string[]).includes(operation) ||
-        (binding.projects !== "all" && (!target.projectId || !binding.projects.includes(target.projectId)))) {
+        this.db.operatingHumanPrincipal(connection.ownerUserId, connection.organizationId)?.role !== "owner") {
       throw new AssistantRefusal("The connector, requester binding, operation or target project is not authorized.");
     }
-    this.operations.authorize(connection.id, operation, target);
+    return binding;
+  }
+
+  private connector(credential: AssistantCredential, connectorHash: string, operation: ConnectorCapability, target: AssistantTarget): AuthenticatedAssistantWorkOrigin {
+    const binding = this.bindingFor(credential, connectorHash, operation);
+    if (binding.projects !== "all" && (!target.projectId || !binding.projects.includes(target.projectId))) {
+      throw new AssistantRefusal("The target project is excluded by the requester binding.");
+    }
+    this.operations.authorize(credential.connectionId, operation === "work_updates" ? "assistant_work_read" : operation, target);
     return {bindingId: binding.id, requesterId: binding.requesterId, workId: ""};
+  }
+
+  work(credential: AssistantCredential, connectorToken: string, workId: string) {
+    const view = assistantWorkView(this.db, this.operations, credential.connectionId, identifier(workId));
+    const session = this.db.getSession(view.work.sessionId)!;
+    const origin = this.connector(credential, hashToken(connectorToken), "work_updates",
+      {kind: "session", id: session.id, ...(session.projectId ? {projectId: session.projectId} : {})});
+    if (origin.bindingId !== view.work.bindingId) throw new AssistantRefusal("This work belongs to another destination binding.");
+    return {...view, binding: this.db.assistantWork.binding(credential.connectionId, origin.bindingId)!};
+  }
+
+  works(credential: AssistantCredential, connectorToken: string, after = "") {
+    const binding = this.bindingFor(credential, hashToken(connectorToken), "work_updates");
+    const page = this.db.assistantWork.reconcile(this.operations, credential.connectionId, after, 5);
+    return {...page, items: page.items.filter(work => work.bindingId === binding.id)};
+  }
+
+  reply(credential: AssistantCredential, connectorToken: string, workId: string, value: unknown) {
+    const input = object(value);
+    const view = this.work(credential, connectorToken, workId);
+    if (!Number.isSafeInteger(input.revision) || (input.revision as number) < 1 ||
+        Object.keys(input).some(key => !["action", "revision", "messageId"].includes(key))) throw new AssistantRefusal("Supply an exact reply revision and action.");
+    const revision = input.revision as number;
+    if (input.action === "begin" && input.messageId === undefined) {
+      return this.db.assistantWork.beginReply(this.operations, credential.connectionId, view.work.workId, revision);
+    }
+    if (input.action !== "confirm" || typeof input.messageId !== "string") throw new AssistantRefusal("A real Discord message receipt is required.");
+    this.db.assistantWork.confirmReply(this.operations, credential.connectionId, view.work.workId, revision, input.messageId);
+    return {state: "confirmed"};
   }
 
   /** Passed to #4464 at composition. Missing context returns null for ordinary owner-authorized
@@ -228,4 +267,23 @@ export function registerAssistantDiscordIngress(app: FastifyInstance, deps: {
     try { return deps.ingress.reconcile(credential, token, (req.params as {commandId: string}).commandId); }
     catch (error) { if (error instanceof AssistantRefusal) return reply.code(403).send({error: error.message}); throw error; }
   });
+  const updates = (action: (req: FastifyRequest, credential: AssistantCredential, token: string) => unknown) =>
+    async (req: FastifyRequest, reply: import("fastify").FastifyReply) => {
+      reply.header("cache-control", "no-store");
+      if (!allowedOrigin(req)) return reply.code(403).send({error: "Cross-origin connector request refused."});
+      const credential = deps.db.assistantConnections.authenticate(extractBearer(req.headers.authorization));
+      const token = req.headers["x-wollipog-connector-token"];
+      if (!credential || typeof token !== "string") return reply.code(401).send({error: "Current Assistant and connector credentials are required."});
+      try { return action(req, credential, token); }
+      catch (error) { if (error instanceof AssistantRefusal) return reply.code(403).send({error: error.message}); throw error; }
+    };
+  app.get("/assistant/discord/work", updates((req, credential, token) => {
+    const after = (req.query as {after?: unknown}).after;
+    if (after !== undefined && (typeof after !== "string" || after.length > 128)) throw new AssistantRefusal("Use the returned reconciliation cursor.");
+    return deps.ingress.works(credential, token, after as string | undefined);
+  }));
+  app.get("/assistant/discord/work/:workId", updates((req, credential, token) =>
+    deps.ingress.work(credential, token, (req.params as {workId: string}).workId)));
+  app.post("/assistant/discord/work/:workId/replies", {bodyLimit: 4096}, updates((req, credential, token) =>
+    deps.ingress.reply(credential, token, (req.params as {workId: string}).workId, req.body)));
 }

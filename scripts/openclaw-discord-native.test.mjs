@@ -86,6 +86,13 @@ test("native component verifies installation, reloads binding policy after disco
     return discovery(settings.connections[0]);
   }}));
   assert.equal(commands, 0);
+  let currentConfig = {tools: {profile: "minimal"}};
+  const changingApi = {...api, runtime: {...api.runtime, config: {current: () => currentConfig}}};
+  await assert.rejects(executeNativeCommand(changingApi, context, {...deps, loadSettings: () => settings, request: async () => {
+    currentConfig = {tools: {profile: "full"}};
+    return discovery(settings.connections[0]);
+  }}), /dedicated_native_profile/);
+  assert.equal(commands, 0, "a changed runtime tool policy cannot expose the connector between discovery and mutation");
   await assert.rejects(executeNativeCommand({...api, runtime: {version: "2026.11.4"}}, context, deps), /untested_host_version/);
   await assert.rejects(executeNativeCommand({...api, config: {tools: {profile: "full"}}}, context, deps), /dedicated_native_profile/);
   await assert.rejects(executeNativeCommand({...api, config: {tools: {profile: "minimal"}, mcp: {servers: {owner: {}}}}}, context, deps), /dedicated_native_profile/);
