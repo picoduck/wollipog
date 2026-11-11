@@ -69,6 +69,24 @@ requester/destination and target, use the same database, and perform no async or
 Without the hook, tools refuse `workOriginId` explicitly. This extension is not an implementation
 of Discord authorization, destination bindings or durable outbound delivery.
 
+The typed `hooks.authenticatedOrigin(receipt)` extension supplies `{requesterId,workId,bindingId}`
+from trusted connector ingress, bound to the receipt's connection, operation, exact argument digest
+and resolved target. It must authenticate ingress outside the model. It receives no model-authored
+requester identity, and the implementation never copies requester fields from tool arguments.
+Returning null with an explicit `workOriginId` refuses the command without retaining a reservation.
+
+When that extension supplies an origin, the reservation callback invokes
+`db.assistantWork.reserveOrigin(connectionId, {commandId, ...authenticatedOrigin, projectId})` on
+the same SQLite savepoint. The project is the server-resolved Location's project, also passed
+explicitly to the launch service so launch defaults cannot select a different project. Follow-ups
+call `attachAcceptedOrigin` inside reservation, before prompt dispatch. Launches pass only
+`assistantWorkOrigin: {connectionId,commandId}` through server-only `SessionsService.createSession`
+context into `NewSessionInput`; #4467's database transaction consumes it before `session.created`.
+This is never taken from `CreateSessionRequest` JSON. The small structural interface is in
+`assistant-work-origin.ts`, allowing the session-management PR to land before #4467. If the work
+store is absent, authenticated correlated commands fail closed. Production composition must install
+the trusted ingress callback; the default MCP registration does not pretend to authenticate Discord.
+
 ## Evidence Limits
 
 Automated coverage uses real SQLite, Fastify MCP and `SessionsService`, with a fixture runner

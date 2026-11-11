@@ -7,6 +7,7 @@ import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
 import { registerAssistantSessionOperations, type AssistantSessionCommandHooks } from "./assistant-session-operations.js";
+import { assistantRequestDigest } from "./assistant-command-receipts.js";
 
 function harness(hooks: AssistantSessionCommandHooks = {}) {
   const db = ControlPlaneDb.open(":memory:");
@@ -210,5 +211,65 @@ test("unsupported runner reports concrete operation, protocol requirement and up
     assert.equal(result.receipt.status, "failed", JSON.stringify(result));
     assert.match(result.error, /account|protocol|upgrad/i);
     assert.ok(result.capabilityRequirement, JSON.stringify(result));
+  } finally {h.close();}
+});
+
+test("trusted work origins reserve atomically and launch reaches server-only NewSessionInput with resolved project", async () => {
+  let expectedDigest = "", reservations = 0, associations = 0;
+  const h = harness({authenticatedOrigin(receipt) {
+    return receipt.argumentsDigest === expectedDigest ? {requesterId: "authenticated-fixture", workId: "work-fixture", bindingId: "binding-fixture"} : null;
+  }});
+  try {
+    const store = {
+      reserveOrigin(connectionId: string, input: {commandId: string; requesterId: string; projectId?: string}) {
+        assert.equal(h.db.raw().isTransaction, true);
+        assert.equal(connectionId, h.issued.connection.id);
+        assert.equal(input.requesterId, "authenticated-fixture");
+        assert.equal(input.projectId, h.locations[1]!.projectId);
+        reservations++;
+      },
+      attachAcceptedOrigin() {associations++;},
+    };
+    Object.assign(h.db, {assistantWork: store});
+    const args = {commandId: "origin-launch", locationId: h.locations[1]!.id, agentId: "agent", useWorktree: false, workOriginId: "work-fixture"};
+    expectedDigest = assistantRequestDigest(args);
+    const create = h.db.createSession.bind(h.db);
+    let launchInput: unknown;
+    h.db.createSession = input => {launchInput = input; return create(input);};
+    const result = await h.call("session_launch", args);
+    assert.equal(result.receipt.status, "succeeded", JSON.stringify(result));
+    assert.deepEqual((launchInput as {assistantWorkOrigin: unknown}).assistantWorkOrigin,
+      {connectionId: h.issued.connection.id, commandId: args.commandId});
+    assert.equal((launchInput as {projectId: string}).projectId, h.locations[1]!.projectId);
+    assert.equal(reservations, 1);
+    assert.equal(associations, 0, "launch attachment belongs inside #4467's db.createSession transaction");
+    await h.call("session_launch", args);
+    assert.equal(reservations, 1);
+    await assert.rejects(h.call("session_launch", {...args, commandId: "spoofed", requesterId: "model-claim"}), /authenticated requester envelope/);
+    assert.equal(h.receipts.get(h.issued.connection.id, "spoofed"), null);
+  } finally {h.close();}
+});
+
+test("authenticated origins fail closed without work extension and follow-ups attach before dispatch", async () => {
+  const h = harness({authenticatedOrigin: () => ({requesterId: "authenticated-fixture", workId: "work-fixture", bindingId: "binding-fixture"})});
+  try {
+    const args = {commandId: "origin-prompt", sessionId: "unrelated-1", text: "Fixture follow-up"};
+    await assert.rejects(h.call("session_prompt", args), /work tracking is unavailable/);
+    assert.equal(h.receipts.get(h.issued.connection.id, args.commandId), null);
+    const order: string[] = [];
+    Object.assign(h.db, {assistantWork: {
+      reserveOrigin() {assert.equal(h.db.raw().isTransaction, true); order.push("reserve");},
+      attachAcceptedOrigin(origin: unknown, sessionId: string) {
+        assert.equal(h.db.raw().isTransaction, true);
+        assert.deepEqual(origin, {connectionId: h.issued.connection.id, commandId: args.commandId});
+        assert.equal(sessionId, args.sessionId);
+        order.push("attach");
+      },
+    }});
+    h.svc.promptFromUser = (_owner, sessionId) => {order.push("dispatch"); return {ok: true, status: 200, data: h.db.getSession(sessionId)!};};
+    await h.call("session_prompt", args);
+    assert.deepEqual(order, ["reserve", "attach", "dispatch"]);
+    await h.call("session_prompt", args);
+    assert.deepEqual(order, ["reserve", "attach", "dispatch"]);
   } finally {h.close();}
 });

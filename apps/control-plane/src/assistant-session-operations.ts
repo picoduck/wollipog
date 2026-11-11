@@ -3,6 +3,7 @@ import type { ControlPlaneDb } from "./db.js";
 import type { SessionsService, ServiceResult } from "./sessions.js";
 import { AssistantOperations, AssistantRefusal, type AssistantOperation, type AssistantTarget } from "./assistant-connections.js";
 import { AssistantCommandReceipts, assistantRequestDigest, type AssistantCommandReceipt } from "./assistant-command-receipts.js";
+import type { AssistantWorkOriginStore, AssistantSessionWorkOrigin, AuthenticatedAssistantWorkOrigin } from "./assistant-work-origin.js";
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new AssistantRefusal("Supply an object of tool arguments.");
@@ -19,6 +20,10 @@ const commandProperties = {sessionId: string, workOriginId: {...string, descript
   commandId: {...string, description: "Stable caller command ID. Reconcile before retrying a lost response."}};
 
 export interface AssistantSessionCommandHooks {
+  /** Trusted ingress lookup of an authenticated requester envelope for this EXACT command.
+   * Must match connection, operation, argumentsDigest and resolved target; no identity from args.
+   * The callback is synchronous and runs inside the reservation transaction before any effect. */
+  authenticatedOrigin?(receipt: Readonly<AssistantCommandReceipt>): AuthenticatedAssistantWorkOrigin | null;
   /** Trusted synchronous extension on the SAME database/savepoint as receipt reservation.
    * Must validate any client workOriginId against connection/target before writing association.
    * Throwing rolls back both writes; never perform network IO or other external effects here. */
@@ -29,6 +34,7 @@ export interface AssistantSessionCommandHooks {
 export function registerAssistantSessionOperations(operations: AssistantOperations, db: ControlPlaneDb, svc: SessionsService, hooks: AssistantSessionCommandHooks = {}): AssistantCommandReceipts {
   AssistantCommandReceipts.install(db.raw());
   const receipts = new AssistantCommandReceipts(db.raw());
+  const workStore = () => (db as ControlPlaneDb & {assistantWork?: AssistantWorkOriginStore}).assistantWork;
   const sessionTarget = (value: unknown): AssistantTarget => {
     const s = db.getSession(text(object(value), "sessionId"));
     if (!s) throw new AssistantRefusal("Session not found. Refresh session_list and select an accessible session.");
@@ -77,18 +83,33 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
         .map(e => ({seq: e.seq, ts: e.ts, kind: e.payload.kind, ...('text' in e.payload ? {text: e.payload.text} : {})})), eventEpoch: db.getSession(id)?.eventEpoch};
     }});
   const mutation = (name: string, description: string, inputSchema: Record<string, unknown>, resolveTarget: (args: unknown) => AssistantTarget,
-    run: (args: Record<string, unknown>, owner: Parameters<SessionsService["promptFromHuman"]>[0]) => ServiceResult<SessionView> | Promise<ServiceResult<SessionView>>) => {
+    run: (args: Record<string, unknown>, owner: Parameters<SessionsService["promptFromHuman"]>[0], origin?: AssistantSessionWorkOrigin) => ServiceResult<SessionView> | Promise<ServiceResult<SessionView>>) => {
     operations.register({name, description, inputSchema, resolveTarget, ownerCanAccess: canAccess, execute: async (value, context) => {
       const args = object(value), commandId = text(args, "commandId");
-      if (args.workOriginId !== undefined && !hooks.associateCommand) throw new AssistantRefusal("Work-origin tracking is not registered on this control plane. Enable the Assistant work tracking extension before submitting correlated commands.");
+      if (args.workOriginId !== undefined && !hooks.authenticatedOrigin && !hooks.associateCommand) throw new AssistantRefusal("Work-origin tracking is not registered on this control plane. Enable the Assistant work tracking extension before submitting correlated commands.");
       const owner = await context.recheck();
       const current = db.assistantConnections.get(context.connection.id)!;
+      let sessionOrigin: AssistantSessionWorkOrigin | undefined;
       const reserved = receipts.reserve({controlPlaneId: db.instanceId(), connectionId: current.id, operationId: commandId,
         operation: name, argumentsDigest: assistantRequestDigest(args), grantRevision: current.revision, target: resolveTarget(args)},
-        receipt => hooks.associateCommand?.(args, receipt));
+        receipt => {
+          const authenticated = hooks.authenticatedOrigin?.(receipt);
+          if (authenticated) {
+            if (name !== "session_launch" && name !== "session_prompt") throw new AssistantRefusal("Work-origin tracking supports launch and follow-up commands. Use an uncorrelated lifecycle command instead.");
+            if (args.workOriginId !== undefined && args.workOriginId !== authenticated.workId) throw new AssistantRefusal("Work origin does not match the authenticated command envelope.");
+            const store = workStore();
+            if (!store) throw new AssistantRefusal("Assistant work tracking is unavailable. Install the work tracking extension before submitting correlated commands.");
+            store.reserveOrigin(current.id, {commandId, ...authenticated, ...(receipt.target.projectId ? {projectId: receipt.target.projectId} : {})});
+            sessionOrigin = {connectionId: current.id, commandId};
+            if (name === "session_prompt") store.attachAcceptedOrigin(sessionOrigin, receipt.target.id);
+          } else if (hooks.authenticatedOrigin && args.workOriginId !== undefined) {
+            throw new AssistantRefusal("No authenticated requester envelope matches this command. Submit it through the trusted connector ingress.");
+          }
+          hooks.associateCommand?.(args, receipt);
+        });
       if (!reserved.created) return {receipt: reserved.receipt, recovery: "Command already reserved. Reconcile receipt and target; never dispatch again. Accepted after interruption means uncertain delivery."};
       try {
-        const result = await run(args, owner);
+        const result = await run(args, owner, sessionOrigin);
         return {receipt: receipts.settle(current.id, commandId, result.ok ? "succeeded" : "failed", result.data?.id),
           ...(result.ok ? {sessionId: result.data?.id} : {error: result.error,
             capabilityRequirement: result.capabilityRequirement, errorDetails: result.errorDetails,
@@ -109,7 +130,7 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
   };
   mutation("session_launch", "Launch work in an authorized project/location using its local or SSH runner. Reconcile commandId before retrying.",
     schema({commandId: commandProperties.commandId, workOriginId: commandProperties.workOriginId, locationId: string, agentId: string, providerAccountId: string, prompt: string, title: string, useWorktree: {type: "boolean"}, config: {type: "object"}}, ["commandId", "locationId", "agentId"]), launchTarget,
-    (args, owner) => {
+    (args, owner, assistantWorkOrigin) => {
       const location = db.getProjectLocation(text(args, "locationId"))!;
       if (!db.canAccessRunner(owner, location.runnerId) || !db.canAccessWorkspace(owner, location.runnerId, location.workspaceId)) throw new AssistantRefusal("The owner cannot access this Location's runner/workspace. Restore access in Project and Machine settings.");
       const request: CreateSessionRequest = {runnerId: location.runnerId, workspaceId: location.workspaceId, projectId: location.projectId,
@@ -119,7 +140,7 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
         ...(typeof args.useWorktree === "boolean" ? {useWorktree: args.useWorktree} : {}),
         ...(args.config && typeof args.config === "object" && !Array.isArray(args.config) ? {config: args.config} : {})};
       return svc.createSession(request, undefined, db.projectScope(location.projectId) ?? undefined, false, false, false,
-        {defaultOwnerUserId: owner.userId, launcherUserId: owner.userId});
+        {defaultOwnerUserId: owner.userId, launcherUserId: owner.userId, ...(assistantWorkOrigin ? {assistantWorkOrigin} : {})});
     });
   mutation("session_prompt", "Send a follow-up to any authorized session. Reconcile commandId before retrying a lost response.",
     schema({...commandProperties, text: string}, ["commandId", "sessionId", "text"]), sessionTarget,
