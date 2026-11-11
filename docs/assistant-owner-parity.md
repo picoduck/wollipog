@@ -70,11 +70,10 @@ The two new owner APIs for issuing/revoking Discord connector credentials are ex
 human-authority entries in the audit. The five `/assistant/discord/...` endpoints are the
 credential-scoped connector protocol, not owner management routes: command dispatch/receipt
 reconciliation and work list/read/reply receipts. They require both current Assistant and connector
-credentials, and do not substitute for missing owner management capabilities. Connection binding,
-subscription and delivery observability remain their existing explicit gaps. The inventory now
-contains 303 owner-route candidates. PR #4476 also added installation renaming; its new audit
-entry is an explicit app-management gap, not a human-authority exclusion. The 163 unresolved
-candidates still block full acceptance and include this connection-management follow-on.
+credentials, and do not substitute for missing owner management capabilities. PR #4497 adds owner-scoped connection, binding, subscription and delivery observability plus
+fenced delivery resume and installation renaming through shared owner services. Establishing or
+changing credentials, grants, bindings and subscription configuration retains human authority. The inventory now
+contains 303 owner-route candidates. The 155 unresolved candidates in other groups still block full acceptance.
 
 ## Delivered Operations
 

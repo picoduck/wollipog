@@ -303,6 +303,7 @@ import { videoFrameValidationSessionId } from "./video-frame-validation.js";
 import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
 import { registerAssistantRoutes } from "./assistant-routes.js";
+import { registerAssistantConnectionOperations } from "./assistant-connection-operations.js";
 import { createSessionWorktreeManagement } from "./session-worktree-management.js";
 import { registerAssistantOwnerManagement } from "./assistant-owner-management.js";
 import { createOwnerRunnerManagement } from "./owner-runner-management.js";
@@ -2563,6 +2564,7 @@ registerAssistantSkills(assistantOperations, {db, hub, requestHuman, requestPrin
 const extendedSkillsDeps = {db, hub, requestHuman, requestPrincipal, pushSkillsSync, builtInSkills: builtInSkills()};
 const extendedSkillsManagement = createExtendedSkillsManagement(extendedSkillsDeps);
 registerAssistantSkillParity(assistantOperations, extendedSkillsDeps, extendedSkillsManagement, assistantManagementMutations);
+registerAssistantConnectionOperations(assistantOperations, {db, outbound: outboundEvents, receipts: assistantCommandReceipts});
 registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });
 registerAssistantWorkOwnerRoutes(app, { db, outboundEvents, requestHuman });
 registerAssistantDiscordIngress(app, { db, ingress: assistantDiscordIngress, requestHuman });
