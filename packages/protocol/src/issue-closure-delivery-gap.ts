@@ -80,6 +80,8 @@ export const ISSUE_CLOSURE_DELIVERY_GAP_CODES = [
   "attempt_open",
   /** The item has no delivered verification with an exact report digest. */
   "no_delivered_verification",
+  /** An epic item predates the history needed to prove it has only tracking work. */
+  "epic_tracking_history_unavailable",
   /** The item has a delivered verification but is not in the delivered state. */
   "work_item_not_delivered",
   /** No pull request the item names or a consumed merge approval binds has merged. */
@@ -154,6 +156,7 @@ const GAP_ACTION: Record<IssueClosureDeliveryGapCode, IssueClosureGapAction> = {
   attempt_awaiting_verification: "verify_child",
   attempt_open: "finish_attempt",
   no_delivered_verification: "deliver_work_item",
+  epic_tracking_history_unavailable: "person_decides",
   work_item_not_delivered: "deliver_work_item",
   no_merged_delivery_pull_request: "record_delivery_pull_requests",
   unmerged_pull_request: "wait_for_pull_requests",
@@ -210,6 +213,7 @@ function gapText(code: IssueClosureDeliveryGapCode, item: string, prs: string, m
     case "attempt_awaiting_verification": return `Work item ${item || "unnamed"} has a completed report awaiting verification`;
     case "attempt_open": return `Work item ${item || "unnamed"} has an attempt that has not reported`;
     case "no_delivered_verification": return `Work item ${item || "unnamed"} has no delivered verification`;
+    case "epic_tracking_history_unavailable": return "This item predates delivery history, so it can't be confirmed as epic tracking only";
     case "work_item_not_delivered": return `Work item ${item || "unnamed"} is not in the delivered state`;
     case "no_merged_delivery_pull_request": return `No merged delivery pull request is recorded${of}`;
     case "unmerged_pull_request": return `Pull requests${of} have not merged: ${prs || "unnamed"}`;

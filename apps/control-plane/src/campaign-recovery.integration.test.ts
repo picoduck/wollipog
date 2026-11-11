@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BACKGROUND_JOB_STALL_MS, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+import { BACKGROUND_JOB_STALL_MS, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, issueClosureDeliveryGap,
   type CampaignBudgetAuthority, type CampaignForgePullRequestObservation, type PendingApproval, type RunnerMetadata,
   type GithubIssueClosureSnapshot, type SessionSnapshot } from "@wollipog/protocol";
 import { closureDeliveryGaps } from "./campaign-issue-authority.js";
@@ -1106,7 +1106,8 @@ function recordEpicClosure(h: ReturnType<typeof mergedWorkVerificationFixture>, 
     resource_snapshot, resource_digest, policy_revision, authority, status, created_at, issue_closure_result)
     VALUES (?, ?, 'root', 'root', 'issue_closure', 'issue_closure:picoduck/wollipog#2938', ?, ?, 1, ?, 'consumed', ?, ?)`)
     .run(occurrence, occurrence, JSON.stringify(snapshot), "f".repeat(64), change.authority ?? "orchestrator", h.now,
-      JSON.stringify({ outcome: change.outcome ?? "closed", completedAt: h.now }));
+      JSON.stringify({ outcome: "uncertain", completedAt: h.now }));
+  h.db.recordGithubIssueClosureResult(occurrence, { outcome: change.outcome ?? "closed", completedAt: h.now });
 }
 
 test("uncertain closures recover on upgrade, deduplicate reads, and release campaign status (#4398)", async () => {
@@ -1307,9 +1308,12 @@ test("an epic placeholder item is finished by its closure proven from members, a
     for (const [occurrence, change] of [["human", { authority: "human" }], ["uncertain", { outcome: "uncertain" }],
       ["already", { outcome: "already_closed" }], ["items", { members: false }], ["unadmitted", { admitted: false }]] as const) {
       recordEpicClosure(h, `closure-${occurrence}`, change);
+      assert.equal(h.db.memberProvenEpicClosures("root").has("picoduck/wollipog#2938"),
+        h.db.memberProvenEpicClosure("root", "picoduck/wollipog", 2938), "batch and scalar proof predicates agree");
       assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", occurrence);
     }
     recordEpicClosure(h, "closure-proven");
+    assert.equal(h.db.memberProvenEpicClosures("root").has("picoduck/wollipog#2938"), true);
     assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "complete");
     assert.equal(h.db.campaignProjection("root")!.status, "verified_complete", "no scope_removed marking is needed");
   } finally { h.db.close(); }
@@ -1322,6 +1326,44 @@ test("an epic closure proven from members does not finish the epic's own dispatc
     assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", "an item with an attempt keeps its own proof");
     assert.equal(h.db.campaignProjection("root")!.status, "stuck");
   } finally { h.db.close(); }
+});
+
+test("#4403 Campaign Status finishes ended epic tracking and retains the same delivery and history gaps", () => {
+  for (const mode of ["tracking", "open", "delivery", "legacy", "legacy_undispatched"] as const) {
+    const h = mergedWorkVerificationFixture("delivered");
+    try {
+      const plan = h.svc.recordCampaignPlan("root", { planComplete: true,
+        items: [{ key: "epic-tracking", issue: { repository: "picoduck/wollipog", number: 2938 } }] });
+      assert.ok(plan.ok, plan.error ?? mode);
+      const itemId = plan.data!.items.find((item) => item.key === "epic-tracking")!.workItemId;
+      if (mode !== "legacy_undispatched") assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: itemId, childSessionId: "unaffected" }).ok);
+      if (mode === "delivery") {
+        assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId, stage: { stage: "implementing" } }).ok);
+        assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId, stage: null }).ok);
+      }
+      if (mode !== "open" && mode !== "legacy_undispatched") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId,
+        endAttempt: { reason: "failed", note: "Tracking completed without delivery work" } }).ok);
+      if (mode === "legacy" || mode === "legacy_undispatched") h.db.raw().prepare("INSERT INTO campaign_work_pr_history_legacy VALUES (?)").run(itemId);
+      const report = h.db.appendEvent("unaffected", { kind: "agent_message", final: true, text: "Tracking report." }, Date.now());
+      assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "unaffected", reportEventSeq: report.seq, followUpsAccounted: true }).ok);
+      const before = h.db.campaignProjection("root")!.work!;
+      assert.equal(before.counts.delivered, 1, "prime the cached projection before the closure receipt");
+      recordEpicClosure(h, "tracking-closure");
+      assert.equal(h.db.campaignRecoveryCompletion("root", Date.now()).state, mode === "tracking" ? "complete" : "recovery_held", mode);
+      assert.equal(h.db.campaignProjection("root")!.status, mode === "tracking" ? "verified_complete" : "stuck", mode);
+      if (mode === "legacy" || mode === "legacy_undispatched") {
+        assert.equal(h.db.campaignProjection("root")!.stuck?.items.find((item) => item.kind === "work_item" && item.workItemId === itemId)?.reason,
+          issueClosureDeliveryGap("epic_tracking_history_unavailable", { workItemId: itemId }).summary,
+          "Campaign Status names the same history gap as the closure proof");
+      }
+      const after = h.db.campaignProjection("root")!.work!;
+      assert.ok(after.revision > before.revision, "the closure receipt invalidates the summary and work-list cursor");
+      assert.equal(after.counts.delivered, mode === "tracking" ? 2 : 1, mode);
+      const detail = h.db.campaignWorkLedger.detail("root", itemId, Date.now())!;
+      assert.equal(detail.primaryState === "delivered", mode === "tracking", mode);
+      assert.deepEqual(detail.deliveries, [], "tracking completion invents no delivery record");
+    } finally { h.db.close(); }
+  }
 });
 
 test("incomplete original work survives replacement and a new head until current-attempt delivery", () => {

@@ -73,7 +73,7 @@ import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compat
   everyOutstandingScopeDecision, outstandingDecisionsBearOnScopeRequest, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
 import { boundedDecisionString, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
 import { needsCampaignIssueScopeSeed } from "./campaign-issue-scope-seed.js";
-import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureCrossRepositoryDelivery, closureCrossRepositoryPullRequests, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
+import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureCampaignPullRequests, closureCrossRepositoryDelivery, closureCrossRepositoryPullRequests, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
   CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES, type CampaignPullRequestRef } from "@wollipog/protocol";
 import { forgeRefKey, type ForgeReadResult } from "./campaign-forge-observations.js";
@@ -94,7 +94,7 @@ import {
 import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
   type SessionReviewJobUpdate } from "@wollipog/protocol";
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
-import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosureBindingSnapshot, issueClosureChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
+import { normalizeIssueClosureSnapshot, issueClosureActiveChildrenMatch, issueClosureBindingSnapshot, issueClosureChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
 import { normalizeLocationSwitchSnapshot } from "./location-switch-snapshot.js";
 import { normalizeCampaignRepositoryAdditionSnapshot } from "./campaign-repository-addition-snapshot.js";
@@ -110,6 +110,7 @@ import { issueClosureDeliveryFailure, issueClosureDeliveryGap, issueClosureProof
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import type { PromptSessionMessage } from "@wollipog/protocol";
 import { posix, win32 } from "node:path";
 import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   addPendingRequest, removePendingRequest, pendingRequests, parentControlRequestEligible, campaignHumanAttentionAdded,
@@ -7395,6 +7396,7 @@ export class SessionsService {
       if (first?.state === "delivering" && first.deliveryId === message.commandId) this.reconcileFirstMessageDelivery(message.sessionId, Date.now());
       this.reconcileCampaignContinuationCommand(message.commandId, Date.now());
       this.reconcileWorkflowDecisionResumeCommand(message.commandId, Date.now());
+      this.promoteIssueClosureResume(message.commandId);
       this.reconcileRestartNoticeCommand(message.commandId, Date.now());
       this.reconcileReviewContinuationCommand(message.commandId, Date.now());
       this.reconcilePullRequestWatchWakeCommand(message.commandId, Date.now());
@@ -14007,7 +14009,9 @@ export class SessionsService {
       const requestId = `issue_closure_epic_${randomUUID()}`;
       const result = await this.hub.requestFromRunner(target.runnerId, requestId, { type: "github_issue_closure", operation: "inspect", requestId, sessionId,
         ...(target.location ? { location: target.location } : {}),
-        issue: base.issue, scopeRevision: base.scopeRevision, epicMembers: true, ...(deliveryPullRequests ? { deliveryPullRequests } : {}) }, 60_000).catch(() => null);
+        issue: base.issue, scopeRevision: base.scopeRevision, epicMembers: true,
+        ...(base.campaignPullRequests === undefined ? {} : { campaignPullRequests: base.campaignPullRequests }),
+        ...(deliveryPullRequests ? { deliveryPullRequests } : {}) }, 60_000).catch(() => null);
       if (deliveryPullRequests) {
         verificationFailure = !result ? { check: "runner_unavailable" }
           : result.type !== "github_issue_closure_result" || result.sessionId !== sessionId ? { check: "runner_response" }
@@ -14087,9 +14091,13 @@ export class SessionsService {
       const target = this.closureTarget(session, request.repository);
       if (!target) return fail(`No Location of ${otherRepository} is online on a runner that can close its issues, so no closure was requested. Retry once one is.`, 409);
       const routed = target.location ? { location: target.location } : {};
+      const repository = otherRepository ?? session.orchestratorPolicy.issueScope?.repository;
+      const campaignPullRequests = repository && runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "closureCampaignPullRequests")
+        ? closureCampaignPullRequests(this.db, session, repository) ?? null : undefined;
       const inspected = await this.hub.requestFromRunner(target.runnerId, requestId, {
         type: "github_issue_closure", operation: "inspect", requestId, sessionId, issue: request.issue, ...routed,
         ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
+        ...(campaignPullRequests === undefined ? {} : { campaignPullRequests }),
       }, 60_000);
       if (inspected.type !== "github_issue_closure_result" || inspected.sessionId !== sessionId ||
           !inspected.ok || !inspected.inspection || inspected.inspection.issue !== request.issue) {
@@ -14109,7 +14117,7 @@ export class SessionsService {
         explanation: request.explanation, evidence: request.evidence,
         ...(request.comment === undefined ? {} : { comment: request.comment }),
         ...(request.dispositionRecommendationId === undefined ? {} : { dispositionRecommendationId: request.dispositionRecommendationId }),
-        activeChildren: children.active, excludedChildren: children.excluded };
+        activeChildren: children.active, excludedChildren: children.excluded, issueAttemptDigest: children.issueAttemptDigest };
       const resourceKey = `issue_closure:${inspection.repository.toLowerCase()}#${request.issue}`;
       // Whoever reviews this request sees why the last executed approval was refused (#4059).
       const previousRefusal = this.db.latestIssueClosureRefusal(sessionId, resourceKey);
@@ -14134,6 +14142,7 @@ export class SessionsService {
             const verified = await this.hub.requestFromRunner(target.runnerId, verificationId, {
               type: "github_issue_closure", operation: "inspect", requestId: verificationId, sessionId, issue: request.issue, ...routed,
               scopeRevision: snapshot.scopeRevision, deliveryPullRequests: delivery.map(({ number, headSha }) => ({ number, headSha })),
+              ...(snapshot.campaignPullRequests === undefined ? {} : { campaignPullRequests: snapshot.campaignPullRequests }),
             }, 60_000).catch(() => null);
             let failure: GithubIssueClosureSnapshot["deliveryVerificationFailure"];
             if (!verified) failure = { check: "runner_unavailable" };
@@ -14228,8 +14237,7 @@ export class SessionsService {
         !this.closureScopeCurrent(session, snapshot)) return "issue scope changed";
     if (!session.parentControlPolicy || decision.policyRevision !== session.parentControlPolicy.revision) return "policy revision changed";
     if (!this.workflowDecisionAuthorityCurrent(session, session.parentControlPolicy, decision)) return "approval authority changed";
-    if (auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !==
-        auditDigest(snapshot.activeChildren)) return "active child work changed";
+    if (!issueClosureActiveChildrenMatch(this.db, sessionId, snapshot)) return "active child work changed";
     return null;
   }
 
@@ -14237,15 +14245,21 @@ export class SessionsService {
    * approval depends on, read after the Location's forge checks. Synchronous, so nothing can change
    * between the answer and the commit. */
   private closureCommitChange(sessionId: string, decision: WorkflowDecisionView, snapshot: GithubIssueClosureSnapshot,
-    synchronizedScopeRevision: number | undefined, runnerId: string, location: GithubIssueClosureLocation): string | null {
+    synchronizedScopeRevision: number | undefined, runnerId: string, location?: GithubIssueClosureLocation,
+    campaignPullRequests?: number[] | null): string | null {
     const bindingChange = this.closureApprovalChange(sessionId, decision, snapshot, decision.resourceDigest);
     if (bindingChange) return bindingChange;
     const session = this.db.getSession(sessionId);
     if (!session || session.orchestratorPolicy?.issueScope?.revision !== synchronizedScopeRevision) return "synchronized issue scope changed";
+    if (snapshot.campaignPullRequests !== undefined &&
+        auditDigest(closureCampaignPullRequests(this.db, session, snapshot.repository) ?? null) !== auditDigest(campaignPullRequests)) {
+      return "campaign pull-request context changed during forge inspection";
+    }
     if (this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, Date.now())) return "session guardrails changed";
     if (decision.authority === "orchestrator" && (scopeCompatibility(this.db, session) ||
         issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return "verified delivery changed";
+    if (!location) return session.runnerId === runnerId ? null : "campaign runner changed";
     // The Location must still be one of that repository's, at the path the checks ran in.
     const entry = campaignScopeRepositories(session).find((candidate) => candidate.repository === location.repository);
     return entry?.locationIds.some((id) => {
@@ -14344,6 +14358,12 @@ export class SessionsService {
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, settled)) {
       return fail("The closure approval, runner or guardrails changed while execution was being prepared; no closure was attempted", 409);
     }
+    const campaignPullRequests = snapshot.campaignPullRequests === undefined ? undefined
+      : closureCampaignPullRequests(this.db, freshSession, snapshot.repository) ?? null;
+    const prepare = snapshot.campaignPullRequests !== undefined;
+    if (prepare && !runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "closureCampaignPullRequests")) {
+      return fail("This approved closure requires a runner supporting fresh campaign PR context and the commit fence; no closure was attempted", 409);
+    }
     const consumed = this.db.consumeGithubIssueClosure(occurrenceId, now);
     if (!consumed) return fail("issue-closure approval was consumed concurrently", 409);
     this.issueClosureRecoveries.add(occurrenceId);
@@ -14358,28 +14378,29 @@ export class SessionsService {
     // The runner receives only the binding: the excluded children are for the approver (#3237).
     const binding = issueClosureBindingSnapshot(snapshot);
     const dispatched = synchronizedScopeRevision === undefined ? binding : { ...binding, scopeRevision: synchronizedScopeRevision };
-    // At a Location nothing can be written until `commit` is sent (#4119).
-    let mayHaveWritten = !target.location;
+    // Location and filtered root closures cannot write until the final `commit` fence.
+    let mayHaveWritten = !target.location && !prepare;
     try {
       const requestId = `issue_closure_execute_${randomUUID()}`;
       let response = await this.hub.requestFromRunner(target.runnerId, requestId, {
         type: "github_issue_closure", operation: "execute", requestId, sessionId, occurrenceId, snapshot: dispatched,
+        ...(prepare ? { prepare: true as const, campaignPullRequests } : {}),
         ...(target.location ? { location: target.location } : {}),
       }, 150_000);
-      if (target.location && response.type === "github_issue_closure_result" && response.sessionId === sessionId && response.ok && response.prepared === true) {
-        // The forge reads took time. This runner holds no copy of the campaign's scope, so the checks
-        // the root's runner makes at its own mutation fence are made here, with nothing awaited
-        // between them and the commit.
-        const commitChange = this.closureCommitChange(sessionId, decision, snapshot, synchronizedScopeRevision, target.runnerId, target.location);
+      if ((target.location || prepare) && response.type === "github_issue_closure_result" && response.sessionId === sessionId && response.ok && response.prepared === true) {
+        // Forge reads took time. Recheck the server's bindings with nothing awaited between this
+        // answer and commit; the root runner also retains its local authority fence.
+        const commitChange = this.closureCommitChange(sessionId, decision, snapshot, synchronizedScopeRevision, target.runnerId, target.location, campaignPullRequests);
         if (commitChange) {
           response = { type: "github_issue_closure_result", requestId, sessionId, ok: false, failure: "campaign_authority_changed",
-            error: `Issue-closure approval refused: ${commitChange} while the Location's checks ran; nothing was written.` };
+            error: `Issue-closure approval refused: ${commitChange} while forge checks ran; nothing was written.` };
           this.log.info(JSON.stringify({ event: "campaign_issue_closure_authority_changed", entryPoint: "closure_commit", sessionId, occurrenceId, outcome: "refused" }));
         } else {
           mayHaveWritten = true;
           const commitId = `issue_closure_commit_${randomUUID()}`;
           response = await this.hub.requestFromRunner(target.runnerId, commitId, {
-            type: "github_issue_closure", operation: "commit", requestId: commitId, sessionId, occurrenceId, location: target.location,
+            type: "github_issue_closure", operation: "commit", requestId: commitId, sessionId, occurrenceId,
+            ...(target.location ? { location: target.location } : {}),
           }, 150_000);
         }
       } else if (!mayHaveWritten && !(response.type === "github_issue_closure_result" && response.sessionId === sessionId && (!response.ok ||
@@ -18131,7 +18152,10 @@ export class SessionsService {
         // the outbox rather than reported, exactly as for a human's durable prompt.
         stage: (plan) => {
           staged = this.promptOutbox.stageWorkflowDecisionResume(
-            decision.occurrenceId, from, child.id, plan.runnerId, plan.commands[0]!, now,
+            decision.occurrenceId, from, child.id, plan.runnerId,
+            decision.category === "issue_closure" && decision.status === "approved" && sessionRole(child) === "orchestrator" &&
+              runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "closureApprovalSteering")
+              ? { ...plan.commands[0]!, issueClosureResume: true } as DurableSessionCommand : plan.commands[0]!, now,
           );
         },
         activate: (plan) => {
@@ -18168,6 +18192,36 @@ export class SessionsService {
     const session = this.db.getSession(queued.sessionId);
     if (!session || !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "queuedPromptCancellation")) return;
     this.hub.sendToRunner(session.runnerId, { type: "cancel_queued_prompt", sessionId: queued.sessionId, promptId: queued.commandId });
+  }
+
+  /** Promote the same queued notification, never send a second copy. Durable steering fences
+   * provider delivery; refusals keep its FIFO command, uncertainty never replays it (#4403). */
+  private promoteIssueClosureResume(commandId: string): void {
+    const command = this.db.getSessionPromptCommand(commandId);
+    const resume = this.db.workflowDecisionResumeForCommand(commandId);
+    if (!command || command.state !== "queued" || resume?.state !== "delivering") return;
+    const decision = this.db.workflowDecisionByOccurrence(resume.occurrenceId);
+    const child = this.db.getSession(command.sessionId);
+    if (!decision || decision.category !== "issue_closure" || decision.status !== "approved" || !child ||
+        child.status !== "running" || sessionRole(child) !== "orchestrator" ||
+        pendingRequests(child.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
+        this.db.listOpenPolicyHookApprovals(child.id).length ||
+        this.db.resolvedCampaignSessionId(child.id) !== child.id ||
+        !runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "closureApprovalSteering")) return;
+    let payload: Partial<PromptSessionMessage>;
+    try { payload = JSON.parse(command.payloadJson); } catch { return; }
+    if (payload.type !== "prompt_session" || payload.issueClosureResume !== true) return;
+    const turnId = this.hub.activeTurnIdForSession(child.id);
+    if (!turnId) return;
+    const submissionId = `closure_resume_${commandId}`;
+    if (this.db.findSteeringAttemptBySubmission(child.id, submissionId)) return;
+    void this.steer(child.id, { submissionId, turnId, promotePromptId: commandId }).then((result) => {
+      this.log.info(JSON.stringify({ event: "issue_closure_approval_wake", entryPoint: "queued_resume_receipt", sessionId: child.id,
+        occurrenceId: decision.occurrenceId, commandId, requestId: submissionId, outcome: result.ok ? result.data?.state : "queued_fallback" }));
+    }).catch(() => {
+      this.log.warn(JSON.stringify({ event: "issue_closure_approval_wake", entryPoint: "queued_resume_receipt", sessionId: child.id,
+        occurrenceId: decision.occurrenceId, commandId, requestId: submissionId, outcome: "promotion_failed" }));
+    });
   }
 
   /** Follow the durable command that carries a decision's resume. Known non-delivery for worktree
