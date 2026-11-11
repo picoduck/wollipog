@@ -49,9 +49,12 @@ it does not waive a remaining blocker.
    Recheck after asynchronous reads and before later effects; never return private data after a
    grant is narrowed. Preserve the shared owner's validation, visibility, lifecycle and recovery
    rules. An app-management confirmation never replaces an existing typed human approval.
-3. **Mutation identity.** Require a caller-stable `commandId` and reuse
+3. **Mutation identity.** Require a caller-stable command ID and reuse
    `AssistantCommandReceipts` from `assistant-command-receipts.ts`, in the connection's existing
-   namespace. Bind installation, connection, operation, canonical argument digest, grant revision
+   namespace. Session/owner/status tools call it `commandId`; the delivered automation/skill tools
+   call it `operationId`. Preserve published schemas rather than silently renaming them. Both use
+   that value in the same durable receipt store; `command_get` looks it up as `commandId`.
+   Bind installation, connection, operation, canonical argument digest, grant revision
    and resolved target. Reserve before the effect. After current authorization, reconcile an
    existing receipt through `reserve`'s operation/digest check before recomputing effects that may
    already have removed the resource. A duplicate never redispatches; accepted/uncertain delivery
@@ -60,7 +63,8 @@ it does not waive a remaining blocker.
 4. **Destructive confirmation.** Honor the current `destructiveConfirmation` policy. Under
    `confirm`, return an authorized preview without reserving or dispatching; bind the exact
    arguments, target and affected scope, operation, connection and grant revision using
-   `AssistantCommandConfirmations`. Repeat unchanged `commandId`/arguments with `confirmationId`.
+   `AssistantCommandConfirmations`. Repeat the unchanged caller command ID and arguments with
+   `confirmationId`, using the operation's existing ID parameter name.
    Consume the one-shot confirmation inside the receipt reservation's same savepoint before any
    effect. Changed/expired/used previews fail closed. Under `none`, the current standing grant
    applies; other mandatory human gates still apply. Never expose inaccessible affected IDs in
@@ -109,9 +113,12 @@ The fixture starts only a new temporary test control plane/database with a reser
 port and pricing-network access disabled, then closes it and removes its state. It never imports
 the hosting database or inherits its registered SSH Machines or unrelated sessions.
 
-Automation/skill coverage owned by #4477 remains a gap until those operations are actually
-registered on main. Its planned operation names are recorded without claiming delivery. Once it
-lands, merge main, verify its actual production registry and update those exact entries.
+Automation/skill PR #4477 is merged. Twenty exact owner-route entries now name its actual
+production operations, including the machine-version read and its policy-only projection through
+`skill_pin_get`. The production-composition test verifies these tools are registered alongside
+owner/session operations. Automation update, enable and pause share the owner update service.
+Remaining automation/skill candidates stay explicit gaps for the residual-parity work item;
+merging this dependency does not establish complete Skill Library or automation parity.
 
 ## Delivered Operations
 
@@ -235,13 +242,14 @@ reads. Legacy review-ledger reads report their actual stored/unavailable state. 
 the retired reviewer bridge or supply a native fallback. Existing session-protocol HTTP read gates
 remain intact; the Assistant calls explicit shared read services as its current granting owner.
 
-The audit still contains **178 NOT-YET-SUPPORTED route candidates** on this local stack:
-93 session routes, 30 Machine routes, 9 automation routes, 38 Skill Library routes, 7 connection
+The audit still contains **158 NOT-YET-SUPPORTED route candidates** on this local stack:
+93 session routes, 30 Machine routes, 4 automation routes, 23 Skill Library routes, 7 connection
 routes and 1 Project route. This count is not a count of unique missing tools. The exact remaining
 entries stay in `assistant-owner-capabilities.json`, and none was reclassified as an exclusion.
 They include the broader session work-management, Machine/workspace registration, connection,
-automation and Skill Library groups assigned to the other campaign work items. Planned #4477 registrations remain unsupported until
-merged and reconciled. The strict acceptance gate therefore still fails intentionally.
+automation and Skill Library groups assigned to the other campaign work items. The 20 delivered
+#4477 route mappings are now reconciled with the production registry; its remaining residuals
+stay unsupported. The strict acceptance gate therefore still fails intentionally.
 
 The production-composition scenario boots a fresh loopback control plane and synthetic database,
 then compares owner HTTP responses with Assistant reads and exercises actual MCP transport,
