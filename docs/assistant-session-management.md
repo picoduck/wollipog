@@ -48,6 +48,15 @@ projects, receipt lookup is refused too. Revocation and rotation take effect thr
 connection checks. Runner capability refusals preserve their structured requirement, and lifecycle
 refusals preserve the application service's concrete cause plus its owner's recovery path.
 
+The owner's current `grant.destructiveConfirmation` applies to Stop and Archive. Under `confirm`,
+the first call returns `confirmationRequired`, a target preview, `confirmationId` and `expiresAt`,
+without reserving or dispatching a command. Review the target, then repeat unchanged arguments and
+the same command ID with that confirmation ID within five minutes. Confirmations bind connection,
+grant revision, operation, current project placement and argument digest, and are one-shot.
+Consumption shares the command reservation's transaction. A grant/target/argument change or expiry
+requires a fresh preview. Existing accepted command IDs always reconcile without dispatch, even
+after a confirmation expires. Under `none`, the existing direct command behavior applies.
+
 There is deliberately no claim of exactly-once runner execution. The reservation prevents blind
 redispatch from the Assistant transport; existing runner outboxes/receipts govern execution.
 A crash between service dispatch and receipt settlement can leave the result resource unknown.

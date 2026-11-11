@@ -273,3 +273,29 @@ test("authenticated origins fail closed without work extension and follow-ups at
     assert.deepEqual(order, ["reserve", "attach", "dispatch"]);
   } finally {h.close();}
 });
+
+test("owner-selected destructive confirmation previews without effects, rejects stale grants, and deduplicates confirmed retries", async () => {
+  const h = harness();
+  try {
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: "all", destructiveConfirmation: "confirm"});
+    const args = {commandId: "confirmed-archive", sessionId: "unrelated-0"};
+    h.db.updateSessionStatus(args.sessionId, "completed", Date.now());
+    const preview = await h.call("session_archive", args);
+    assert.equal(preview.confirmationRequired, true);
+    assert.equal(h.receipts.get(h.issued.connection.id, args.commandId), null);
+    assert.equal(h.db.getSession(args.sessionId)?.archived, false);
+    await assert.rejects(h.call("session_stop", {...args, confirmationId: preview.confirmationId}), /confirmation/);
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: "all"});
+    assert.equal(h.db.assistantConnections.destructiveConfirmation(h.issued.connection.id), "confirm");
+    await assert.rejects(h.call("session_archive", {...args, confirmationId: preview.confirmationId}), /confirmation/);
+    assert.equal(h.receipts.get(h.issued.connection.id, args.commandId), null);
+    const fresh = await h.call("session_archive", args);
+    const result = await h.call("session_archive", {...args, confirmationId: fresh.confirmationId});
+    assert.equal(result.receipt.status, "succeeded");
+    assert.equal(h.db.getSession(args.sessionId)?.archived, true);
+    assert.deepEqual((await h.call("session_archive", {...args, confirmationId: fresh.confirmationId})).receipt, result.receipt);
+    assert.deepEqual((await h.call("session_archive", args)).receipt, result.receipt);
+    const stop = await h.call("session_stop", {commandId: "confirmed-stop", sessionId: "unrelated-1"});
+    assert.equal(stop.confirmationRequired, true);
+  } finally {h.close();}
+});
