@@ -297,7 +297,7 @@ import {
   shouldReloadReservedDraft,
 } from "../conversation-steering.js";
 import { deriveSteeringReceipts, SteeringReceipts } from "./SteeringReceipts.js";
-import { SessionCommandReceipts, visibleSessionCommandReceipts } from "./SessionCommandReceipts.js";
+import { SessionCommandReceipts, visibleSessionCommandReceipts, useCommandReceiptDismissals } from "./SessionCommandReceipts.js";
 import { ReceiptLine, RECEIPT_ROW_ATTRIBUTE, receiptRowId, receiptRowIds } from "./TranscriptReceipt.js";
 import { ArrowUpIcon, AtSignIcon, CheckIcon, ChevronDownIcon, EditIcon, FolderIcon, GuardrailsIcon, ImageIcon, ImageOffIcon, MicIcon, OrchestratorIcon, PlanIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon, WarningIcon } from "./Icons.js";
 import {
@@ -5485,8 +5485,9 @@ function SessionDetailLoaded({
   const steeringReceipts = mode === "expanded"
     ? deriveSteeringReceipts(session.steeringAttempts ?? [], items, session.activeTurnId, historyPartial)
     : [];
+  const [dismissedCommandReceipts, dismissCommandReceipt] = useCommandReceiptDismissals();
   const commandReceipts = mode === "expanded"
-    ? visibleSessionCommandReceipts(session.commandInvocations ?? [], items, historyPartial)
+    ? visibleSessionCommandReceipts(session.commandInvocations ?? [], items, historyPartial, dismissedCommandReceipts)
     : [];
   const hasTranscriptReceipts = (session.pendingPrompts?.length ?? 0) > 0 || steeringReceipts.length > 0 ||
     commandReceipts.length > 0 || (mode === "expanded" && retitleFeedback !== null);
@@ -7151,7 +7152,8 @@ function SessionDetailLoaded({
   const sentMessageReceipts = mode === "expanded" ? (
     <>
       <SessionCommandReceipts
-        invocations={session.commandInvocations ?? []}
+        invocations={commandReceipts}
+        onDismiss={dismissCommandReceipt}
         timelineItems={items}
         historyPartial={historyPartial}
         agentLabel={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
