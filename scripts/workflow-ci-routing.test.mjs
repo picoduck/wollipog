@@ -314,7 +314,7 @@ test("both actual execution branches preserve commands, propagate errors and nev
     assert.ifError(run.error);
     assert.equal(run.status, exit);
     if (id === "unit") assert.equal(run.stdout.trim(), path === "group" && isFast && raw === "enabled"
-      ? "node scripts/test-suites.mjs --node-only --groups node-fast --ci --shard=1/3" : "pnpm test:ci --shard=1/3");
+      ? "node scripts/test-suites.mjs --node-only --groups node-fast --ci --shard=1/4" : "pnpm test:ci --shard=1/4");
     else assert.equal(run.stdout.trim(), isFast && raw === "enabled"
       ? path === "pr" ? "pnpm test:e2e --config playwright.pr.config.ts" : "pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts"
       : "pnpm test:e2e --config playwright.ci.config.ts --project=shard-1");

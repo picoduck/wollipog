@@ -18,6 +18,7 @@ import {
   codexCommandSandboxProbe,
 } from "./codex-app-server.js";
 import {
+  classifyCodexSandboxProbe,
   CODEX_SANDBOX_PROBE_ENV,
   CODEX_SANDBOX_PROBE_SENTINEL,
   codexSandboxProbeCommand,
@@ -38,6 +39,12 @@ const NESTED_BWRAP_FAILURE = {
   stdout: "",
   stderr: "bwrap: No permissions to create new namespace, likely because the kernel does not allow " +
     "non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.\n",
+};
+/** Exact host diagnostic reported in #4470. */
+const ARTICLE_BWRAP_FAILURE = {
+  exitCode: 1,
+  stdout: "",
+  stderr: "bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.",
 };
 /** The same probe when the sandbox starts: the command ran and printed the sentinel. */
 const STARTED = { exitCode: 0, stdout: CODEX_SANDBOX_PROBE_SENTINEL, stderr: "" };
@@ -117,19 +124,21 @@ function driverWith(options: {
 }
 
 test("inside the runner's bwrap boundary, a nested sandbox that cannot start hands commands to that boundary", { skip: linuxOnly }, async () => {
-  for (const network of ["inherit", "deny"] as const) {
-    const h = driverWith({ isolation: bwrap(network), probe: () => NESTED_BWRAP_FAILURE });
-    const turn = await h.firstTurn();
-    // The probe used exactly the policy the turn would otherwise have sent, a trusted absolute
-    // command, and an environment with a fixed PATH and no loader overrides.
-    assert.deepEqual(h.probes.map((probe) => [probe.command, probe.sandboxPolicy, probe.env]),
-      [[PROBE, { type: "workspaceWrite" }, CODEX_SANDBOX_PROBE_ENV]]);
-    assert.deepEqual(turn.sandboxPolicy,
-      { type: "externalSandbox", networkAccess: network === "deny" ? "restricted" : "enabled" });
-    // The approval policy and reviewer are untouched: escalations still reach their owners.
-    assert.equal(turn.approvalPolicy, "on-request");
-    assert.equal(turn.approvalsReviewer, "auto_review");
-    assert.deepEqual(h.sandboxEvents(), ["codex_command_sandbox_outer_boundary"]);
+  for (const response of [NESTED_BWRAP_FAILURE, ARTICLE_BWRAP_FAILURE]) {
+    for (const network of ["inherit", "deny"] as const) {
+      const h = driverWith({ isolation: bwrap(network), probe: () => response });
+      const turn = await h.firstTurn();
+      // The probe used exactly the policy the turn would otherwise have sent, a trusted absolute
+      // command, and an environment with a fixed PATH and no loader overrides.
+      assert.deepEqual(h.probes.map((probe) => [probe.command, probe.sandboxPolicy, probe.env]),
+        [[PROBE, { type: "workspaceWrite" }, CODEX_SANDBOX_PROBE_ENV]]);
+      assert.deepEqual(turn.sandboxPolicy,
+        { type: "externalSandbox", networkAccess: network === "deny" ? "restricted" : "enabled" });
+      // The approval policy and reviewer are untouched: escalations still reach their owners.
+      assert.equal(turn.approvalPolicy, "on-request");
+      assert.equal(turn.approvalsReviewer, "auto_review");
+      assert.deepEqual(h.sandboxEvents(), ["codex_command_sandbox_outer_boundary"]);
+    }
   }
 });
 
@@ -344,4 +353,18 @@ test("the outer boundary replaces only a workspace-write policy", () => {
   // Without an outer boundary nothing changes.
   assert.deepEqual(buildCodexTurnParams({ permissionMode: "auto-review" } as SessionConfig, "t", "/repo", []).sandboxPolicy,
     { type: "workspaceWrite" });
+});
+
+
+test("the captured article wording preserves namespace-denial safeguards (#4470)", () => {
+  for (const stderr of [ARTICLE_BWRAP_FAILURE.stderr, `${ARTICLE_BWRAP_FAILURE.stderr}\n`, NESTED_BWRAP_FAILURE.stderr,
+    "bwrap: setting up unprivileged user namespaces: Operation not permitted"]) {
+    assert.deepEqual(classifyCodexSandboxProbe(1, "", stderr), { outcome: "failed", exitCode: 1, namespaceDenied: true });
+    assert.deepEqual(classifyCodexSandboxProbe(1, CODEX_SANDBOX_PROBE_SENTINEL, stderr), { outcome: "inconclusive" });
+    for (const diagnostic of [`other failure\n${stderr}`, `${stderr}\nbwrap: execvp printf: No such file`, `error: ${stderr}`]) {
+      assert.deepEqual(classifyCodexSandboxProbe(1, "", diagnostic), { outcome: "failed", exitCode: 1, namespaceDenied: false });
+    }
+  }
+  assert.deepEqual(classifyCodexSandboxProbe(1, "", "bwrap: Can't open /repo: Permission denied"),
+    { outcome: "failed", exitCode: 1, namespaceDenied: false });
 });

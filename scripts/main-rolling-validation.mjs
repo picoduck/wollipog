@@ -22,7 +22,7 @@ const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const ZERO = "0".repeat(40);
 const ACTIVE = ["queued", "in_progress", "waiting", "pending", "requested"];
 // Unit-test shards appended before the aggregator (#3770), so the established positions hold.
-export const UNIT_SHARDS = [1, 2, 3].map((i) => `Unit Tests (${i})`);
+export const UNIT_SHARDS = [1, 2, 3, 4].map((i) => `Unit Tests (${i})`);
 export const REQUIRED = [
   "Full Validation / Typecheck & Bundles",
   ...BROWSER_SHARDS.map((i) => `Full Validation / Browser End-to-End Tests (${i})`),

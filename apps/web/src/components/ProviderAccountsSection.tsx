@@ -27,6 +27,8 @@ import { ExpectedProviderAccount, providerAccountGroupRefusalSentence, providerA
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Notice } from "./Notice.js";
+import { providerLoginStartFailure } from "../provider-login-start-failure.js";
+import { ProviderLoginStartFailure } from "./ProviderLoginStartFailure.js";
 import { ProviderSignIn, providerSignInAlreadyOnMachine, providerSignInHiddenTitle } from "./ProviderLoginCard.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ProviderAccountUsage, useMachineAccountUsage } from "./ProviderAccountUsage.js";
@@ -365,7 +367,7 @@ function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, stat
   );
 }
 
-type SectionNotice = { title: ReactNode; body: string; details?: string };
+type SectionNotice = { title: ReactNode; body: ReactNode; details?: string };
 
 /** What Priority Order expects to do now, and whether this Machine can do it. */
 function PrioritySummary({ runner, preview }: {
@@ -551,7 +553,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     try {
       await api.startProviderLogin(runner.runnerId, { accountId: account.id });
     } catch (cause) {
-      setNotice({ title: <>Couldn't Sign In to {identifier(account)}</>, body: (cause as Error).message });
+      setNotice({ title: <>Couldn't Sign In to {identifier(account)}</>, body: <ProviderLoginStartFailure failure={providerLoginStartFailure(cause)} /> });
     }
   });
 

@@ -131,7 +131,7 @@ export function probeExecutableWritable(path: string, writableRoots: readonly st
 }
 
 /** bubblewrap's own refusal, as the whole of one line. */
-const BWRAP_NAMESPACE_DENIED = /^bwrap: (?:No permissions to create new namespace|.*unprivileged user namespaces)/;
+const BWRAP_NAMESPACE_DENIED = /^bwrap: (?:No permissions to create (?:a )?new namespace|.*unprivileged user namespaces)/;
 
 /** The refusal is the probe's ENTIRE diagnostic output: once the Codex CLI's own `WARNING:` notices
  * are set aside (measured: `codex sandbox` prints one about PATH aliases first), exactly one line

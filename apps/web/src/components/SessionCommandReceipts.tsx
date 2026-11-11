@@ -1,5 +1,7 @@
 import type { SessionCommandInvocationView } from "@wollipog/protocol";
-import React from "react";
+import React, { useCallback, useMemo, useState } from "react";
+import { useInstanceScope } from "../instance-scope.js";
+import { loadInstanceStorageValue, saveInstanceStorageValue } from "../instance-storage.js";
 import { deliveryReason, type MessageReceiptStatus } from "../conversation-steering.js";
 import type { TimelineItem } from "../timeline.js";
 import { ReceiptLine, ReceiptRow, receiptRowId } from "./TranscriptReceipt.js";
@@ -48,11 +50,47 @@ function commandInvocationIdentity(invocation: Pick<
   ]);
 }
 
+const DISMISSALS_KEY = "wollipog.sessions.commandReceiptDismissals";
+const DISMISSALS_CAP = 500;
+
+function dismissalKey(invocation: SessionCommandInvocationView): string {
+  // A definitive rejection still surfaces after an uncertain receipt was dismissed.
+  return JSON.stringify([invocation.sessionId, invocation.invocationId, invocation.state]);
+}
+
+function readDismissals(scope: string): string[] {
+  try {
+    const value: unknown = JSON.parse(loadInstanceStorageValue(DISMISSALS_KEY, scope) ?? "[]");
+    return Array.isArray(value) ? value.filter((key): key is string => typeof key === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Device-local presentation only: dismissal never changes the provider's delivery record. */
+export function useCommandReceiptDismissals(): [ReadonlySet<string>, (invocation: SessionCommandInvocationView) => void] {
+  const scope = useInstanceScope();
+  // Dismiss also works when browser storage is unavailable.
+  const [local, setLocal] = useState<{ scope: string; keys: string[] } | null>(null);
+  const dismissed = useMemo(() => new Set([
+    ...readDismissals(scope), ...(local?.scope === scope ? local.keys : []),
+  ]), [scope, local]);
+  const dismiss = useCallback((invocation: SessionCommandInvocationView) => {
+    if (invocation.state !== "rejected" && invocation.state !== "uncertain") return;
+    const key = dismissalKey(invocation);
+    const keys = [...new Set([...readDismissals(scope), ...dismissed, key])].slice(-DISMISSALS_CAP);
+    saveInstanceStorageValue(DISMISSALS_KEY, JSON.stringify(keys), scope);
+    setLocal({ scope, keys });
+  }, [scope, dismissed]);
+  return [dismissed, dismiss];
+}
+
 export function visibleSessionCommandReceipts(
   invocations: readonly SessionCommandInvocationView[],
   timelineItems: readonly TimelineItem[],
   /** The timeline is a bounded window, so a canonical message may simply be below it. */
   historyPartial = false,
+  dismissed: ReadonlySet<string> = new Set(),
 ): SessionCommandInvocationView[] {
   const canonical = new Set(timelineItems.flatMap((item) =>
     item.kind === "user_message" && item.commandInvocation
@@ -76,7 +114,7 @@ export function visibleSessionCommandReceipts(
 
   return invocations.filter((invocation) => {
     if (invocation.state === "completed" || invocation.state === "rejected" || invocation.state === "uncertain") {
-      return terminalRecoveryIds.has(invocation.invocationId);
+      return terminalRecoveryIds.has(invocation.invocationId) && !dismissed.has(dismissalKey(invocation));
     }
     return true;
   });
@@ -90,7 +128,9 @@ export function SessionCommandReceipts({
   historyPartial = false,
   agentLabel,
   isSkillInvocation,
+  onDismiss,
 }: {
+  onDismiss?: (invocation: SessionCommandInvocationView) => void;
   invocations: readonly SessionCommandInvocationView[];
   timelineItems: readonly TimelineItem[];
   /** The transcript is a bounded window, so a canonical message may sit in an unloaded turn. */
@@ -127,6 +167,12 @@ export function SessionCommandReceipts({
               progress={line.progress}
               reason={line.reason}
               role="status"
+              actions={failed && onDismiss ? (
+                <span className="tl-receipt-buttons">
+                  <button type="button" className="btn sm" aria-label="Dismiss Command Message"
+                    onClick={() => onDismiss(invocation)}>Dismiss</button>
+                </span>
+              ) : undefined}
               detailsId={`provider-command-details-${invocation.invocationId}`}
               details={invocation.error ? <p className="tl-receipt-raw">{invocation.error}</p> : undefined}
             />

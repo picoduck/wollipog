@@ -735,6 +735,18 @@ const client = {
   ) => {
     if (!runner) throw new Error("runner not found");
     // Add Account's request failure (#2995): a label of "Unreachable" is refused as a timeout.
+    const startRefusal = new URLSearchParams(window.location.search).get("startRefusal");
+    if (startRefusal === "offline") throw new ApiError("runner is offline", 409);
+    if (startRefusal === "publication") throw new ApiError("private storage exception", 503, "PROVIDER_PUBLICATION_UNAVAILABLE");
+    const directoryFailure = new URLSearchParams(window.location.search).get("directoryFailure");
+    if (directoryFailure) {
+      const [component, reason] = directoryFailure.split(":");
+      throw new ApiError("Private peer exception /fixture/secret", 409, undefined, {
+        directoryDiagnostic: directoryFailure === "absent" ? undefined : {
+          code: "managed_profile_directory", component, reason, path: "/fixture/secret",
+        },
+      });
+    }
     if ("label" in body && body.label === "Unreachable") throw new ApiError("The runner did not answer in time.", 504);
     const existing = "accountId" in body
       ? runner.providerAccounts?.find((account) => account.id === body.accountId)

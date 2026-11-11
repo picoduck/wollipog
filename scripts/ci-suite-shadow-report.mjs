@@ -8,15 +8,18 @@ import { parseTiming, TIMING_MARKER } from "./ci-timing.mjs";
 import { combineReports } from "./merge-queue-wait-report.mjs";
 import { reliabilityReport } from "./ci-reliability-report.mjs";
 
-// #3770 moved the Node suite out of "Typecheck, Unit Tests & Bundles" into three shards. Runs
+// #3770 moved the Node suite out of "Typecheck, Unit Tests & Bundles" into separate shards. Runs
 // before it keep their original single Node job; a run is read in the layout it executed.
 const LEGACY_NODE_JOB = "Typecheck, Unit Tests & Bundles", CHECKS_JOB = "Typecheck & Bundles";
-const UNIT_WORK = [1, 2, 3].map((n) => `Unit Tests (${n})`);
+const UNIT_WORK = [1, 2, 3, 4].map((n) => `Unit Tests (${n})`);
+// Historical reports do not carry a unit-shard count. Infer only the known layouts
+// for advisory comparisons; certification independently requires today's full inventory.
+const unitWork = (jobs) => jobs.some((job) => job.name === "Unit Tests (4)") ? UNIT_WORK : UNIT_WORK.slice(0, 3);
 const otherWork = (shards) => [...Array.from({ length: shards }, (_, i) => `Browser End-to-End Tests (${i + 1})`),
   "Settings-Rows win32 Baselines / Detect Settings-Rows Changes",
   "Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines", "WebKit End-to-End Tests"];
 const requiredWork = (jobs, shards = 5) => jobs.some((job) => job.name === LEGACY_NODE_JOB) ? [LEGACY_NODE_JOB, ...otherWork(shards)]
-  : [CHECKS_JOB, ...UNIT_WORK, ...otherWork(shards)];
+  : [CHECKS_JOB, ...unitWork(jobs), ...otherWork(shards)];
 const nodeJob = (name) => name === LEGACY_NODE_JOB || UNIT_WORK.includes(name);
 const mandatorySteps = ["Typecheck", "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle", "Rendered Production Browser Smoke"];
 const utcWorkingDate = (time) => {
