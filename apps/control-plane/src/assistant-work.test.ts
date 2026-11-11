@@ -9,6 +9,7 @@ import { ControlPlaneDb } from "./db.js";
 import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
 import { registerAssistantWorkOperations, registerAssistantWorkOwnerRoutes } from "./assistant-work-routes.js";
 import { installAssistantOutboundScope } from "./assistant-outbound-schema.js";
+import { isOrganizationAdministrationRoute } from "./identity.js";
 import { OutboundEventsService, resolveOutboundTarget, validatePrivateCallbackAddresses } from "./outbound-events.js";
 
 const destination = {requesterId: "requester-fixture", accountId: "account-fixture", conversationId: "conversation-fixture",
@@ -121,12 +122,13 @@ test("current authorization is checked after DNS and a revoked binding prevents 
     await worker.tick(11);
     assert.equal(sent, false);
     assert.equal(db.listOutboundEventDeliveries("sub-fixture")![0]!.status, "failed");
+    assert.equal(db.listOutboundEventDeliveries("sub-fixture")![0]!.statusCode, undefined, "local authorization failure is not a callback HTTP status");
   } finally { db.close(); }
 });
 
 test("private target exceptions require exact owner-configured addresses and never permit metadata or HTTP", async () => {
   assert.equal(validatePrivateCallbackAddresses(["10.23.45.67"]), true);
-  for (const addresses of [["169.254.169.254"], ["100.100.100.200"], ["127.0.0.1"], ["0.0.0.0"], ["10.0.0.0/8"], ["10.1.2.3", "10.1.2.3"], ["::ffff:10.1.2.3"]]) {
+  for (const addresses of [["169.254.169.254"], ["100.100.100.200"], ["127.0.0.1"], ["0.0.0.0"], ["10.0.0.0/8"], ["10.1.2.3", "10.1.2.3"], ["::ffff:10.1.2.3"], ["0:0:0:0:0:ffff:a01:203"]]) {
     assert.equal(validatePrivateCallbackAddresses(addresses), false);
   }
   const lookup = (async () => [{address: "10.23.45.67", family: 4}]) as never;
@@ -169,6 +171,43 @@ test("accepted command origins bind creation atomically and refuse a changed req
   } finally { db.close(); }
 });
 
+test("source deletion retains a content-free work identity tombstone and prevents late updates or work-ID reassignment", () => {
+  const {db, connection, operations, input} = setup();
+  try {
+    const id = connection.connection.id;
+    db.assistantWork.track(operations, id, input);
+    const work = db.assistantWork.get(id, input.workId)!;
+    db.assistantWork.beginReply(operations, id, input.workId, work.revision);
+    assert.doesNotThrow(() => db.deleteSession(input.sessionId));
+    assert.ok(db.assistantWork.get(id, input.workId), "the minimal identity survives source cleanup");
+    assert.throws(() => db.assistantWork.authorize(operations, id, input.workId), /unavailable/);
+    assert.equal(db.assistantWork.reconcile(operations, id).items.length, 0);
+    assert.throws(() => db.assistantWork.track(operations, id, {...input, sessionId: "another-session"}), /reused/);
+    assert.doesNotThrow(() => db.setPendingApproval(input.sessionId, {requestId: "late-fixture", kind: "question", title: "Stale fixture", options: []}));
+  } finally {db.close();}
+});
+
+test("reconciliation advances through empty filtered pages without disclosing an unauthorized caller-chosen work ID", () => {
+  const {db, owner, connection, operations, input, binding} = setup();
+  try {
+    const id = connection.connection.id;
+    db.assistantWork.track(operations, id, {...input, workId: "private-work-name-fixture"});
+    const second = db.assistantWork.createBinding(owner, id, {...destination, destination: "channel:456", sessionKey: "agent:fixture:discord:channel:456"});
+    db.assistantWork.track(operations, id, {...input, workId: "visible-work-fixture", bindingId: second.id});
+    db.assistantWork.revokeBinding(owner, id, binding.id);
+    const first = db.assistantWork.reconcile(operations, id, "", 1);
+    assert.deepEqual(first.items, []);
+    assert.ok(first.nextAfter);
+    assert.equal(first.nextAfter.includes("private"), false);
+    // Database maintenance must not change a persisted pagination position.
+    db.raw().exec("VACUUM");
+    const next = db.assistantWork.reconcile(operations, id, first.nextAfter, 1);
+    assert.equal(next.items[0]!.workId, "visible-work-fixture");
+    assert.equal(next.nextAfter, null);
+    assert.throws(() => db.assistantWork.reconcile(operations, id, "private-work-name-fixture", 1), /returned work cursor/);
+  } finally {db.close();}
+});
+
 test("MCP work reads and owner callback configuration keep private coordinates out of model results", async () => {
   const {db, owner, connection, operations, input} = setup();
   const app = Fastify();
@@ -196,6 +235,17 @@ test("MCP work reads and owner callback configuration keep private coordinates o
     const listed = (await app.inject({method: "GET", url: path, headers: {authorization: "Bearer owner-fixture"}})).json();
     assert.equal(listed.subscriptions.length, 1);
     assert.equal("secret" in listed.subscriptions[0], false);
+    const subscription = `${path}/${listed.subscriptions[0].subscriptionId}`;
+    const ownerHeaders = {authorization: "Bearer owner-fixture"};
+    assert.equal((await app.inject({method: "GET", url: subscription, headers: ownerHeaders})).statusCode, 200);
+    assert.equal((await app.inject({method: "GET", url: `${subscription}/deliveries`, headers: ownerHeaders})).statusCode, 200);
+    assert.equal((await app.inject({method: "POST", url: `${subscription}/rotate`, headers: ownerHeaders})).statusCode, 200);
+    assert.equal((await app.inject({method: "POST", url: `${subscription}/resume`, headers: ownerHeaders})).statusCode, 200);
+    const other = db.assistantConnections.create(owner, "Other", {operations: "all", projects: "all"});
+    const wrong = `/api/assistant-connections/${other.connection.id}/event-subscriptions/${listed.subscriptions[0].subscriptionId}`;
+    assert.equal((await app.inject({method: "POST", url: `${wrong}/rotate`, headers: ownerHeaders})).statusCode, 400);
+    assert.equal((await app.inject({method: "DELETE", url: subscription, headers: ownerHeaders})).statusCode, 200);
+    assert.equal((await app.inject({method: "GET", url: subscription, headers: ownerHeaders})).statusCode, 400);
   } finally { await app.close(); await worker.close(); db.close(); }
 });
 
@@ -224,4 +274,30 @@ test("legacy subscription migration preserves queued delivery identities and for
     sql.prepare("DELETE FROM outbound_event_subscriptions WHERE subscription_id=?").run("subscription-fixture");
     assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM outbound_event_deliveries").get()!.n, 0);
   } finally { sql.close(); }
+});
+
+test("non-personal organization owners can inspect and manage their exact private callback policy through scoped routes", async () => {
+  const {db, owner} = setup();
+  const app = Fastify();
+  db.raw().prepare("INSERT INTO identity_organizations VALUES (?,?,?,?)").run("tenant-fixture", "Tenant Fixture", 1, 1);
+  db.raw().prepare("INSERT INTO identity_memberships VALUES (?,?,?,?,?)").run("tenant-fixture", owner.userId, "owner", 1, 1);
+  const tenant = db.operatingHumanPrincipal(owner.userId, "tenant-fixture")!;
+  const connection = db.assistantConnections.create(tenant, "Tenant Connection", {operations: "all", projects: "all"}).connection;
+  const worker = new OutboundEventsService(db, quiet, (async () => [{address: "10.23.45.67", family: 4}]) as never);
+  registerAssistantWorkOwnerRoutes(app, {db, outboundEvents: worker, requestHuman: req => req.headers.authorization === "Bearer tenant-fixture" ? tenant : null});
+  const path = `/api/assistant-connections/${connection.id}/event-subscriptions`, headers = {authorization: "Bearer tenant-fixture"};
+  try {
+    assert.equal(isOrganizationAdministrationRoute("/api/assistant-connections/:id/event-subscriptions/:subscriptionId/rotate"), true);
+    const created = await app.inject({method: "POST", url: path, headers,
+      payload: {callbackUrl: "https://events.example.test/hook", eventKinds: ["session.completed"], privateAddresses: ["10.23.45.67"]}});
+    assert.equal(created.statusCode, 200);
+    const subscription = `${path}/${created.json().subscription.subscriptionId}`;
+    const read = await app.inject({method: "GET", url: subscription, headers});
+    assert.deepEqual(read.json().privateAddresses, ["10.23.45.67"]);
+    assert.equal("secret" in read.json(), false);
+    const rotated = await app.inject({method: "POST", url: `${subscription}/rotate`, headers});
+    assert.equal(rotated.statusCode, 200);
+    assert.deepEqual(rotated.json().subscription.privateAddresses, ["10.23.45.67"]);
+    assert.equal((await app.inject({method: "DELETE", url: subscription, headers})).statusCode, 200);
+  } finally {await app.close(); await worker.close(); db.close();}
 });

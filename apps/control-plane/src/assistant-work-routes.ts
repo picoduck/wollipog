@@ -25,7 +25,7 @@ export function registerAssistantWorkOperations(db: ControlPlaneDb, operations: 
   const schema = {type: "object", properties: {sessionId: {type: "string"}, workId: {type: "string"},
     bindingId: {type: "string"}, operationId: {type: "string"}}, required: ["sessionId", "workId"], additionalProperties: false};
   operations.register({name: "assistant_work_track", description: "Track existing work using an explicit owner-issued destination binding. This grants no session mutation authority.",
-    inputSchema: schema, resolveTarget: target, ownerCanAccess: (owner, resource) => db.canAccessSession(owner, resource.id),
+    inputSchema: {...schema, required: ["sessionId", "workId", "bindingId"]}, resolveTarget: target, ownerCanAccess: (owner, resource) => db.canAccessSession(owner, resource.id),
     execute: (args, context) => {
       const input = record(args);
       return db.assistantWork.track(operations, context.connection.id, {workId: text(input.workId),
@@ -33,7 +33,8 @@ export function registerAssistantWorkOperations(db: ControlPlaneDb, operations: 
         ...(input.operationId === undefined ? {} : {operationId: text(input.operationId)})});
     }});
   operations.register({name: "assistant_work_read", description: "Read current authorized work state and attention resolution coordinates. Reply content requires a separate current source-access check.",
-    inputSchema: schema, resolveTarget: target, ownerCanAccess: (owner, resource) => db.canAccessSession(owner, resource.id),
+    inputSchema: {type: "object", properties: {sessionId: {type: "string"}, workId: {type: "string"}}, required: ["sessionId", "workId"], additionalProperties: false},
+    resolveTarget: target, ownerCanAccess: (owner, resource) => db.canAccessSession(owner, resource.id),
     execute: (args, context) => {
       const input = record(args);
       const work = db.assistantWork.authorize(operations, context.connection.id, text(input.workId));
@@ -78,6 +79,25 @@ export function registerAssistantWorkOwnerRoutes(app: FastifyInstance, deps: {
     try { return await action(req); }
     catch (error) { if (error instanceof AssistantRefusal) return reply.code(400).send({error: error.message}); throw error; }
   };
+  const subscriptionId = (req: FastifyRequest): string => {
+    const {connectionId} = owner(req);
+    const id = text((req.params as {subscriptionId: string}).subscriptionId);
+    const subscription = deps.db.getOutboundEventSubscription(id);
+    if (!subscription || subscription.scope.kind !== "assistant" || subscription.scope.connectionId !== connectionId) {
+      throw new AssistantRefusal("Event subscription not found for this connection owner.");
+    }
+    return id;
+  };
+  app.get("/api/assistant-connections/:id/event-subscriptions/:subscriptionId", handle(req =>
+    deps.outboundEvents.get(subscriptionId(req)).data));
+  app.get("/api/assistant-connections/:id/event-subscriptions/:subscriptionId/deliveries", handle(req =>
+    deps.outboundEvents.deliveries(subscriptionId(req)).data));
+  app.post("/api/assistant-connections/:id/event-subscriptions/:subscriptionId/rotate", handle(req =>
+    deps.outboundEvents.rotate(subscriptionId(req)).data));
+  app.post("/api/assistant-connections/:id/event-subscriptions/:subscriptionId/resume", handle(req =>
+    deps.outboundEvents.resume(subscriptionId(req)).data));
+  app.delete("/api/assistant-connections/:id/event-subscriptions/:subscriptionId", handle(req =>
+    deps.outboundEvents.revoke(subscriptionId(req)).data));
   app.post("/api/assistant-connections/:id/destination-bindings", handle(req => {
     const {principal, connectionId} = owner(req);
     return deps.db.assistantWork.createBinding(principal, connectionId, record(req.body) as unknown as Omit<AssistantDestinationBinding, "id" | "connectionId" | "revision" | "revoked">);

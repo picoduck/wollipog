@@ -9566,6 +9566,8 @@ export type OutboundEventSubscriptionState = "active" | "paused";
 export interface OutboundEventSubscriptionView {
   subscriptionId: string;
   callbackUrl: string;
+  /** Owner-visible exact-address policy; never included in event envelopes or journals. */
+  privateAddresses?: string[];
   scope: OutboundEventSubscriptionScope;
   eventKinds: OutboundEventKind[];
   includeSessionName: boolean;

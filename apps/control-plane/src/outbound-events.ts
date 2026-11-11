@@ -128,7 +128,7 @@ export function validatePrivateCallbackAddresses(value: unknown): value is strin
   privateNetworks.addSubnet("fc00::", 7, "ipv6");
   return value.every(address => typeof address === "string" && address !== "100.100.100.200" && !address.toLowerCase().startsWith("::ffff:") &&
     (isIP(address) === 4 ? privateNetworks.check(address, "ipv4") :
-      isIP(address) === 6 && privateNetworks.check(address, "ipv6")));
+      isIP(address) === 6 && /^f[cd][0-9a-f]{2}:/i.test(address) && privateNetworks.check(address, "ipv6")));
 }
 
 export async function resolveOutboundTarget(raw: string, lookup: Lookup = dnsLookup, privateAddresses?: string[]): Promise<ServiceResult<ResolvedTarget>> {
@@ -429,18 +429,19 @@ export class OutboundEventsService {
     const timeout = setTimeout(() => controller.abort("timeout" satisfies DeliveryAbortReason), this.requestTimeoutMs);
     timeout.unref?.();
     let statusCode: number | undefined;
+    let authorizationRefused = false;
     let error: string | undefined;
     const startedAt = Date.now();
     try {
       if (delivery.assistantConnectionId && !this.db.assistantWork.authorizeDelivery(delivery.assistantConnectionId, delivery.payloadJson)) {
-        statusCode = 403;
+        authorizationRefused = true;
         throw new Error("Assistant work or destination authority is no longer available");
       }
       const target = await abortable(resolveOutboundTarget(delivery.callbackUrl, this.lookup, delivery.privateAddresses), controller.signal);
       if (!target.ok || !target.data) throw new Error(target.error ?? "Callback target is invalid");
       // DNS resolution is asynchronous: grants and bindings may have changed during it.
       if (delivery.assistantConnectionId && !this.db.assistantWork.authorizeDelivery(delivery.assistantConnectionId, delivery.payloadJson)) {
-        statusCode = 403;
+        authorizationRefused = true;
         throw new Error("Assistant work or destination authority is no longer available");
       }
       const response = await this.transport(target.data, delivery, controller.signal);
@@ -468,6 +469,8 @@ export class OutboundEventsService {
       error = abortReason === "rotation"
         ? "Delivery deferred after subscription secret rotation"
         : "Delivery deferred during control-plane shutdown";
+    } else if (authorizationRefused) {
+      disposition = "failed";
     } else if (statusCode !== undefined && statusCode >= 200 && statusCode < 300) {
       disposition = "delivered";
       error = undefined;

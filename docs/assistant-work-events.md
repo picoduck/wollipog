@@ -47,6 +47,9 @@ different session, binding or operation correlation is refused. Each result incl
 and connection IDs. Use those IDs to distinguish named installations, never names or MCP prefixes.
 The read grant is also required when tracking work; project grants and owner resource access are
 checked from current session placement. Work snapshots contain no results or destination coordinates.
+Deleting a source session leaves the minimal correlation as an unreadable identity tombstone.
+It prevents a delayed event or a reused work ID from silently adopting another session/destination;
+current authorization refuses access after the source is gone. No transcript or result is retained.
 
 For #4464's receipt service:
 
@@ -68,14 +71,15 @@ For #4464's receipt service:
 
 Session and attention changes advance durable per-work revisions independently of webhooks. After
 reconnect, page all current work, follow `nextAfter` even on an empty filtered page, and compare
-revisions with the connector's durable progress. Start another sweep from the beginning to observe
-work inserted behind a previous cursor. Selected-project grants must pass an allowed `projectId`;
+revisions with the connector's durable progress. Cursors represent metadata-only positions, never
+caller-chosen IDs from filtered-out work. Start another sweep from the beginning to observe changed
+state on older rows. Selected-project grants must pass an allowed `projectId`;
 every returned item also passes its current source and destination checks. Revoked/unreadable items
 are omitted; omission does not authorize a private reply or mean that execution failed.
 
 This is current-state recovery, not an unlimited historical event stream. Paused subscriptions can
-miss transient states. Current pending attention and final state remain recoverable. Exactly-once
-commands depend on command identity/receipts, not on completeness or ordering of wakeup delivery.
+miss transient states. Current pending attention and final state remain recoverable. Preventing
+duplicate commands depends on command identity/receipts and never on wakeup ordering or completeness.
 Each connection may hold at most 100 work correlations for one session, bounding a single wakeup's
 work references. Reuse a work ID for the same accepted work rather than creating one per retry.
 
@@ -88,8 +92,11 @@ The owner creates and lists subscriptions through:
 
 Creation takes `callbackUrl` and lifecycle `eventKinds`. The service sets the Assistant connection
 scope and disables content options. The response returns the signing secret once; keep it separate
-from the Assistant bearer and OpenClaw hook token. The existing detail, delivery-journal, rotate,
-resume and revoke routes work for the issuing owner. Connection-owned subscriptions are excluded
+from the Assistant bearer and OpenClaw hook token. Detail, delivery-journal, rotate, resume and
+revoke routes are under `/api/assistant-connections/:id/event-subscriptions/:subscriptionId`
+(GET, GET `/deliveries`, POST `/rotate`, POST `/resume`, DELETE). They check the exact connection
+owner and work for non-personal organizations too. Owner views expose the configured exact private
+address set for inspection; events and journals never include it. Connection-owned subscriptions are excluded
 from the project/automation UI list. Ordinary session credentials and Assistant bearer credentials
 cannot configure standing callback authority.
 

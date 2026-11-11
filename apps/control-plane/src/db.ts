@@ -26438,7 +26438,7 @@ export class ControlPlaneDb {
       if (JSON.stringify(existing) !== JSON.stringify(identified)) {
         this.advanceSessionAttentionRevision(id);
         if (identified) this.enqueueOutboundSessionEventInTransaction({
-          sourceKey: `assistant-attention:${id}:${(this.stmt("SELECT revision FROM session_attention WHERE session_id=?").get(id) as {revision: number}).revision}`,
+          sourceKey: `assistant-attention:${id}:${(this.stmt("SELECT revision FROM session_attention WHERE session_id=?").get(id) as {revision: number} | undefined)?.revision ?? 0}`,
           kind: "session.input_required", sessionId: id, occurredAt: Date.now(), assistantOnly: true,
         });
       }
@@ -35831,6 +35831,7 @@ export class ControlPlaneDb {
     return {
       subscriptionId: row.subscription_id,
       callbackUrl: row.callback_url,
+      ...(row.private_addresses_json ? {privateAddresses: JSON.parse(row.private_addresses_json)} : {}),
       scope: row.scope_kind === "project"
         ? { kind: "project", projectId: row.project_id! }
         : row.scope_kind === "automation" ? { kind: "automation", automationId: row.automation_id! }

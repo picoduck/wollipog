@@ -72,12 +72,13 @@ export class AssistantWorkStore {
       revision INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY(connection_id) REFERENCES assistant_connections(id));
       CREATE TABLE IF NOT EXISTS assistant_work (
+      position INTEGER PRIMARY KEY AUTOINCREMENT,
       connection_id TEXT NOT NULL, work_id TEXT NOT NULL, session_id TEXT NOT NULL,
       binding_id TEXT NOT NULL, operation_id TEXT, revision INTEGER NOT NULL DEFAULT 1,
       status TEXT NOT NULL, attention_revision INTEGER NOT NULL,
-      PRIMARY KEY(connection_id,work_id),
+      UNIQUE(connection_id,work_id),
       FOREIGN KEY(connection_id) REFERENCES assistant_connections(id),
-      FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+      -- Keep the content-free correlation as a no-reuse tombstone after source deletion.
       FOREIGN KEY(binding_id) REFERENCES assistant_destination_bindings(id));
       CREATE INDEX IF NOT EXISTS assistant_work_session ON assistant_work(session_id);
       CREATE TABLE IF NOT EXISTS assistant_work_origins (
@@ -249,16 +250,17 @@ export class AssistantWorkStore {
     });
   }
 
-  /** State recovery is independent of webhook success. No delivery-journal cursor is needed.
-   * Bounded pages use an immutable work ID cursor; clients compare per-work revisions. */
+  /** State recovery is independent of webhook success. Bounded pages use a metadata-only
+   * position cursor, so a filtered page cannot disclose an unauthorized work's caller-chosen ID. */
   reconcile(operations: AssistantOperations, connectionId: string, after = "", limit = 100): {
     items: AssistantWork[]; nextAfter: string | null;
   } {
-    if (typeof after !== "string" || after.length > 128 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
-      throw new AssistantRefusal("Use a work ID cursor and a page size from 1 to 100.");
+    const position = after === "" ? 0 : typeof after === "string" && /^awc_[1-9][0-9]*$/.test(after) ? Number(after.slice(4)) : NaN;
+    if (!Number.isSafeInteger(position) || position < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new AssistantRefusal("Use the returned work cursor and a page size from 1 to 100.");
     }
-    const rows = this.sql.prepare("SELECT work_id FROM assistant_work WHERE connection_id=? AND work_id>? ORDER BY work_id LIMIT ?")
-      .all(connectionId, after, limit + 1) as {work_id: string}[];
+    const rows = this.sql.prepare("SELECT position,work_id FROM assistant_work WHERE connection_id=? AND position>? ORDER BY position LIMIT ?")
+      .all(connectionId, position, limit + 1) as {position: number; work_id: string}[];
     const page = rows.slice(0, limit);
     const items = page.flatMap(row => {
       try {
@@ -271,7 +273,7 @@ export class AssistantWorkStore {
         return [this.get(connectionId, row.work_id)!];
       } catch (error) { if (error instanceof AssistantRefusal) return []; throw error; }
     });
-    return {items, nextAfter: rows.length > limit ? page.at(-1)!.work_id : null};
+    return {items, nextAfter: rows.length > limit ? `awc_${page.at(-1)!.position}` : null};
   }
 
   forSession(sessionId: string): AssistantWork[] {
