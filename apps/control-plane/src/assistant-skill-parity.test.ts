@@ -411,6 +411,9 @@ test("verified restore/discard rejections retain their safe remedy with uncertai
     const args = {runnerId: "machine", commandId: "rejected", expectedRevision: f.revision(), payload: body};
     await assert.rejects(f.call(operation, args), /Outcome uncertain.*Observation changed\. Sync and review the copy again/);
     assert.equal(f.receipts.get(f.issued.connection.id, "rejected")?.status, "uncertain");
+    const activity = f.db.assistantConnections.activity(f.issued.connection.id) as Array<{operation: string; outcome: string}>;
+    assert.equal(activity.find(entry => entry.operation === operation)?.outcome, "failed");
+    assert.ok(!JSON.stringify(activity).includes("Observation changed"), "activity stores no raw refusal/result text");
     const count = f.state.calls.length;
     assert.equal((await f.call(operation, args)).receipt.status, "uncertain");
     assert.equal(f.state.calls.length, count);

@@ -73,6 +73,8 @@ Uncertain restore/discard rejections retain the service's sanitized remedy under
 Adoption preparation sync may itself change Machine files: an adoption refused before dispatch
 still requires reconciling preparation, and reports that adoption was not sent with the preflight
 remedy. Neither case silently permits replay.
+Connection activity records such calls as `failed`, distinct from an authority `refused` result;
+inspect the durable command receipt to distinguish an uncertain effect from a no-effect refusal.
 
 ## Human Authority and Evidence Limits
 

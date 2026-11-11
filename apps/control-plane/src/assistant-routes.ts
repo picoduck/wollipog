@@ -3,6 +3,7 @@ import { extractBearer } from "./auth.js";
 import type { HumanPrincipal } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
 import { assistantGrant, AssistantOperations, AssistantRefusal } from "./assistant-connections.js";
+import {ManagementUncertainOutcome} from "./assistant-management-command.js";
 
 export function createAssistantOperations(db: ControlPlaneDb): AssistantOperations {
   const operations = new AssistantOperations(db.assistantConnections, (user, organization) => db.operatingHumanPrincipal(user, organization));
@@ -107,7 +108,9 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
       } else return rpcError(-32601, "Method not supported. Use initialize, ping, tools/list or tools/call with MCP Streamable HTTP.");
       return {jsonrpc: "2.0", id: message.id, result};
     } catch (error) {
-      if (error instanceof AssistantRefusal) {
+      // Only explicit application-safe errors may expose text; uncertainty is a failed call in
+      // activity, not an authorization refusal or proof that the command had no effects.
+      if (error instanceof AssistantRefusal || error instanceof ManagementUncertainOutcome) {
         if (message.method !== "tools/call") return rpcError(-32001, error.message);
         return {jsonrpc: "2.0", id: message.id ?? null, result: {isError: true, content: [{type: "text", text: error.message}]}};
       }

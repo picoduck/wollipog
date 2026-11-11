@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import { AssistantRefusal, type AssistantConnection, type AssistantOperationReceipt, type AssistantTarget } from "./assistant-connections.js";
 import type { AssistantCommandConfirmations } from "./assistant-command-confirmations.js";
 
-/** A safe, actionable refusal message whose receipt must retain possible effects. Unlike an
+/** A safe, actionable operation error whose receipt must retain possible effects. Unlike an
  * arbitrary Error, this message may be returned through MCP without exposing transport logs. */
-export class ManagementUncertainOutcome extends AssistantRefusal {}
+export class ManagementUncertainOutcome extends Error {}
 
 /** Narrow adapter to the operation-agnostic durable command store. No arguments or results persist. */
 export interface ManagementCommands {
@@ -70,8 +70,7 @@ export class ManagementMutations {
       this.commands.settle(connection.id, args.operationId, "succeeded", input.resourceId?.());
       return {receipt: this.commands.get(connection.id, args.operationId), result, impact};
     } catch (error) {
-      this.commands.settle(connection.id, args.operationId,
-        error instanceof AssistantRefusal && !(error instanceof ManagementUncertainOutcome) ? "failed" : "uncertain");
+      this.commands.settle(connection.id, args.operationId, error instanceof AssistantRefusal ? "failed" : "uncertain");
       throw error;
     }
   }
