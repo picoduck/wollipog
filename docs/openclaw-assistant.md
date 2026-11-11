@@ -245,8 +245,14 @@ OpenClaw executable, resolving to its package's `openclaw.mjs`, rather than an u
 This adapter does not establish model tool selection, Gateway policy enforcement or native Discord
 admission; its direct runtime API exercise is separate from the real CLI probe.
 
-Configuration mutation is pending #4465's merged registrations. The current script reports that
-step pending; it must be integrated before claiming the full smoke acceptance criterion.
+Configuration mutation uses #4465's [skill tools](assistant-management.md): create an unassigned
+synthetic skill, add a second immutable version with `expectedRevision` and a stable `operationId`,
+then verify content, revision and receipt readback after control-plane/SQLite reopen. A duplicate
+operation returns the same receipt without creating a third version. The stored library mutation
+and installed OpenClaw MCP calls are real; there is no assignment or runner deployment. Configuration
+tools use `operationId` for mutations; reconcile it through `command_get` as `commandId` on the
+same connection. This smoke verifies a skill configuration change, not automation scheduling or
+skill synchronization to a real runner. Those execution/deployment outcomes remain for #4468.
 
 ## OpenClaw References
 
