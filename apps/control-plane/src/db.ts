@@ -22,6 +22,8 @@ import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 
 import { DatabaseSync } from "node:sqlite";
 import { AssistantConnections } from "./assistant-connections.js";
+import { AssistantWorkStore } from "./assistant-work.js";
+import { installAssistantOutboundScope } from "./assistant-outbound-schema.js";
 import { runnerRetryConnection } from "./runner-persistence.js";
 import { AUTOMATION_APPROVAL_TTL_MS } from "./automation-creation-lifecycle.js";
 import {
@@ -4563,7 +4565,8 @@ interface AutomationSessionOriginRow {
 
 interface OutboundEventSubscriptionRow {
   subscription_id: string; callback_url: string; secret_key: string; generation: number;
-  scope_kind: "project" | "automation"; project_id: string | null; automation_id: string | null;
+  scope_kind: "project" | "automation" | "assistant"; project_id: string | null; automation_id: string | null;
+  assistant_connection_id: string | null; private_addresses_json: string | null;
   event_kinds_json: string; include_session_name: number; include_question_title: number;
   state: OutboundEventSubscriptionState; pause_reason: string | null; consecutive_failures: number;
   created_by_kind: GovernanceActor["kind"]; created_by_id: string | null;
@@ -4985,6 +4988,8 @@ export class HourlyUsageUnavailableError extends RangeError {
 }
 
 export interface NewSessionInput {
+  /** Server-validated origin reserved alongside the Assistant command receipt. */
+  assistantWorkOrigin?: {connectionId: string; commandId: string};
   /** Server-owned campaign fields and the actual implementing harness, captured atomically. */
   reviewPolicyCapture?: ReviewPolicyCapture;
   /** Authenticated launching user for personal review settings, including shared Projects. */
@@ -5146,6 +5151,8 @@ export interface ClaimedOutboundEventDelivery {
   callbackUrl: string;
   secret: string;
   payloadJson: string;
+  assistantConnectionId?: string;
+  privateAddresses?: string[];
   attempt: number;
   leaseId: string;
 }
@@ -6030,6 +6037,7 @@ export class OccupiedUnreadLocationError extends Error {
 
 export class ControlPlaneDb {
   readonly assistantConnections: AssistantConnections;
+  readonly assistantWork: AssistantWorkStore;
   private readonly providerPublications: ProviderProfilePublicationStore;
   readonly campaignBudgets: CampaignBudgetLedger;
   readonly campaignReviewJobs: CampaignReviewJobs;
@@ -6078,6 +6086,8 @@ export class ControlPlaneDb {
       AssistantConnections.install(db);
       installAssistantAutomationAuthority(db);
       installSkillManagementRevisions(db);
+      installAssistantOutboundScope(db);
+      AssistantWorkStore.install(db);
       CampaignBudgetLedger.install(db);
       CampaignReviewJobs.install(db);
       SessionReviewJobs.install(db);
@@ -6087,6 +6097,7 @@ export class ControlPlaneDb {
       ReviewSettingsStore.install(db);
     }
     this.assistantConnections = new AssistantConnections(db);
+    this.assistantWork = new AssistantWorkStore(db, this, this.assistantConnections);
     this.providerPublications = new ProviderProfilePublicationStore(db, controlPlaneInstanceId);
     this.campaignBudgets = new CampaignBudgetLedger(db);
     this.campaignReviewJobs = new CampaignReviewJobs(db,this.campaignBudgets,(rootId)=>{
@@ -19455,6 +19466,7 @@ export class ControlPlaneDb {
         ?? (scope.owner.kind === "user" ? scope.owner.userId : null);
       if (reviewUserId) this.reviewSettings.attributeSession(input.id, reviewUserId);
       if (input.reviewPolicyCapture) this.reviewSettings.captureSessionPolicy(input.id, reviewUserId, projectId, input.reviewPolicyCapture);
+      if (input.assistantWorkOrigin) this.assistantWork.attachAcceptedOrigin(input.assistantWorkOrigin, input.id);
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-created:${input.id}`,
         kind: "session.created",
@@ -26421,14 +26433,19 @@ export class ControlPlaneDb {
   }
 
   setPendingApproval(id: string, approval: PendingApproval | null): void {
-    const existing = parseJson<PendingApproval>((this.stmt(
-      "SELECT pending_approval FROM sessions WHERE id=?",
-    ).get(id) as { pending_approval: string | null } | undefined)?.pending_approval ?? null);
-    const identified = this.withoutSubmittedAsyncQuestions(id,
-      approval ? pendingApprovalWithOccurrenceIds(approval, existing) : null);
-    this.stmt("UPDATE sessions SET pending_approval=? WHERE id=?")
-      .run(identified ? JSON.stringify(identified) : null, id);
-    if (JSON.stringify(existing) !== JSON.stringify(identified)) this.advanceSessionAttentionRevision(id);
+    this.atomic(() => {
+      const existing = parseJson<PendingApproval>((this.stmt(
+        "SELECT pending_approval FROM sessions WHERE id=?",
+      ).get(id) as { pending_approval: string | null } | undefined)?.pending_approval ?? null);
+      const identified = this.withoutSubmittedAsyncQuestions(id,
+        approval ? pendingApprovalWithOccurrenceIds(approval, existing) : null);
+      this.stmt("UPDATE sessions SET pending_approval=? WHERE id=?")
+        .run(identified ? JSON.stringify(identified) : null, id);
+      if (JSON.stringify(existing) !== JSON.stringify(identified)) {
+        this.advanceSessionAttentionRevision(id);
+        this.enqueueOutboundAssistantAttentionInTransaction(id, pendingRequests(identified), Date.now());
+      }
+    });
   }
 
   getPolicyHookApproval(sessionId: string, requestId: string): PolicyHookApprovalRecord | null {
@@ -34463,15 +34480,21 @@ export class ControlPlaneDb {
     includeQuestionTitle: boolean;
     actor: GovernanceActor;
     now: number;
+    privateAddresses?: string[];
   }): OutboundEventSubscriptionView | null {
     if (input.scope.kind === "project" && !this.getProject(input.scope.projectId)) return null;
     if (input.scope.kind === "automation" && !this.getAutomation(input.scope.automationId)) return null;
+    if (input.scope.kind === "assistant") {
+      const connection = this.assistantConnections.get(input.scope.connectionId);
+      if (!connection || connection.revoked || input.actor.kind !== "human" || input.actor.id !== connection.ownerUserId ||
+          this.operatingHumanPrincipal(connection.ownerUserId, connection.organizationId)?.role !== "owner") return null;
+    }
     this.stmt(
       `INSERT INTO outbound_event_subscriptions
        (subscription_id,callback_url,secret_key,generation,scope_kind,project_id,automation_id,
         event_kinds_json,include_session_name,include_question_title,state,created_by_kind,
-        created_by_id,created_at,updated_at)
-       VALUES (?,?,?,1,?,?,?,?,?,?,'active',?,?,?,?)`,
+        created_by_id,created_at,updated_at,assistant_connection_id,private_addresses_json)
+       VALUES (?,?,?,1,?,?,?,?,?,?,'active',?,?,?,?,?,?)`,
     ).run(
       input.subscriptionId,
       input.callbackUrl,
@@ -34486,13 +34509,15 @@ export class ControlPlaneDb {
       input.actor.id ?? null,
       input.now,
       input.now,
+      input.scope.kind === "assistant" ? input.scope.connectionId : null,
+      input.privateAddresses?.length ? JSON.stringify(input.privateAddresses) : null,
     );
     return this.getOutboundEventSubscription(input.subscriptionId);
   }
 
   listOutboundEventSubscriptions(): OutboundEventSubscriptionView[] {
     const rows = this.stmt(
-      `SELECT * FROM outbound_event_subscriptions WHERE revoked_at IS NULL
+      `SELECT * FROM outbound_event_subscriptions WHERE revoked_at IS NULL AND scope_kind<>'assistant'
        ORDER BY created_at, subscription_id`,
     ).all() as unknown as OutboundEventSubscriptionRow[];
     return rows.map((row) => this.outboundEventSubscription(row));
@@ -34571,7 +34596,7 @@ export class ControlPlaneDb {
          WHERE status='delivering' AND lease_expires_at<=?`,
       ).run(now, now, now);
       const rows = this.stmt(
-        `SELECT delivery.*,subscription.callback_url,subscription.secret_key
+        `SELECT delivery.*,subscription.callback_url,subscription.secret_key,subscription.assistant_connection_id,subscription.private_addresses_json
          FROM outbound_event_deliveries delivery INDEXED BY idx_outbound_event_deliveries_retry
          JOIN outbound_event_subscriptions subscription
            ON subscription.subscription_id=delivery.subscription_id
@@ -34580,7 +34605,7 @@ export class ControlPlaneDb {
            AND delivery.payload_json IS NOT NULL
          ORDER BY delivery.next_attempt_at,delivery.created_at,delivery.delivery_id LIMIT ?`,
       ).all(now, Math.max(1, Math.min(64, Math.floor(limit)))) as unknown as Array<
-        OutboundEventDeliveryRow & { callback_url: string; secret_key: string }
+        OutboundEventDeliveryRow & { callback_url: string; secret_key: string; assistant_connection_id: string | null; private_addresses_json: string | null }
       >;
       const claimed: ClaimedOutboundEventDelivery[] = [];
       for (const row of rows) {
@@ -34599,6 +34624,8 @@ export class ControlPlaneDb {
           callbackUrl: row.callback_url,
           secret: row.secret_key,
           payloadJson: row.payload_json!,
+          ...(row.assistant_connection_id ? {assistantConnectionId: row.assistant_connection_id} : {}),
+          ...(row.private_addresses_json ? {privateAddresses: JSON.parse(row.private_addresses_json)} : {}),
           attempt: row.attempt_count + 1,
           leaseId,
         });
@@ -34611,7 +34638,7 @@ export class ControlPlaneDb {
     deliveryId: string;
     subscriptionId: string;
     leaseId: string;
-    disposition: "delivered" | "retry" | "failed" | "deferred";
+    disposition: "delivered" | "retry" | "failed" | "deferred" | "dropped";
     now: number;
     statusCode?: number;
     nextAttemptAt?: number;
@@ -35815,9 +35842,11 @@ export class ControlPlaneDb {
     return {
       subscriptionId: row.subscription_id,
       callbackUrl: row.callback_url,
+      ...(row.private_addresses_json ? {privateAddresses: JSON.parse(row.private_addresses_json)} : {}),
       scope: row.scope_kind === "project"
         ? { kind: "project", projectId: row.project_id! }
-        : { kind: "automation", automationId: row.automation_id! },
+        : row.scope_kind === "automation" ? { kind: "automation", automationId: row.automation_id! }
+        : { kind: "assistant", connectionId: row.assistant_connection_id! },
       eventKinds: jsonArray(row.event_kinds_json).filter((kind): kind is OutboundEventKind =>
         OUTBOUND_EVENT_KINDS.has(kind as OutboundEventKind)),
       includeSessionName: row.include_session_name === 1,
@@ -35852,6 +35881,13 @@ export class ControlPlaneDb {
     };
   }
 
+  private enqueueOutboundAssistantAttentionInTransaction(sessionId: string, requests: PendingApproval[], now: number): void {
+    for (const request of requests) this.enqueueOutboundSessionEventInTransaction({
+      sourceKey: `assistant-attention:${sessionId}:${request.occurrenceId ?? request.requestId}`,
+      kind: "session.input_required", sessionId, occurredAt: now, assistantOnly: true,
+    });
+  }
+
   private enqueueOutboundStatusEventsInTransaction(input: {
     sessionId: string;
     previousStatus?: SessionStatus;
@@ -35880,6 +35916,10 @@ export class ControlPlaneDb {
         });
       }
     }
+    // Snapshot and direct pending/status producers share the occurrence fence. Async asks
+    // also wake while execution continues; a status change must not create a second wake.
+    this.enqueueOutboundAssistantAttentionInTransaction(input.sessionId, pendingRequests(input.pending)
+      .filter(request => input.status === "input_required" || (request.async && !isTerminal(input.status))), input.now);
     if (input.status !== "input_required") return;
     const sessionRow = this.stmt("SELECT * FROM sessions WHERE id=?")
       .get(input.sessionId) as unknown as SessionRow | undefined;
@@ -35897,6 +35937,7 @@ export class ControlPlaneDb {
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-input-required:${input.sessionId}:${occurrenceId}`,
         kind: "session.input_required",
+        excludeAssistant: true,
         sessionId: input.sessionId,
         occurredAt: input.now,
         ...(request.kind === "question" ? { questionTitle: request.title } : {}),
@@ -35963,6 +36004,8 @@ export class ControlPlaneDb {
     occurredAt: number;
     detail?: Pick<OutboundEventEnvelope, "branch" | "pullRequest" | "checks" | "cost">;
     questionTitle?: string;
+    assistantOnly?: boolean;
+    excludeAssistant?: boolean;
   }): number {
     const session = this.stmt(
       `SELECT id,project_id,title FROM sessions WHERE id=?`,
@@ -35978,10 +36021,14 @@ export class ControlPlaneDb {
       `SELECT * FROM outbound_event_subscriptions
        WHERE revoked_at IS NULL AND state='active'
          AND ((scope_kind='project' AND project_id=?) OR
-              (scope_kind='automation' AND automation_id=?))
+              (scope_kind='automation' AND automation_id=?) OR
+              (scope_kind='assistant' AND assistant_connection_id IN (SELECT connection_id FROM assistant_work WHERE session_id=?)))
        ORDER BY created_at,subscription_id`,
-    ).all(session.project_id, origin?.automation_id ?? null) as unknown as OutboundEventSubscriptionRow[])
-      .filter((row) => jsonArray(row.event_kinds_json).includes(input.kind));
+    ).all(session.project_id, origin?.automation_id ?? null, input.sessionId) as unknown as OutboundEventSubscriptionRow[])
+      .filter((row) => jsonArray(row.event_kinds_json).includes(input.kind))
+      .filter((row) => !input.assistantOnly || row.scope_kind === "assistant")
+      .filter((row) => !input.excludeAssistant || row.scope_kind !== "assistant")
+      .filter((row) => row.scope_kind !== "assistant" || this.assistantWork.authorizedForSession(row.assistant_connection_id!, input.sessionId).length > 0);
     if (matching.length === 0) return 0;
 
     const eventId = `oev_${randomUUID().replace(/-/g, "")}`;
@@ -36030,6 +36077,15 @@ export class ControlPlaneDb {
           ? { questionTitle: input.questionTitle.slice(0, 240) }
           : {}),
       };
+      if (row.scope_kind === "assistant") {
+        const work = this.assistantWork.authorizedForSession(row.assistant_connection_id!, input.sessionId);
+        // Assistant wakeups never inherit automation parameters, names, question text or results.
+        for (const key of Object.keys(envelope)) {
+          if (!["version", "eventId", "kind", "occurredAt", "sessionId", "projectId"].includes(key)) delete (envelope as unknown as Record<string, unknown>)[key];
+        }
+        envelope.assistant = {controlPlaneId: this.instanceId(), connectionId: row.assistant_connection_id!,
+          work: work.map(({workId, revision, attentionRevision}) => ({workId, revision, attentionRevision}))};
+      }
       const payload = JSON.stringify(envelope);
       if (Buffer.byteLength(payload) > OUTBOUND_EVENT_BODY_LIMIT_BYTES) {
         this.stmt(
