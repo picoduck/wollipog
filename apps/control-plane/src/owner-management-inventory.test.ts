@@ -41,7 +41,8 @@ test("production composition inventory is exhaustive; unresolved gaps cannot cou
   // The Discord composition must retain the authenticated-origin session seam and both
   // management registration families. A conflict resolution must not silently drop one.
   for (const tool of ["session_launch", "command_get", "assistant_work_track", "assistant_work_read",
-    "assistant_work_reconcile", "auto_list", "skill_pin_get", "session_config", "location_add"]) {
+    "assistant_work_reconcile", "auto_list", "skill_pin_get", "session_config", "location_add",
+    "session_work_get", "queue_get", "queue_edit", "queue_cancel", "session_steer", "session_invoke"]) {
     assert.ok(snapshot.tools.includes(tool), `${tool}: production composition lost a registration family`);
   }
   const manifest = JSON.parse(readFileSync(new URL("../../../docs/assistant-owner-capabilities.json", import.meta.url), "utf8")) as

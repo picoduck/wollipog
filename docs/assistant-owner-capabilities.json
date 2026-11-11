@@ -269,7 +269,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/sessions/:id/queued/:promptId/edit": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "queue_get"
+    ]
   },
   "GET /api/sessions/:id/reminder": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -642,13 +644,17 @@
     ]
   },
   "POST /api/sessions/:id/cancel-queued": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "queue_cancel"
+    ]
   },
   "POST /api/sessions/:id/column": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/command-invocations": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_invoke"
+    ]
   },
   "POST /api/sessions/:id/config": {
     "tools": [
@@ -815,7 +821,9 @@
     ]
   },
   "POST /api/sessions/:id/queued/:promptId/edit": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "queue_edit"
+    ]
   },
   "POST /api/sessions/:id/reprocess": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -876,7 +884,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/steer": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_steer"
+    ]
   },
   "POST /api/sessions/:id/steering/:submissionId/resolve": {
     "tools": [

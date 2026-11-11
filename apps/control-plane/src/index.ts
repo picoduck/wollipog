@@ -73,9 +73,7 @@ import {
   workspaceRemovalBlockedMessage,
   validProviderHomeLaunchRefusal,
   scopeAudienceContained,
-  isPromptImageReference,
   isWorkspaceReference,
-  validatePromptImageInputs,
   type AddBoxRequest,
   type AccessScopeChangePreview,
   type AddPodMemberRequest,
@@ -130,7 +128,6 @@ import {
   type ShellView,
   type UserStatus,
   type PromptRequest,
-  type PromptImageInput,
   type InvokeSessionCommandRequest,
   type SteerRequest,
   type RelayPodRequest,
@@ -305,6 +302,8 @@ import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
 import { registerAssistantRoutes } from "./assistant-routes.js";
 import { createSessionWorktreeManagement } from "./session-worktree-management.js";
 import { registerAssistantOwnerManagement } from "./assistant-owner-management.js";
+import { createSessionQueueManagement } from "./session-queue-management.js";
+import { registerAssistantSessionWork } from "./assistant-session-work.js";
 import { createOwnerRunnerManagement } from "./owner-runner-management.js";
 import { createOwnerProjectManagement } from "./owner-project-management.js";
 import { projectName, requestedAccessScope } from "./project-management-validation.js";
@@ -3562,124 +3561,27 @@ app.post("/api/sessions/:id/workspace-references", async (req, reply) => {
   return { reference: r.data };
 });
 
-// Drop one not-yet-started queued prompt (the running turn is unaffected). The runner echoes the
-// updated queue back via session_queue, which refreshes the session — so this is fire-and-forget.
+const sessionQueueManagement = createSessionQueueManagement({db, hub, svc, runnerCapabilityError,
+  warn: error => app.log.warn({error: error instanceof Error ? error.message : String(error)}, "prepared queued-edit image lease cleanup deferred")});
+registerAssistantSessionWork(assistantOperations, {db, svc, receipts: assistantCommandReceipts, queue: sessionQueueManagement});
+
 app.post("/api/sessions/:id/cancel-queued", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const body = (req.body ?? {}) as { promptId?: unknown };
-  if (typeof body.promptId !== "string" || !body.promptId) {
-    return reply.code(400).send({ error: "promptId (string) is required" });
-  }
-  const session = db.getSession(id);
-  if (!session) return reply.code(404).send({ error: "session not found" });
-  if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptCancellation", "queued prompt cancellation");
-  if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  if (!hub.sendToRunner(session.runnerId, { type: "cancel_queued_prompt", sessionId: id, promptId: body.promptId })) {
-    return reply.code(409).send({ error: "runner is offline" });
-  }
-  return reply.code(204).send();
+  const result = sessionQueueManagement.cancel((req.params as {id: string}).id, (req.body as {promptId?: unknown} | null)?.promptId);
+  return reply.code(result.status).send(result.body);
 });
-
 app.get("/api/sessions/:id/queued/:promptId/edit", async (req, reply) => {
-  const { id, promptId } = req.params as { id: string; promptId: string };
-  if (!promptId) return reply.code(400).send({ error: "promptId is required" });
-  const session = db.getSession(id);
-  if (!session) return reply.code(404).send({ error: "session not found" });
-  if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptEditing", "queued prompt editing");
-  if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  const requestId = `read_queue_${randomUUID().slice(0, 12)}`;
+  const {id, promptId} = req.params as {id: string; promptId: string};
   try {
-    const result = await hub.requestFromRunner(session.runnerId, requestId, {
-      type: "read_queued_prompt", requestId, sessionId: id, promptId,
-    }, 10_000);
-    if (result.type !== "read_queued_prompt_result" || result.sessionId !== id || result.promptId !== promptId) {
-      return reply.code(502).send({ error: "unexpected runner reply" });
-    }
-    if (!result.ok || !result.prompt) {
-      return reply.code(409).send({ error: result.error ?? "queued message cannot be edited", reason: result.reason });
-    }
-    return { prompt: result.prompt };
-  } catch (error) {
-    return reply.code(502).send({ error: (error as Error).message });
-  }
+    const result = await sessionQueueManagement.read(id, promptId);
+    return reply.code(result.status).send(result.body);
+  } catch (error) { return reply.code(502).send({error: (error as Error).message}); }
 });
-
 app.post("/api/sessions/:id/queued/:promptId/edit", async (req, reply) => {
-  const { id, promptId } = req.params as { id: string; promptId: string };
-  const body = (req.body ?? {}) as {
-    submissionId?: unknown;
-    expectedRevision?: unknown;
-    text?: unknown;
-    images?: unknown;
-  };
-  if (typeof body.submissionId !== "string" || !body.submissionId.trim()) {
-    return reply.code(400).send({ error: "submissionId is required" });
-  }
-  if (typeof body.expectedRevision !== "string" || !body.expectedRevision.trim()) {
-    return reply.code(400).send({ error: "expectedRevision is required" });
-  }
-  if (typeof body.text !== "string") return reply.code(400).send({ error: "text must be a string" });
-  const images = body.images === undefined ? [] : body.images;
-  if (!Array.isArray(images)) return reply.code(400).send({ error: "images must be an array" });
-  const typedImages = images as PromptImageInput[];
-  const imageValidation = validatePromptImageInputs(typedImages);
-  if (!imageValidation.ok) return reply.code(400).send({ error: imageValidation.error });
-  if (!body.text.trim() && typedImages.length === 0) {
-    return reply.code(400).send({ error: "a queued message cannot be empty" });
-  }
-  const session = db.getSession(id);
-  if (!session) return reply.code(404).send({ error: "session not found" });
-  if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptEditing", "queued prompt editing");
-  if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  if (typedImages.some(isWorkspaceReference)) {
-    const unsupportedWorkspaceReferences = runnerCapabilityError(
-      session.runnerId,
-      "workspaceReferences",
-      "workspace references",
-    );
-    if (unsupportedWorkspaceReferences) {
-      return reply.code(409).send(failureBody(unsupportedWorkspaceReferences));
-    }
-  }
-  const preparedImages = svc.prepareQueuedPromptEditImages(id, typedImages);
-  if (!preparedImages.ok || !preparedImages.data) {
-    return reply.code(preparedImages.status).send(failureBody(preparedImages, "queued message images are invalid"));
-  }
-  const requestId = `edit_queue_${randomUUID().slice(0, 12)}`;
+  const {id, promptId} = req.params as {id: string; promptId: string};
   try {
-    const result = await hub.requestFromRunner(session.runnerId, requestId, {
-      type: "edit_queued_prompt",
-      requestId,
-      submissionId: body.submissionId,
-      sessionId: id,
-      promptId,
-      expectedRevision: body.expectedRevision,
-      text: body.text,
-      images: preparedImages.data,
-    }, 10_000);
-    if (result.type !== "edit_queued_prompt_result" || result.sessionId !== id || result.promptId !== promptId ||
-        result.submissionId !== body.submissionId) {
-      return reply.code(502).send({ error: "unexpected runner reply" });
-    }
-    if (!result.applied || !result.prompt) {
-      return reply.code(409).send({ error: result.error ?? "queued message could not be saved", reason: result.reason });
-    }
-    try {
-      db.commitPreparedPromptImages(preparedImages.data.flatMap((image) =>
-        isWorkspaceReference(image) || !isPromptImageReference(image) ? [] : [image.artifactId]));
-    } catch (error) {
-      // Runner acceptance is authoritative. Lease cleanup is outcome-neutral; never turn an
-      // applied edit into an ambiguous client failure.
-      req.log.warn({ error: error instanceof Error ? error.message : String(error) },
-        "prepared queued-edit image lease cleanup deferred");
-    }
-    return { prompt: result.prompt };
-  } catch (error) {
-    return reply.code(502).send({ error: (error as Error).message });
-  }
+    const result = await sessionQueueManagement.edit(id, promptId, req.body);
+    return reply.code(result.status).send(result.body);
+  } catch (error) { return reply.code(502).send({error: (error as Error).message}); }
 });
 
 app.post("/api/sessions/:id/pending-prompts/:commandId/resolve", async (req, reply) => {
