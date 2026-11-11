@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { AssistantCommandReceipts, assistantRequestDigest } from "./assistant-command-receipts.js";
 
 test("durable reservation deduplicates, binds operation/content and atomically associates work", () => {
@@ -24,4 +27,22 @@ test("durable reservation deduplicates, binds operation/content and atomically a
     assert.equal(store.reserve(request).receipt.status, "uncertain");
     assert.equal(store.settle("connection", "event:1", "succeeded").status, "uncertain");
   } finally { sql.close(); }
+});
+
+test("a process interruption leaves its reservation durable after SQLite reopen, without replay permission", () => {
+  const directory = mkdtempSync(join(tmpdir(), "assistant-receipts-"));
+  const path = join(directory, "receipts.sqlite");
+  let db = new DatabaseSync(path);
+  try {
+    AssistantCommandReceipts.install(db);
+    const input = {controlPlaneId: "cp", connectionId: "connection", operationId: "interrupted", operation: "session_launch",
+      argumentsDigest: assistantRequestDigest({locationId: "location"}), grantRevision: 2, target: {kind: "project", id: "project", projectId: "project"}};
+    new AssistantCommandReceipts(db).reserve(input);
+    db.close();
+    db = new DatabaseSync(path);
+    const recovered = new AssistantCommandReceipts(db).reserve(input);
+    assert.equal(recovered.created, false);
+    assert.equal(recovered.receipt.status, "accepted");
+    assert.equal(recovered.receipt.grantRevision, 2);
+  } finally {db.close(); rmSync(directory, {recursive: true});}
 });
