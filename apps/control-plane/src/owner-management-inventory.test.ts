@@ -44,7 +44,10 @@ test("production composition inventory is exhaustive; unresolved gaps cannot cou
     "assistant_work_reconcile", "auto_list", "skill_pin_get", "session_config", "location_add",
     "session_work_get", "queue_get", "queue_edit", "queue_cancel", "session_steer", "session_invoke",
     "session_project", "session_workspace", "session_column", "session_retitle", "session_rewind", "session_fork",
-    "session_reprocess", "session_delete", "session_adopt", "session_role_get", "session_role"]) {
+    "session_reprocess", "session_delete", "session_adopt", "session_role_get", "session_role",
+    "session_watch", "session_watch_get", "session_wait_report", "side_chat_get", "side_chat_create",
+    "prompt_history", "history_preview", "attachment_history", "session_export", "session_artifacts",
+    "transcript_shares", "reminder_get", "reminder_set", "reminder_remove", "shell_list", "shell_open", "shell_close"]) {
     assert.ok(snapshot.tools.includes(tool), `${tool}: production composition lost a registration family`);
   }
   const manifest = JSON.parse(readFileSync(new URL("../../../docs/assistant-owner-capabilities.json", import.meta.url), "utf8")) as

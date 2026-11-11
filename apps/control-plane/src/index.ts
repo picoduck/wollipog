@@ -299,8 +299,11 @@ import { createSessionWorktreeManagement } from "./session-worktree-management.j
 import { registerAssistantOwnerManagement } from "./assistant-owner-management.js";
 import { createSessionQueueManagement } from "./session-queue-management.js";
 import { createSessionLifecycleManagement } from "./session-lifecycle-management.js";
+import { createSessionContentManagement } from "./session-content-management.js";
+import { createSessionShellManagement } from "./session-shell-management.js";
 import { registerAssistantSessionWork } from "./assistant-session-work.js";
 import { registerAssistantSessionLifecycle } from "./assistant-session-lifecycle.js";
+import { registerAssistantSessionContent } from "./assistant-session-content.js";
 import { createOwnerRunnerManagement } from "./owner-runner-management.js";
 import { createOwnerProjectManagement } from "./owner-project-management.js";
 import { projectName, requestedAccessScope } from "./project-management-validation.js";
@@ -3596,7 +3599,7 @@ app.post("/api/sessions/:id/pending-prompts/:commandId/resolve", async (req, rep
 
 // Shells panel: durable bounded history and detachable runner-owned processes.
 app.get("/api/sessions/:id/shells", async (req) => {
-  return { shells: shellRegistry.list((req.params as { id: string }).id) };
+  return sessionShellManagement.list((req.params as { id: string }).id);
 });
 
 app.get("/api/sessions/:id/shells/:shellId/history", async (req, reply) => {
@@ -3628,7 +3631,7 @@ type OpenSessionShellResult =
 async function openSessionShell(
   sessionId: string,
   body: { cols?: unknown; rows?: unknown; kind?: unknown },
-  options: { initialNativeTui?: boolean } = {},
+  options: { initialNativeTui?: boolean; recheck?: () => Promise<unknown> } = {},
 ): Promise<OpenSessionShellResult> {
   const session = db.getSession(sessionId);
   if (!session) return { ok: false, status: 404, error: "session not found" };
@@ -3697,6 +3700,7 @@ async function openSessionShell(
         ...(providerHomeRefusal ? { providerHomeRefusal } : {}),
       };
     }
+    await options.recheck?.();
     const shell = shellRegistry.setPty(shellId, Boolean(res.pty), Date.now());
     if (!shell) {
       forgetAmbiguousOpen();
@@ -3713,6 +3717,8 @@ async function openSessionShell(
     };
   }
 }
+
+const sessionShellManagement = createSessionShellManagement({hub, registry: shellRegistry, open: openSessionShell});
 
 app.post("/api/sessions/:id/shells", async (req, reply) => {
   const result = await openSessionShell(
@@ -3761,14 +3767,8 @@ app.post("/api/sessions/:id/shells/:shellId/input", async (req, reply) => {
 
 app.delete("/api/sessions/:id/shells/:shellId", async (req, reply) => {
   const { id, shellId } = req.params as { id: string; shellId: string };
-  const entry = shellRegistry.get(shellId);
-  if (!entry || entry.sessionId !== id) return reply.code(404).send({ error: "shell not found" });
-  // Delete means kill + forget. A tombstone prevents an already-in-flight reconnect snapshot
-  // from resurrecting the tab; collapsing the dock is a separate local detach action.
-  hub.sendToRunner(entry.runnerId, { type: "shell_close", shellId });
-  shellRegistry.remove(shellId, entry.runnerId, Date.now());
-  hub.shellExit(entry.sessionId, shellId, null, entry.outputEndSeq);
-  return reply.code(204).send();
+  const result = sessionShellManagement.close(id, shellId);
+  return reply.code(result.status).send(result.body);
 });
 
 app.post("/api/sessions/adopt", async (req, reply) => {
@@ -4852,58 +4852,15 @@ registerPromptHistoryRoute(app, {
   requestPrincipal: (req) => requestPrincipals.get(req) ?? requestPrincipal(req),
 });
 
-app.get("/api/sessions/:id/retained-attachment-events", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const query = req.query as { after?: string; limit?: string; eventEpoch?: string };
-  const after = Number(query.after ?? 0);
-  const limit = Number(query.limit);
-  const eventEpoch = Number(query.eventEpoch);
-  if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200 ||
-      !Number.isSafeInteger(eventEpoch) || eventEpoch < 0) {
-    return reply.code(400).send({ error: "after, limit, and eventEpoch must be bounded non-negative integers" });
-  }
-  const state = db.getRunnerHistoryState(id);
-  if (!state) return reply.code(404).send({ error: "session not found" });
-  if (state.eventEpoch !== eventEpoch) {
-    return reply.code(409).send({ error: "session event history was replaced", code: "stale_event_epoch",
-      eventEpoch: state.eventEpoch });
-  }
-  const page = eventEpoch > 0
-    ? db.listRetainedAttachmentEventPage(id, after, limit)
-    : { events: [], nextAfterSeq: after, hasMore: false };
-  return { events: page.events, eventEpoch, nextAfter: page.nextAfterSeq, hasMore: page.hasMore };
-});
+app.get("/api/sessions/:id/retained-attachment-events", async (req, reply) => sessionContentManagement.retained(
+  (req.params as {id: string}).id, req.query, reply));
 
 const historyPreviews = new HistoryPreviewReader(db, hub);
+const sessionContentManagement = createSessionContentManagement({db, svc, historyPreviews});
+registerAssistantSessionContent(assistantOperations, {db, hub, svc, receipts: assistantCommandReceipts, content: sessionContentManagement, shells: sessionShellManagement});
 
-app.get("/api/sessions/:id/history-preview", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const query = req.query as Record<string, string | undefined>;
-  const values: Record<string, number> = {};
-  for (const key of ["eventEpoch", "logEpoch", "throughSeq", "turnStartSeq", "afterSeq", "beforeSeq", "handoffSeq", "handoffFirstSeq", "handoffLastSeq", "handoffAfter", "limit"]) {
-    if (query[key] === undefined) continue;
-    const value = Number(query[key]);
-    if (!Number.isSafeInteger(value) || value < 0) return reply.code(400).send({ error: "invalid history preview cursor" });
-    values[key] = value;
-  }
-  if (["eventEpoch", "logEpoch", "throughSeq", "turnStartSeq", "limit"].some(key => values[key] === undefined) ||
-      values.limit! < 1 || values.limit! > 200 || values.turnStartSeq! > values.throughSeq! ||
-      (values.afterSeq !== undefined && values.beforeSeq !== undefined) ||
-      [values.afterSeq, values.beforeSeq, values.handoffSeq, values.handoffFirstSeq, values.handoffLastSeq].some(value => value !== undefined && value > values.throughSeq! + 1)) {
-    return reply.code(400).send({ error: "invalid history preview cursor" });
-  }
-  const state = db.getRunnerHistoryState(id);
-  if (!state) return reply.code(404).send({ error: "session not found" });
-  if (state.eventEpoch !== values.eventEpoch || (state.historyEpoch !== null && state.historyEpoch !== values.logEpoch)) {
-    return reply.code(409).send({ error: "session event history was replaced", code: "stale_event_epoch", eventEpoch: state.eventEpoch });
-  }
-  // A ready preview ends opening recovery polls. Continue the existing deduplicated maintenance
-  // path if an earlier hydration RPC timed out; private rows never supply its cursor or writes.
-  if (!state.complete) void svc.hydrateHistory(id);
-  const read = { ...values, limit: values.limit! };
-  if (values.handoffSeq !== undefined) return { handoff: historyPreviews.handoff(id, values.eventEpoch!, read) };
-  return { preview: await historyPreviews.read(id, values.eventEpoch!, read) };
-});
+app.get("/api/sessions/:id/history-preview", async (req, reply) => sessionContentManagement.preview(
+  (req.params as {id: string}).id, req.query, reply));
 
 app.get("/api/sessions/:id/events", async (req, reply) => {
   const id = (req.params as { id: string }).id;

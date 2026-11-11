@@ -1,7 +1,8 @@
 # Assistant Session Work Management
 
-Refs #4468. This is the first group-3 parity slice; lifecycle/placement and the remaining
-watch, wait and content-management candidates remain explicit audit gaps.
+Refs #4468. Group 3 is organized in three staged slices. The global owner-parity gate continues
+to expose unresolved work in the other assigned groups; this document does not claim real
+OpenClaw/Discord/remote-host acceptance.
 
 Use `session_work_get` to inspect the current queue, active turn ID, provider command catalog
 and durable invocation states. The queue includes runner-live and durable prompt projections,
@@ -68,3 +69,50 @@ authority from Assistant text. The owner's role settings UI remains the path for
 
 These additions remain MOCKED integration evidence: real isolated shared services and durable state,
 with fixture runner transport. Real provider execution and hosting deployment remain unverified.
+
+## Watches, Waits and Content Management
+
+| Tool | Management Operation |
+| --- | --- |
+| `session_watch` | Register or replace the durable PR watch on an exact head; completion wakes the managed session. |
+| `session_watch_get` | Read current PR-watch and masked wait-health state. |
+| `session_wait_report` | Report observed wait progress/end through the shared wait registry. |
+| `shell_list`, `shell_open`, `shell_close` | Inspect, open or close terminal processes through the owner's registry/runner service. |
+| `side_chat_get`, `side_chat_create` | Read/create/reuse an auxiliary work session; check both sides of the relationship. |
+| `prompt_history`, `history_preview` | Read bounded recall or authoritative windows with exact epoch/cursor fences. |
+| `attachment_history` | Page retained attachment event references after history replacement. |
+| `session_export` | Page the owner's redacted cached transcript without publishing it. |
+| `session_artifacts` | List attachment/artifact metadata, exact hashes and pagination coordinates. |
+| `transcript_shares` | Inspect existing share metadata without returning bearer capabilities. |
+| `reminder_get`, `reminder_set`, `reminder_remove` | Manage only the granting owner's reminder row with existing optimistic revision rules. |
+
+Wait reporting is telemetry, not a blocking wait, a runner poll, a wake or proof that a remote
+operation ran. Only report actual observed durations/progress. Every progress report uses its own
+durable command ID; repeating that ID reconciles without inventing a fresh successful poll. The
+shared registry is deliberately ephemeral across control-plane restart. A real ongoing call reports
+fresh observations after reconnect rather than replaying old timing. PR watches are durable and
+use the runner's existing read-only forge watcher; they confer no merge authority.
+
+Terminal inventory/open/close are management paths, including the supported Native TUI opening
+path and its existing provider-home/protocol gates. Raw terminal input, resize and output history
+remain interactive workspace I/O through the authorized session terminal. Shell closure requires
+destructive confirmation and binds exact process identity, not a moving output counter.
+
+Transcript exports use the owner's bounded/redacted cache projection, explicitly possibly partial.
+They do not call an unbounded runner history RPC. Each response has at most 64 KiB of text and
+ends at a UTF-8 character boundary. Continue with `nextOffset` and its exact `sha256`; a changed
+snapshot or missing digest requires restarting at offset 0. History and attachment page reads retain
+the owner's epoch semantics and check current access after asynchronous hydration/preview reads.
+
+History/export, side-chat lifecycle, share inspection, attachment inventory and reminders are
+management capabilities here. They are not excluded as conversation I/O. Two narrower boundaries
+remain explicit in the audit: screenshot/video upload endpoints transfer actual file bytes and use
+the existing authorized session artifact/file-picker path; transcript-share creation/revocation
+manages an independent bearer capability and stays with the authenticated owner under the campaign's
+credential boundary. The Assistant can inspect metadata and authorized cached content without
+issuing credentials, creating a public share, uploading files or approving evidence. Upload
+preferences and exact evidence inspection/review authority remain independent.
+
+Verification remains MOCKED integration: real isolated SQLite, HTTP/MCP, shared services, cache
+projections and durable receipts with synthetic identities and fixture transports. No live model,
+Discord, remote TLS/host or SSH execution is claimed by these local parity slices.
