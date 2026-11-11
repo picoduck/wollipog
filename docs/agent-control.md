@@ -1058,6 +1058,18 @@ launch is left out of the turn's roots.
 
 ### Codex's Sandbox Inside This Boundary
 
+Protocol v361 catalogs `AgentDefinition.providerCommandHomeWriteSeparation`, and launches log
+the fixed `provider_command_home_write_separation` diagnostic to the runner log without adding
+session-history events. Remote-target launch diagnostics remain unknown. Both describe only runner-enforced
+separation of provider credential-home writes from model command subprocess writes. Current native
+Linux/macOS harnesses report unprotected: unsupported command mediation for Claude/Codex/Pi,
+incomplete adapter coverage for ACP. Other native hosts and WSL report unavailable. An older
+runner's missing report is unknown. None of these reports asserts that the provider's own nested
+sandbox is ineffective. `externalSandbox`, ACP client-terminal support, isolation configuration,
+and failed probes never establish protection. Provider refresh, transcripts and configuration
+writes retain their existing behavior. The [enforcement plan](provider-command-home-write-separation.md)
+and [ADR 0003](adr/0003-runner-owned-execution-isolation.md) describe remaining #3922 work.
+
 Codex App Server's workspace sandbox starts its own bubblewrap. On a host that restricts
 unprivileged user namespaces, such as recent Ubuntu with `kernel.apparmor_restrict_unprivileged_userns=1`
 and the stock `bwrap-userns-restrict` AppArmor profile, a bubblewrap started inside this boundary

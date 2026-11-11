@@ -1554,6 +1554,27 @@ test("list_runners -> GET /api/runners, field-mapped", async () => {
   assert.equal(data.runners[0].agents[0].command, undefined, "launch params are not the calling session's business");
 });
 
+test("get_agent_capabilities discloses bounded runner command-home separation, including legacy absence", async () => {
+  for (const [report, expected] of [
+    [undefined, { status: "unknown", reason: "report_unavailable" }],
+    [{ version: 1, status: "unprotected", reason: "unsupported_command_mediation", secret: "must-not-escape" },
+      { version: 1, status: "unprotected", reason: "unsupported_command_mediation" }],
+    [{ version: 1, status: "unprotected", reason: "incomplete_adapter_coverage" },
+      { version: 1, status: "unprotected", reason: "incomplete_adapter_coverage" }],
+    [{ version: 1, status: "unavailable", reason: "unsupported_host" },
+      { version: 1, status: "unavailable", reason: "unsupported_host" }],
+    [{ version: 2, status: "protected", reason: "must-not-escape" }, { status: "unknown", reason: "report_unavailable" }],
+  ]) {
+    const { deps } = makeDeps(() => ({ status: 200, body: { runners: [{ runnerId: "r1", agents: [{
+      id: "fixture", name: "Fixture", driver: "acp", providerCommandHomeWriteSeparation: report,
+    }] }] } }));
+    const result = resultJson(await callTool(deps, "get_agent_capabilities", { runnerId: "r1", agentId: "fixture" }));
+    assert.deepEqual(result.agent.providerCommandHomeWriteSeparation, expected);
+    assert.equal(result.discovery.status, "unavailable", "disclosure must not fabricate model or harness readiness");
+    assert.doesNotMatch(JSON.stringify(result), /must-not-escape/);
+  }
+});
+
 test("get_agent_capabilities projects advertised metadata and exact effort fallback semantics", async () => {
   const { deps, calls } = makeDeps(() => ({
     status: 200,

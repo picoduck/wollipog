@@ -1435,6 +1435,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 360: Bind closure PR relatedness and child work to server facts; safely steer approved closure notices (#4403).
   360,
   // v361 slot
+  // 361: Disclose runner-enforced provider/command credential-home write separation (#3922).
+  361,
   // v362 slot
   // v363 slot
   // v364 slot

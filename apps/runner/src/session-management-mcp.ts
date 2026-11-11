@@ -1,4 +1,4 @@
-import { PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_MODEL_UNKNOWN_SENTENCE, PROVIDER_ACCOUNT_SKIP_TEXT } from "@wollipog/protocol";
+import { PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_MODEL_UNKNOWN_SENTENCE, PROVIDER_ACCOUNT_SKIP_TEXT, providerCommandHomeWriteSeparationReport } from "@wollipog/protocol";
 import { RETIRED_REVIEW_TOOL_NAMES, REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { normalizeWorkflowDecisionOwnerRule, WORKFLOW_DECISION_OWNER_RULE_QUOTE_MAX_CHARS, WORKFLOW_DECISION_OWNER_RULE_SOURCE_MAX_CHARS } from "@wollipog/protocol";
 import { sessionCredentialRefusal } from "./session-credential-error.js";
@@ -1842,6 +1842,7 @@ export const TOOLS: McpTool[] = [
         ...(agent.available === false && typeof agent.unavailableReason === "string"
           ? { unavailableReason: agent.unavailableReason } : {}),
         authStatus: agent.authStatus ?? null,
+        providerCommandHomeWriteSeparation: providerCommandHomeWriteSeparationReport(agent.providerCommandHomeWriteSeparation),
       };
       const discoveryUnavailable = !capabilities || typeof capabilities !== "object" ||
         isOrchestratorOnlyCapabilities(capabilities);
