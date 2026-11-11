@@ -4,7 +4,7 @@ import Fastify from "fastify";
 import { runInNewContext } from "node:vm";
 import { registerAuthGate } from "./http-auth.js";
 import { mutationAuthorizationError, PERSONAL_ORGANIZATION_ID, agentCredentialSessionTargetError,
-  agentDelegationAuthorizationError } from "./identity.js";
+  agentDelegationAuthorizationError, isOrganizationAdministrationRoute } from "./identity.js";
 import { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
 import { createControlPlaneVideoReviewStore } from "./video-evidence-artifacts.js";
 import { VideoEvidenceRuntime, type VideoReviewBinding, type VideoReviewRuntimeAccess } from "./video-evidence-runtime.js";
@@ -1074,7 +1074,8 @@ test("CR2 Reproduction F4 real Fastify gate denies unauthorized media and missin
   const js = ts.transpileModule(fn.getText(ast), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const authorize = runInNewContext(js + "\nauthorizeApiRequest;", { db: h.db, svc: h.service,
     requestPrincipals: new WeakMap(), mutationAuthorizationError, mediaSessionMutationAllowed,
-    MEDIA_SESSION_PURPOSE_ERROR, PERSONAL_ORGANIZATION_ID, agentCredentialSessionTargetError, agentDelegationAuthorizationError });
+    MEDIA_SESSION_PURPOSE_ERROR, PERSONAL_ORGANIZATION_ID, agentCredentialSessionTargetError, agentDelegationAuthorizationError,
+    isOrganizationAdministrationRoute });
   const app = Fastify(); t.after(() => app.close());
   registerAuthGate(app, { authenticate: () => ({ id: "synthetic-device", name: "Code Fixture", principal: outsider }),
     isAllowedOrigin: () => true, authorize });
