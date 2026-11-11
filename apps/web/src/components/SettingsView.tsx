@@ -1,4 +1,5 @@
 import { RemoteAccessPanel } from "./RemoteAccessPanel.js";
+import { AssistantConnectionsPanel } from "./AssistantConnectionsPanel.js";
 import { setHideAccountEmails, useAccountEmailPrivacy } from "../account-email-privacy.js";
 import React, { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArtifactUploadSettings } from "./ArtifactUploadSettings.js";
@@ -851,6 +852,7 @@ export function NetworkPanel({ tailnet, onNavigate }: { tailnet: TailnetAccessSe
         )}
       </SettingsGroup>
       <RemoteAccessPanel key={instances.activeProfile.id} />
+      <AssistantConnectionsPanel />
       {tailnet.desktop && (
         <SettingsGroup title="Tailnet" scope="This Machine">
           <TailnetAccessRow tailnet={tailnet} />
