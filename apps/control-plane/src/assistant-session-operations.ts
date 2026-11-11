@@ -4,6 +4,8 @@ import type { SessionsService, ServiceResult } from "./sessions.js";
 import { AssistantOperations, AssistantRefusal, type AssistantOperation, type AssistantTarget } from "./assistant-connections.js";
 import { AssistantCommandReceipts, assistantRequestDigest, type AssistantCommandReceipt } from "./assistant-command-receipts.js";
 import type { AssistantWorkOriginStore, AssistantSessionWorkOrigin, AuthenticatedAssistantWorkOrigin } from "./assistant-work-origin.js";
+import { AssistantCommandConfirmations } from "./assistant-command-confirmations.js";
+import { OrchestratorSettings } from "./orchestrator-settings.js";
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new AssistantRefusal("Supply an object of tool arguments.");
@@ -34,6 +36,9 @@ export interface AssistantSessionCommandHooks {
 export function registerAssistantSessionOperations(operations: AssistantOperations, db: ControlPlaneDb, svc: SessionsService, hooks: AssistantSessionCommandHooks = {}): AssistantCommandReceipts {
   AssistantCommandReceipts.install(db.raw());
   const receipts = new AssistantCommandReceipts(db.raw());
+  AssistantCommandConfirmations.install(db.raw());
+  const confirmations = new AssistantCommandConfirmations(db.raw());
+  const orchestratorSettings = new OrchestratorSettings(db);
   const workStore = () => (db as ControlPlaneDb & {assistantWork?: AssistantWorkOriginStore}).assistantWork;
   const sessionTarget = (value: unknown): AssistantTarget => {
     const s = db.getSession(text(object(value), "sessionId"));
@@ -89,10 +94,25 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
       if (args.workOriginId !== undefined && !hooks.authenticatedOrigin && !hooks.associateCommand) throw new AssistantRefusal("Work-origin tracking is not registered on this control plane. Enable the Assistant work tracking extension before submitting correlated commands.");
       const owner = await context.recheck();
       const current = db.assistantConnections.get(context.connection.id)!;
+      const {confirmationId, ...requestArgs} = args;
+      const argumentsDigest = assistantRequestDigest(requestArgs), target = resolveTarget(args);
+      const destructive = name === "session_stop" || name === "session_archive";
+      const confirm = destructive && db.assistantConnections.destructiveConfirmation(current.id) === "confirm";
+      const confirmationBinding = {connectionId: current.id, grantRevision: current.revision, operation: name, argumentsDigest,
+        targetDigest: assistantRequestDigest(target)};
+      if (!receipts.get(current.id, commandId) && confirm && confirmationId === undefined) {
+        return {confirmationRequired: true, ...confirmations.issue(confirmationBinding), operation: name,
+          target: summary(db.getSession(target.id)!),
+          recovery: "Review this exact target, then repeat the same command ID and arguments with confirmationId before expiry. No command was dispatched."};
+      }
       let sessionOrigin: AssistantSessionWorkOrigin | undefined;
       const reserved = receipts.reserve({controlPlaneId: db.instanceId(), connectionId: current.id, operationId: commandId,
-        operation: name, argumentsDigest: assistantRequestDigest(args), grantRevision: current.revision, target: resolveTarget(args)},
+        operation: name, argumentsDigest, grantRevision: current.revision, target},
         receipt => {
+          if (confirm) {
+            if (typeof confirmationId !== "string") throw new AssistantRefusal("A confirmationId from this exact command's preview is required.");
+            confirmations.consume(confirmationId, confirmationBinding);
+          }
           const authenticated = hooks.authenticatedOrigin?.(receipt);
           if (authenticated) {
             if (name !== "session_launch" && name !== "session_prompt") throw new AssistantRefusal("Work-origin tracking supports launch and follow-up commands. Use an uncorrelated lifecycle command instead.");
@@ -140,23 +160,35 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
         ...(typeof args.useWorktree === "boolean" ? {useWorktree: args.useWorktree} : {}),
         ...(args.config && typeof args.config === "object" && !Array.isArray(args.config) ? {config: args.config} : {})};
       return svc.createSession(request, undefined, db.projectScope(location.projectId) ?? undefined, false, false, false,
-        {defaultOwnerUserId: owner.userId, launcherUserId: owner.userId, ...(assistantWorkOrigin ? {assistantWorkOrigin} : {})});
+        {defaultOwnerUserId: owner.userId, launcherUserId: owner.userId, ...(assistantWorkOrigin ? {assistantWorkOrigin} : {}),
+          orchestratorDefaults: orchestratorSettings.view(owner),
+          validateOrchestratorDefaults: defaults => orchestratorSettings.compatibilityError(owner, defaults)});
     });
   mutation("session_prompt", "Send a follow-up to any authorized session. Reconcile commandId before retrying a lost response.",
     schema({...commandProperties, text: string}, ["commandId", "sessionId", "text"]), sessionTarget,
     (args, owner) => svc.promptFromUser(owner.userId, text(args, "sessionId"), text(args, "text")));
-  mutation("session_stop", "Stop through the owner's lifecycle service.", schema(commandProperties, ["commandId", "sessionId"]), sessionTarget,
+  mutation("session_stop", "Stop through the owner's lifecycle service. Owner-selected confirm policy returns a preview; repeat unchanged arguments with its confirmationId.", schema({...commandProperties, confirmationId: string}, ["commandId", "sessionId"]), sessionTarget,
     args => svc.stop(text(args, "sessionId")));
   mutation("session_restart", "Restart with existing worktree/provider recovery checks; optionally unarchive or wait for a busy provider home.",
     schema({...commandProperties, unarchive: {type: "boolean"}, waitForProviderHome: {type: "boolean"}}, ["commandId", "sessionId"]), sessionTarget,
     args => svc.restart(text(args, "sessionId"), {unarchive: args.unarchive === true, waitForProviderHome: args.waitForProviderHome === true}));
-  mutation("session_archive", "Archive through the owner's stop-before-archive service.", schema(commandProperties, ["commandId", "sessionId"]), sessionTarget,
+  mutation("session_archive", "Archive through the owner's stop-before-archive service. Owner-selected confirm policy returns a preview; repeat unchanged arguments with its confirmationId.", schema({...commandProperties, confirmationId: string}, ["commandId", "sessionId"]), sessionTarget,
     args => svc.setArchived(text(args, "sessionId"), true));
   operations.register({name: "command_get", description: "Reconcile caller commandId before retrying. Accepted/uncertain means never blindly replay. Rechecks current source access.",
     inputSchema: schema({commandId: string}, ["commandId"]), metadata: true, resolveTarget: () => ({kind: "inventory", id: "commands"}), ownerCanAccess: () => true,
     execute: (args, ctx) => {
       const receipt = receipts.get(ctx.connection.id, text(object(args), "commandId"));
       if (!receipt) return {receipt: null};
+      if (receipt.target.kind === "session" && !db.getSession(receipt.target.id)) {
+        // Reconcile only this connection's content-free command verdict after source deletion.
+        // Original project access remains mandatory; never substitute a live result or transcript.
+        operations.authorize(ctx.connection.id, receipt.operation, receipt.target.projectId
+          ? {kind: "project", id: receipt.target.projectId, projectId: receipt.target.projectId}
+          : {kind: "receipt", id: receipt.operationId});
+        return {resourceDeleted: true, receipt: {operationId: receipt.operationId, operation: receipt.operation,
+          status: receipt.status, createdAt: receipt.createdAt, updatedAt: receipt.updatedAt},
+          recovery: "The source session was deleted. This is the retained command verdict only; do not replay the original command."};
+      }
       const target = receipt.target.kind === "session" ? sessionTarget({sessionId: receipt.target.id}) : receipt.target;
       operations.authorize(ctx.connection.id, receipt.operation, target);
       if (receipt.resourceId && db.getSession(receipt.resourceId)) {

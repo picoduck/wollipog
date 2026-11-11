@@ -47,6 +47,28 @@ their source, not cached in an old command response. If a source moves outside t
 projects, receipt lookup is refused too. Revocation and rotation take effect through the existing
 connection checks. Runner capability refusals preserve their structured requirement, and lifecycle
 refusals preserve the application service's concrete cause plus its owner's recovery path.
+If a session has been deleted, `command_get` can return only the connection's content-free command
+verdict and timestamps, subject to current operation and original-project access. It cannot return
+a deleted transcript or private result. Command identity rows have no automatic expiry: deleting
+them would let old event IDs dispatch again. A storage retirement/replay-horizon design is deferred;
+retaining one compact row per accepted command is an explicit current storage cost.
+
+Saved Orchestrator launch defaults and their compatibility validation use the same settings service
+as the owner's API. Assistant follow-ups and restarts deliberately preserve the human-only campaign
+authority paths: they do not call `promptFromHuman` or `restoreHumanCampaignAuthority`. The former
+can establish a Full Control objective/scope from a human's first message; the latter attributes
+boundary repair to a human. A connection grant is not proof of a new human approval. Existing
+campaign boundaries, first-message fences and owner recovery guidance remain authoritative; perform
+human-required scope/authority establishment in Wollipog before resuming ordinary Assistant work.
+
+The owner's current `grant.destructiveConfirmation` applies to Stop and Archive. Under `confirm`,
+the first call returns `confirmationRequired`, a target preview, `confirmationId` and `expiresAt`,
+without reserving or dispatching a command. Review the target, then repeat unchanged arguments and
+the same command ID with that confirmation ID within five minutes. Confirmations bind connection,
+grant revision, operation, current project placement and argument digest, and are one-shot.
+Consumption shares the command reservation's transaction. A grant/target/argument change or expiry
+requires a fresh preview. Existing accepted command IDs always reconcile without dispatch, even
+after a confirmation expires. Under `none`, the existing direct command behavior applies.
 
 There is deliberately no claim of exactly-once runner execution. The reservation prevents blind
 redispatch from the Assistant transport; existing runner outboxes/receipts govern execution.
