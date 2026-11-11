@@ -1,15 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync } from "@wollipog/test-support/bounded-child-process";
+import { playwrightInventory } from "./playwright-inventory.mjs";
 import { CRITICAL_BROWSER_FILES } from "./ci-pr-browser-policy.mjs";
 
 const files = [...CRITICAL_BROWSER_FILES, "remote-instances.spec.ts"].map((file) => `apps/web/e2e/${file}`);
-const list = (config) => JSON.parse(execFileSync(process.execPath,
-  ["node_modules/@playwright/test/cli.js", "test", "--config", config, "--list", "--reporter=json"], {
-    encoding: "utf8", timeout: 30000, maxBuffer: 32 * 1024 * 1024,
-    env: { ...process.env, PR_BROWSER_FILES: JSON.stringify(files), CI: "", SYNTHETIC_ARTIFACT_FAILURE: "false", FORCE_COLOR: "0" },
-    stdio: ["ignore", "pipe", "pipe"],
-  }));
+const list = (config) => playwrightInventory(config, { PR_BROWSER_FILES: JSON.stringify(files) });
 const identities = (suite) => [
   ...(suite.specs ?? []).flatMap((spec) => spec.tests.map((item) => ({
     file: spec.file, key: JSON.stringify([spec.file, spec.line, spec.column, spec.title, item.expectedStatus]),
