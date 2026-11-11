@@ -66,6 +66,14 @@ loss of active organization-owner status disables the connection until restored/
 Only the issuing owner can configure, rotate, revoke or read connection activity through
 `/api/assistant-connections`; Assistant credentials never reach these owner-only APIs.
 
+`grant.destructiveConfirmation` is owner-selectable `"none" | "confirm"`; omitted inputs normalize
+to `"none"`, including Full Access. Read current policy through
+`db.assistantConnections.destructiveConfirmation(connectionId)` immediately before destructive
+execution or preview. Under `"confirm"`, sibling services must implement an Assistant preview and
+short-lived confirmation ID bound to the connection, operation and exact target/arguments; a stale
+or changed grant requires rechecking. This slice exposes the policy/accessor, not destructive
+operations or confirmation persistence. The owner can change the field through the configure API.
+
 ## Operation Inventory Responsibilities
 
 Discovery is implemented here. The following families must register through this contract and

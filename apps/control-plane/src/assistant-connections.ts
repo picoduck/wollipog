@@ -6,6 +6,8 @@ import type { HumanPrincipal } from "./identity.js";
 export interface AssistantGrant {
   operations: "all" | string[];
   projects: "all" | string[];
+  /** Omitted legacy/create inputs normalize to none; all stored/read grants include the value. */
+  destructiveConfirmation?: "none" | "confirm";
 }
 export interface AssistantConnection {
   id: string;
@@ -40,7 +42,8 @@ export function assistantGrant(value: unknown): AssistantGrant {
   const valid = (v: unknown): v is "all" | string[] => v === "all" ||
     (Array.isArray(v) && v.length <= 500 && v.every(x => typeof x === "string" && /^[\w.:-]{1,128}$/.test(x)));
   if (!input || !valid(input.operations) || !valid(input.projects)) throw new AssistantRefusal("Specify exact operations and projects, or all, in the owner's connection settings.");
-  return { operations: input.operations, projects: input.projects };
+  if (input.destructiveConfirmation !== undefined && input.destructiveConfirmation !== "none" && input.destructiveConfirmation !== "confirm") throw new AssistantRefusal("Destructive confirmation must be none or confirm in the owner's connection settings.");
+  return { operations: input.operations, projects: input.projects, destructiveConfirmation: input.destructiveConfirmation ?? "none" };
 }
 
 /** Separate credential namespace/table: never accepted as a human, runner or session. */
@@ -112,6 +115,13 @@ export class AssistantConnections {
     return this.get(credential.connectionId)!;
   }
   installationName(): string { return (this.db.prepare("SELECT name FROM assistant_installation WHERE singleton=1").get() as {name: string}).name; }
+  /** Read live policy immediately before a destructive operation or its confirmation preview.
+   * Sibling operation services implement preview + short-lived confirmation IDs for confirm. */
+  destructiveConfirmation(connectionId: string): "none" | "confirm" {
+    const connection = this.get(connectionId);
+    if (!connection || connection.revoked) throw new AssistantRefusal("Assistant connection is missing or revoked. Create a new connection instead.");
+    return connection.grant.destructiveConfirmation ?? "none";
+  }
   activity(id: string): unknown[] { return this.db.prepare("SELECT connection_id,grant_revision,operation,target_json,outcome,created_at FROM assistant_activity WHERE connection_id=? ORDER BY id DESC LIMIT 100").all(id); }
   record(connection: AssistantConnection, operation: string, target: AssistantTarget, outcome: "succeeded" | "refused" | "failed"): void {
     // Only registered names and resolved resource identifiers. Never arguments or exception messages.

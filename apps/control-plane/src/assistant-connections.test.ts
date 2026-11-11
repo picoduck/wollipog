@@ -19,6 +19,10 @@ test("broad grants include new registrations; selected projects and operations r
     const store = new AssistantConnections(db);
     const issued = store.create(owner, "Remote Assistant", full);
     const credential = store.authenticate(issued.token)!;
+    assert.equal(store.destructiveConfirmation(issued.connection.id), "none");
+    store.configure(issued.connection.id, {...full, destructiveConfirmation: "confirm"});
+    assert.equal(store.destructiveConfirmation(issued.connection.id), "confirm");
+    assert.equal(store.get(issued.connection.id)!.grant.destructiveConfirmation, "confirm");
     const operations = new AssistantOperations(store, () => owner);
     operations.register({name: "session_stop", description: "Stop", inputSchema: {}, resolveTarget: () => ({kind: "session", id: "unrelated", projectId: "other"}), ownerCanAccess: p => p.userId === owner.userId, execute: () => "stopped"});
     assert.equal(await operations.call(credential, "session_stop", {}), "stopped");
@@ -80,6 +84,7 @@ test("rotation refuses inactive IDs without notifications; activity is bounded a
     assert.equal(store.activity(second.id).length, 1);
     assert.match(JSON.stringify(db.prepare("EXPLAIN QUERY PLAN SELECT * FROM assistant_activity WHERE connection_id=? ORDER BY id DESC LIMIT 100").all(first.id)), /assistant_activity_connection/);
     store.revoke(first.id);
+    assert.throws(() => store.destructiveConfirmation(first.id), /missing or revoked/);
     let changes = 0;
     store.onChange(() => { changes++; });
     assert.throws(() => store.rotate(first.id), /missing or revoked/);
