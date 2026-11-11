@@ -271,6 +271,90 @@ test("ordinary Assistant automation retains its granting owner's launcher attrib
   } finally {f.db.close();}
 });
 
+test("a human resumes an ordinary schedule after an Assistant pause without retaining stale Assistant authority", async () => {
+  const f = fixture();
+  try {
+    const input = f.spec();
+    if (input.action.kind !== "create_session") assert.fail();
+    delete input.action.request.campaign;
+    delete input.action.request.role;
+    delete input.action.request.orchestrator;
+    input.action.request.config!.permissionMode = "default";
+    const saved = f.service.create(input, f.actor).data!;
+    const issued = f.db.assistantConnections.create(f.human, "Pausing Assistant", {operations: "all", projects: "all"});
+    assert.equal(f.service.update(saved.automationId, {...input, enabled: false}, {kind: "agent", id: issued.connection.id}, undefined, "auto_pause").ok, true);
+    const resumed = f.service.update(saved.automationId, input, f.actor);
+    assert.equal(resumed.ok, true, resumed.error ?? "Human resume accepted");
+    f.db.assistantConnections.revoke(issued.connection.id);
+    f.service.tick(resumed.data!.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.automationId)[0]!;
+    assert.notEqual(execution.status, "failed", execution.error ?? "Human-resumed schedule ran");
+    assert.ok(f.db.getSession(execution.sessionId!));
+    assert.equal(f.db.raw().prepare("SELECT count(*) AS n FROM assistant_automation_authority WHERE automation_id=?").get(saved.automationId)!.n, 0);
+  } finally {f.db.close();}
+});
+
+test("ordinary Assistant recovery retains its occurrence launcher after a human edits the schedule", async () => {
+  const f = fixture();
+  try {
+    const input = f.spec();
+    if (input.action.kind !== "create_session") assert.fail();
+    delete input.action.request.campaign;
+    delete input.action.request.role;
+    delete input.action.request.orchestrator;
+    input.action.request.config!.permissionMode = "default";
+    const issued = f.db.assistantConnections.create(f.human, "Original Assistant", {operations: "all", projects: "all"});
+    const saved = f.service.create(input, {kind: "agent", id: issued.connection.id}).data!;
+    const activate = f.db.activateAutomationCommands.bind(f.db);
+    f.db.activateAutomationCommands = () => {throw new Error("Synthetic crash before activation");};
+    f.service.tick(saved.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.automationId)[0]!;
+    const command = f.db.listAutomationCommands(execution.executionId)[0]!;
+    assert.equal(command.state, "staged");
+    assert.equal(f.service.update(saved.automationId, {...input, name: "Human edit"}, f.actor).ok, true);
+    f.db.activateAutomationCommands = activate;
+    const launchers: Array<string | undefined> = [];
+    const createSession = f.sessions.createSession.bind(f.sessions);
+    f.sessions.createSession = (...args) => {
+      launchers.push(args[6]?.launcherUserId);
+      return createSession(...args);
+    };
+    new AutomationsService(f.db, f.hub, f.sessions, {info() {}, warn() {}}, undefined, f.runtime).recover();
+    await f.drain();
+    assert.deepEqual(launchers, [f.human.userId]);
+    assert.equal(f.db.listAutomationCommands(execution.executionId)[0]!.commandId, command.commandId);
+    assert.notEqual(f.db.listAutomationCommands(execution.executionId)[0]!.state, "staged");
+  } finally {f.db.close();}
+});
+
+test("Assistant schedule authority retains a numeric defining-event identity", () => {
+  const f = fixture();
+  try {
+    const issued = f.db.assistantConnections.create(f.human, "Scheduled Assistant", {operations: "all", projects: "all"});
+    const saved = f.service.create(f.spec(), {kind: "agent", id: issued.connection.id}).data!;
+    const row = f.db.raw().prepare("SELECT authorization_json FROM assistant_automation_authority WHERE automation_id=?").get(saved.automationId) as {authorization_json: string};
+    assert.equal(Number.isSafeInteger(JSON.parse(row.authorization_json).authorEventRowid), true);
+  } finally {f.db.close();}
+});
+
+test("an intervening trigger author cannot reuse an earlier Assistant campaign authorization", async () => {
+  const f = fixture();
+  try {
+    const issued = f.db.assistantConnections.create(f.human, "Scheduled Assistant", {operations: "all", projects: "all"});
+    const saved = f.service.create(f.spec(), {kind: "agent", id: issued.connection.id}).data!;
+    assert.equal(f.service.createTrigger(saved.automationId, {kind: "webhook", name: "Owner Trigger"}, f.actor).ok, true);
+    f.service.tick(saved.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.automationId)[0]!;
+    assert.equal(execution.status, "failed");
+    assert.match(execution.error!, /assistant_schedule_author_changed/);
+    assert.equal(f.db.listSessions().length, 0);
+    assert.equal(f.sent.some(m => m.type === "durable_session_command"), false);
+  } finally {f.db.close();}
+});
+
 for (const mode of ["custom", "full_control"] as const) test(`${mode} occurrence atomically creates a campaign, allowance, task ledger and durable command`, async () => {
   const f = fixture();
   try {

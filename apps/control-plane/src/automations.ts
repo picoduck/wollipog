@@ -71,8 +71,8 @@ function automationDeliveryWindowMs(schedule: AutomationSchedule, scheduledFor: 
 /** The sessions an automation creates are launched by its human creator (#3898), from its durable
  * audit trail and never its action payload or the execution's schedule, and only while no one else
  * has changed the definition or its triggers. Creation records them only while a member. */
-function automationLauncher(db: ControlPlaneDb, automation: AutomationSchedule): { launcherUserId: string } | undefined {
-  const assistant = scheduledAssistantOwner(db, automation);
+function automationLauncher(db: ControlPlaneDb, automation: AutomationSchedule, executionId: string): { launcherUserId: string } | undefined {
+  const assistant = scheduledAssistantOwner(db, automation, executionId);
   if (assistant) return {launcherUserId: assistant.owner.userId};
   const creator = db.automationSoleHumanAuthor(automation.automationId);
   return creator ? { launcherUserId: creator } : undefined;
@@ -1860,7 +1860,7 @@ export class AutomationsService {
           maxToolCalls: automation.limits.maxToolCalls,
         },
       }, this.deliveryOptions(automation, execution, { sessionId: `s_auto_${execution.executionId}` }, now, target, commandSnapshots),
-      undefined, false, false, false, automationLauncher(this.db, automation));
+      undefined, false, false, false, automationLauncher(this.db, automation, execution.executionId));
       result = created;
     } else if (automation.action.kind === "prompt_session") {
       const session = this.db.getSession(automation.action.sessionId)!;
@@ -1898,7 +1898,7 @@ export class AutomationsService {
         runId: `r_auto_${execution.executionId}`,
         workflowInstanceId: `wfi_auto_${execution.executionId}`,
         memberSessionId: (index) => `s_auto_${execution.executionId}_${String(index).padStart(3, "0")}`,
-      }, now, target, commandSnapshots), automationLauncher(this.db, automation));
+      }, now, target, commandSnapshots), automationLauncher(this.db, automation, execution.executionId));
       result = launched;
       if (launched.data) {
         controlPlaneWorkflow = {

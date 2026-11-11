@@ -76,6 +76,9 @@ acknowledgment may have been lost become uncertain; they are never reported as s
 `auto_get.assistantAuthorizations` exposes the secret-free occurrence audit (Assistant, owner,
 grant revision, operation and outcome). Ordinary human-author and session-proposal rules remain
 unchanged. The owner directed this scheduled-campaign extension through the campaign parent.
+A later non-Assistant save clears the schedule's current Assistant binding atomically, so ordinary
+human edits do not inherit an old connection's restrictions. Previously authorized occurrences
+retain their own Assistant identity and launcher attribution during recovery.
 
 Skill impact reports potentially affected machines within the skill's ownership audience, including
 offline targets. Reported state is the last runner report, not a promise that an offline machine

@@ -64,7 +64,7 @@ export function authorizeAssistantAutomation(db: ControlPlaneDb, connectionId: s
 }
 
 function definingEvent(db: ControlPlaneDb, automationId: string): {rowid: number; actor_kind: string; actor_id: string | null} | null {
-  const row = db.raw().prepare(`SELECT rowid,actor_kind,actor_id FROM automation_events WHERE automation_id=?
+  const row = db.raw().prepare(`SELECT event_id AS rowid,actor_kind,actor_id FROM automation_events WHERE automation_id=?
     AND kind IN ('created','updated','enabled','disabled','trigger_created','trigger_rotated')
     AND NOT(kind='updated' AND actor_kind='system' AND actor_id=('automation:' || automation_id)
       AND COALESCE(json_extract(detail,'$.installationPinned'),0)=1)

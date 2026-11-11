@@ -34074,6 +34074,7 @@ export class ControlPlaneDb {
       });
       if (input.assistantAuthorization) bindAssistantAutomation(this, this.getAutomation(input.automationId)!,
         input.assistantAuthorization.connectionId, input.assistantAuthorization.operation);
+      else this.stmt("DELETE FROM assistant_automation_authority WHERE automation_id=?").run(input.automationId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -34128,6 +34129,7 @@ export class ControlPlaneDb {
       });
       if (input.assistantAuthorization) bindAssistantAutomation(this, this.getAutomation(input.automationId)!,
         input.assistantAuthorization.connectionId, input.assistantAuthorization.operation);
+      else this.stmt("DELETE FROM assistant_automation_authority WHERE automation_id=?").run(input.automationId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
