@@ -9,6 +9,8 @@ import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { resolveNative } from "./discovery/resolve.js";
 import { managedWorktreeGitLayout, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
 import { createPiCommandHomePrototype, piCommandHomePrototypeNamespaceUnavailable, type PiCommandHomePrototypePolicy } from "./pi-command-home-prototype.js";
+import { createPiInertControlLauncher } from "./pi-inert-control-launcher.js";
+import { createHash } from "node:crypto";
 
 const nativeBwrap = process.platform === "linux" ? await resolveNative("bwrap") : null;
 
@@ -79,6 +81,39 @@ test("inert production resolver reserves and pins managed Git config before any 
   const root = realpathSync(mkdtempSync(join(process.cwd(), ".pi-managed-config-")));
   try { await prepareTopology(root); }
   finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("fixed inert MCP helper loses HOME writes and descendants while the actual outer provider keeps refresh/config", {
+  skip: process.platform !== "linux" ? "UNAVAILABLE: prototype requires native Linux" : false, timeout: 60_000,
+}, async t => {
+  const root = realpathSync(mkdtempSync(join(process.cwd(), ".pi-inert-control-os-")));
+  try {
+    if (!nativeBwrap) { t.skip("UNAVAILABLE: production discovery cannot resolve bubblewrap"); return; }
+    const { outer, worktree, home, policy } = await prepareTopology(root);
+    const mcp = fileURLToPath(new URL("./fixtures/pi-inert-control-helper.mjs", import.meta.url));
+    // Exercise the new constructor before any kernel skip, including the real entrypoint pin and
+    // source/target grant checks. The installation/runtime audits are explicitly inert fixtures.
+    createPiInertControlLauncher({ commandPolicy: policy, controlEntrypoint: fileURLToPath(new URL("./pi-inert-control-entrypoint.mjs", import.meta.url)),
+      mcpEntrypoint: mcp, mcpEntrypointSha256: createHash("sha256").update(readFileSync(mcp)).digest("hex"), imports: [], transportEnvironment: {} },
+    { auditInstallation: () => true, auditRuntime: () => true });
+    const probe = spawnSync(outer.command, [...outer.args, "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
+      "--tmpfs", "/tmp", "--unshare-pid", "--", "/bin/true"], { encoding: "utf8", timeout: 5_000,
+      env: { PATH: "/usr/bin:/bin", HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
+    if (probe.status !== 0 && piCommandHomePrototypeNamespaceUnavailable(probe.stderr ?? "")) {
+      t.skip("UNAVAILABLE: host refuses outer namespace; no fixed-helper OS conformance established"); return;
+    }
+    assert.equal(probe.status, 0, probe.stderr);
+    const fixture = fileURLToPath(new URL("./fixtures/pi-inert-control-provider.mjs", import.meta.url));
+    const moduleUrl = new URL("./pi-inert-control-launcher.ts", import.meta.url).href;
+    const args = buildBwrapArgs({ command: process.execPath, cwd: worktree,
+      args: ["--import", import.meta.resolve("tsx"), fixture, moduleUrl, JSON.stringify(policy)] }, outer);
+    const result = spawnSync(outer.command, args, { encoding: "utf8", timeout: 50_000,
+      env: { PATH: "/usr/bin:/bin", HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /PI_INERT_CONTROL_OUTER_WRITES: passed/u);
+    if (result.stdout.includes("PI_INERT_CONTROL_UNAVAILABLE")) { t.skip("UNAVAILABLE: inner namespace refused; no fixed-helper OS conformance established"); return; }
+    assert.match(result.stdout, /PI_INERT_CONTROL_OS_CONFORMANCE: passed/u);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("installed pinned Pi SDK factory invokes the prototype operations without any provider or command process", {

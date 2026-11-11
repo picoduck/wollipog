@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
@@ -152,6 +152,14 @@ test("prototype refuses aliases, overlapping grants, mutable dependencies and wr
     await assert.rejects(backend.exec("inert", f.home, { onData() {} }), /could not prove/);
     symlinkSync(f.worktree, join(f.home, "alias"));
     assert.throws(() => createPiCommandHomePrototype(f.policy, deps), /could not prove/);
+  } finally { f.cleanup(); }
+});
+
+test("shared dormant policy refuses a pre-existing hard-linked HOME file before command construction", { skip: linux }, () => {
+  const f = fixture();
+  try {
+    linkSync(join(f.home, "auth.json"), join(f.worktree, "inert-alias"));
+    assert.throws(() => createPiCommandHomePrototype(f.policy, { auditInstallation: () => true, auditRuntime: () => true }), /could not prove/u);
   } finally { f.cleanup(); }
 });
 
