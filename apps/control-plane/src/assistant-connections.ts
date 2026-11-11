@@ -3,21 +3,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { hashToken } from "./auth.js";
 import type { HumanPrincipal } from "./identity.js";
 
-export interface AssistantGrant {
-  operations: "all" | string[];
-  projects: "all" | string[];
-  /** Omitted legacy/create inputs normalize to none; all stored/read grants include the value. */
-  destructiveConfirmation?: "none" | "confirm";
-}
-export interface AssistantConnection {
-  id: string;
-  name: string;
-  ownerUserId: string;
-  organizationId: string;
-  grant: AssistantGrant;
-  revision: number;
-  revoked: boolean;
-}
+import type { AssistantGrant, AssistantConnection } from "@wollipog/protocol";
+export type { AssistantGrant, AssistantConnection } from "@wollipog/protocol";
 export interface AssistantTarget { kind: string; id: string; projectId?: string }
 export interface AssistantCredential { connectionId: string; tokenHash: string }
 /** Mutation units persist this per connection before dispatch. Unknown delivery must be reconciled,

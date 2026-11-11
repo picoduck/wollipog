@@ -3,8 +3,10 @@ import { useApi } from "../api-context.js";
 import { useInstanceScope } from "../instance-scope.js";
 import type { AssistantActivity, AssistantConnection, AssistantConnectionsView, AssistantGrant } from "../assistant-connections.js";
 import { Modal } from "./Modal.js";
+import { useFeedback } from "./FeedbackProvider.js";
+import { secretValueRef } from "./ui/secret-input.js";
 import { Notice } from "./Notice.js";
-import { ChoiceRow } from "./ui/ChoiceControls.js";
+import { ChoiceRows, Select } from "./ui/ChoiceControls.js";
 import { LinkRow, SettingsGroup, StaticRow, ValueRow } from "./ui/SettingsRows.js";
 
 export function AssistantConnectionsPanel() {
@@ -31,7 +33,7 @@ export function AssistantConnectionsDialog({onClose}: {onClose(): void}) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [confirm, setConfirm] = useState<"rotate" | "revoke" | null>(null);
+  const {confirm: askConfirm} = useFeedback();
   const locked = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -48,7 +50,7 @@ export function AssistantConnectionsDialog({onClose}: {onClose(): void}) {
   };
   const update = (connection: AssistantConnection) => setView(current => current ? {...current, connections: [...current.connections.filter(c => c.id !== connection.id), connection]} : current);
   const connection = view?.connections.find(c => c.id === selected);
-  const leave = () => { setSelected(null); setActivity(null); setConfirm(null); setSecret(null); setReveal(false); setNotice(""); };
+  const leave = () => { setSelected(null); setActivity(null); setSecret(null); setReveal(false); setNotice(""); };
   const copyText = async (value: string, credential = false) => {
     setError("");
     try {
@@ -59,6 +61,19 @@ export function AssistantConnectionsDialog({onClose}: {onClose(): void}) {
       if (mounted.current) setError(credential ? "Couldn't copy the credential. Choose Show Credential, then select the text and copy it manually." : "Couldn't copy the ID. Select the ID field and copy it manually.");
     }
   };
+  const changeCredential = (action: "rotate" | "revoke") => void run(async () => {
+    if (!connection) return;
+    const title = action === "rotate" ? "Rotate Credential" : "Revoke Connection";
+    const approved = await askConfirm({title, confirmLabel: title, tone: "danger", message: action === "rotate"
+      ? `The old credential for “${connection.name}” stops working immediately. Update the assistant with the new credential shown once after rotation.`
+      : `Permanently disable “${connection.name}”. Already completed actions are retained; create a new connection to restore access.`});
+    if (!approved || !mounted.current) return;
+    const response = action === "rotate" ? await api.rotateAssistantConnection(connection.id) : await api.revokeAssistantConnection(connection.id);
+    if (!mounted.current) return;
+    update(response.connection); setActivity(null);
+    if ("token" in response && typeof response.token === "string") { setSecret(response.token); setReveal(false); }
+    else setNotice("Connection revoked. Later authorization checks will refuse its access.");
+  });
   const editor = view && (selected === "new" || connection) && <ConnectionEditor key={selected} connection={connection} view={view} busy={busy} onSave={(name, grant) => void run(async () => {
     const response = connection ? await api.configureAssistantConnection(connection.id, {name, grant, expectedRevision: connection.revision}) : await api.createAssistantConnection({name, grant});
     if (!mounted.current) return;
@@ -74,7 +89,7 @@ export function AssistantConnectionsDialog({onClose}: {onClose(): void}) {
     {!view && error && <button className="btn" type="button" onClick={() => void run(async () => { const data = await api.assistantConnections(); if (mounted.current) setView(data); })}>Try Again</button>}
     {secret ? <>
       <Notice tone="warning" title="Save Your Credential">This credential is available only now. Store it securely in your assistant's connection configuration. Closing this dialog or dismissing it removes it from this window.</Notice>
-      <label className="field"><span>Assistant Credential</span><input autoComplete="off" spellCheck={false} readOnly type={reveal ? "text" : "password"} value={secret} /></label>
+      <label className="field"><span>Assistant Credential</span><input autoComplete="off" spellCheck={false} readOnly type={reveal ? "text" : "password"} ref={secretValueRef(secret)} /></label>
       <div className="field-row"><button type="button" className="btn" onClick={() => { setReveal(v => !v); setError(""); }}>{reveal ? "Hide Credential" : "Show Credential"}</button>
         <button type="button" className="btn" onClick={() => void copyText(secret, true)}>Copy Credential</button>
         <button type="button" className="btn primary" onClick={() => { setSecret(null); setReveal(false); setNotice(""); }}>Dismiss Credential</button></div>
@@ -98,18 +113,9 @@ export function AssistantConnectionsDialog({onClose}: {onClose(): void}) {
         {connection && <IdentityField title="Connection ID" value={connection.id} onCopy={() => void copyText(connection.id)} />}
         {connection?.revoked ? <details className="disclosure"><summary>Inspect Revoked Grants</summary>{editor}</details> : editor}
         {connection && !connection.revoked && <div className="field-row">
-          <button type="button" className="btn" disabled={busy} onClick={() => setConfirm("rotate")}>Rotate Credential</button>
-          <button type="button" className="btn danger" disabled={busy} onClick={() => setConfirm("revoke")}>Revoke Connection</button>
+          <button type="button" className="btn" disabled={busy} onClick={() => changeCredential("rotate")}>Rotate Credential</button>
+          <button type="button" className="btn ghost danger" disabled={busy} onClick={() => changeCredential("revoke")}>Revoke Connection</button>
         </div>}
-        {connection && confirm && <Notice tone="warning" title={confirm === "rotate" ? "Rotate This Credential?" : "Revoke This Connection?"} actions={<>
-          <button type="button" className="btn danger sm" disabled={busy} onClick={() => void run(async () => {
-            const response = confirm === "rotate" ? await api.rotateAssistantConnection(connection.id) : await api.revokeAssistantConnection(connection.id);
-            if (!mounted.current) return;
-            update(response.connection); setConfirm(null); setActivity(null);
-            if ("token" in response && typeof response.token === "string") { setSecret(response.token); setReveal(false); } else setNotice("Connection revoked. Later authorization checks will refuse its access.");
-          })}>{confirm === "rotate" ? "Confirm Rotation" : "Confirm Revocation"}</button>
-          <button type="button" className="btn sm" disabled={busy} onClick={() => setConfirm(null)}>Cancel</button>
-        </>}>{confirm === "rotate" ? "The old credential stops working immediately. Update the assistant with the new credential shown once after rotation." : "This permanently disables the connection. Already completed actions are retained; create a new connection to restore access."}</Notice>}
         {connection && <SettingsGroup title="Activity" intro="Latest 100 actions; this server retains up to 1,000 per connection. No credentials or tool arguments are recorded." action={<button type="button" className="btn sm" disabled={busy} onClick={() => void run(async () => { const result = await api.assistantConnectionActivity(connection.id); if (mounted.current) setActivity(result.activity); })}>Refresh Activity</button>}>
           {activity === null ? <StaticRow title="Activity Not Loaded" /> : activity.length === 0 ? <StaticRow title="No Activity" /> : activity.map((item, i) => <ValueRow key={i} title={operationTitle(item.operation)} value={operationTitle(item.outcome)} description={<><span>Assistant: {item.assistant.name}</span><br /><span>Target: {item.targetLabel}</span><br />{new Date(item.created_at).toLocaleString()} · Grant {item.grant_revision}</>} />)}
         </SettingsGroup>}
@@ -154,12 +160,12 @@ function ConnectionEditor({connection, view, busy, onSave}: {connection?: Assist
     <fieldset className="form assistant-fields" disabled={busy || connection?.revoked}>
       <legend>{connection ? "Connection Settings" : "New Connection"}</legend>
       <label className="field"><span>Connection Name</span><input required maxLength={80} autoComplete="off" value={name} onChange={event => setName(event.target.value)} /></label>
-      <label className="field"><span>Management Access</span><select value={operations === "all" ? "all" : "selected"} onChange={event => setOperations(event.target.value === "all" ? "all" : [])}><option value="all">Full Access</option><option value="selected">Configured Access</option></select></label>
+      <div className="field"><span className="field-label">Management Access</span><Select label="Management Access" value={operations === "all" ? "all" : "selected"} options={[{value: "all", label: "Full Access"}, {value: "selected", label: "Configured Access"}]} disabled={busy || connection?.revoked} onChange={value => setOperations(value === "all" ? "all" : [])} /></div>
       <p className="field-helper">Full Access includes all current and future management operations the granting owner can perform, including unrelated sessions and remote runners. External permissions and compatibility still apply.</p>
-      {Array.isArray(operations) && <fieldset className="form assistant-fields"><legend>Allowed Operations</legend>{operationChoices.map(id => <ChoiceRow key={id} type="checkbox" title={operationTitle(id)} checked={operations.includes(id)} disabled={busy || connection?.revoked} onSelect={() => setOperations(toggle(operations, id))} description={<><code>{id}</code> — {view.operations.find(o => o.name === id)?.description ?? "Not currently registered on this server."}</>} />)}{operationChoices.length === 0 && <p>No operations are registered.</p>}</fieldset>}
-      <label className="field"><span>Project Access</span><select value={projects === "all" ? "all" : "selected"} onChange={event => setProjects(event.target.value === "all" ? "all" : [])}><option value="all">All Projects</option><option value="selected">Selected Projects</option></select></label>
-      {Array.isArray(projects) && <fieldset className="form assistant-fields"><legend>Allowed Projects</legend>{projectChoices.map(id => <ChoiceRow key={id} type="checkbox" title={view.projects.find(p => p.id === id)?.name ?? id} checked={projects.includes(id)} disabled={busy || connection?.revoked} onSelect={() => setProjects(toggle(projects, id))} />)}<p className="field-helper">Only selected projects are allowed. Resources without a project are excluded. Installation and connection metadata remain readable when granted.</p></fieldset>}
-      <label className="field"><span>Destructive Confirmation</span><select value={confirmation} onChange={event => setConfirmation(event.target.value as "none" | "confirm")}><option value="none">None</option><option value="confirm">Confirm</option></select></label>
+      {Array.isArray(operations) && <fieldset className="form assistant-fields"><legend>Allowed Operations</legend><ChoiceRows label="Allowed Operations" multiple value={operations} onChange={id => setOperations(toggle(operations, id))} options={operationChoices.map(id => ({value: id, title: operationTitle(id), disabled: busy || connection?.revoked, description: <><code>{id}</code> — {view.operations.find(o => o.name === id)?.description ?? "Not currently registered on this server."}</>}))} />{operationChoices.length === 0 && <p>No operations are registered.</p>}</fieldset>}
+      <div className="field"><span className="field-label">Project Access</span><Select label="Project Access" value={projects === "all" ? "all" : "selected"} options={[{value: "all", label: "All Projects"}, {value: "selected", label: "Selected Projects"}]} disabled={busy || connection?.revoked} onChange={value => setProjects(value === "all" ? "all" : [])} /></div>
+      {Array.isArray(projects) && <fieldset className="form assistant-fields"><legend>Allowed Projects</legend><ChoiceRows label="Allowed Projects" multiple value={projects} onChange={id => setProjects(toggle(projects, id))} options={projectChoices.map(id => ({value: id, title: view.projects.find(p => p.id === id)?.name ?? id, disabled: busy || connection?.revoked}))} /><p className="field-helper">Only selected projects are allowed. Resources without a project are excluded. Installation and connection metadata remain readable when granted.</p></fieldset>}
+      <div className="field"><span className="field-label">Destructive Confirmation</span><Select label="Destructive Confirmation" value={confirmation} options={[{value: "none", label: "None"}, {value: "confirm", label: "Confirm"}]} disabled={busy || connection?.revoked} onChange={setConfirmation} /></div>
       <p className="field-helper">Confirm requires a preview and short-lived confirmation for destructive operations. None allows granted operations without that extra step.</p>
       <button className="btn primary" disabled={!name.trim()}>{connection ? "Save Connection" : "Create Connection"}</button>
     </fieldset>

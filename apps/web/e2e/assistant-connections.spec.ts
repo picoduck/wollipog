@@ -14,12 +14,14 @@ for (const theme of ["dark", "light"] as const) {
       await expect(page.getByRole("status")).toContainText("Installation name saved");
       await page.getByRole("button", {name: "New Connection", exact: true}).click();
       await page.getByLabel("Connection Name", {exact: true}).fill("OpenClaw Desktop");
-      await expect(page.getByRole("combobox", {name: "Management Access", exact: true})).toHaveValue("all");
-      await expect(page.getByRole("combobox", {name: "Destructive Confirmation", exact: true})).toHaveValue("none");
+      await expect(page.getByRole("button", {name: /^Management Access:/})).toContainText("Full Access");
+      await expect(page.getByRole("button", {name: /^Destructive Confirmation:/})).toContainText("None");
       await page.getByRole("button", {name: "Create Connection", exact: true}).evaluate(button => { (button as HTMLButtonElement).click(); (button as HTMLButtonElement).click(); });
       const secret = page.getByLabel("Assistant Credential", {exact: true});
       await expect(secret).toHaveAttribute("type", "password");
       const token = await secret.inputValue();
+      expect(await secret.getAttribute("value")).toBeNull();
+      expect(await page.locator("html").evaluate((element, credential) => element.innerHTML.includes(credential), token)).toBe(false);
       expect(server.db.assistantConnections.authenticate(token)).not.toBeNull();
       expect((server.db.raw().prepare("SELECT count(*) AS n FROM assistant_connections").get() as {n: number}).n).toBe(1);
       await page.evaluate(() => Object.defineProperty(navigator, "clipboard", {configurable: true, value: {writeText: async () => { throw new Error("fixture denied"); }}}));
@@ -36,11 +38,14 @@ for (const theme of ["dark", "light"] as const) {
       await page.getByRole("button", {name: "Dismiss Credential"}).click();
       await expect(secret).toHaveCount(0);
       await page.getByLabel("Connection Name", {exact: true}).fill("OpenClaw Remote");
-      await page.getByRole("combobox", {name: "Management Access", exact: true}).selectOption("selected");
+      await page.getByRole("button", {name: /^Management Access:/}).click();
+      await page.getByRole("option", {name: "Configured Access", exact: true}).click();
       await page.getByRole("checkbox", {name: /Assistant Discover/}).check();
-      await page.getByRole("combobox", {name: "Project Access", exact: true}).selectOption("selected");
+      await page.getByRole("button", {name: /^Project Access:/}).click();
+      await page.getByRole("option", {name: "Selected Projects", exact: true}).click();
       await page.getByRole("checkbox", {name: "Assistant Sandbox"}).check();
-      await page.getByRole("combobox", {name: "Destructive Confirmation", exact: true}).selectOption("confirm");
+      await page.getByRole("button", {name: /^Destructive Confirmation:/}).click();
+      await page.getByRole("option", {name: "Confirm", exact: true}).click();
       await page.getByRole("button", {name: "Save Connection", exact: true}).click();
       await expect(page.getByRole("status")).toContainText("Connection saved");
       const connection = server.db.assistantConnections.current(server.db.assistantConnections.authenticate(token)!);
@@ -60,13 +65,13 @@ for (const theme of ["dark", "light"] as const) {
       if (process.env.ASSISTANT_EVIDENCE_DIR) {
         await page.setViewportSize({width: 1280, height: 1400});
         await page.getByLabel("Connection Name", {exact: true}).scrollIntoViewIfNeeded();
-        await expect(page.getByRole("combobox", {name: "Destructive Confirmation", exact: true})).toBeInViewport();
+        await expect(page.getByRole("button", {name: /^Destructive Confirmation:/})).toBeInViewport();
         await expect(page.getByRole("checkbox", {name: "Assistant Sandbox"})).toBeInViewport();
         expect((await page.getByLabel("Connection ID", {exact: true}).boundingBox())!.width).toBeGreaterThan(500);
         await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-configure-${theme}.png`, animations: "disabled"});
         await page.setViewportSize({width: 390, height: 844});
         await expect(page.getByRole("dialog")).toBeInViewport({ratio: 0.95});
-        await page.getByRole("combobox", {name: "Destructive Confirmation", exact: true}).scrollIntoViewIfNeeded();
+        await page.getByRole("button", {name: /^Destructive Confirmation:/}).scrollIntoViewIfNeeded();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-configure-mobile-${theme}.png`, animations: "disabled"});
         await page.setViewportSize({width: 1280, height: 1000});
@@ -76,10 +81,12 @@ for (const theme of ["dark", "light"] as const) {
       await page.getByRole("button", {name: "Refresh Activity"}).click();
       await expect(page.getByText("Succeeded", {exact: true})).toBeVisible();
       await page.getByRole("button", {name: "Rotate Credential", exact: true}).click();
+      await expect(page.getByRole("dialog", {name: "Rotate Credential", exact: true})).toBeVisible();
+      if (process.env.ASSISTANT_EVIDENCE_DIR) await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-rotate-confirm-${theme}.png`, animations: "disabled"});
       await page.getByRole("button", {name: "Cancel", exact: true}).click();
       expect(server.db.assistantConnections.authenticate(token)).not.toBeNull();
       await page.getByRole("button", {name: "Rotate Credential", exact: true}).click();
-      await page.getByRole("button", {name: "Confirm Rotation", exact: true}).click();
+      await page.getByRole("dialog", {name: "Rotate Credential", exact: true}).getByRole("button", {name: "Rotate Credential", exact: true}).click();
       await expect(secret).toBeVisible();
       const rotated = await secret.inputValue();
       expect(server.db.assistantConnections.authenticate(token)).toBeNull();
@@ -89,7 +96,9 @@ for (const theme of ["dark", "light"] as const) {
       await expect(secret).toHaveCount(0);
       await page.getByRole("button", {name: /OpenClaw Remote/}).click();
       await page.getByRole("button", {name: "Revoke Connection", exact: true}).click();
-      await page.getByRole("button", {name: "Confirm Revocation", exact: true}).click();
+      await expect(page.getByRole("dialog", {name: "Revoke Connection", exact: true})).toBeVisible();
+      if (process.env.ASSISTANT_EVIDENCE_DIR) await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-revoke-confirm-${theme}.png`, animations: "disabled"});
+      await page.getByRole("dialog", {name: "Revoke Connection", exact: true}).getByRole("button", {name: "Revoke Connection", exact: true}).click();
       await expect(page.getByRole("status")).toContainText("Connection revoked");
       expect(server.db.assistantConnections.authenticate(rotated)).toBeNull();
       await page.getByText("Inspect Revoked Grants", {exact: true}).click();
@@ -172,6 +181,6 @@ test("stale owner editor cannot restore a grant narrowed by another client", asy
     await page.getByRole("button", {name: "Back to Connections"}).click();
     await page.getByRole("button", {name: "Refresh Connections"}).click();
     await page.getByRole("button", {name: /Concurrent Owner/}).click();
-    await expect(page.getByRole("combobox", {name: "Project Access", exact: true})).toHaveValue("selected");
+    await expect(page.getByRole("button", {name: /^Project Access:/})).toContainText("Selected Projects");
   } finally { await server.close(); }
 });

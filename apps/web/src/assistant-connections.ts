@@ -1,13 +1,6 @@
 /** Browser-facing owner management API. Secrets appear only in create/rotate responses. */
-export interface AssistantGrant {
-  operations: "all" | string[];
-  projects: "all" | string[];
-  destructiveConfirmation?: "none" | "confirm";
-}
-export interface AssistantConnection {
-  id: string; name: string; ownerUserId: string; organizationId: string;
-  grant: AssistantGrant; revision: number; revoked: boolean;
-}
+import type { AssistantConnection } from "@wollipog/protocol";
+export type { AssistantGrant, AssistantConnection } from "@wollipog/protocol";
 export interface AssistantConnectionsView {
   connections: AssistantConnection[];
   installation: {id: string; name: string; canRename: boolean};
