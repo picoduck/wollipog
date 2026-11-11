@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
@@ -901,6 +901,10 @@ test("video prefix-cache installs clear the resolver lock and reject incomplete 
   const shell = step.split("        run: |\n")[1].trimEnd().split("\n").map((line) => line.slice(10)).join("\n");
   const dir = mkdtempSync(resolve(tmpdir(), "video-cache-test-"));
   try {
+    const cache = resolve(dir, ".cache/video-decoder-packages");
+    mkdirSync(cache, { recursive: true });
+    const archive = resolve(cache, "ffmpeg_1_amd64.deb");
+    writeFileSync(archive, "inert cached archive");
     writeFileSync(resolve(dir, "sudo"), `#!/bin/bash
 printf '%s\\n' "$*" >> "$CACHE_TEST_CALLS"
 if [[ "$1" == pkill ]]; then exit 1; fi
@@ -908,12 +912,12 @@ if [[ "$1" == cp ]]; then exit 0; fi
 if [[ "$*" == *--no-download* ]]; then exit "$CACHE_TEST_OFFLINE_STATUS"; fi
 exit 0
 `, { mode: 0o755 });
-    for (const cacheHit of ["true", "false"]) {
+    for (const [cacheHit, cacheFallback] of [["true", "true"], ["true", "false"], ["false", "true"]]) {
       for (const offlineStatus of ["0", "23"]) {
         const callsPath = resolve(dir, "calls");
         writeFileSync(callsPath, "");
         const result = spawnSync("bash", ["-e", "-c", shell], { encoding: "utf8", env: {
-          ...process.env, PATH: `${dir}:${process.env.PATH}`, CACHE_HIT: cacheHit, CACHE_FALLBACK: "true",
+          ...process.env, HOME: dir, PATH: `${dir}:${process.env.PATH}`, CACHE_HIT: cacheHit, CACHE_FALLBACK: cacheFallback,
           CACHE_TEST_CALLS: callsPath, CACHE_TEST_OFFLINE_STATUS: offlineStatus,
         } });
         assert.equal(result.error, undefined);
@@ -921,7 +925,7 @@ exit 0
         const calls = readFileSync(callsPath, "utf8").trim().split("\n");
         assert.equal(calls[0], "pkill -KILL -x apt-get");
         if (cacheHit === "true") {
-          assert.match(calls.at(-1), /^apt-get install -y --no-install-recommends --no-download --no-remove bubblewrap ffmpeg .*\.deb$/);
+          assert.equal(calls.at(-1), `apt-get install -y --no-install-recommends --no-download --no-remove bubblewrap ffmpeg${cacheFallback === "true" ? ` ${archive}` : ""}`);
           assert.ok(!calls.some((call) => call.startsWith("apt-get update")));
         } else {
           assert.deepEqual(calls.slice(1), ["apt-get update -qq", "apt-get install -y --no-install-recommends bubblewrap ffmpeg"]);
