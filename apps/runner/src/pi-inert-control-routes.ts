@@ -150,4 +150,3 @@ export function piInertActivationGaps(inventory: Awaited<ReturnType<typeof piCon
   if (inventory.routes.some(route => route.kind === "remote-control-plane")) gaps.add("remote-control-plane-effects");
   return [...gaps].sort();
 }
-
