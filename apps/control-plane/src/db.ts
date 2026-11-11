@@ -8,6 +8,7 @@ import { CAMPAIGN_CLEANUP_ITEMS_LIMIT, CAMPAIGN_LIVE_WORK_KINDS, CAMPAIGN_STUCK_
   worktreeRefusalAction, cleanupReasonSentence, PROTOCOL_VERSION, type CampaignActivityView, type CampaignCleanupItem, type CampaignLiveWorkKind,
   type CampaignRepairView, type CampaignStuckItem, type OrchestratorCampaignHandoff } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
+import { preserveSkillRemoval } from "./skill-removal-history.js";
 import { safeProviderReadiness } from "@wollipog/protocol";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
@@ -11285,6 +11286,7 @@ export class ControlPlaneDb {
 
   deleteSkill(skillId: string, now = Date.now()): boolean {
     return this.atomic(() => {
+      preserveSkillRemoval(this.db, skillId, now);
       this.stmt("DELETE FROM skill_machine_versions WHERE skill_id=?").run(skillId);
       this.stmt("DELETE FROM skill_machine_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
       this.stmt("DELETE FROM skill_git_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
