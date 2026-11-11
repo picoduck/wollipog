@@ -103,11 +103,14 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
       else if (message.method === "tools/call") {
         if (typeof message.params?.name !== "string") return rpcError(-32602, "A registered tool name is required.");
         const output = await deps.operations.call(credential, message.params.name, message.params.arguments ?? {});
-        result = { content: [{type: "text", text: JSON.stringify(output)}] };
+        result = { content: [{type: "text", text: JSON.stringify(output ?? null)}] };
       } else return rpcError(-32601, "Method not supported. Use initialize, ping, tools/list or tools/call with MCP Streamable HTTP.");
       return {jsonrpc: "2.0", id: message.id, result};
     } catch (error) {
-      if (error instanceof AssistantRefusal) return {jsonrpc: "2.0", id: message.id ?? null, result: {isError: true, content: [{type: "text", text: error.message}]}};
+      if (error instanceof AssistantRefusal) {
+        if (message.method !== "tools/call") return rpcError(-32001, error.message);
+        return {jsonrpc: "2.0", id: message.id ?? null, result: {isError: true, content: [{type: "text", text: error.message}]}};
+      }
       req.log.error("Assistant operation failed");
       return rpcError(-32603, "Assistant operation failed. Inspect connection activity and control-plane health; do not blindly retry a mutation.");
     }

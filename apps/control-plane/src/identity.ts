@@ -62,6 +62,13 @@ export function canAdministerIdentity(role: OrganizationRole): boolean {
   return role === "owner" || role === "admin";
 }
 
+/** These management APIs belong to the authenticated organization rather than only the personal
+ * installation organization. Their handlers retain role and exact-resource owner checks. */
+export function isOrganizationAdministrationRoute(routePath: string): boolean {
+  return ["/api/identity", "/api/assistant-connections", "/api/runner-credentials", "/api/devices"]
+    .some(path => routePath === path || routePath.startsWith(`${path}/`));
+}
+
 /**
  * Central organization-role gate for the API surface. Agent session credentials remain limited by
  * their existing exact route allowlist before they reach this function. Human viewers are read-only;

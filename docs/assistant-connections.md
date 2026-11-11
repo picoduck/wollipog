@@ -102,7 +102,8 @@ or expired MCP session never proves a mutation failed and must not trigger autom
 This PR defines the type; it does not claim durable mutation receipt implementation.
 
 Activity contains connection ID, authorizing grant revision, operation, resolved target, timestamp
-and outcome. No arguments, bearer credentials, token hashes or exception text are recorded.
+and outcome. Retention keeps the latest 1,000 entries per connection (the activity API shows 100);
+older entries are removed on insertion. No arguments, bearer credentials, token hashes or exception text are recorded.
 Operation services must return secret-free errors distinguishing unavailable runners/peers and
 unsupported versions. Generic unexpected errors disclose no internal exception text.
 

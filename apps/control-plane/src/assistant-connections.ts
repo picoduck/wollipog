@@ -32,6 +32,7 @@ export interface AssistantOperationReceipt {
   resourceId?: string;
 }
 export class AssistantRefusal extends Error {}
+export const ASSISTANT_ACTIVITY_LIMIT = 1_000;
 const secret = () => `wollipoga_${randomBytes(32).toString("base64url")}`;
 
 export function assistantGrant(value: unknown): AssistantGrant {
@@ -63,6 +64,7 @@ export class AssistantConnections {
       CREATE TABLE IF NOT EXISTS assistant_activity (
       id INTEGER PRIMARY KEY, connection_id TEXT NOT NULL, grant_revision INTEGER NOT NULL,
       operation TEXT NOT NULL, target_json TEXT NOT NULL, outcome TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS assistant_activity_connection ON assistant_activity(connection_id, id DESC);
       CREATE TABLE IF NOT EXISTS assistant_installation (singleton INTEGER PRIMARY KEY CHECK(singleton=1), name TEXT NOT NULL);
       INSERT OR IGNORE INTO assistant_installation VALUES (1, 'Wollipog');`);
   }
@@ -89,7 +91,8 @@ export class AssistantConnections {
   }
   rotate(id: string): string {
     const token = secret();
-    this.db.prepare("UPDATE assistant_connections SET token_hash=?,revision=revision+1 WHERE id=? AND revoked=0").run(hashToken(token), id);
+    const updated = this.db.prepare("UPDATE assistant_connections SET token_hash=?,revision=revision+1 WHERE id=? AND revoked=0").run(hashToken(token), id);
+    if (updated.changes === 0) throw new AssistantRefusal("Assistant connection is missing or revoked. Create a new connection instead.");
     this.changed(id);
     return token;
   }
@@ -113,6 +116,9 @@ export class AssistantConnections {
   record(connection: AssistantConnection, operation: string, target: AssistantTarget, outcome: "succeeded" | "refused" | "failed"): void {
     // Only registered names and resolved resource identifiers. Never arguments or exception messages.
     this.db.prepare("INSERT INTO assistant_activity(connection_id,grant_revision,operation,target_json,outcome,created_at) VALUES (?,?,?,?,?,?)").run(connection.id, connection.revision, operation, JSON.stringify(target), outcome, Date.now());
+    this.db.prepare(`DELETE FROM assistant_activity WHERE connection_id=? AND id <= (
+      SELECT id FROM assistant_activity WHERE connection_id=? ORDER BY id DESC LIMIT 1 OFFSET ?
+    )`).run(connection.id, connection.id, ASSISTANT_ACTIVITY_LIMIT);
   }
 }
 
