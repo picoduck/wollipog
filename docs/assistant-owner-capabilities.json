@@ -28,7 +28,9 @@
     ]
   },
   "DELETE /api/runners/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "runner_remove"
+    ]
   },
   "DELETE /api/runners/:id/provider-accounts/:accountId": {
     "exclusion": "human_authority",
@@ -36,10 +38,14 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "DELETE /api/runners/:id/provider-logins/:operationId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Cancels a provider sign-in transaction and its credential-establishment state. Sign-in control remains with the authenticated owner.",
+    "remedy": "Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."
   },
   "DELETE /api/runners/:runnerId/workspaces/:workspaceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "workspace_remove"
+    ]
   },
   "DELETE /api/sessions/:id": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -124,7 +130,9 @@
     ]
   },
   "GET /api/projects/:id/access-scope": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "project_scope_get"
+    ]
   },
   "GET /api/projects/:id/locations/:locationId/worktree-setup": {
     "tools": [
@@ -137,22 +145,30 @@
     ]
   },
   "GET /api/runners/:id/external-sessions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "runner_external_sessions"
+    ]
   },
   "GET /api/runners/:id/list-directory": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "runner_directory"
+    ]
   },
   "GET /api/runners/:id/provider-account-selection": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/runners/:id/provider-accounts/:accountId/home-lease": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Inspects a provider credential HOME lease and its credential-access recovery state, within the owner's provider-account security surface.",
+    "remedy": "Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."
   },
   "GET /api/runners/:id/skills": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "GET /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "workspace_scope_get"
+    ]
   },
   "GET /api/sessions": {
     "tools": [
@@ -388,7 +404,9 @@
     ]
   },
   "PATCH /api/runners/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "runner_rename"
+    ]
   },
   "PATCH /api/sessions/:id/review-findings/:findingId": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -502,7 +520,9 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/runners/:id/provider-accounts/:accountId/recover-lease": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Authorizes recovery of an exact stale provider credential HOME lease and asserts that its prior processes no longer use that HOME. This credential-access recovery requires the authenticated owner.",
+    "remedy": "Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."
   },
   "POST /api/runners/:id/provider-accounts/:accountId/revoke-profile-access": {
     "exclusion": "human_authority",
@@ -525,7 +545,9 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/runners/:id/rediscover": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "runner_rediscover"
+    ]
   },
   "POST /api/runners/:id/skill-adoption-recovery": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -546,16 +568,24 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/runners/:runnerId/host-action": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "interactive_workspace_io",
+    "reason": "Opens a registered workspace or source location in the host's graphical file manager/editor. This is an interactive desktop I/O action, not Machine, Workspace or session administration.",
+    "remedy": "Use the authenticated owner Open in File Manager/Open in Editor action on the host, or prompt an authorized session for workspace work. Workspace registration directory browsing is separately available through runner_directory."
   },
   "POST /api/runners/:runnerId/workspaces": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "workspace_create"
+    ]
   },
   "POST /api/runners/:runnerId/workspaces/:workspaceId/rename": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "workspace_rename"
+    ]
   },
   "POST /api/runners/:runnerId/workspaces/register": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "workspace_register"
+    ]
   },
   "POST /api/sessions": {
     "tools": [
@@ -685,7 +715,9 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/host-action": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "interactive_workspace_io",
+    "reason": "Opens a registered workspace or source location in the host's graphical file manager/editor. This is an interactive desktop I/O action, not Machine, Workspace or session administration.",
+    "remedy": "Use the authenticated owner Open in File Manager/Open in Editor action on the host, or prompt an authorized session for workspace work. Workspace registration directory browsing is separately available through runner_directory."
   },
   "POST /api/sessions/:id/location-switch-requests": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -1047,7 +1079,9 @@
     ]
   },
   "PUT /api/runners/:id/automatic-account-switching": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Changes the persistent Machine policy for automatic use of provider credential accounts. Standing provider-access policy remains human-controlled.",
+    "remedy": "Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."
   },
   "PUT /api/runners/:id/capacity": {
     "tools": [
@@ -1058,13 +1092,19 @@
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "PUT /api/runners/:id/provider-account-defaults/:provider": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Changes the Machine's persistent default provider credential-account choice. Provider-account access configuration remains human-controlled.",
+    "remedy": "Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."
   },
   "PUT /api/runners/:id/provider-account-policies/:provider": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Changes persistent provider credential-account selection policy and allowed account access. Assistant standing grants cannot establish this provider-access authority.",
+    "remedy": "Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."
   },
   "PUT /api/runners/:id/provider-logins/:operationId/dismiss": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Acknowledges a provider sign-in result in the owner's authentication flow. Assistant text cannot act as the owner of that credential-establishment transaction.",
+    "remedy": "Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."
   },
   "PUT /api/runners/:id/reviewer-security": {
     "exclusion": "human_authority",

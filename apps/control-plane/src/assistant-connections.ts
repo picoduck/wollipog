@@ -190,7 +190,12 @@ export class AssistantOperations {
       };
       const owner = await recheck();
       const result = await operation.execute(args, { owner, connection, recheck });
-      this.connections.record(connection, name, target, "succeeded");
+      // A delivered RPC can still report a refused service command or uncertain dispatch.
+      // Registered services return receipts/status, never a private error in the activity row.
+      const response = result && typeof result === "object" ? result as {status?: unknown; receipt?: {status?: unknown}} : undefined;
+      const failed = response?.receipt?.status === "failed" || response?.receipt?.status === "uncertain" ||
+        (typeof response?.status === "number" && response.status >= 400);
+      this.connections.record(connection, name, target, failed ? "failed" : "succeeded");
       return result;
     } catch (error) {
       this.connections.record(connection, name, target, error instanceof AssistantRefusal ? "refused" : "failed");

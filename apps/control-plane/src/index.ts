@@ -70,9 +70,7 @@ import {
   type RunnerCapabilityRequirementDetails,
   type ProviderHomeLaunchRefusalView,
   runnerSupportsProtocol,
-  workspaceRemovalBlockedMessage,
   validProviderHomeLaunchRefusal,
-  scopeAudienceContained,
   isPromptImageReference,
   isWorkspaceReference,
   validatePromptImageInputs,
@@ -122,7 +120,6 @@ import {
   type GovernancePolicy,
   type OnboardingInfo,
   type OrganizationRole,
-  type ResourceOwner,
   type ResourceScope,
   type ParentControlMode,
   type ParentControlDecisionPolicy,
@@ -305,9 +302,13 @@ import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
 import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
 import { createSessionWorktreeManagement } from "./session-worktree-management.js";
 import { registerAssistantOwnerManagement } from "./assistant-owner-management.js";
+import { registerAssistantMachineManagement } from "./assistant-machine-management.js";
 import { createOwnerRunnerManagement } from "./owner-runner-management.js";
+import { createOwnerMachineManagement } from "./owner-machine-management.js";
 import { createOwnerProjectManagement } from "./owner-project-management.js";
-import { projectName, requestedAccessScope } from "./project-management-validation.js";
+import { projectName, requestedAccessScope, accessScopeOwnerFromQuery,
+  accessScopeTransitionError as sharedAccessScopeTransitionError,
+  accessScopePreviewForPrincipal as sharedAccessScopePreviewForPrincipal } from "./project-management-validation.js";
 import { OwnerManagementInventory } from "./owner-management-inventory.js";
 import { registerAssistantWorkOperations, registerAssistantWorkOwnerRoutes } from "./assistant-work-routes.js";
 import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
@@ -2390,38 +2391,11 @@ app.get("/api/runners", async (req) => {
 
 /* ------------------------------- Projects -------------------------------- */
 
-const accessScopeTransitionError = (
-  principal: HumanPrincipal,
-  currentScope: ResourceScope,
-  targetScope: ResourceScope,
-): string | null => {
-  if (canAdministerIdentity(principal.role)) return null;
-  const sameAudience = scopeAudienceContained(currentScope, targetScope) &&
-    scopeAudienceContained(targetScope, currentScope);
-  if (sameAudience || (db.scopeAudienceContainedWithMembership(targetScope, currentScope) &&
-      !db.scopeAudienceContainedWithMembership(currentScope, targetScope))) return null;
-  return "organization owner or admin permission is required unless the access change only narrows the current audience";
-};
 
-const accessScopeOwnerFromQuery = (query: unknown): ResourceOwner | undefined => {
-  const { ownerKind, ownerId } = (query ?? {}) as { ownerKind?: unknown; ownerId?: unknown };
-  if (ownerKind === "organization" && typeof ownerId === "string") {
-    return { kind: "organization", organizationId: ownerId };
-  }
-  if (ownerKind === "user" && typeof ownerId === "string") return { kind: "user", userId: ownerId };
-  if (ownerKind === "team" && typeof ownerId === "string") return { kind: "team", teamId: ownerId };
-  return undefined;
-};
-
-/** Keep relationship evidence internal when a Location manager cannot access an attached Project. */
-const accessScopePreviewForPrincipal = (
-  principal: AuthPrincipal,
-  preview: AccessScopeChangePreview,
-): AccessScopeChangePreview => ({
-  ...preview,
-  affectedProjects: preview.affectedProjects.filter((project) =>
-    db.canAccessProject(principal, project.projectId)),
-});
+const accessScopeTransitionError = (principal: HumanPrincipal, current: ResourceScope, target: ResourceScope) =>
+  sharedAccessScopeTransitionError(db, principal, current, target);
+const accessScopePreviewForPrincipal = (principal: AuthPrincipal, preview: AccessScopeChangePreview) =>
+  sharedAccessScopePreviewForPrincipal(db, principal, preview);
 
 const accessibleProject = (req: FastifyRequest, projectId: string) => {
   const principal = requestPrincipal(req);
@@ -2438,21 +2412,6 @@ const manageableProject = (req: FastifyRequest, projectId: string) => {
 app.get("/api/projects", async (req) => {
   const principal = requestPrincipal(req);
   return { projects: principal ? db.listProjectsForPrincipal(principal, true) : [] };
-});
-
-app.get("/api/projects/:id/access-scope", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  const requested = requestedAccessScope(db, principal, accessScopeOwnerFromQuery(req.query));
-  if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
-  const currentScope = db.projectScope(id);
-  if (!currentScope) return reply.code(404).send({ error: "project not found" });
-  const transitionError = accessScopeTransitionError(principal, currentScope, requested.scope);
-  if (transitionError) return reply.code(403).send({ error: transitionError });
-  const preview = db.previewProjectAccessScope(id, requested.scope);
-  return preview ? { preview } : reply.code(404).send({ error: "project not found" });
 });
 
 app.put("/api/projects/:id/access-scope", async (req, reply) => {
@@ -2901,14 +2860,6 @@ app.post("/api/push/unsubscribe", async (req, reply) => {
 
 // Ask a runner to re-probe its installed agents; the refreshed list arrives
 // asynchronously via an agents_updated message.
-app.post("/api/runners/:id/rediscover", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
-  const sent = hub.sendToRunner(id, { type: "rediscover", runnerId: id });
-  if (!sent) return reply.code(503).send({ error: "runner not reachable" });
-  return { ok: true };
-});
-
 app.post("/api/runners/:id/provider-logins", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = requestPrincipal(req);
@@ -3179,24 +3130,6 @@ app.post("/api/runners/:id/acp-registry/:agentId/approval", async (req, reply) =
 
 // Remove a stale/offline runner (and its sessions/runs) from the dashboard. Online runners must be
 // stopped first — otherwise they'd just re-register.
-app.patch("/api/runners/:id", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const body = (req.body ?? {}) as { displayName?: unknown };
-  if (typeof body.displayName !== "string") {
-    return reply.code(400).send({ error: "displayName must be a string" });
-  }
-  const displayName = body.displayName.trim();
-  if (displayName && !projectName(displayName)) {
-    return reply.code(400).send({ error: "displayName must be 120 characters or fewer and contain no control characters" });
-  }
-  const boxId = db.boxIdForRunner(id);
-  if (!db.getRunner(id) && !boxId) return reply.code(404).send({ error: "runner not found" });
-  db.setMachineDisplayName(id, displayName);
-  hub.runnerChanged(id);
-  if (boxId) hub.boxChanged(boxId);
-  return { ok: true };
-});
-
 app.put("/api/runners/:id/harness-installation", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = requestPrincipal(req);
@@ -3265,6 +3198,8 @@ app.put("/api/runners/:id/target-harness-installation", async (req, reply) => {
 
 const ownerRunnerManagement = createOwnerRunnerManagement(db, hub);
 ownerRunnerManagement.registerHttp(app, requestHuman);
+const ownerMachineManagement = createOwnerMachineManagement(db, hub, svc);
+ownerMachineManagement.registerHttp(app, requestHuman);
 
 registerReviewerSecurityRoutes(app, db, hub, requestPrincipal);
 
@@ -3459,46 +3394,8 @@ app.get("/api/runners/:id/provider-account-selection", async (req, reply) => {
     : preview);
 });
 
-app.delete("/api/runners/:id", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  if (hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is online — stop it before removing" });
-  // A box's runner must be removed through the box (DELETE /api/boxes/:id): that path also tears
-  // down the orchestrator's runtime/timer state and tells UIs to drop the box card. deleteRunner()
-  // would delete the persisted box row but leave both unsignaled, orphaning the box.
-  if (db.boxIdForRunner(id)) {
-    return reply.code(409).send({ error: "this runner belongs to a box — remove the box instead (DELETE /api/boxes/:id)" });
-  }
-  const projectIds = db.projectIdsForRunner(id);
-  const res = db.deleteRunner(id);
-  if (!res) return reply.code(404).send({ error: "runner not found" });
-  for (const sid of res.sessionIds) hub.sessionRemoved(sid, false);
-  for (const rid of res.runIds) hub.runRemoved(rid);
-  for (const podId of res.podIds) {
-    const pod = db.reconcilePodAfterMembershipLoss(podId, Date.now());
-    if (pod) hub.podChanged(pod);
-  }
-  hub.runnerRemoved(id);
-  for (const projectId of projectIds) hub.projectChangedById(projectId);
-  return reply.code(204).send();
-});
-
 // Phase 3: list external (CLI-started) sessions on a runner host, and adopt one into Wollipog.
-app.get("/api/runners/:id/external-sessions", async (req, reply) => {
-  const query = req.query as { agentId?: string };
-  const r = await svc.listExternalSessions((req.params as { id: string }).id, query.agentId || undefined);
-  if (!r.ok) return reply.code(r.status).send(failureBody(r));
-  return { sessions: r.data };
-});
-
 // Browse the runner machine's filesystem for the workspace directory picker.
-app.get("/api/runners/:id/list-directory", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const q = req.query as { path?: string; distro?: string };
-  const r = await svc.listDirectory(id, q.path ?? "", q.distro || undefined);
-  if (!r.ok) return reply.code(r.status).send(failureBody(r));
-  return r.data;
-});
-
 // Files panel: browse / read files under a session's root (worktree or repo, runner-resolved).
 // `?path=a&path=b` parses as an array — reject it here rather than shipping a non-string to the
 // runner (whose validator would throw an opaque TypeError back as a 502).
@@ -5735,6 +5632,7 @@ registerUsageRoutes(app, db, requestPrincipal, hub, {
 const runSessionWorktreeRequest = createSessionWorktreeManagement({db, hub, svc, worktreeCreates, runnerCapabilityError});
 registerAssistantOwnerManagement(assistantOperations, {db, svc, receipts: assistantCommandReceipts,
   projects: ownerProjectManagement, runners: ownerRunnerManagement, worktree: runSessionWorktreeRequest});
+registerAssistantMachineManagement(assistantOperations, db, ownerMachineManagement, assistantCommandReceipts);
 
 app.post("/api/sessions/:id/worktrees", async (req, reply) => {
   const id = (req.params as { id: string }).id;
@@ -6230,46 +6128,6 @@ app.post("/api/sessions/:id/host-action", async (req, reply) => {
 
 // Create a project ("New project"). CP-owned workspace persisted in workspace_extras so it
 // survives runner re-registers. Requires the runner online — the path was browsed on its host.
-app.post("/api/runners/:runnerId/workspaces", async (req, reply) => {
-  const { runnerId } = req.params as { runnerId: string };
-  const body = (req.body ?? {}) as { name?: unknown; path?: unknown };
-  const name = typeof body.name === "string" ? body.name.trim() : "";
-  const path = typeof body.path === "string" ? body.path.trim() : "";
-  if (!name || !path) return reply.code(400).send({ error: "name and path are required" });
-  if (!db.getRunner(runnerId)) return reply.code(404).send({ error: "runner not found" });
-  if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const principal = requestHuman(req);
-  const scope: ResourceScope | undefined = principal ? {
-    organizationId: principal.organizationId,
-    owner: { kind: "user", userId: principal.userId },
-  } : undefined;
-  const workspace = db.createWorkspace(runnerId, { name, path }, scope);
-  hub.runnerChanged(runnerId);
-  for (const projectId of db.projectIdsForWorkspace(runnerId, workspace.id)) {
-    hub.projectChangedById(projectId);
-  }
-  return { workspace };
-});
-
-app.get("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (req, reply) => {
-  const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!db.canManageWorkspace(principal, runnerId, workspaceId)) {
-    return reply.code(404).send({ error: "workspace not found" });
-  }
-  const requested = requestedAccessScope(db, principal, accessScopeOwnerFromQuery(req.query));
-  if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
-  const currentScope = db.workspaceScope(runnerId, workspaceId);
-  if (!currentScope) return reply.code(404).send({ error: "workspace not found" });
-  const transitionError = accessScopeTransitionError(principal, currentScope, requested.scope);
-  if (transitionError) return reply.code(403).send({ error: transitionError });
-  const preview = db.previewWorkspaceAccessScope(runnerId, workspaceId, requested.scope);
-  return preview
-    ? { preview: accessScopePreviewForPrincipal(principal, preview) }
-    : reply.code(404).send({ error: "workspace not found" });
-});
-
 app.put("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (req, reply) => {
   const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
   const principal = requestHuman(req);
@@ -6311,109 +6169,10 @@ app.put("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (re
 
 // Rename a project (workspace display name). CP-owned override — the runner's own config
 // name stays untouched and the override survives re-registers. Empty name resets it.
-app.post("/api/runners/:runnerId/workspaces/register", async (req, reply) => {
-  const { runnerId } = req.params as { runnerId: string };
-  const body = (req.body ?? {}) as { name?: unknown; path?: unknown };
-  const name = typeof body.name === "string" ? body.name.trim() : "";
-  const path = typeof body.path === "string" ? body.path.trim() : "";
-  if (!name || !path) return reply.code(400).send({ error: "name and path are required" });
-  if (!db.getRunner(runnerId)) return reply.code(404).send({ error: "runner not found" });
-  if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const principal = requestHuman(req);
-  const scope: ResourceScope | undefined = principal ? {
-    organizationId: principal.organizationId,
-    owner: { kind: "user", userId: principal.userId },
-  } : undefined;
-  try {
-    const workspace = db.registerMachineWorkspace(runnerId, { name, path }, scope);
-    hub.runnerChanged(runnerId);
-    return { workspace };
-  } catch (error) {
-    const message = (error as Error).message;
-    return reply.code(message.includes("already registered") ? 409 : 400).send({ error: message });
-  }
-});
-
 // Remove Workspace (#4123): unregister one Workspace from a Machine with the authority that
 // registers one (owners and admins). Nothing on disk is deleted. Anything that still uses the
 // Workspace refuses removal with what to resolve; a configured Workspace is removed by its runner,
 // which keeps it removed across restarts, and older runners are refused with an update hint.
-app.delete("/api/runners/:runnerId/workspaces/:workspaceId", async (req, reply) => {
-  const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
-  // A person removes a workspace, never an agent credential, and only one they may manage.
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  const runner = db.getRunner(runnerId);
-  if (!runner) return reply.code(404).send({ error: "runner not found" });
-  if (!db.canManageWorkspace(principal, runnerId, workspaceId)) {
-    return reply.code(404).send({ error: "workspace not found" });
-  }
-  const source = db.workspaceSource(runnerId, workspaceId);
-  if (!source) return reply.code(404).send({ error: "workspace not found" });
-  if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  if (source === "configured") {
-    const unsupported = runnerCapabilityError(runnerId, "workspaceRemoval", "removing configured workspaces");
-    if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  }
-  // Checking what uses it and hiding it is one transaction, so nothing can come to depend on the
-  // workspace while its runner is asked; a managed workspace is gone at this point.
-  const started = db.beginWorkspaceRemoval(runnerId, workspaceId);
-  if (!started) return reply.code(404).send({ error: "workspace not found" });
-  if (!started.ok) {
-    return reply.code(409).send({ error: workspaceRemovalBlockedMessage(started.blockers), blockers: started.blockers });
-  }
-  hub.runnerChanged(runnerId);
-  if (started.source === "managed") return { removed: true };
-  const requestId = `workspace_remove_${randomUUID()}`;
-  try {
-    const result = await hub.requestFromRunner(runnerId, requestId, {
-      type: "remove_workspace",
-      requestId,
-      runnerId,
-      workspaceId,
-      path: started.path,
-    });
-    if (result.type !== "remove_workspace_result" || !result.ok) {
-      db.cancelWorkspaceRemoval(runnerId, workspaceId);
-      hub.runnerChanged(runnerId);
-      return result.type === "remove_workspace_result"
-        ? reply.code(409).send({ error: result.error ?? "The machine could not remove the workspace." })
-        : reply.code(502).send({ error: "unexpected runner reply" });
-    }
-  } catch (error) {
-    if (isRunnerRequestNotSentError(error)) {
-      db.cancelWorkspaceRemoval(runnerId, workspaceId);
-      hub.runnerChanged(runnerId);
-      return reply.code(409).send({ error: "runner is offline" });
-    }
-    // The runner may have recorded it. The workspace stays hidden; the runner's next registration
-    // restores it if the runner still has it.
-    return reply.code(504).send({
-      error: "The machine didn't confirm the removal. The workspace stays hidden, and comes back when the machine reconnects if it wasn't removed.",
-    });
-  }
-  db.finishWorkspaceRemoval(runnerId, workspaceId);
-  return { removed: true };
-});
-
-app.post("/api/runners/:runnerId/workspaces/:workspaceId/rename", async (req, reply) => {
-  const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
-  const body = (req.body ?? {}) as { name?: unknown };
-  if (typeof body.name !== "string") return reply.code(400).send({ error: "name must be a string" });
-  if (!db.getRunner(runnerId)) return reply.code(404).send({ error: "runner not found" });
-  const linkedProjectIds = db.projectIdsForWorkspace(runnerId, workspaceId);
-  const principal = requestHuman(req);
-  if (!principal || !db.canManageWorkspace(principal, runnerId, workspaceId)) {
-    return reply.code(404).send({ error: "workspace not found" });
-  }
-  db.renameWorkspace(runnerId, workspaceId, body.name);
-  hub.runnerChanged(runnerId);
-  for (const projectId of linkedProjectIds) hub.projectChangedById(projectId);
-  // Re-broadcast affected sessions so every open dashboard re-groups its sidebar immediately.
-  for (const id of db.sessionIdsForWorkspace(runnerId, workspaceId)) hub.sessionChangedById(id);
-  return { ok: true };
-});
-
 // Reveal a project root in the runner host's file manager ("Open in Explorer"). Only paths
 // the runner itself advertised as workspace roots are allowed — this endpoint must not be a
 // generic "open anything on the host" primitive.
