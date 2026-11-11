@@ -42,7 +42,7 @@
   "GET /api/runners/:id/skills": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
   "GET /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
   "GET /api/sessions": {"tools":["session_list"]},
-  "GET /api/sessions/:id": {"tools":["session_status"]},
+  "GET /api/sessions/:id": {"tools":["session_get","session_config_get","worktree_get","session_status"]},
   "GET /api/sessions/:id/artifacts": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
   "GET /api/sessions/:id/authentication/accounts": {"gap":"NOT-YET-SUPPORTED blocker: Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."},
   "GET /api/sessions/:id/automation-proposals/:occurrenceId": {"tools":["decision_get"]},

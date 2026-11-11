@@ -2,6 +2,7 @@ import type { AuthPrincipal } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { SessionsService } from "./sessions.js";
 import type { Hub } from "./hub.js";
+import type { FastifyBaseLogger } from "fastify";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { OwnerManagement } from "./owner-management.js";
 import { AssistantRefusal, type AssistantOperations, type AssistantOperation, type AssistantTarget } from "./assistant-connections.js";
@@ -67,6 +68,7 @@ function coordinate(args: Record<string, unknown>, key: string): string {
 export function registerAssistantStatusOperations(operations: AssistantOperations, deps: {
   db: ControlPlaneDb; svc: SessionsService; hub: Hub; receipts: AssistantCommandReceipts;
   status: OwnerManagement<AuthPrincipal>; campaign: OwnerManagement<AuthPrincipal>; scope: OwnerManagement<AuthPrincipal>; additional?: OwnerManagement<AuthPrincipal>;
+  log?: FastifyBaseLogger;
 }) {
   const {db, receipts} = deps;
   AssistantCommandConfirmations.install(db.raw());
@@ -112,7 +114,9 @@ export function registerAssistantStatusOperations(operations: AssistantOperation
           // before reading any payload when the connection cannot inspect every contributor.
           const root = db.campaignRootForMember(id);
           const related = new Set<string>();
-          if ((name.startsWith("campaign_") || name === "session_status" || name === "session_lookup" || inventory) && root) {
+          // Any shared status operation may return a full session view (including mutation
+          // responses). Its campaign projection must obey the connection's project grant.
+          if (root) {
             related.add(root);
             db.campaignDescendantIds(root).forEach(s => related.add(s));
             for (const attempts of db.campaignWorkLedger.attemptSessionIdsByItem(root).values()) {
@@ -124,7 +128,17 @@ export function registerAssistantStatusOperations(operations: AssistantOperation
             const controller = db.sessionResultOrchestrator(id);
             if (controller) related.add(controller);
           }
-          for (const sessionId of related) operations.authorize(ctx.connection.id, name, target({sessionId}));
+          related.add(id);
+          for (const sessionId of related) {
+            const resource = target({sessionId});
+            operations.authorize(ctx.connection.id, name, resource);
+            // Inventory admission is metadata-only, but each returned row/contributor isn't.
+            // The registry intentionally skips project checks for metadata operations.
+            const projects = db.assistantConnections.get(ctx.connection.id)!.grant.projects;
+            if (projects !== "all" && (!resource.projectId || !projects.includes(resource.projectId))) {
+              throw new AssistantRefusal("The target project is excluded by this connection. Select a connection that can access every contributing project.");
+            }
+          }
         };
         await ctx.recheck();
         if (name === "campaign_get" && db.assistantConnections.get(ctx.connection.id)!.grant.projects !== "all") {
@@ -136,7 +150,8 @@ export function registerAssistantStatusOperations(operations: AssistantOperation
         const invoke = async () => {
           const result = name === "session_lookup" ? lookupSessionById(db, ctx.owner, params.id, session => deps.hub.withQueue(session, true))
             : await service!.execute(route, {principal: ctx.owner, params, query,
-          body,
+          body, entryPoint: "assistant",
+          log: deps.log?.child({entryPoint: "assistant", operation: name, ...(mutate ? {commandId: coordinate(args, "commandId")} : {})}),
           projectIds: db.assistantConnections.get(ctx.connection.id)!.grant.projects === "all" ? undefined
             : db.assistantConnections.get(ctx.connection.id)!.grant.projects as string[]});
           // The HTTP owner adapter applies these shared projections before serialization. MCP
@@ -169,6 +184,7 @@ export function registerAssistantStatusOperations(operations: AssistantOperation
           const result = await invoke();
           const receipt = receipts.settle(current.id, commandId, result.status < 400 ? "succeeded" : result.status < 500 ? "failed" : "uncertain");
           await ctx.recheck();
+          authorizeRelated();
           return {receipt, ...result};
         } catch {
           const receipt = receipts.get(current.id, commandId)!;

@@ -10,13 +10,16 @@ import type { AuthPrincipal } from "./identity.js";
 import { createAssistantOperations } from "./assistant-routes.js";
 import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
 import { registerAssistantStatusOperations } from "./assistant-status-operations.js";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS } from "@wollipog/protocol";
+import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
-function faultFixture() {
+function faultFixture(campaign = false) {
   const db = ControlPlaneDb.open(":memory:"), local = db.localIdentityContext();
   const owner = db.operatingHumanPrincipal(local.userId, local.organizationId)!;
   db.registerRunner({runnerId: "r", hostname: "fixture", os: "linux", version: "test", agents: [], workspaces: []}, Date.now());
   const project = db.createProject({name: "Fixture"});
-  db.createSession({id: "s", runnerId: "r", workspaceId: null, agentId: null, title: "Fixture", driver: "codex-app-server", useWorktree: false, config: {}, now: Date.now()});
+  db.createSession({id: "s", runnerId: "r", workspaceId: null, agentId: null, title: "Fixture", driver: "codex-app-server", useWorktree: false, config: {}, now: Date.now(),
+    ...(campaign ? {role: "orchestrator" as const, orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default")} : {})});
   db.setSessionProject("s", project.id, null);
   const hub = new Hub(db), svc = new SessionsService(db, hub, {info() {}, warn() {}, error() {}});
   const operations = createAssistantOperations(db), receipts = registerAssistantSessionOperations(operations, db, svc);
@@ -35,6 +38,50 @@ test("production owner and Assistant status paths preserve receipts, revisions, 
   const line = child.stdout.split("\n").find(line => line.startsWith("STATUS_ACCEPTANCE "));
   assert.ok(line, "The production status acceptance assertions did not finish.");
   assert.equal(JSON.parse(line.slice("STATUS_ACCEPTANCE ".length)).realRunner, false);
+  const logs = child.stdout.split("\n").flatMap(line => {try {return [JSON.parse(line)];} catch {return [];}})
+    .filter(entry => entry.event === "background_blocked_results_acknowledged");
+  assert.ok(logs.some(entry => entry.entryPoint === "dashboard" && typeof entry.reqId === "string"));
+  assert.ok(logs.some(entry => entry.entryPoint === "assistant" && entry.commandId === "blocked-once"));
+});
+
+test("archive inventory rechecks each returned row after an asynchronous grant change", async () => {
+  const h = faultFixture();
+  let enter!: () => void, finish!: () => void;
+  const entered = new Promise<void>(resolve => {enter = resolve;});
+  const finished = new Promise<void>(resolve => {finish = resolve;});
+  h.status.define("GET", "/api/sessions/archive-page", async () => {enter(); await finished; return {sessions: [{id: "s", privateFixtureText: "withhold"}]};});
+  try {
+    const pending = h.call("session_archive_list", {});
+    await entered;
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: []});
+    finish();
+    await assert.rejects(pending, /excluded/);
+  } finally {finish(); h.db.close();}
+});
+
+test("a completed mutation with a newly excluded campaign contributor withholds its session body without replay", async () => {
+  const h = faultFixture(true);
+  let enter!: () => void, finish!: () => void, attempts = 0;
+  const entered = new Promise<void>(resolve => {enter = resolve;});
+  const finished = new Promise<void>(resolve => {finish = resolve;});
+  h.status.define("POST", "/api/sessions/:id/result/acknowledge", async () => {attempts++; enter(); await finished; return {session: {privateFixtureText: "withhold"}};});
+  try {
+    const granted = h.db.getSession("s")!.projectId!;
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: [granted]});
+    const args = {sessionId: "s", commandId: "once", payload: {revision: "fixture:1"}};
+    const pending = h.call("result_ack", args);
+    await entered;
+    const hidden = h.db.createProject({name: "Excluded"});
+    h.db.createSession({id: "child", parentSessionId: "s", runnerId: "r", workspaceId: null, agentId: null,
+      title: "Child", driver: "codex-app-server", useWorktree: false, config: {}, now: Date.now()});
+    h.db.setSessionProject("child", hidden.id, null);
+    finish();
+    const result = await pending;
+    assert.equal(result.receipt.status, "succeeded");
+    assert.ok(!JSON.stringify(result).includes("privateFixtureText"));
+    await assert.rejects(h.call("result_ack", args), /excluded/);
+    assert.equal(attempts, 1);
+  } finally {finish(); h.db.close();}
 });
 
 test("an asynchronous status read cannot return private content after its project grant narrows", async () => {

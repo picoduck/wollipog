@@ -244,11 +244,18 @@ Receipt reconciliation precedes recomputing effects, so an already completed rem
 reconcilable after its reminder disappears. Accepted/uncertain commands are never redispatched.
 
 Archive project constraints apply inside the shared database query before pagination and facet
-computation. A campaign/request aggregate refuses before disclosure if any contributing root,
-descendant or retained attempt session is outside the current grant. Authority is checked again
-after asynchronous reads; narrowing a grant while history loads withholds the response. Campaign
+computation. Each returned row also checks its embedded campaign contributors against the current
+project grant; metadata admission never authorizes a session view. Status operations and mutation
+previews/responses refuse disclosure if any contributing root, descendant or retained attempt
+session is outside the current grant. Authority is checked again after asynchronous work;
+narrowing a grant while history loads withholds the response. A completed mutation still retains
+its receipt when a newly excluded contributor prevents returning its session body. Campaign
 reads retain owner cost/forge visibility rules and do not create proposals, expand scope, resolve
 decisions, start reviews or act on approvals.
+
+Work-item list query fields use the same allowlist/parser on HTTP and Assistant paths. Blocked-result
+acknowledgement logs preserve the HTTP request logger and its request id; Assistant logs identify
+the Assistant entry point, operation and command id. Payloads and result content are not logged.
 
 `decision_get` also reads the exact stored status of automation proposals, Location switch requests
 and repository-addition requests. Their existing read adapters select the same session-bound

@@ -8,6 +8,9 @@ export interface OwnerManagementInput<P extends AuthPrincipal = HumanPrincipal> 
   params: unknown;
   body: unknown;
   query: unknown;
+  /** Trusted transport context, never supplied by the operation's payload/query. */
+  log?: FastifyRequest["log"];
+  entryPoint?: "dashboard" | "assistant";
   /** Trusted adapter constraint, never copied from caller payload/query. Applied before paging. */
   projectIds?: readonly string[];
   /** Assistant callers must recheck after asynchronous inspection, before later writes. */
@@ -48,7 +51,8 @@ export class OwnerManagement<P extends AuthPrincipal = HumanPrincipal> {
         handler: async (request, reply) => {
           const owner = principal(request);
           if (!owner) return reply.code(unauthenticatedStatus).send({error: unauthenticatedStatus === 403 ? "human identity is required" : "authentication required"});
-          const result = await this.execute(key, {principal: owner, params: request.params, body: request.body, query: request.query});
+          const result = await this.execute(key, {principal: owner, params: request.params, body: request.body, query: request.query,
+            log: request.log, entryPoint: "dashboard"});
           if (result.headers) reply.headers(result.headers);
           return reply.code(result.status).send(result.body);
         }});

@@ -4431,21 +4431,25 @@ app.post("/api/sessions/:id/orchestrator-campaign/plan", async (req, reply) => {
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
-app.get("/api/sessions/:id/orchestrator-campaign/work-items", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = campaignLedgerPrincipal(req, reply, id);
-  if (!principal) return reply;
-  const query = req.query as Record<string, unknown>;
+function campaignWorkItemsReadQuery(query: Record<string, unknown>): GetCampaignWorkItemsRequest {
   const text = (name: string) => typeof query[name] === "string" ? query[name] as string : undefined;
   const limit = text("limit");
-  return respond(reply, svc.campaignWorkItems(id, {
+  return {
     ...(text("cursor") !== undefined ? { cursor: text("cursor") } : {}),
     ...(limit !== undefined ? { limit: /^\d{1,4}$/u.test(limit) ? Number(limit) : Number.NaN } : {}),
     ...(text("origin") !== undefined ? { origin: text("origin") as GetCampaignWorkItemsRequest["origin"] } : {}),
     ...(text("state") !== undefined ? { state: text("state") as GetCampaignWorkItemsRequest["state"] } : {}),
     ...(text("sort") !== undefined ? { sort: text("sort") as GetCampaignWorkItemsRequest["sort"] } : {}),
     ...(text("includeRecommendations") === "true" ? { includeRecommendations: true } : {}),
-  }, (sessionId) => db.canAccessSession(principal, sessionId)));
+  };
+}
+
+app.get("/api/sessions/:id/orchestrator-campaign/work-items", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = campaignLedgerPrincipal(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.campaignWorkItems(id, campaignWorkItemsReadQuery(req.query as Record<string, unknown>),
+    (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
 app.get("/api/sessions/:id/orchestrator-campaign/work-items/:itemId", async (req, reply) => {
@@ -6572,7 +6576,7 @@ ownerSessionStatus.define("POST", "/api/sessions/:id/background-deliveries/ackno
   if (!db.getSession(id)) return reply.code(404).send({ error: "session not found" });
   const changed = db.acknowledgeBackgroundBlockedResults(id, body.targets, Date.now());
   if (changed) hub.sessionChangedById(id);
-  app.log.info({ event: "background_blocked_results_acknowledged", sessionId: id, changed,
+  (req.log ?? app.log).info({ event: "background_blocked_results_acknowledged", entryPoint: req.entryPoint ?? "owner_management", sessionId: id, changed,
     requested: body.targets.length }, "Blocked-result acknowledgement completed");
   return db.getSession(id);
 });
@@ -6627,17 +6631,14 @@ for (const suffix of ["review-jobs", "review-jobs/:jobId", "review-jobs/:jobId/r
 for (const suffix of ["work-items", "work-items/:itemId"] as const) {
   assistantStatusReads.define("GET", `/api/sessions/:id/orchestrator-campaign/${suffix}`, (req, reply) => {
     const {id, itemId} = req.params as {id: string; itemId?: string};
-    const query = req.query as Record<string, string>;
-    return respond(reply, svc.campaignWorkItems(id, itemId ? {workItemId: itemId} : {
-      ...query, ...(query.limit === undefined ? {} : {limit: /^\d{1,4}$/u.test(query.limit) ? Number(query.limit) : Number.NaN}),
-      includeRecommendations: query.includeRecommendations === "true",
-    } as Parameters<SessionsService["campaignWorkItems"]>[1], sessionId => db.canAccessSession(req.principal, sessionId)));
+    return respond(reply, svc.campaignWorkItems(id, itemId ? {workItemId: itemId}
+      : campaignWorkItemsReadQuery(req.query as Record<string, unknown>), sessionId => db.canAccessSession(req.principal, sessionId)));
   });
 }
 // These explicit service adapters are for owner-delegated READ status only. They are not HTTP
 // routes, and leave the existing session-protocol request/execute gates untouched.
 ownerSessionStatus.registerHttp(app, requestPrincipal);
-registerAssistantStatusOperations(assistantOperations, {db, svc, hub, receipts: assistantCommandReceipts, status: ownerSessionStatus, campaign: ownerCampaignStatus, scope: ownerCampaignScope, additional: assistantStatusReads});
+registerAssistantStatusOperations(assistantOperations, {db, svc, hub, receipts: assistantCommandReceipts, status: ownerSessionStatus, campaign: ownerCampaignStatus, scope: ownerCampaignScope, additional: assistantStatusReads, log: app.log});
 
 app.delete("/api/sessions/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;

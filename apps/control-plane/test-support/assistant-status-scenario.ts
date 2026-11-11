@@ -101,6 +101,9 @@ export async function verifyStatus(app: FastifyInstance, operations: AssistantOp
     assert.equal(blocked.watchdogState, "continuation_blocked");
     const blockedArgs = {sessionId: "status-blocked", commandId: "blocked-once", payload: {targets: [{parentTurnId: blocked.parentTurnId, revision: blocked.blockedResultRevision}]}};
     assert.equal((await call("result_blocked_ack", blockedArgs)).receipt.status, "succeeded");
+    // An owner HTTP acknowledgement retains its request logger; MCP has its command context.
+    assert.equal((await app.inject({method: "POST", url: "/api/sessions/status-blocked/background-deliveries/acknowledge-blocked-results",
+      headers, payload: blockedArgs.payload})).statusCode, 200);
     assert.equal(db.getSession("status-blocked")!.backgroundDeliveries?.[0]?.watchdogState, undefined);
     assert.equal((await call("result_blocked_ack", blockedArgs)).receipt.status, "succeeded");
     background("status-missing", [{...baseJob, continuationId: "missing-continuation", continuationQueuedAt: 1_200,
@@ -139,6 +142,11 @@ export async function verifyStatus(app: FastifyInstance, operations: AssistantOp
       const read = await call(name, {sessionId: "status-root"});
       assert.equal(read.status, 200, name);
     }
+    const items = await call("campaign_work_items", {sessionId: "status-root"});
+    const injectedItems = await call("campaign_work_items", {sessionId: "status-root", query: {workItemId: "must-not-be-a-selector"}});
+    assert.equal(injectedItems.status, 200);
+    assert.deepEqual(injectedItems.body, items.body);
+    assert.equal((await call("campaign_work_items", {sessionId: "status-root", query: {limit: "bad"}})).status, 400);
     db.assistantConnections.configure(issued.connection.id, {operations: "all", projects: [granted.id]});
     await assert.rejects(call("session_status", {sessionId: "status-hidden"}), /excluded/);
     const archive = await call("session_archive_list", {query: {archive: "all"}});
@@ -151,6 +159,13 @@ export async function verifyStatus(app: FastifyInstance, operations: AssistantOp
     await assert.rejects(call("campaign_status", {sessionId: "status-root"}), /excluded/);
     await assert.rejects(call("session_status", {sessionId: "status-root"}), /excluded/);
     await assert.rejects(call("request_list", {sessionId: "status-root"}), /excluded/);
+    // Archive SQL filters root rows, but each root view also embeds campaign children.
+    await assert.rejects(call("session_archive_list", {query: {archive: "all"}}), /excluded/);
+    db.appendEvent("status-root", {kind: "agent_message", text: "Root fixture result", final: true}, Date.now());
+    db.appendEvent("status-root", {kind: "agent_response_completed"}, Date.now());
+    const rootRevision = db.getSession("status-root")!.attention!.result!.revision;
+    await assert.rejects(call("result_ack", {sessionId: "status-root", commandId: "hidden-campaign-ack", payload: {revision: rootRevision}}), /excluded/);
+    assert.equal(new AssistantCommandReceipts(db.raw()).get(issued.connection.id, "hidden-campaign-ack"), null);
     db.assistantConnections.configure(issued.connection.id, {operations: ["session_status"], projects: [granted.id]});
     await assert.rejects(call("result_ack", {sessionId: "status-visible", commandId: "excluded-op", payload: {revision: second}}), /excluded/);
     assert.equal(new AssistantCommandReceipts(db.raw()).get(issued.connection.id, "excluded-op"), null);
