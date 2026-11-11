@@ -25,6 +25,16 @@ Each exact route has one classification:
   classification. A gap is never an allowed exclusion. This deliberately overinclusive audit also
   exposes session-credential-only protocol endpoints; those need explicit owner-counterpart
   classification rather than being silently discarded.
+- `exclusion: session_protocol`: restricted to exactly `POST /api/sessions/:id/waits` and
+  `POST /api/sessions/:id/pull-request-watch`. Actual owner HTTP receives 403: these writes
+  require the matching session's own credential to attest runtime progress/watch ownership.
+  They are not owner capabilities. Each entry records this fence, the registered owner-facing
+  read counterpart `session_watch_get`, and the supported remedy: the genuine session runtime
+  performs these writes. The audit rejects this classification for every other route, requires
+  the read counterpart to be registered, and tests both real owner HTTP and Assistant MCP
+  denial. This narrow contract extension was approved by the controlling Orchestrator in
+  clarification `workflow_37bd52c7276345768122bfe742ceadb6`; it does not exempt ordinary work
+  management or allow an Assistant to impersonate a session from its `sessionId`.
 
 No external technical limitation is claimed by this slice. The inventory supports such an entry
 only with a concrete reason and supported remedy. The parent authorized staged delivery through
