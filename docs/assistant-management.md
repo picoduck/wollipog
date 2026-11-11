@@ -120,8 +120,8 @@ confirmation/uncertain-delivery behavior. Runner transport is mocked; these are 
 integration tests, not real OpenClaw, Discord, remote-host or SSH evidence. Existing skill route
 tests verify owner API behavior after extraction.
 
-Pending delivery dependencies: the shared receipt module must land with the session-management
-unit, and the implemented grant policy must land with the connection unit. Scheduled campaign tests
+The shared receipt module comes from the delivered session-management unit, and the grant policy
+comes from the delivered connection unit. Scheduled campaign tests
 exercise the real shared campaign admission, database, allowance and durable outbox, with mocked
 repository inspection and runner transport; they do not launch a real provider. Regular
 session/workflow automations use their shared owner services. Remote proxy/TLS,
