@@ -15,7 +15,7 @@ export function createSessionQueueManagement(deps: {
 }) {
   const {db, hub, svc, runnerCapabilityError} = deps;
   const failure = (status: number, error: string): OwnerManagementResult => ({status, body: {error}});
-  const preflight = (sessionId: string, capability: RunnerProtocolCapability, label: string) => {
+  const requireQueuedPromptCapability = (sessionId: string, capability: RunnerProtocolCapability, label: string) => {
     const session = db.getSession(sessionId);
     if (!session) return {result: failure(404, "session not found")};
     if (!hub.isRunnerOnline(session.runnerId)) return {result: failure(409, "runner is offline")};
@@ -33,7 +33,7 @@ export function createSessionQueueManagement(deps: {
     },
     cancel(sessionId: string, promptId: unknown): OwnerManagementResult {
       if (typeof promptId !== "string" || !promptId) return failure(400, "promptId (string) is required");
-      const checked = preflight(sessionId, "queuedPromptCancellation", "queued prompt cancellation");
+      const checked = requireQueuedPromptCapability(sessionId, "queuedPromptCancellation", "queued prompt cancellation");
       if (checked.result) return checked.result;
       if (!hub.sendToRunner(checked.session!.runnerId, {type: "cancel_queued_prompt", sessionId, promptId})) return failure(409, "runner is offline");
       // Fire-and-forget acceptance. session_queue is the authoritative state readback.
@@ -41,7 +41,7 @@ export function createSessionQueueManagement(deps: {
     },
     async read(sessionId: string, promptId: string): Promise<OwnerManagementResult> {
       if (!promptId) return failure(400, "promptId is required");
-      const checked = preflight(sessionId, "queuedPromptEditing", "queued prompt editing");
+      const checked = requireQueuedPromptCapability(sessionId, "queuedPromptEditing", "queued prompt editing");
       if (checked.result) return checked.result;
       const requestId = `read_queue_${randomUUID().slice(0, 12)}`;
       const result = await hub.requestFromRunner(checked.session!.runnerId, requestId, {
@@ -62,7 +62,7 @@ export function createSessionQueueManagement(deps: {
       const validation = validatePromptImageInputs(typedImages);
       if (!validation.ok) return failure(400, validation.error!);
       if (!body.text.trim() && typedImages.length === 0) return failure(400, "a queued message cannot be empty");
-      const checked = preflight(sessionId, "queuedPromptEditing", "queued prompt editing");
+      const checked = requireQueuedPromptCapability(sessionId, "queuedPromptEditing", "queued prompt editing");
       if (checked.result) return checked.result;
       if (typedImages.some(isWorkspaceReference)) {
         const unsupported = runnerCapabilityError(checked.session!.runnerId, "workspaceReferences", "workspace references");
