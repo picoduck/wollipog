@@ -312,6 +312,7 @@ import { videoFrameValidationSessionId } from "./video-frame-validation.js";
 import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
 import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
+import { registerAssistantWorkOperations, registerAssistantWorkOwnerRoutes } from "./assistant-work-routes.js";
 import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
 import { sessionCredentialRefusal } from "./session-credential-refusal.js";
 import { pushDecision } from "./push-decision.js";
@@ -817,6 +818,14 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   }
 
   const params = (req.params ?? {}) as Record<string, unknown>;
+  if (routePath.startsWith("/api/outbound-event-subscriptions/") && typeof params.id === "string") {
+    const subscription = db.getOutboundEventSubscription(params.id);
+    if (subscription?.scope.kind === "assistant") {
+      const connection = db.assistantConnections.get(subscription.scope.connectionId);
+      if (principal.kind !== "human" || principal.role !== "owner" || !connection || connection.ownerUserId !== principal.userId ||
+          connection.organizationId !== principal.organizationId) return {statusCode: 404, error: "outbound event subscription not found"};
+    }
+  }
   const sessionId = typeof params.id === "string" && routePath.startsWith("/api/sessions/") ? params.id
     : typeof params.sessionId === "string" ? params.sessionId : null;
   if (sessionId && principal.kind === "agent") {
@@ -2951,8 +2960,10 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
 
 registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
 const assistantOperations = createAssistantOperations(db);
+registerAssistantWorkOperations(db, assistantOperations);
 registerAssistantSessionOperations(assistantOperations, db, svc);
 registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });
+registerAssistantWorkOwnerRoutes(app, { db, outboundEvents, requestHuman });
 
 /* ------------------------------- Skills ---------------------------------- */
 
