@@ -313,6 +313,7 @@ import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
 import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
 import { registerAssistantWorkOperations, registerAssistantWorkOwnerRoutes } from "./assistant-work-routes.js";
+import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
 import { sessionCredentialRefusal } from "./session-credential-refusal.js";
 import { pushDecision } from "./push-decision.js";
 import { automationPushMessage } from "./automation-push-decision.js";
@@ -2960,6 +2961,7 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
 registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
 const assistantOperations = createAssistantOperations(db);
 registerAssistantWorkOperations(db, assistantOperations);
+registerAssistantSessionOperations(assistantOperations, db, svc);
 registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });
 registerAssistantWorkOwnerRoutes(app, { db, outboundEvents, requestHuman });
 

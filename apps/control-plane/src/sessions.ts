@@ -4744,6 +4744,8 @@ export class SessionsService {
     initiallyArchived = false,
     allowProjectWithoutLocation = false,
     creationContext?: {
+      /** Trusted Assistant command origin. Never copied from CreateSessionRequest JSON. */
+      assistantWorkOrigin?: {connectionId: string; commandId: string};
       defaultOwnerUserId?: string;
       /** Trusted launcher attribution (#3840) when it is not the authenticated human above, such as
        * a side chat's parent's launcher. A child or review session always inherits instead. */
@@ -5787,6 +5789,9 @@ export class SessionsService {
     if (delivery && !scheduled) delivery.stage(plan!);
     let session: SessionView;
     const sessionInput: Parameters<ControlPlaneDb["createSession"]>[0] = {
+      // #4467's NewSessionInput consumes this inside the session creation transaction, before
+      // staging session.created. The structural spread also compiles before that unit lands.
+      ...(creationContext?.assistantWorkOrigin ? {assistantWorkOrigin: creationContext.assistantWorkOrigin} : {}),
       ...(reviewFields ? { reviewPolicyCapture: { fields: reviewFields,
         implementer: agentHarnessIdentityFor({ id: req.agentId, driver: launch.driver, context: launch.context }),
         resolveModel: (harness, model, effort) => {
