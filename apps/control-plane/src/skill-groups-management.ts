@@ -190,6 +190,7 @@ export function createSkillGroupsManagement(deps: SkillsRouteDeps): SkillApplica
     }
     const requestId = `skills_${randomUUID().slice(0, 8)}`;
     try {
+      req.effectStarted?.();
       const result = await pushSkillsSync.request(id, requestId);
       if (result.type !== "skills_state") {
         return reply.code(502).send({ error: "unexpected runner reply" });

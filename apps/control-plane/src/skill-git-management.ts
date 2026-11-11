@@ -104,13 +104,14 @@ export function createSkillGitManagement(deps: SkillsRouteDeps,
       const refusal = deploymentImpactRefusal(deps.db, existing.id, body.expectedDeploymentImpact);
       if (refusal) return reply.code(refusal.status).send(refusal.body);
     }
+    req.beforeEffect?.();
     try {
-      req.beforeEffect?.();
       const skill = deps.db.importGitSkill({ ...candidate,
         source: { ...candidate.source, path: candidate.path, commit: candidate.commit, executablePaths: candidate.executablePaths },
         scope: { organizationId: principal.organizationId, owner: { kind: "organization", organizationId: principal.organizationId } },
         expectedVersionId: snapshot.versions.get(candidate.name) ?? null,
       });
+      req.effectStarted?.();
       snapshot.candidates = snapshot.candidates.filter((entry) => entry.path !== candidate.path);
       if (!snapshot.candidates.length) snapshots.delete(body.previewId!);
       if (existing && existing.latestVersion?.digest !== candidate.digest) {

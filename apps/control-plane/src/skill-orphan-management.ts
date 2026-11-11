@@ -319,8 +319,8 @@ export function createSkillOrphanManagement(deps: SkillsRouteDeps, lock: EditedC
     if (refusal) return reply.code(refusal.status).send(refusal.body);
     const { ref } = preview;
     let skill;
+    req.beforeEffect?.();
     try {
-      req.beforeEffect?.();
       skill = db.importMachineSkill({
         ...payload,
         note: ref.kind === "kept_aside"
@@ -337,6 +337,7 @@ export function createSkillOrphanManagement(deps: SkillsRouteDeps, lock: EditedC
         scope: { organizationId: principal.organizationId, owner: { kind: "organization", organizationId: principal.organizationId } },
         expectedVersionId: preview.expectedLatestVersionId,
       });
+      req.effectStarted?.();
     } catch (error) {
       if (error instanceof SkillImportConflictError) return reply.code(409).send({ error: error.message });
       return reply.code(500).send({ error: "Importing the copy failed." });
@@ -415,6 +416,7 @@ export function createSkillOrphanManagement(deps: SkillsRouteDeps, lock: EditedC
     lock.pending = true;
     let status: "discarded" | "kept_aside" | "not_needed" | "gone";
     try {
+      req.effectStarted?.();
       if (ref.kind === "kept_aside") {
         const result = await discardKeptAside(runnerId, ref.id,
           { observedFingerprint: fingerprint as string, ...(typeof digest === "string" ? { observedDigest: digest } : {}) });

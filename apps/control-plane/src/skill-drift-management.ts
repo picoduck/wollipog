@@ -216,8 +216,8 @@ export function createSkillDriftManagement(deps: SkillsRouteDeps): SkillApplicat
     const refusal = updating ? deploymentImpactRefusal(db, skill.id, body?.expectedDeploymentImpact) : null;
     if (refusal) return reply.code(refusal.status).send(refusal.body);
     let imported;
+    req.beforeEffect?.();
     try {
-      req.beforeEffect?.();
       imported = db.importSkillDriftEdit({
         skillId: skill.id,
         runnerId: preview.runnerId,
@@ -235,6 +235,7 @@ export function createSkillDriftManagement(deps: SkillsRouteDeps): SkillApplicat
         expectedLatestVersionId: preview.expectedLatestVersionId,
         expectedPinRevision: preview.expectedPinRevision,
       });
+      req.effectStarted?.();
     } catch (error) {
       if (error instanceof SkillImportConflictError) return reply.code(409).send({ error: error.message });
       return reply.code(500).send({ error: "Importing the edited copy failed." });
@@ -305,6 +306,7 @@ export function createSkillDriftManagement(deps: SkillsRouteDeps): SkillApplicat
       // With the library version, the runner rebuilds the copy in place. Without it (the skill was
       // deleted and re-created), it discards the copy and converges to the current desired state.
       const library = db.getSkillVersionByDigest(skill.id, target.digest);
+      req.effectStarted?.();
       result = await restoreOnRunner(runnerId, target, observedDigest, library?.files);
     } catch {
       return reply.code(502).send({ error: "The machine did not confirm the restore. Sync it and review the edited copy again." });

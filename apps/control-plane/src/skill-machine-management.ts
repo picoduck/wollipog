@@ -372,6 +372,7 @@ export function createMachineSkillManagement(deps: SkillsRouteDeps): SkillApplic
       }
 
       const syncRequestId = randomUUID();
+      req.effectStarted?.();
       const synced = await deps.pushSkillsSync.request(discovery.runnerId, syncRequestId);
       if (synced.type !== "skills_state" || synced.requestId !== syncRequestId || synced.runnerId !== discovery.runnerId || synced.error) {
         return reply.code(409).send({ error: "The approved version could not be prepared on the machine." });
@@ -393,6 +394,7 @@ export function createMachineSkillManagement(deps: SkillsRouteDeps): SkillApplic
       }
       const requestId = randomUUID();
       req.beforeEffect?.();
+      req.effectStarted?.();
       adoptionDispatched = true;
       const result = await deps.hub.requestFromRunner(discovery.runnerId, requestId, {
         type: "skill_adoption", runnerId: discovery.runnerId, requestId, candidate: preview.candidate,
@@ -454,6 +456,7 @@ export function createMachineSkillManagement(deps: SkillsRouteDeps): SkillApplic
     pending = true;
     try {
       const requestId = randomUUID();
+      req.effectStarted?.();
       const result = await deps.hub.requestFromRunner(runnerId, requestId, {
         type: "skill_adoption_recovery", runnerId, requestId, operation: "restore",
         operationId, confirmation: "explicit",
@@ -495,8 +498,8 @@ export function createMachineSkillManagement(deps: SkillsRouteDeps): SkillApplic
     }
     const refusal = updating ? deploymentImpactRefusal(deps.db, existing.id, body?.expectedDeploymentImpact) : null;
     if (refusal) return reply.code(refusal.status).send(refusal.body);
+    req.beforeEffect?.();
     try {
-      req.beforeEffect?.();
       const skill = deps.db.importMachineSkill({ ...preview.payload, expectedVersionId: preview.expectedVersionId,
         source: { runnerId: discovery.runnerId, sourceDirectory: preview.candidate.sourceDirectory,
           name: preview.candidate.name, digest: preview.payload.digest, importedAt: Date.now(),
@@ -505,6 +508,7 @@ export function createMachineSkillManagement(deps: SkillsRouteDeps): SkillApplic
             : {}),
           ...(preview.candidate.context?.kind === "wsl" ? { context: preview.candidate.context } : {}) },
         scope: { organizationId: principal.organizationId, owner: { kind: "organization", organizationId: principal.organizationId } } });
+      req.effectStarted?.();
       delete discovery.preview;
       if (updating) for (const runner of deps.db.listRunners()) deps.pushSkillsSync(runner.runnerId);
       return { skill };

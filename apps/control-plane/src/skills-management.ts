@@ -21,6 +21,9 @@ export interface SkillApplicationInput {
   recheck?: () => Promise<unknown>;
   /** Final synchronous fence immediately before a write or destructive runner dispatch. */
   beforeEffect?: () => void;
+  /** A write committed or an external mutation is about to be dispatched. Later refusals
+   * cannot be reported as proof that the operation had no effect. */
+  effectStarted?: () => void;
 }
 export interface SkillApplicationResult { status: number; body: unknown }
 type Handler = (input: SkillApplicationInput, reply: SkillApplicationReply) => Promise<unknown>;

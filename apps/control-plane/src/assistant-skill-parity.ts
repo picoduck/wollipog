@@ -112,9 +112,18 @@ export function registerAssistantSkillParity(operations: AssistantOperations, de
         };
         const execute = async () => {
           const params = {id: target(a).id, assignmentId: a.assignmentId, operationId: a.recoveryId};
-          const result = await (name === "skill_assignments" ? core : service).execute(route, {
+          let effectStarted = false;
+          let result;
+          try {
+            result = await (name === "skill_assignments" ? core : service).execute(route, {
               get principal() {return authorize();}, params, body: a.payload ?? {}, query: {},
-              recheck: async () => {await ctx.recheck(); scope();}, beforeEffect: () => {scope();}});
+              recheck: async () => {await ctx.recheck(); scope();}, beforeEffect: () => {scope();},
+              effectStarted: () => {effectStarted = true;}});
+          } catch (error) {
+            if (mutation && effectStarted) throw new Error("A skill effect may have committed. Reconcile the command receipt and current state under authorized access.");
+            throw error;
+          }
+          if (result.status >= 400 && mutation && effectStarted) throw new Error("A skill effect may have committed before the service refused further work. Reconcile its receipt and current state.");
           if (result.status >= 500) throw new Error("Skill operation outcome is uncertain. Inspect command_get and the current owner resource before any retry.");
           if (result.status >= 400) throw new AssistantRefusal(`Skill operation refused (${result.status}). ${String((result.body as {error?: string})?.error ?? "Inspect the owner API requirements.")}`);
           // Check live access after asynchronous runner/network work before exposing private files.

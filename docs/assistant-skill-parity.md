@@ -66,6 +66,9 @@ and status, without raw arguments, files, credentials, responses or transport di
 `succeeded` records service acceptance, not successful deployment to an offline Machine. Read
 `skill_machine_state` and `skill_deployments` for reported outcomes; preserve uncertain recovery
 journals and follow the owner's supported recovery flow before issuing a genuinely new command.
+If access changes after an import commits or a runner mutation is dispatched, the receipt remains
+`uncertain` and private results are withheld. A revision refusal at the final import fence retains
+its actionable reread remedy and a `failed` receipt when no effect has started.
 
 ## Human Authority and Evidence Limits
 

@@ -34,12 +34,13 @@ function fixture(t: TestContext) {
   db.registerRunner({runnerId: "machine", hostname: "Fixture", os: "linux", version: "test", workspaces: [], agents: [
     {id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex"},
   ]}, 1, 400);
-  const state = {online: true, calls: [] as ControlPlaneToRunner[], syncs: 0, beforeRead: async () => {}, failSync: false};
+  const state = {online: true, calls: [] as ControlPlaneToRunner[], syncs: 0, beforeRead: async () => {}, beforeSyncReply: async () => {}, failSync: false};
   const candidate = {id: "candidate", name: "alpha", sourceDirectory: ".codex/skills", generation: "one"};
   const push = ((_runnerId: string) => {}) as SkillsSyncPusher;
   push.request = async (runnerId, requestId) => {
     state.syncs++;
     if (state.failSync) throw new Error("private transport diagnostic");
+    await state.beforeSyncReply();
     return {type: "skills_state", runnerId, requestId, deployed: [], unmanaged: [], drift: [], keptAside: []};
   };
   const deps: SkillsRouteDeps = {db, requestHuman: () => owner, requestPrincipal: () => owner, pushSkillsSync: push,
@@ -83,7 +84,7 @@ function fixture(t: TestContext) {
     assert.ok(result, response.body);
     return JSON.parse(result.content[0].text);
   };
-  return {db, app, owner, issued, operations, receipts, call, state, deps, automations, revision: () => skillLibraryRevision(deps)};
+  return {db, app, owner, issued, operations, receipts, call, state, deps, automations, service, revision: () => skillLibraryRevision(deps)};
 }
 
 test("MCP groups/assignments share owner services, conflict fences, offline impact and durable reconciliation", async t => {
@@ -320,4 +321,61 @@ test("orphaned-copy preview/import reads the owner snapshot and preserves import
   assert.equal(imported.result.data.skill.latestVersion.digest, payload().digest);
   assert.equal(f.db.listSkillVersions(imported.result.data.skill.id).versions.length, 1);
   assert.ok(f.state.calls.some(c => c.type === "skill_kept_aside" && c.operation === "discard"));
+});
+
+test("committed drift/orphan effects keep uncertain receipts after post-effect access loss", async t => {
+  for (const operation of ["skill_drift_import", "skill_orphan_import", "skill_drift_restore"] as const) {
+    await t.test(operation, async t => {
+      const f = fixture(t);
+      const skill = f.db.createSkill(payload("alpha", "Library"));
+      const drift = {name: "alpha", digest: skill.latestVersion!.digest, variant: "agent" as const, observedDigest: payload().digest, held: true};
+      let args: Record<string, unknown>;
+      if (operation === "skill_orphan_import") {
+        const id = "00000000-0000-4000-8000-000000000003";
+        f.db.setRunnerSkillState("machine", {deployed: [], unmanaged: [], keptAside: [{id, name: "alpha", digest: skill.latestVersion!.digest,
+          variant: "agent", keptAsideAt: 1, observedDigest: payload().digest, observedFingerprint: "9".repeat(64)}]}, 2);
+        const preview = await f.call("skill_orphan_preview", {runnerId: "machine", commandId: "preview", payload: {kind: "kept_aside", id}});
+        args = {previewId: preview.result.data.previewId, commandId: "late", expectedRevision: preview.result.revision, payload: {acceptUpdate: true}};
+      } else {
+        f.db.createSkillAssignment({skillId: skill.id, scopeKind: "runner", runnerId: "machine", agentSelector: {kind: "agent", agentId: "codex"}});
+        f.db.setRunnerSkillState("machine", {deployed: [], unmanaged: [], drift: [drift]}, 2);
+        if (operation === "skill_drift_import") {
+          const preview = await f.call("skill_drift_preview", {runnerId: "machine", commandId: "preview", payload: drift});
+          args = {previewId: preview.result.data.previewId, commandId: "late", expectedRevision: preview.result.revision, payload: {acceptUpdate: true}};
+        } else args = {runnerId: "machine", commandId: "late", expectedRevision: f.revision(), payload: {...drift, confirmation: "explicit"}};
+      }
+      f.state.beforeSyncReply = async () => {
+        // This callback runs only after the import committed / restore was acknowledged.
+        if (operation === "skill_orphan_import") f.db.canAccessSkill = () => false;
+        else f.db.assistantConnections.configure(f.issued.connection.id, {operations: ["skill_groups"], projects: "all"});
+      };
+      await assert.rejects(f.call(operation, args), /operation failed/);
+      assert.equal(f.receipts.get(f.issued.connection.id, "late")?.status, "uncertain");
+      assert.equal(f.db.listSkillVersions(skill.id).versions.length, operation === "skill_drift_restore" ? 1 : 2);
+      if (operation === "skill_drift_restore") assert.ok(f.state.calls.some(c => c.type === "skill_drift" && c.operation === "restore"));
+      else assert.equal(f.db.getSkill(skill.id)?.latestVersion?.digest, payload().digest);
+      if (operation === "skill_drift_import") {
+        f.db.assistantConnections.configure(f.issued.connection.id, {operations: "all", projects: "all"});
+        const syncs = f.state.syncs;
+        assert.equal((await f.call(operation, args)).receipt.status, "uncertain");
+        assert.equal(f.state.syncs, syncs);
+        assert.equal(f.db.listSkillVersions(skill.id).versions.length, 2);
+      }
+    });
+  }
+});
+
+test("an import fence refusal retains its revision remedy and failed receipt before any write", async t => {
+  const f = fixture(t);
+  const preview = await f.call("skill_git_preview", {commandId: "preview", payload: {url: "team/repository"}});
+  const key = "POST /api/skill-git/import", handler = f.service.handlers.get(key)!;
+  f.service.handlers.set(key, async (req, reply) => handler(Object.create(req, {beforeEffect: {value: () => {
+    f.db.createSkillGroup("Intervening Owner Edit", 2);
+    req.beforeEffect?.();
+  }}}), reply));
+  await assert.rejects(f.call("skill_git_import", {commandId: "import", expectedRevision: preview.result.revision,
+    payload: {previewId: preview.result.data.previewId, path: "skills/alpha"}}), /Skill Library revision changed.*Read the current resource/);
+  assert.equal(f.receipts.get(f.issued.connection.id, "import")?.status, "failed");
+  assert.equal(f.db.listSkills().length, 0);
+  assert.equal(f.state.calls.length, 0);
 });
