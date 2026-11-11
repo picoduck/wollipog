@@ -277,7 +277,13 @@ path. They cannot answer an owner approval from ordinary chat.
 Reply reservation is centralized in Wollipog before any message send. A local durable journal
 records the channel and deterministic nonce before Discord. Only an actual matching Discord
 message ID can confirm a reply. A lost send response searches at most 100 recent messages for the
-exact nonce, bot and channel; an unresolved match remains uncertain and is never blindly resent.
+exact stored notice digest, bot and channel; an unresolved or ambiguous match remains uncertain
+and is never blindly resent. Notices carry a short opaque reference derived from work identity
+and revision, so identical status/link text from different updates cannot be mistaken for a receipt.
+The local journal stores the digest, not the notice body. Confirmation checks the exact message ID
+and message content as well as author/channel. It never requires a nonce on later REST reads:
+Discord's message schema makes that field optional. Empty/unavailable message content cannot prove
+delivery. Older journals without notice evidence stay uncertain through the additive schema upgrade.
 A known message ID survives a control-plane outage and is read back from Discord before retrying
 confirmation. The short Discord nonce window is supplemental, not an exactly-once guarantee.
 Readback that is unavailable, too old, ambiguous or no longer authorized requires explicit owner
@@ -286,6 +292,16 @@ recall an already sent message, and cross-service checks cannot eliminate every 
 A lost reply-reservation response, or a crash between CP reservation and the local journal write,
 also remains uncertain. The two databases and Discord do not share an atomic transaction; this
 implementation favors suppressing a possible duplicate over silently retrying an unproven send.
+
+The connection/work-origin upgrade is versioned too: databases created by the foundation retain
+their accepted origins while the obsolete one-command-per-work unique constraint is removed.
+The command identity primary key remains intact, so follow-ups can reuse work without replaying
+earlier commands. Receipt status reads require a current command capability even for missing IDs.
+
+Confirmed work reconciles without Discord reads. Only bot identity is memoized per credential
+(bounded to 32 entries); source, member permissions and routing remain current at each effect.
+The sender avoids duplicate preparation within one phase and repeats live checks before sending
+after reservation and before confirming. Permission data is never cached to improve throughput.
 
 Diagnostics contain bounded event/reason labels only. Inspect local wake/reply state and the
 control plane's bounded delivery journal privately; never publish raw rows, configuration, keys,

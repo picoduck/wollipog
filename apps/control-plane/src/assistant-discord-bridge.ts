@@ -63,7 +63,7 @@ export async function startDiscordBridge(deps: {
   else await app.listen({host: "127.0.0.1", port: settings.bridge.port});
   let active: Promise<void> | undefined, closing = false;
   const observe = async (name: string, bindingId: string, workId: string, eventId: string) => {
-    const prepared = await sender.prepare(name, bindingId, workId);
+    const prepared = await sender.source(name, bindingId, workId);
     const {work} = prepared.view, keys = [work.controlPlaneId, work.connectionId, work.workId, work.revision] as const;
     const existing = sql.prepare("SELECT run_id FROM assistant_bridge_wakes WHERE control_plane_id=? AND connection_id=? AND work_id=? AND revision=?").get(...keys);
     if (!existing) {

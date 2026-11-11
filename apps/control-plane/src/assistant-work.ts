@@ -103,6 +103,31 @@ export class AssistantWorkStore {
       CREATE TRIGGER IF NOT EXISTS assistant_work_attention_initial AFTER INSERT ON session_attention BEGIN
         UPDATE assistant_work SET attention_revision=NEW.revision,revision=revision+1 WHERE session_id=NEW.session_id;
       END;`);
+    // The released foundation allowed only one command per work identity. Follow-ups need
+    // many command origins; CREATE TABLE IF NOT EXISTS cannot remove that old constraint.
+    sql.exec("SAVEPOINT assistant_work_origins_upgrade");
+    try {
+      sql.exec(`CREATE TABLE IF NOT EXISTS assistant_work_schema (
+        singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL);
+        INSERT OR IGNORE INTO assistant_work_schema VALUES (1,1);`);
+      const version = (sql.prepare("SELECT version FROM assistant_work_schema WHERE singleton=1").get() as {version: number}).version;
+      if (version < 2) {
+        const unique = (sql.prepare("SELECT name FROM pragma_index_list('assistant_work_origins') WHERE \"unique\"=1").all() as {name: string}[])
+          .some(index => JSON.stringify((sql.prepare("SELECT name FROM pragma_index_info(?) ORDER BY seqno").all(index.name) as {name: string}[])
+            .map(column => column.name)) === JSON.stringify(["connection_id", "work_id"]));
+        if (unique) sql.exec(`CREATE TABLE assistant_work_origins_v2 (
+          connection_id TEXT NOT NULL,command_id TEXT NOT NULL,work_id TEXT NOT NULL,
+          binding_id TEXT NOT NULL,requester_id TEXT NOT NULL,project_id TEXT,session_id TEXT,
+          PRIMARY KEY(connection_id,command_id),
+          FOREIGN KEY(connection_id) REFERENCES assistant_connections(id),
+          FOREIGN KEY(binding_id) REFERENCES assistant_destination_bindings(id));
+          INSERT INTO assistant_work_origins_v2 SELECT connection_id,command_id,work_id,binding_id,requester_id,project_id,session_id FROM assistant_work_origins;
+          DROP TABLE assistant_work_origins;
+          ALTER TABLE assistant_work_origins_v2 RENAME TO assistant_work_origins;`);
+        sql.exec("UPDATE assistant_work_schema SET version=2 WHERE singleton=1");
+      }
+      sql.exec("RELEASE assistant_work_origins_upgrade");
+    } catch (error) {sql.exec("ROLLBACK TO assistant_work_origins_upgrade; RELEASE assistant_work_origins_upgrade"); throw error;}
   }
 
   origin(connectionId: string, commandId: string): {workId: string; bindingId: string; requesterId: string; sessionId: string | null} | null {

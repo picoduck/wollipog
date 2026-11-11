@@ -15,7 +15,7 @@ interface WorkView {
   work: AssistantWork; binding: AssistantDestinationBinding;
   resolution: {path: string; requests: {path: string}[]; ordinaryChatGrantsApproval: false};
 }
-interface LocalReply {state: string; channel_id: string; nonce: string; message_id: string | null}
+interface LocalReply {state: string; channel_id: string; nonce: string; notice_digest: string | null; message_id: string | null}
 const snowflake = (value: unknown): value is string => typeof value === "string" && /^[0-9]{1,32}$/.test(value);
 const canonical = (value: unknown): value is string => typeof value === "string" && /^[\w.:-]{1,128}$/.test(value);
 const fingerprint = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -45,6 +45,7 @@ export async function deliveryJson(request: typeof fetch, url: string | URL, ini
  * The CP reply fence is authoritative across receivers; this local journal retains a Discord
  * message/nonce before an unavailable CP confirmation can lose that delivery evidence. */
 export class AssistantDiscordDelivery {
+  private readonly botIdentities = new Map<string, {id: string; bot: true}>();
   constructor(private sql: DatabaseSync, private deps: {
     connections(): DiscordDeliveryConnection[];
     secret(name: string): string | undefined;
@@ -55,7 +56,10 @@ export class AssistantDiscordDelivery {
       position INTEGER PRIMARY KEY AUTOINCREMENT,binding_id TEXT NOT NULL,
       control_plane_id TEXT NOT NULL,connection_id TEXT NOT NULL,work_id TEXT NOT NULL,revision INTEGER NOT NULL,
       state TEXT NOT NULL CHECK(state IN ('uncertain','sent','confirmed')),channel_id TEXT NOT NULL,
-      nonce TEXT NOT NULL,message_id TEXT,UNIQUE(control_plane_id,connection_id,work_id,revision));`);
+      nonce TEXT NOT NULL,message_id TEXT,notice_digest TEXT,UNIQUE(control_plane_id,connection_id,work_id,revision));`);
+    if (!(sql.prepare("PRAGMA table_info(assistant_discord_reply_journal)").all() as {name: string}[]).some(column => column.name === "notice_digest")) {
+      sql.exec("ALTER TABLE assistant_discord_reply_journal ADD COLUMN notice_digest TEXT");
+    }
   }
   private selected(name: string, bindingId: string) {
     const matches = this.deps.connections().filter(connection => connection.name === name);
@@ -89,7 +93,7 @@ export class AssistantDiscordDelivery {
       method: body === undefined ? "GET" : "POST", headers: {authorization: `Bot ${bot}`,
         ...(body === undefined ? {} : {"content-type": "application/json"})}, ...(body === undefined ? {} : {body: JSON.stringify(body)})});
   }
-  async prepare(name: string, bindingId: string, workId: string) {
+  async source(name: string, bindingId: string, workId: string) {
     if (!canonical(workId)) throw new Error("invalid_work_identity");
     const initial = this.selected(name, bindingId);
     const view = await this.cp(initial, `/assistant/discord/work/${encodeURIComponent(workId)}`) as WorkView;
@@ -99,11 +103,28 @@ export class AssistantDiscordDelivery {
         view.binding.id !== bindingId || !Number.isSafeInteger(view.binding.revision) ||
         ["requesterId", "accountId", "destination", "agentId", "conversationId", "sessionKey"].some(key =>
           (view.binding as unknown as Record<string, unknown>)[key] !== (initial.binding as unknown as Record<string, unknown>)[key])) throw new Error("wrong_work_or_destination");
+    return {view, selected: initial};
+  }
+  async prepare(name: string, bindingId: string, workId: string) {
+    return this.destination(await this.source(name, bindingId, workId));
+  }
+  private async destination(source: Awaited<ReturnType<AssistantDiscordDelivery["source"]>>) {
+    const {view, selected: initial} = source;
     const channelId = initial.binding.destination.startsWith("channel:") ? initial.binding.destination.slice(8) : initial.binding.updates!.dmChannelId;
     if (!snowflake(channelId)) throw new Error("unproven_dm_channel");
     const channel = await this.discord(initial.bot, `/channels/${channelId}`);
     if (channel.id !== channelId) throw new Error("wrong_discord_channel");
-    const me = await this.discord(initial.bot, "/users/@me");
+    // A bot token's identity is immutable. Do not cache memberships, permissions or routing.
+    // Rotation selects a new key; revoked tokens still fail every live Discord resource read.
+    const botKey = fingerprint(initial.bot);
+    let me = this.botIdentities.get(botKey);
+    if (!me) {
+      const identity = await this.discord(initial.bot, "/users/@me");
+      if (!snowflake(identity.id) || identity.bot !== true) throw new Error("wrong_discord_account");
+      me = {id: identity.id, bot: true};
+      if (this.botIdentities.size >= 32) this.botIdentities.delete(this.botIdentities.keys().next().value!);
+      this.botIdentities.set(botKey, me);
+    }
     if (me.id !== initial.binding.updates!.botUserId || me.bot !== true) throw new Error("wrong_discord_account");
     let roles: string[] = [];
     if (initial.binding.destination.startsWith("user:")) {
@@ -128,7 +149,7 @@ export class AssistantDiscordDelivery {
       }
     }
     if (!this.deps.currentPolicy(initial.binding, channel.guild_id ?? null, channel.parent_id, roles) ||
-        fingerprint(initial) !== fingerprint(this.selected(name, bindingId))) throw new Error("current_openclaw_policy_refused");
+        fingerprint(initial) !== fingerprint(this.selected(initial.connection.name, initial.binding.bindingId))) throw new Error("current_openclaw_policy_refused");
     return {view, selected: initial, channelId};
   }
   async reconcile(name: string, bindingId: string, after = ""): Promise<{items: AssistantWork[]; nextAfter: string | null}> {
@@ -141,17 +162,21 @@ export class AssistantDiscordDelivery {
     return page;
   }
   async deliver(name: string, bindingId: string, workId: string, revision?: number): Promise<{state: string}> {
-    let prepared = await this.prepare(name, bindingId, workId);
-    const {work} = prepared.view;
+    const source = await this.source(name, bindingId, workId);
+    const {work} = source.view;
     const version = revision ?? work.revision;
     const keys = [work.controlPlaneId, work.connectionId, workId, version] as const;
     const prior = this.sql.prepare("SELECT * FROM assistant_discord_reply_journal WHERE control_plane_id=? AND connection_id=? AND work_id=? AND revision=?").get(...keys) as LocalReply | undefined;
     if (prior?.state === "confirmed") return {state: "confirmed"};
+    if (prior && !prior.notice_digest) return {state: "uncertain"}; // Old journal lacks durable content evidence.
+    let prepared = await this.destination(source);
     const nonce = fingerprint(keys).slice(0, 24);
+    let noticeDigest = prior?.notice_digest;
     let messageId = prior?.message_id ?? null;
     if (prior && prior.channel_id !== prepared.channelId) throw new Error("reply_destination_changed");
     const receiptMatches = (message: any) => snowflake(message?.id) && message.channel_id === prepared.channelId &&
-      message.author?.id === prepared.selected.binding.updates!.botUserId && String(message.nonce) === nonce;
+      message.author?.id === prepared.selected.binding.updates!.botUserId && typeof message.content === "string" &&
+      fingerprint(message.content) === noticeDigest;
     if (prior && !messageId) {
       const recent = await this.discord(prepared.selected.bot, `/channels/${prepared.channelId}/messages?limit=100`);
       if (!Array.isArray(recent) || recent.length > 100) throw new Error("unproven_discord_receipt");
@@ -162,14 +187,13 @@ export class AssistantDiscordDelivery {
     if (!prior) {
       if (version !== work.revision) throw new Error("work_revision_changed");
       const notice = renderDiscordWorkNotice(prepared.view, prepared.selected.origin);
-      // Repeat asynchronous source and Discord checks immediately before the durable send fence.
-      prepared = await this.prepare(name, bindingId, workId);
-      if (prepared.view.work.revision !== version) throw new Error("work_revision_changed");
+      noticeDigest = fingerprint(notice);
+      // Initial preparation is current here; no network operation intervenes before reservation.
       const begin = await this.cp(prepared.selected, `/assistant/discord/work/${encodeURIComponent(workId)}/replies`, {action: "begin", revision: version});
       if (begin.state !== "send") return {state: begin.state === "confirmed" ? "confirmed" : "uncertain"};
       this.sql.prepare(`INSERT INTO assistant_discord_reply_journal
-        (control_plane_id,connection_id,work_id,revision,state,channel_id,nonce,binding_id)
-        VALUES (?,?,?,?,'uncertain',?,?,?)`).run(...keys, prepared.channelId, nonce, bindingId);
+        (control_plane_id,connection_id,work_id,revision,state,channel_id,nonce,binding_id,notice_digest)
+        VALUES (?,?,?,?,'uncertain',?,?,?,?)`).run(...keys, prepared.channelId, nonce, bindingId, noticeDigest);
       prepared = await this.prepare(name, bindingId, workId);
       if (prepared.view.work.revision !== version) throw new Error("work_revision_changed");
       // A crash or any unknown POST result stays uncertain. Never replay after a restart.
@@ -183,7 +207,7 @@ export class AssistantDiscordDelivery {
     // Retained message evidence is checked with Discord before reconciliation, never model text.
     prepared = await this.prepare(name, bindingId, workId);
     const message = await this.discord(prepared.selected.bot, `/channels/${prepared.channelId}/messages/${messageId}`);
-    if (!receiptMatches(message)) throw new Error("unproven_discord_receipt");
+    if (message.id !== messageId || !receiptMatches(message)) throw new Error("unproven_discord_receipt");
     const confirmed = await this.cp(prepared.selected, `/assistant/discord/work/${encodeURIComponent(workId)}/replies`, {action: "confirm", revision: version, messageId});
     if (confirmed.state !== "confirmed") throw new Error("unconfirmed_control_plane_receipt");
     this.sql.prepare("UPDATE assistant_discord_reply_journal SET state='confirmed' WHERE control_plane_id=? AND connection_id=? AND work_id=? AND revision=?").run(...keys);
@@ -205,7 +229,8 @@ export function renderDiscordWorkNotice(view: WorkView, origin: string): string 
   const states: Record<string, string> = {completed: "Work completed.", failed: "Work failed.", input_required: "Work needs attention.",
     idle: "Work is idle.", stopped: "Work stopped.", running: "Work is running.", queued: "Work is queued.", starting: "Work is starting."};
   const status = request ? "Work needs attention." : states[view.work.status] ?? "Work changed.";
-  const notice = `${status} ${new URL(path, origin).href}${request ? " Answer or approve through Wollipog; a Discord reply grants no approval." : ""}`;
+  const reference = fingerprint([view.work.controlPlaneId, view.work.connectionId, view.work.workId, view.work.revision]).slice(0, 24);
+  const notice = `${status} ${new URL(path, origin).href}${request ? " Answer or approve through Wollipog; a Discord reply grants no approval." : ""}\nReference: ${reference}`;
   if (notice.length > 2000) throw new Error("notice_exceeds_discord_limit");
   return notice;
 }

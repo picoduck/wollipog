@@ -185,15 +185,14 @@ export class AssistantDiscordIngress {
   reconcile(credential: AssistantCredential, connectorToken: string, commandId: string): {receipt: AssistantCommandReceipt | null} {
     if (!/^wollipogc_[A-Za-z0-9_-]{43}$/.test(connectorToken)) throw new AssistantRefusal("A trusted connector credential is required.");
     const connection = this.db.assistantConnections.current(credential);
+    const commandNames = this.operations.list(connection).filter(operation => operation.name === "session_launch" || operation.name === "session_prompt");
+    const commandAuthorized = commandNames.some(operation => {
+      try {this.bindingFor(credential, hashToken(connectorToken), operation.name as ConnectorOperation); return true;}
+      catch (error) {if (error instanceof AssistantRefusal) return false; throw error;}
+    });
+    if (!commandAuthorized) throw new AssistantRefusal("A current command connector capability is required to read command receipts.");
     const receipt = new AssistantCommandReceipts(this.db.raw()).get(connection.id, identifier(commandId));
     if (!receipt) {
-      const row = this.db.raw().prepare("SELECT * FROM assistant_discord_connectors WHERE token_hash=? AND connection_id=? AND revoked=0")
-        .get(hashToken(connectorToken), connection.id) as ConnectorRow | undefined;
-      const binding = row && this.db.assistantWork.binding(connection.id, row.binding_id);
-      if (!binding || binding.revoked || binding.revision !== row!.binding_revision ||
-          this.db.operatingHumanPrincipal(connection.ownerUserId, connection.organizationId)?.role !== "owner") {
-        throw new AssistantRefusal("Connector authority is unavailable.");
-      }
       return {receipt: null};
     }
     if (receipt.operation !== "session_launch" && receipt.operation !== "session_prompt") throw new AssistantRefusal("Not a correlated session command.");

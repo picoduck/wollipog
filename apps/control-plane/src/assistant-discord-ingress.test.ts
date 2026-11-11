@@ -211,6 +211,8 @@ test("work updates and reply receipts require a separate current binding-scoped 
     assert.equal((await h.command({operation: "session_launch", arguments: h.args, workId: "work-fixture"})).statusCode, 200);
     assert.throws(() => h.ingress.work(h.credential, h.connector.token, "work-fixture"), /not authorized/);
     const issued = h.ingress.issue(h.owner, h.issued.connection.id, h.binding.id, ["work_updates"]);
+    assert.equal((await h.app.inject({method: "GET", url: "/assistant/discord/commands/missing-command-fixture",
+      headers: {...h.headers, "x-wollipog-connector-token": issued.token}})).statusCode, 403);
     const view = h.ingress.work(h.credential, issued.token, "work-fixture");
     assert.equal(view.binding.id, h.binding.id);
     assert.equal(view.resolution.ordinaryChatGrantsApproval, false);
@@ -235,6 +237,10 @@ test("accepted command, connector binding and work correlation reconcile after c
   const first = await h.command(payload);
   assert.equal(first.statusCode, 200, first.body);
   const accepted = first.json();
+  // Reconstruct the foundation's one-command-per-work uniqueness before upgrading. Its
+  // table-level UNIQUE and this unique index enforce the same SQLite insertion constraint.
+  h.db.raw().exec(`CREATE UNIQUE INDEX foundation_work_origin_identity ON assistant_work_origins(connection_id,work_id);
+    DROP TABLE IF EXISTS assistant_work_schema;`);
   await h.close();
   const db = ControlPlaneDb.open(path), app = Fastify();
   try {
@@ -252,5 +258,16 @@ test("accepted command, connector binding and work correlation reconcile after c
     const recovered = await app.inject({method: "GET", url: `/assistant/discord/commands/${h.args.commandId}`, headers: h.headers});
     assert.equal(recovered.statusCode, 200, recovered.body);
     assert.equal(db.assistantWork.get(h.issued.connection.id, "work-fixture")!.sessionId, accepted.sessionId);
+    db.updateSessionStatus(accepted.sessionId, "idle", Date.now());
+    const followup = {operation: "session_prompt", arguments: {commandId: "upgraded-followup-fixture", sessionId: accepted.sessionId, text: "Synthetic follow-up"}, workId: "work-fixture"};
+    const prompted = await app.inject({method: "POST", url: "/assistant/discord/commands", headers: h.headers, payload: followup});
+    assert.equal(prompted.statusCode, 200, prompted.body);
+    assert.equal(prompted.json().receipt.status, "succeeded", prompted.body);
+    const sent = dispatches;
+    await app.inject({method: "POST", url: "/assistant/discord/commands", headers: h.headers, payload: followup});
+    assert.equal(dispatches, sent);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM assistant_work_origins").get()!.n, 2);
+    assert.equal(db.raw().prepare("SELECT version FROM assistant_work_schema WHERE singleton=1").get()!.version, 2);
+    assert.deepEqual(db.raw().prepare("PRAGMA foreign_key_check").all(), []);
   } finally {await app.close(); db.close(); rmSync(directory, {recursive: true, force: true});}
 });

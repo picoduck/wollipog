@@ -243,7 +243,7 @@ The production status sender uses the reply-intent service with a logical work r
 
 The receipt transport requires the separate binding-scoped `work_updates` connector capability
 alongside the current Assistant bearer. It is not model-callable. Discord credentials stay inside
-the isolated OpenClaw service, which verifies the actual message author/channel/nonce and ID before
+the isolated OpenClaw service, which verifies the actual message author/channel, exact notice digest and ID before
 confirming. Uncertain sends use bounded message readback, never blind retry. See the native setup
 guide for supported policy subsets, DM/thread checks, build instructions and recovery limitations.
 

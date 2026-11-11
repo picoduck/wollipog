@@ -38,6 +38,7 @@ async function harness(options: {direct?: boolean; privateThread?: boolean} = {}
   let canView = true, wrongChannel = false, failConfirm = false, loseSendResponse = false, revokeDuringBegin = false, policy = true;
   let memberPresent = true, wrongRecipient = false;
   let sends = 0, hooks = 0;
+  let discordCalls = 0;
   const messages: any[] = [];
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {status, headers: {"content-type": "application/json"}});
   const request = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -51,6 +52,7 @@ async function harness(options: {direct?: boolean; privateThread?: boolean} = {}
     }
     if (target.origin === "http://127.0.0.1:38001") {hooks++; return json({runId: "hook-run-fixture"});}
     assert.equal(target.origin, "https://discord.com");
+    discordCalls++;
     assert.equal((init?.headers as Record<string, string>).authorization, "Bot synthetic-bot-fixture");
     const path = target.pathname.replace("/api/v10", "");
     if (path === "/users/@me") return json({id: "345", bot: true});
@@ -70,13 +72,15 @@ async function harness(options: {direct?: boolean; privateThread?: boolean} = {}
       if (loseSendResponse) throw new Error("synthetic disconnected response");
       return json(messages.at(-1));
     }
-    if (path === "/channels/123/messages") return json(messages);
-    if (/^\/channels\/123\/messages\/[0-9]+$/.test(path)) return json(messages.find(message => message.id === path.split("/").at(-1)));
+    // The official message contract makes nonce optional; REST reads need not retain it.
+    const readback = (message: any) => {const {nonce: _ephemeral, ...stored} = message; return stored;};
+    if (path === "/channels/123/messages") return json(messages.map(readback));
+    if (/^\/channels\/123\/messages\/[0-9]+$/.test(path)) return json(readback(messages.find(message => message.id === path.split("/").at(-1))));
     throw new Error("unexpected fixture route");
   }) as typeof fetch;
   const deps = {connections: () => connections, secret: (name: string) => env[name], currentPolicy: () => policy, request};
   return {db, owner, issued, operations, ingress, binding, session, connector, connections, deps, app, env, messages,
-    counts: () => ({sends, hooks}), access: (value: boolean) => {canView = value;}, wrong: () => {wrongChannel = true;},
+    counts: () => ({sends, hooks}), apiCalls: () => discordCalls, access: (value: boolean) => {canView = value;}, wrong: () => {wrongChannel = true;},
     outage: (value: boolean) => {failConfirm = value;}, lost: (value: boolean) => {loseSendResponse = value;},
     race: () => {revokeDuringBegin = true;}, policy: (value: boolean) => {policy = value;},
     leave: () => {memberPresent = false;}, recipient: () => {wrongRecipient = true;},
@@ -88,7 +92,10 @@ test("production sender composes real source/binding/reply fences, keeps private
   try {
     const sender = new AssistantDiscordDelivery(sql, h.deps);
     assert.deepEqual(await sender.deliver("local", h.binding.id, "work-fixture"), {state: "confirmed"});
+    const calls = h.apiCalls();
+    assert.ok(calls <= 15, `one public-channel send uses at most 15 Discord calls, got ${calls}`);
     assert.deepEqual(await sender.deliver("local", h.binding.id, "work-fixture"), {state: "confirmed"});
+    assert.equal(h.apiCalls(), calls, "confirmed work performs no new Discord reads on a reconciliation sweep");
     assert.equal(h.counts().sends, 1);
     assert.match(h.messages[0].content, /^Work completed\. http:\/\/127\.0\.0\.1:38000\/sessions\//);
     assert.equal(h.db.raw().prepare("SELECT state FROM assistant_reply_intents").get()!.state, "confirmed");
@@ -119,7 +126,7 @@ test("private-thread membership and exact DM recipients are rechecked without fa
   }
 });
 
-test("unknown Discord sends reconcile durable nonces after restart without a second POST", async () => {
+test("unknown Discord sends reconcile durable notice references after restart without nonce on reads or a second POST", async () => {
   const h = await harness(), root = mkdtempSync(join(tmpdir(), "discord-delivery-fixture-")), path = join(root, "inbox.sqlite");
   let sql = new DatabaseSync(path);
   try {
@@ -131,6 +138,35 @@ test("unknown Discord sends reconcile durable nonces after restart without a sec
     assert.deepEqual(await new AssistantDiscordDelivery(sql, h.deps).deliver("local", h.binding.id, "work-fixture"), {state: "confirmed"});
     assert.equal(h.counts().sends, 1);
   } finally {sql.close(); rmSync(root, {recursive: true, force: true}); await h.close();}
+});
+
+test("lost-response readback refuses ambiguous or changed notice bodies instead of guessing a receipt", async () => {
+  const h = await harness(), sql = new DatabaseSync(":memory:");
+  try {
+    const sender = new AssistantDiscordDelivery(sql, h.deps);
+    h.lost(true);
+    await assert.rejects(sender.deliver("local", h.binding.id, "work-fixture"));
+    const original = h.messages[0].content;
+    h.messages.push({...h.messages[0], id: "679"});
+    assert.deepEqual(await sender.deliver("local", h.binding.id, "work-fixture"), {state: "uncertain"});
+    h.messages.pop(); h.messages[0].content = `${original} changed`;
+    assert.deepEqual(await sender.deliver("local", h.binding.id, "work-fixture"), {state: "uncertain"});
+    h.messages[0].content = original;
+    assert.deepEqual(await sender.deliver("local", h.binding.id, "work-fixture"), {state: "confirmed"});
+    assert.equal(h.counts().sends, 1);
+  } finally {sql.close(); await h.close();}
+});
+
+test("older local journals without exact notice evidence remain uncertain after schema upgrade", async () => {
+  const h = await harness(), sql = new DatabaseSync(":memory:");
+  try {
+    h.lost(true);
+    await assert.rejects(new AssistantDiscordDelivery(sql, h.deps).deliver("local", h.binding.id, "work-fixture"));
+    sql.exec("ALTER TABLE assistant_discord_reply_journal DROP COLUMN notice_digest");
+    const sender = new AssistantDiscordDelivery(sql, h.deps);
+    assert.deepEqual(await sender.deliver("local", h.binding.id, "work-fixture"), {state: "uncertain"});
+    assert.equal(h.counts().sends, 1);
+  } finally {sql.close(); await h.close();}
 });
 
 test("oversized resolution notices are refused before reply reservation or Discord transport", async () => {
