@@ -1,4 +1,4 @@
-import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS } from "@wollipog/protocol";
+import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, issueClosureDeliveryGap } from "@wollipog/protocol";
 import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
@@ -6417,9 +6417,9 @@ export class ControlPlaneDb {
         if (handedOff.has(item.id)) continue;
         // Delivery is proven in the item's own repository, whichever of the campaign's it is (#4119).
         if (item.commitment !== "committed" || !item.issue || !campaignIssueInScope(policy, item.issue)) continue;
-        // A never-dispatched placeholder of an epic this campaign closed from its members (#4060) is
-        // finished by that closure. Any item with an attempt still needs its own delivery.
-        if (item.attemptCount === 0 && !item.currentAttempt && this.memberProvenEpicClosure(campaignId, item.issue.repository, item.issue.number)) continue;
+        // The same server-derived tracking predicate as closure proof and gaps (#4403), so an
+        // ended tracking attempt is finished by the epic's proven closure while delivery work isn't.
+        if (this.campaignWorkLedger.epicTrackingItem(campaignId, item.id) && this.memberProvenEpicClosure(campaignId, item.issue.repository, item.issue.number)) continue;
         // These are trusted work-item attestations, not agent stage prose or session-report verification.
         // Keep an unresolved incomplete attestation across new workers/heads. A legitimate later
         // delivery supersedes it; insertion order, not tied timestamps or random UUIDs, is chronology.
@@ -6600,6 +6600,7 @@ export class ControlPlaneDb {
             pullRequest: { repository: snapshot.repository, number: snapshot.pullRequest } }] : [];
         }),
       campaignRepositories: (campaignId) => this.campaignRepositoriesOf(campaignId),
+      memberProvenEpicClosures: (campaignId) => this.memberProvenEpicClosures(campaignId),
     });
     return this.campaignWorkLedgerStore;
   }
@@ -23666,11 +23667,16 @@ export class ControlPlaneDb {
     // Only a completion check that ran judged the in-scope original items; when it could not run
     // (a worktree retirement still pending, or no child at all), they count as agent work here.
     const scopeJudged = completion.state !== "children_unfinished";
-    const agentWork = ledger.agentUnfinished.filter((item) => !(scopeJudged && scope && item.origin === "original" && item.issue &&
+    const closedEpics = this.memberProvenEpicClosures(campaignId);
+    const unknownEpicHistory = new Set(ledger.agentUnfinished.filter((item) => item.issue &&
+      closedEpics.has(`${item.issue.repository.toLowerCase()}#${item.issue.number}`) &&
+      this.campaignWorkLedger.epicTrackingHistoryUnavailable(campaignId, item.id)).map((item) => item.id));
+    const agentWork = ledger.agentUnfinished.filter((item) => unknownEpicHistory.has(item.id) || !(scopeJudged && scope && item.origin === "original" && item.issue &&
       item.issue.repository.toLowerCase() === scope.repository.toLowerCase() && scope.issueNumbers.includes(item.issue.number) &&
       policy.issueNumbers?.includes(item.issue.number)));
     const stuckItems: CampaignStuckItem[] = agentWork.map((item) => ({ kind: "work_item", workItemId: item.id, issue: item.issue,
-      reason: "Committed work is not delivered and no agent is working on it." }));
+      reason: unknownEpicHistory.has(item.id) ? issueClosureDeliveryGap("epic_tracking_history_unavailable", { workItemId: item.id }).summary
+        : "Committed work is not delivered and no agent is working on it." }));
     const result = (status: "waiting_human" | "complete_needs_cleanup" | "verified_complete" | "stuck") =>
       ({ status, recoveryIds: completion.recoveryIds, stuckItems: status === "stuck" ? stuckItems : [], handoffs: ledger.handoffs });
     if (completion.state === "recovery_ready" || completion.state === "recovery_held") {
@@ -25868,9 +25874,16 @@ export class ControlPlaneDb {
   }
 
   recordGithubIssueClosureResult(occurrenceId: string, result: NonNullable<WorkflowDecisionView["issueClosureResult"]>): void {
+    const before = this.workflowDecisionByOccurrence(occurrenceId);
     this.stmt(`UPDATE workflow_decisions SET issue_closure_result=?
       WHERE occurrence_id=? AND category='issue_closure' AND status='consumed'`)
       .run(JSON.stringify(result), occurrenceId);
+    const snapshot = before?.resourceSnapshot;
+    if (result.outcome === "closed" && before?.issueClosureResult?.outcome !== "closed" && before?.status === "consumed" &&
+        before.authority === "orchestrator" && snapshot?.category === "issue_closure" && snapshot.reason === "completed" &&
+        snapshot.issueAdmission && snapshot.epicMembers?.readable && snapshot.epicMembers.members.length) {
+      this.campaignWorkLedger.observedChanged(before.sessionId, result.completedAt);
+    }
   }
 
   /** The refusal of this session's latest executed closure of `resourceKey`, when that execution was
@@ -25889,17 +25902,36 @@ export class ControlPlaneDb {
    * proven from the epic's members (#4060) that the runner confirmed closed. An uncertain, refused,
    * already-closed or person-owned closure does not count. */
   memberProvenEpicClosure(campaignId: string, repository: string, issue: number): boolean {
+    const key = `issue_closure:${repository.toLowerCase()}#${issue}`;
     const rows = this.stmt(`SELECT resource_snapshot, issue_closure_result FROM workflow_decisions
       WHERE session_id=? AND controlling_session_id=? AND category='issue_closure' AND resource_key=? AND status='consumed'
         AND authority='orchestrator' AND issue_closure_result IS NOT NULL`)
-      .all(campaignId, campaignId, `issue_closure:${repository.toLowerCase()}#${issue}`) as Array<{ resource_snapshot: string; issue_closure_result: string }>;
-    return rows.some((row) => {
-      const snapshot = parseJson<GithubIssueClosureSnapshot>(row.resource_snapshot);
-      const result = parseJson<GithubIssueClosureResult>(row.issue_closure_result);
-      return snapshot?.category === "issue_closure" && snapshot.reason === "completed" && snapshot.issue === issue &&
-        Boolean(snapshot.issueAdmission) && snapshot.epicMembers?.readable === true && snapshot.epicMembers.members.length > 0 &&
-        result?.outcome === "closed";
-    });
+      .all(campaignId, campaignId, key) as Array<{ resource_snapshot: string; issue_closure_result: string }>;
+    return rows.some((row) => this.memberProvenEpicClosureKey(row) === key);
+  }
+
+  /** One read per ledger projection, rather than one receipt query per planned issue item. */
+  memberProvenEpicClosures(campaignId: string): ReadonlySet<string> {
+    const rows = this.stmt(`SELECT resource_key, resource_snapshot, issue_closure_result FROM workflow_decisions
+      WHERE session_id=? AND controlling_session_id=? AND category='issue_closure' AND status='consumed'
+        AND authority='orchestrator' AND issue_closure_result IS NOT NULL`)
+      .all(campaignId, campaignId) as Array<{ resource_key: string; resource_snapshot: string; issue_closure_result: string }>;
+    const issues = new Set<string>();
+    for (const row of rows) {
+      const key = this.memberProvenEpicClosureKey(row);
+      if (key && key === row.resource_key) issues.add(key.slice("issue_closure:".length));
+    }
+    return issues;
+  }
+
+  private memberProvenEpicClosureKey(row: { resource_snapshot: string; issue_closure_result: string }): string | null {
+    const snapshot = parseJson<GithubIssueClosureSnapshot>(row.resource_snapshot);
+    const result = parseJson<GithubIssueClosureResult>(row.issue_closure_result);
+    return snapshot?.category === "issue_closure" && snapshot.reason === "completed" &&
+      typeof snapshot.repository === "string" && Number.isSafeInteger(snapshot.issue) && snapshot.issue > 0 &&
+      Boolean(snapshot.issueAdmission) && snapshot.epicMembers?.readable === true && Array.isArray(snapshot.epicMembers.members) &&
+      snapshot.epicMembers.members.length > 0 && result?.outcome === "closed"
+      ? `issue_closure:${snapshot.repository.toLowerCase()}#${snapshot.issue}` : null;
   }
 
   /** Consumption and its initial uncertainty are one durable write before dispatch. */

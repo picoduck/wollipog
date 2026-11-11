@@ -9,6 +9,33 @@ import { forgeRefKey, type ForgeFactEntry } from "./campaign-forge-observations.
 
 export const issueEvidenceDigest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
+/** Complete ledger identities, never issue prose. A failed or incomplete read preserves the
+ * conservative runner rule. Include other issues' PRs: any open PR of this campaign is a gap. */
+export function closureCampaignPullRequests(db: ControlPlaneDb, root: SessionView, repository: string): number[] | undefined {
+  try {
+    const history = db.campaignWorkLedger.closurePullRequestHistory(root.id, repository);
+    if (history === undefined) return undefined;
+    const refs = new Set<number>(history);
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const page = db.campaignWorkLedger.page(root.id, { state: "all", limit: 100, ...(cursor ? { cursor } : {}) }, Date.now());
+      if (!page.ok) return undefined;
+      for (const item of page.data.items) {
+        if (seen.has(item.id) || seen.size >= 10_000) return undefined;
+        seen.add(item.id);
+        const detail = db.campaignWorkLedger.detail(root.id, item.id, Date.now());
+        if (!detail || !detail.deliveries) return undefined;
+        for (const pr of [...(detail.stage?.pullRequests ?? []), ...detail.deliveries.flatMap((delivery) => delivery.pullRequests)]) {
+          if (pr.repository.toLowerCase() === repository.toLowerCase()) refs.add(pr.number);
+        }
+      }
+      cursor = page.data.nextCursor ?? undefined;
+    } while (cursor);
+    return [...refs].sort((a, b) => a - b);
+  } catch { return undefined; }
+}
+
 /** Allowlisted messages only: runner reason fields and error text are untrusted input. */
 export function campaignScopeTargetFailureMessage(reason: unknown): string {
   switch (reason) {
@@ -410,10 +437,10 @@ function itemDelivered(db: ControlPlaneDb, root: SessionView, item: CampaignWork
   return merged > 0;
 }
 
-/** A work item that was never dispatched: no attempt, past or open. Under the epic source (#4060)
- * such an item of the epic itself, a placeholder, neither proves nor blocks the epic's closure. */
-export const epicPlaceholderItem = (item: Pick<CampaignWorkItemDetail, "attemptCount" | "currentAttempt">) =>
-  item.attemptCount === 0 && !item.currentAttempt;
+/** The ledger proves absence of delivery work, including erased stages. Titles prove nothing.
+ * Inconsistent or missing attempt detail cannot expand the exception. */
+export const epicPlaceholderItem = (db: ControlPlaneDb, root: SessionView, item: CampaignWorkItemDetail) =>
+  !item.currentAttempt && item.attemptCount === item.attempts.length && db.campaignWorkLedger.epicTrackingItem(root.id, item.id);
 
 /** Whether the epic source may prove this closure (#4060): a completed closure of an issue with no
  * fixed-by plan. A recorded plan stays the issue's proof, and a not-planned closure keeps its own. */
@@ -426,7 +453,7 @@ export function epicSourceApplies(db: ControlPlaneDb, root: SessionView, snapsho
  * agent text never names one. Every member must be in the campaign's scope and closed as completed.
  * An open member is not proven here even when its own closure would be, so an epic never closes
  * ahead of a member: closing the member first is the route. The epic's own work items still count,
- * each delivered under the ordinary proof, except a placeholder that was never dispatched. An
+ * each delivered under the ordinary proof, except server-derived epic tracking work. An
  * issue without members keeps the ordinary proof. */
 function epicMemberEvidence(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot) {
   const read = snapshot.epicMembers;
@@ -436,7 +463,7 @@ function epicMemberEvidence(db: ControlPlaneDb, root: SessionView, snapshot: Git
   const own = trackedIssueWork(db, root, snapshot.issue, snapshot.repository);
   if (!own) return null;
   const excluded = new Set<string>();
-  const placeholders = own.filter(epicPlaceholderItem).map((item) => item.id);
+  const placeholders = own.filter((item) => epicPlaceholderItem(db, root, item)).map((item) => item.id);
   const items = own.filter((item) => !placeholders.includes(item.id));
   if (items.some((item) => !itemDelivered(db, root, item, snapshot, excluded))) return null;
   return { source: "epic_members" as const, members: read.members.map((member) => ({ ...member })), placeholders,
@@ -526,7 +553,14 @@ function epicGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIss
   }
   const own = trackedIssueWork(db, root, snapshot.issue, snapshot.repository);
   if (!own) return add("delivery_unverified");
-  itemGapsInto(db, root, snapshot, own.filter((item) => !epicPlaceholderItem(item)), add, count);
+  const ordinary: CampaignWorkItemDetail[] = [];
+  for (const item of own) {
+    if (epicPlaceholderItem(db, root, item)) continue;
+    if (db.campaignWorkLedger.epicTrackingHistoryUnavailable(root.id, item.id)) {
+      add("epic_tracking_history_unavailable", { workItemId: item.id });
+    } else ordinary.push(item);
+  }
+  itemGapsInto(db, root, snapshot, ordinary, add, count);
 }
 
 function itemGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot, items: CampaignWorkItemDetail[],
