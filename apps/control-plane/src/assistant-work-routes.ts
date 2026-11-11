@@ -5,6 +5,7 @@ import type { AssistantDestinationBinding } from "./assistant-work.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
 import type { OutboundEventsService } from "./outbound-events.js";
+import { AssistantConnectionManagement } from "./assistant-connection-management.js";
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new AssistantRefusal("Expected an argument object.");
@@ -71,13 +72,11 @@ export function registerAssistantWorkOwnerRoutes(app: FastifyInstance, deps: {
   db: ControlPlaneDb; outboundEvents: OutboundEventsService;
   requestHuman(req: FastifyRequest): HumanPrincipal | null;
 }): void {
+  const management = new AssistantConnectionManagement(deps.db);
   const owner = (req: FastifyRequest) => {
     const principal = deps.requestHuman(req), connectionId = text((req.params as {id: string}).id);
-    const connection = deps.db.assistantConnections.get(connectionId);
-    if (!principal || principal.role !== "owner" || !connection || connection.revoked ||
-        connection.ownerUserId !== principal.userId || connection.organizationId !== principal.organizationId) {
-      throw new AssistantRefusal("Assistant connection not found for this owner.");
-    }
+    if (!principal) throw new AssistantRefusal("Assistant connection not found for this owner.");
+    management.connection(principal, connectionId);
     return {principal, connectionId};
   };
   const handle = (action: (req: FastifyRequest) => unknown | Promise<unknown>) => async (req: FastifyRequest, reply: import("fastify").FastifyReply) => {
@@ -86,22 +85,25 @@ export function registerAssistantWorkOwnerRoutes(app: FastifyInstance, deps: {
     catch (error) { if (error instanceof AssistantRefusal) return reply.code(400).send({error: error.message}); throw error; }
   };
   const subscriptionId = (req: FastifyRequest): string => {
-    const {connectionId} = owner(req);
+    const {principal, connectionId} = owner(req);
     const id = text((req.params as {subscriptionId: string}).subscriptionId);
-    const subscription = deps.db.getOutboundEventSubscription(id);
-    if (!subscription || subscription.scope.kind !== "assistant" || subscription.scope.connectionId !== connectionId) {
-      throw new AssistantRefusal("Event subscription not found for this connection owner.");
-    }
+    management.subscription(principal, connectionId, id);
     return id;
   };
-  app.get("/api/assistant-connections/:id/event-subscriptions/:subscriptionId", handle(req =>
-    deps.outboundEvents.get(subscriptionId(req)).data));
-  app.get("/api/assistant-connections/:id/event-subscriptions/:subscriptionId/deliveries", handle(req =>
-    deps.outboundEvents.deliveries(subscriptionId(req)).data));
+  app.get("/api/assistant-connections/:id/event-subscriptions/:subscriptionId", handle(req => {
+    const {principal, connectionId} = owner(req);
+    return management.subscription(principal, connectionId, text((req.params as {subscriptionId: string}).subscriptionId));
+  }));
+  app.get("/api/assistant-connections/:id/event-subscriptions/:subscriptionId/deliveries", handle(req => {
+    const {principal, connectionId} = owner(req);
+    return management.deliveries(principal, connectionId, text((req.params as {subscriptionId: string}).subscriptionId), deps.outboundEvents);
+  }));
   app.post("/api/assistant-connections/:id/event-subscriptions/:subscriptionId/rotate", handle(req =>
     deps.outboundEvents.rotate(subscriptionId(req)).data));
-  app.post("/api/assistant-connections/:id/event-subscriptions/:subscriptionId/resume", handle(req =>
-    deps.outboundEvents.resume(subscriptionId(req)).data));
+  app.post("/api/assistant-connections/:id/event-subscriptions/:subscriptionId/resume", handle(req => {
+    const {principal, connectionId} = owner(req);
+    return management.resume(principal, connectionId, text((req.params as {subscriptionId: string}).subscriptionId), deps.outboundEvents);
+  }));
   app.delete("/api/assistant-connections/:id/event-subscriptions/:subscriptionId", handle(req =>
     deps.outboundEvents.revoke(subscriptionId(req)).data));
   app.post("/api/assistant-connections/:id/destination-bindings", handle(req => {
@@ -109,16 +111,12 @@ export function registerAssistantWorkOwnerRoutes(app: FastifyInstance, deps: {
     return deps.db.assistantWork.createBinding(principal, connectionId, record(req.body) as unknown as Omit<AssistantDestinationBinding, "id" | "connectionId" | "revision" | "revoked">);
   }));
   app.get("/api/assistant-connections/:id/destination-bindings", handle(req => {
-    const {connectionId} = owner(req);
-    const rows = deps.db.raw().prepare("SELECT id FROM assistant_destination_bindings WHERE connection_id=? ORDER BY id")
-      .all(connectionId) as {id: string}[];
-    return {bindings: rows.map(row => deps.db.assistantWork.binding(connectionId, row.id))};
+    const {principal, connectionId} = owner(req);
+    return management.bindings(principal, connectionId);
   }));
   app.get("/api/assistant-connections/:id/event-subscriptions", handle(req => {
-    const {connectionId} = owner(req);
-    const rows = deps.db.raw().prepare("SELECT subscription_id FROM outbound_event_subscriptions WHERE assistant_connection_id=? AND revoked_at IS NULL ORDER BY subscription_id")
-      .all(connectionId) as {subscription_id: string}[];
-    return {subscriptions: rows.map(row => deps.db.getOutboundEventSubscription(row.subscription_id))};
+    const {principal, connectionId} = owner(req);
+    return management.subscriptions(principal, connectionId);
   }));
   app.delete("/api/assistant-connections/:id/destination-bindings/:bindingId", handle(req => {
     const {principal, connectionId} = owner(req);
