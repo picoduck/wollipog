@@ -269,3 +269,19 @@ test("background job and hold coordinates match owner bounds before runner dispa
     assert.equal(requests, 0);
   } finally {h.db.close();}
 });
+
+test("completed Location removal reconciles before reading removed effects and still rejects command reuse", async () => {
+  const h = harness();
+  try {
+    const args = {commandId: "removed-location", projectId: h.project.id, locationId: h.location.id};
+    const removed = await h.call("location_remove", args);
+    assert.equal(removed.receipt.status, "succeeded");
+    assert.equal(h.db.getProjectLocation(h.location.id), null);
+    const repeated = await h.call("location_remove", args);
+    assert.deepEqual(repeated.receipt, removed.receipt);
+    await assert.rejects(h.call("location_remove", {...args, locationId: "different-location"}), /different operation or request/);
+    await assert.rejects(h.call("project_delete", {commandId: args.commandId, projectId: h.project.id}), /different operation or request/);
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: [h.second.id]});
+    await assert.rejects(h.call("location_remove", args), /excluded/);
+  } finally {h.db.close();}
+});

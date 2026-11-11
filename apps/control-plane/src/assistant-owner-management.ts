@@ -77,19 +77,25 @@ export function registerAssistantOwnerManagement(operations: AssistantOperations
         const {confirmationId, ...request} = args;
         const current = db.assistantConnections.get(ctx.connection.id)!;
         const resolved = target(args), digest = assistantRequestDigest(request);
+        const identity = {controlPlaneId: db.instanceId(), connectionId: current.id, operationId: commandId,
+          operation: name, argumentsDigest: digest, grantRevision: current.revision, target: resolved};
+        const alreadyReserved = (receipt: ReturnType<AssistantCommandReceipts["settle"]>) => ({receipt,
+          recovery: "Already reserved. Read the resource and receipt; never redispatch an accepted or uncertain command."});
+        // Current authorization above remains mandatory, as does reserve's operation/digest check.
+        // The original effects may have removed the Location; they are not needed to reconcile.
+        if (receipts.get(current.id, commandId)) return alreadyReserved(receipts.reserve(identity).receipt);
         const affected = impact?.(args, ctx);
         const binding = {connectionId: current.id, grantRevision: current.revision, operation: name,
           argumentsDigest: digest, targetDigest: assistantRequestDigest({target: resolved, impact: affected ?? null})};
         const confirm = destructive && db.assistantConnections.destructiveConfirmation(current.id) === "confirm";
-        if (!receipts.get(current.id, commandId) && confirm && confirmationId === undefined) {
+        if (confirm && confirmationId === undefined) {
           return {confirmationRequired: true, ...confirmations.issue(binding), operation: name, target: resolved,
             impact: affected, recovery: "Review the affected scope; repeat unchanged arguments and commandId with confirmationId before expiry."};
         }
-        const reservation = receipts.reserve({controlPlaneId: db.instanceId(), connectionId: current.id,
-          operationId: commandId, operation: name, argumentsDigest: digest, grantRevision: current.revision, target: resolved}, () => {
+        const reservation = receipts.reserve(identity, () => {
           if (confirm) confirmations.consume(text(args, "confirmationId"), binding);
         });
-        if (!reservation.created) return {receipt: reservation.receipt, recovery: "Already reserved. Read the resource and receipt; never redispatch an accepted or uncertain command."};
+        if (!reservation.created) return alreadyReserved(reservation.receipt);
         try {
           const result = await execute(args, ctx);
           const body = result.body as {project?: {id?: string}} | undefined;
