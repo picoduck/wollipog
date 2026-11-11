@@ -5,6 +5,7 @@ import { dispatch } from "./session-management-mcp.js";
 
 export type PiControlRole = "ordinary" | "orchestrator" | "evidence";
 export type PiControlRouteKind = "local-subprocess" | "local-file-read" | "remote-control-plane" | "unknown";
+export type PiControlRemoteEffect = "control-plane" | "forge" | "unclassified";
 const REMOTE_TOOLS: ReadonlySet<string> = new Set([
   "adjudicate_campaign_recommendation",
   "allocate_campaign_budget",
@@ -123,10 +124,13 @@ export function classifyPiControlCatalog(tools: readonly PiControlCatalogTool[])
     catch { throw new Error("Pi inert catalog refused."); }
     if (Buffer.byteLength(serialized) > 131_072) throw new Error("Pi inert catalog refused.");
     const kind = piControlRouteKind(tool.name);
+    const remoteEffects: PiControlRemoteEffect[] = kind === "unknown" ? ["unclassified"] :
+      tool.name === "wait_pull_request" ? ["control-plane", "forge"] : ["control-plane"];
     return Object.freeze({ name: tool.name, kind,
       definitionSha256: createHash("sha256").update(serialized).digest("hex"),
-      // A local namespace never certifies effects behind the control-plane API.
-      ...(kind === "remote-control-plane" ? { transitiveEffects: "unproven" as const } : {}) });
+      // Local describes an entry-point resource, not its full effects. Artifact upload and wait
+      // progress reports still reach the CP; gh/glab also reach the forge outside this namespace.
+      remoteEffects: Object.freeze(remoteEffects), transitiveEffects: "unproven" as const });
   }).sort((a, b) => a.name.localeCompare(b.name));
 }
 /** Exercise the actual role filter, with network disabled rather than an invented tool list. */
@@ -147,6 +151,7 @@ export async function piControlRoleInventory(role: PiControlRole) {
 export function piInertActivationGaps(inventory: Awaited<ReturnType<typeof piControlRoleInventory>>) {
   const gaps = new Set(["actual-outer-mount-identity", "immutable-loaded-import-closure", "real-pi-launch-coverage"]);
   if (inventory.routes.some(route => route.kind === "unknown")) gaps.add("unknown-tool-route");
-  if (inventory.routes.some(route => route.kind === "remote-control-plane")) gaps.add("remote-control-plane-effects");
+  if (inventory.routes.some(route => route.remoteEffects.includes("control-plane"))) gaps.add("remote-control-plane-effects");
+  if (inventory.routes.some(route => route.remoteEffects.includes("forge"))) gaps.add("remote-forge-effects");
   return [...gaps].sort();
 }

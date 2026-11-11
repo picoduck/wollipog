@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import fc from "fast-check";
-import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, SESSION_WAIT_PROGRESS_REPORT_MS } from "@wollipog/protocol";
 import { dispatch, type McpDeps } from "./session-management-mcp.js";
 import { classifyPiControlCatalog, piControlRoleInventory, piControlRouteKind, piInertActivationGaps, type PiControlCatalogTool } from "./pi-inert-control-routes.js";
 
@@ -20,6 +20,12 @@ test("every actual role-filtered Agent Control tool is classified, without claim
   }
   assert.equal(ordinary.routes.find(route => route.name === "wait_pull_request")?.kind, "local-subprocess");
   assert.equal(ordinary.routes.find(route => route.name === "attach_session_artifact")?.kind, "local-file-read");
+  for (const name of ["wait_pull_request", "attach_session_artifact"]) {
+    const route = ordinary.routes.find(route => route.name === name)!;
+    assert.equal(route.transitiveEffects, "unproven");
+    assert.ok(route.remoteEffects.includes("control-plane"));
+    assert.ok(piInertActivationGaps({ ...ordinary, routes: [route] }).includes("remote-control-plane-effects"));
+  }
   assert.equal(orchestrator.routes.some(route => route.name === "attach_session_artifact"), false);
 });
 
@@ -51,13 +57,47 @@ test("the actual wait tool reaches its two local command backends; remote mutati
   };
   const call = (name: string, args: unknown) => dispatch({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, deps);
   await call("wait_pull_request", { pullRequest: "https://github.com/inert/repo/pull/7" });
-  assert.ok(effects.includes("gh")); assert.ok(!effects.includes("glab")); assert.ok(!effects.some(effect => effect.startsWith("HTTP")));
+  assert.ok(effects.includes("gh")); assert.ok(!effects.includes("glab"));
   effects.length = 0;
   await call("wait_pull_request", { pullRequest: "https://gitlab.example.invalid/inert/repo/-/merge_requests/7" });
   assert.ok(effects.includes("glab")); assert.ok(!effects.includes("gh"));
   effects.length = 0;
   await call("create_worktree", { branch: "inert" });
   assert.deepEqual(effects, ["HTTP:POST:/api/sessions/synthetic/worktrees"]);
+});
+
+test("a local forge-wait route also reports active/ended to the remote control plane after its threshold", async () => {
+  let time = 0, forgeReads = 0;
+  const states: string[] = [];
+  const result = await dispatch({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+    name: "wait_pull_request", arguments: { pullRequest: "https://gitlab.example.invalid/inert/repo/-/merge_requests/7",
+      timeoutMs: SESSION_WAIT_PROGRESS_REPORT_MS * 4 + 1_000 },
+  } }, {
+    cpUrl: "http://inert.invalid", selfSessionId: "synthetic", token: "synthetic", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+    now: () => time, sleep: async () => { time += SESSION_WAIT_PROGRESS_REPORT_MS + 100; },
+    fetch: async (url, init) => {
+      assert.equal(new URL(url).pathname, "/api/sessions/synthetic/waits");
+      assert.equal(init?.method, "POST"); states.push(JSON.parse(init!.body!).state);
+      return { ok: true, status: 200, text: async () => "{}" };
+    },
+    gh: async () => { assert.fail("GitLab wait selected gh"); },
+    glab: async args => {
+      forgeReads++;
+      const path = args[1] ?? "";
+      if (path.includes("merge_trains")) return { stdout: "", stderr: "glab: 404 Not Found (HTTP 404)", code: 1, timedOut: false };
+      const value = path.endsWith("/merge_requests/7") ? { iid: 7, state: "opened", draft: false, sha: "a".repeat(40), target_branch: "main",
+        web_url: "https://gitlab.example.invalid/inert/repo/-/merge_requests/7",
+        head_pipeline: { id: 9, status: time === 0 ? "running" : "success" } } : { only_allow_merge_if_pipeline_succeeds: true };
+      return { stdout: JSON.stringify(value), stderr: "", code: null, timedOut: false };
+    },
+  });
+  assert.ok(!result.result.isError, JSON.stringify(result));
+  assert.ok(forgeReads > 1); assert.deepEqual(states, ["active", "ended"]);
+  const inventory = await piControlRoleInventory("ordinary");
+  const wait = inventory.routes.find(route => route.name === "wait_pull_request")!;
+  assert.equal(wait.transitiveEffects, "unproven");
+  assert.deepEqual(wait.remoteEffects, ["control-plane", "forge"]);
+  assert.ok(piInertActivationGaps({ ...inventory, routes: [wait] }).includes("remote-control-plane-effects"));
 });
 
 test("the artifact route reads only its explicit inert file and delegates upload to a stub, without local commands", async () => {

@@ -15,8 +15,8 @@ does not attest to a handler's implementation, imported code or transitive effec
 | --- | --- | --- |
 | Model Bash, RPC Bash, `user_bash` | Existing pinned operations backend and refusing fallback | Real Pi/import/mount identity remains unproven |
 | Agent Control MCP child | Fixed Node/entrypoint/selector inside the narrower child policy | No real launch wiring or complete import closure attestation |
-| `wait_pull_request` | Actual handler fixtures reach `gh` and `glab` spies | Only local child/descendants can inherit this namespace |
-| Artifact attachment | Actual handler reads an explicit inert file and uses a stub upload | Reads unchanged; no real upload in tests |
+| `wait_pull_request` | Actual handler fixtures reach `gh`/`glab` spies and cross the wait-progress reporting threshold | Local subprocess kind still has unproven forge and control-plane effects |
+| Artifact attachment | Actual handler reads an explicit inert file and uses a stub upload | Local file-read kind still has unproven control-plane effects; no real upload in tests |
 | Other Agent Control tools | Explicit control-plane delegation classification | Remote worktree/Git/setup/forge/provider/review effects remain unproven |
 | Native read/edit/write | Existing tools and permission policy retained | This is subprocess separation, not denial of every model file write |
 | Native grep/find | Installed source spawns `rg`/`fd` separately | Active instances remain ineligible until separately contained |
