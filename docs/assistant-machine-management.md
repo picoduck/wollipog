@@ -41,6 +41,9 @@ they do not return an audience-change confirmation token. Persistent audience ch
 on the authenticated owner access-scope path.
 
 Every call checks current authority. Asynchronous results are checked again before release.
+The shared owner HTTP global-resource ceiling also applies: Machine-global operations require
+the installation's personal organization. Other organizations retain the owner API's member-scoped
+Workspace rename and scope reads; owning a runner alone does not bypass a global route restriction.
 If grants narrow while a directory or external-session read is in flight, its result is withheld.
 If access changes after a write commits, the command stays uncertain and private results are
 withheld; an uncertain receipt never authorizes replay. Activity records failed/uncertain service

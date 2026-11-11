@@ -1,5 +1,5 @@
 import { providerAccountSelectionPreviewForAgent, type ProviderAccountSelectionPreview, type ResourceScope } from "@wollipog/protocol";
-import { PERSONAL_ORGANIZATION_ID } from "./identity.js";
+import { PERSONAL_ORGANIZATION_ID, humanGlobalResourceAuthorizationError } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
 import { AssistantRefusal, type AssistantOperations, type AssistantOperation, type AssistantTarget } from "./assistant-connections.js";
 import { AssistantCommandReceipts, assistantRequestDigest } from "./assistant-command-receipts.js";
@@ -131,7 +131,9 @@ export function registerAssistantMachineManagement(operations: AssistantOperatio
   };
   for (const [name, route, kind, mutate, destructive] of ASSISTANT_MACHINE_MANAGEMENT) {
     const properties = kind === "control_plane" ? {} : kind === "project" ? {projectId: string} : {runnerId: string, ...(kind === "workspace" ? {workspaceId: string} : {})};
-    operations.register({name, description: descriptions[name], ownerCanAccess: access,
+    const space = route.indexOf(" "), method = route.slice(0, space), path = route.slice(space + 1);
+    operations.register({name, description: descriptions[name], ownerCanAccess: (owner, resolved) =>
+      humanGlobalResourceAuthorizationError(method, path, owner) === null && access(owner, resolved),
       inputSchema: {type: "object", additionalProperties: false, properties: {...properties, payload: {type: "object"},
         ...(mutate ? {commandId: string, confirmationId: string} : {})},
         required: [...Object.keys(properties), ...(mutate ? ["commandId"] : [])]},

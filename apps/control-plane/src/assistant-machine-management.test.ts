@@ -190,6 +190,62 @@ test("current project grants fence shared workspaces, arbitrary registration and
   } finally {h.db.close();}
 });
 
+test("non-personal organization owners cannot bypass global Machine HTTP restrictions through MCP", async () => {
+  const h = harness(), app = Fastify();
+  const organizationId = "org_machine_fixture", runnerId = "org-runner";
+  h.db.raw().prepare("INSERT INTO identity_organizations (organization_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+    .run(organizationId, "Machine Fixture", 1, 1);
+  h.db.createIdentityMember({userId: "usr_machine_fixture", displayName: "Machine Owner", organizationId, role: "owner", now: 1});
+  const owner = h.db.operatingHumanPrincipal("usr_machine_fixture", organizationId)!;
+  h.db.registerRunner({...h.metadata, runnerId}, Date.now(), PROTOCOL_VERSION,
+    {organizationId, owner: {kind: "organization", organizationId}});
+  const connection = h.db.assistantConnections.create(owner, "Organization Fixture", {operations: "all", projects: "all"});
+  const credential = h.db.assistantConnections.authenticate(connection.token)!;
+  const call = (name: string, args: unknown) => h.operations.call(credential, name, args) as Promise<any>;
+  h.service.registerHttp(app, () => owner);
+  try {
+    assert.equal(h.db.canManageRunner(owner, runnerId), true, "resource ownership alone is insufficient for global routes");
+    for (const [method, url, payload] of [
+      ["PATCH", `/api/runners/${runnerId}`, {displayName: "Denied"}],
+      ["GET", `/api/runners/${runnerId}/list-directory`, undefined],
+      ["POST", `/api/runners/${runnerId}/workspaces/register`, {name: "Denied", path: "/fixture/denied"}],
+    ] as const) {
+      const response = await app.inject({method, url, payload});
+      assert.equal(response.statusCode, 403);
+      assert.match(response.json().error, /personal control-plane organization/);
+    }
+    for (const [name, , kind] of ASSISTANT_MACHINE_MANAGEMENT) {
+      if (kind !== "runner" && name !== "workspace_remove" && name !== "installation_rename") continue;
+      await assert.rejects(call(name, {runnerId, workspaceId: "repo", commandId: name,
+        payload: {name: "Denied", path: "/fixture/denied", displayName: "Denied"}}), /cannot access/);
+      assert.equal(h.receipts.get(connection.connection.id, name), null, "refuse before reserving a command");
+    }
+    assert.equal(h.sent.length, 0);
+    assert.equal(h.db.getRunner(runnerId)?.displayName, undefined);
+    // These two routes are member-scoped in the same owner HTTP gate and remain usable.
+    const renamed = await call("workspace_rename", {runnerId, workspaceId: "repo", commandId: "member-rename", payload: {name: "Org Workspace"}});
+    assert.equal(renamed.receipt.status, "succeeded");
+    assert.ok((await call("workspace_scope_get", {runnerId, workspaceId: "repo"})).body.scope);
+  } finally {await app.close(); h.db.close();}
+});
+
+test("directory and external-session owner HTTP retain flat capability refusal fields", async () => {
+  const h = harness(), app = Fastify();
+  h.service.registerHttp(app, () => h.owner);
+  try {
+    const version = Math.min(RUNNER_CAPABILITY_MIN_PROTOCOL.directoryListing, RUNNER_CAPABILITY_MIN_PROTOCOL.externalSessions) - 1;
+    h.db.registerRunner(h.metadata, Date.now(), version);
+    for (const [path, capability] of [["list-directory", "directoryListing"], ["external-sessions", "externalSessions"]] as const) {
+      const response = await app.inject({method: "GET", url: `/api/runners/${h.metadata.runnerId}/${path}`});
+      assert.equal(response.statusCode, 409);
+      assert.equal(response.json().requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL[capability]);
+      assert.equal(response.json().runnerProtocolVersion, version);
+      assert.equal(response.json().capabilityRequirement, undefined);
+    }
+    assert.equal(h.sent.length, 0);
+  } finally {await app.close(); h.db.close();}
+});
+
 test("directory and external-session reads reuse real runner services and refuse results after grant loss", async () => {
   const h = harness();
   try {

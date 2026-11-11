@@ -387,7 +387,7 @@ import {
   providerForkCleanupTarget,
   providerForkSnapshotIdError,
   canAdministerIdentity,
-  isOrganizationAdministrationRoute,
+  humanGlobalResourceAuthorizationError,
   isMutationMethod,
   PERSONAL_ORGANIZATION_ID,
   mutationAuthorizationError,
@@ -763,53 +763,10 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   if (mutationError) return mutationError;
   if (!principal) return null;
 
-  const memberScopedRoute = routePath === "/api/remote-access" || routePath === "/api/instance" || routePath === "/api/compatibility" ||
-    routePath === "/api/identity" || routePath === "/api/runners" ||
-    (routePath === "/api/session-naming" || routePath.startsWith("/api/session-naming/")) ||
-    routePath === "/api/projects" || routePath.startsWith("/api/projects/") ||
-    routePath === "/api/sessions" || routePath.startsWith("/api/sessions/") ||
-    routePath === "/api/search" || routePath === "/api/usage" || routePath === "/api/usage/retention" ||
-    routePath === "/api/usage/daily-budget" || routePath === "/api/usage/users" ||
-    routePath === "/api/usage/pricing/refresh" || routePath === "/api/usage/subscriptions" ||
-    routePath === "/api/usage/subscriptions/refresh" ||
-    routePath === "/api/push/vapid-public-key" || routePath === "/api/push/subscriptions" ||
-    routePath === "/api/push/unsubscribe" ||
-    routePath === "/api/artifacts/:artifactId/export" ||
-    // Skills record per-resource ownership rows, so like /api/projects they are member-scoped
-    // rather than personal-organization-global resources.
-    routePath === "/api/skills" || routePath.startsWith("/api/skills/") ||
-    routePath === "/api/skill-groups" || routePath.startsWith("/api/skill-groups/") ||
-    routePath === "/api/skill-assignments" || routePath.startsWith("/api/skill-assignments/") ||
-    routePath === "/api/runners/:id/skills" ||
-    routePath === "/api/runners/:id/capacity" ||
-    routePath === "/api/runners/:id/provider-logins" ||
-    routePath === "/api/runners/:id/provider-logins/:operationId/code" ||
-    routePath === "/api/runners/:id/provider-logins/:operationId/dismiss" ||
-    routePath === "/api/runners/:id/provider-logins/:operationId" ||
-    routePath === "/api/runners/:id/skills/sync" ||
-    routePath === "/api/runners/:id/skill-snapshots" ||
-    routePath.startsWith("/api/skill-machine/") ||
-    routePath.startsWith("/api/runners/:id/skill-drift/") || routePath.startsWith("/api/skill-drift/") ||
-    routePath.startsWith("/api/runners/:id/orphaned-skill-copies/") || routePath.startsWith("/api/orphaned-skill-copies/") ||
-    routePath === "/api/runners/:runnerId/host-action" ||
-    routePath === "/api/runners/:runnerId/workspaces/:workspaceId/rename" ||
-    routePath === "/api/runners/:runnerId/workspaces/:workspaceId/access-scope";
-  const organizationAdminRoute = isOrganizationAdministrationRoute(routePath);
   const organizationAdmin = principal.kind === "human" && (principal.role === "owner" || principal.role === "admin");
   if (principal.kind === "human") {
-    if (!organizationAdmin && req.method === "POST" && routePath === "/api/projects/:id/locations/new") {
-      return "organization owner or admin permission is required to register an arbitrary host path";
-    }
-    if (!organizationAdmin && !memberScopedRoute) {
-      return "organization owner or admin permission is required for this global resource";
-    }
-    if (organizationAdmin && !memberScopedRoute && !organizationAdminRoute &&
-        principal.organizationId !== PERSONAL_ORGANIZATION_ID) {
-      return "this global resource belongs to the personal control-plane organization";
-    }
-    if (!organizationAdmin && routePath === "/api/sessions/adopt") {
-      return "organization owner or admin permission is required to adopt unscoped provider sessions";
-    }
+    const error = humanGlobalResourceAuthorizationError(req.method, routePath, principal);
+    if (error) return error;
   }
   if (principal.kind === "agent") {
     const delegationError = agentDelegationAuthorizationError(routePath, principal);

@@ -6,13 +6,21 @@ import { runnerCapabilityRequirementError, runnerSupportsProtocol, workspaceRemo
 import type { ControlPlaneDb } from "./db.js";
 import { isRunnerRequestNotSentError, type Hub } from "./hub.js";
 import type { SessionsService } from "./sessions.js";
-import { OwnerManagement } from "./owner-management.js";
+import { OwnerManagement, type OwnerManagementHandler } from "./owner-management.js";
+import { humanGlobalResourceAuthorizationError } from "./identity.js";
+import { failureBody } from "./capability-refusal.js";
 import { projectName, requestedAccessScope, accessScopeOwnerFromQuery, accessScopeTransitionError, accessScopePreviewForPrincipal } from "./project-management-validation.js";
 
 /** Machine/Workspace application services shared by owner HTTP and Assistant transports. */
 export function createOwnerMachineManagement(db: ControlPlaneDb, hub: Hub, svc: SessionsService) {
   const management = new OwnerManagement();
-  management.define("PUT", "/api/runners/:id/harness-installation", async (req, reply) => {
+  const define = (method: string, path: string, handler: OwnerManagementHandler) => {
+    management.define(method, path, (req, reply) => {
+      const error = humanGlobalResourceAuthorizationError(method, path, req.principal);
+      return error ? reply.code(403).send({error}) : handler(req, reply);
+    });
+  };
+  define("PUT", "/api/runners/:id/harness-installation", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const principal = req.principal;
     if (!principal || !db.canManageRunner(principal, id)) {
@@ -55,7 +63,7 @@ export function createOwnerMachineManagement(db: ControlPlaneDb, hub: Hub, svc: 
     return { selection };
   });
 
-  management.define("PUT", "/api/runners/:id/target-harness-installation", async (req, reply) => {
+  define("PUT", "/api/runners/:id/target-harness-installation", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const principal = req.principal;
     if (!principal || !db.canManageRunner(principal, id)) {
@@ -77,15 +85,15 @@ export function createOwnerMachineManagement(db: ControlPlaneDb, hub: Hub, svc: 
     hub.runnerChanged(id);
     return { selection };
   });
-  management.define("GET", "/api/runners/:id/provider-account-selection", (req, reply) => {
+  define("GET", "/api/runners/:id/provider-account-selection", (req, reply) => {
     const result = readProviderAccountSelection(db, svc, req.principal, (req.params as {id: string}).id, req.query as Parameters<typeof readProviderAccountSelection>[4]);
     return reply.code(result.status).send(result.body);
   });
-  management.define("POST", "/api/assistant-connections/installation", (req, reply) => {
+  define("POST", "/api/assistant-connections/installation", (req, reply) => {
     const result = renameAssistantInstallation(db, req.principal, (req.body as {name?: unknown} | null)?.name);
     return reply.code(result.status).send(result.body);
   });
-  management.define("PATCH", "/api/runners/:id", (req, reply) => {
+  define("PATCH", "/api/runners/:id", (req, reply) => {
     const {id} = req.params as {id: string};
     if (!db.canManageRunner(req.principal, id)) return reply.code(403).send({error: "Machine owner or organization admin permission is required"});
     const body = (req.body ?? {}) as {displayName?: unknown};
@@ -99,14 +107,14 @@ export function createOwnerMachineManagement(db: ControlPlaneDb, hub: Hub, svc: 
     if (boxId) hub.boxChanged(boxId);
     return {ok: true};
   });
-  management.define("POST", "/api/runners/:id/rediscover", (req, reply) => {
+  define("POST", "/api/runners/:id/rediscover", (req, reply) => {
     const {id} = req.params as {id: string};
     if (!db.canManageRunner(req.principal, id)) return reply.code(403).send({error: "Machine owner or organization admin permission is required"});
     if (!hub.isRunnerOnline(id)) return reply.code(409).send({error: "runner is offline"});
     if (!hub.sendToRunner(id, {type: "rediscover", runnerId: id})) return reply.code(503).send({error: "runner not reachable"});
     return {ok: true};
   });
-  management.define("DELETE", "/api/runners/:id", (req, reply) => {
+  define("DELETE", "/api/runners/:id", (req, reply) => {
     const {id} = req.params as {id: string};
     if (!db.canManageRunner(req.principal, id)) return reply.code(403).send({error: "Machine owner or organization admin permission is required"});
     if (hub.isRunnerOnline(id)) return reply.code(409).send({error: "runner is online — stop it before removing"});
@@ -123,21 +131,21 @@ export function createOwnerMachineManagement(db: ControlPlaneDb, hub: Hub, svc: 
     for (const projectId of projectIds) hub.projectChangedById(projectId);
     return reply.code(204).send(undefined);
   });
-  management.define("GET", "/api/runners/:id/external-sessions", async (req, reply) => {
+  define("GET", "/api/runners/:id/external-sessions", async (req, reply) => {
     const {id} = req.params as {id: string}, query = (req.query ?? {}) as {agentId?: unknown};
     if (!db.canAccessRunner(req.principal, id)) return reply.code(404).send({error: "runner not found"});
     if (query.agentId !== undefined && typeof query.agentId !== "string") return reply.code(400).send({error: "agentId must be a string"});
     const result = await svc.listExternalSessions(id, query.agentId || undefined);
-    return result.ok ? {sessions: result.data} : reply.code(result.status).send({error: result.error, capabilityRequirement: result.capabilityRequirement});
+    return result.ok ? {sessions: result.data} : reply.code(result.status).send(failureBody(result));
   });
-  management.define("GET", "/api/runners/:id/list-directory", async (req, reply) => {
+  define("GET", "/api/runners/:id/list-directory", async (req, reply) => {
     const {id} = req.params as {id: string}, query = (req.query ?? {}) as {path?: unknown; distro?: unknown};
     if (!db.canAccessRunner(req.principal, id)) return reply.code(404).send({error: "runner not found"});
     if ((query.path !== undefined && typeof query.path !== "string") || (query.distro !== undefined && typeof query.distro !== "string")) return reply.code(400).send({error: "path and distro must be strings"});
     const result = await svc.listDirectory(id, query.path ?? "", query.distro || undefined);
-    return result.ok ? result.data : reply.code(result.status).send({error: result.error, capabilityRequirement: result.capabilityRequirement});
+    return result.ok ? result.data : reply.code(result.status).send(failureBody(result));
   });
-  for (const register of [false, true]) management.define("POST", `/api/runners/:runnerId/workspaces${register ? "/register" : ""}`, (req, reply) => {
+  for (const register of [false, true]) define("POST", `/api/runners/:runnerId/workspaces${register ? "/register" : ""}`, (req, reply) => {
     const {runnerId} = req.params as {runnerId: string};
     if (!db.canManageRunner(req.principal, runnerId)) return reply.code(403).send({error: "Machine owner or organization admin permission is required"});
     const body = (req.body ?? {}) as {name?: unknown; path?: unknown};
@@ -157,7 +165,7 @@ export function createOwnerMachineManagement(db: ControlPlaneDb, hub: Hub, svc: 
       return reply.code(message.includes("already registered") ? 409 : 400).send({error: message});
     }
   });
-  management.define("POST", "/api/runners/:runnerId/workspaces/:workspaceId/rename", (req, reply) => {
+  define("POST", "/api/runners/:runnerId/workspaces/:workspaceId/rename", (req, reply) => {
     const {runnerId, workspaceId} = req.params as {runnerId: string; workspaceId: string};
     const body = (req.body ?? {}) as {name?: unknown};
     if (typeof body.name !== "string") return reply.code(400).send({error: "name must be a string"});
@@ -170,7 +178,7 @@ export function createOwnerMachineManagement(db: ControlPlaneDb, hub: Hub, svc: 
     for (const id of db.sessionIdsForWorkspace(runnerId, workspaceId)) hub.sessionChangedById(id);
     return {ok: true};
   });
-  management.define("DELETE", "/api/runners/:runnerId/workspaces/:workspaceId", async (req, reply) => {
+  define("DELETE", "/api/runners/:runnerId/workspaces/:workspaceId", async (req, reply) => {
     const {runnerId, workspaceId} = req.params as {runnerId: string; workspaceId: string};
     const runner = db.getRunner(runnerId);
     if (!runner) return reply.code(404).send({error: "runner not found"});
@@ -203,7 +211,7 @@ export function createOwnerMachineManagement(db: ControlPlaneDb, hub: Hub, svc: 
     db.finishWorkspaceRemoval(runnerId, workspaceId);
     return {removed: true};
   });
-  management.define("GET", "/api/runners/:runnerId/workspaces/:workspaceId/access-scope", (req, reply) => {
+  define("GET", "/api/runners/:runnerId/workspaces/:workspaceId/access-scope", (req, reply) => {
     const {runnerId, workspaceId} = req.params as {runnerId: string; workspaceId: string}, principal = req.principal;
     if (!db.canManageWorkspace(principal, runnerId, workspaceId)) return reply.code(404).send({error: "workspace not found"});
     const requested = requestedAccessScope(db, principal, accessScopeOwnerFromQuery(req.query));
@@ -215,7 +223,7 @@ export function createOwnerMachineManagement(db: ControlPlaneDb, hub: Hub, svc: 
     const preview = db.previewWorkspaceAccessScope(runnerId, workspaceId, requested.scope);
     return preview ? {preview: accessScopePreviewForPrincipal(db, principal, preview)} : reply.code(404).send({error: "workspace not found"});
   });
-  management.define("GET", "/api/projects/:id/access-scope", (req, reply) => {
+  define("GET", "/api/projects/:id/access-scope", (req, reply) => {
     const {id} = req.params as {id: string}, principal = req.principal;
     if (!db.canManageProject(principal, id) || !db.getProjectForPrincipal(principal, id)) return reply.code(404).send({error: "project not found"});
     const requested = requestedAccessScope(db, principal, accessScopeOwnerFromQuery(req.query));
