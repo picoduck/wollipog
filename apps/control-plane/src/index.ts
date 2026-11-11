@@ -311,9 +311,10 @@ import {
 import { videoFrameValidationSessionId } from "./video-frame-validation.js";
 import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
-import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
-import { registerAssistantWorkOperations, registerAssistantWorkOwnerRoutes } from "./assistant-work-routes.js";
-import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
+import { registerAssistantRoutes } from "./assistant-routes.js";
+import { registerAssistantWorkOwnerRoutes } from "./assistant-work-routes.js";
+import { registerAssistantDiscordIngress } from "./assistant-discord-ingress.js";
+import { createAssistantManagement } from "./assistant-composition.js";
 import { sessionCredentialRefusal } from "./session-credential-refusal.js";
 import { pushDecision } from "./push-decision.js";
 import { automationPushMessage } from "./automation-push-decision.js";
@@ -2959,11 +2960,10 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
 });
 
 registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
-const assistantOperations = createAssistantOperations(db);
-registerAssistantWorkOperations(db, assistantOperations);
-registerAssistantSessionOperations(assistantOperations, db, svc);
+const {operations: assistantOperations, ingress: assistantDiscordIngress} = createAssistantManagement(db, svc);
 registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });
 registerAssistantWorkOwnerRoutes(app, { db, outboundEvents, requestHuman });
+registerAssistantDiscordIngress(app, { db, ingress: assistantDiscordIngress, requestHuman });
 
 /* ------------------------------- Skills ---------------------------------- */
 

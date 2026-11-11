@@ -84,7 +84,7 @@ export class AssistantWorkStore {
       CREATE TABLE IF NOT EXISTS assistant_work_origins (
       connection_id TEXT NOT NULL, command_id TEXT NOT NULL, work_id TEXT NOT NULL,
       binding_id TEXT NOT NULL, requester_id TEXT NOT NULL, project_id TEXT, session_id TEXT,
-      PRIMARY KEY(connection_id,command_id), UNIQUE(connection_id,work_id),
+      PRIMARY KEY(connection_id,command_id),
       FOREIGN KEY(connection_id) REFERENCES assistant_connections(id),
       FOREIGN KEY(binding_id) REFERENCES assistant_destination_bindings(id));
       CREATE TABLE IF NOT EXISTS assistant_reply_intents (
@@ -103,6 +103,12 @@ export class AssistantWorkStore {
       CREATE TRIGGER IF NOT EXISTS assistant_work_attention_initial AFTER INSERT ON session_attention BEGIN
         UPDATE assistant_work SET attention_revision=NEW.revision,revision=revision+1 WHERE session_id=NEW.session_id;
       END;`);
+  }
+
+  origin(connectionId: string, commandId: string): {workId: string; bindingId: string; requesterId: string; sessionId: string | null} | null {
+    const row = this.sql.prepare("SELECT work_id,binding_id,requester_id,session_id FROM assistant_work_origins WHERE connection_id=? AND command_id=?")
+      .get(connectionId, commandId) as {work_id: string; binding_id: string; requester_id: string; session_id: string | null} | undefined;
+    return row ? {workId: row.work_id, bindingId: row.binding_id, requesterId: row.requester_id, sessionId: row.session_id} : null;
   }
 
   constructor(private sql: DatabaseSync, private db: ControlPlaneDb,
@@ -244,7 +250,12 @@ export class AssistantWorkStore {
       }
       this.reserveOrigin(connectionId, {commandId, workId: origin.work_id, bindingId: origin.binding_id,
         requesterId: origin.requester_id, ...(origin.project_id ? {projectId: origin.project_id} : {})});
-      const work = this.track(operations, connectionId, {workId: origin.work_id, bindingId: origin.binding_id, sessionId, operationId: commandId});
+      const prior = this.get(connectionId, origin.work_id);
+      if (prior && (prior.sessionId !== sessionId || prior.bindingId !== origin.binding_id)) {
+        throw new AssistantRefusal("A follow-up cannot reroute its existing work correlation.");
+      }
+      const work = prior ? this.authorize(operations, connectionId, origin.work_id)
+        : this.track(operations, connectionId, {workId: origin.work_id, bindingId: origin.binding_id, sessionId, operationId: commandId});
       this.sql.prepare("UPDATE assistant_work_origins SET session_id=? WHERE connection_id=? AND command_id=?").run(sessionId, connectionId, commandId);
       return work;
     });
