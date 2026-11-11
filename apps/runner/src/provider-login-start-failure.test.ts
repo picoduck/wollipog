@@ -30,3 +30,26 @@ test("lookalikes, wrapped causes, raw filesystem failures and unlanded producer 
   assert.deepEqual(providerLoginStartFailure(new Error(sentence)), { error: sentence });
   assert.deepEqual(providerLoginStartFailure({ message: sentence }), { error: PROVIDER_LOGIN_START_FAILURE });
 });
+
+test("fixed launcher/plugin and managed-profile refusals retain their operator guidance", () => {
+  const messages = [
+    "Codex sign-in could not identify a supported launcher form. Use a supported Codex launcher form; see docs/codex-plugin-launchers.md.",
+    "Codex plugin inheritance could not identify a supported launcher form. Use a supported Codex launcher form; see docs/codex-plugin-launchers.md.",
+    "Codex plugin inheritance could not read the default config.toml.",
+    "Codex plugin inheritance could not read the account config.toml.",
+    "Codex plugin inheritance could not reconcile the account plugin cache.",
+    "Claude plugin inheritance could not read plugin settings or installation records.",
+    "Claude plugin inheritance could not read this plugin registry version.",
+    "Claude plugin inheritance could not read plugin installation records.",
+    "Claude plugin inheritance could not reconcile the account plugin cache.",
+    "A managed provider profile with this identity already exists.",
+    "The managed provider profile path is invalid.",
+    "Managed provider profiles are not supported on this Machine.",
+  ];
+  for (const message of messages) {
+    assert.deepEqual(providerLoginStartFailure(new Error(message)), { error: message });
+    assert.deepEqual(providerLoginStartFailure(new Error(message + " secret /private")), { error: PROVIDER_LOGIN_START_FAILURE });
+  }
+  assert.deepEqual(providerLoginStartFailure(new Error("Codex plugin inheritance could not read /private secret")),
+    { error: PROVIDER_LOGIN_START_FAILURE });
+});

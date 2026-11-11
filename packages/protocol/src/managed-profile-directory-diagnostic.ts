@@ -65,6 +65,18 @@ const businessErrors = new Set([
   "The provider sign-in was canceled before launch.",
   "The provider sign-in command could not be started.",
   "Provider sign-in targeted a different Machine.",
+  "Codex sign-in could not identify a supported launcher form. Use a supported Codex launcher form; see docs/codex-plugin-launchers.md.",
+  "Codex plugin inheritance could not identify a supported launcher form. Use a supported Codex launcher form; see docs/codex-plugin-launchers.md.",
+  "Codex plugin inheritance could not read the default config.toml.",
+  "Codex plugin inheritance could not read the account config.toml.",
+  "Codex plugin inheritance could not reconcile the account plugin cache.",
+  "Claude plugin inheritance could not read plugin settings or installation records.",
+  "Claude plugin inheritance could not read this plugin registry version.",
+  "Claude plugin inheritance could not read plugin installation records.",
+  "Claude plugin inheritance could not reconcile the account plugin cache.",
+  "A managed provider profile with this identity already exists.",
+  "The managed provider profile path is invalid.",
+  "Managed provider profiles are not supported on this Machine.",
 ]);
 
 export function safeProviderLoginStartError(value: unknown): string {

@@ -791,6 +791,10 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     { peer: {}, expected: { error: PROVIDER_LOGIN_START_FAILURE } },
     { peer: { error: "Account label must contain 1 to 100 characters." },
       expected: { error: "Account label must contain 1 to 100 characters." } },
+    { peer: { error: "Codex plugin inheritance could not identify a supported launcher form. Use a supported Codex launcher form; see docs/codex-plugin-launchers.md." },
+      expected: { error: "Codex plugin inheritance could not identify a supported launcher form. Use a supported Codex launcher form; see docs/codex-plugin-launchers.md." } },
+    { peer: { error: "Codex plugin inheritance could not read /private secret" },
+      expected: { error: PROVIDER_LOGIN_START_FAILURE } },
   ];
   for (const [index, fixture] of startFailures.entries()) {
     const label = `Diagnostic Fixture ${index}`;

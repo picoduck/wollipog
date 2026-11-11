@@ -67,6 +67,7 @@ allowlisted optional `failureReason` survives.
 
 Malformed, unknown or missing diagnostics receive the generic fixed guidance above and no DTO.
 Exact existing business-validation sentences (label conflict, account limit, unavailable agent,
+fixed launcher/plugin-inheritance guidance, managed-profile identity/path/platform refusals,
 and other enumerated start errors) remain useful through a narrow explicit mapping. Unknown
 runner text, appended text and raw filesystem messages never pass through. Receiving diagnostics
 does not authorize login or repair and must never trigger automatic retry. The UI should validate
