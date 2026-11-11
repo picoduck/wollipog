@@ -387,6 +387,7 @@ import {
   type AuthPrincipal,
   type HumanPrincipal,
   workflowActorForPrincipal,
+  validParentControlCoordinate,
 } from "./identity.js";
 
 // Consume inherited launch material before initialization can create any descendants.
@@ -719,11 +720,6 @@ function requestPrincipal(req: FastifyRequest, allowQueryToken = false): AuthPri
 function requestHuman(req: FastifyRequest): HumanPrincipal | null {
   const principal = requestPrincipal(req);
   return principal?.kind === "human" ? principal : null;
-}
-
-function validParentControlCoordinate(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= 256 &&
-    !/[\u0000-\u001f\u007f]/u.test(value);
 }
 
 function humanActorId(req: FastifyRequest): string {

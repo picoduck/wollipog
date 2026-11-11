@@ -6,6 +6,7 @@ import { AssistantCommandReceipts, assistantRequestDigest } from "./assistant-co
 import { AssistantCommandConfirmations } from "./assistant-command-confirmations.js";
 import { OwnerManagement, type OwnerManagementResult } from "./owner-management.js";
 import type { createSessionWorktreeManagement } from "./session-worktree-management.js";
+import { validParentControlCoordinate } from "./identity.js";
 
 const str = {type: "string"};
 const obj = {type: "object"};
@@ -58,7 +59,7 @@ export function registerAssistantOwnerManagement(operations: AssistantOperations
   const define = (name: string, description: string, properties: Record<string, unknown>, required: string[],
     target: (args: unknown) => AssistantTarget, mutate: boolean, destructive: boolean,
     execute: (args: Record<string, unknown>, ctx: Context) => Promise<OwnerManagementResult> | OwnerManagementResult,
-    impact?: (args: Record<string, unknown>) => unknown) => {
+    impact?: (args: Record<string, unknown>, ctx: Context) => unknown) => {
     operations.register({name, description,
       inputSchema: {type: "object", additionalProperties: false,
         properties: {...properties, ...(mutate ? {commandId: str, confirmationId: str} : {})},
@@ -76,12 +77,13 @@ export function registerAssistantOwnerManagement(operations: AssistantOperations
         const {confirmationId, ...request} = args;
         const current = db.assistantConnections.get(ctx.connection.id)!;
         const resolved = target(args), digest = assistantRequestDigest(request);
+        const affected = impact?.(args, ctx);
         const binding = {connectionId: current.id, grantRevision: current.revision, operation: name,
-          argumentsDigest: digest, targetDigest: assistantRequestDigest({target: resolved, impact: impact?.(args) ?? null})};
+          argumentsDigest: digest, targetDigest: assistantRequestDigest({target: resolved, impact: affected ?? null})};
         const confirm = destructive && db.assistantConnections.destructiveConfirmation(current.id) === "confirm";
         if (!receipts.get(current.id, commandId) && confirm && confirmationId === undefined) {
           return {confirmationRequired: true, ...confirmations.issue(binding), operation: name, target: resolved,
-            impact: impact?.(args), recovery: "Review the affected scope; repeat unchanged arguments and commandId with confirmationId before expiry."};
+            impact: affected, recovery: "Review the affected scope; repeat unchanged arguments and commandId with confirmationId before expiry."};
         }
         const reservation = receipts.reserve({controlPlaneId: db.instanceId(), connectionId: current.id,
           operationId: commandId, operation: name, argumentsDigest: digest, grantRevision: current.revision, target: resolved}, () => {
@@ -159,13 +161,15 @@ export function registerAssistantOwnerManagement(operations: AssistantOperations
     });
   define("session_job_stop", "Stop one background job on any owner-authorized session.", {sessionId: str, jobId: str}, ["sessionId", "jobId"], sessionTarget, true, true,
     async (args, ctx) => {
+      if (!validParentControlCoordinate(args.jobId)) throw new AssistantRefusal("jobId must be a valid coordinate of at most 256 characters without controls.");
       if (!db.isSessionOwner(ctx.owner, text(args, "sessionId"))) throw new AssistantRefusal("Stopping background work requires the session owner's authority.");
-      return result(await svc.stopBackgroundJob(text(args, "sessionId"), text(args, "jobId"), {kind: "user", userId: ctx.owner.userId}));
+      return result(await svc.stopBackgroundJob(text(args, "sessionId"), args.jobId, {kind: "user", userId: ctx.owner.userId}));
     });
   define("session_hold_release", "Release the exact handoff hold, ending its unfinished jobs through the owner service.", {sessionId: str, holdId: str}, ["sessionId", "holdId"], sessionTarget, true, true,
     async (args, ctx) => {
+      if (!validParentControlCoordinate(args.holdId)) throw new AssistantRefusal("holdId must be a valid coordinate of at most 256 characters without controls.");
       if (!db.isSessionOwner(ctx.owner, text(args, "sessionId"))) throw new AssistantRefusal("Releasing a handoff requires the session owner's authority.");
-      return result(await svc.releaseQueueHold(text(args, "sessionId"), text(args, "holdId"), {kind: "user", userId: ctx.owner.userId}));
+      return result(await svc.releaseQueueHold(text(args, "sessionId"), args.holdId, {kind: "user", userId: ctx.owner.userId}));
     });
   for (const operation of ["create", "attach", "select", "discard", "retry_setup", "generate_setup"] as const) {
     define(`worktree_${operation}`, "Manage a session worktree using the owner's runner path; dirty-tree, repository and retirement safety checks remain mandatory.",
@@ -180,6 +184,37 @@ export function registerAssistantOwnerManagement(operations: AssistantOperations
         return service.execute("POST /worktree", {principal: ctx.owner, params: {}, body: {}, query: {}});
       }, args => db.getSession(text(args, "sessionId"))?.worktrees);
   }
+  const checkLocationResources = (name: string, payload: Record<string, unknown>, ctx: Context) => {
+    const grant = db.assistantConnections.get(ctx.connection.id)!.grant;
+    if (grant.projects === "all") return;
+    if (name === "location_create") throw new AssistantRefusal("Registering an arbitrary Machine folder requires an all-project grant. Ask the owner to add the Location or select all projects in Assistant Connections.");
+    if (name !== "location_add") return;
+    const runnerId = text(payload, "runnerId"), workspaceId = text(payload, "workspaceId");
+    const reachable = db.listProjectsForPrincipal(ctx.owner, true).some(project =>
+      grant.projects.includes(project.id) && project.locations.some(location =>
+        location.runnerId === runnerId && location.workspaceId === workspaceId && location.availability !== "runner_removed"));
+    if (!reachable) throw new AssistantRefusal("This workspace is outside the connection's granted projects. The owner can add the Location or grant all projects in Assistant Connections.");
+  };
+  const projectImpact = (name: string, args: Record<string, unknown>, ctx: Context) => {
+    const payload = args.payload === undefined ? {} : object(args.payload);
+    let location: ReturnType<ControlPlaneDb["getProjectLocation"]> = null;
+    if (name === "location_move" || name === "location_remove") {
+      location = db.getProjectLocation(name === "location_move" ? text(payload, "locationId") : text(args, "locationId"));
+      if (!location || (name === "location_remove" && location.projectId !== args.projectId)) throw new AssistantRefusal("Location not found.");
+      operations.authorize(ctx.connection.id, name, {kind: "project", id: location.projectId, projectId: location.projectId});
+    }
+    const affected = db.listSessions({includeArchived: true}).filter(session =>
+      location ? session.projectLocationId === location.id : session.projectId === args.projectId);
+    // Match owner-service refusal before exposing any preview or reserving a command. Merely
+    // filtering the display would still let a confirmation bind effects on an unseen resource.
+    if (affected.some(session => !db.canAccessSession(ctx.owner, session.id))) throw new AssistantRefusal("Project or Location contains sessions you cannot manage.");
+    return {
+      destinationProjectId: text(args, "projectId"),
+      ...(location ? {sourceLocation: {id: location.id, projectId: location.projectId, runnerId: location.runnerId, workspaceId: location.workspaceId}} : {}),
+      sessions: affected.map(session => ({id: session.id, projectId: session.projectId, locationId: session.projectLocationId}))
+        .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    };
+  };
   for (const [name, route, mutate, destructive] of ASSISTANT_PROJECT_MANAGEMENT) {
     define(name, `Owner project operation: ${route}. Uses the shared owner service, current grants and durable command identity.`,
       {projectId: str, locationId: str, payload: obj}, route.includes(":id") ? ["projectId"] : [], args => {
@@ -191,14 +226,19 @@ export function registerAssistantOwnerManagement(operations: AssistantOperations
         const payload = args.payload === undefined ? {} : object(args.payload);
         if (Object.hasOwn(payload, "owner")) throw new AssistantRefusal("Resource authority selection requires the owner's authenticated access-scope path.");
         if (Object.hasOwn(payload, "childSessionDefaults")) throw new AssistantRefusal("Changing persistent child budget and tool guardrails requires authenticated owner Project settings.");
+        checkLocationResources(name, payload, ctx);
         if (route.includes(":locationId")) text(args, "locationId");
         if (name === "location_move") {
           const source = db.getProjectLocation(text(payload, "locationId"));
           if (!source) throw new AssistantRefusal("Source Location not found.");
           operations.authorize(ctx.connection.id, name, {kind: "project", id: source.projectId, projectId: source.projectId});
         }
-        return projects.execute(route, {principal: ctx.owner, params: {id: args.projectId, locationId: args.locationId}, body: payload, query: {}, recheck: ctx.recheck});
-      }, args => db.listSessions({includeArchived: true}).filter(s => s.projectId === args.projectId).map(s => ({id: s.id, projectId: s.projectId, locationId: s.projectLocationId})));
+        return projects.execute(route, {principal: ctx.owner, params: {id: args.projectId, locationId: args.locationId}, body: payload, query: {}, recheck: async () => {
+          const owner = await ctx.recheck();
+          checkLocationResources(name, payload, ctx);
+          return owner;
+        }});
+      }, destructive ? (args, ctx) => projectImpact(name, args, ctx) : undefined);
   }
   define("runner_capacity", "Change owner-managed runner capacity with an expected revision; protocol and ownership checks match Machine settings.",
     {runnerId: str, configuredUnits: {type: "integer", minimum: 1, maximum: 256}, expectedRevision: {type: "integer", minimum: 0}},

@@ -79,9 +79,8 @@ test("project/Location writes share owner behavior, fence both sides of a move, 
     assert.equal(renamed.receipt.status, "succeeded");
     assert.equal(h.db.getProjectLocation(h.location.id)!.name, "Renamed");
     h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: [h.second.id]});
-    const denied = await h.call("location_move", {commandId: "move", projectId: h.second.id, payload: {locationId: h.location.id}});
-    assert.equal(denied.receipt.status, "failed");
-    assert.match(denied.error, /excluded/);
+    await assert.rejects(h.call("location_move", {commandId: "move", projectId: h.second.id, payload: {locationId: h.location.id}}), /excluded/);
+    assert.equal(h.receipts.get(h.issued.connection.id, "move"), null);
     assert.equal(h.db.getProjectLocation(h.location.id)!.projectId, h.project.id);
     h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: "all"});
     h.svc.listDirectory = async () => {
@@ -174,5 +173,99 @@ test("runner capacity preserves revision checks and worktree refuses dirty retir
     assert.match(dirty.body.error, /uncommitted/);
     await h.call("worktree_discard", args);
     assert.equal(requests, 1);
+  } finally {h.db.close();}
+});
+
+test("project-scoped grants cannot import an excluded workspace or inspect/register arbitrary Machine folders", async () => {
+  const h = harness();
+  try {
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: [h.second.id]});
+    const added = await h.call("location_add", {commandId: "excluded-workspace", projectId: h.second.id, payload: {runnerId: "runner", workspaceId: "repo"}});
+    assert.equal(added.receipt.status, "failed");
+    assert.equal(h.db.getProject(h.second.id)!.locations.length, 0);
+    let inspections = 0;
+    h.svc.listDirectory = async () => {inspections++; return {ok: true, status: 200, data: {path: "/fixture/new", parent: "/fixture", entries: []}};};
+    const created = await h.call("location_create", {commandId: "excluded-folder", projectId: h.second.id, payload: {runnerId: "runner", path: "/fixture/new", name: "New"}});
+    assert.equal(created.receipt.status, "failed");
+    assert.equal(inspections, 0);
+    assert.equal(h.db.getProject(h.second.id)!.locations.length, 0);
+  } finally {h.db.close();}
+});
+
+test("Location move preview binds the source project, Location and affected sessions", async () => {
+  const h = harness();
+  try {
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: "all", destructiveConfirmation: "confirm"});
+    const args = {commandId: "scope-move", projectId: h.second.id, payload: {locationId: h.location.id}};
+    const preview = await h.call("location_move", args);
+    assert.equal(preview.confirmationRequired, true);
+    assert.ok(JSON.stringify(preview.impact).includes("unrelated"));
+    h.db.createSession({id: "new-source-work", runnerId: "runner", workspaceId: "repo", agentId: "agent", title: "Existing", driver: "acp", useWorktree: false, config: {}, now: Date.now()});
+    h.db.setSessionProject("new-source-work", h.project.id, h.location.id);
+    await assert.rejects(h.call("location_move", {...args, confirmationId: preview.confirmationId}), /confirmation/);
+    assert.equal(h.db.getProjectLocation(h.location.id)!.projectId, h.project.id);
+    assert.equal(h.receipts.get(h.issued.connection.id, args.commandId), null);
+    const renewed = await h.call("location_move", args);
+    assert.equal(renewed.impact.sourceLocation.id, h.location.id);
+    assert.equal(renewed.impact.sourceLocation.projectId, h.project.id);
+    const third = h.db.createProject({name: "Third"});
+    h.db.moveProjectLocation(h.location.id, third.id, Date.now(), h.owner.userId);
+    await assert.rejects(h.call("location_move", {...args, confirmationId: renewed.confirmationId}), /confirmation/);
+    const current = await h.call("location_move", args);
+    assert.equal(current.impact.sourceLocation.projectId, third.id);
+    assert.equal((await h.call("location_move", {...args, confirmationId: current.confirmationId})).receipt.status, "succeeded");
+    assert.equal(h.db.getProjectLocation(h.location.id)!.projectId, h.second.id);
+  } finally {h.db.close();}
+});
+
+test("granted workspace linking stays available, while narrowing after folder inspection stops registration", async () => {
+  const h = harness();
+  try {
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: [h.project.id, h.second.id]});
+    const added = await h.call("location_add", {commandId: "granted-workspace", projectId: h.second.id, payload: {runnerId: "runner", workspaceId: "repo"}});
+    assert.equal(added.receipt.status, "succeeded");
+    const target = h.db.getProject(h.second.id)!.locations[0]!;
+    assert.equal((await h.call("session_launch", {commandId: "granted-launch", locationId: target.id, agentId: "agent", useWorktree: false})).receipt.status, "succeeded");
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: "all"});
+    let inspections = 0;
+    h.svc.listDirectory = async () => {
+      inspections++;
+      h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: [h.project.id]});
+      return {ok: true, status: 200, data: {path: "/fixture/new", parent: "/fixture", entries: []}};
+    };
+    const narrowed = await h.call("location_create", {commandId: "narrow-during-inspection", projectId: h.project.id, payload: {runnerId: "runner", name: "New", path: "/fixture/new"}});
+    assert.equal(narrowed.receipt.status, "failed");
+    assert.match(narrowed.error, /all-project/);
+    assert.equal(inspections, 1);
+    assert.equal(h.db.getProject(h.project.id)!.locations.length, 1);
+  } finally {h.db.close();}
+});
+
+test("destructive previews respect current source visibility rather than the global session table", async () => {
+  const h = harness();
+  try {
+    // Active organization owners can read same-organization private sessions today. Model an
+    // inaccessible resource explicitly rather than claiming that the current policy hides it.
+    const original = h.db.canAccessSession.bind(h.db);
+    h.db.canAccessSession = (principal, id) => id !== "unrelated" && original(principal, id);
+    h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: "all", destructiveConfirmation: "confirm"});
+    await assert.rejects(h.call("project_delete", {commandId: "hidden-impact", projectId: h.project.id}), /sessions you cannot manage/);
+    assert.equal(h.receipts.get(h.issued.connection.id, "hidden-impact"), null);
+  } finally {h.db.close();}
+});
+
+test("background job and hold coordinates match owner bounds before runner dispatch", async () => {
+  const h = harness();
+  try {
+    let requests = 0;
+    h.hub.requestFromRunner = async () => {requests++; throw new Error("must not dispatch invalid coordinates");};
+    for (const [name, key] of [["session_job_stop", "jobId"], ["session_hold_release", "holdId"]]) {
+      for (const value of ["x".repeat(257), "invalid\ncoordinate"]) {
+        const response = await h.call(name!, {sessionId: "unrelated", commandId: `invalid:${key}:${value.length}`, [key!]: value});
+        assert.equal(response.receipt.status, "failed");
+        assert.match(response.error, /coordinate|identifier/i);
+      }
+    }
+    assert.equal(requests, 0);
   } finally {h.db.close();}
 });

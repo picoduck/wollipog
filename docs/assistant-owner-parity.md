@@ -75,6 +75,11 @@ Project/Location tools use `projectId`, optional `locationId` for exact Location
 in `payload` and require both source and destination project grants. Installation-wide creation
 and Machine capacity require an all-project grant; they cannot be reached by inventing a project
 label. Capacity changes carry `configuredUnits` and `expectedRevision`; reread on a conflict.
+With selected-project grants, `location_add` may link only an exact runner/workspace already
+reachable through a currently granted Project. `location_create` registers an arbitrary Machine
+folder and requires all projects; the check runs before directory inspection and again before
+registration. The owner can instead add a Location through Project settings without expanding
+the Assistant grant. Adding an excluded workspace to an allowed Project cannot manufacture access.
 Session configuration keeps permission, budget and guardrail changes on authenticated owner paths.
 Ordinary configuration does not impersonate human campaign authority or restore a stale boundary.
 Project `childSessionDefaults` also changes persistent child budget/tool guardrails and remains on
@@ -86,6 +91,9 @@ honor `destructiveConfirmation`. Under `confirm`, first inspect the target/affec
 then repeat unchanged arguments and command ID with its short-lived `confirmationId`. A changed
 grant or affected scope invalidates the preview. Confirmation consumption and receipt reservation
 share a transaction. Under `none`, standing authority applies without another approval.
+Location move/remove previews bind the current source Location, its Project and its affected
+sessions. An inaccessible affected session causes a content-free refusal before any preview,
+rather than exposing its identity or confirming an unseen effect.
 
 ## Recovery and Evidence
 
