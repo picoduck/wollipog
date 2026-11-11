@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
-import { spawnSync } from "node:child_process";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { OwnerManagementInventory, type OwnerOperationCoverage } from "./owner-management-inventory.js";
