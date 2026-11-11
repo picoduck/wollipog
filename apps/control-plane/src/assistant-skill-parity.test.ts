@@ -34,7 +34,7 @@ function fixture(t: TestContext) {
   db.registerRunner({runnerId: "machine", hostname: "Fixture", os: "linux", version: "test", workspaces: [], agents: [
     {id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex"},
   ]}, 1, 400);
-  const state = {online: true, calls: [] as ControlPlaneToRunner[], syncs: 0, beforeRead: async () => {}, beforeSyncReply: async () => {}, failSync: false};
+  const state = {online: true, calls: [] as ControlPlaneToRunner[], syncs: 0, beforeRead: async () => {}, beforeSyncReply: async () => {}, failSync: false, rejectRestore: false};
   const candidate = {id: "candidate", name: "alpha", sourceDirectory: ".codex/skills", generation: "one"};
   const push = ((_runnerId: string) => {}) as SkillsSyncPusher;
   push.request = async (runnerId, requestId) => {
@@ -60,10 +60,14 @@ function fixture(t: TestContext) {
       if (message.type === "skill_kept_aside") return message.operation === "read"
         ? {type: "skill_kept_aside_result", runnerId, requestId, status: "read", files: payload().files,
           observedDigest: payload().digest, observedFingerprint: "9".repeat(64)}
-        : {type: "skill_kept_aside_result", runnerId, requestId, status: "discarded"};
+        : state.rejectRestore
+          ? {type: "skill_kept_aside_result", runnerId, requestId, status: "rejected", error: "Observation changed. Sync and review the copy again."}
+          : {type: "skill_kept_aside_result", runnerId, requestId, status: "discarded"};
       if (message.type === "skill_drift") {
         if (message.operation === "read") return {type: "skill_drift_result", runnerId, requestId, status: "read", files: payload().files, observedDigest: payload().digest};
-        return {type: "skill_drift_result", runnerId, requestId, status: "restored"};
+        return state.rejectRestore
+          ? {type: "skill_drift_result", runnerId, requestId, status: "rejected", error: "Observation changed. Sync and review the copy again."}
+          : {type: "skill_drift_result", runnerId, requestId, status: "restored"};
       }
       throw new Error("Unexpected runner operation");
     }}};
@@ -147,7 +151,7 @@ test("sync uses shared service; an uncertain response is never redispatched on r
   assert.deepEqual(read.data.desired, []);
   f.state.failSync = true;
   const args = {runnerId: "machine", commandId: "sync", expectedRevision: read.revision};
-  await assert.rejects(f.call("skill_sync", args), /operation failed/);
+  await assert.rejects(f.call("skill_sync", args), /Outcome uncertain/);
   const receipt = await f.call("command_get", {commandId: "sync"});
   assert.equal(receipt.receipt.status, "uncertain");
   assert.equal((await f.call("skill_sync", args)).receipt.status, "uncertain");
@@ -246,6 +250,14 @@ test("adoption checks live library revision after source inspection before any d
   assert.equal(adopted.result.data.status, "adopted");
   assert.equal(f.state.calls.filter(c => c.type === "skill_adoption").length, 1);
   assert.equal((await f.call("command_get", {commandId: "fresh-adopt"})).receipt.status, "succeeded");
+  const nextPreview = await f.call("skill_machine_preview", {previewId, commandId: "review-prep-change", payload: {candidateId: "candidate"}});
+  const nextReady = await f.call("skill_adoption_preflight", {previewId, commandId: "preflight-prep-change", payload: {previewId: nextPreview.result.data.previewId}});
+  f.state.beforeSyncReply = async () => {f.db.updateSkillAssignment(f.db.listSkillAssignments(skill.id)[0]!.id, {enabled: false});};
+  await assert.rejects(f.call("skill_machine_adopt", {previewId, commandId: "prep-change", expectedRevision: nextReady.result.revision,
+    payload: {previewId: nextPreview.result.data.previewId, adoptionToken: nextReady.result.data.adoptionToken, confirmation: "explicit"}}),
+    /Outcome uncertain.*Adoption was not sent.*run preflight again/);
+  assert.equal(f.state.calls.filter(c => c.type === "skill_adoption").length, 1, "preparation refusal sends no additional adoption");
+  assert.equal(f.receipts.get(f.issued.connection.id, "prep-change")?.status, "uncertain", "preparatory sync itself may have changed files");
 });
 
 test("current owner ceiling prevents Machine access even under an all-operations grant", async t => {
@@ -349,7 +361,7 @@ test("committed drift/orphan effects keep uncertain receipts after post-effect a
         if (operation === "skill_orphan_import") f.db.canAccessSkill = () => false;
         else f.db.assistantConnections.configure(f.issued.connection.id, {operations: ["skill_groups"], projects: "all"});
       };
-      await assert.rejects(f.call(operation, args), /operation failed/);
+      await assert.rejects(f.call(operation, args), /operation failed|Outcome uncertain/);
       assert.equal(f.receipts.get(f.issued.connection.id, "late")?.status, "uncertain");
       assert.equal(f.db.listSkillVersions(skill.id).versions.length, operation === "skill_drift_restore" ? 1 : 2);
       if (operation === "skill_drift_restore") assert.ok(f.state.calls.some(c => c.type === "skill_drift" && c.operation === "restore"));
@@ -378,4 +390,29 @@ test("an import fence refusal retains its revision remedy and failed receipt bef
   assert.equal(f.receipts.get(f.issued.connection.id, "import")?.status, "failed");
   assert.equal(f.db.listSkills().length, 0);
   assert.equal(f.state.calls.length, 0);
+});
+
+test("verified restore/discard rejections retain their safe remedy with uncertain receipts", async t => {
+  for (const operation of ["skill_drift_restore", "skill_orphan_discard"] as const) await t.test(operation, async t => {
+    const f = fixture(t);
+    let body: Record<string, unknown>;
+    if (operation === "skill_drift_restore") {
+      const skill = f.db.createSkill(payload("alpha", "Library"));
+      const drift = {name: "alpha", digest: skill.latestVersion!.digest, variant: "agent" as const, observedDigest: payload().digest, held: true};
+      f.db.setRunnerSkillState("machine", {deployed: [], unmanaged: [], drift: [drift]}, 2);
+      body = {...drift, confirmation: "explicit"};
+    } else {
+      const id = "00000000-0000-4000-8000-000000000004";
+      f.db.setRunnerSkillState("machine", {deployed: [], unmanaged: [], keptAside: [{id, name: "alpha", digest: "a".repeat(64),
+        variant: "agent", keptAsideAt: 1, observedDigest: payload().digest, observedFingerprint: "9".repeat(64)}]}, 2);
+      body = {kind: "kept_aside", id, observedDigest: payload().digest, observedFingerprint: "9".repeat(64), confirmation: "explicit"};
+    }
+    f.state.rejectRestore = true;
+    const args = {runnerId: "machine", commandId: "rejected", expectedRevision: f.revision(), payload: body};
+    await assert.rejects(f.call(operation, args), /Outcome uncertain.*Observation changed\. Sync and review the copy again/);
+    assert.equal(f.receipts.get(f.issued.connection.id, "rejected")?.status, "uncertain");
+    const count = f.state.calls.length;
+    assert.equal((await f.call(operation, args)).receipt.status, "uncertain");
+    assert.equal(f.state.calls.length, count);
+  });
 });

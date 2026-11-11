@@ -1,7 +1,7 @@
 import { AssistantRefusal, type AssistantOperations, type AssistantTarget } from "./assistant-connections.js";
 import type { SkillsRouteDeps } from "./skills-route.js";
 import { createSkillsManagement, type SkillApplicationService } from "./skills-management.js";
-import type { ManagementMutations } from "./assistant-management-command.js";
+import {ManagementUncertainOutcome, type ManagementMutations} from "./assistant-management-command.js";
 import { assistantRequestDigest } from "./assistant-command-receipts.js";
 import {skillParityPayloadSchema} from "./assistant-skill-parity-schemas.js";
 
@@ -123,7 +123,21 @@ export function registerAssistantSkillParity(operations: AssistantOperations, de
             if (mutation && effectStarted) throw new Error("A skill effect may have committed. Reconcile the command receipt and current state under authorized access.");
             throw error;
           }
-          if (result.status >= 400 && mutation && effectStarted) throw new Error("A skill effect may have committed before the service refused further work. Reconcile its receipt and current state.");
+          if (result.status >= 400 && mutation && effectStarted) {
+            // Preserve a verified runner refusal's remedy, but never release it after access loss
+            // or include arbitrary 5xx diagnostics. Preparation sync can itself change files, so
+            // adoption's 'not sent' result still requires reconciling its preparatory effects.
+            let detail = "The service refused further work after a possible skill effect.";
+            try {
+              await ctx.recheck(); authorize();
+              const message = (result.body as {error?: unknown})?.error;
+              if (typeof message === "string" && (result.status < 500 ||
+                name === "skill_machine_adopt" && message.startsWith("Adoption was not sent."))) {
+                detail = message.replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim().slice(0, 500);
+              }
+            } catch { /* Current access must permit any resource-specific refusal detail. */ }
+            throw new ManagementUncertainOutcome(`Outcome uncertain. ${detail} Reconcile command_get and current Machine/library state before issuing a new command.`);
+          }
           if (result.status >= 500) throw new Error("Skill operation outcome is uncertain. Inspect command_get and the current owner resource before any retry.");
           if (result.status >= 400) throw new AssistantRefusal(`Skill operation refused (${result.status}). ${String((result.body as {error?: string})?.error ?? "Inspect the owner API requirements.")}`);
           // Check live access after asynchronous runner/network work before exposing private files.

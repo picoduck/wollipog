@@ -69,6 +69,10 @@ journals and follow the owner's supported recovery flow before issuing a genuine
 If access changes after an import commits or a runner mutation is dispatched, the receipt remains
 `uncertain` and private results are withheld. A revision refusal at the final import fence retains
 its actionable reread remedy and a `failed` receipt when no effect has started.
+Uncertain restore/discard rejections retain the service's sanitized remedy under current access.
+Adoption preparation sync may itself change Machine files: an adoption refused before dispatch
+still requires reconciling preparation, and reports that adoption was not sent with the preflight
+remedy. Neither case silently permits replay.
 
 ## Human Authority and Evidence Limits
 
