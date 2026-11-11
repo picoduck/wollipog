@@ -9,7 +9,7 @@ export const NODE_TEST_GLOBS = [
 ];
 export const profile = JSON.parse(readFileSync(new URL("../docs/ci-node-profile-2026-10-23.json", import.meta.url), "utf8"));
 // Scheduling costs can be refreshed independently of the fast/remaining membership profile.
-export const schedulingProfile = JSON.parse(readFileSync(new URL("../docs/ci-node-shard-profile-2026-11-10.json", import.meta.url), "utf8"));
+export const schedulingProfile = JSON.parse(readFileSync(new URL("../docs/ci-node-profile-shards-2026-11-10.json", import.meta.url), "utf8"));
 
 export async function discoverNodeTests(cwd = process.cwd()) {
   const files = new Set();

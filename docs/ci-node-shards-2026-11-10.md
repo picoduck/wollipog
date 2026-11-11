@@ -2,7 +2,7 @@
 
 Refs #4459. Source: [PR run 42915746591, attempt 1](https://github.com/picoduck/wollipog/actions/runs/42915746591/attempts/1),
 tested commit `dabb5b8943f6981034ad09339830fe39416c1bb2`. The committed
-[profile](ci-node-shard-profile-2026-11-10.json) contains the twenty slowest files from
+[profile](ci-node-profile-shards-2026-11-10.json) contains the twenty slowest files from
 each shard's `ci-timing-v1` projection, resolved by SHA-256 of repository-relative
 paths. It includes public job IDs and step durations, without test inputs or log text.
 

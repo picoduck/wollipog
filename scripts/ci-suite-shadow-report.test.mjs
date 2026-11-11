@@ -17,7 +17,7 @@ const plan = () => makeSelection({ tree, fastFiles: [], diff: { entries: [{ path
     runId: "101", attempt: 1, event: "merge_group", diffKind: "combined-merge-group" } });
 const summary = (suite) => ({ version: 1, suite, count: 3, failed: 0, skipped: 0, cancelled: 0, unmeasured: 0, retryOnly: 0, truncated: false,
   context: { runId: "101", attempt: 1, testedSha, workflowSha: testedSha }, slowestFiles: [], slowestTests: [], reliability: { tests: [], truncated: false } });
-// Runs before #3770 had one Node job; later runs have a test-free checks job and four Node shards.
+// Before #3770: one Node job. After it: three shards; #4459 adds a fourth.
 function input({ split = false } = {}) {
   const node = split ? ["Unit Tests (1)", "Unit Tests (2)", "Unit Tests (3)", "Unit Tests (4)"] : ["Typecheck, Unit Tests & Bundles"];
   const names = [...(split ? ["Typecheck & Bundles"] : []), ...node, ...[1, 2, 3, 4, 5].map((n) => `Browser End-to-End Tests (${n})`),
@@ -51,7 +51,14 @@ test("full passing results yield explicitly inferred samples with actual full ru
   assert.equal(report.certification, "none");
 });
 
-test("from #3770, a run is read as a test-free checks job and four Node shards, each one required", () => {
+test("three- and four-shard runs retain their executed layout in advisory comparisons", () => {
+  const historical = input({ split: true });
+  historical.records[0].jobs = historical.records[0].jobs.filter(job => job.name !== "Unit Tests (4)");
+  assert.deepEqual(shadowReport(historical).gaps, []);
+  assert.equal(shadowReport(historical).comparisons.length, 1);
+  const incomplete = structuredClone(historical);
+  incomplete.records[0].jobs = incomplete.records[0].jobs.filter(job => job.name !== "Unit Tests (3)");
+  assert.equal(shadowReport(incomplete).gaps[0].reason, "missing-or-duplicate-full-job");
   const split = shadowReport(input({ split: true }));
   assert.deepEqual(split.gaps, []);
   assert.equal(split.comparisons.length, 1);
