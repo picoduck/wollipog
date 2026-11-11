@@ -24956,6 +24956,7 @@ export class SessionsService {
     runnerId: string,
     descriptor: ExternalSessionDescriptor,
     backfill: boolean,
+    recheck?: () => Promise<unknown>,
   ): Promise<ServiceResult<SessionView>> {
     if (!this.hub.isRunnerOnline(runnerId)) return fail("runner is offline", 409);
     if (!descriptor.agentSessionId) return fail("descriptor is missing an agent session id", 400);
@@ -25033,6 +25034,7 @@ export class SessionsService {
         return fail((err as Error).message, 504);
       }
     }
+    await recheck?.();
     // Pre-v35 native runners retain the compatibility fire-and-forget path, but the dashboard body
     // is not a trustworthy cwd. Create an explicitly unassigned/unlinkable placeholder; the first
     // later runner snapshot promotes it atomically from its runner-owned workspacePath.
@@ -25083,7 +25085,7 @@ export class SessionsService {
   /** Re-import an adopted session: ask its runner to re-read the original CLI transcript with the
    * current parser (replacing the box's event log), then invalidate the cache and re-hydrate. Keeps
    * the session id + board state — only the event timeline is refreshed. */
-  async reprocessSession(sessionId: string): Promise<ServiceResult<SessionView>> {
+  async reprocessSession(sessionId: string, recheck?: () => Promise<unknown>): Promise<ServiceResult<SessionView>> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (!session.adopted) return fail("only adopted sessions can be reprocessed", 400);
@@ -25120,6 +25122,7 @@ export class SessionsService {
       const now = Date.now();
       const inserted = [];
       try {
+        await recheck?.();
         if (this.historyChangedSince(sessionId, historyBeforeStaging)) {
           return fail("the session's history changed while it was being reprocessed; reprocess it again", 409);
         }
