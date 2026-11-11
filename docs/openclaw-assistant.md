@@ -94,7 +94,9 @@ Disambiguate an unspecified installation before mutating anything.
 Use the selected prefix for each subsequent operation. Session/resource IDs and operation receipts
 must stay associated with the discovered installation and connection. A conversation needs an
 explicit authorized connection binding; shared Discord membership does not grant Full Access.
-The full originating-conversation event/reply integration is tracked in #4467.
+Use #4467's [Assistant work and conversation connector](assistant-work-events.md) for
+Discord-originated commands and signed event/reply delivery. That component owns the OpenClaw-side
+correlation and event receiver; this guide configures the generic MCP connection only.
 
 Discord-originated commands correlate with work only through #4467's trusted ingress. At
 composition, that ingress supplies `hooks.authenticatedOrigin(receipt)` after authenticating the
@@ -103,6 +105,14 @@ tool arguments, conversation IDs, requester IDs or JSON origin fields cannot est
 Do not ask the model to copy an origin into a tool call as a substitute for authenticated ingress.
 Plain MCP commands remain valid without Discord correlation; the smoke test below deliberately
 uses this uncorrelated path and does not claim originating-conversation delivery evidence.
+
+The trusted connector calls `/assistant/discord/commands` with both an Assistant bearer and a
+separate binding-scoped `X-Wollipog-Connector-Token`. It must authenticate the actual Discord
+account, requester and conversation before selecting that credential. Connector credentials stay
+in protected native runtime configuration, outside model prompts, arguments and MCP tool
+configuration. Do not add the connector credential to the generic MCP entries generated here.
+Keep the broad generic MCP connection restricted to owner-trusted contexts; shared Discord contexts
+must use the requester-aware connector rather than receiving that connection's authority directly.
 
 ## Equivalent Remote Setup
 
