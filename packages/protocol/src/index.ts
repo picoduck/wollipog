@@ -9556,6 +9556,12 @@ export type OutboundEventKind =
   | "cost.checkpoint"
   | "cost.budget_exhausted";
 
+/** The content-minimized Assistant transport and receiver share this lifecycle contract. */
+export const ASSISTANT_WORK_EVENT_KINDS: readonly OutboundEventKind[] = [
+  "session.created", "session.input_required", "session.idle", "session.completed",
+  "session.failed", "session.stopped",
+];
+
 export type OutboundEventSubscriptionScope =
   | { kind: "project"; projectId: string }
   | { kind: "automation"; automationId: string }

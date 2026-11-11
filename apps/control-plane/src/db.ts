@@ -26437,10 +26437,7 @@ export class ControlPlaneDb {
         .run(identified ? JSON.stringify(identified) : null, id);
       if (JSON.stringify(existing) !== JSON.stringify(identified)) {
         this.advanceSessionAttentionRevision(id);
-        if (identified) this.enqueueOutboundSessionEventInTransaction({
-          sourceKey: `assistant-attention:${id}:${(this.stmt("SELECT revision FROM session_attention WHERE session_id=?").get(id) as {revision: number} | undefined)?.revision ?? 0}`,
-          kind: "session.input_required", sessionId: id, occurredAt: Date.now(), assistantOnly: true,
-        });
+        this.enqueueOutboundAssistantAttentionInTransaction(id, pendingRequests(identified), Date.now());
       }
     });
   }
@@ -34627,7 +34624,7 @@ export class ControlPlaneDb {
     deliveryId: string;
     subscriptionId: string;
     leaseId: string;
-    disposition: "delivered" | "retry" | "failed" | "deferred";
+    disposition: "delivered" | "retry" | "failed" | "deferred" | "dropped";
     now: number;
     statusCode?: number;
     nextAttemptAt?: number;
@@ -35870,6 +35867,13 @@ export class ControlPlaneDb {
     };
   }
 
+  private enqueueOutboundAssistantAttentionInTransaction(sessionId: string, requests: PendingApproval[], now: number): void {
+    for (const request of requests) this.enqueueOutboundSessionEventInTransaction({
+      sourceKey: `assistant-attention:${sessionId}:${request.occurrenceId ?? request.requestId}`,
+      kind: "session.input_required", sessionId, occurredAt: now, assistantOnly: true,
+    });
+  }
+
   private enqueueOutboundStatusEventsInTransaction(input: {
     sessionId: string;
     previousStatus?: SessionStatus;
@@ -35898,6 +35902,10 @@ export class ControlPlaneDb {
         });
       }
     }
+    // Snapshot and direct pending/status producers share the occurrence fence. Async asks
+    // also wake while execution continues; a status change must not create a second wake.
+    this.enqueueOutboundAssistantAttentionInTransaction(input.sessionId, pendingRequests(input.pending)
+      .filter(request => input.status === "input_required" || (request.async && !isTerminal(input.status))), input.now);
     if (input.status !== "input_required") return;
     const sessionRow = this.stmt("SELECT * FROM sessions WHERE id=?")
       .get(input.sessionId) as unknown as SessionRow | undefined;
@@ -35915,6 +35923,7 @@ export class ControlPlaneDb {
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-input-required:${input.sessionId}:${occurrenceId}`,
         kind: "session.input_required",
+        excludeAssistant: true,
         sessionId: input.sessionId,
         occurredAt: input.now,
         ...(request.kind === "question" ? { questionTitle: request.title } : {}),
@@ -35982,6 +35991,7 @@ export class ControlPlaneDb {
     detail?: Pick<OutboundEventEnvelope, "branch" | "pullRequest" | "checks" | "cost">;
     questionTitle?: string;
     assistantOnly?: boolean;
+    excludeAssistant?: boolean;
   }): number {
     const session = this.stmt(
       `SELECT id,project_id,title FROM sessions WHERE id=?`,
@@ -36003,6 +36013,7 @@ export class ControlPlaneDb {
     ).all(session.project_id, origin?.automation_id ?? null, input.sessionId) as unknown as OutboundEventSubscriptionRow[])
       .filter((row) => jsonArray(row.event_kinds_json).includes(input.kind))
       .filter((row) => !input.assistantOnly || row.scope_kind === "assistant")
+      .filter((row) => !input.excludeAssistant || row.scope_kind !== "assistant")
       .filter((row) => row.scope_kind !== "assistant" || this.assistantWork.authorizedForSession(row.assistant_connection_id!, input.sessionId).length > 0);
     if (matching.length === 0) return 0;
 

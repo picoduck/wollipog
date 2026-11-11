@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { FastifyInstance } from "fastify";
-import { WOLLIPOG_OUTBOUND_EVENT_MEDIA_TYPE, type OutboundEventEnvelope } from "@wollipog/protocol";
+import { ASSISTANT_WORK_EVENT_KINDS, WOLLIPOG_OUTBOUND_EVENT_MEDIA_TYPE, type OutboundEventEnvelope } from "@wollipog/protocol";
 import { verifyAutomationTriggerSignature } from "./automation-trigger-ingress.js";
 import type { AssistantDestinationBinding } from "./assistant-work.js";
 
@@ -105,7 +105,7 @@ export function registerAssistantEventReceiver(app: FastifyInstance, config: {
     const references = envelope?.assistant?.work;
     if (envelope?.version !== "v1" || typeof envelope.eventId !== "string" || !/^[\w.:-]{1,128}$/.test(envelope.eventId) ||
         header("x-wollipog-event-id") !== envelope.eventId || typeof envelope.sessionId !== "string" ||
-        !Number.isSafeInteger(envelope.occurredAt) || !["session.created", "session.idle", "session.completed", "session.failed", "session.stopped", "session.input_required"].includes(envelope.kind) ||
+        !Number.isSafeInteger(envelope.occurredAt) || !ASSISTANT_WORK_EVENT_KINDS.includes(envelope.kind) ||
         envelope.assistant?.controlPlaneId !== config.controlPlaneId || envelope.assistant?.connectionId !== config.connectionId ||
         !Array.isArray(references) || !references.length || references.length > 100 ||
         new Set(references.map(work => work?.workId)).size !== references.length ||

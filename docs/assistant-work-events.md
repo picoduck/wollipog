@@ -90,7 +90,9 @@ The owner creates and lists subscriptions through:
 - `POST /api/assistant-connections/:id/event-subscriptions`
 - `GET /api/assistant-connections/:id/event-subscriptions`
 
-Creation takes `callbackUrl` and lifecycle `eventKinds`. The service sets the Assistant connection
+Creation takes `callbackUrl` and lifecycle `eventKinds`: `session.created`, `session.input_required`,
+`session.idle`, `session.completed`, `session.failed` and `session.stopped`. Other kinds are refused
+for this transport before subscription creation. The service sets the Assistant connection
 scope and disables content options. The response returns the signing secret once; keep it separate
 from the Assistant bearer and OpenClaw hook token. Detail, delivery-journal, rotate, resume and
 revoke routes are under `/api/assistant-connections/:id/event-subscriptions/:subscriptionId`
@@ -108,11 +110,15 @@ redirect refusal and journal retention semantics still apply. The worker recheck
 grant, source placement and binding after DNS resolution and before transport. Connection change
 notifications cancel active work promptly; live checks remain authoritative after missed hints or
 restart. Revocation clears subscriptions and pending delivery bodies.
+Locally unauthorized deliveries are dropped and their bodies cleared; they do not count as callback
+failures or pause delivery for other authorized work on the connection.
 
 Attention notices use `assistant_work_read` to retrieve current occurrence/request coordinates and
 relative paths into the supported Wollipog session/attention UI. Resolve paths only against the
 owner-configured installation origin. A notification is not an approval. Required owner approvals
 stay on their supported authenticated Wollipog path; an ordinary Discord reply never supplies one.
+Direct pending updates and reconnect/status observations share a durable occurrence key, so the
+same attention occurrence does not produce an additional wake through each producer.
 
 ## Local and Remote Transport
 

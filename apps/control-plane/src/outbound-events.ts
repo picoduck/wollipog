@@ -4,6 +4,7 @@ import { request as httpsRequest } from "node:https";
 import { BlockList, isIP } from "node:net";
 import { randomUUID } from "node:crypto";
 import {
+  ASSISTANT_WORK_EVENT_KINDS,
   WOLLIPOG_OUTBOUND_EVENT_MEDIA_TYPE,
   type CreateOutboundEventSubscriptionRequest,
   type GitSummaryInfo,
@@ -271,6 +272,9 @@ export class OutboundEventsService {
       return fail("outbound event subscription is malformed");
     }
     if (request.scope.kind === "assistant") {
+      if (request.eventKinds.some(kind => !ASSISTANT_WORK_EVENT_KINDS.includes(kind))) {
+        return fail("Assistant callbacks support only session lifecycle event kinds");
+      }
       const connection = this.db.assistantConnections.get(request.scope.connectionId);
       if (!connection || connection.revoked || actor.kind !== "human" || actor.id !== connection.ownerUserId ||
           request.includeSessionName || request.includeQuestionTitle) return fail("Only the connection owner can configure a content-minimized Assistant callback", 403);
@@ -460,7 +464,7 @@ export class OutboundEventsService {
     const now = Date.now();
     const abortReason = controller.signal.reason as DeliveryAbortReason | undefined;
     if (abortReason === "revocation") return;
-    let disposition: "delivered" | "retry" | "failed" | "deferred";
+    let disposition: "delivered" | "retry" | "failed" | "deferred" | "dropped";
     let nextAttemptAt: number | undefined;
     let pauseReason: string | undefined;
     if (abortReason === "rotation" || abortReason === "shutdown") {
@@ -470,7 +474,7 @@ export class OutboundEventsService {
         ? "Delivery deferred after subscription secret rotation"
         : "Delivery deferred during control-plane shutdown";
     } else if (authorizationRefused) {
-      disposition = "failed";
+      disposition = "dropped";
     } else if (statusCode !== undefined && statusCode >= 200 && statusCode < 300) {
       disposition = "delivered";
       error = undefined;

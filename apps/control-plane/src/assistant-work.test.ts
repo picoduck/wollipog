@@ -121,9 +121,70 @@ test("current authorization is checked after DNS and a revoked binding prevents 
     }) as never, async () => { sent = true; return {statusCode: 204}; });
     await worker.tick(11);
     assert.equal(sent, false);
-    assert.equal(db.listOutboundEventDeliveries("sub-fixture")![0]!.status, "failed");
+    assert.equal(db.listOutboundEventDeliveries("sub-fixture")![0]!.status, "dropped");
     assert.equal(db.listOutboundEventDeliveries("sub-fixture")![0]!.statusCode, undefined, "local authorization failure is not a callback HTTP status");
   } finally { db.close(); }
+});
+
+test("revoked work deliveries do not pause callbacks for other still-authorized work", async () => {
+  const {db, owner, connection, operations, input, binding} = setup();
+  const sent: string[] = [];
+  const worker = new OutboundEventsService(db, quiet, undefined, async (_target, delivery) => {
+    sent.push(JSON.parse(delivery.payloadJson).sessionId);
+    return {statusCode: 204};
+  });
+  try {
+    const id = connection.connection.id;
+    db.assistantWork.track(operations, id, input);
+    db.createOutboundEventSubscription({subscriptionId: "sub-fixture", callbackUrl: "http://127.0.0.1/hook", secret: "synthetic",
+      scope: {kind: "assistant", connectionId: id}, eventKinds: ["session.completed", "session.idle"],
+      includeSessionName: false, includeQuestionTitle: false, actor: {kind: "human", id: owner.userId}, now: 3});
+    db.updateSessionStatus(input.sessionId, "idle", 10);
+    db.updateSessionStatus(input.sessionId, "completed", 11);
+    db.updateSessionStatus(input.sessionId, "idle", 12);
+    db.assistantWork.revokeBinding(owner, id, binding.id);
+    await worker.tick(20);
+    assert.equal(db.getOutboundEventSubscription("sub-fixture")!.state, "active");
+    const dropped = db.listOutboundEventDeliveries("sub-fixture")!;
+    assert.equal(dropped.length, 3);
+    assert.ok(dropped.every(item => item.status === "dropped" && item.statusCode === undefined));
+    assert.deepEqual(sent, []);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM outbound_event_deliveries WHERE payload_json IS NOT NULL").get()!.n, 0);
+    const next = db.createSession({id: "allowed-session-fixture", runnerId: "runner-fixture", workspaceId: "workspace-fixture",
+      agentId: "agent-fixture", title: "Fixture", useWorktree: true, driver: "acp", config: {}, now: 21});
+    const allowedBinding = db.assistantWork.createBinding(owner, id, destination);
+    db.assistantWork.track(operations, id, {...input, sessionId: next.id, workId: "allowed-work-fixture", bindingId: allowedBinding.id});
+    db.updateSessionStatus(next.id, "completed", 22);
+    await worker.tick(23);
+    assert.deepEqual(sent, [next.id]);
+  } finally {await worker.close(); db.close();}
+});
+
+test("one attention occurrence stages one Assistant wake across pending and status producers", () => {
+  const {db, owner, connection, operations, input} = setup();
+  try {
+    db.assistantWork.track(operations, connection.connection.id, input);
+    db.createOutboundEventSubscription({subscriptionId: "sub-fixture", callbackUrl: "http://127.0.0.1/hook", secret: "synthetic",
+      scope: {kind: "assistant", connectionId: connection.connection.id}, eventKinds: ["session.input_required"],
+      includeSessionName: false, includeQuestionTitle: false, actor: {kind: "human", id: owner.userId}, now: 3});
+    const pending = {requestId: "question-fixture", occurrenceId: "occurrence-fixture", kind: "question" as const, title: "Fixture", options: []};
+    db.setPendingApproval(input.sessionId, pending);
+    db.updateSessionStatus(input.sessionId, "input_required", 10);
+    db.updateSessionStatus(input.sessionId, "input_required", 11);
+    assert.equal(db.listOutboundEventDeliveries("sub-fixture")!.length, 1);
+    db.setPendingApproval(input.sessionId, {...pending, additionalRequests: [{...pending, requestId: "second-question", occurrenceId: "second-occurrence", async: true}]});
+    db.updateSessionStatus(input.sessionId, "input_required", 12);
+    assert.equal(db.listOutboundEventDeliveries("sub-fixture")!.length, 2);
+    // Reconnect snapshots bypass setPendingApproval; they must use the same durable fence.
+    const snapshotPending = {...pending, requestId: "snapshot-question", occurrenceId: "snapshot-occurrence", async: true};
+    db.updateSessionFromSnapshot(input.sessionId, {id: input.sessionId, workspaceId: "workspace-fixture", agentId: "agent-fixture",
+      title: "Fixture", status: "idle", driver: "acp", useWorktree: true, worktreePath: null, config: {}, preview: null,
+      pendingApproval: snapshotPending, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 2, updatedAt: 13}, 13);
+    assert.equal(db.listOutboundEventDeliveries("sub-fixture")!.length, 3);
+    db.setPendingApproval(input.sessionId, snapshotPending);
+    db.updateSessionStatus(input.sessionId, "input_required", 14);
+    assert.equal(db.listOutboundEventDeliveries("sub-fixture")!.length, 3);
+  } finally {db.close();}
 });
 
 test("private target exceptions require exact owner-configured addresses and never permit metadata or HTTP", async () => {
@@ -230,6 +291,10 @@ test("MCP work reads and owner callback configuration keep private coordinates o
     assert.equal((await call("assistant_work_read", {sessionId: "wrong-session", workId: input.workId})).json().result.isError, true);
     const path = `/api/assistant-connections/${connection.connection.id}/event-subscriptions`;
     const payload = {callbackUrl: "http://127.0.0.1/hook", eventKinds: ["session.completed"]};
+    assert.equal((await app.inject({method: "POST", url: path, headers: {authorization: "Bearer owner-fixture"},
+      payload: {...payload, eventKinds: ["cost.checkpoint"]}})).statusCode, 400);
+    assert.equal((await worker.create({...payload, scope: {kind: "assistant", connectionId: connection.connection.id},
+      eventKinds: ["checks.failed"]}, {kind: "human", id: owner.userId})).ok, false);
     assert.equal((await app.inject({method: "POST", url: path, headers: bearer, payload})).statusCode, 400);
     assert.equal((await app.inject({method: "POST", url: path, headers: {authorization: "Bearer owner-fixture"}, payload})).statusCode, 200);
     const listed = (await app.inject({method: "GET", url: path, headers: {authorization: "Bearer owner-fixture"}})).json();

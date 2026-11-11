@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { Writable } from "node:stream";
-import { WOLLIPOG_OUTBOUND_EVENT_MEDIA_TYPE, type OutboundEventEnvelope } from "@wollipog/protocol";
+import { ASSISTANT_WORK_EVENT_KINDS, WOLLIPOG_OUTBOUND_EVENT_MEDIA_TYPE, type OutboundEventEnvelope } from "@wollipog/protocol";
 import { AssistantEventInbox, dispatchAssistantWake, registerAssistantEventReceiver, wakeOpenClaw } from "./assistant-event-receiver.js";
 import { signAutomationTrigger } from "./automation-trigger-ingress.js";
 
@@ -44,6 +44,10 @@ test("signed receiver durably accepts before 202, deduplicates across restart an
     assert.equal((await send(event, {"x-wollipog-event-id": "wrong-event"})).statusCode, 400);
     assert.equal((await send({...event, assistant: {...event.assistant!, connectionId: "another-connection"}})).statusCode, 400);
     assert.equal((await send({...event, occurredAt: 2})).statusCode, 409, "same ID with different bytes conflicts");
+    assert.equal((await send({...event, eventId: "unsupported-kind", kind: "cost.checkpoint"})).statusCode, 400);
+    for (const kind of ASSISTANT_WORK_EVENT_KINDS) {
+      assert.equal((await send({...event, eventId: `event-${kind}`, kind})).statusCode, 202);
+    }
     key = null;
     assert.equal((await send(event)).statusCode, 401, "revocation is checked even for duplicate requests");
     const diagnostics = logs.flatMap(line => line.trim().split("\n")).map(line => JSON.parse(line))
