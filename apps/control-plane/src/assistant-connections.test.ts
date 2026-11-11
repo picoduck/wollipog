@@ -93,11 +93,17 @@ test("revision-aware grant edits refuse stale widening; names reject hidden cont
     assert.throws(() => store.configure(connection.id, full, "Stale Rename", connection.revision), AssistantConflict);
     assert.deepEqual(store.get(connection.id)!.grant.operations, narrow.operations);
     assert.equal(store.get(connection.id)!.name, "Renamed");
-    for (const name of ["A\u202eevil", "X\u200b", "X\u0085"]) {
+    for (const name of ["A\u202eevil", "X\u200b", "X\u0085", "Hidden\u200dJoiner", "👩‍💻\u202eevil"]) {
       assert.throws(() => store.configure(connection.id, full, name));
       assert.throws(() => store.renameInstallation(name));
     }
     assert.equal(store.get(connection.id)!.name, "Renamed");
+    for (const name of ["👩‍💻 Laptop", "👨🏽‍💻 Remote", "👩‍👩‍👧‍👦 Family"]) {
+      store.configure(connection.id, narrow, name);
+      assert.equal(store.get(connection.id)!.name, name);
+      store.renameInstallation(name);
+      assert.equal(store.installationName(), name);
+    }
   } finally { db.close(); }
 });
 

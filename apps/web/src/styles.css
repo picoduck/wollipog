@@ -12358,6 +12358,14 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: 0;
   font: var(--type-section);
 }
+@media (max-width: 760px) {
+  /* Grant restrictions must remain readable in full, including operation inventory details. */
+  .assistant-fields .choice-row-desc {
+    display: block;
+    overflow: visible;
+    white-space: normal;
+  }
+}
 .assistant-id-control {
   display: flex;
   align-items: center;

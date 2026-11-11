@@ -29,7 +29,9 @@ export interface AssistantActivityRecord {
 export const ASSISTANT_ACTIVITY_LIMIT = 1_000;
 const secret = () => `wollipoga_${randomBytes(32).toString("base64url")}`;
 function displayName(value: unknown): string {
-  if (typeof value !== "string" || !value.trim() || value.length > 80 || /[\p{Cc}\p{Cf}]/u.test(value)) throw new AssistantRefusal("Name must contain 1–80 characters without control or hidden formatting characters.");
+  // Joiners inside visible emoji sequences are typography, unlike invisible formatting in text.
+  const text = typeof value === "string" ? value.replace(/\p{Extended_Pictographic}[\p{Emoji_Modifier}\uFE0F]*(?:\u200D\p{Extended_Pictographic}[\p{Emoji_Modifier}\uFE0F]*)+/gu, "") : "";
+  if (typeof value !== "string" || !value.trim() || value.length > 80 || /[\p{Cc}\p{Cf}]/u.test(text)) throw new AssistantRefusal("Name must contain 1–80 characters without control or hidden formatting characters.");
   return value.trim();
 }
 

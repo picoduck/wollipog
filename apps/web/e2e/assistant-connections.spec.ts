@@ -34,7 +34,7 @@ for (const theme of ["dark", "light"] as const) {
       await expect(secret).toHaveAttribute("type", "password");
       expect(await page.evaluate(value => JSON.stringify({...localStorage, ...sessionStorage}).includes(value), token)).toBe(false);
       // Capture the UI's own password masking, using only a runtime-generated synthetic secret.
-      if (process.env.ASSISTANT_EVIDENCE_DIR) await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-credential-${theme}.png`, animations: "disabled"});
+      if (process.env.ASSISTANT_EVIDENCE_DIR && !process.env.ASSISTANT_MOBILE_EVIDENCE_ONLY) await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-credential-${theme}.png`, animations: "disabled"});
       await page.getByRole("button", {name: "Dismiss Credential"}).click();
       await expect(secret).toHaveCount(0);
       await page.getByLabel("Connection Name", {exact: true}).fill("OpenClaw Remote");
@@ -68,10 +68,23 @@ for (const theme of ["dark", "light"] as const) {
         await expect(page.getByRole("button", {name: /^Destructive Confirmation:/})).toBeInViewport();
         await expect(page.getByRole("checkbox", {name: "Assistant Sandbox"})).toBeInViewport();
         expect((await page.getByLabel("Connection ID", {exact: true}).boundingBox())!.width).toBeGreaterThan(500);
-        await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-configure-${theme}.png`, animations: "disabled"});
-        await page.setViewportSize({width: 390, height: 844});
+        if (!process.env.ASSISTANT_MOBILE_EVIDENCE_ONLY) await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-configure-${theme}.png`, animations: "disabled"});
+        await page.setViewportSize({width: 390, height: 1000});
         await expect(page.getByRole("dialog")).toBeInViewport({ratio: 0.95});
-        await page.getByRole("button", {name: /^Destructive Confirmation:/}).scrollIntoViewIfNeeded();
+        const operationRow = page.locator(".choice-row").filter({hasText: "Assistant Discover"});
+        await operationRow.evaluate(row => {
+          row.scrollIntoView({block: "center"});
+          const body = row.closest(".modal-body");
+          const group = row.closest("fieldset");
+          if (body && group) body.scrollTop += group.getBoundingClientRect().top - body.getBoundingClientRect().top - 16;
+        });
+        const header = await page.locator(".modal-head").boundingBox();
+        const row = await operationRow.boundingBox();
+        expect(row!.y).toBeGreaterThanOrEqual(header!.y + header!.height);
+        await expect(operationRow).toBeInViewport({ratio: 1});
+        await expect(operationRow.locator(".choice-row-desc")).toHaveCSS("display", "block");
+        expect(await operationRow.locator(".choice-row-desc").evaluate(element => element.scrollHeight <= element.clientHeight)).toBe(true);
+        await expect(page.getByRole("button", {name: /^Destructive Confirmation:/})).toBeInViewport();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-configure-mobile-${theme}.png`, animations: "disabled"});
         await page.setViewportSize({width: 1280, height: 1000});
@@ -82,7 +95,7 @@ for (const theme of ["dark", "light"] as const) {
       await expect(page.getByText("Succeeded", {exact: true})).toBeVisible();
       await page.getByRole("button", {name: "Rotate Credential", exact: true}).click();
       await expect(page.getByRole("dialog", {name: "Rotate Credential", exact: true})).toBeVisible();
-      if (process.env.ASSISTANT_EVIDENCE_DIR) await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-rotate-confirm-${theme}.png`, animations: "disabled"});
+      if (process.env.ASSISTANT_EVIDENCE_DIR && !process.env.ASSISTANT_MOBILE_EVIDENCE_ONLY) await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-rotate-confirm-${theme}.png`, animations: "disabled"});
       await page.getByRole("button", {name: "Cancel", exact: true}).click();
       expect(server.db.assistantConnections.authenticate(token)).not.toBeNull();
       await page.getByRole("button", {name: "Rotate Credential", exact: true}).click();
@@ -97,7 +110,7 @@ for (const theme of ["dark", "light"] as const) {
       await page.getByRole("button", {name: /OpenClaw Remote/}).click();
       await page.getByRole("button", {name: "Revoke Connection", exact: true}).click();
       await expect(page.getByRole("dialog", {name: "Revoke Connection", exact: true})).toBeVisible();
-      if (process.env.ASSISTANT_EVIDENCE_DIR) await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-revoke-confirm-${theme}.png`, animations: "disabled"});
+      if (process.env.ASSISTANT_EVIDENCE_DIR && !process.env.ASSISTANT_MOBILE_EVIDENCE_ONLY) await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-revoke-confirm-${theme}.png`, animations: "disabled"});
       await page.getByRole("dialog", {name: "Revoke Connection", exact: true}).getByRole("button", {name: "Revoke Connection", exact: true}).click();
       await expect(page.getByRole("status")).toContainText("Connection revoked");
       expect(server.db.assistantConnections.authenticate(rotated)).toBeNull();
@@ -109,7 +122,7 @@ for (const theme of ["dark", "light"] as const) {
       await expect(page.getByText("Assistant: OpenClaw Remote", {exact: true})).toBeVisible();
       await expect(page.getByText("Target: Control Plane · Workbench", {exact: true})).toBeVisible();
       await expect(page.getByRole("dialog")).not.toContainText('{"kind"');
-      if (process.env.ASSISTANT_EVIDENCE_DIR) {
+      if (process.env.ASSISTANT_EVIDENCE_DIR && !process.env.ASSISTANT_MOBILE_EVIDENCE_ONLY) {
         await expect(page.getByText("Revoked", {exact: true})).toBeInViewport();
         await expect(page.getByText("Target: Control Plane · Workbench", {exact: true})).toBeInViewport();
         await page.screenshot({path: `${process.env.ASSISTANT_EVIDENCE_DIR}/assistant-revoked-${theme}.png`, animations: "disabled"});
