@@ -317,19 +317,20 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-24.04
     # One full Node suite took 1,816-1,896 seconds of the old 35-minute checks job by 2026-10-30,
-    # and merge groups were cancelled after every test had passed (#3770). Each shard runs a third
+    # and merge groups were cancelled after every test had passed (#3770). Each shard runs a quarter
     # of the same planned suite (scripts/node-test-plan.mjs deals every file to exactly one shard),
-    # so a shard's Unit Tests step should take about eleven minutes against its own 18. The budget
+    # after #4459 measured suite growth and variable 14–18 minute steps with three shards.
+    # Four shards target about eleven minutes against each step's unchanged 18. The budget
     # covers every step's own bound, both video decoder install attempts included, plus a
     # five-minute allowance for the setup actions, so an overrun fails the step that caused it
     # instead of cancelling the job. `fail-fast` is off because the aggregator reads a cancelled job
-    # as a budget hit. To add a shard, extend the list and the `/3` denominators together; the
+    # as a budget hit. To add a shard, extend the list and the `/4` denominators together; the
     # contract test requires them to agree.
     timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -466,9 +467,9 @@ jobs:
           GROUP_FAST: ${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}
         run: |
           if [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then
-            node scripts/test-suites.mjs --node-only --groups node-fast --ci --shard=${{ matrix.shard }}/3
+            node scripts/test-suites.mjs --node-only --groups node-fast --ci --shard=${{ matrix.shard }}/4
           else
-            pnpm test:ci --shard=${{ matrix.shard }}/3
+            pnpm test:ci --shard=${{ matrix.shard }}/4
           fi
 
   delegated_pipeline:

@@ -386,7 +386,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     "unit: every line after `steps:` must belong to a step");
   const unitShards = unitHeader[1].split(",").map((value) => Number(value.trim()));
   assert.deepEqual(unitShards, unitShards.map((_, index) => index + 1), "unit: shards must be numbered consecutively");
-  assert.ok(unitShards.length >= 2, "unit: the suite must stay split across parallel jobs");
+  assert.deepEqual(unitShards, [1, 2, 3, 4], "unit: retain the four-shard capacity envelope (#4459)");
   const shardArg = `--shard=\${{ matrix.shard }}/${unitShards.length}`;
   assert.ok(unit.endsWith([
     "      - name: Unit Tests",

@@ -71,7 +71,7 @@ build after every test had passed, and a cancelled job names no step. The work i
 
 - `checks` (**Typecheck & Bundles**) keeps typecheck, the Node engine boundaries, delegated
   containment and the bundles, about five minutes.
-- `unit` (**Unit Tests (1)**, **(2)**, **(3)**) runs one shard each of the same planned
+- `unit` (**Unit Tests (1)**, **(2)**, **(3)**, **(4)**) runs one shard each of the same planned
   suite. `scripts/node-test-plan.mjs` deals the cost-ordered plan back and forth across the
   shards, so every discovered file runs in exactly one shard and the measured long files
   spread evenly. Each shard installs the video decoder it needs; `fail-fast` is off.
@@ -83,15 +83,15 @@ a sharded `node-fast` selection; every PR runs full Node testing. The `unit` job
 `needs` as `checks`, and the aggregator requires `needs.unit.result` to be `success`: one
 failed, cancelled or skipped shard fails the required check under the name **Unit Tests**.
 Main-push validation reuses this workflow, so the rolling inventory, release
-certification, main health and the restoration verifier require all three shard jobs and
+certification, main health and the restoration verifier require all four shard jobs and
 their `Unit Tests` steps.
 
 Every `run:` step in these two jobs has its own `timeout-minutes`, and the job budget
 covers all of those bounds at once, both decoder install attempts included, plus five
 minutes for the pinned setup actions. A step that overruns therefore fails under its own
 name before the job budget can cancel the job. The **Unit Tests** step allows 18 minutes
-against about eleven expected; the jobs allow 50 and 35 minutes. To add a shard, extend
-the matrix list and the `/3` denominators together. The workflow contract test requires
+against about eleven expected with four shards ([timing evidence](ci-node-shards-2026-11-10.md)); the jobs allow 50 and 35 minutes. To add a shard, extend
+the matrix list and the `/4` denominators together. The workflow contract test requires
 them to agree, and pins each job's shape as it does the browser shards.
 
 Merge groups run the workflow file from the group's own merge commit, so a pull request
@@ -231,7 +231,7 @@ the newest `--runs` completed merge-group runs created after the switch-back eac
 prove full coverage on their exact attempt: the trusted workflow blobs; a successful
 queue run of `ci.yml`; the rolling full
 inventory (`Typecheck & Bundles` with every engine, containment and bundle step, the
-three `Unit Tests (n)` shards each with its `Unit Tests` step, all five browser shards and no extra leg, shard 1's production smoke,
+four `Unit Tests (n)` shards each with its `Unit Tests` step, all five browser shards and no extra leg, shard 1's production smoke,
 WebKit, the win32 change detection, the aggregator); the path-scoped win32 comparison
 succeeded or was skipped; and `Merge Group Gate` absent or skipped with no reduced-coverage
 record. A failing, in-progress, partial or gate-active run is a refusal, not a pass. The
