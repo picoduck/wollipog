@@ -8422,8 +8422,14 @@ export interface SessionView {
   importLocationReady?: boolean;
   agentId: string | null;
   agentName: string | null;
+  /** The bound account's id and label. An agent's credential receives neither (#4508): account ids
+   * are derived from labels, which are personal data. */
   providerAccountId?: string;
   providerAccountLabel?: string;
+  /** #4508: the bound account as the opaque `acct:` reference `get_provider_account_selection`
+   * lists, set only in what an agent's credential receives, in place of `providerAccountId`. Older
+   * control planes omit it. */
+  providerAccountRef?: string;
   /** True when the current binding was chosen by the Machine's opt-in automatic policy. */
   providerAccountAutomaticallySelected?: boolean;
   /** Protocol v334 (#4353): why this session started on its account. Fixed at creation, so a later

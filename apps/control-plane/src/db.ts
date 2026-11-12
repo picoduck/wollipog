@@ -1,5 +1,6 @@
 import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, issueClosureDeliveryGap, knownProviderCommandHomeWriteSeparation } from "@wollipog/protocol";
 import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
+import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
   type CampaignBoundaryRepository, type CampaignRepositoryAdditionResult,
@@ -13828,7 +13829,9 @@ export class ControlPlaneDb {
       this.sessionSummaryReads.clear();
       this.sessionSummaryReadBytes=0;
     }
-    const sessions=this.listSessionSummaries(principal,includeArchived);
+    // The entry is keyed by its principal, so an agent's narrowed list (#4508) never serves a person.
+    const listed=this.listSessionSummaries(principal,includeArchived);
+    const sessions=principal.kind==="agent" ? withoutProviderAccountNames(listed) : listed;
     const json=JSON.stringify({ sessions });
     const bytes=Buffer.byteLength(json);
     const entry: { revision: string; sessions: SessionView[]; json: string; legacyJson?: string; bytes: number }={ revision,sessions,json,bytes };
