@@ -8,6 +8,11 @@ export interface OwnerManagementInput<P extends AuthPrincipal = HumanPrincipal> 
   params: unknown;
   body: unknown;
   query: unknown;
+  /** Trusted transport context, never supplied by the operation's payload/query. */
+  log?: FastifyRequest["log"];
+  entryPoint?: "dashboard" | "assistant";
+  /** Trusted adapter constraint, never copied from caller payload/query. Applied before paging. */
+  projectIds?: readonly string[];
   /** Assistant callers must recheck after asynchronous inspection, before later writes. */
   recheck?: () => Promise<P>;
   /** Server-created intersection with transport grants, never supplied in a request body. */
@@ -44,14 +49,18 @@ export class OwnerManagement<P extends AuthPrincipal = HumanPrincipal> {
     return {status, body: sent ? body : returned, ...(Object.keys(headers).length ? {headers} : {})};
   }
   registerHttp(app: FastifyInstance, principal: (request: FastifyRequest) => P | null,
-    unauthenticated = {status: 403, error: "human identity is required"}): void {
+    unauthenticated: number | {status: number; error: string} = 403, exclude: readonly string[] = []): void {
+    const refusal = typeof unauthenticated === "number" ? {status: unauthenticated,
+      error: unauthenticated === 403 ? "human identity is required" : "authentication required"} : unauthenticated;
     for (const key of this.keys()) {
+      if (exclude.includes(key)) continue;
       const space = key.indexOf(" ");
       app.route({method: key.slice(0, space) as "GET" | "POST" | "PUT" | "PATCH" | "DELETE", url: key.slice(space + 1),
         handler: async (request, reply) => {
           const owner = principal(request);
-          if (!owner) return reply.code(unauthenticated.status).send({error: unauthenticated.error});
-          const result = await this.execute(key, {principal: owner, params: request.params, body: request.body, query: request.query});
+          if (!owner) return reply.code(refusal.status).send({error: refusal.error});
+          const result = await this.execute(key, {principal: owner, params: request.params, body: request.body, query: request.query,
+            log: request.log, entryPoint: "dashboard"});
           if (result.headers) reply.headers(result.headers);
           return reply.code(result.status).send(result.body);
         }});

@@ -1,1368 +1,305 @@
 {
-  "DELETE /api/assistant-connections/:id/discord-connectors/:connectorId": {
-    "exclusion": "human_authority",
-    "reason": "Revokes an owner-issued trusted Discord connector credential and its standing command/destination authority.",
-    "remedy": "Use this exact authenticated connection-owner API to revoke the connector; ordinary Assistant commands cannot change connector credentials or standing grants."
-  },
-  "DELETE /api/assistant-connections/:id/destination-bindings/:bindingId": {
-    "exclusion": "human_authority",
-    "reason": "Revokes the owner's standing requester/destination authorization binding.",
-    "remedy": "Use the authenticated owner's destination-binding configuration path."
-  },
-  "DELETE /api/assistant-connections/:id/event-subscriptions/:subscriptionId": {
-    "exclusion": "human_authority",
-    "reason": "Revokes owner-established standing callback delivery authority and its signing credential.",
-    "remedy": "Use the authenticated owner's connection event-subscription configuration path."
-  },
-  "DELETE /api/automations/:id": {
-    "tools": [
-      "auto_delete"
-    ]
-  },
-  "DELETE /api/automations/:id/triggers/:triggerId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "DELETE /api/projects/:id": {
-    "tools": [
-      "project_delete"
-    ]
-  },
-  "DELETE /api/projects/:id/locations/:locationId": {
-    "tools": [
-      "location_remove"
-    ]
-  },
-  "DELETE /api/runners/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "DELETE /api/runners/:id/provider-accounts/:accountId": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "DELETE /api/runners/:id/provider-logins/:operationId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "DELETE /api/runners/:runnerId/workspaces/:workspaceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "DELETE /api/sessions/:id": {
-    "tools": [
-      "session_delete"
-    ]
-  },
-  "DELETE /api/sessions/:id/reminder": {
-    "tools": [
-      "reminder_remove"
-    ]
-  },
-  "DELETE /api/sessions/:id/shells/:shellId": {
-    "tools": [
-      "shell_close"
-    ]
-  },
-  "DELETE /api/sessions/:id/transcript-shares/:shareId": {
-    "exclusion": "human_authority",
-    "reason": "Revokes the owner's independently issued transcript-share bearer capability; credential lifecycle remains on the authenticated owner path.",
-    "remedy": "Use this exact authenticated owner transcript-sharing API/UI for capability issuance or revocation. The Assistant can inspect share metadata through transcript_shares and read authorized cached content through session_export without issuing credentials or publishing it."
-  },
-  "DELETE /api/skill-assignments/:id": {
-    "tools": [
-      "skill_unassign"
-    ]
-  },
-  "DELETE /api/skill-drift/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "DELETE /api/skill-git/preview/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "DELETE /api/skill-groups/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "DELETE /api/skill-groups/:id/assignments/:assignmentId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "DELETE /api/skill-machine/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "DELETE /api/skills/:id": {
-    "tools": [
-      "skill_remove"
-    ]
-  },
-  "GET /api/assistant-connections": {
-    "tools": [
-      "connection_list"
-    ]
-  },
-  "GET /api/assistant-connections/:id/activity": {
-    "tools": [
-      "connection_activity"
-    ]
-  },
-  "GET /api/assistant-connections/:id/destination-bindings": {
-    "tools": [
-      "dest_list"
-    ]
-  },
-  "GET /api/assistant-connections/:id/event-subscriptions": {
-    "tools": [
-      "sub_list"
-    ]
-  },
-  "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId": {
-    "tools": [
-      "sub_get"
-    ]
-  },
-  "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId/deliveries": {
-    "tools": [
-      "delivery_list"
-    ]
-  },
-  "GET /api/automations": {
-    "tools": [
-      "auto_list"
-    ]
-  },
-  "GET /api/automations/:id": {
-    "tools": [
-      "auto_get"
-    ]
-  },
-  "GET /api/automations/:id/triggers": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/projects": {
-    "tools": [
-      "project_list"
-    ]
-  },
-  "GET /api/projects/:id": {
-    "tools": [
-      "project_list"
-    ]
-  },
-  "GET /api/projects/:id/access-scope": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/projects/:id/locations/:locationId/worktree-setup": {
-    "tools": [
-      "location_setup_get"
-    ]
-  },
-  "GET /api/runners": {
-    "tools": [
-      "runner_list"
-    ]
-  },
-  "GET /api/runners/:id/external-sessions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/runners/:id/list-directory": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/runners/:id/provider-account-selection": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/runners/:id/provider-accounts/:accountId/home-lease": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/runners/:id/skills": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions": {
-    "tools": [
-      "session_list"
-    ]
-  },
-  "GET /api/sessions/:id": {
-    "tools": [
-      "session_get",
-      "session_config_get",
-      "worktree_get"
-    ]
-  },
-  "GET /api/sessions/:id/artifacts": {
-    "tools": [
-      "session_artifacts"
-    ]
-  },
-  "GET /api/sessions/:id/authentication/accounts": {
-    "exclusion": "human_authority",
-    "reason": "Exposes authentication-recovery account and sign-in context; authentication remains human-only.",
-    "remedy": "Use the authenticated owner Authentication Required recovery UI."
-  },
-  "GET /api/sessions/:id/automation-proposals/:occurrenceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/campaign/decisions": {
-    "tools": [
-      "campaign_decisions"
-    ]
-  },
-  "GET /api/sessions/:id/campaign/issue-scope": {
-    "tools": [
-      "campaign_scope"
-    ]
-  },
-  "GET /api/sessions/:id/campaign/recommendations": {
-    "tools": [
-      "campaign_recs"
-    ]
-  },
-  "GET /api/sessions/:id/campaign/summary": {
-    "tools": [
-      "campaign_summary"
-    ]
-  },
-  "GET /api/sessions/:id/campaign/work-items": {
-    "tools": [
-      "campaign_items"
-    ]
-  },
-  "GET /api/sessions/:id/campaign/work-items/:itemId": {
-    "tools": [
-      "campaign_item"
-    ]
-  },
-  "GET /api/sessions/:id/child-sessions": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/cross-model-reviews": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/cross-model-reviews/:jobId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/cross-model-reviews/:jobId/artifacts": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/descendant-requests": {
-    "tools": [
-      "desc_request_list"
-    ]
-  },
-  "GET /api/sessions/:id/events": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/export": {
-    "tools": [
-      "session_export"
-    ]
-  },
-  "GET /api/sessions/:id/file": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "GET /api/sessions/:id/files": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "GET /api/sessions/:id/governance-audit": {
-    "tools": [
-      "governance_audit"
-    ]
-  },
-  "GET /api/sessions/:id/history-preview": {
-    "tools": [
-      "history_preview"
-    ]
-  },
-  "GET /api/sessions/:id/location-switch-requests/:occurrenceId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/behavior": {
-    "tools": [
-      "campaign_behavior"
-    ]
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine campaign root Orchestrator's repository-addition protocol and its exact human approval/digest/reinspection checks. No equivalent owner read is claimed for this protocol occurrence."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/review-jobs": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity. Historical review-job protocol has no claimed owner equivalent; new job creation remains retired (410 after its identity gate).",
-    "remedy": "The genuine Orchestrator may read historical job state/report through its existing protocol. Use genuine session review-sessions for new controlled reviews; never restore the retired bridge."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/review-jobs/:jobId": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity. Historical review-job protocol has no claimed owner equivalent; new job creation remains retired (410 after its identity gate).",
-    "remedy": "The genuine Orchestrator may read historical job state/report through its existing protocol. Use genuine session review-sessions for new controlled reviews; never restore the retired bridge."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/review-jobs/:jobId/report": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity. Historical review-job protocol has no claimed owner equivalent; new job creation remains retired (410 after its identity gate).",
-    "remedy": "The genuine Orchestrator may read historical job state/report through its existing protocol. Use genuine session review-sessions for new controlled reviews; never restore the retired bridge."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/work-items": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "GET /api/sessions/:id/orchestrator-campaign/work-items/:itemId": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "GET /api/sessions/:id/prompt-history": {
-    "tools": [
-      "prompt_history"
-    ]
-  },
-  "GET /api/sessions/:id/provider-accounts": {
-    "exclusion": "human_authority",
-    "reason": "Returns raw provider-account identities, labels and authentication/usage context rather than the opaque account preview.",
-    "remedy": "Use the authenticated owner account settings; use the separate opaque account-preview Assistant tool for harness selection."
-  },
-  "GET /api/sessions/:id/queued/:promptId/edit": {
-    "tools": [
-      "queue_get"
-    ]
-  },
-  "GET /api/sessions/:id/reminder": {
-    "tools": [
-      "reminder_get"
-    ]
-  },
-  "GET /api/sessions/:id/retained-attachment-events": {
-    "tools": [
-      "attachment_history"
-    ]
-  },
-  "GET /api/sessions/:id/review-findings": {
-    "tools": [
-      "review_find_list"
-    ]
-  },
-  "GET /api/sessions/:id/review-sessions": {
-    "tools": [
-      "review_list"
-    ]
-  },
-  "GET /api/sessions/:id/review-sessions/:reviewSessionId": {
-    "tools": [
-      "review_get"
-    ]
-  },
-  "GET /api/sessions/:id/role": {
-    "tools": [
-      "session_role_get"
-    ]
-  },
-  "GET /api/sessions/:id/shells": {
-    "tools": [
-      "shell_list"
-    ]
-  },
-  "GET /api/sessions/:id/shells/:shellId/history": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "GET /api/sessions/:id/side-chat": {
-    "tools": [
-      "side_chat_get"
-    ]
-  },
-  "GET /api/sessions/:id/steering": {
-    "tools": [
-      "steering_list"
-    ]
-  },
-  "GET /api/sessions/:id/steering/:submissionId": {
-    "tools": [
-      "steering_get"
-    ]
-  },
-  "GET /api/sessions/:id/transcript-shares": {
-    "tools": [
-      "transcript_shares"
-    ]
-  },
-  "GET /api/sessions/:id/usage": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/:id/workflow-decisions": {
-    "tools": [
-      "decision_list"
-    ]
-  },
-  "GET /api/sessions/:id/workflow-decisions/:occurrenceId": {
-    "tools": [
-      "decision_get"
-    ]
-  },
-  "GET /api/sessions/:id/workspace-references/search": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "GET /api/sessions/:id/worktrees/operations": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/archive-page": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/sessions/lookup/by-id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/skill-assignments": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/skill-groups": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/skill-groups/:id/assignments": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/skills": {
-    "tools": [
-      "skill_list"
-    ]
-  },
-  "GET /api/skills/:id": {
-    "tools": [
-      "skill_get"
-    ]
-  },
-  "GET /api/skills/:id/built-in-version": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "GET /api/skills/:id/machines/:runnerId/version": {
-    "tools": [
-      "skill_pin_get"
-    ]
-  },
-  "GET /api/skills/:id/machines/:runnerId/version-policy": {
-    "tools": [
-      "skill_pin_get"
-    ]
-  },
-  "GET /api/skills/:id/versions": {
-    "tools": [
-      "skill_versions"
-    ]
-  },
-  "GET /api/skills/:id/versions/:versionId": {
-    "tools": [
-      "skill_version_get"
-    ]
-  },
-  "PATCH /api/projects/:id": {
-    "tools": [
-      "project_update"
-    ]
-  },
-  "PATCH /api/projects/:id/locations/:locationId": {
-    "tools": [
-      "location_rename"
-    ]
-  },
-  "PATCH /api/runners/:id": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PATCH /api/sessions/:id/review-findings/:findingId": {
-    "tools": [
-      "review_find_set"
-    ]
-  },
-  "PATCH /api/skill-assignments/:id": {
-    "tools": [
-      "skill_assign_update"
-    ]
-  },
-  "PATCH /api/skill-groups/:id/assignments/:assignmentId": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/assistant-connections": {
-    "exclusion": "human_authority",
-    "reason": "Creates an Assistant bearer credential and installs owner-selected standing operation/project grants and confirmation policy. The Assistant cannot issue its own authority.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/assistant-connections/:id/configure": {
-    "exclusion": "human_authority",
-    "reason": "Changes a connection's standing operation/project grants and destructive-confirmation policy, potentially expanding future authority. This mixed authority-edit route remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/assistant-connections/:id/discord-connectors": {
-    "exclusion": "human_authority",
-    "reason": "Issues a trusted Discord connector credential with owner-selected destination binding and allowed command operations; this establishes persistent access.",
-    "remedy": "Use this exact authenticated connection-owner API, then configure the credential privately in the dedicated connector profile."
-  },
-  "POST /api/assistant-connections/:id/destination-bindings": {
-    "exclusion": "human_authority",
-    "reason": "Creates standing authorization for the exact requester and private destination. An Assistant must not authorize its own recipients.",
-    "remedy": "Use the authenticated owner's destination-binding configuration path."
-  },
-  "POST /api/assistant-connections/:id/event-subscriptions": {
-    "exclusion": "human_authority",
-    "reason": "Establishes standing callback authority, issues a signing credential, and can configure an exact private-network permission exception.",
-    "remedy": "Use the authenticated owner's connection event-subscription configuration path."
-  },
-  "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/resume": {
-    "tools": [
-      "delivery_resume"
-    ]
-  },
-  "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/rotate": {
-    "exclusion": "human_authority",
-    "reason": "Rotates the owner's event-signing credential; credential establishment remains human controlled.",
-    "remedy": "Use the authenticated owner's connection event-subscription rotation path."
-  },
-  "POST /api/assistant-connections/:id/revoke": {
-    "exclusion": "human_authority",
-    "reason": "Revokes an owner-issued Assistant bearer credential and its standing grants. Credential lifecycle and authority removal stay on the authenticated owner's connection path.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/assistant-connections/:id/rotate": {
-    "exclusion": "human_authority",
-    "reason": "Issues a replacement Assistant bearer credential and invalidates the previous credential. Establishing or transferring credential access remains human controlled.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/assistant-connections/installation": {
-    "tools": [
-      "install_name"
-    ]
-  },
-  "POST /api/automations": {
-    "tools": [
-      "auto_create"
-    ]
-  },
-  "POST /api/automations/:id/triggers": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/automations/:id/triggers/:triggerId/rotate": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/projects": {
-    "tools": [
-      "project_create"
-    ]
-  },
-  "POST /api/projects/:id/archive-sessions": {
-    "tools": [
-      "project_archive_sessions"
-    ]
-  },
-  "POST /api/projects/:id/locations": {
-    "tools": [
-      "location_add"
-    ]
-  },
-  "POST /api/projects/:id/locations/:locationId/default": {
-    "tools": [
-      "location_default"
-    ]
-  },
-  "POST /api/projects/:id/locations/:locationId/worktree-setup": {
-    "tools": [
-      "location_setup_generate"
-    ]
-  },
-  "POST /api/projects/:id/locations/move": {
-    "tools": [
-      "location_move"
-    ]
-  },
-  "POST /api/projects/:id/locations/new": {
-    "tools": [
-      "location_create"
-    ]
-  },
-  "POST /api/runners/:id/acp-registry/:agentId/approval": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/runners/:id/orphaned-skill-copies/discard": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:id/orphaned-skill-copies/preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:id/provider-accounts/:accountId/adopt-profile": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/runners/:id/provider-accounts/:accountId/recover-lease": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:id/provider-accounts/:accountId/revoke-profile-access": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/runners/:id/provider-imports": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/runners/:id/provider-logins": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/runners/:id/provider-logins/:operationId/code": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/runners/:id/rediscover": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:id/skill-adoption-recovery": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:id/skill-adoption-recovery/:operationId/restore": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:id/skill-drift/preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:id/skill-drift/restore": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:id/skill-snapshots": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:id/skills/sync": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:runnerId/host-action": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:runnerId/workspaces": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:runnerId/workspaces/:workspaceId/rename": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/runners/:runnerId/workspaces/register": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions": {
-    "tools": [
-      "session_launch"
-    ]
-  },
-  "POST /api/sessions/:id/answer": {
-    "exclusion": "human_authority",
-    "reason": "The handler calls answerQuestion with an authenticated human actor and can answer credential prompts and required owner gates; an Assistant must not manufacture that actor.",
-    "remedy": "Open the supported question or typed-decision UI and have its exact owner answer it; a Discord notice can link there."
-  },
-  "POST /api/sessions/:id/approve": {
-    "exclusion": "human_authority",
-    "reason": "Supplies a required human approval or creates an owner decision. Ordinary Assistant text cannot impersonate the owner or satisfy a typed gate.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/sessions/:id/archive": {
-    "tools": [
-      "session_archive",
-      "session_unarchive"
-    ]
-  },
-  "POST /api/sessions/:id/artifacts/screenshots": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Transfers actual image/video file bytes from an execution workspace or the owner's file picker into private artifact storage. This is binary workspace/file-upload I/O, not work-management or evidence approval; metadata inspection remains an Assistant management operation.",
-    "remedy": "Use an authorized session's existing attach_session_artifact tool or owner file-upload path to transfer the exact file under current upload/provider-disclosure authority. Then use session_artifacts and attachment_history for management/readback. Attaching/listing does not inspect bytes or approve evidence."
-  },
-  "POST /api/sessions/:id/artifacts/videos": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Transfers actual image/video file bytes from an execution workspace or the owner's file picker into private artifact storage. This is binary workspace/file-upload I/O, not work-management or evidence approval; metadata inspection remains an Assistant management operation.",
-    "remedy": "Use an authorized session's existing attach_session_artifact tool or owner file-upload path to transfer the exact file under current upload/provider-disclosure authority. Then use session_artifacts and attachment_history for management/readback. Attaching/listing does not inspect bytes or approve evidence."
-  },
-  "POST /api/sessions/:id/authentication/account": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/sessions/:id/authentication/current-identity": {
-    "exclusion": "human_authority",
-    "reason": "Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/sessions/:id/automation-proposals": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
-  },
-  "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
-  },
-  "POST /api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/background-deliveries/:continuationId/acknowledge-retry-exhaustion": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/background-deliveries/acknowledge-blocked-results": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/background-jobs/:jobId/stop": {
-    "tools": [
-      "session_job_stop"
-    ]
-  },
-  "POST /api/sessions/:id/campaign/decisions/:occurrenceId/classify": {
-    "exclusion": "human_authority",
-    "reason": "Only the actual campaign owner may classify an uncertain credential or scope screen. Assistant text cannot supply that human authority.",
-    "remedy": "Use the campaign owner’s classification in Campaign Status."
-  },
-  "POST /api/sessions/:id/campaign/issue-scope/proposals": {
-    "exclusion": "human_authority",
-    "reason": "The human proposal branch supplies owner scope provenance and bypasses agent seed and lineage constraints. An Assistant cannot assert this provenance, even though the proposal first creates a typed decision.",
-    "remedy": "Use the owner’s Campaign Status scope proposal, or let the genuine root Orchestrator propose within its existing boundary."
-  },
-  "POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh": {
-    "tools": [
-      "campaign_forge_refresh"
-    ]
-  },
-  "POST /api/sessions/:id/cancel": {
-    "tools": [
-      "session_cancel"
-    ]
-  },
-  "POST /api/sessions/:id/cancel-queued": {
-    "tools": [
-      "queue_cancel"
-    ]
-  },
-  "POST /api/sessions/:id/column": {
-    "tools": [
-      "session_column"
-    ]
-  },
-  "POST /api/sessions/:id/command-invocations": {
-    "tools": [
-      "session_invoke"
-    ]
-  },
-  "POST /api/sessions/:id/config": {
-    "tools": [
-      "session_config"
-    ]
-  },
-  "POST /api/sessions/:id/cross-model-reviews": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine session historical protocol for old jobs, and current review-sessions for new reviews; the retired bridge is not revived."
-  },
-  "POST /api/sessions/:id/cross-model-reviews/:jobId/cancel": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine session historical protocol for old jobs, and current review-sessions for new reviews; the retired bridge is not revived."
-  },
-  "POST /api/sessions/:id/delegated-image-review/acknowledge": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
-  },
-  "POST /api/sessions/:id/delegated-image-review/image": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
-  },
-  "POST /api/sessions/:id/delegated-image-review/verdict": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
-  },
-  "POST /api/sessions/:id/descendant-requests/delegated-image-review": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching parent agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching parent runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/descendant-requests/delegated-image-review/get": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching parent agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching parent runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/descendant-requests/resolve": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching parent agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching parent runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/descendant-requests/review-ui-evidence": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching parent agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching parent runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/descendant-requests/review-ui-evidence/acknowledge": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching parent agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching parent runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/fork": {
-    "tools": [
-      "session_fork"
-    ]
-  },
-  "POST /api/sessions/:id/git": {
-    "tools": [
-      "session_git"
-    ]
-  },
-  "POST /api/sessions/:id/github-issue-closures": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
-  },
-  "POST /api/sessions/:id/github-issue-closures/:occurrenceId/execute": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
-  },
-  "POST /api/sessions/:id/host-action": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/location-switch-requests": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
-  },
-  "POST /api/sessions/:id/location-switch-requests/:occurrenceId/execute": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
-  },
-  "POST /api/sessions/:id/logout-agent": {
-    "exclusion": "human_authority",
-    "reason": "Changes provider authentication by logging the agent out.",
-    "remedy": "Use the authenticated owner logout control."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/behavior": {
-    "exclusion": "human_authority",
-    "reason": "Changing Child Harness, Model, Effort, Follow-Ups or Completion changes the human-controlled durable campaign execution policy.",
-    "remedy": "Use the authenticated campaign behavior settings and current behavior revision."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/budget-allocations": {
-    "exclusion": "human_authority",
-    "reason": "Cost allocations remain outside Assistant authority. This route also rejects owner HTTP and requires the matching Orchestrator credential with a separately human-established budget envelope.",
-    "remedy": "The owner establishes the budget boundary; the genuine Orchestrator may allocate only inside that existing envelope."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/cleanup/delete-merged-branches": {
-    "tools": [
-      "campaign_branch_clean"
-    ]
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/control": {
-    "exclusion": "human_authority",
-    "reason": "Control-mode changes mint or revoke campaign authority, budget and evidence boundaries and require the authenticated campaign owner.",
-    "remedy": "Use the owner’s campaign control settings with the current policy revision."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/follow-up-limit": {
-    "exclusion": "human_authority",
-    "reason": "Changing the follow-up limit remints human campaign authority and revokes affected decisions.",
-    "remedy": "Use the campaign owner’s follow-up limit settings."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/follow-ups": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/full-control": {
-    "exclusion": "human_authority",
-    "reason": "Establishes a human Full Control objective/scope or its authority boundary; Assistant-authored text is not a human boundary.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/full-control/preflight": {
-    "exclusion": "human_authority",
-    "reason": "Establishes a human Full Control objective/scope or its authority boundary; Assistant-authored text is not a human boundary.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/locations/:locationId/include": {
-    "exclusion": "human_authority",
-    "reason": "Including a Location widens the campaign repository boundary and requires its actual owner’s consent and Location reinspection.",
-    "remedy": "Use the campaign owner’s Include in Campaign action."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/plan": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/recommendations/:recommendationId/adjudicate": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/repository-additions": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine campaign root Orchestrator's repository-addition protocol and its exact human approval/digest/reinspection checks. No equivalent owner read is claimed for this protocol occurrence."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId/execute": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine campaign root Orchestrator's repository-addition protocol and its exact human approval/digest/reinspection checks. No equivalent owner read is claimed for this protocol occurrence."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/review-jobs": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity. Historical review-job protocol has no claimed owner equivalent; new job creation remains retired (410 after its identity gate).",
-    "remedy": "The genuine Orchestrator may read historical job state/report through its existing protocol. Use genuine session review-sessions for new controlled reviews; never restore the retired bridge."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/scope-grant/selection-count": {
-    "exclusion": "human_authority",
-    "reason": "Changing the selection count remints a human-established issue selection grant.",
-    "remedy": "Use the campaign owner’s selection-count settings with the current policy revision."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/slots/release": {
-    "exclusion": "human_authority",
-    "reason": "Manual slot release is a person’s attestation that the exact provider generation ended when automatic proof is unavailable. It is explicitly outside agent and delegated authority.",
-    "remedy": "The campaign owner must verify provider termination and release that generation in Campaign Status with a reason."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/verify-child": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/assign": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/delivery": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/owner-decisions": {
-    "exclusion": "human_authority",
-    "reason": "Supplies a required human approval or creates an owner decision. Ordinary Assistant text cannot impersonate the owner or satisfy a typed gate.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "POST /api/sessions/:id/parent-control": {
-    "exclusion": "human_authority",
-    "reason": "Changes persistent Parent Control delegation authority.",
-    "remedy": "Use authenticated owner Parent Control settings."
-  },
-  "POST /api/sessions/:id/parent-control-policy": {
-    "exclusion": "human_authority",
-    "reason": "Changes persistent decision-delegation policy and its revision.",
-    "remedy": "Use authenticated owner Parent Control policy settings."
-  },
-  "POST /api/sessions/:id/pending-prompts/:commandId/resolve": {
-    "tools": [
-      "session_pending_resolve"
-    ]
-  },
-  "POST /api/sessions/:id/policy-hook": {
-    "exclusion": "human_authority",
-    "reason": "Evaluates the privileged runner policy-hook protocol under configured governance; it is not an owner management action.",
-    "remedy": "Use the genuine configured runner hook under the existing human-established policy."
-  },
-  "POST /api/sessions/:id/project": {
-    "tools": [
-      "session_project"
-    ]
-  },
-  "POST /api/sessions/:id/prompt": {
-    "tools": [
-      "session_prompt"
-    ]
-  },
-  "POST /api/sessions/:id/prompt-images": {
-    "tools": [
-      "prompt_image_add"
-    ]
-  },
-  "POST /api/sessions/:id/provider-account": {
-    "exclusion": "human_authority",
-    "reason": "Switches the provider identity and account binding used by the session.",
-    "remedy": "Use the authenticated owner account-switch settings; Assistant previews grant no switching authority."
-  },
-  "POST /api/sessions/:id/pull-request-watch": {
-    "exclusion": "session_protocol",
-    "reason": "This exact route requires the matching session's own runner-issued credential; owner HTTP is refused with 403. It attests runtime watch ownership or observed wait progress, rather than an owner app-management capability. An owner Assistant grant cannot supply that identity.",
-    "remedy": "Use session_watch_get for the owner-facing read counterpart. The managed session itself uses park_on_pull_request or its real wait_session/wait_pull_request runtime tools with its own credential; never pass that credential to the Assistant or infer it from sessionId.",
-    "ownerTools": [
-      "session_watch_get"
-    ]
-  },
-  "POST /api/sessions/:id/queue-hold/release": {
-    "tools": [
-      "session_hold_release"
-    ]
-  },
-  "POST /api/sessions/:id/queued/:promptId/edit": {
-    "tools": [
-      "queue_edit"
-    ]
-  },
-  "POST /api/sessions/:id/reprocess": {
-    "tools": [
-      "session_reprocess"
-    ]
-  },
-  "POST /api/sessions/:id/restart": {
-    "tools": [
-      "session_restart"
-    ]
-  },
-  "POST /api/sessions/:id/result/acknowledge": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/result/handoff": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/sessions/:id/retitle": {
-    "tools": [
-      "session_retitle"
-    ]
-  },
-  "POST /api/sessions/:id/retry-stop": {
-    "tools": [
-      "session_retry_stop"
-    ]
-  },
-  "POST /api/sessions/:id/review-findings": {
-    "tools": [
-      "review_find_add"
-    ]
-  },
-  "POST /api/sessions/:id/review-findings/bundle": {
-    "tools": [
-      "review_find_send"
-    ]
-  },
-  "POST /api/sessions/:id/review-sessions": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/review-sessions/:reviewSessionId/cancel": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/rewind": {
-    "tools": [
-      "session_rewind"
-    ]
-  },
-  "POST /api/sessions/:id/role": {
-    "tools": [
-      "session_role"
-    ]
-  },
-  "POST /api/sessions/:id/shells": {
-    "tools": [
-      "shell_open"
-    ]
-  },
-  "POST /api/sessions/:id/shells/:shellId/input": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "POST /api/sessions/:id/shells/:shellId/resize": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "POST /api/sessions/:id/side-chat": {
-    "tools": [
-      "side_chat_create"
-    ]
-  },
-  "POST /api/sessions/:id/steer": {
-    "tools": [
-      "session_steer"
-    ]
-  },
-  "POST /api/sessions/:id/steering/:submissionId/resolve": {
-    "tools": [
-      "steering_resolve"
-    ]
-  },
-  "POST /api/sessions/:id/stop": {
-    "tools": [
-      "session_stop"
-    ]
-  },
-  "POST /api/sessions/:id/title": {
-    "tools": [
-      "session_title"
-    ]
-  },
-  "POST /api/sessions/:id/transcript-shares": {
-    "exclusion": "human_authority",
-    "reason": "Issues a separate bearer capability authorizing public reads of a frozen private transcript. Credential issuance and new disclosure authority require the authenticated owner.",
-    "remedy": "Use this exact authenticated owner transcript-sharing API/UI for capability issuance or revocation. The Assistant can inspect share metadata through transcript_shares and read authorized cached content through session_export without issuing credentials or publishing it."
-  },
-  "POST /api/sessions/:id/unarchive-and-restart": {
-    "tools": [
-      "session_unarchive_restart"
-    ]
-  },
-  "POST /api/sessions/:id/video-evidence-review/acknowledge": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
-  },
-  "POST /api/sessions/:id/video-evidence-review/acknowledge-frames": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
-  },
-  "POST /api/sessions/:id/video-evidence-review/frame": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
-  },
-  "POST /api/sessions/:id/video-evidence-review/frames": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
-  },
-  "POST /api/sessions/:id/video-evidence-review/prepare": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
-  },
-  "POST /api/sessions/:id/video-evidence-review/provenance": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
-  },
-  "POST /api/sessions/:id/video-evidence-review/verdict": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
-  },
-  "POST /api/sessions/:id/waits": {
-    "exclusion": "session_protocol",
-    "reason": "This exact route requires the matching session's own runner-issued credential; owner HTTP is refused with 403. It attests runtime watch ownership or observed wait progress, rather than an owner app-management capability. An owner Assistant grant cannot supply that identity.",
-    "remedy": "Use session_watch_get for the owner-facing read counterpart. The managed session itself uses park_on_pull_request or its real wait_session/wait_pull_request runtime tools with its own credential; never pass that credential to the Assistant or infer it from sessionId.",
-    "ownerTools": [
-      "session_watch_get"
-    ]
-  },
-  "POST /api/sessions/:id/workflow-decisions": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/consume": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/reconcile": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw": {
-    "exclusion": "session_protocol",
-    "reason": "Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.",
-    "remedy": "Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."
-  },
-  "POST /api/sessions/:id/workspace": {
-    "tools": [
-      "session_workspace"
-    ]
-  },
-  "POST /api/sessions/:id/workspace-references": {
-    "exclusion": "interactive_workspace_io",
-    "reason": "Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.",
-    "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
-  },
-  "POST /api/sessions/:id/worktrees": {
-    "tools": [
-      "worktree_create"
-    ]
-  },
-  "POST /api/sessions/:id/worktrees/attach": {
-    "tools": [
-      "worktree_attach"
-    ]
-  },
-  "POST /api/sessions/:id/worktrees/delete-refs": {
-    "exclusion": "session_protocol",
-    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
-    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
-  },
-  "POST /api/sessions/:id/worktrees/discard": {
-    "tools": [
-      "worktree_discard"
-    ]
-  },
-  "POST /api/sessions/:id/worktrees/generate-setup": {
-    "tools": [
-      "worktree_generate_setup"
-    ]
-  },
-  "POST /api/sessions/:id/worktrees/retry-setup": {
-    "tools": [
-      "worktree_retry_setup"
-    ]
-  },
-  "POST /api/sessions/:id/worktrees/select": {
-    "tools": [
-      "worktree_select"
-    ]
-  },
-  "POST /api/sessions/adopt": {
-    "tools": [
-      "session_adopt"
-    ]
-  },
-  "POST /api/skill-assignments": {
-    "tools": [
-      "skill_assign"
-    ]
-  },
-  "POST /api/skill-drift/:id/import": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/skill-git/import": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/skill-git/preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/skill-groups": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/skill-groups/:id/assignments": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/skill-groups/:id/convert": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/skill-machine/:id/adopt": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/skill-machine/:id/adoption-preflight": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/skill-machine/:id/import": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/skill-machine/:id/preview": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/skills": {
-    "tools": [
-      "skill_create"
-    ]
-  },
-  "POST /api/skills/:id/built-in-version": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "POST /api/skills/:id/restore": {
-    "tools": [
-      "skill_restore"
-    ]
-  },
-  "POST /api/skills/:id/versions": {
-    "tools": [
-      "skill_version_add"
-    ]
-  },
-  "PUT /api/automations/:id": {
-    "tools": [
-      "auto_update",
-      "auto_enable",
-      "auto_pause"
-    ]
-  },
-  "PUT /api/projects/:id/access-scope": {
-    "exclusion": "human_authority",
-    "reason": "Changes a persistent resource access audience and requires the authenticated owner access-scope confirmation.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "PUT /api/projects/:id/worktree-setup-notice/dismiss": {
-    "tools": [
-      "project_notice_dismiss"
-    ]
-  },
-  "PUT /api/runners/:id/automatic-account-switching": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PUT /api/runners/:id/capacity": {
-    "tools": [
-      "runner_capacity"
-    ]
-  },
-  "PUT /api/runners/:id/harness-installation": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PUT /api/runners/:id/provider-account-defaults/:provider": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PUT /api/runners/:id/provider-account-policies/:provider": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PUT /api/runners/:id/provider-logins/:operationId/dismiss": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PUT /api/runners/:id/reviewer-security": {
-    "exclusion": "human_authority",
-    "reason": "Changes trusted reviewer security policy, a human-controlled persistent permission boundary.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "PUT /api/runners/:id/target-harness-installation": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PUT /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {
-    "exclusion": "human_authority",
-    "reason": "Changes a persistent resource access audience and requires the authenticated owner access-scope confirmation.",
-    "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
-  },
-  "PUT /api/sessions/:id/reminder": {
-    "tools": [
-      "reminder_set"
-    ]
-  },
-  "PUT /api/skills/:id": {
-    "tools": [
-      "skill_update"
-    ]
-  },
-  "PUT /api/skills/:id/git-auto-update": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  },
-  "PUT /api/skills/:id/machines/:runnerId/version": {
-    "tools": [
-      "skill_pin_set"
-    ]
-  },
-  "PUT /api/skills/:id/recommendation": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
-  }
+  "DELETE /api/assistant-connections/:id/destination-bindings/:bindingId": {"exclusion":"human_authority","reason":"Revokes the owner's standing requester/destination authorization binding.","remedy":"Use the authenticated owner's destination-binding configuration path."},
+  "DELETE /api/assistant-connections/:id/discord-connectors/:connectorId": {"exclusion":"human_authority","reason":"Revokes an owner-issued trusted Discord connector credential and its standing command/destination authority.","remedy":"Use this exact authenticated connection-owner API to revoke the connector; ordinary Assistant commands cannot change connector credentials or standing grants."},
+  "DELETE /api/assistant-connections/:id/event-subscriptions/:subscriptionId": {"exclusion":"human_authority","reason":"Revokes owner-established standing callback delivery authority and its signing credential.","remedy":"Use the authenticated owner's connection event-subscription configuration path."},
+  "DELETE /api/automations/:id": {"tools":["auto_delete"]},
+  "DELETE /api/automations/:id/triggers/:triggerId": {"tools":["auto_trigger_remove"]},
+  "DELETE /api/orphaned-skill-copies/:id": {"tools":["skill_orphan_preview_discard"]},
+  "DELETE /api/projects/:id": {"tools":["project_delete"]},
+  "DELETE /api/projects/:id/locations/:locationId": {"tools":["location_remove"]},
+  "DELETE /api/runners/:id": {"tools":["runner_remove"]},
+  "DELETE /api/runners/:id/provider-accounts/:accountId": {"exclusion":"human_authority","reason":"Removes a provider credential account and its authentication state. Credential deletion remains with the authenticated owner.","remedy":"Use this exact authenticated owner API in the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."},
+  "DELETE /api/runners/:id/provider-logins/:operationId": {"exclusion":"human_authority","reason":"Cancels a provider sign-in transaction and its credential-establishment state. Sign-in control remains with the authenticated owner.","remedy":"Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."},
+  "DELETE /api/runners/:runnerId/workspaces/:workspaceId": {"tools":["workspace_remove"]},
+  "DELETE /api/sessions/:id": {"tools":["session_delete"]},
+  "DELETE /api/sessions/:id/reminder": {"tools":["reminder_remove"]},
+  "DELETE /api/sessions/:id/shells/:shellId": {"tools":["shell_close"]},
+  "DELETE /api/sessions/:id/transcript-shares/:shareId": {"exclusion":"human_authority","reason":"Revokes the owner's independently issued transcript-share bearer capability; credential lifecycle remains on the authenticated owner path.","remedy":"Use this exact authenticated owner transcript-sharing API/UI for capability issuance or revocation. The Assistant can inspect share metadata through transcript_shares and read authorized cached content through session_export without issuing credentials or publishing it."},
+  "DELETE /api/skill-assignments/:id": {"tools":["skill_unassign"]},
+  "DELETE /api/skill-drift/:id": {"tools":["skill_drift_discard"]},
+  "DELETE /api/skill-git/preview/:id": {"tools":["skill_git_preview_discard"]},
+  "DELETE /api/skill-groups/:id": {"tools":["skill_group_remove"]},
+  "DELETE /api/skill-groups/:id/assignments/:assignmentId": {"tools":["skill_group_unassign"]},
+  "DELETE /api/skill-machine/:id": {"tools":["skill_machine_discard"]},
+  "DELETE /api/skills/:id": {"tools":["skill_remove"]},
+  "GET /api/assistant-connections": {"tools":["connection_list"]},
+  "GET /api/assistant-connections/:id/activity": {"tools":["connection_activity"]},
+  "GET /api/assistant-connections/:id/destination-bindings": {"tools":["dest_list"]},
+  "GET /api/assistant-connections/:id/event-subscriptions": {"tools":["sub_list"]},
+  "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId": {"tools":["sub_get"]},
+  "GET /api/assistant-connections/:id/event-subscriptions/:subscriptionId/deliveries": {"tools":["delivery_list"]},
+  "GET /api/automations": {"tools":["auto_list"]},
+  "GET /api/automations/:id": {"tools":["auto_get"]},
+  "GET /api/automations/:id/triggers": {"tools":["auto_triggers"]},
+  "GET /api/projects": {"tools":["project_list"]},
+  "GET /api/projects/:id": {"tools":["project_list"]},
+  "GET /api/projects/:id/access-scope": {"tools":["project_scope_get"]},
+  "GET /api/projects/:id/locations/:locationId/worktree-setup": {"tools":["location_setup_get"]},
+  "GET /api/runners": {"tools":["runner_list"]},
+  "GET /api/runners/:id/external-sessions": {"tools":["runner_external_sessions"]},
+  "GET /api/runners/:id/list-directory": {"tools":["runner_directory"]},
+  "GET /api/runners/:id/provider-account-selection": {"tools":["account_selection_get"]},
+  "GET /api/runners/:id/provider-accounts/:accountId/home-lease": {"exclusion":"human_authority","reason":"Inspects a provider credential HOME lease and its credential-access recovery state, within the owner's provider-account security surface.","remedy":"Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."},
+  "GET /api/runners/:id/skills": {"tools":["skill_machine_state"]},
+  "GET /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {"tools":["workspace_scope_get"]},
+  "GET /api/sessions": {"tools":["session_list"]},
+  "GET /api/sessions/:id": {"tools":["session_get","session_config_get","worktree_get","session_status"]},
+  "GET /api/sessions/:id/artifacts": {"tools":["session_artifacts"]},
+  "GET /api/sessions/:id/authentication/accounts": {"exclusion":"human_authority","reason":"Exposes authentication-recovery account and sign-in context; authentication remains human-only.","remedy":"Use the authenticated owner Authentication Required recovery UI."},
+  "GET /api/sessions/:id/automation-proposals/:occurrenceId": {"tools":["decision_get"]},
+  "GET /api/sessions/:id/campaign/decisions": {"tools":["campaign_decisions"]},
+  "GET /api/sessions/:id/campaign/issue-scope": {"tools":["campaign_scope"]},
+  "GET /api/sessions/:id/campaign/recommendations": {"tools":["campaign_recs","campaign_recommendations"]},
+  "GET /api/sessions/:id/campaign/summary": {"tools":["campaign_summary","campaign_status"]},
+  "GET /api/sessions/:id/campaign/work-items": {"tools":["campaign_items"]},
+  "GET /api/sessions/:id/campaign/work-items/:itemId": {"tools":["campaign_item"]},
+  "GET /api/sessions/:id/child-sessions": {"tools":["session_children"]},
+  "GET /api/sessions/:id/cross-model-reviews": {"tools":["review_jobs"]},
+  "GET /api/sessions/:id/cross-model-reviews/:jobId": {"tools":["review_job"]},
+  "GET /api/sessions/:id/cross-model-reviews/:jobId/artifacts": {"tools":["review_job_artifacts"]},
+  "GET /api/sessions/:id/descendant-requests": {"tools":["desc_request_list","request_list"]},
+  "GET /api/sessions/:id/events": {"tools":["session_events"]},
+  "GET /api/sessions/:id/export": {"tools":["session_export"]},
+  "GET /api/sessions/:id/file": {"exclusion":"interactive_workspace_io","reason":"Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "GET /api/sessions/:id/files": {"exclusion":"interactive_workspace_io","reason":"Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "GET /api/sessions/:id/governance-audit": {"tools":["governance_audit"]},
+  "GET /api/sessions/:id/history-preview": {"tools":["session_history","history_preview"]},
+  "GET /api/sessions/:id/location-switch-requests/:occurrenceId": {"tools":["decision_get"]},
+  "GET /api/sessions/:id/orchestrator-campaign": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "GET /api/sessions/:id/orchestrator-campaign/behavior": {"tools":["campaign_behavior"]},
+  "GET /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine campaign root Orchestrator's repository-addition protocol and its exact human approval/digest/reinspection checks. No equivalent owner read is claimed for this protocol occurrence."},
+  "GET /api/sessions/:id/orchestrator-campaign/review-jobs": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity. Historical review-job protocol has no claimed owner equivalent; new job creation remains retired (410 after its identity gate).","remedy":"The genuine Orchestrator may read historical job state/report through its existing protocol. Use genuine session review-sessions for new controlled reviews; never restore the retired bridge."},
+  "GET /api/sessions/:id/orchestrator-campaign/review-jobs/:jobId": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity. Historical review-job protocol has no claimed owner equivalent; new job creation remains retired (410 after its identity gate).","remedy":"The genuine Orchestrator may read historical job state/report through its existing protocol. Use genuine session review-sessions for new controlled reviews; never restore the retired bridge."},
+  "GET /api/sessions/:id/orchestrator-campaign/review-jobs/:jobId/report": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity. Historical review-job protocol has no claimed owner equivalent; new job creation remains retired (410 after its identity gate).","remedy":"The genuine Orchestrator may read historical job state/report through its existing protocol. Use genuine session review-sessions for new controlled reviews; never restore the retired bridge."},
+  "GET /api/sessions/:id/orchestrator-campaign/work-items": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "GET /api/sessions/:id/orchestrator-campaign/work-items/:itemId": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "GET /api/sessions/:id/prompt-history": {"tools":["prompt_history"]},
+  "GET /api/sessions/:id/provider-accounts": {"exclusion":"human_authority","reason":"Returns raw provider-account identities, labels and authentication/usage context rather than the opaque account preview.","remedy":"Use the authenticated owner account settings; use the separate opaque account-preview Assistant tool for harness selection."},
+  "GET /api/sessions/:id/queued/:promptId/edit": {"tools":["queue_get"]},
+  "GET /api/sessions/:id/reminder": {"tools":["reminder_get"]},
+  "GET /api/sessions/:id/retained-attachment-events": {"tools":["attachment_history"]},
+  "GET /api/sessions/:id/review-findings": {"tools":["review_find_list","review_findings"]},
+  "GET /api/sessions/:id/review-sessions": {"tools":["review_list"]},
+  "GET /api/sessions/:id/review-sessions/:reviewSessionId": {"tools":["review_get"]},
+  "GET /api/sessions/:id/role": {"tools":["session_role_get"]},
+  "GET /api/sessions/:id/shells": {"tools":["shell_list"]},
+  "GET /api/sessions/:id/shells/:shellId/history": {"exclusion":"interactive_workspace_io","reason":"Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "GET /api/sessions/:id/side-chat": {"tools":["side_chat_get"]},
+  "GET /api/sessions/:id/steering": {"tools":["steering_list"]},
+  "GET /api/sessions/:id/steering/:submissionId": {"tools":["steering_get"]},
+  "GET /api/sessions/:id/transcript-shares": {"tools":["transcript_shares"]},
+  "GET /api/sessions/:id/usage": {"tools":["session_usage"]},
+  "GET /api/sessions/:id/workflow-decisions": {"tools":["decision_list"]},
+  "GET /api/sessions/:id/workflow-decisions/:occurrenceId": {"tools":["decision_get"]},
+  "GET /api/sessions/:id/workspace-references/search": {"exclusion":"interactive_workspace_io","reason":"Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "GET /api/sessions/:id/worktrees/operations": {"tools":["worktree_ops"]},
+  "GET /api/sessions/archive-page": {"tools":["session_archive_list"]},
+  "GET /api/sessions/lookup/by-id": {"tools":["session_lookup"]},
+  "GET /api/skill-assignments": {"tools":["skill_assignments"]},
+  "GET /api/skill-groups": {"tools":["skill_groups"]},
+  "GET /api/skill-groups/:id/assignments": {"tools":["skill_group_assignments"]},
+  "GET /api/skills": {"tools":["skill_list"]},
+  "GET /api/skills/:id": {"tools":["skill_get"]},
+  "GET /api/skills/:id/built-in-version": {"tools":["skill_builtin_get"]},
+  "GET /api/skills/:id/machines/:runnerId/version": {"tools":["skill_pin_get"]},
+  "GET /api/skills/:id/machines/:runnerId/version-policy": {"tools":["skill_pin_get"]},
+  "GET /api/skills/:id/versions": {"tools":["skill_versions"]},
+  "GET /api/skills/:id/versions/:versionId": {"tools":["skill_version_get"]},
+  "PATCH /api/projects/:id": {"tools":["project_update"]},
+  "PATCH /api/projects/:id/locations/:locationId": {"tools":["location_rename"]},
+  "PATCH /api/runners/:id": {"tools":["runner_rename"]},
+  "PATCH /api/sessions/:id/review-findings/:findingId": {"tools":["review_find_set"]},
+  "PATCH /api/skill-assignments/:id": {"tools":["skill_assign_update"]},
+  "PATCH /api/skill-groups/:id/assignments/:assignmentId": {"tools":["skill_group_assignment_edit"]},
+  "POST /api/assistant-connections": {"exclusion":"human_authority","reason":"Creates an Assistant bearer credential and installs owner-selected standing operation/project grants and confirmation policy. The Assistant cannot issue its own authority.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/assistant-connections/:id/configure": {"exclusion":"human_authority","reason":"Changes a connection's standing operation/project grants and destructive-confirmation policy, potentially expanding future authority. This mixed authority-edit route remains with the authenticated owner.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/assistant-connections/:id/destination-bindings": {"exclusion":"human_authority","reason":"Creates standing authorization for the exact requester and private destination. An Assistant must not authorize its own recipients.","remedy":"Use the authenticated owner's destination-binding configuration path."},
+  "POST /api/assistant-connections/:id/discord-connectors": {"exclusion":"human_authority","reason":"Issues a trusted Discord connector credential with owner-selected destination binding and allowed command operations; this establishes persistent access.","remedy":"Use this exact authenticated connection-owner API, then configure the credential privately in the dedicated connector profile."},
+  "POST /api/assistant-connections/:id/event-subscriptions": {"exclusion":"human_authority","reason":"Establishes standing callback authority, issues a signing credential, and can configure an exact private-network permission exception.","remedy":"Use the authenticated owner's connection event-subscription configuration path."},
+  "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/resume": {"tools":["delivery_resume"]},
+  "POST /api/assistant-connections/:id/event-subscriptions/:subscriptionId/rotate": {"exclusion":"human_authority","reason":"Rotates the owner's event-signing credential; credential establishment remains human controlled.","remedy":"Use the authenticated owner's connection event-subscription rotation path."},
+  "POST /api/assistant-connections/:id/revoke": {"exclusion":"human_authority","reason":"Revokes an owner-issued Assistant bearer credential and its standing grants. Credential lifecycle and authority removal stay on the authenticated owner's connection path.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/assistant-connections/:id/rotate": {"exclusion":"human_authority","reason":"Issues a replacement Assistant bearer credential and invalidates the previous credential. Establishing or transferring credential access remains human controlled.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/assistant-connections/installation": {"tools":["installation_rename","install_name"]},
+  "POST /api/automations": {"tools":["auto_create"]},
+  "POST /api/automations/:id/triggers": {"exclusion":"human_authority","reason":"Issues a new standing inbound webhook/ChatOps signing credential and delivery authorization. Credential establishment remains human-only.","remedy":"Create the trigger through the authenticated owner's automation settings; the Assistant may inspect trigger metadata and remove it under current authority."},
+  "POST /api/automations/:id/triggers/:triggerId/rotate": {"exclusion":"human_authority","reason":"Rotates and discloses a standing inbound signing credential. Assistant arguments cannot supply human credential authority.","remedy":"Rotate the trigger through the authenticated owner's automation settings, then inspect metadata with auto_triggers."},
+  "POST /api/orphaned-skill-copies/:id/import": {"tools":["skill_orphan_import"]},
+  "POST /api/projects": {"tools":["project_create"]},
+  "POST /api/projects/:id/archive-sessions": {"tools":["project_archive_sessions"]},
+  "POST /api/projects/:id/locations": {"tools":["location_add"]},
+  "POST /api/projects/:id/locations/:locationId/default": {"tools":["location_default"]},
+  "POST /api/projects/:id/locations/:locationId/worktree-setup": {"tools":["location_setup_generate"]},
+  "POST /api/projects/:id/locations/move": {"tools":["location_move"]},
+  "POST /api/projects/:id/locations/new": {"tools":["location_create"]},
+  "POST /api/runners/:id/acp-registry/:agentId/approval": {"exclusion":"human_authority","reason":"Approves an untrusted ACP registry installation and establishes executable trust. Selecting an already trusted discovered installation does not grant this authority.","remedy":"Use this exact authenticated owner API in the Machine's agent trust approval UI; resume ordinary Assistant management after the owner completes it."},
+  "POST /api/runners/:id/orphaned-skill-copies/discard": {"tools":["skill_orphan_discard"]},
+  "POST /api/runners/:id/orphaned-skill-copies/preview": {"tools":["skill_orphan_preview"]},
+  "POST /api/runners/:id/provider-accounts/:accountId/adopt-profile": {"exclusion":"human_authority","reason":"Adopts a provider credential HOME as a profile and establishes this control plane's credential-access grant. Provider access establishment requires the authenticated owner.","remedy":"Use this exact authenticated owner API in the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."},
+  "POST /api/runners/:id/provider-accounts/:accountId/recover-lease": {"exclusion":"human_authority","reason":"Authorizes recovery of an exact stale provider credential HOME lease and asserts that its prior processes no longer use that HOME. This credential-access recovery requires the authenticated owner.","remedy":"Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."},
+  "POST /api/runners/:id/provider-accounts/:accountId/revoke-profile-access": {"exclusion":"human_authority","reason":"Revokes a persistent control-plane grant to a provider credential profile. Lasting provider-account access changes remain human-controlled.","remedy":"Use this exact authenticated owner API in the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."},
+  "POST /api/runners/:id/provider-imports": {"exclusion":"human_authority","reason":"Imports provider credentials into an account. Supplying or importing authentication material requires the authenticated owner.","remedy":"Use this exact authenticated owner API in the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."},
+  "POST /api/runners/:id/provider-logins": {"exclusion":"human_authority","reason":"Creates a provider sign-in transaction and its credential account. Sign-in and account creation remain human-controlled.","remedy":"Use this exact authenticated owner API in the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."},
+  "POST /api/runners/:id/provider-logins/:operationId/code": {"exclusion":"human_authority","reason":"Submits a provider authentication code to complete sign-in. Assistant text cannot supply credentials or complete the owner's authentication transaction.","remedy":"Use this exact authenticated owner API in the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."},
+  "POST /api/runners/:id/rediscover": {"tools":["runner_rediscover"]},
+  "POST /api/runners/:id/skill-adoption-recovery": {"tools":["skill_recovery_list"]},
+  "POST /api/runners/:id/skill-adoption-recovery/:operationId/restore": {"tools":["skill_recovery_restore"]},
+  "POST /api/runners/:id/skill-drift/preview": {"tools":["skill_drift_preview"]},
+  "POST /api/runners/:id/skill-drift/restore": {"tools":["skill_drift_restore"]},
+  "POST /api/runners/:id/skill-snapshots": {"tools":["skill_machine_discover"]},
+  "POST /api/runners/:id/skills/sync": {"tools":["skill_sync"]},
+  "POST /api/runners/:runnerId/host-action": {"exclusion":"interactive_workspace_io","reason":"Opens a registered workspace or source location in the host's graphical file manager/editor. This is an interactive desktop I/O action, not Machine, Workspace or session administration.","remedy":"Use the authenticated owner Open in File Manager/Open in Editor action on the host, or prompt an authorized session for workspace work. Workspace registration directory browsing is separately available through runner_directory."},
+  "POST /api/runners/:runnerId/workspaces": {"tools":["workspace_create"]},
+  "POST /api/runners/:runnerId/workspaces/:workspaceId/rename": {"tools":["workspace_rename"]},
+  "POST /api/runners/:runnerId/workspaces/register": {"tools":["workspace_register"]},
+  "POST /api/sessions": {"tools":["session_launch"]},
+  "POST /api/sessions/:id/answer": {"exclusion":"human_authority","reason":"The handler calls answerQuestion with an authenticated human actor and can answer credential prompts and required owner gates; an Assistant must not manufacture that actor.","remedy":"Open the supported question or typed-decision UI and have its exact owner answer it; a Discord notice can link there."},
+  "POST /api/sessions/:id/approve": {"exclusion":"human_authority","reason":"Supplies a required human approval or creates an owner decision. Ordinary Assistant text cannot impersonate the owner or satisfy a typed gate.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/sessions/:id/archive": {"tools":["session_archive","session_unarchive"]},
+  "POST /api/sessions/:id/artifacts/screenshots": {"exclusion":"interactive_workspace_io","reason":"Transfers actual image/video file bytes from an execution workspace or the owner's file picker into private artifact storage. This is binary workspace/file-upload I/O, not work-management or evidence approval; metadata inspection remains an Assistant management operation.","remedy":"Use an authorized session's existing attach_session_artifact tool or owner file-upload path to transfer the exact file under current upload/provider-disclosure authority. Then use session_artifacts and attachment_history for management/readback. Attaching/listing does not inspect bytes or approve evidence."},
+  "POST /api/sessions/:id/artifacts/videos": {"exclusion":"interactive_workspace_io","reason":"Transfers actual image/video file bytes from an execution workspace or the owner's file picker into private artifact storage. This is binary workspace/file-upload I/O, not work-management or evidence approval; metadata inspection remains an Assistant management operation.","remedy":"Use an authorized session's existing attach_session_artifact tool or owner file-upload path to transfer the exact file under current upload/provider-disclosure authority. Then use session_artifacts and attachment_history for management/readback. Attaching/listing does not inspect bytes or approve evidence."},
+  "POST /api/sessions/:id/authentication/account": {"exclusion":"human_authority","reason":"Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/sessions/:id/authentication/current-identity": {"exclusion":"human_authority","reason":"Supplies, imports, adopts or removes provider credentials/access, or approves an untrusted agent installation. Provider access establishment remains with the authenticated owner.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/sessions/:id/automation-proposals": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."},
+  "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."},
+  "POST /api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result": {"tools":["result_missing_ack"]},
+  "POST /api/sessions/:id/background-deliveries/:continuationId/acknowledge-retry-exhaustion": {"tools":["result_retry_ack"]},
+  "POST /api/sessions/:id/background-deliveries/acknowledge-blocked-results": {"tools":["result_blocked_ack"]},
+  "POST /api/sessions/:id/background-jobs/:jobId/stop": {"tools":["session_job_stop"]},
+  "POST /api/sessions/:id/campaign/decisions/:occurrenceId/classify": {"exclusion":"human_authority","reason":"Only the actual campaign owner may classify an uncertain credential or scope screen. Assistant text cannot supply that human authority.","remedy":"Use the campaign owner’s classification in Campaign Status."},
+  "POST /api/sessions/:id/campaign/issue-scope/proposals": {"exclusion":"human_authority","reason":"The human proposal branch supplies owner scope provenance and bypasses agent seed and lineage constraints. An Assistant cannot assert this provenance, even though the proposal first creates a typed decision.","remedy":"Use the owner’s Campaign Status scope proposal, or let the genuine root Orchestrator propose within its existing boundary."},
+  "POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh": {"tools":["campaign_forge_refresh"]},
+  "POST /api/sessions/:id/cancel": {"tools":["session_cancel"]},
+  "POST /api/sessions/:id/cancel-queued": {"tools":["queue_cancel"]},
+  "POST /api/sessions/:id/column": {"tools":["session_column"]},
+  "POST /api/sessions/:id/command-invocations": {"tools":["session_invoke"]},
+  "POST /api/sessions/:id/config": {"tools":["session_config"]},
+  "POST /api/sessions/:id/cross-model-reviews": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine session historical protocol for old jobs, and current review-sessions for new reviews; the retired bridge is not revived."},
+  "POST /api/sessions/:id/cross-model-reviews/:jobId/cancel": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine session historical protocol for old jobs, and current review-sessions for new reviews; the retired bridge is not revived."},
+  "POST /api/sessions/:id/delegated-image-review/acknowledge": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."},
+  "POST /api/sessions/:id/delegated-image-review/image": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."},
+  "POST /api/sessions/:id/delegated-image-review/verdict": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."},
+  "POST /api/sessions/:id/descendant-requests/delegated-image-review": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching parent agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching parent runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/descendant-requests/delegated-image-review/get": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching parent agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching parent runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/descendant-requests/resolve": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching parent agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching parent runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/descendant-requests/review-ui-evidence": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching parent agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching parent runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/descendant-requests/review-ui-evidence/acknowledge": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching parent agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching parent runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/fork": {"tools":["session_fork"]},
+  "POST /api/sessions/:id/git": {"tools":["session_git"]},
+  "POST /api/sessions/:id/github-issue-closures": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."},
+  "POST /api/sessions/:id/github-issue-closures/:occurrenceId/execute": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."},
+  "POST /api/sessions/:id/host-action": {"exclusion":"interactive_workspace_io","reason":"Opens a registered workspace or source location in the host's graphical file manager/editor. This is an interactive desktop I/O action, not Machine, Workspace or session administration.","remedy":"Use the authenticated owner Open in File Manager/Open in Editor action on the host, or prompt an authorized session for workspace work. Workspace registration directory browsing is separately available through runner_directory."},
+  "POST /api/sessions/:id/location-switch-requests": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."},
+  "POST /api/sessions/:id/location-switch-requests/:occurrenceId/execute": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."},
+  "POST /api/sessions/:id/logout-agent": {"exclusion":"human_authority","reason":"Changes provider authentication by logging the agent out.","remedy":"Use the authenticated owner logout control."},
+  "POST /api/sessions/:id/orchestrator-campaign/behavior": {"exclusion":"human_authority","reason":"Changing Child Harness, Model, Effort, Follow-Ups or Completion changes the human-controlled durable campaign execution policy.","remedy":"Use the authenticated campaign behavior settings and current behavior revision."},
+  "POST /api/sessions/:id/orchestrator-campaign/budget-allocations": {"exclusion":"human_authority","reason":"Cost allocations remain outside Assistant authority. This route also rejects owner HTTP and requires the matching Orchestrator credential with a separately human-established budget envelope.","remedy":"The owner establishes the budget boundary; the genuine Orchestrator may allocate only inside that existing envelope."},
+  "POST /api/sessions/:id/orchestrator-campaign/cleanup/delete-merged-branches": {"tools":["campaign_branch_clean"]},
+  "POST /api/sessions/:id/orchestrator-campaign/control": {"exclusion":"human_authority","reason":"Control-mode changes mint or revoke campaign authority, budget and evidence boundaries and require the authenticated campaign owner.","remedy":"Use the owner’s campaign control settings with the current policy revision."},
+  "POST /api/sessions/:id/orchestrator-campaign/follow-up-limit": {"exclusion":"human_authority","reason":"Changing the follow-up limit remints human campaign authority and revokes affected decisions.","remedy":"Use the campaign owner’s follow-up limit settings."},
+  "POST /api/sessions/:id/orchestrator-campaign/follow-ups": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/orchestrator-campaign/full-control": {"exclusion":"human_authority","reason":"Establishes a human Full Control objective/scope or its authority boundary; Assistant-authored text is not a human boundary.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/sessions/:id/orchestrator-campaign/full-control/preflight": {"exclusion":"human_authority","reason":"Establishes a human Full Control objective/scope or its authority boundary; Assistant-authored text is not a human boundary.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/sessions/:id/orchestrator-campaign/locations/:locationId/include": {"exclusion":"human_authority","reason":"Including a Location widens the campaign repository boundary and requires its actual owner’s consent and Location reinspection.","remedy":"Use the campaign owner’s Include in Campaign action."},
+  "POST /api/sessions/:id/orchestrator-campaign/plan": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/orchestrator-campaign/recommendations/:recommendationId/adjudicate": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/orchestrator-campaign/repository-additions": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine campaign root Orchestrator's repository-addition protocol and its exact human approval/digest/reinspection checks. No equivalent owner read is claimed for this protocol occurrence."},
+  "POST /api/sessions/:id/orchestrator-campaign/repository-additions/:occurrenceId/execute": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine campaign root Orchestrator's repository-addition protocol and its exact human approval/digest/reinspection checks. No equivalent owner read is claimed for this protocol occurrence."},
+  "POST /api/sessions/:id/orchestrator-campaign/review-jobs": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity. Historical review-job protocol has no claimed owner equivalent; new job creation remains retired (410 after its identity gate).","remedy":"The genuine Orchestrator may read historical job state/report through its existing protocol. Use genuine session review-sessions for new controlled reviews; never restore the retired bridge."},
+  "POST /api/sessions/:id/orchestrator-campaign/scope-grant/selection-count": {"exclusion":"human_authority","reason":"Changing the selection count remints a human-established issue selection grant.","remedy":"Use the campaign owner’s selection-count settings with the current policy revision."},
+  "POST /api/sessions/:id/orchestrator-campaign/slots/release": {"exclusion":"human_authority","reason":"Manual slot release is a person’s attestation that the exact provider generation ended when automatic proof is unavailable. It is explicitly outside agent and delegated authority.","remedy":"The campaign owner must verify provider termination and release that generation in Campaign Status with a reason."},
+  "POST /api/sessions/:id/orchestrator-campaign/verify-child": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/assign": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/delivery": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/owner-decisions": {"exclusion":"human_authority","reason":"Supplies a required human approval or creates an owner decision. Ordinary Assistant text cannot impersonate the owner or satisfy a typed gate.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "POST /api/sessions/:id/parent-control": {"exclusion":"human_authority","reason":"Changes persistent Parent Control delegation authority.","remedy":"Use authenticated owner Parent Control settings."},
+  "POST /api/sessions/:id/parent-control-policy": {"exclusion":"human_authority","reason":"Changes persistent decision-delegation policy and its revision.","remedy":"Use authenticated owner Parent Control policy settings."},
+  "POST /api/sessions/:id/pending-prompts/:commandId/resolve": {"tools":["session_pending_resolve"]},
+  "POST /api/sessions/:id/policy-hook": {"exclusion":"human_authority","reason":"Evaluates the privileged runner policy-hook protocol under configured governance; it is not an owner management action.","remedy":"Use the genuine configured runner hook under the existing human-established policy."},
+  "POST /api/sessions/:id/project": {"tools":["session_project"]},
+  "POST /api/sessions/:id/prompt": {"tools":["session_prompt"]},
+  "POST /api/sessions/:id/prompt-images": {"tools":["prompt_image_add"]},
+  "POST /api/sessions/:id/provider-account": {"exclusion":"human_authority","reason":"Switches the provider identity and account binding used by the session.","remedy":"Use the authenticated owner account-switch settings; Assistant previews grant no switching authority."},
+  "POST /api/sessions/:id/pull-request-watch": {"exclusion":"session_protocol","reason":"This exact route requires the matching session's own runner-issued credential; owner HTTP is refused with 403. It attests runtime watch ownership or observed wait progress, rather than an owner app-management capability. An owner Assistant grant cannot supply that identity.","remedy":"Use session_watch_get for the owner-facing read counterpart. The managed session itself uses park_on_pull_request or its real wait_session/wait_pull_request runtime tools with its own credential; never pass that credential to the Assistant or infer it from sessionId.","ownerTools":["session_watch_get"]},
+  "POST /api/sessions/:id/queue-hold/release": {"tools":["session_hold_release"]},
+  "POST /api/sessions/:id/queued/:promptId/edit": {"tools":["queue_edit"]},
+  "POST /api/sessions/:id/reprocess": {"tools":["session_reprocess"]},
+  "POST /api/sessions/:id/restart": {"tools":["session_restart"]},
+  "POST /api/sessions/:id/result/acknowledge": {"tools":["result_ack"]},
+  "POST /api/sessions/:id/result/handoff": {"tools":["result_handoff"]},
+  "POST /api/sessions/:id/retitle": {"tools":["session_retitle"]},
+  "POST /api/sessions/:id/retry-stop": {"tools":["session_retry_stop"]},
+  "POST /api/sessions/:id/review-findings": {"tools":["review_find_add"]},
+  "POST /api/sessions/:id/review-findings/bundle": {"tools":["review_find_send"]},
+  "POST /api/sessions/:id/review-sessions": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/review-sessions/:reviewSessionId/cancel": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/rewind": {"tools":["session_rewind"]},
+  "POST /api/sessions/:id/role": {"tools":["session_role"]},
+  "POST /api/sessions/:id/shells": {"tools":["shell_open"]},
+  "POST /api/sessions/:id/shells/:shellId/input": {"exclusion":"interactive_workspace_io","reason":"Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "POST /api/sessions/:id/shells/:shellId/resize": {"exclusion":"interactive_workspace_io","reason":"Interactive terminal process, keystroke/viewport or bounded terminal-output I/O inside a session workspace; not session lifecycle or app administration.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "POST /api/sessions/:id/side-chat": {"tools":["side_chat_create"]},
+  "POST /api/sessions/:id/steer": {"tools":["session_steer"]},
+  "POST /api/sessions/:id/steering/:submissionId/resolve": {"tools":["steering_resolve"]},
+  "POST /api/sessions/:id/stop": {"tools":["session_stop"]},
+  "POST /api/sessions/:id/title": {"tools":["session_title"]},
+  "POST /api/sessions/:id/transcript-shares": {"exclusion":"human_authority","reason":"Issues a separate bearer capability authorizing public reads of a frozen private transcript. Credential issuance and new disclosure authority require the authenticated owner.","remedy":"Use this exact authenticated owner transcript-sharing API/UI for capability issuance or revocation. The Assistant can inspect share metadata through transcript_shares and read authorized cached content through session_export without issuing credentials or publishing it."},
+  "POST /api/sessions/:id/unarchive-and-restart": {"tools":["session_unarchive_restart"]},
+  "POST /api/sessions/:id/video-evidence-review/acknowledge": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."},
+  "POST /api/sessions/:id/video-evidence-review/acknowledge-frames": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."},
+  "POST /api/sessions/:id/video-evidence-review/frame": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."},
+  "POST /api/sessions/:id/video-evidence-review/frames": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."},
+  "POST /api/sessions/:id/video-evidence-review/prepare": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."},
+  "POST /api/sessions/:id/video-evidence-review/provenance": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."},
+  "POST /api/sessions/:id/video-evidence-review/verdict": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."},
+  "POST /api/sessions/:id/waits": {"exclusion":"session_protocol","reason":"This exact route requires the matching session's own runner-issued credential; owner HTTP is refused with 403. It attests runtime watch ownership or observed wait progress, rather than an owner app-management capability. An owner Assistant grant cannot supply that identity.","remedy":"Use session_watch_get for the owner-facing read counterpart. The managed session itself uses park_on_pull_request or its real wait_session/wait_pull_request runtime tools with its own credential; never pass that credential to the Assistant or infer it from sessionId.","ownerTools":["session_watch_get"]},
+  "POST /api/sessions/:id/workflow-decisions": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/consume": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching Orchestrator agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching Orchestrator runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/reconcile": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw": {"exclusion":"session_protocol","reason":"Owner HTTP returns 403: this exact route requires the matching session agent credential and retains its existing session/campaign relationship and authority checks. An Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine matching session runtime's supported protocol. Authorized owner campaign, workflow-decision and review inspection is available through the separate owner-facing Assistant tools; those do not impersonate this protocol."},
+  "POST /api/sessions/:id/workspace": {"tools":["session_workspace"]},
+  "POST /api/sessions/:id/workspace-references": {"exclusion":"interactive_workspace_io","reason":"Interactive browsing, reading and attachment/reference selection within the execution workspace. It does not configure a Project Location or grant app authority.","remedy":"Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."},
+  "POST /api/sessions/:id/worktrees": {"tools":["worktree_create"]},
+  "POST /api/sessions/:id/worktrees/attach": {"tools":["worktree_attach"]},
+  "POST /api/sessions/:id/worktrees/delete-refs": {"exclusion":"session_protocol","reason":"Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.","remedy":"Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."},
+  "POST /api/sessions/:id/worktrees/discard": {"tools":["worktree_discard"]},
+  "POST /api/sessions/:id/worktrees/generate-setup": {"tools":["worktree_generate_setup"]},
+  "POST /api/sessions/:id/worktrees/retry-setup": {"tools":["worktree_retry_setup"]},
+  "POST /api/sessions/:id/worktrees/select": {"tools":["worktree_select"]},
+  "POST /api/sessions/adopt": {"tools":["session_adopt"]},
+  "POST /api/skill-assignments": {"tools":["skill_assign"]},
+  "POST /api/skill-drift/:id/import": {"tools":["skill_drift_import"]},
+  "POST /api/skill-git/import": {"tools":["skill_git_import"]},
+  "POST /api/skill-git/preview": {"tools":["skill_git_preview"]},
+  "POST /api/skill-groups": {"tools":["skill_group_create"]},
+  "POST /api/skill-groups/:id/assignments": {"tools":["skill_group_assign"]},
+  "POST /api/skill-groups/:id/convert": {"exclusion":"human_authority","reason":"Accepts ownership of a legacy unowned group and establishes persistent resource/deployment authority. Standing ownership grants remain human-only.","remedy":"Review and accept legacy group ownership through the authenticated owner's Skill Library, then use the ordinary Assistant group and assignment operations."},
+  "POST /api/skill-machine/:id/adopt": {"tools":["skill_machine_adopt"]},
+  "POST /api/skill-machine/:id/adoption-preflight": {"tools":["skill_adoption_preflight"]},
+  "POST /api/skill-machine/:id/import": {"tools":["skill_machine_import"]},
+  "POST /api/skill-machine/:id/preview": {"tools":["skill_machine_preview"]},
+  "POST /api/skills": {"tools":["skill_create"]},
+  "POST /api/skills/:id/built-in-version": {"tools":["skill_builtin_apply"]},
+  "POST /api/skills/:id/restore": {"tools":["skill_restore"]},
+  "POST /api/skills/:id/versions": {"tools":["skill_version_add"]},
+  "PUT /api/automations/:id": {"tools":["auto_update","auto_enable","auto_pause"]},
+  "PUT /api/projects/:id/access-scope": {"exclusion":"human_authority","reason":"Changes a persistent resource access audience and requires the authenticated owner access-scope confirmation.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "PUT /api/projects/:id/worktree-setup-notice/dismiss": {"tools":["project_notice_dismiss"]},
+  "PUT /api/runners/:id/automatic-account-switching": {"exclusion":"human_authority","reason":"Changes the persistent Machine policy for automatic use of provider credential accounts. Standing provider-access policy remains human-controlled.","remedy":"Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."},
+  "PUT /api/runners/:id/capacity": {"tools":["runner_capacity"]},
+  "PUT /api/runners/:id/harness-installation": {"tools":["harness_select"]},
+  "PUT /api/runners/:id/provider-account-defaults/:provider": {"exclusion":"human_authority","reason":"Changes the Machine's persistent default provider credential-account choice. Provider-account access configuration remains human-controlled.","remedy":"Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."},
+  "PUT /api/runners/:id/provider-account-policies/:provider": {"exclusion":"human_authority","reason":"Changes persistent provider credential-account selection policy and allowed account access. Assistant standing grants cannot establish this provider-access authority.","remedy":"Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."},
+  "PUT /api/runners/:id/provider-logins/:operationId/dismiss": {"exclusion":"human_authority","reason":"Acknowledges a provider sign-in result in the owner's authentication flow. Assistant text cannot act as the owner of that credential-establishment transaction.","remedy":"Use this exact authenticated owner API through the Machine's provider account or sign-in settings; resume ordinary Assistant management after the owner completes it."},
+  "PUT /api/runners/:id/reviewer-security": {"exclusion":"human_authority","reason":"Changes trusted reviewer security policy, a human-controlled persistent permission boundary.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "PUT /api/runners/:id/target-harness-installation": {"tools":["target_harness_select"]},
+  "PUT /api/runners/:runnerId/workspaces/:workspaceId/access-scope": {"exclusion":"human_authority","reason":"Changes a persistent resource access audience and requires the authenticated owner access-scope confirmation.","remedy":"Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."},
+  "PUT /api/sessions/:id/reminder": {"tools":["reminder_set"]},
+  "PUT /api/skills/:id": {"tools":["skill_update"]},
+  "PUT /api/skills/:id/git-auto-update": {"exclusion":"human_authority","reason":"Establishes or revokes unattended authority to fetch using the control plane's ambient Git credentials. This persistent credential-use opt-in remains human-only.","remedy":"The instance owner configures automatic Git updates in authenticated Skill Library settings; Assistant preview/import uses already-authorized owner access without changing that opt-in."},
+  "PUT /api/skills/:id/machines/:runnerId/version": {"tools":["skill_pin_set"]},
+  "PUT /api/skills/:id/recommendation": {"tools":["skill_recommendation"]}
 }

@@ -25,6 +25,14 @@ export const ASSISTANT_RESIDUAL_HUMAN_ROUTES = [
   "POST /api/sessions/:id/provider-account",
 ] as const;
 
+/** Preserve the status family's supported owner-read names through the same constrained services. */
+export const ASSISTANT_CAMPAIGN_ALIASES = [
+  ["campaign_status", "campaign_summary"],
+  ["campaign_recommendations", "campaign_recs"],
+  ["request_list", "desc_request_list"],
+  ["review_findings", "review_find_list"],
+] as const;
+
 export const ASSISTANT_CAMPAIGN_MANAGEMENT = [
   ["campaign_summary", "GET /api/sessions/:id/campaign/summary"],
   ["campaign_decisions", "GET /api/sessions/:id/campaign/decisions"],
@@ -128,7 +136,8 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
       }
     }
   };
-  for (const [name, route] of [...ASSISTANT_CAMPAIGN_MANAGEMENT, ...ASSISTANT_RESIDUAL_MANAGEMENT.filter(([, route]) => deps.services.some(service => service.keys().includes(route)))]) {
+  const aliases = ASSISTANT_CAMPAIGN_ALIASES.map(([alias, canonical]) => [alias, ASSISTANT_CAMPAIGN_MANAGEMENT.find(([name]) => name === canonical)![1]] as const);
+  for (const [name, route] of [...ASSISTANT_CAMPAIGN_MANAGEMENT, ...aliases, ...ASSISTANT_RESIDUAL_MANAGEMENT.filter(([, route]) => deps.services.some(service => service.keys().includes(route)))]) {
     const service = deps.services.find(candidate => candidate.keys().includes(route));
     if (!service) throw new Error(`Missing shared campaign operation ${route}`);
     const command = name === "campaign_branch_clean" || name === "review_find_add" || name === "review_find_set" || name === "review_find_send";
@@ -136,7 +145,7 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
     const parameters = [...route.matchAll(/:([A-Za-z]+)/g)].map(match => match[1]!).filter(key => key !== "id");
     const properties: Record<string, unknown> = {sessionId: str, ...Object.fromEntries(parameters.map(key => [key, str])),
       ...(image ? {commandId: str, sourceArtifactId: str} : git ? {commandId: str, confirmationId: str, payload: obj} : command ? {commandId: str, confirmationId: str, ...(name === "campaign_branch_clean" ? {} : {payload: obj})} : {query: obj})};
-    operations.register({name, description: descriptions[name]!,
+    operations.register({name, description: descriptions[name] ?? descriptions[ASSISTANT_CAMPAIGN_ALIASES.find(([alias]) => alias === name)![1]]!,
       inputSchema: {type: "object", additionalProperties: false, properties,
         required: ["sessionId", ...parameters, ...(image ? ["commandId"] : git ? ["payload"] : command ? ["commandId", ...(name === "campaign_branch_clean" ? [] : ["payload"])] : [])]},
       resolveTarget: target,

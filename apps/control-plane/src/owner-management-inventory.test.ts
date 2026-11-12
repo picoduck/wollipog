@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { OwnerManagementInventory, type OwnerOperationCoverage } from "./owner-management-inventory.js";
 import { ASSISTANT_CONNECTION_OPERATIONS } from "./assistant-connection-operations.js";
-import { ASSISTANT_CAMPAIGN_MANAGEMENT, ASSISTANT_CAMPAIGN_HUMAN_ROUTES, ASSISTANT_RESIDUAL_MANAGEMENT, ASSISTANT_RESIDUAL_HUMAN_ROUTES } from "./assistant-campaign-management.js";
+import { ASSISTANT_CAMPAIGN_MANAGEMENT, ASSISTANT_CAMPAIGN_HUMAN_ROUTES, ASSISTANT_RESIDUAL_MANAGEMENT, ASSISTANT_RESIDUAL_HUMAN_ROUTES, ASSISTANT_CAMPAIGN_ALIASES } from "./assistant-campaign-management.js";
 import { CAMPAIGN_SESSION_PROTOCOL_ROUTES, RESIDUAL_SESSION_PROTOCOL_ROUTES } from "./campaign-session-protocol.js";
 
 test("parity gate observes generated owner routes and fails unregistered or undocumented operations", async () => {
@@ -80,18 +80,20 @@ test("production composition inventory is exhaustive; unresolved gaps cannot cou
     "transcript_shares", "reminder_get", "reminder_set", "reminder_remove", "shell_list", "shell_open", "shell_close"]) {
     assert.ok(snapshot.tools.includes(tool), `${tool}: production composition lost a registration family`);
   }
-  for (const tool of ["session_watch", "session_wait_report"]) {
+  for (const tool of ["session_watch", "session_wait_report", "campaign_get", "campaign_work_items", "campaign_work_item", "campaign_review_jobs", "campaign_review_job", "campaign_review_report"]) {
     assert.ok(!snapshot.tools.includes(tool), `${tool}: an owner connection must not impersonate session-runtime protocol writes`);
   }
   const manifest = JSON.parse(readFileSync(new URL("../../../docs/assistant-owner-capabilities.json", import.meta.url), "utf8")) as
     Record<string, OwnerOperationCoverage | {gap: string}>;
   for (const [tool, route] of ASSISTANT_CONNECTION_OPERATIONS) {
     assert.ok(snapshot.tools.includes(tool), `${tool}: production lost a group-5 connection operation`);
-    assert.deepEqual(manifest[route], {tools: [tool]}, `${route}: group-5 audit drift`);
+    const tools = tool === "install_name" ? ["installation_rename", tool] : [tool];
+    assert.deepEqual(manifest[route], {tools}, `${route}: group-5 audit drift`);
   }
   for (const [tool, route] of [...ASSISTANT_CAMPAIGN_MANAGEMENT, ...ASSISTANT_RESIDUAL_MANAGEMENT]) {
     assert.ok(snapshot.tools.includes(tool), `${tool}: production lost a group-7 operation`);
-    assert.deepEqual(manifest[route], {tools: [tool]}, `${route}: group-7 audit drift`);
+    const aliases = ASSISTANT_CAMPAIGN_ALIASES.filter(([, canonical]) => canonical === tool).map(([alias]) => alias);
+    assert.deepEqual(manifest[route], {tools: [tool, ...aliases]}, `${route}: group-7 audit drift`);
   }
   const group7Routes = new Set<string>([...ASSISTANT_CAMPAIGN_MANAGEMENT.map(([, route]) => route), ...ASSISTANT_CAMPAIGN_HUMAN_ROUTES, ...CAMPAIGN_SESSION_PROTOCOL_ROUTES]);
   const group7 = Object.entries(manifest).filter(([route]) => group7Routes.has(route));

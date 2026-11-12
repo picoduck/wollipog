@@ -1,7 +1,0 @@
-{
-  "reason": "Pre-existing orphan-copy response contract independently declared by server list routes and the skills client, including observed identity, held state and skill deletion metadata. Awaiting shared protocol ownership.",
-  "declarations": [
-    { "path": "apps/control-plane/src/skill-orphan-route.ts", "symbol": "OrphanedSkillCopy" },
-    { "path": "apps/web/src/skills.ts", "symbol": "OrphanedSkillCopy" }
-  ]
-}

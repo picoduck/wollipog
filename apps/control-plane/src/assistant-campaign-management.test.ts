@@ -11,7 +11,7 @@ import {registerCampaignIssueScopeRoutes} from "./campaign-issue-scope-routes.js
 import {createCampaignReviewManagement} from "./campaign-review-management.js";
 import {createAssistantOperations, registerAssistantRoutes} from "./assistant-routes.js";
 import {registerAssistantSessionOperations} from "./assistant-session-operations.js";
-import {ASSISTANT_CAMPAIGN_MANAGEMENT, registerAssistantCampaignManagement} from "./assistant-campaign-management.js";
+import {ASSISTANT_CAMPAIGN_MANAGEMENT, ASSISTANT_CAMPAIGN_ALIASES, registerAssistantCampaignManagement} from "./assistant-campaign-management.js";
 import {sessionHoldReaderFor} from "./session-command-permissions.js";
 import {AssistantRefusal} from "./assistant-connections.js";
 
@@ -76,6 +76,23 @@ async function fixture() {
 
 const finding = {scope: "all_branch", diffHash: "a".repeat(64), filePath: "fixture.ts", side: "right", line: 1,
   body: "Synthetic finding", severity: "minor", required: true};
+
+test("integrated status aliases retain shared projections and their own current operation grants", async () => {
+  const h = await fixture();
+  try {
+    for (const [alias, canonical] of ASSISTANT_CAMPAIGN_ALIASES) {
+      h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: "all"});
+      const expected = await h.call(canonical);
+      assert.deepEqual(await h.mcp(alias), expected, alias);
+      h.db.assistantConnections.configure(h.issued.connection.id, {operations: [alias], projects: [h.project.id]});
+      assert.equal((await h.call(alias)).status, expected.status);
+      await assert.rejects(h.call(canonical), /excluded/);
+      h.db.setSessionProject("worker", h.other.id, h.otherLocation.id);
+      await assert.rejects(h.call(alias), /outside/);
+      h.db.setSessionProject("worker", h.project.id, h.location.id);
+    }
+  } finally {await h.close();}
+});
 
 test("all 14 read-like operations match the owner HTTP projection through actual MCP", async (t) => {
   t.mock.timers.enable({apis: ["Date"], now: 1_800_000_000_000});

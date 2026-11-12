@@ -165,7 +165,14 @@ test("reminders use the granting owner's private row, optimistic revisions and d
     const reminder = (await h.call("reminder_get")).reminder;
     assert.equal(reminder.scheduleKind, "someday");
     h.db.assistantConnections.configure(h.issued.connection.id, {operations: "all", projects: "all", destructiveConfirmation: "confirm"});
-    const args = {commandId: "remove", revision: reminder.revision, reminderId: reminder.reminderId};
+    const replace = {commandId: "replace", reminder: {scheduleKind: "someday", originalExpression: "Someday", wakePolicy: "until_activity"}};
+    const replacement = await h.call("reminder_set", replace);
+    assert.equal(replacement.confirmationRequired, true);
+    assert.equal((await h.call("reminder_get")).reminder.wakePolicy, "regardless");
+    assert.equal((await h.call("reminder_set", {...replace, confirmationId: replacement.confirmationId})).receipt.status, "succeeded");
+    const current = (await h.call("reminder_get")).reminder;
+    assert.equal(current.wakePolicy, "until_activity");
+    const args = {commandId: "remove", revision: current.revision, reminderId: current.reminderId};
     const preview = await h.call("reminder_remove", args); assert.equal(preview.confirmationRequired, true);
     assert.equal((await h.call("reminder_remove", {...args, confirmationId: preview.confirmationId})).receipt.status, "succeeded");
     assert.equal((await h.call("reminder_get")).reminder, null);

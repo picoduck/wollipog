@@ -6,6 +6,7 @@ import { AssistantCommandReceipts, assistantRequestDigest, type AssistantCommand
 import type { AssistantWorkOriginStore, AssistantSessionWorkOrigin, AuthenticatedAssistantWorkOrigin } from "./assistant-work-origin.js";
 import { AssistantCommandConfirmations } from "./assistant-command-confirmations.js";
 import { OrchestratorSettings } from "./orchestrator-settings.js";
+import { machineWorkspaceCoordinates } from "./assistant-machine-management.js";
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new AssistantRefusal("Supply an object of tool arguments.");
@@ -187,6 +188,20 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
         return {resourceRevoked: true, receipt: {operationId: receipt.operationId, operation: receipt.operation,
           status: receipt.status, createdAt: receipt.createdAt, updatedAt: receipt.updatedAt},
           recovery: "The target connection was revoked. This is the retained command verdict only; do not replay the command."};
+      }
+      if ((receipt.target.kind === "runner" && !db.getRunner(receipt.target.id) && !db.boxIdForRunner(receipt.target.id)) ||
+          (receipt.target.kind === "workspace" && !db.workspaceSource(...machineWorkspaceCoordinates(receipt.target)))) {
+        // Group-4 removals retain a content-free verdict, never old workspace/Machine metadata.
+        operations.authorize(ctx.connection.id, receipt.operation, {kind: "receipt", id: receipt.operationId,
+          ...(receipt.target.projectId ? {projectId: receipt.target.projectId} : {})});
+        return {resourceDeleted: true, receipt: {operationId: receipt.operationId, operation: receipt.operation,
+          status: receipt.status, createdAt: receipt.createdAt, updatedAt: receipt.updatedAt},
+          recovery: "The source Machine or Workspace was removed. This is the retained command verdict only; never replay the command."};
+      }
+      if (receipt.target.kind === "workspace") {
+        const [runnerId, workspaceId] = machineWorkspaceCoordinates(receipt.target);
+        for (const projectId of db.projectIdsForWorkspace(runnerId, workspaceId)) operations.authorize(ctx.connection.id, receipt.operation,
+          {kind: "workspace", id: receipt.target.id, projectId});
       }
       if ((receipt.target.kind === "session" && !db.getSession(receipt.target.id)) ||
           (receipt.target.kind === "project" && !db.getProject(receipt.target.id))) {

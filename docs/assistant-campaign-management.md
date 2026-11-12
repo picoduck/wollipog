@@ -74,6 +74,11 @@ equivalent. No Assistant tool may impersonate those credentials.
 
 ## Residual Owner Capabilities
 
+Integration retains the status aliases `campaign_status`, `campaign_recommendations`,
+`request_list` and `review_findings` through these same current-grant-constrained services.
+Overlapping canonical names register once. Protocol-only campaign and historical review-ledger
+aliases are not registered; their credential boundaries and genuine-runtime remedies stay explicit.
+
 The residual audit adds three tools. `governance_audit` reads the owner's bounded session audit
 (`query.limit`, 1–500, and optional `query.before`); it cannot change governance. `session_git`
 calls the same shared operation as owner HTTP, accepting exactly the existing parser's eleven
