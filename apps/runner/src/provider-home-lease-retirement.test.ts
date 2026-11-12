@@ -40,10 +40,12 @@ int __wrap_unlinkat(int fd, const char *name, int flags) {
 }
 `);
   const registry = fileURLToPath(new URL("./provider-home-lease.ts", import.meta.url));
+  const bounded = fileURLToPath(new URL("../../../packages/test-support/src/bounded-child-process.ts", import.meta.url));
   writeFileSync(fixture, `const assert=require('node:assert/strict');
-const cp=require('node:child_process'), original=cp.spawnSync;
-cp.spawnSync=(command,args,options)=>original(command,command==='/usr/bin/cc'?[...args,${JSON.stringify(wrapper)},'-Wl,--wrap=fsync','-Wl,--wrap=unlinkat']:args,options);
 require(${JSON.stringify(createRequire(import.meta.url).resolve("tsx/cjs"))});
+const {interceptSpawnSyncForTest,spawnSync}=require(${JSON.stringify(bounded)});
+const restore=interceptSpawnSyncForTest((command,args,options)=>command==='/usr/bin/cc'&&!args.includes(${JSON.stringify(wrapper)})?spawnSync(command,[...args,${JSON.stringify(wrapper)},'-Wl,--wrap=fsync','-Wl,--wrap=unlinkat'],options):undefined);
+try {
 const {ProviderHomeLeaseRegistry,providerHomeLeaseRefusalKind}=require(${JSON.stringify(registry)});
 const fs=require('node:fs'),{join}=require('node:path'),{hostname}=require('node:os'),{createHash,randomUUID}=require('node:crypto');
 const home=join(${JSON.stringify(root)},'home'),base=join(home,'.agent-manager/provider-home-leases-v1'),lock=join(base,'mutable-home.lock');
@@ -59,6 +61,7 @@ assert.equal(r.acquireHome(home),true);assert.equal(r.releaseHome(home),true);
 const foreign=new ProviderHomeLeaseRegistry('b'.repeat(64));assert.equal(foreign.acquireHome(home),true);
 const before=fs.readFileSync(anchor);assert.throws(()=>new ProviderHomeLeaseRegistry(owner,{isProcessAlive:()=>false}).acquireHome(home),e=>providerHomeLeaseRefusalKind(e)==='foreign_owner');assert.deepEqual(fs.readFileSync(anchor),before);assert.equal(foreign.releaseHome(home),true);
 fs.writeFileSync(anchor,'invalid journal');assert.throws(()=>new ProviderHomeLeaseRegistry(owner).acquireHome(home),e=>providerHomeLeaseRefusalKind(e)==='unverifiable');assert.equal(fs.readFileSync(anchor,'utf8'),'invalid journal');
+} finally { restore(); }
 `);
   const result = spawnSync(process.execPath, [fixture], { encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024 });
   assert.equal(result.status, 0, result.stderr);
