@@ -29641,12 +29641,15 @@ export class ControlPlaneDb {
     return deleted;
   }
 
-  getSession(id: string): SessionView | null {
+  /** Control-only readers can omit the descendant-derived campaign projection. Public session
+   * views and notification before/after views keep the default, fully projected result. */
+  getSession(id: string, options: { includeCampaignProjection?: boolean } = {}): SessionView | null {
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(id) as unknown as
       | SessionRow
       | undefined;
     return row
-      ? this.sessionView(row, undefined, this.sessionStopIntent(id), true, this.childSessionAllocations(id).liveCount)
+      ? this.sessionView(row, undefined, this.sessionStopIntent(id), true, this.childSessionAllocations(id).liveCount,
+        options.includeCampaignProjection ?? true)
       : null;
   }
 
@@ -30019,7 +30022,7 @@ export class ControlPlaneDb {
     stopIntent?: SessionStopIntentRecord,
     includeBackgroundJobs = true,
     liveChildSessions = 0,
-    /** False only for the campaign video fact's root view, which must not embed its own projection. */
+    /** Control-only and campaign video fact views do not need the descendant-derived projection. */
     includeCampaignProjection = true,
   ): SessionView {
     const agentName = row.agent_id

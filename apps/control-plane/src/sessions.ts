@@ -10564,9 +10564,12 @@ export class SessionsService {
     if (!before) return;
     // A yielded batch may outlive deletion or reparenting of its controlling campaign. Do not
     // write continuation events for a stale owner (or a deleted row's foreign key).
-    if (this.campaignEventController(this.db.getSession(before.id))?.id !== before.id) return;
+    const root = this.db.campaignAncestryRoot(before.id);
+    if (typeof root !== "object" || !root.hasPolicy || root.id !== before.id) return;
     const now = Date.now();
-    const currentCampaign = this.db.getSession(before.id);
+    // Control and request admission need current policy, not the expensive descendant status
+    // projection. Build that projection below only where publication actually consumes it.
+    const currentCampaign = this.db.getSession(before.id, { includeCampaignProjection: false });
     if (currentCampaign?.orchestratorPolicy?.control?.mode === "full_control") {
       this.campaignRecovery.synchronize(currentCampaign, now);
     }
@@ -18836,7 +18839,7 @@ export class SessionsService {
     // Writes each held child's recovery advice for the calling Orchestrator (#1863).
     holdReaderFor?: (target: { id: string; parentSessionId: string | null }) => HoldAdviceReader | undefined,
   ): ServiceResult<DescendantRequestsView> {
-    const parent = this.db.getSession(parentSessionId);
+    const parent = this.db.getSession(parentSessionId, { includeCampaignProjection: false });
     if (!parent) return fail("session not found", 404);
     const rootCampaign = this.orchestratorCampaignController(parent);
     if (rootCampaign === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
