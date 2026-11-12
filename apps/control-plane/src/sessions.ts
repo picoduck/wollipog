@@ -15922,12 +15922,20 @@ export class SessionsService {
           (personFullControl && outstandingDecisionsBearOnScopeRequest(this.db, childSessionId, snapshot)) ||
           (currentChild.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision) {
         this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });
-        return fail("Campaign scope or affected work changed. Refresh Campaign Status and request approval of a new exact proposal.", 409);
+        const changed = !latest ? ["scope snapshot unavailable"] :
+          Object.keys({ ...snapshot, ...latest }).filter((key) => auditDigest((snapshot as unknown as Record<string, unknown>)[key]) !==
+            auditDigest((latest as unknown as Record<string, unknown>)[key]));
+        if ((currentChild.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision) changed.push("scope revision");
+        if (personFullControl && outstandingDecisionsBearOnScopeRequest(this.db, childSessionId, snapshot)) changed.push("outstanding decisions affecting scope");
+        return fail(`Campaign scope or affected work changed (${changed.join(", ")}). Refresh Campaign Status and request approval of a new exact proposal.`, 409);
       }
       if (!actor.id) return fail("An authenticated human identity is required for scope authorization", 403);
       const approved = this.db.approveCampaignIssueScope(occurrenceId, authority === "orchestrator" ? issueBoundary(currentChild)!.authorizedByUserId : actor.id, now,
         authority === "orchestrator" ? actor.id : undefined);
-      if (!approved) return fail("Campaign scope changed concurrently. Refresh and propose again.", 409);
+      if ("refusal" in approved) {
+        this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });
+        return fail(`${approved.refusal}. Refresh Campaign Status and request approval of a new exact proposal.`, 409);
+      }
       const resolvedScope = approved.decision;
       for (const stale of approved.revoked) {
         this.settleWorkflowDecisionPause(stale.sessionId, stale.occurrenceId, now);

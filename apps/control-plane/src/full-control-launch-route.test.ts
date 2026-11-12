@@ -1558,6 +1558,70 @@ test("\"Fix #12 and #13\": exactly #12 and #13 are admitted after the floors wit
   } finally { await server.close(); f.db.close(); }
 });
 
+test("an admitted initial proposal with withheld operations survives idle repair and the root's own resolution (#4427)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server,
+      "Fix #12 and #13. Only open bugs. Do not close issues or delete merged branches.");
+    const before = c.revision();
+    const plan = f.sessions.recordCampaignPlan(c.id, { planComplete: true, items: [{ key: "delivery", title: "Deliver the requested work" }] });
+    assert.equal(plan.ok, true, plan.error ?? "");
+    f.db.updateSessionStatus(c.id, "idle", Date.now());
+    const repair = f.sessions.repairCampaign(c.id);
+    const proposed = await c.propose([named(12), named(13)], {
+      constraints: ["Only open bugs"], withheldOperations: ["issue_closure", "merged_branch_deletion"],
+    });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "orchestrator");
+    const snapshot = proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
+    assert.equal(snapshot.scopeProposal!.route, "admitted");
+    assert.equal(snapshot.scopeProposal!.constraintCheck!.verdict, "admit");
+    assert.ok(snapshot.scopeProposal!.checks.includes("withheld_operations"));
+    // Idle housekeeping and continuation writes carry no scope or boundary authority.
+    assert.equal(await repair, true, "idle repair actually ran during admission");
+    const applied = c.apply(proposed.data!.occurrenceId);
+    assert.equal(applied.ok, true, applied.error ?? "");
+    assert.equal(c.revision(), before + 1);
+    assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12, 13]);
+    assert.equal(f.db.workflowDecisionByOccurrence(proposed.data!.occurrenceId)!.status, "consumed");
+    const boundary = boundaryOf(f, c.id);
+    assert.equal(boundary.operations.includes("issue_closure"), false);
+    assert.equal(boundary.operations.includes("merged_branch_deletion"), false);
+    assert.equal(campaignBoundaryCurrent(f.db.getSession(c.id)!), true);
+    assert.deepEqual(establishedOf(f, c.id).initialScope!.withheldOperations, ["issue_closure", "merged_branch_deletion"]);
+    assert.equal((await f.sessions.campaignIssueScope(c.id)).data!.scopeProposals![0]!.outcome, "applied");
+    assert.equal(c.ownerRequests().length, 0);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a changed scope input is named, retires the stale proposal, and permits a fresh self-resolution (#4427)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Fix #12. Do not close issues.");
+    const extra = { withheldOperations: ["issue_closure" as const] };
+    const proposed = await c.propose([named(12)], extra);
+    assert.equal(proposed.data!.authority, "orchestrator");
+    const question = f.sessions.createWorkflowDecision(c.id, { requestId: "changed-input", resourceKey: "design-question",
+      resourceSnapshot: { category: "implementation_question", question: "Which design?",
+        options: [{ optionId: "a", label: "Option A" }, { optionId: "b", label: "Option B" }] } }, () => true);
+    assert.equal(question.ok, true, question.error ?? "");
+    const refused = c.apply(proposed.data!.occurrenceId);
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /changed \(affectedDecisions\)/u);
+    assert.equal(f.db.workflowDecisionByOccurrence(proposed.data!.occurrenceId)!.status, "revoked");
+    assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    const fresh = await c.propose([named(12)], extra);
+    assert.equal(fresh.data!.authority, "orchestrator");
+    assert.notEqual(fresh.data!.occurrenceId, proposed.data!.occurrenceId);
+    const applied = c.apply(fresh.data!.occurrenceId);
+    assert.equal(applied.ok, true, applied.error ?? "");
+    assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    assert.equal(f.db.workflowDecisionByOccurrence(question.data!.occurrenceId)!.status, "revoked", "narrowing invalidates old authority");
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("an owner-named number the message writes only as a plain number goes to the check, and an admitted proposal is re-checked for other campaigns when applied (#4282)", async () => {
   const f = fixture();
   const { server } = await app(f);
