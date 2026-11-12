@@ -7,7 +7,9 @@ fetches its forge-owned PR ref from that base repository, and checks the fetched
 creating the private checkout. Fork URLs and contributor configuration are never fetch inputs.
 Optional `reviewer: {harness, model, effort}` selects a supported native Codex or Claude Code
 reviewer, without changing worker configuration or granting same-family consent. Unavailable
-selections and older peers refuse explicitly. Callers must compare the reviewed SHA with the
+selections and older peers refuse explicitly. Selection cannot override a captured campaign
+policy or current owner-configured reviewer; a conflicting harness/model/effort is refused.
+Callers must compare the reviewed SHA with the
 current forge head before acting; a review does not authorize publication or merge.
 
 Wollipog protocol v100 gives each native host session a purpose-specific control credential. The

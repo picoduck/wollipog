@@ -2291,6 +2291,43 @@ function campaignReviewChild(h: ReturnType<typeof harness>, id = "snapshot-child
   return result.data;
 }
 
+test("contributor reviewer selection cannot replace captured campaign or Automatic policy", () => {
+  for (const fixed of [true, false]) {
+    const h = harness({ campaign: true, configuration: true,
+      reviewSession: { ...CAPABILITY, configuration: true, contributorReviews: true },
+      ...(fixed ? { reviewPolicy: { reviewHarness: "codex" as const, reviewModel: "gpt-6.1-sol", reviewEffort: "high", reviewRoundBudget: 2 } } : {}) });
+    try {
+      const child = campaignReviewChild(h);
+      const reviewer = { harness: "codex" as const, model: "gpt-6.1-sol", effort: "high" };
+      const before = h.starts().length;
+      for (const changed of [{ harness: "claude-code" as const }, { model: "other" }, { effort: "low" }]) {
+        const result = h.svc.requestReviewSession(child.id, request({ mode: "contributor", reviewer: { ...reviewer, ...changed } }));
+        assert.match(result.error!, /conflicts.*review policy/u);
+      }
+      assert.equal(h.starts().length, before, "conflicting selections never launch or reserve a review");
+      const matching = h.svc.requestReviewSession(child.id, request({ mode: "contributor", reviewer }));
+      assert.ok(matching.ok, matching.error ?? "matching policy refused");
+      assert.equal(h.starts().at(-1)?.spec.config?.model, reviewer.model);
+      assert.equal(h.starts().at(-1)?.spec.review?.history?.roundBudget, fixed ? 2 : 4);
+    } finally { h.db.close(); }
+  }
+});
+
+test("contributor reviewer selection cannot replace current owner-configured settings", () => {
+  const h = harness({ configuration: true,
+    reviewSession: { ...CAPABILITY, configuration: true, contributorReviews: true } });
+  try {
+    h.db.reviewSettings.set(h.db.localIdentityContext().userId, null, { version: 1, roundBudget: 2, reviewers: [{
+      implementer: { agentId: "claude", driver: "claude-code", context: { kind: "native" } },
+      harness: "codex", model: "gpt-6.1-sol", effort: "high", allowSameFamily: false,
+    }] });
+    const before = h.starts().length;
+    assert.match(h.svc.requestReviewSession("s1", request({ mode: "contributor",
+      reviewer: { harness: "codex", model: "gpt-6.1-sol", effort: "low" } })).error!, /conflicts.*review policy/u);
+    assert.equal(h.starts().length, before);
+  } finally { h.db.close(); }
+});
+
 test("campaign review fields are captured at child launch and fixed policy wins over later personal changes", () => {
   const h = harness({ campaign: true, configuration: true, reviewPolicy: {
     reviewHarness: "codex", reviewModel: "gpt-6.1-sol", reviewEffort: "high", reviewRoundBudget: 2,

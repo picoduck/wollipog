@@ -459,7 +459,9 @@ Contributor mode also accepts `reviewer: {harness: "codex" | "claude-code", mode
 preserving the implementation worker's profile. The selected installation/model/effort must
 be available, and existing same-family consent, account policy, budgets and review limits still
 apply. Missing profiles are refused without substitution. Omitting selection uses configured
-review defaults. Reviewers retain the managed read-only preset and never execute project code
+review defaults. Explicit selection must match any captured campaign policy or current
+owner-configured review settings; conflicting harness/model/effort requests are refused.
+Reviewers retain the managed read-only preset and never execute project code
 or load project settings, hooks, skills or MCP configuration. Read the managed session's model,
 effort and usage alongside the exact head, validity and findings. Re-read the forge head before
 using a result: a moved head needs a new review. Review completion grants no publication,

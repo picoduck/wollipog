@@ -187,10 +187,14 @@ export function configuredReview(db: ControlPlaneDb, session: SessionView, runne
   const agent = runner?.agents.find(a => a.id === session.agentId);
   const identity = agent ? agentHarnessIdentityFor(agent) : { agentId: session.agentId ?? "unknown", driver: session.driver ?? "acp", context: { kind: "native" as const } };
   const rule = effective.settings.reviewers.find(r => agentHarnessIdentityKey(r.implementer) === agentHarnessIdentityKey(identity));
-  const harness = selection?.harness ?? (snapshot ? snapshot.reviewHarness : rule?.harness ?? reviewerHarnessFor(session.driver));
+  // A worker request is not authority to replace the owner's settings or a child's immutable
+  // launch policy, even when the worker names its own PR as a contributor review.
+  const pinned = !!snapshot || effective.source !== "system_default";
+  const selectable = pinned ? undefined : selection;
+  const harness = selectable?.harness ?? (snapshot ? snapshot.reviewHarness : rule?.harness ?? reviewerHarnessFor(session.driver));
   if (!harness) throw new ReviewSettingsError("Choose a reviewer for this implementing harness in Settings → Reviews.", 409);
-  const requestedModel = selection?.model ?? (snapshot ? snapshot.reviewModel : rule?.model);
-  const effort = selection?.effort ?? (snapshot ? snapshot.reviewEffort : rule?.effort) ?? "high";
+  const requestedModel = selectable?.model ?? (snapshot ? snapshot.reviewModel : rule?.model);
+  const effort = selectable?.effort ?? (snapshot ? snapshot.reviewEffort : rule?.effort) ?? "high";
   if (runner?.runtime?.reviewSession?.configuration !== true) {
     throw new ReviewSettingsError(`This machine cannot apply the configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort). Update Wollipog on it before requesting a review.`, 409);
   }
@@ -210,6 +214,9 @@ export function configuredReview(db: ControlPlaneDb, session: SessionView, runne
       requestedModel != null && !reviewModelSupported(reviewer.capabilities, requestedModel, effort) ||
       !reviewModelSupported(reviewer.capabilities, model, effort)) {
     throw new ReviewSettingsError(`The configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort) is unavailable on this session's machine: the discovered installation does not support the requested model and effort. ${snapshot ? "Launch a new child with an updated review policy." : "Choose a discovered model and effort in Settings → Reviews."}`, 409);
+  }
+  if (pinned && selection && (selection.harness !== harness || selection.model !== model || selection.effort !== effort)) {
+    throw new ReviewSettingsError("The requested contributor reviewer conflicts with the session's captured or owner-configured review policy. Select the configured harness, model and effort.", 409);
   }
   const allowSameFamily = rule?.harness === harness && rule.allowSameFamily;
   if (!allowSameFamily && sameReviewFamily(session.driver, session.model, harness, model)) {
