@@ -252,10 +252,23 @@ policy-identity cohort keys in [Cohort Keys and Cutover](#cohort-keys-and-cutove
 shadow-only candidate, `fast-required-v3`, relaxes only low-risk fallbacks; see the
 [v3 candidate replay](ci-suite-v3-candidate-2026-10-29.md). Nothing in this section changes for v1.
 
-**Remaining:** at least 30 eligible natural changes across five working days,
-individual miss/flake/infrastructure review, actual shadow overhead/selected
-runtime evidence, and the reviewed fast/full comparison. Full queue validation
-continues throughout. Do not hold a ready slot waiting for future traffic.
+The [November 12 measurement](ci-suite-shadow-2026-11-12.md) establishes **46
+eligible distinct v1.1 PR changes across six UTC working dates**, exceeding the
+30-change/five-date numerical threshold. The bounded sample attempted 62 natural
+merge groups, with every exclusion retained. Earlier v1 records remain separate;
+the v1.1 workflow change was introduced by #4149, rather than #4147. Nearly every
+selection was full; the affected plan also retained every inventoried portable
+test file. Zero policy-selected misses therefore does not establish reduced-subset
+safety. Four fixed-fast miss candidates, individual retries/interruptions, actual
+shadow-job overhead and contract drift are recorded in the report.
+
+**Remaining:** owner-reviewed assurance interpretation and unresolved
+miss/flake/infrastructure causes, representative reduced-subset safety evidence
+if reduced coverage is proposed, and actual standalone fast/selected runtime.
+`selectedRuntimeMs` remains null and the 5–10 minute target is undemonstrated.
+The numerical threshold does not certify this cohort or make #3637 ready.
+Full queue validation continues throughout. Do not hold a ready slot waiting
+for future traffic.
 
 ### Corrected v1.1 Prose Contract (#3812)
 
