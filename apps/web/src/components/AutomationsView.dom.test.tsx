@@ -3,9 +3,13 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
 import type {
+  AutomationCreationSnapshot,
   AutomationExecution,
   AutomationSchedule,
+  OrchestratorSettingsView,
+  ProviderAccountSelectionPreview,
   AutomationSpec,
   AutomationTriggerView,
   CreateAutomationTriggerRequest,
@@ -30,6 +34,8 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { AutomationsView } from "./AutomationsView.js";
 import { AutomationEditor } from "./AutomationEditor.js";
 import { AutomationDetail } from "./AutomationDetail.js";
+import { AutomationCreationSummary } from "./AutomationCreationSummary.js";
+import { setHideAccountEmails } from "../account-email-privacy.js";
 import { agentOptions } from "./agent-options.js";
 import { agentDisplayName } from "../agent-presentation.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -171,11 +177,15 @@ function snapshot(runnerViews = runners): UiSnapshotMessage {
   };
 }
 
+/** An agent's Create Automation approval to render instead of a route, while set. */
+let summarySnapshot: AutomationCreationSnapshot | null = null;
+
 /** The list, an automation's page, or the editor, as App routes them. */
 function AutomationsWhenReady() {
   const ready = useStoreSelector((state) => state.snapshotLoaded);
   const view = useStoreSelector((state) => state.view);
   if (!ready) return null;
+  if (summarySnapshot) return <AutomationCreationSummary snapshot={summarySnapshot} />;
   if (view.name === "automation") return <AutomationDetail key={view.id} automationId={view.id} />;
   return view.name === "automations" && view.editor
     ? <AutomationEditor key={viewPath(view)} route={view.editor} />
@@ -3069,5 +3079,311 @@ test("editing an automation keeps its retired exec agent unavailable with the co
     assert.match(option.textContent ?? "", /Change this agent's driver to codex-app-server in the runner configuration/);
   } finally {
     await unmountFixture(fixture);
+  }
+});
+
+// #4512: the editor shows which account each run is expected to use, from the launch dialogs' preview.
+const ACCOUNT_MACHINE: RunnerView = {
+  ...runners[0]!,
+  // A runner whose view carries its accounts and saved policies, so an empty list is authoritative.
+  protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountSelectionPolicy,
+  providerAccounts: [
+    { id: "work", label: "work@example.com", provider: "claude", authStatus: "authenticated" },
+    { id: "spare", label: "Spare", provider: "claude", authStatus: "unauthenticated" },
+  ],
+};
+
+function accountPreview(overrides: Partial<ProviderAccountSelectionPreview>): ProviderAccountSelectionPreview {
+  return {
+    provider: "claude", mode: "priority", policyRevision: 2, status: "selected", source: "priority", accountId: "work",
+    candidates: [
+      { accountId: "spare", position: 1, eligible: false, reason: "signed_out" },
+      { accountId: "work", position: 2, eligible: true, selected: true },
+    ],
+    enforcement: "enforced", generatedAt: 1, ...overrides,
+  };
+}
+
+/** Mounts New Automation on a machine with accounts, answering every preview with `preview`. */
+async function mountAccountEditor(preview: ProviderAccountSelectionPreview, overrides: Partial<ApiClient> = {}) {
+  const targets: unknown[] = [];
+  const creates: AutomationSpec[] = [];
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [ACCOUNT_MACHINE], [], {
+    providerAccountSelection: async (runnerId: string, target: unknown) => {
+      targets.push({ runnerId, target });
+      return preview;
+    },
+    createAutomation: async (spec: AutomationSpec) => {
+      creates.push(structuredClone(spec));
+      return { ...schedule("created", spec.name), ...spec };
+    },
+    ...overrides,
+  });
+  return { fixture, targets, creates };
+}
+
+function agentField(container: HTMLDivElement): HTMLElement {
+  const field = choiceTrigger(container, "Agent")?.closest<HTMLElement>(".field");
+  assert.ok(field, "the Agent field is rendered");
+  return field;
+}
+
+test("under Priority Order a session automation names its expected account, why, and that each run rechecks it (#4512)", async () => {
+  const { fixture, targets } = await mountAccountEditor(accountPreview({}));
+  try {
+    const text = agentField(fixture.container).textContent ?? "";
+    assert.match(text, /Each run is expected to use work@example\.com\./);
+    assert.match(text, /This is the first eligible account in the machine's Priority Order\. Skipped ahead of it: one needs sign-in\./);
+    assert.match(text, /The account is rechecked when each run starts\./);
+    assert.deepEqual(targets.at(-1), { runnerId: "runner-1", target: { agentId: "rich-agent", workspaceId: "runner-1-workspace" } },
+      "the preview asks about this exact agent and folder, placed as a run would be");
+
+    const reads = targets.length;
+    await choose(fixture.container, "Agent", "Other Agent");
+    assert.equal(targets.length, reads, "a provider with neither accounts nor a saved policy on this machine isn't read");
+    assert.doesNotMatch(agentField(fixture.container).textContent ?? "", /expected to use|Each run/,
+      "and nothing is shown for it");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("under Default Account the editor shows the machine's saved default (#4512)", async () => {
+  const { fixture } = await mountAccountEditor(accountPreview({ mode: "fixed", source: "fixed_default", candidates: [] }));
+  try {
+    const text = agentField(fixture.container).textContent ?? "";
+    assert.match(text, /Each run is expected to use work@example\.com\. This is the machine's Default Account\./);
+    assert.match(text, /The account is rechecked when each run starts\./);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("with no eligible account the editor says why and saving stays possible (#4512)", async () => {
+  const { fixture, creates } = await mountAccountEditor(accountPreview({
+    status: "choice_required", source: "none", accountId: undefined, refusal: "no_eligible_account",
+    candidates: [
+      { accountId: "spare", position: 1, eligible: false, reason: "signed_out" },
+      { accountId: "work", position: 2, eligible: false, reason: "usage_exhausted" },
+    ],
+  }));
+  try {
+    const warning = agentField(fixture.container).querySelector(".field-warn");
+    assert.ok(warning, "the reason is a field warning, not an error");
+    assert.match(warning.textContent ?? "",
+      /^No Claude account in this machine's Priority Order can start a run right now \(one needs sign-in and one is at a usage limit\)\. Runs that start before this changes are refused\. Review this machine's Provider Accounts\. You can still save\. The account is rechecked when each run starts\.$/);
+    assertNoDomNode(agentField(fixture.container).querySelector(".field-error"), "nothing marks the field invalid");
+    await setLabeledInput(fixture.container, "Name", "Nightly Review");
+    await act(async () => { button(fixture.container, "Create Automation").click(); });
+    await act(settle);
+    assert.equal(creates.length, 1, "Create Automation saves");
+    const action = creates[0]!.action;
+    assert.ok(action.kind === "create_session" && action.request.providerAccountId === undefined, "and names no account");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("under Hide Account Emails the expected account stays masked (#4512)", async () => {
+  setHideAccountEmails(true);
+  try {
+    const { fixture } = await mountAccountEditor(accountPreview({}));
+    try {
+      const field = agentField(fixture.container);
+      assert.doesNotMatch(field.textContent ?? "", /work@example\.com/);
+      assert.match(field.textContent ?? "", /Each run is expected to use/);
+      assert.ok(field.querySelector('button[aria-label="Show Account Email"]'), "and can be revealed from the keyboard");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  } finally {
+    setHideAccountEmails(false);
+  }
+});
+
+test("an Orchestrator automation shows what Default resolves to under its account choice, until one is named (#4512)", async () => {
+  const { fixture } = await mountAccountEditor(accountPreview({}), {
+    orchestratorSettings: async (): Promise<OrchestratorSettingsView> => ({
+      defaults: structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), source: "system_default", controlModeSupported: true,
+    } as OrchestratorSettingsView),
+  });
+  try {
+    await choose(fixture.container, "Session Role", "Orchestrator");
+    assert.doesNotMatch(agentField(fixture.container).textContent ?? "", /expected to use/, "shown once, beside the choice");
+    const select = choiceTrigger(fixture.container, "Orchestrator Provider Account");
+    assert.ok(select);
+    const field = select.closest<HTMLElement>(".field")!;
+    const described = select.getAttribute("aria-describedby");
+    assert.ok(described, "the choice is described by its expectation");
+    const expectation = fixture.container.ownerDocument.getElementById(described);
+    assert.ok(expectation && field.contains(expectation));
+    assert.match(expectation.textContent ?? "", /^Each run is expected to use work@example\.com\. .*The account is rechecked when each run starts\.$/);
+
+    // The choice lists email labels masked, as it always has.
+    await choose(fixture.container, "Orchestrator Provider Account", "Hidden Account");
+    assert.doesNotMatch(field.textContent ?? "", /expected to use/, "a named account needs no prediction");
+    assert.equal(select.getAttribute("aria-describedby"), null);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an Orchestrator automation with no eligible account points to its own account choice (#4512)", async () => {
+  const { fixture } = await mountAccountEditor(accountPreview({
+    status: "choice_required", source: "none", accountId: undefined, refusal: "empty_order", candidates: [],
+  }), {
+    orchestratorSettings: async (): Promise<OrchestratorSettingsView> => ({
+      defaults: structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), source: "system_default", controlModeSupported: true,
+    } as OrchestratorSettingsView),
+  });
+  try {
+    await choose(fixture.container, "Session Role", "Orchestrator");
+    const field = choiceTrigger(fixture.container, "Orchestrator Provider Account")!.closest<HTMLElement>(".field")!;
+    assert.match(field.querySelector(".field-warn")?.textContent ?? "",
+      /^This machine's Claude Priority Order has no accounts\. Runs that start before this changes are refused\. Choose an account above, or review this machine's Provider Accounts\./);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+const ORCHESTRATOR_SETTINGS = {
+  orchestratorSettings: async (): Promise<OrchestratorSettingsView> => ({
+    defaults: structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), source: "system_default", controlModeSupported: true,
+  } as OrchestratorSettingsView),
+};
+
+test("with no accounts left, a saved policy's refusal still shows for both roles (#4512)", async () => {
+  const targets: unknown[] = [];
+  const creates: AutomationSpec[] = [];
+  const empty = accountPreview({ status: "choice_required", source: "none", accountId: undefined, refusal: "empty_order", candidates: [] });
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [{ ...ACCOUNT_MACHINE, providerAccounts: [],
+    providerAccountDefaults: [{ provider: "claude", accountId: null, revision: 2, mode: "priority", priorityAccountIds: [] }] }], [], {
+    ...ORCHESTRATOR_SETTINGS,
+    providerAccountSelection: async (_runnerId: string, target: unknown) => { targets.push(target); return empty; },
+    createAutomation: async (spec: AutomationSpec) => {
+      creates.push(structuredClone(spec));
+      return { ...schedule("created", spec.name), ...spec };
+    },
+  });
+  try {
+    assert.ok(targets.length > 0, "the preview is read although the machine has no accounts");
+    assert.match(agentField(fixture.container).querySelector(".field-warn")?.textContent ?? "",
+      /^This machine's Claude Priority Order has no accounts\. Runs that start before this changes are refused\. Review this machine's Provider Accounts\./);
+
+    await choose(fixture.container, "Session Role", "Orchestrator");
+    assert.equal(choiceTrigger(fixture.container, "Orchestrator Provider Account"), undefined, "there is no account to choose");
+    assert.match(agentField(fixture.container).querySelector(".field-warn")?.textContent ?? "", /has no accounts\. .* Review this machine's/,
+      "so the Orchestrator's refusal stays under Agent, without pointing to a choice that isn't there");
+
+    await choose(fixture.container, "Session Role", "Normal");
+    await setLabeledInput(fixture.container, "Name", "Nightly Review");
+    await act(async () => { button(fixture.container, "Create Automation").click(); });
+    await act(settle);
+    assert.equal(creates.length, 1, "Create Automation still saves");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an older runner's view omits accounts and policies, so its refusal is still read and shown (#4512)", async () => {
+  const targets: unknown[] = [];
+  const older = { ...runners[0]!, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts - 1 };
+  assert.equal(older.providerAccounts, undefined);
+  assert.equal(older.providerAccountDefaults, undefined);
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [older], [], {
+    providerAccountSelection: async (_runnerId: string, target: unknown) => {
+      targets.push(target);
+      return accountPreview({ status: "choice_required", source: "none", accountId: undefined,
+        refusal: "runner_update_required", candidates: [], enforcement: "runner_update_required" });
+    },
+  });
+  try {
+    assert.ok(targets.length > 0, "the preview is read although the view lists no accounts or policies");
+    assert.match(agentField(fixture.container).querySelector(".field-warn")?.textContent ?? "",
+      /^This machine's runner can't enforce the Claude Priority Order\. Runs that start before this changes are refused\./);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an account named under Orchestrator and kept as Normal is what each run uses, not the policy's (#4512)", async () => {
+  const { fixture, creates } = await mountAccountEditor(accountPreview({ accountId: "spare" }), ORCHESTRATOR_SETTINGS);
+  try {
+    await choose(fixture.container, "Session Role", "Orchestrator");
+    await choose(fixture.container, "Orchestrator Provider Account", "Hidden Account");
+    await choose(fixture.container, "Session Role", "Normal");
+    const text = agentField(fixture.container).textContent ?? "";
+    assert.match(text, /Each run uses work@example\.com, the account chosen for this automation\./);
+    assert.doesNotMatch(text, /expected to use/, "no prediction of the policy's account");
+    await setLabeledInput(fixture.container, "Name", "Nightly Review");
+    await act(async () => { button(fixture.container, "Create Automation").click(); });
+    await act(settle);
+    const action = creates[0]?.action;
+    assert.ok(action?.kind === "create_session" && action.request.providerAccountId === "work", "and the saved run names it");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a named account no longer on the machine says each run is refused (#4512)", async () => {
+  const stored = schedule("gone-account", "Gone Account");
+  if (stored.action.kind !== "create_session") throw new Error("expected create-session action");
+  stored.action.request.providerAccountId = "removed";
+  const fixture = await mountAt(editRoute(stored.automationId), [stored], {}, {}, [], {}, [ACCOUNT_MACHINE], [], {
+    providerAccountSelection: async () => accountPreview({}),
+  });
+  try {
+    assert.equal(agentField(fixture.container).querySelector(".field-warn")?.textContent,
+      "The account chosen for this automation is no longer on this machine, so each run is refused when it starts.");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an account named by opaque reference is never called missing (#4512)", async () => {
+  const stored = schedule("ref-account", "Ref Account");
+  if (stored.action.kind !== "create_session") throw new Error("expected create-session action");
+  stored.action.request.providerAccountId = "acct:0123456789abcdef";
+  const targets: unknown[] = [];
+  const fixture = await mountAt(editRoute(stored.automationId), [stored], {}, {}, [], {}, [ACCOUNT_MACHINE], [], {
+    providerAccountSelection: async (_runnerId: string, target: unknown) => { targets.push(target); return accountPreview({}); },
+  });
+  try {
+    const field = agentField(fixture.container);
+    assertNoDomNode(field.querySelector(".field-warn"), "no claim that the account is gone or that runs are refused");
+    assert.match(field.textContent ?? "",
+      /Each run uses the account this automation names\. It was named by reference, so this page can't show which one\./);
+    assert.equal(targets.length, 0, "and no policy prediction is read for it");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an agent's Create Automation approval shows what Default is expected to resolve to (#4512)", async () => {
+  const { automationId: _id, revision: _revision, createdBy: _by, createdAt: _at, updatedAt: _updated, ...spec } =
+    schedule("proposed", "Proposed");
+  summarySnapshot = {
+    category: "automation_creation", targetDigest: "a".repeat(64), effectiveTargets: [], requestedSpecDigest: "b".repeat(64),
+    nextFireAt: 1, expiresAt: 2, spec,
+  };
+  const targets: unknown[] = [];
+  try {
+    const fixture = await mountFixture([], {}, {}, [], {}, [ACCOUNT_MACHINE], [], {
+      providerAccountSelection: async (_runnerId: string, target: unknown) => {
+        targets.push(target);
+        return accountPreview({});
+      },
+    });
+    try {
+      const fact = [...fixture.container.querySelectorAll("dt")].find((term) => term.textContent === "Provider Account")?.nextElementSibling;
+      assert.ok(fact, "a session automation's approval lists its account");
+      assert.match(fact.textContent ?? "", /^Default/);
+      assert.match(fact.textContent ?? "", /Each run is expected to use work@example\.com\..*The account is rechecked when each run starts\./);
+      assert.deepEqual(targets.at(-1), { agentId: "rich-agent", workspaceId: "runner-1-workspace" });
+    } finally {
+      await unmountFixture(fixture);
+    }
+  } finally {
+    summarySnapshot = null;
   }
 });
