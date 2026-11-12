@@ -10585,3 +10585,25 @@ test("an exclusion list past its cap keeps the latest items, and each one droppe
     assert.deepEqual(c.policy().unreadLocations?.map((item) => item.locationId), ["pl_over_0"], "the one dropped counts as unread");
   } finally { await c.server.close(); f.db.close(); }
 });
+
+test("an unread record recovered from a malformed or overflowing exclusion of someone else's Location ends with a revoke, and the owner's own stays (#4319 follow-on C, review round 5)", async () => {
+  for (const recovered of ["malformed", "overflow"] as const) {
+    const f = fixture();
+    const c = await launchedMultiRepositoryCampaign(f);
+    registerBelow(f);
+    try {
+      const theirs = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: OTHER_PERSON.userId });
+      const second = f.db.createWorkspace("below", { name: "below y", path: "/fixture/below-y" }, f.scope);
+      const mine = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: second.id, addedByUserId: f.human.userId });
+      const broken = (locationId: string, name: string) => ({ locationId, name, failure: "not-a-failure", reason: 7 });
+      const items = recovered === "malformed" ? [broken(theirs.id, "below z"), broken(mine.id, "below y")]
+        : [belowExclusion(theirs.id, "below z", null), belowExclusion(mine.id, "below y", null),
+          ...Array.from({ length: CAMPAIGN_BOUNDARY_LOCATIONS_MAX }, (_value, index) => belowExclusion(`pl_kept_${index}`, `kept ${index}`, "kept/repo"))];
+      f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({ ...c.policy(), excludedLocations: items }), c.rootId);
+      f.db.recordEarlierUnreadLocations(Date.now());
+      assert.deepEqual(c.policy().unreadLocations?.map((item) => item.locationId).sort(), [theirs.id, mine.id].sort(), `${recovered}: both recovered`);
+      assert.equal(f.sessions.setCampaignControl(c.rootId, { mode: "custom" }, f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human).ok, true);
+      assert.deepEqual(c.policy().unreadLocations?.map((item) => item.locationId), [mine.id], `${recovered}: a revoke ends someone else's, and the owner's own stays`);
+    } finally { await c.server.close(); f.db.close(); }
+  }
+});

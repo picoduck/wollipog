@@ -36563,7 +36563,13 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
     });
     if (unread.length) {
       const recorded = Array.isArray(value.unreadLocations) ? value.unreadLocations : [];
-      value.unreadLocations = [...recorded, ...unread.filter((item) => !recorded.some((other) => (other as { locationId?: unknown })?.locationId === item.locationId))];
+      const added = unread.filter((item) => !recorded.some((other) => (other as { locationId?: unknown })?.locationId === item.locationId));
+      value.unreadLocations = [...recorded, ...added];
+      // Each recovered one is marked as counted by consent (review round 5): a revoke keeps a marked
+      // Location that is the owner's own and ends someone else's, as for any count by consent, so the
+      // owner can always clear one resting on a runner or Location they don't control.
+      const marks = Array.isArray(value.unreadByConsent) ? value.unreadByConsent : [];
+      if (added.length) value.unreadByConsent = [...marks, ...added.map((item) => item.locationId)];
     }
     // Each reason reads as today's fixed sentence, so stored text never reaches a person, and a raised
     // version floor (#4319) names the new version rather than dropping the list its reconnects retry.
