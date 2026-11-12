@@ -642,11 +642,17 @@ for (const scenario of [
       : edges.viewportBottom - edges.rowBottom;
     // Allow fractional virtual measurements and integer scrollTop rounding while still ruling out
     // centering or any other movement substantially larger than the minimum reveal delta. A row
-    // revealed at the very end of the list cannot come closer than the list's bottom padding, so
-    // there the list must instead have scrolled as far as it goes.
-    const remaining = await list.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
+    // revealed at either end cannot come closer than the list's padding at that boundary.
+    // Check the minimum achievable gap there instead of assuming it can scroll past its limit.
+    const { remaining, scrollTop, paddingTop } = await list.evaluate((element) => ({
+      remaining: element.scrollHeight - element.clientHeight - element.scrollTop,
+      scrollTop: element.scrollTop,
+      paddingTop: Number.parseFloat(getComputedStyle(element).paddingTop),
+    }));
     expect(nearestEdgeDelta).toBeGreaterThanOrEqual(-5);
-    if (scenario.direction === "down" && remaining <= 5) expect(nearestEdgeDelta).toBeLessThanOrEqual(5 + 7 + remaining);
+    if (scenario.direction === "up" && scrollTop <= 5) {
+      expect(Math.abs(nearestEdgeDelta - (paddingTop - scrollTop))).toBeLessThanOrEqual(5);
+    } else if (scenario.direction === "down" && remaining <= 5) expect(nearestEdgeDelta).toBeLessThanOrEqual(5 + 7 + remaining);
     else expect(Math.abs(nearestEdgeDelta)).toBeLessThanOrEqual(5);
   }
 

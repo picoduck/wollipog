@@ -786,6 +786,9 @@ export function InboxView({
     cancelListRevealRef.current?.();
     const previous = previousSurfaceRef.current;
     if (previous?.expanded === expanded && previous.sessionId === surfaceSessionId) return;
+    // Hiding/showing the virtual list can deliver a clamped scroll event before this frame.
+    // Restore the reader's saved position from the surface transition, before that delivery.
+    const savedScrollTop = inboxScrollPositions.get(instanceScope) ?? 0;
     const frame = window.requestAnimationFrame(() => {
       previousSurfaceRef.current = { expanded, sessionId: surfaceSessionId };
       if (expanded) {
@@ -795,7 +798,7 @@ export function InboxView({
       } else if (shouldRestoreInboxScroll(previous, expanded)) {
         // See shouldRestoreInboxScroll: restoring on every selection change overwrote the scroll
         // that moveSelection() had just performed, one animation frame earlier.
-        if (listRef.current) listRef.current.scrollTop = inboxScrollPositions.get(instanceScope) ?? 0;
+        if (listRef.current) listRef.current.scrollTop = savedScrollTop;
         listRef.current?.focus();
         const list = listRef.current;
         if (list && displayedSelection) {
@@ -804,6 +807,7 @@ export function InboxView({
           // smallest possible delta after the cached viewport is restored. Repeat briefly because
           // the virtualizer can refine offscreen estimates as measured rows settle.
           let framesRemaining = 8;
+          let restoredScroll = false;
           const cancelReveal = () => {
             if (listRevealFrameRef.current !== null) window.cancelAnimationFrame(listRevealFrameRef.current);
             listRevealFrameRef.current = null;
@@ -824,7 +828,15 @@ export function InboxView({
               cancelReveal();
               return;
             }
-            const row = list.querySelector<HTMLElement>(`#inbox-session-${encodeResourceId(displayedSelection)}`);
+            // The remounted list initially renders an estimate-backed sizer and hidden rows.
+            // An early restore can clamp to zero and an early reveal can then adopt that position.
+            // Restore once its measured geometry is committed, before computing the minimum reveal.
+            const ready = list.querySelector('[data-virtual-measurements="ready"]') !== null;
+            if (ready && !restoredScroll) {
+              list.scrollTop = savedScrollTop;
+              restoredScroll = true;
+            }
+            const row = ready ? list.querySelector<HTMLElement>(`#inbox-session-${encodeResourceId(displayedSelection)}`) : null;
             if (row) {
               const rowRect = row.getBoundingClientRect();
               const viewport = list.getBoundingClientRect();
@@ -1929,6 +1941,7 @@ export function InboxView({
                 onExpand={expand}
                 onToggleThread={toggleThread}
                 onScrollPosition={(scrollTop, layoutCorrection) => {
+                  if (expandedSessionIdRef.current !== null) return;
                   inboxScrollPositions.set(instanceScope, scrollTop);
                   if (layoutCorrection) return;
                   // Native pans cancel pointer events; wheel and momentum scrolling have no press.

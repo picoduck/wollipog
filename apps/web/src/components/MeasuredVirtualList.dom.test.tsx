@@ -72,7 +72,20 @@ for (const [name, value] of [
   ["offsetHeight", 72],
   ["scrollHeight", 1_400],
 ] as const) {
-  Object.defineProperty(domWindow.HTMLElement.prototype, name, { configurable: true, get: () => value });
+  Object.defineProperty(domWindow.HTMLElement.prototype, name, {
+    configurable: true,
+    get(this: HTMLElement) {
+      // Range clamping and mounted-row reseeding must see the same geometry as the DOMRects.
+      if (this.dataset.testid === "breakpoint-reader") {
+        if (name === "clientHeight") return breakpointGeometry.viewportHeight;
+        if (name === "clientWidth") return breakpointGeometry.width;
+        if (name === "scrollHeight") return 14 + 11 * breakpointGeometry.rowHeight;
+      }
+      if (name === "offsetHeight" && this.hasAttribute("data-virtual-row") &&
+          this.closest("[data-testid='breakpoint-reader']")) return breakpointGeometry.rowHeight;
+      return value;
+    },
+  });
 }
 
 const requestFrame = ((callback: FrameRequestCallback) => {
