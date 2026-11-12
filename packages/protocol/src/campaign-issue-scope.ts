@@ -239,7 +239,18 @@ export function validIssueAdmission(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
   const p = v.publicationAuthority as Record<string, unknown> | undefined;
-  return Object.keys(v).every((key) => ["boundaryRevision", "evidenceDigest", "publicationAuthority"].includes(key)) &&
+  const r = v.relatedness as Record<string, unknown> | undefined;
+  const related = r === undefined || Boolean(r && typeof r === "object" &&
+    (r.basis === "decision_model" && Object.keys(r).length === 1 ||
+     r.basis === "failed_campaign_run" && Object.keys(r).length === 8 &&
+     typeof r.repository === "string" && /^[\w.-]+\/[\w.-]+$/u.test(r.repository) &&
+     Number.isSafeInteger(r.pullRequest) && (r.pullRequest as number) > 0 &&
+     Number.isSafeInteger(r.runId) && (r.runId as number) > 0 &&
+     Number.isSafeInteger(r.jobId) && (r.jobId as number) > 0 &&
+     Number.isSafeInteger(r.checkRunId) && (r.checkRunId as number) > 0 &&
+     typeof r.checkName === "string" && r.checkName.trim().length > 0 && r.checkName.length <= 512 &&
+     typeof r.headSha === "string" && /^[0-9a-f]{40}$/u.test(r.headSha)));
+  return related && Object.keys(v).every((key) => ["boundaryRevision", "evidenceDigest", "publicationAuthority", "relatedness"].includes(key)) &&
     (p === undefined || Boolean(p && typeof p === "object" && Object.keys(p).length === 2 &&
       typeof p.authorizedByUserId === "string" && p.authorizedByUserId.length > 0 && p.authorizedByUserId.length <= 256 &&
       typeof p.objectiveDigest === "string" && /^[0-9a-f]{64}$/u.test(p.objectiveDigest))) &&

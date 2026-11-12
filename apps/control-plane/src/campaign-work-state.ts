@@ -40,6 +40,8 @@ export interface CampaignWorkItemStateRecord {
   /** A recorded delivery (#4070) exists and no attempt was opened on the item after it. Omitted
    * means none. */
   recordedDelivery?: boolean;
+  /** Server-proven completed epic closure finishes only an item with no delivery work. */
+  epicTrackingClosed?: boolean;
   /** #4120: the status of each merge dependency, a prerequisite in another repository. Omitted
    * means none; dependencies within one repository are only in `dependsOn`. */
   mergeDependencies?: readonly CampaignMergeDependencyStatus[];
@@ -75,6 +77,7 @@ export function deriveCampaignWorkItemState(
   // observed MERGED, its merge still waits on its prerequisites, so it is unfinished, blocked for good
   // when one can never merge, and otherwise waiting on the merge.
   if (record.recordedDelivery) return { state: "delivered", causes: [] };
+  if (record.epicTrackingClosed && !attempt?.open) return { state: "delivered", causes: [] };
   if (attempt?.delivered) {
     if (record.ownPullRequestsMerged || !record.mergeDependencies?.some((status) => status !== "merged")) return { state: "delivered", causes: [] };
     return mergeDependencyFailed ? { state: "blocked", causes: ["dependency_blocked"] } : { state: "waiting", causes: ["dependency_unmerged"] };

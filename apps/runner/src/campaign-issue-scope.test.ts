@@ -1,6 +1,34 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+import { CampaignIssueScopeRefusal, inspectCampaignFailedRun, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+
+for (const scenario of ["merge failure", "required failure", "another PR", "passed", "cancelled", "skipped", "wrong head", "optional check", "wrong job", "passing check", "cancelled check", "skipped check"] as const) {
+  test(`failed campaign run evidence: ${scenario}`, async () => {
+    const evidence = { repository: "team/repo", pullRequest: 10, headSha: "a".repeat(40), runId: 123, jobId: 321 };
+    const merge = scenario !== "required failure" && scenario !== "optional check";
+    const run = async (command: string, args: string[]) => {
+      if (command === "git") return "https://github.com/team/repo.git";
+      const path = args[args.indexOf("github.com") + 1];
+      if (path === "graphql") return JSON.stringify({ data: { node: { databaseId: 456, isRequired: scenario !== "optional check" } } });
+      if (path?.includes("actions/runs/")) return JSON.stringify({ id: 123, repository: { full_name: "team/repo" },
+        status: "completed", conclusion: scenario === "passed" ? "success" : scenario === "cancelled" ? "cancelled" : scenario === "skipped" ? "skipped" : "failure", event: merge ? "merge_group" : "pull_request",
+        head_sha: "b".repeat(40), check_suite_id: 789,
+        head_branch: `gh-readonly-queue/main/pr-${scenario === "another PR" ? 11 : 10}-${scenario === "wrong head" ? "c".repeat(40) : evidence.headSha}`,
+        pull_requests: [{ number: 10, head: { sha: evidence.headSha }, base: { repo: { full_name: "team/repo" } } }] });
+      if (path?.includes("pulls/")) return JSON.stringify({ base: { ref: "main" } });
+      if (path?.includes("compare/")) return JSON.stringify({ status: "ahead" });
+      if (path?.includes("actions/jobs/")) return JSON.stringify({ id: 321, run_id: scenario === "wrong job" ? 124 : 123,
+        status: "completed", conclusion: "failure", check_run_url: "https://api.github.com/repos/team/repo/check-runs/456" });
+      if (path?.includes("check-runs/")) return JSON.stringify({ id: 456, node_id: "node456", head_sha: "b".repeat(40), name: "Broken Check",
+        status: "completed", check_suite: { id: 789 }, conclusion: scenario === "passing check" ? "success"
+          : scenario === "cancelled check" ? "cancelled" : scenario === "skipped check" ? "skipped" : "failure" });
+      throw new Error(`Unexpected command ${args.join(" ")}`);
+    };
+    const result = await inspectCampaignFailedRun(run, evidence);
+    assert.deepEqual(result.failedRun, scenario === "merge failure" || scenario === "required failure"
+      ? { ...evidence, checkRunId: 456, checkName: "Broken Check" } : undefined);
+  });
+}
 
 /** GitLab answers for a nested project on a self-managed host (#3539). */
 function gitlabScope(issues: Record<number, { title: string; description?: string | null; web_url?: string; project_id?: number }>) {
@@ -130,6 +158,33 @@ test("follow-up scope inspects exact title, body and labels rather than trusting
     const run=async(command:string)=>command==="git"?"https://github.com/team/repo.git":JSON.stringify({number:10,title:changed==="title"?"Changed":"Exact",body:changed==="body"?"Changed body":"Exact body",labels:[{name:changed==="labels"?"bug":"feature"}],html_url:"https://github.com/team/repo/issues/10"});
     if(changed!=="none") await assert.rejects(inspectCampaignIssueScope(run,undefined,[10],publication));
     else assert.equal((await inspectCampaignIssueScope(run,undefined,[10],publication)).candidates[0]!.issue.number,10);
+  }
+});
+
+test("published bodies ignore only trailing whitespace, with content-free field refusals (#4404)", async () => {
+  const publication = { sanitizedTitle: "Private title", sanitizedBody: "Private body\nSecond line", labels: ["feature"] };
+  for (const [body, title, labels, field] of [
+    [publication.sanitizedBody + "\n", publication.sanitizedTitle, ["feature"], null],
+    [publication.sanitizedBody + " \t\r\n", publication.sanitizedTitle, ["feature"], null],
+    [" " + publication.sanitizedBody, publication.sanitizedTitle, ["feature"], "body"],
+    ["Private  body\nSecond line", publication.sanitizedTitle, ["feature"], "body"],
+    ["Private body\nChanged line", publication.sanitizedTitle, ["feature"], "body"],
+    [publication.sanitizedBody, publication.sanitizedTitle + " ", ["feature"], "title"],
+    [publication.sanitizedBody, "Other title", ["feature"], "title"],
+    [publication.sanitizedBody, publication.sanitizedTitle, ["bug"], "labels"],
+  ] as const) {
+    const run = async (command: string) => command === "git" ? "https://github.com/team/repo.git" : JSON.stringify({ number: 10,
+      title, body, labels: labels.map((name) => ({ name })), html_url: "https://github.com/team/repo/issues/10" });
+    if (field) await assert.rejects(inspectCampaignIssueScope(run, undefined, [10], publication), (error: Error) => {
+      assert.match(error.message, new RegExp(field));
+      assert.doesNotMatch(error.message, /Private|Second|feature|bug/);
+      return true;
+    });
+    else assert.equal((await inspectCampaignIssueScope(run, undefined, [10], publication)).candidates.length, 1);
+    // Compare both directions, including an approved trailing newline absent on the forge.
+    if (!field) assert.equal((await inspectCampaignIssueScope(async (command) => command === "git" ? "https://github.com/team/repo.git" : JSON.stringify({
+      number: 10, title, body: publication.sanitizedBody, labels: [{ name: "feature" }], html_url: "https://github.com/team/repo/issues/10" }),
+      undefined, [10], { ...publication, sanitizedBody: body })).candidates.length, 1);
   }
 });
 

@@ -320,15 +320,29 @@ approval is invalidated. A legacy campaign with no saved repository stays unveri
   name matches one repository, every issue must be in one of them (`repository_constraint_mismatch`). That
   proves what the names are, not what the owner meant by them, so they are still the Orchestrator's claim:
   a `repository_limit` question for each name asks the Decision Model whether the message limits the work
-  to it, rather than excluding or only mentioning it, and named repositories never take the no-model path.
+  to it, rather than excluding or only mentioning it, except for the literal owner-named fast path below.
   Any name that matches none or several grants nothing, for the whole list: the proposal becomes the
   owner's one approval (`repository_name_unresolved`) with no model call, and approving it applies no part
   of the limit. A name only ever resolves against the boundary, so a limit can't add a repository.
 - **A limit left out.** The `repository_limits_complete` question asks whether the message limits the work
   to a repository the proposal doesn't name. `omits_limit` is neither a refusal nor an admission: the
   proposal goes to the owner's one approval. A message that writes a campaign repository's name beside an
-  initial proposal with no limit (`repository_mentioned`) always reaches this check; `owner/repo#12` and an
+  initial proposal with no limit (`repository_mentioned`) reaches this check unless the literal fast path
+  below proves the limit; `owner/repo#12` and an
   issue's URL point at an issue and don't count.
+- **Exact owner-named repository (#4402, protocol 348).** An affirmative request such as
+  `Use the orchestrate-issues skill to fix #1, #2 and #3 in owner/repo` with exactly those owner-named
+  issues in that repository records the full repository name as a limit, with the server-derived
+  `repositoryLimitVerified` marker. No model judges that repository phrase. With nothing else to check,
+  admission needs no model call or owner prompt. Counts, constraints and withheld operations still run
+  their existing checks; the recorded limit counts as listed for `constraints_complete`. Omissions,
+  another repository's proposed or named issue, multiple repository names, exclusions, aliases and
+  ambiguous wording retain the existing check/owner route. Older runners retain that route too.
+  The named repository becomes the admitted limit even with a broad trailing invitation such as
+  `Fix #12 in owner/repo. Afterwards feel free to pick follow-ups from any of the campaign's repositories.`
+  This conservatively narrows the boundary; it never grants more authority. Work in another repository
+  must first use the existing owner-approved repository-addition and scope routes to widen that limit.
+  In unusual wording this may cost an extra owner approval rather than silently widening authority.
 - **Narrowing the boundary (#4117).** Admitting a limited initial scope, by the check or by the owner,
   re-mints the boundary without the other repositories at a new revision, and revokes what was bound to
   the old one. It happens before anything is dispatched. The admitted scope records `repositoryLimits`, and
@@ -691,8 +705,9 @@ A delegated closure is still created `pending`: the root approves it itself with
 authorization there), then executes it with `close_github_issue`. Executing it while pending refuses
 with that exact step; a pending human-owned closure refuses with a statement that a person must
 approve it. Approval at creation was considered and rejected, because it would bypass the
-resolution-time authority recheck and start the 30-minute expiry before the root acts.
-Existing issue/PR inspection, audience, assignment digests, exact snapshot, expiry, scope synchronization,
+resolution-time authority recheck. An approved closure does not expire on age alone: its bindings
+must remain unchanged, and execution re-reads forge evidence. Older control planes retain their age cutoff.
+Existing issue/PR inspection, audience, assignment digests, exact snapshot, scope synchronization,
 guardrails, durable dispatch fence and uncertain-result reconciliation continue to apply. Changed
 delivery/disposition invalidates execution. Inspect uncertain outcomes; never replay a close or comment.
 At the runner mutation fence, bounded closure rechecks its synchronized authority contract and
@@ -743,6 +758,7 @@ Orchestrator-owned and supersedes the person's pending request for the same issu
 | `attempt_awaiting_verification` (item) | `verify_child`: `verify_campaign_child` with that item |
 | `attempt_open` (item) | `finish_attempt`: wait and verify, or end the attempt |
 | `no_work_item`, `no_delivered_verification`, `work_item_not_delivered` (item) | `deliver_work_item` |
+| `epic_tracking_history_unavailable` (item) | `person_decides`: this item predates delivery history, so it can't be confirmed as epic tracking only |
 | `no_merged_delivery_pull_request`, `pull_request_outside_repository` (item) | `record_delivery_pull_requests`: the item's reported stage |
 | `unmerged_pull_request` (item, numbers) | `wait_for_pull_requests` |
 | `stale_pull_request`, `delivery_merge_unconfirmed` (item, numbers) | `request_again` |
@@ -758,15 +774,48 @@ still covers a stale boundary, another repository, an issue outside the scope, a
 operation the boundary does not delegate (whose `deliveryFailure` reads `outside_boundary`, with no
 gaps), and an admission bound to another boundary revision.
 
-**A timeline-only reference keeps blocking.** The runner relates an open pull request to the issue
-by closing reference, by a mention in its title or body, or by GitHub's `cross-referenced`
-timeline event. GitHub keeps that event after the mention is edited out, so a sibling PR that no
-longer mentions the issue and has no closing reference still blocks delegated closure until it
-merges or closes. This is deliberate: the timeline event is the only record the forge keeps of
-the relation, the snapshot does not carry the PR's body to re-check, and a body can be edited back
-at any moment. Treating an edited-out mention as unrelated would let an agent's edit remove a
-proof condition. The gap names each such PR and says it blocks until it merges or closes; the
-person-owned route stays available meanwhile.
+**Closure relatedness uses closing references and campaign history (#4403).** On runner protocol
+360+, the server supplies append-only campaign PR identities. Every open campaign PR remains a
+gap, even without an issue mention. An outside PR is related only when its forge closing references
+include the issue. An unreadable closing-reference connection counts that PR as related; incomplete
+or unreadable campaign history counts every open PR as related. A bare outside mention or retained
+timeline event is not a gap when both facts are known. Older peers retain the conservative mention
+and timeline rule.
+
+An existing campaign whose items predate append-only PR history remains in this conservative mode:
+current stages cannot prove that a cleared PR was never part of the campaign. This can retain a
+person-owned closure and bind its approval to all open PRs in the repository. The explicit human
+approval still executes if those bindings remain unchanged. Falling back to mention matching would
+allow a campaign PR with erased history and no mention to be incorrectly excluded.
+
+Execution reads current campaign identities and forge closing references again using the same
+predicate. New closed PR identities do not require reapproval; a newly related open PR does. The
+approved snapshot remains immutable. Root and Location executions with this context use the existing
+prepare/commit fence: after the forge read, the server rechecks scope, policy, authority, child work,
+delivery and the dispatched campaign identities before allowing a write. A concurrent context
+change refuses; no close or comment precedes the durable attempt fence.
+
+**Epic tracking work uses server facts (#4403).** A completed epic without a fixed-by plan can be
+proven by its in-scope members, all closed as completed and freshly read on the forge. Its own items
+still need delivery proof unless the ledger proves they are tracking work: no open attempts,
+delivered attempts, verifications, deliveries, PRs or recorded delivery-stage activity. Ended
+tracking attempts alone do not disqualify an item. Titles prove nothing. Sticky activity and PR
+history prevent cleared stages from qualifying; incomplete migrated history retains the ordinary
+proof for all pre-history work, even without attempts: root-reported delivery stages or PRs could
+have been cleared before upgrade. Campaign Status item states, counts, recovery and closure gaps use the
+same predicate and the verified member-proven closure receipt. The old placeholder rule required
+zero attempts, so it excluded tracking items whose tracking attempts had already ended.
+
+An approved closure's issue-specific child digest preserves its binding when the child moves to
+unrelated recorded work. New issue work, newly bound children and unconsumed issue-bound decisions
+still invalidate it. Issue attempt identities remain bound even when a newly joined child ends
+before execution, including when no child was live at approval. Prompt identities are captured at attempt boundaries: issue prompts admitted
+before reassignment remain bound, while later prompts on the unrelated attempt do not. A prompt
+in an unassigned interval cannot be attributed away from the issue. Missing boundary history or
+uncertain attribution retains strict assignment binding.
+Approved root notifications on protocol 360+ can promote the same durable queued command through
+the existing steering lane at a safe tool boundary. Rejection retains queued delivery; uncertain
+provider delivery is not replayed. Older runners keep queued continuation delivery.
 
 ### Decision Model Checks on Follow-Ups and Closures (#4104)
 
@@ -776,7 +825,19 @@ admitted the request, never reads its text any other way, and may only refuse.
 
 - **Follow-up relatedness** (`follow_up_relatedness`). After a bounded publication passes its
   structural floor (an accepted recommendation, origins in scope, capacity, a safe payload), the
-  model reads the owner's own words, what their grant covers, the origin work and the follow-up.
+  server first checks specific GitHub Actions job URLs (`/actions/runs/RUN/job/JOB`) in the sanitized
+  payload (runner v351+). The exact job must point to a failed check run; the sanitized title or
+  body must contain the check's forge-read name verbatim. Cancelled, skipped or passing evidence
+  does not qualify. A verified
+  failed merge group or required check of the origin item's recorded PR, on a head admitted for
+  its child through a valid completed review session or consumed merge gate, admits relatedness without a model
+  call. The admission records `failed_campaign_run` and the PR/head/run/job/check id and name; otherwise it records
+  `decision_model` when admitted. Text alone, another PR, a passing run, unreadable evidence and
+  older runners keep the ordinary check. All structural and publication floors still apply.
+  One refusal is not a precedent for deferring other follow-ups: evaluate each independently.
+  The server proves the payload names a real failing check, not causality. The Orchestrator's
+  accept/adjudicate step and exact-payload publication review remain the semantic gate.
+  The ordinary model reads the owner's own words, what their grant covers, the origin work and the follow-up.
   - `related`: the publication proceeds as before.
   - `unrelated`: it is refused back to the requester as the correctable `unrelated_follow_up` (a 409,
     nothing created), with the model's reason appended to the fixed sentence.
@@ -891,5 +952,5 @@ The server derives the cause, explains it in plain words and states any Maximum 
 Keep published follow-up lineage: only server-verified consumed payloads settle their reserved slots
 on approval, so Maximum Issues counts the issue once. Denial changes nothing. Fixable errors
 (for example follow_up_not_single, publication_not_consumed, publication_already_admitted,
-payload_mismatch and epic_members_unverified) remain refusals; correct them and retry.
+payload_title_mismatch, payload_body_mismatch, payload_labels_mismatch and epic_members_unverified) remain refusals; correct them and retry. payload_read_failed means the published issue could not be read and verified; retry the read. Only trailing body whitespace is ignored; titles and labels stay exact. Older peers may report the generic payload_mismatch refusal.
 Never supply an owner-review cause or a settled publication yourself.

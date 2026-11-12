@@ -7,7 +7,7 @@ import { once } from "node:events";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { discoverNodeTests, nodeTestInventory, planNodeTests, profile, shardNodeTests, NODE_TEST_GLOBS } from "./node-test-plan.mjs";
+import { discoverNodeTests, nodeTestInventory, planNodeTests, profile, schedulingProfile, shardNodeTests, NODE_TEST_GLOBS } from "./node-test-plan.mjs";
 import { parseTiming } from "./ci-timing.mjs";
 
 test("partition union equals independent root discovery with no overlap or lost new files", async (t) => {
@@ -42,7 +42,7 @@ test("partition union equals independent root discovery with no overlap or lost 
 test("the largest measured costs run first without changing membership or worker count", async () => {
   const files = await discoverNodeTests();
   const ordered = planNodeTests(files);
-  assert.deepEqual(ordered.slice(0, profile.slowestFiles.length), profile.slowestFiles.map(row => row.file));
+  assert.deepEqual(ordered.slice(0, schedulingProfile.slowestFiles.length), schedulingProfile.slowestFiles.map(row => row.file));
   assert.deepEqual(ordered.sort(), files);
   assert.equal(new Set(profile.fastFiles).size, profile.fastFiles.length);
   for (const file of profile.fastFiles) assert.ok(files.includes(file), `stale fast-file entry: ${file}`);
@@ -61,11 +61,28 @@ test("CI shards partition the planned suite exactly and spread the measured long
     assert.ok(Math.max(...sizes) - Math.min(...sizes) <= 1, `${suite} ${total}: file counts must stay balanced`);
   }
   // Dealt back and forth, the measured files of each round of 2n alternate direction.
-  const measured = profile.slowestFiles.map((row) => row.file);
+  const measured = schedulingProfile.slowestFiles.map((row) => row.file);
   assert.deepEqual(shardNodeTests(measured, "1/3"), measured.filter((_, i) => [0, 5].includes(i % 6)));
   assert.deepEqual(shardNodeTests(measured, "3/3"), measured.filter((_, i) => [2, 3].includes(i % 6)));
   for (const shard of [undefined, "", "0/3", "4/3", "1/0", "1", "-1/3", "1/3/3", "a/3", "01/3"])
     assert.throws(() => shardNodeTests(measured, shard), /Invalid Node test shard/, String(shard));
+});
+
+test("refreshed CI costs spread the observed slow files across four shards (#4459)", async () => {
+  const files = await discoverNodeTests();
+  const costs = new Map(schedulingProfile.slowestFiles.map(row => [row.file, row.durationMs]));
+  assert.equal(costs.size, schedulingProfile.slowestFiles.length);
+  for (const [file, cost] of costs) {
+    assert.ok(files.includes(file), `stale scheduling entry: ${file}`);
+    assert.ok(Number.isFinite(cost) && cost > 0, file);
+  }
+  const loads = (plan, total) => Array.from({ length: total }, (_, i) => shardNodeTests(plan, `${i + 1}/${total}`)
+    .reduce((sum, file) => sum + (costs.get(file) ?? 0), 0));
+  const oldCosts = new Map(profile.slowestFiles.map(row => [row.file, row.durationMs]));
+  const previous = [...files].sort((a, b) => (oldCosts.get(b) ?? 0) - (oldCosts.get(a) ?? 0) || a.localeCompare(b, "en"));
+  const before = loads(previous, 3), after = loads(planNodeTests(files), 4);
+  assert.ok(Math.max(...after) - Math.min(...after) < 200_000, `measured load imbalance: ${after}`);
+  assert.ok(Math.max(...after) < Math.max(...before) * 0.85, `expected improvement over ${before}`);
 });
 
 const runner = pathToFileURL(resolve("scripts/test-node.mjs")).href;

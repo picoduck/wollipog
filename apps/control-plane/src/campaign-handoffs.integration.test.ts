@@ -55,6 +55,139 @@ function fixture(completion: "retain" | "stop_and_archive" = "retain") {
 
 type Fixture = ReturnType<typeof fixture>;
 
+for (const later of ["none", "notice", "prompt", "unknown_notice", "assignment", "report", "no_report"] as const) {
+  test(`failed child report finality: ${later} (#4400)`, async () => {
+    const h = fixture();
+    try {
+      assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "child" }).ok);
+      const seq = later === "no_report" ? 1 : h.report("child");
+      if (later === "notice") {
+        // Server staging, not a payload flag or a recognizable notice string, establishes origin.
+        h.db.stageRestartNotice({ occurrenceIds: [], command: { commandId: "notice", sessionId: "child", runnerId: "r",
+          payloadJson: "{}", payloadSha256: "test", now: Date.now(), expiresAt: Date.now() + 1000 } });
+      }
+      if (["notice", "prompt", "unknown_notice"].includes(later)) h.db.appendEvent("child", {
+        kind: "user_message", text: "Identical notice-looking text", commandId: later === "notice" ? "notice" : "unknown",
+      }, Date.now());
+      if (later === "report") h.report("child", "A later completed report.");
+      if (later === "assignment") assert.ok(h.svc.assignCampaignWorkItem("root", {
+        workItemId: h.advisory, childSessionId: "child",
+      }).ok);
+      h.db.updateSessionStatus("child", "failed", Date.now());
+      const acceptable = later === "none" || later === "notice";
+      const verify = h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: seq, followUpsAccounted: true });
+      assert.equal(verify.ok, acceptable, verify.error ?? "verification result");
+      assert.equal(h.db.campaignChildReportVerified("root", "child"), acceptable);
+      const record = () => h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery,
+        report: { childSessionId: "child", reportEventSeq: seq } });
+      if (!acceptable && later !== "assignment") assert.equal((await record()).ok, false);
+      if (later !== "assignment") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.delivery, endAttempt: { reason: "failed" } }).ok);
+      const recorded = await record();
+      assert.equal(recorded.ok, acceptable || later === "assignment", recorded.error ?? "delivery result");
+      assert.equal(h.db.campaignWorkLedger.detail("root", h.delivery, Date.now())!.primaryState === "delivered", acceptable || later === "assignment");
+    } finally { h.db.close(); }
+  });
+}
+
+test("a failed child's open attempt can record delivery from its standing report (#4400)", async () => {
+  const h = fixture();
+  try {
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "child" }).ok);
+    const seq = h.report("child");
+    h.db.updateSessionStatus("child", "failed", Date.now());
+    const result = await h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery,
+      report: { childSessionId: "child", reportEventSeq: seq } });
+    assert.ok(result.ok, result.error ?? "delivery refused");
+    assert.equal(result.data!.item.primaryState, "delivered");
+  } finally { h.db.close(); }
+});
+
+for (const createdAt of [99, 201]) for (const deliveredBeforeReport of [false, true]) test(`failed report uses prompt event order, command time=${createdAt}, prior delivery=${deliveredBeforeReport} (#4400)`, () => {
+  const h = fixture();
+  try {
+    // Clock skew must not establish ordering between a CP command and a runner report.
+    const send = () => {
+      h.db.stageSessionPromptCommand({ commandId: "real-prompt", sessionId: "child", runnerId: "r",
+        payloadJson: "{}", payloadSha256: "test", now: createdAt, expiresAt: Date.now() + 200_000 });
+      h.db.markSessionPromptCommandSent("real-prompt", "sent-request", createdAt + 1, Date.now() + 200_000);
+    };
+    if (deliveredBeforeReport) {
+      send();
+      h.db.appendEvent("child", { kind: "user_message", text: "Real work", commandId: "real-prompt" }, 100);
+    }
+    const seq = h.db.appendEvent("child", { kind: "agent_message", final: true, text: "Completed work" }, 101).seq;
+    if (!deliveredBeforeReport) send();
+    h.db.updateSessionStatus("child", "idle", 102);
+    assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: seq, followUpsAccounted: true }).ok);
+    h.db.updateSessionStatus("child", "failed", 103);
+    assert.equal(h.db.durableFinalReportSeq("child"), deliveredBeforeReport ? seq : null);
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), deliveredBeforeReport);
+    assert.equal(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: seq,
+      followUpsAccounted: true }).ok, deliveredBeforeReport);
+  } finally { h.db.close(); }
+});
+
+for (const ordering of ["sent", "retried_later", "queued"] as const) test(`uncertain command awaiting its receipt: ${ordering} (#4400)`, () => {
+  const h = fixture();
+  try {
+    h.db.stageSessionPromptCommand({ commandId: "receipt", sessionId: "child", runnerId: "r",
+      payloadJson: "{}", payloadSha256: "test", now: 1000, expiresAt: Date.now() + 200_000 });
+    h.db.markSessionPromptCommandSent("receipt", "first", 1001, Date.now() + 200_000);
+    if (ordering === "queued") h.db.recordSessionPromptCommandReceipt({ commandId: "receipt", sessionId: "child",
+      runnerId: "r", state: "queued", revision: 1, now: 1002 });
+    const seq = h.report("child");
+    if (ordering === "retried_later") h.db.markSessionPromptCommandSent("receipt", "retry", 1002, Date.now() + 200_000);
+    h.db.updateSessionStatus("child", "idle", Date.now());
+    assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: seq, followUpsAccounted: true }).ok);
+    h.db.updateSessionStatus("child", "failed", Date.now());
+    assert.equal(h.db.durableFinalReportSeq("child"), null);
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
+  } finally { h.db.close(); }
+});
+
+for (const dirty of [false, true]) test(`successor delivery settles failed child, preserved worktree=${dirty} (#4400)`, () => {
+  const h = fixture("stop_and_archive");
+  try {
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "child" }).ok);
+    h.db.updateSessionStatus("child", "failed", Date.now());
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.delivery, endAttempt: { reason: "failed" } }).ok);
+    if (dirty) h.db.raw().prepare("UPDATE sessions SET worktree_path=? WHERE id='child'").run("/preserved/dirty");
+    assert.equal(h.db.campaignChildFailureSuperseded("root", "child"), false, "failure never proves delivery");
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "other" }).ok);
+    h.db.updateSessionStatus("other", "completed", Date.now());
+    const verified = h.svc.verifyCampaignChild("root", { childSessionId: "other", reportEventSeq: h.report("other"),
+      followUpsAccounted: true, workItem: { id: h.delivery, outcome: "delivered" } });
+    assert.ok(verified.ok, verified.error ?? "verification refused");
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), false, "no invented report verification");
+    assert.equal(h.db.campaignChildFailureSuperseded("root", "child"), true);
+    assert.ok(handOff(h, h.advisory, "human").ok);
+    h.db.updateSessionStatus("root", "idle", Date.now());
+    assert.equal(h.db.campaignProjection("root")!.status, "complete_needs_cleanup");
+    assert.equal(h.db.campaignProjection("root")!.children.blocked, 0);
+    if (dirty) assert.equal(h.db.campaignProjection("root")!.cleanupWorktrees?.[0]?.path, "/preserved/dirty");
+  } finally { h.db.close(); }
+});
+
+test("failed at creation with no report does not hold an otherwise completed campaign (#4400)", () => {
+  const h = fixture();
+  try {
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "child" }).ok);
+    h.db.updateSessionStatus("child", "failed", Date.now());
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.delivery, endAttempt: { reason: "failed" } }).ok);
+    assert.ok(h.svc.setArchived("child", true).ok);
+    for (const workItemId of [h.delivery, h.advisory]) {
+      assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId, childSessionId: "other" }).ok);
+      h.db.updateSessionStatus("other", "idle", Date.now());
+      const result = h.svc.verifyCampaignChild("root", { childSessionId: "other", reportEventSeq: h.report("other"),
+        followUpsAccounted: true, workItem: { id: workItemId, outcome: "delivered" } });
+      assert.ok(result.ok, result.error ?? "verification refused");
+    }
+    h.db.updateSessionStatus("root", "idle", Date.now());
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
+    assert.equal(h.db.campaignProjection("root")!.status, "verified_complete");
+  } finally { h.db.close(); }
+});
+
 /** Both children report and are verified; `child` delivers `delivery` through its open attempt. */
 function finishChildren(h: Fixture, completion: "retain" | "stop_and_archive" = "retain") {
   assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "child" }).ok);
@@ -229,6 +362,35 @@ function reusedChild() {
   return { ...h, draftReport, firstReport, laterReport };
 }
 
+for (const terminal of ["stopped", "failed"] as const) test(`closed-attempt delivery survives later ${terminal} status (#4400)`, async () => {
+  const h = reusedChild();
+  try {
+    if (terminal === "stopped") h.db.updateSessionStatus("child", "stopped", Date.now(), { cause: "requested" });
+    else h.db.updateSessionStatus("child", "failed", Date.now());
+    const result = await h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery,
+      report: { childSessionId: "child", reportEventSeq: h.firstReport } });
+    assert.ok(result.ok, result.error ?? "closed-attempt delivery refused");
+    assert.equal(result.data!.item.primaryState, "delivered");
+  } finally { h.db.close(); }
+});
+
+test("a work-carrying review continuation still supersedes a verified report (#4400)", () => {
+  const h = fixture();
+  try {
+    const seq = h.report("child");
+    h.db.updateSessionStatus("child", "idle", Date.now());
+    assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: seq, followUpsAccounted: true }).ok);
+    h.db.stageReviewContinuation({ reviewSessionIds: [], command: { commandId: "review", sessionId: "child", runnerId: "r",
+      payloadJson: "{}", payloadSha256: "test", now: Date.now(), expiresAt: Date.now() + 1000 } });
+    const message = { kind: "user_message" as const, text: "Handle the review", commandId: "review" };
+    h.db.appendEvent("child", message, Date.now());
+    h.db.invalidateCampaignReportsForLiveEvent("child", message, Date.now());
+    h.db.updateSessionStatus("child", "failed", Date.now());
+    assert.equal(h.db.durableFinalReportSeq("child"), null);
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
+  } finally { h.db.close(); }
+});
+
 test("the Orchestrator records delivery after reuse from the child's exact report inside the reassigned attempt", async () => {
   const h = reusedChild();
   try {
@@ -332,7 +494,7 @@ test("a delivery with an open attempt closes it, and another session still worki
     const report = h.report("child");
     const working = await h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery,
       report: { childSessionId: "child", reportEventSeq: report } });
-    assert.match(working.error ?? "", /still working on this item/u);
+    assert.match(working.error ?? "", /child is running/u);
     h.db.updateSessionStatus("child", "idle", Date.now());
     const recorded = await h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery,
       report: { childSessionId: "child", reportEventSeq: report } });

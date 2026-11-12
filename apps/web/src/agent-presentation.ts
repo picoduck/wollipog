@@ -5,6 +5,7 @@ import {
   type AgentDefinition,
   type AgentDriverKind,
   type AgentHarnessIdentity,
+  type AgentModel,
   type ModelResolutionDrift,
   type OrchestratorHarnessCapability,
 } from "@wollipog/protocol";
@@ -71,6 +72,20 @@ export function modelDriftText(drift: ModelResolutionDrift): string {
 export function pinnedModelChoices(drift: ModelResolutionDrift): ModelResolutionDrift["pinned"] {
   const seen = new Set<string>();
   return drift.pinned.filter((choice) => !seen.has(choice.displayName) && Boolean(seen.add(choice.displayName)));
+}
+
+/** Distinguish colliding picker names without changing provider names or stored model IDs. */
+export function modelOptionLabel(
+  model: Pick<AgentModel, "id" | "displayName">,
+  options: Iterable<Pick<AgentModel, "id" | "displayName">>,
+): string {
+  const name = model.displayName?.trim() || model.id;
+  for (const other of options) {
+    if (other.id !== model.id && (other.displayName?.trim() || other.id) === name) {
+      return `${name} (${model.id})`;
+    }
+  }
+  return name;
 }
 
 /** Normalize only names emitted by earlier Wollipog onboarding, preserving custom agent names. */
@@ -179,6 +194,15 @@ function agentNeedsUpdate(agent: AgentDefinition): boolean {
 function reportedAgentStatus(agent: AgentDefinition): Exclude<AgentStatus, "ready_when_last_seen"> {
   // The retired Codex exec driver (#3259) never runs, whatever an older runner reports for it.
   if (isRetiredCodexExec(agent)) return "unavailable";
+  if (agent.providerReadiness) {
+    if (agent.providerReadiness.installation === "missing") return "not_installed";
+    if (agent.providerReadiness.installation === "incompatible") return "update_required";
+    // Another explicitly permitted account may prove aggregate availability without changing the
+    // default. Its observation must not disable that installation or select another account.
+    if (agent.available === true) return "ready";
+    if (agent.providerReadiness.reason === "sign_in_required") return "sign_in_required";
+    return "unavailable";
+  }
   if (agent.claudeCode?.status === "unavailable" || agent.codexAppServer?.status === "unavailable" ||
       RUNNER_REASON_PATTERNS.notInstalled.test(agent.unavailableReason ?? "") ||
       (agent.registry?.installStatus === "manual-only" && agent.available !== true)) return "not_installed";

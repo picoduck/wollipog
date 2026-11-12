@@ -3,7 +3,7 @@ import ts from "typescript";
 import Fastify from "fastify";
 import { runInNewContext } from "node:vm";
 import { registerAuthGate } from "./http-auth.js";
-import { mutationAuthorizationError, PERSONAL_ORGANIZATION_ID, agentCredentialSessionTargetError,
+import { mutationAuthorizationError, humanGlobalResourceAuthorizationError, agentCredentialSessionTargetError,
   agentDelegationAuthorizationError } from "./identity.js";
 import { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
 import { createControlPlaneVideoReviewStore } from "./video-evidence-artifacts.js";
@@ -1072,9 +1072,10 @@ test("CR2 Reproduction F4 real Fastify gate denies unauthorized media and missin
   const fn = ast.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === "authorizeApiRequest");
   assert.ok(fn, "extract the actual frozen handler without importing hosting bootstrap");
   const js = ts.transpileModule(fn.getText(ast), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  // The extracted function has no module imports; supply the real shared authorization helper.
   const authorize = runInNewContext(js + "\nauthorizeApiRequest;", { db: h.db, svc: h.service,
     requestPrincipals: new WeakMap(), mutationAuthorizationError, mediaSessionMutationAllowed,
-    MEDIA_SESSION_PURPOSE_ERROR, PERSONAL_ORGANIZATION_ID, agentCredentialSessionTargetError, agentDelegationAuthorizationError });
+    MEDIA_SESSION_PURPOSE_ERROR, humanGlobalResourceAuthorizationError, agentCredentialSessionTargetError, agentDelegationAuthorizationError });
   const app = Fastify(); t.after(() => app.close());
   registerAuthGate(app, { authenticate: () => ({ id: "synthetic-device", name: "Code Fixture", principal: outsider }),
     isAllowedOrigin: () => true, authorize });

@@ -720,6 +720,59 @@ test("a late async dismissal cannot clear a reused provider request id", () => {
   }
 });
 
+test("#4403 only marked root closure notifications promote their existing durable receipt", async () => {
+  for (const mode of ["accepted", "rejected", "uncertain", "plain", "non_root", "guardrail"] as const) {
+    const { sm, sent, store, cleanup } = makeHarness(true);
+    const journalRoot = mkdtempSync(join(tmpdir(), "closure-wake-journal-"));
+    try {
+      const entry = (sm as any).active.get("s_perm");
+      const config = mode === "non_root" ? {} : { permissionMode: "orchestrator" as const };
+      store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex", status: "running", config });
+      entry.activeTurnId = "root-turn";
+      entry.activeTurnConfig = config;
+      entry.providerReady = true;
+      entry.context = { kind: "native" };
+      entry.client.activeSteeringTurnId = () => "provider-turn";
+      let calls = 0;
+      entry.client.steer = async () => {
+        calls++;
+        return { outcome: mode === "rejected" ? "rejected" : mode === "uncertain" ? "uncertain" : "accepted", providerTurnId: "provider-turn" };
+      };
+      const activeOwner = { commandId: "active-root-turn" };
+      entry.currentDurable = activeOwner;
+      const command = { type: "prompt_session" as const, sessionId: "s_perm", text: "Exact closure approved",
+        ...(mode === "plain" ? {} : { issueClosureResume: true as const }) };
+      const journal = new DurableCommandStore(journalRoot, { ownerId: "owner", now: () => 1 });
+      const claim = journal.claim({ type: "durable_session_command", requestId: "receipt", commandId: "closure-notice",
+        executionId: "execution", expiresAt: 10_000, payloadDigest: durableCommandPayloadDigest(command), command });
+      assert.equal(claim.kind, "new");
+      if (claim.kind !== "new") throw Error("missing receipt");
+      const handle = claim.handle;
+      const lifecycle: DurableCommandLifecycle = { commandId: handle.commandId,
+        ...(handle.issueClosureResume ? { issueClosureResume: true } : {}),
+        queued: () => { handle.queued(); }, started: (seq) => { handle.started(seq); },
+        beginSteering: () => handle.beginSteering(), steeringRejected: () => { handle.steeringRejected(); },
+        completed: () => { handle.completed(); }, failed: (error, code) => { handle.failed(error, code); },
+        uncertain: (error) => { handle.uncertain(error); } };
+      assert.equal(sm.prompt("s_perm", command.text, [], undefined, undefined, lifecycle), true);
+      if (mode === "guardrail") entry.governanceTripped = true;
+      const request = { sessionId: "s_perm", turnId: "root-turn", submissionId: "promote-closure", promotePromptId: handle.commandId };
+      const result = await sm.steerSession(request);
+      const promoted = ["accepted", "rejected", "uncertain"].includes(mode);
+      assert.equal(calls, promoted ? 1 : 0, mode);
+      assert.equal(result.disposition, mode === "accepted" ? "accepted" : mode === "uncertain" ? "uncertain" : "rejected", mode);
+      assert.equal(handle.state, mode === "accepted" ? "completed" : mode === "uncertain" ? "uncertain" : "queued", mode);
+      assert.equal(entry.currentDurable, activeOwner, "the active turn keeps its receipt ownership");
+      assert.equal(entry.queue.length, mode === "accepted" || mode === "uncertain" ? 0 : 1, mode);
+      await sm.steerSession(request);
+      assert.equal(calls, promoted ? 1 : 0, "submission replay cannot re-deliver the notification");
+      const events = eventsOf(sent, "user_message") as Array<{ payload: { commandId?: string; deliveryIntent?: string } }>;
+      assert.equal(events.filter((event) => event.payload.commandId === handle.commandId && event.payload.deliveryIntent === "steer").length,
+        mode === "accepted" ? 1 : 0, mode);
+    } finally { cleanup(); rmSync(journalRoot, { recursive: true, force: true }); }
+  }
+});
+
 for (const automated of [false, true]) for (const outcome of ["accepted", "rejected", "uncertain", "cancelled", "restored", "discarded"] as const) {
   test(`a durable async answer uses steering and handles ${outcome} delivery without reopening${automated ? " during an automation-owned turn" : ""}`, async () => {
     const { sm, sent, store, cleanup } = makeHarness(true);

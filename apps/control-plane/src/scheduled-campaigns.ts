@@ -14,6 +14,9 @@ import { authorizeFullControl } from "./campaign-authority.js";
 import { inspectCampaignWorkspace } from "./project-location-inspection.js";
 import { evaluateUiEvidenceReviewClient } from "./ui-evidence-review.js";
 import type { PreStagedDeliveryOptions, ServiceResult, SessionsService } from "./sessions.js";
+import { AssistantRefusal } from "./assistant-connections.js";
+import { authorizeAssistantAutomation, scheduledAssistantOwner, auditAssistantAutomationOccurrence,
+  type AssistantAutomationOperation } from "./assistant-automation-authority.js";
 
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const text = (v: unknown, max: number): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= max && !v.includes("\0");
@@ -46,8 +49,9 @@ export function scheduledCampaignPrompt(prompt: string | undefined, campaign: Au
   ].filter(Boolean).join("\n\n");
 }
 
-/** Runtime authority comes from the schedule's sole authenticated human author and its immutable
- * execution snapshot. Each occurrence re-inspects the approved repository and uses the same
+/** Runtime authority comes from the sole authenticated human author or a still-authorized
+ * Assistant connection, bounded by its current owner and immutable execution snapshot.
+ * Each occurrence re-inspects the approved repository and uses the same
  * preparation, boundary derivation, budget admission and durable outbox as interactive campaigns. */
 export class ScheduledCampaignRuntime {
   constructor(private db: ControlPlaneDb, private hub: Hub, private sessions: SessionsService,
@@ -58,14 +62,18 @@ export class ScheduledCampaignRuntime {
     return userId && scope ? this.db.automationCreationHuman(userId, scope.organizationId) : null;
   }
 
-  validate(spec: AutomationSpec, actor: GovernanceActor): string | null {
+  validate(spec: AutomationSpec, actor: GovernanceActor, operation: AssistantAutomationOperation = "auto_create"): string | null {
     if (spec.action.kind !== "create_session" || !spec.action.request.campaign) return null;
     const request = spec.action.request;
     const targets = [{ runnerId: request.runnerId, workspaceId: request.workspaceId, agentId: request.agentId,
       projectId: request.projectId, projectLocationId: request.projectLocationId, installationBindings: spec.action.installationBindings },
       ...(spec.runnerPolicy.kind === "alternate" ? spec.runnerPolicy.targets : [])];
     for (const target of targets) {
-      const human = actor.kind === "human" ? this.human(actor.id, target.runnerId) : null;
+      let human = actor.kind === "human" ? this.human(actor.id, target.runnerId) : null;
+      if (actor.kind === "agent" && actor.id?.startsWith("asst_")) {
+        try { human = authorizeAssistantAutomation(this.db, actor.id, operation, spec).owner; }
+        catch (error) { if (error instanceof AssistantRefusal) return error.message; throw error; }
+      }
       if (!human) return "Scheduled campaigns require an active authenticated human owner";
       if (!this.db.canAccessRunner(human, target.runnerId) || !this.db.canAccessWorkspace(human, target.runnerId, target.workspaceId)) {
         return "The scheduled campaign target is outside its owner's access";
@@ -115,7 +123,15 @@ export class ScheduledCampaignRuntime {
   async launch(automation: AutomationSchedule, execution: AutomationExecution, target: AutomationRunnerTarget,
     delivery: PreStagedDeliveryOptions): Promise<ServiceResult<SessionView>> {
     if (automation.action.kind !== "create_session" || !automation.action.request.campaign) return fail("Campaign configuration is missing");
-    let human = this.human(this.db.automationSoleHumanAuthor(automation.automationId, true) ?? undefined, target.runnerId);
+    const assistantRefusal = (error: unknown) => {
+      if (!(error instanceof AssistantRefusal)) throw error;
+      auditAssistantAutomationOccurrence(this.db, automation.automationId, execution.executionId, "refused", error.message);
+      return fail(error.message, 403);
+    };
+    let assistant: ReturnType<typeof scheduledAssistantOwner>;
+    try { assistant = scheduledAssistantOwner(this.db, automation, execution.executionId); }
+    catch (error) { return assistantRefusal(error); }
+    let human = assistant?.owner ?? this.human(this.db.automationSoleHumanAuthor(automation.automationId, true) ?? undefined, target.runnerId);
     if (!human) return fail("The campaign schedule no longer has one active authorizing human; review and recreate the schedule");
     const { campaign, ...stored } = automation.action.request;
     const body: CreateSessionRequest = { ...stored, runnerId: target.runnerId, workspaceId: target.workspaceId,
@@ -132,6 +148,7 @@ export class ScheduledCampaignRuntime {
         return fail("Campaign recovery requires the retained launch command");
       }
       const plan = { runnerId: target.runnerId, sessionId: rootId, commands: delivery.commandSnapshots };
+      if (assistant) auditAssistantAutomationOccurrence(this.db, automation.automationId, execution.executionId, "authorized");
       delivery.stage(plan);
       delivery.activate(plan);
       return { ok: true, status: 200, data: existing };
@@ -148,11 +165,15 @@ export class ScheduledCampaignRuntime {
     // The definition can be edited, paused, deleted or lose its author during the inspection.
     const current = this.db.getAutomation(automation.automationId);
     if (!current?.enabled || current.revision !== execution.automationRevision || this.db.getAutomationExecution(execution.executionId)?.status !== "dispatching" ||
-        this.db.automationSoleHumanAuthor(automation.automationId, true) !== human.userId ||
+        (!assistant && this.db.automationSoleHumanAuthor(automation.automationId, true) !== human.userId) ||
         this.db.getWorkspacePath(target.runnerId, target.workspaceId) !== workspacePath) {
       return fail("The campaign schedule or target changed during launch; no campaign was started");
     }
-    human = this.human(human.userId, target.runnerId);
+    if (assistant) {
+      try { assistant = scheduledAssistantOwner(this.db, automation, execution.executionId); }
+      catch (error) { return assistantRefusal(error); }
+      human = assistant?.owner ?? null;
+    } else human = this.human(human.userId, target.runnerId);
     if (!human) return fail("The schedule's author is no longer authorized to launch campaigns");
     runner = this.db.listRunnersForPrincipal(human).find(r => r.runnerId === target.runnerId);
     if (!runner) return fail("Campaign target is unavailable");
@@ -171,7 +192,8 @@ export class ScheduledCampaignRuntime {
       concurrency: Math.min(launch.policy.behavior.maximumConcurrentChildren, campaign.fullControl?.budget?.concurrency ?? Infinity),
       acceptedFollowUps: campaign.fullControl?.budget?.acceptedFollowUps ?? (launch.policy.behavior.followUps === "execute_approved" ? 1 : 0) };
     const scheduled = { automationId: automation.automationId, executionId: execution.executionId, budget,
-      tasks: campaign.tasks };
+      tasks: campaign.tasks, ...(assistant ? {assistantAuthorization: assistant.authorization} : {}) };
+    if (assistant) auditAssistantAutomationOccurrence(this.db, automation.automationId, execution.executionId, "authorized");
     if (campaign.controlMode === "custom") {
       return this.sessions.createSession(body, delivery, ownerScope, false, false, false,
         { ...context, scheduledCampaign: scheduled });

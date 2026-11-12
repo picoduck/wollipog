@@ -71,7 +71,7 @@ build after every test had passed, and a cancelled job names no step. The work i
 
 - `checks` (**Typecheck & Bundles**) keeps typecheck, the Node engine boundaries, delegated
   containment and the bundles, about five minutes.
-- `unit` (**Unit Tests (1)**, **(2)**, **(3)**) runs one shard each of the same planned
+- `unit` (**Unit Tests (1)**, **(2)**, **(3)**, **(4)**) runs one shard each of the same planned
   suite. `scripts/node-test-plan.mjs` deals the cost-ordered plan back and forth across the
   shards, so every discovered file runs in exactly one shard and the measured long files
   spread evenly. Each shard installs the video decoder it needs; `fail-fast` is off.
@@ -83,15 +83,15 @@ a sharded `node-fast` selection; every PR runs full Node testing. The `unit` job
 `needs` as `checks`, and the aggregator requires `needs.unit.result` to be `success`: one
 failed, cancelled or skipped shard fails the required check under the name **Unit Tests**.
 Main-push validation reuses this workflow, so the rolling inventory, release
-certification, main health and the restoration verifier require all three shard jobs and
+certification, main health and the restoration verifier require all four shard jobs and
 their `Unit Tests` steps.
 
 Every `run:` step in these two jobs has its own `timeout-minutes`, and the job budget
 covers all of those bounds at once, both decoder install attempts included, plus five
 minutes for the pinned setup actions. A step that overruns therefore fails under its own
 name before the job budget can cancel the job. The **Unit Tests** step allows 18 minutes
-against about eleven expected; the jobs allow 50 and 35 minutes. To add a shard, extend
-the matrix list and the `/3` denominators together. The workflow contract test requires
+against about eleven expected with four shards ([timing evidence](ci-node-shards-2026-11-10.md)); the jobs allow 50 and 35 minutes. To add a shard, extend
+the matrix list and the `/4` denominators together. The workflow contract test requires
 them to agree, and pins each job's shape as it does the browser shards.
 
 Merge groups run the workflow file from the group's own merge commit, so a pull request
@@ -231,7 +231,7 @@ the newest `--runs` completed merge-group runs created after the switch-back eac
 prove full coverage on their exact attempt: the trusted workflow blobs; a successful
 queue run of `ci.yml`; the rolling full
 inventory (`Typecheck & Bundles` with every engine, containment and bundle step, the
-three `Unit Tests (n)` shards each with its `Unit Tests` step, all five browser shards and no extra leg, shard 1's production smoke,
+four `Unit Tests (n)` shards each with its `Unit Tests` step, all five browser shards and no extra leg, shard 1's production smoke,
 WebKit, the win32 change detection, the aggregator); the path-scoped win32 comparison
 succeeded or was skipped; and `Merge Group Gate` absent or skipped with no reduced-coverage
 record. A failing, in-progress, partial or gate-active run is a refusal, not a pass. The
@@ -283,6 +283,61 @@ which already used `!cancelled()`. The obsolete run and its required aggregator
 both concluded `cancelled`; its replacement started without manual cancellation.
 That is one observed check-conclusion outcome, not proof of every queued,
 same-head replacement, dependency-timeout, or cancellation interleaving.
+
+## Missing Required Aggregate
+
+**Means:** a completed CI attempt has no protected aggregate record, or the API evidence is incomplete.
+**First check:** collect the exact attempt's full job inventory, compare its check suite, and open the workflow run page's Annotations section.
+**Escalate to:** a repository operator, then GitHub Support for workflow-level internal errors or unexplained absence.
+
+Use the version-2 report (`--all-events --json`) when investigating presence and outcome.
+Its per-attempt `aggregation` field is independent of timestamps: `absent` means a terminal
+run with a complete inventory but no job of the protected name; `pending` distinguishes
+`not-created` on an active run from a recorded `job-waiting`. `running`, `passing`,
+`failing`, `cancelled` and `skipped` describe the recorded job. Incomplete listings,
+duplicate aggregate records, and unsupported statuses are `unmeasured`.
+Older exports can be recombined offline with `--input` to derive the field from retained metadata.
+Missing timing is not missing aggregation; the legacy `aggregatorNeverRan` timing counter
+alone cannot distinguish these cases. These reports are advisory and grant no merge authority.
+Absence describes the API records, not whether the job should have been admitted; check event
+and draft guards before treating an absent record as an incident.
+
+For an exact incident, substitute the public repository, numeric run/attempt and check-suite IDs:
+
+```sh
+gh api repos/OWNER/REPO/actions/runs/RUN/attempts/ATTEMPT
+gh api --paginate 'repos/OWNER/REPO/actions/runs/RUN/attempts/ATTEMPT/jobs?per_page=100'
+gh api repos/OWNER/REPO/check-suites/SUITE
+gh api --paginate 'repos/OWNER/REPO/check-suites/SUITE/check-runs?per_page=100'
+gh api --paginate 'repos/OWNER/REPO/check-runs/CHECK/annotations?per_page=100'
+gh api 'repos/OWNER/REPO/contents/.github/workflows/ci.yml?ref=TESTED_SHA'
+gh run view RUN --attempt ATTEMPT --repo OWNER/REPO
+```
+
+Retain run ID, attempt, event, tested SHA, workflow blob, conclusions, counts and queue-removal
+reason/time. Verify all pages and uniqueness against `total_count`; do not call a truncated
+listing absent. Check that the suite is for the same tested SHA. The check-suite endpoint lists
+current check records, so do not use it to attribute a historical attempt after reruns; correlate
+job IDs to the exact attempt. Inspect output/annotations on relevant checks and the run page
+for orchestration errors. The run page is a separate evidence source: workflow-level errors may
+be omitted from the jobs/check-run annotations APIs and from `gh run view`. In the November 9
+incident, only that page exposed GitHub's internal server error and correlation ID. Retain that
+ID for support; do not treat successful job annotations as proof that no workflow error exists.
+Sanitize before sharing; raw responses may contain runner and user identities.
+
+A recorded queue wait is a scheduling investigation under #2674; a failing work job needs its
+failure investigated first. A completed run without an aggregate cannot gain one by waiting.
+For a workflow internal server error or unexplained missing job, preserve the public run links,
+error/correlation ID when present, and workflow comparison for an operator to escalate to GitHub
+Support. A successful identical definition alone does not prove a GitHub outage; a reported internal
+error identifies a failure class without revealing its internal cause. See the
+[November 9 incident](ci-missing-aggregate-2026-11-09.md).
+
+Recovery requires the existing gates: recheck main health, PR head, review and required branch checks;
+obtain the applicable merge authorization before re-enqueueing after removal. A rerun also needs the
+normal operator authorization. Do not automatically retry, synthesize a passing status, bypass the queue,
+remove a required check, or expand timeout/capacity. Verify actual merge separately. Report diagnostic
+coverage separately from whether GitHub's underlying failure has been resolved.
 
 ## Safe Verification
 

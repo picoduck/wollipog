@@ -5,7 +5,7 @@
  * needs access to the root session; an Orchestrator agent may read only the campaign its own
  * credential resolves to; every other agent is refused. Reads never change the ledger revision.
  */
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type {
   CampaignCostSummary,
   CampaignCostValue,
@@ -28,6 +28,7 @@ import type { ControlPlaneDb } from "./db.js";
 import { decisionOccurrenceView } from "./decision-runtime.js";
 import { selectionProposalView } from "./scope-selection.js";
 import type { AuthPrincipal } from "./identity.js";
+import { OwnerManagement, type OwnerManagementInput, type OwnerManagementReply } from "./owner-management.js";
 
 /* ------------------------------ Cost visibility ------------------------------ */
 
@@ -136,20 +137,24 @@ function limitOf(query: Record<string, unknown>): { limit?: number } {
   return limit === undefined ? {} : { limit: /^\d{1,4}$/u.test(limit) ? Number(limit) : Number.NaN };
 }
 
-export function registerCampaignStatusRoutes(
-  app: FastifyInstance,
-  deps: {
-    db: ControlPlaneDb;
-    requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
-    /** Slice 8: read these pull requests now, subject to the rate limit; never rejects. */
-    refreshForge?(campaignId: string, refs: readonly CampaignPullRequestRef[]): Promise<void>;
-  },
-): void {
+export interface CampaignStatusDependencies {
+  db: ControlPlaneDb;
+  /** Slice 8: read these pull requests now, subject to the rate limit; never rejects. */
+  refreshForge?(campaignId: string, refs: readonly CampaignPullRequestRef[]): Promise<void>;
+}
+
+/** Shared non-HTTP projection and forge-read operations for both adapters. */
+export function createCampaignStatusManagement(deps: CampaignStatusDependencies): OwnerManagement<AuthPrincipal> {
   const { db } = deps;
+  const management = new OwnerManagement<AuthPrincipal>();
+  const app = {
+    get: (path: string, handler: Parameters<typeof management.define>[2]) => management.define("GET", path, handler),
+    post: (path: string, handler: Parameters<typeof management.define>[2]) => management.define("POST", path, handler),
+  };
 
   /** Resolve the root campaign for `:id` and authorize the reader, or send the refusal. */
-  const reader = (req: FastifyRequest, reply: FastifyReply, id: string): CampaignReader | null => {
-    const principal = deps.requestPrincipal(req);
+  const reader = (req: OwnerManagementInput<AuthPrincipal>, reply: OwnerManagementReply, id: string): CampaignReader | null => {
+    const principal = req.principal;
     if (!principal) {
       void reply.code(401).send({ error: "authentication required" });
       return null;
@@ -164,11 +169,11 @@ export function registerCampaignStatusRoutes(
         return null;
       }
     } else {
-      if (!db.canAccessSession(principal, id)) {
+      if (!db.canAccessSession(principal, id) || req.access && !req.access.session(id)) {
         void reply.code(404).send({ error: "session not found" });
         return null;
       }
-      if (rootId && !db.canAccessSession(principal, rootId)) {
+      if (rootId && (!db.canAccessSession(principal, rootId) || req.access && !req.access.session(rootId))) {
         void reply.code(403).send({ error: "access to the campaign's Orchestrator session is required" });
         return null;
       }
@@ -182,7 +187,7 @@ export function registerCampaignStatusRoutes(
       const target = sessionId ?? rootId;
       let result = visible.get(target);
       if (result === undefined) {
-        result = db.canAccessSession(principal, target);
+        result = db.canAccessSession(principal, target) && (!req.access || req.access.session(target));
         visible.set(target, result);
       }
       return result;
@@ -194,7 +199,7 @@ export function registerCampaignStatusRoutes(
       if (result === undefined) {
         // The agent branch above already limited an agent to its own campaign's Orchestrator.
         const runner = principal.kind === "agent" ? null : db.campaignForgeObservingRunner(rootId, repository);
-        result = principal.kind === "agent" || (runner !== null && db.canAccessRunner(principal, runner.runnerId));
+        result = principal.kind === "agent" || (runner !== null && db.canAccessRunner(principal, runner.runnerId) && (!req.access || req.access.runner(runner.runnerId)));
         forge.set(key, result);
       }
       return result;
@@ -202,7 +207,7 @@ export function registerCampaignStatusRoutes(
     const forgeFactVisible = (ref: CampaignPullRequestRef): boolean => {
       if (principal.kind === "agent") return true;
       const supplier = db.campaignForgeObservations.supplier(rootId, ref);
-      return supplier ? db.canAccessRunner(principal, supplier) : forgeVisible(ref.repository);
+      return supplier ? db.canAccessRunner(principal, supplier) && (!req.access || req.access.runner(supplier)) : forgeVisible(ref.repository);
     };
     return { principal, rootId, canSee, forgeVisible, forgeFactVisible };
   };
@@ -312,11 +317,15 @@ export function registerCampaignStatusRoutes(
     if (!before) return reply.code(404).send({ error: "work item not found in this campaign" });
     // A reader who may not see a repository's facts can't cause a read through its Location's login.
     const refs = (before.observed.pullRequests?.map((entry) => entry.ref) ?? []).filter((ref) => read.forgeVisible(ref.repository));
+    await req.recheck?.();
     if (refs.length > 0 && deps.refreshForge) await deps.refreshForge(read.rootId, refs);
-    const item = ledger.detail(read.rootId, itemId, Date.now());
+    await req.recheck?.();
+    const fresh = reader(req, reply, id);
+    if (!fresh) return reply;
+    const item = ledger.detail(fresh.rootId, itemId, Date.now(), fresh.canSee);
     const response: CampaignForgeRefreshResponse = {
       revision: ledger.revision(read.rootId),
-      pullRequests: item ? forgeFactsForPrincipal(item, read.forgeFactVisible).observed.pullRequests ?? [] : [],
+      pullRequests: item ? forgeFactsForPrincipal(item, fresh.forgeFactVisible).observed.pullRequests ?? [] : [],
     };
     return reply.send(response);
   });
@@ -337,4 +346,13 @@ export function registerCampaignStatusRoutes(
     if (!page.ok) return reply.code(page.status).send({ ...page.details, error: page.error });
     return reply.send(page.data);
   });
+  return management;
+}
+
+export function registerCampaignStatusRoutes(app: FastifyInstance, deps: CampaignStatusDependencies & {
+  requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
+}): OwnerManagement<AuthPrincipal> {
+  const management = createCampaignStatusManagement(deps);
+  management.registerHttp(app, deps.requestPrincipal, {status: 401, error: "authentication required"});
+  return management;
 }

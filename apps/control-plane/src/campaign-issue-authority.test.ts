@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { CAMPAIGN_FORGE_OBSERVATION, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL, type CampaignControl, type CampaignPublicationAdmissionFailure, type RunnerMetadata, type WorkflowDecisionView,
@@ -10,19 +13,20 @@ import { Hub } from "./hub.js";
 import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
-import { closureEvidence, closureDeliveryGaps, issueEvidenceDigest, publicationEvidence } from "./campaign-issue-authority.js";
+import { closureCampaignPullRequests, closureEvidence, closureDeliveryGaps, issueEvidenceDigest, publicationEvidence } from "./campaign-issue-authority.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import { healthyDecisionRuntime } from "./credential-screen-test-fixture.js";
+import { issueClosureActiveChildrenMatch } from "./github-issue-closure.js";
 
 /** A related open pull request as the runner reports it, without a closing reference. */
 const openPullRequest = (number: number) => ({ number, title: "Work", url: `https://github.com/team/repo/pull/${number}`, headSha: "b".repeat(40) });
 /** Each gap's code and work item, without its derived action and summary. */
 const gapNames = (gaps: IssueClosureDeliveryGap[] | null | undefined) => gaps?.map((gap) => ({ code: gap.code, workItemId: gap.workItemId }));
 
-function harness(full = true, maximum = 5, issues = [100]) {
-  const db = ControlPlaneDb.open(":memory:");
+function harness(full = true, maximum = 5, issues = [100], databasePath = ":memory:") {
+  const db = ControlPlaneDb.open(databasePath);
   const principal: HumanPrincipal = { ...db.localIdentityContext(), kind: "human", actorId: db.localIdentityContext().userId };
   const metadata: RunnerMetadata = { runnerId: "r", hostname: "test", os: "linux", version: "test",
     workspaces: [{ id: "w", name: "Repo", path: "/repos/test" }], agents: [{ id: "codex", name: "Codex", command: "codex", args: [], env: {},
@@ -42,6 +46,7 @@ function harness(full = true, maximum = 5, issues = [100]) {
     epicMembers: undefined as IssueClosureEpicMembers | undefined, closureMessages: [] as unknown[] };
   hub.requestFromRunner = async (_runner, requestId, message) => {
     if (message.type === "campaign_issue_scope") {
+      if (message.operation === "failed_run_inspect") throw new Error("Unexpected failure inspection");
       if (message.operation === "publication_inspect") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId,
         ok: state.publicationOk, repository: "team/repo", publicationDigest: issueEvidenceDigest({ sanitizedTitle: message.sanitizedTitle, sanitizedBody: message.sanitizedBody, labels: message.labels }),
         ...(state.subjectSearch ? { duplicateSearch: "subject" as const } : {}) };
@@ -51,11 +56,13 @@ function harness(full = true, maximum = 5, issues = [100]) {
     }
     if (message.type === "github_issue_closure") {
       state.closureMessages.push(message);
+      if (message.operation === "execute" && message.prepare) return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true, prepared: true };
       if (message.operation !== "inspect") { state.executes++; return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true,
         result: { outcome: "uncertain", completedAt: Date.now() } }; }
       return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true, inspection: { repository: "team/repo", issue: message.issue,
         title: "Issue", url: `https://github.com/team/repo/issues/${message.issue}`, state: "OPEN", forgeDigest: "a".repeat(64),
         openPullRequests: state.openPR === false ? [] : [openPullRequest(state.openPR === true ? 10 : state.openPR)],
+        ...(message.campaignPullRequests === undefined ? {} : { campaignPullRequests: message.campaignPullRequests }),
         ...(message.deliveryPullRequests === undefined ? {} : { delivery: state.delivery }),
         // A member read is bound into the digest, as the runner binds it.
         ...(message.epicMembers && state.epicMembers ? { epicMembers: state.epicMembers, forgeDigest: "b".repeat(64) } : {}) } };
@@ -77,6 +84,278 @@ function harness(full = true, maximum = 5, issues = [100]) {
   const item = page.data.items[0]!;
   return { db, svc, hub, metadata, principal, state, approve, proposal, item, logs };
 }
+
+test("#4403 campaign PR identities include other work, and incomplete ledger reads fail conservatively", () => {
+  const h = harness();
+  try {
+    assert.deepEqual(closureCampaignPullRequests(h.db, h.db.getSession("root")!, "team/repo"), []);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+      stage: { stage: "in_review", pullRequests: [{ repository: "team/repo", number: 77 }] } }).ok);
+    assert.deepEqual(closureCampaignPullRequests(h.db, h.db.getSession("root")!, "team/repo"), [77]);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id, stage: null }).ok);
+    assert.deepEqual(closureCampaignPullRequests(h.db, h.db.getSession("root")!, "team/repo"), [77], "clearing a stage retains campaign membership");
+    assert.deepEqual(closureCampaignPullRequests(h.db, h.db.getSession("root")!, "other/repo"), []);
+    h.db.campaignWorkLedger.detail = () => null;
+    assert.equal(closureCampaignPullRequests(h.db, h.db.getSession("root")!, "team/repo"), undefined);
+  } finally { h.db.close(); }
+});
+
+test("#4403 an upgraded campaign cannot exclude an outside PR when historical membership is unknown", async () => {
+  const h = harness(true, 5, [100, 101]);
+  try {
+    h.state.epicMembers = { readable: true, members: [{ number: 101, state: "completed" }] };
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (r, id, message, timeout) => {
+      const answer = await runner(r, id, message, timeout);
+      if (message.type === "github_issue_closure" && message.operation === "inspect" &&
+          answer.type === "github_issue_closure_result" && answer.inspection) {
+        // The PR has no mention or closing reference. Mirror the real runner's null rule:
+        // unreadable historical campaign membership cannot prove even this PR unrelated.
+        return { ...answer, inspection: { ...answer.inspection,
+          openPullRequests: message.campaignPullRequests === null ? [openPullRequest(99)] : [] } };
+      }
+      return answer;
+    };
+    const request = (requestId: string) => h.svc.requestGithubIssueClosure("root", { requestId, issue: 100,
+      reason: "completed", explanation: "Members verified closed", evidence: ["Forge member read"] });
+    const known = await request("known-campaign");
+    assert.ok(known.ok, known.error ?? "known campaign request");
+    assert.equal(known.data!.decision!.authority, "orchestrator");
+    assert.deepEqual(closureSnapshot(known.data!.decision!).campaignPullRequests, []);
+    // This is the marker the real database migration gives existing items (reopen tested below).
+    h.db.raw().prepare("INSERT INTO campaign_work_pr_history_legacy VALUES (?)").run(h.item.id);
+    const unknown = await request("legacy-campaign");
+    assert.ok(unknown.ok, unknown.error ?? "unknown campaign request");
+    const d = unknown.data!.decision!;
+    assert.equal(d.authority, "human", "unknown membership cannot remove an owner step");
+    assert.equal(closureSnapshot(d).campaignPullRequests, null);
+    assert.ok(closureSnapshot(d).deliveryGaps?.some((gap) => gap.code === "open_related_pull_requests"));
+    assert.equal((await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest)).ok, false,
+      "an unapproved human-owned closure cannot execute");
+    assert.equal(h.state.executes, 0);
+    assert.ok(h.approve(d).ok);
+    assert.ok((await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest)).ok,
+      "the unchanged explicit human approval remains executable");
+    assert.equal(h.state.executes, 1);
+  } finally { h.db.close(); }
+});
+
+test("#4403 a large planned campaign reads member-proven receipts once and skips ineligible tracking queries", (t) => {
+  const issues = Array.from({ length: 20 }, (_, index) => 100 + index);
+  const h = harness(false, 20, issues);
+  try {
+    const items = Array.from({ length: 499 }, (_, index) => ({ key: `planned-${index}`,
+      issue: { repository: "team/repo", number: issues[index % issues.length]! } }));
+    for (let offset = 0; offset < items.length; offset += 100) {
+      const plan = h.svc.recordCampaignPlan("root", { planComplete: true,
+        items: items.slice(offset, offset + 100) });
+      assert.ok(plan.ok, plan.error ?? "planned batch");
+    }
+    let receipts = 0, tracking = 0;
+    const read = h.db.memberProvenEpicClosures.bind(h.db);
+    const qualify = h.db.campaignWorkLedger.epicTrackingItem.bind(h.db.campaignWorkLedger);
+    h.db.memberProvenEpicClosures = (root) => { receipts++; return read(root); };
+    h.db.campaignWorkLedger.epicTrackingItem = (root, item) => { tracking++; return qualify(root, item); };
+    h.db.campaignWorkLedger.observedChanged("root", Date.now());
+    const started = performance.now();
+    const summary = h.db.campaignWorkLedger.summary("root", { campaignCreatedAt: 1, complete: false,
+      childSessionIds: ["child"], cleanupPending: 0 });
+    assert.equal(summary.counts.committed, 500);
+    assert.equal(summary.counts.delivered, 0);
+    assert.equal(receipts, 1, "receipt lookup is per projection, not per item");
+    assert.equal(tracking, 0, "ordinary planned issues without qualifying receipts need no tracking queries");
+    t.diagnostic(JSON.stringify({ plannedItems: 500, receiptReads: receipts, trackingReads: tracking, durationMs: performance.now() - started }));
+  } finally { h.db.close(); }
+});
+
+test("#4403 upgrading existing work retains unknown PR and delivery history across reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "closure-history-upgrade-"));
+  const path = join(dir, "test.db");
+  const h = harness(true, 5, [100], path);
+  const itemId = h.item.id;
+  let undispatchedItemId = "";
+  try {
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: itemId, childSessionId: "child" }).ok);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId,
+      stage: { stage: "implementing", pullRequests: [{ repository: "team/repo", number: 77 }] } }).ok);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId, stage: null,
+      endAttempt: { reason: "failed", note: "Ended old work" } }).ok);
+    const plan = h.svc.recordCampaignPlan("root", { planComplete: true,
+      items: [{ key: "undispatched-old-work", issue: { repository: "team/repo", number: 100 } }] });
+    assert.ok(plan.ok, plan.error ?? "undispatched item");
+    undispatchedItemId = plan.data!.items.find((item) => item.key === "undispatched-old-work")!.workItemId;
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: undispatchedItemId,
+      stage: { stage: "in_review", pullRequests: [{ repository: "team/repo", number: 78 }] } }).ok);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: undispatchedItemId, stage: null }).ok);
+    // Reproduce a pre-history schema, whose cleared stages cannot be reconstructed on upgrade.
+    h.db.raw().exec(`DROP TRIGGER campaign_work_delivery_stage_inserted;
+      DROP TRIGGER campaign_work_delivery_stage_updated;
+      DROP TRIGGER campaign_work_pr_stage_inserted;
+      DROP TRIGGER campaign_work_pr_stage_updated;
+      DROP TRIGGER campaign_work_pr_delivery_recorded;
+      DROP TABLE campaign_work_delivery_activity;
+      DROP TABLE campaign_work_pr_history;
+      DROP TABLE campaign_work_pr_history_legacy;
+      DROP TABLE campaign_work_pr_history_start;`);
+  } finally { h.db.close(); }
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    assert.equal(db.campaignWorkLedger.closurePullRequestHistory("root", "team/repo"), undefined);
+    assert.equal(db.campaignWorkLedger.epicTrackingItem("root", itemId), false,
+      "an ended legacy attempt cannot prove absence of delivery work");
+    assert.equal(db.campaignWorkLedger.epicTrackingItem("root", undispatchedItemId), false,
+      "zero attempts cannot prove the absence of erased delivery work or PRs before migration");
+    const svc = new SessionsService(db, new Hub(db), { info() {}, warn() {}, error() {} });
+    const added = svc.recordCampaignPlan("root", { planComplete: true,
+      items: [{ key: "fresh-tracking", issue: { repository: "team/repo", number: 100 } }] });
+    assert.ok(added.ok, added.error ?? "new tracking item");
+    const freshId = added.data!.items.find((item) => item.key === "fresh-tracking")!.workItemId;
+    assert.equal(db.campaignWorkLedger.epicTrackingItem("root", freshId), true);
+    db.close();
+    db = ControlPlaneDb.open(path);
+    assert.equal(db.campaignWorkLedger.epicTrackingItem("root", freshId), true,
+      "reopening does not misclassify post-migration items as legacy");
+    assert.equal(db.campaignWorkLedger.epicTrackingItem("root", itemId), false);
+    assert.equal(db.campaignWorkLedger.closurePullRequestHistory("root", "team/repo"), undefined);
+  } finally { db?.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("#4403 execution refreshes campaign context, retains the approved payload and fences inspection races", async () => {
+  for (const mode of ["closed_record", "unreadable", "during_checks", "downgraded"] as const) {
+    const h = harness(false);
+    try {
+      const result = await h.svc.requestGithubIssueClosure("root", { requestId: mode, issue: 100, reason: "completed",
+        explanation: "Claimed delivery", evidence: ["Report"] });
+      assert.ok(result.ok, result.error ?? "closure request");
+      const d = result.data!.decision!;
+      assert.deepEqual(closureSnapshot(d).campaignPullRequests, []);
+      assert.ok(h.approve(d).ok);
+      if (mode === "closed_record") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+        stage: { stage: "in_review", pullRequests: [{ repository: "team/repo", number: 77 }] } }).ok);
+      if (mode === "unreadable") h.db.campaignWorkLedger.detail = () => null;
+      if (mode === "downgraded") h.db.registerRunner(h.metadata, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.closureCampaignPullRequests - 1);
+      const runner = h.hub.requestFromRunner;
+      h.hub.requestFromRunner = async (r, id, message, timeout) => {
+        const answer = await runner(r, id, message, timeout);
+        if (message.type === "github_issue_closure" && message.operation === "execute" && mode === "during_checks") {
+          assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+            stage: { stage: "in_review", pullRequests: [{ repository: "team/repo", number: 77 }] } }).ok);
+        }
+        return answer;
+      };
+      const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+      if (mode === "downgraded") {
+        assert.equal(executed.ok, false);
+        assert.match(executed.error!, /requires a runner supporting fresh campaign PR context/u);
+        assert.equal(h.state.executes, 0);
+      } else {
+        assert.ok(executed.ok, executed.error ?? mode);
+        assert.equal(h.state.executes, mode === "during_checks" ? 0 : 1);
+        if (mode === "during_checks") assert.match(executed.data!.issueClosureResult?.refusal?.runnerError ?? "", /context changed during forge inspection/u);
+        const dispatch = h.state.closureMessages.find((raw) => (raw as { operation: string }).operation === "execute") as {
+          snapshot: { campaignPullRequests: number[] }; campaignPullRequests: number[] | null; prepare: boolean };
+        assert.deepEqual(dispatch.snapshot.campaignPullRequests, [], "approved payload remains unchanged");
+        assert.deepEqual(dispatch.campaignPullRequests, mode === "closed_record" ? [77] : mode === "unreadable" ? null : []);
+        assert.equal(dispatch.prepare, true);
+      }
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4403 an ended epic-tracking attempt is enough, but delivery work, PRs, open attempts and unknown history stay gaps", async () => {
+  for (const mode of ["tracking", "open", "delivery", "pull_request", "delivered_attempt", "legacy", "legacy_undispatched"] as const) {
+    const h = harness(true, 5, [100, 101]);
+    try {
+      h.state.epicMembers = { readable: true, members: [{ number: 101, state: "completed" }] };
+      if (mode !== "legacy_undispatched") assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.item.id, childSessionId: "child" }).ok);
+      if (mode === "delivery" || mode === "pull_request") {
+        assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id, title: "Close Epic Once Members Finish",
+          stage: { stage: "implementing", ...(mode === "pull_request" ? { pullRequests: [{ repository: "team/repo", number: 77 }] } : {}) } }).ok);
+        assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id, stage: null }).ok);
+      }
+      if (mode !== "open" && mode !== "legacy_undispatched") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+        endAttempt: { reason: "failed", note: "Tracking attempt ended" } }).ok);
+      if (mode === "delivered_attempt") h.db.raw().prepare("UPDATE campaign_work_attempts SET end_reason='delivered' WHERE work_item_id=?").run(h.item.id);
+      if (mode === "legacy" || mode === "legacy_undispatched") h.db.raw().prepare("INSERT INTO campaign_work_pr_history_legacy VALUES (?)").run(h.item.id);
+      const result = await h.svc.requestGithubIssueClosure("root", { requestId: `tracking-${mode}`, issue: 100, reason: "completed",
+        explanation: "Members verified closed", evidence: ["Forge member read"] });
+      assert.ok(result.ok, result.error ?? mode);
+      const decision = result.data!.decision!;
+      assert.equal(decision.authority, mode === "tracking" ? "orchestrator" : "human", mode);
+      const gaps = closureSnapshot(decision).deliveryGaps;
+      assert.equal(gaps === undefined, mode === "tracking", mode);
+      if (gaps) assert.ok(gaps.some((gap) => gap.workItemId === h.item.id), mode);
+      if (mode === "legacy" || mode === "legacy_undispatched") {
+        const gap = gaps?.find((gap) => gap.workItemId === h.item.id);
+        assert.equal(gap?.summary,
+          issueClosureDeliveryGap("epic_tracking_history_unavailable", { workItemId: h.item.id }).summary);
+        assert.equal(gap?.action, "person_decides");
+        assert.match(gap!.summary, /^This item predates delivery history, so it can't be confirmed as epic tracking only\./u);
+      }
+      assert.equal(h.db.campaignWorkLedger.epicTrackingItem("root", h.item.id), mode === "tracking", mode);
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4403 a bound child can leave for unrelated work, but new issue work, decisions, children and missing history refuse", async () => {
+  for (const mode of ["left", "issue_work", "issue_prompt", "unassigned_prompt", "decision", "joined", "joined_new_item_ended", "joined_without_active", "missing_history"] as const) {
+    const h = harness(false, 5, [100, 101]);
+    try {
+      h.db.appendEvent("child", { kind: "user_message", text: "Implement issue 100" }, Date.now());
+      assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.item.id, childSessionId: "child" }).ok);
+      const plan = h.svc.recordCampaignPlan("root", { planComplete: true,
+        items: [{ key: "other-issue", issue: { repository: "team/repo", number: 101 } }] });
+      assert.ok(plan.ok, plan.error ?? "plan");
+      const other = plan.data!.items.find((item) => item.key === "other-issue")!.workItemId;
+      if (mode === "joined_without_active") h.db.updateSessionStatus("child", "completed", Date.now());
+      const requested = await h.svc.requestGithubIssueClosure("root", { requestId: `reassignment-${mode}`, issue: 100, reason: "completed",
+        explanation: "Owner reviews exact work state", evidence: ["Report"] });
+      assert.ok(requested.ok, requested.error ?? mode);
+      const d = requested.data!.decision!;
+      assert.equal(d.authority, "human");
+      const before = closureSnapshot(d);
+      assert.ok(before.issueAttemptDigest);
+      if (mode !== "joined_without_active") assert.ok(before.activeChildren.find((child) => child.sessionId === "child")?.issueWorkDigest);
+      assert.ok(h.approve(d).ok);
+      if (mode === "issue_prompt") assert.ok(h.svc.prompt("child", "Change the implementation of issue 100").ok);
+      if (mode === "unassigned_prompt") {
+        assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+          endAttempt: { reason: "failed", note: "Ended before reassignment" } }).ok);
+        assert.ok(h.svc.prompt("child", "Continue earlier issue work").ok);
+      }
+      assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: other, childSessionId: "child" }).ok);
+      if (mode !== "joined_without_active") assert.ok(h.svc.prompt("child", "Implement issue 101").ok);
+      if (mode === "issue_work") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id, stage: { stage: "implementing" } }).ok);
+      if (mode === "decision") assert.ok(h.svc.createWorkflowDecision("child", { requestId: "new-issue-question", resourceKey: "new-issue-question",
+        resourceSnapshot: { category: "implementation_question", kind: "question", question: "Continue earlier issue work?", options: [] } }).ok);
+      if (mode === "joined" || mode === "joined_new_item_ended" || mode === "joined_without_active") {
+        h.db.createSession({ id: "joined-child", runnerId: "r", workspaceId: "w", agentId: "codex", title: "Joined", useWorktree: false,
+          driver: "codex-app-server", now: Date.now(), config: {}, parentSessionId: "root" });
+        let joinedItem = h.item.id;
+        if (mode !== "joined") {
+          const added = h.svc.recordCampaignPlan("root", { planComplete: true,
+            items: [{ key: "joined-new-item", issue: { repository: "team/repo", number: 100 } }] });
+          assert.ok(added.ok, added.error ?? mode);
+          joinedItem = added.data!.items.find((item) => item.key === "joined-new-item")!.workItemId;
+        }
+        assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: joinedItem, childSessionId: "joined-child" }).ok);
+        if (mode !== "joined") {
+          assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: joinedItem,
+            endAttempt: { reason: "failed", note: "New child ended before execution" } }).ok);
+          h.db.updateSessionStatus("joined-child", "completed", Date.now());
+        }
+      }
+      if (mode === "missing_history") h.db.raw().prepare("INSERT INTO campaign_work_pr_history_legacy VALUES (?)").run(h.item.id);
+      const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+      assert.equal(executed.ok, mode === "left", `${mode}: ${executed.error}`);
+      assert.equal(h.state.executes, mode === "left" ? 1 : 0, mode);
+      if (!executed.ok) assert.match(executed.error!, /active child work changed/u);
+      const legacy = { ...before, activeChildren: before.activeChildren.map(({ issueWorkDigest: _digest, ...child }) => child) };
+      assert.equal(issueClosureActiveChildrenMatch(h.db, "root", legacy), false, "old approvals keep their old assignment check");
+    } finally { h.db.close(); }
+  }
+});
 
 test("#4164 real runner inspection admits a merge-queue squash delivery and rejects invalid merges", async () => {
   const { inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } = await import("../../runner/src/github-issue-closure.js");
@@ -374,7 +653,8 @@ test("#4060 an in-scope epic's completed closure is Orchestrator-owned from its 
     assert.equal(current.authority, "orchestrator");
     assert.ok(h.approve(current).ok);
     assert.ok((await h.svc.executeGithubIssueClosure("root", current.occurrenceId, current.resourceDigest)).ok);
-    const executed = h.state.closureMessages.at(-1) as { operation: string; snapshot: { epicMembers?: IssueClosureEpicMembers } };
+    const executed = [...h.state.closureMessages].reverse().find((message) => (message as { operation: string }).operation === "execute") as {
+      operation: string; snapshot: { epicMembers?: IssueClosureEpicMembers } };
     assert.equal(executed.operation, "execute");
     assert.deepEqual(executed.snapshot.epicMembers, h.state.epicMembers);
   } finally { h.db.close(); }
@@ -1917,6 +2197,83 @@ function promptedClosure(requestId: string) {
   } };
 }
 
+test("#4403 age alone preserves a human or delegated closure approval", async () => {
+  for (const full of [false, true]) {
+    const h = harness(full);
+    try {
+      const c = await h.svc.requestGithubIssueClosure("root", { requestId: "aged-approval", issue: 100, reason: "completed",
+        explanation: "Delivery reported", evidence: ["Report"] });
+      assert.ok(c.ok, c.error ?? "closure request");
+      const d = c.data!.decision!;
+      assert.equal(d.authority, "human", "unproven delivery stays the person's even in Full Control");
+      assert.ok(h.approve(d).ok);
+      h.db.raw().prepare("UPDATE workflow_decisions SET resolved_at=? WHERE occurrence_id=?")
+        .run(Date.now() - 2 * 60 * 60_000, d.occurrenceId);
+      const result = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+      assert.ok(result.ok, result.error ?? "closure execution");
+      assert.equal(h.state.executes, 1);
+    } finally { h.db.close(); }
+  }
+  const { h, approved } = promptedClosure("aged-delegated-approval");
+  try {
+    const d = await approved();
+    h.db.raw().prepare("UPDATE workflow_decisions SET resolved_at=? WHERE occurrence_id=?")
+      .run(Date.now() - 2 * 60 * 60_000, d.occurrenceId);
+    const result = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.ok(result.ok, result.error ?? "closure execution");
+    assert.equal(h.state.executes, 1);
+  } finally { h.db.close(); }
+});
+
+test("#4403 stale approvals name the changed binding even after thirty minutes", async () => {
+  for (const binding of ["payload digest", "issue scope", "policy revision", "approval authority", "active child work"] as const) {
+    const h = harness(false);
+    try {
+      const c = await h.svc.requestGithubIssueClosure("root", { requestId: "stale-approval", issue: 100, reason: "completed",
+        explanation: "Delivery reported", evidence: ["Report"] });
+      assert.ok(c.ok, c.error ?? "closure request");
+      const d = c.data!.decision!;
+      assert.ok(h.approve(d).ok);
+      h.db.raw().prepare("UPDATE workflow_decisions SET resolved_at=? WHERE occurrence_id=?")
+        .run(Date.now() - 2 * 60 * 60_000, d.occurrenceId);
+      if (binding === "issue scope") h.db.raw().prepare("UPDATE workflow_decisions SET resource_snapshot=json_set(resource_snapshot,'$.scopeRevision',99) WHERE occurrence_id=?").run(d.occurrenceId);
+      if (binding === "policy revision") h.db.raw().prepare("UPDATE workflow_decisions SET policy_revision=999 WHERE occurrence_id=?").run(d.occurrenceId);
+      if (binding === "approval authority") h.db.raw().prepare("UPDATE workflow_decisions SET authority='orchestrator' WHERE occurrence_id=?").run(d.occurrenceId);
+      if (binding === "active child work") h.db.updateSessionStatus("child", "completed", Date.now());
+      const result = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, binding === "payload digest" ? "wrong" : d.resourceDigest);
+      assert.equal(result.ok, false);
+      assert.match(result.error!, new RegExp(`${binding} changed`, "u"));
+      assert.equal(h.state.executes, 0);
+      assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "revoked");
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4403 synchronization cannot hide a changed binding behind an old approval", async () => {
+  const h = harness(false);
+  try {
+    const c = await h.svc.requestGithubIssueClosure("root", { requestId: "sync-change", issue: 100, reason: "completed",
+      explanation: "Delivery reported", evidence: ["Report"] });
+    assert.ok(c.ok, c.error ?? "closure request");
+    const d = c.data!.decision!;
+    assert.ok(h.approve(d).ok);
+    h.db.raw().prepare("UPDATE workflow_decisions SET resolved_at=? WHERE occurrence_id=?")
+      .run(Date.now() - 2 * 60 * 60_000, d.occurrenceId);
+    const request = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (r, id, message, timeout) => {
+      const result = await request(r, id, message, timeout);
+      if (message.type === "campaign_issue_scope" && message.operation === "synchronize") {
+        h.db.updateSessionStatus("child", "completed", Date.now());
+      }
+      return result;
+    };
+    const result = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.equal(result.ok, false);
+    assert.match(result.error!, /active child work changed/u);
+    assert.equal(h.state.executes, 0);
+  } finally { h.db.close(); }
+});
+
 test("#3793 a prompt delivery retry between approval and execution keeps the closure", async () => {
   const { h, pending, approved } = promptedClosure("retried-prompt");
   try {
@@ -2021,6 +2378,50 @@ function steerable(h: ReturnType<typeof harness>) {
   };
   return steering;
 }
+
+test("#4403 an approval promotes its one durable notification mid-turn; fallback and uncertainty never duplicate it", async () => {
+  for (const mode of ["accepted", "rejected", "uncertain", "older", "guardrail", "turn_ended"] as const) {
+    const h = harness(false);
+    try {
+      const steering = steerable(h);
+      h.hub.activeTurnIdForSession = (id) => id === "root" && mode !== "turn_ended" ? "root-turn" : undefined;
+      if (mode === "older") h.db.registerRunner(h.metadata, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.closureApprovalSteering - 1);
+      const runner = h.hub.requestFromRunner;
+      h.hub.requestFromRunner = async (r, requestId, message, timeout) => {
+        const result = await runner(r, requestId, message, timeout);
+        if (message.type === "steer_session" && result.type === "steer_session_result" && (mode === "rejected" || mode === "uncertain")) {
+          return { ...result, disposition: mode, reason: mode === "uncertain" ? "transport_uncertain" : "unsupported_driver" };
+        }
+        return result;
+      };
+      const requested = await h.svc.requestGithubIssueClosure("root", { requestId: `wake-${mode}`, issue: 100, reason: "completed",
+        explanation: "Claimed delivery", evidence: ["Report"] });
+      assert.ok(requested.ok, requested.error ?? mode);
+      const d = requested.data!.decision!;
+      assert.equal(d.authority, "human");
+      assert.ok(h.approve(d).ok);
+      const q = h.db.getSession("root")!.pendingPrompts!.find((prompt) => prompt.text.includes(d.occurrenceId))!;
+      assert.ok(q, mode);
+      const payload = JSON.parse(h.db.getSessionPromptCommand(q.commandId)!.payloadJson);
+      assert.equal(payload.issueClosureResume, mode === "older" ? undefined : true);
+      if (mode === "guardrail") h.db.setPendingApproval("root", { requestId: "auth", kind: "authentication", title: "Authentication Required", options: [] });
+      const queued = { type: "durable_session_command_update" as const, commandId: q.commandId,
+        sessionId: "root", state: "queued" as const, revision: q.revision + 1 };
+      assert.ok(h.svc.onDurablePromptReceipt("r", queued));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const promoted = ["accepted", "rejected", "uncertain"].includes(mode);
+      assert.equal(steering.submissions.length, promoted ? 1 : 0, mode);
+      assert.equal(h.db.getSession("root")!.status, "running", "no interruption or replacement turn");
+      assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)!.status, "approved", "notification grants no action");
+      if (mode === "accepted" || mode === "uncertain") assert.ok(h.svc.onDurablePromptReceipt("r", {
+        ...queued, state: mode === "accepted" ? "completed" : "uncertain", revision: queued.revision + 1 }));
+      h.svc.onDurablePromptReceipt("r", queued);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(steering.submissions.length, promoted ? 1 : 0, "receipt retries cannot duplicate steering");
+      assert.equal(h.db.getSession("root")!.pendingPrompts?.length ?? 0, mode === "accepted" ? 0 : 1, mode);
+    } finally { h.db.close(); }
+  }
+});
 
 test("#3877 a prompt steered into a bound running child between approval and execution revokes the closure", async () => {
   const { h, prompts, approved } = promptedClosure("steered-prompt");
@@ -2456,9 +2857,31 @@ test("#2940 a person-approved publication names the failed condition: removed or
       return message.type === "campaign_issue_scope" && message.operation === "inspect" && message.publication && result.type === "campaign_issue_scope_result"
         ? { ...result, candidates: result.candidates?.map((c) => ({ ...c, title: "[Feature]: An edited title" })) } : result;
     };
-    assert.equal(refusalCode(await followUpScope(mismatch, "payload-mismatch", p.decision.occurrenceId)), "payload_mismatch");
+    assert.equal(refusalCode(await followUpScope(mismatch, "payload-mismatch", p.decision.occurrenceId)), "payload_title_mismatch");
     assert.equal(mismatch.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
   } finally { mismatch.db.close(); }
+});
+
+test("#4404 publication refusals distinguish fields and failed reads without echoing content", async () => {
+  for (const field of ["title", "body", "labels", undefined, "untrusted Private content"] as const) {
+    const h = harness(true, 3);
+    try {
+      const p = await humanApprovedPublication(h);
+      const runner = h.hub.requestFromRunner.bind(h.hub);
+      h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+        const result = await runner(runnerId, requestId, message, timeout);
+        return message.type === "campaign_issue_scope" && message.operation === "inspect" && message.publication && result.type === "campaign_issue_scope_result"
+          ? { ...result, ok: false, publicationFailure: field as "body", error: "Private issue content and token" } : result;
+      };
+      const refused = await followUpScope(h, "field-refusal", p.decision.occurrenceId);
+      const known = field === "title" || field === "body" || field === "labels";
+      assert.equal(refusalCode(refused), known ? `payload_${field}_mismatch` : "payload_read_failed");
+      assert.match(refused.error!, known ? new RegExp(field) : /could not be read/);
+      assert.doesNotMatch(JSON.stringify(refused), /Private|token|untrusted/);
+      assert.equal(h.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
+      assert.equal(pendingScopeRequests(h).length, 0);
+    } finally { h.db.close(); }
+  }
 });
 
 test("#2940 Orchestrator scope refusals name their condition with a bounded code and no requested content", async () => {
@@ -4551,6 +4974,7 @@ test("a follow-up in another boundary repository is inspected through its Locati
     const inspections: Array<{ runnerId: string; workspacePath?: string; publication?: unknown }> = [];
     const verifications: Array<{ issueNumbers: number[]; title?: string }> = [];
     let publishedPayloadMatches = true;
+    let publicationFailure: "title" | "body" | "labels" | undefined;
     // Runs while the runner is answering, as a person changing the Location mid-request would.
     let whileInspecting: (() => void) | null = null;
     const runner = h.hub.requestFromRunner;
@@ -4565,7 +4989,7 @@ test("a follow-up in another boundary repository is inspected through its Locati
       // Reading issues, with a payload to match or without one, is not a duplicate search.
       if (message.issueNumbers.length) {
         verifications.push({ issueNumbers: message.issueNumbers, ...(message.publication ? { title: message.publication.sanitizedTitle } : {}) });
-        return message.publication && !publishedPayloadMatches ? { ...result, ok: false, failure: "publication_refused" as const } : result;
+        return message.publication && !publishedPayloadMatches ? { ...result, ok: false, failure: "publication_refused" as const, publicationFailure } : result;
       }
       inspections.push({ runnerId, workspacePath: message.workspacePath, publication: message.publication });
       return { ...result, publicationDigest: issueEvidenceDigest(message.publication), duplicateSearch: "subject" as const };
@@ -4624,7 +5048,14 @@ test("a follow-up in another boundary repository is inspected through its Locati
       explanation: "The published follow-up", lineage: { kind: "follow_up", publicationOccurrenceId } });
     publishedPayloadMatches = false;
     const altered = await join("join-altered", 77, admitted.data!.occurrenceId);
-    assert.equal(altered.errorDetails?.code, "payload_mismatch", "an edited issue never joins");
+    assert.equal(altered.errorDetails?.code, "payload_read_failed", "an old runner's unclassified refusal never admits an edited issue");
+    for (const field of ["title", "body", "labels"] as const) {
+      publicationFailure = field;
+      const refused = await join(`join-altered-${field}`, 77, admitted.data!.occurrenceId);
+      assert.equal(refused.errorDetails?.code, `payload_${field}_mismatch`);
+      assert.match(refused.error!, new RegExp(field));
+      assert.doesNotMatch(refused.error!, /Related repair|Private|token/);
+    }
     publishedPayloadMatches = true;
     verifications.length = 0;
     const joined = await join("join", 77, admitted.data!.occurrenceId);
@@ -4775,7 +5206,7 @@ test("#4333 owner routing states a required increase and refuses a mismatched pu
       return message.type === "campaign_issue_scope" && message.operation === "inspect" && message.publication && result.type === "campaign_issue_scope_result"
         ? { ...result, candidates: [] } : result;
     };
-    assert.equal(refusalCode(await followUpScope(mismatch, "routed-mismatch", p.decision.occurrenceId)), "payload_mismatch");
+    assert.equal(refusalCode(await followUpScope(mismatch, "routed-mismatch", p.decision.occurrenceId)), "payload_read_failed");
     assert.equal(pendingScopeRequests(mismatch).length, 0);
     assert.equal(mismatch.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
   } finally { mismatch.db.close(); }

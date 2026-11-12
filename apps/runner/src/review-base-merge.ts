@@ -6,11 +6,14 @@
  * The head must be a two-parent merge whose first parent is the reviewed head and whose second is a
  * commit of the pull request's current base that the reviewed head did not already contain. Its tree
  * may differ from Git's own merge of those parents only inside the conflicted hunks Git left: a
- * clean merge must match exactly, and a resolution may rewrite each conflict block of a regular file
+ * clean merge must match exactly except for a proven protocol renumber (#4399). A resolution may
+ * rewrite each conflict block of a regular file
  * but not the text around it, nor the file's mode or type. Octopus merges, a merged parent outside the base branch, a commit after the merge, a
- * path-level conflict (rename, delete, binary) or any change outside a conflict block fail the proof.
+ * path-level conflict (rename, delete, binary) or an unproven change outside a conflict block fail the proof.
  */
 import type { ReviewBaseMerge } from "@wollipog/protocol";
+import { generated, LEDGER, ledgerDelta, ledgerEntries, renumberedLedger, replaceVersion } from "./review-protocol-renumber.js";
+import { BUILT_IN_SKILLS, reproduceBuiltInSkills } from "./review-generated-skills.js";
 
 /** Git in the review mirror; a failure carries its exit status and `stdout`, as `execFile`'s does. */
 export type BaseMergeGit = (args: string[]) => Promise<string>;
@@ -132,21 +135,93 @@ export async function classifyBaseMerge(raw: BaseMergeGit, reference: string, he
     if (!automatic || automatic.conflicted.length > MAX_CONFLICTED_FILES) return null;
     const conflicted = new Set(automatic.conflicted);
     const differing = await rawChanges(git, automatic.tree, `${head}^{tree}`);
-    if (!differing) return null;
+    if (!differing || differing.length > MAX_CONFLICTED_FILES) return null;
+    const read = (revision: string, path: string) => git(["cat-file", "blob", `${revision}:${path}`]);
+    const mergeBase = async (revision: string) => (await git(["merge-base", "--end-of-options", baseSha, revision])).trim();
+    // Missing, unsupported or ambiguous declarations disable the relaxation, not the old proof.
+    const declarations = await Promise.all([reference, head, await mergeBase(reference), merged].map(async (revision) => {
+      try {
+        return ledgerEntries(await read(revision, LEDGER));
+      } catch { return null; }
+    }));
+    const [prior, current, originalBase, mergedBase] = declarations;
+    const oldVersion = prior ? Math.max(...prior.entries.keys()) : 0;
+    const newVersion = current ? Math.max(...current.entries.keys()) : 0;
+    // A base's version advance is not a PR renumber. Both numbers must be this PR's own claims,
+    // and the new entry must be exactly the old one, placed under its declared slot.
+    const newEntry = current?.entries.get(newVersion);
+    const renumber = prior && current && originalBase && mergedBase && newVersion > oldVersion &&
+      !originalBase.entries.has(oldVersion) && !mergedBase.entries.has(newVersion) &&
+      newEntry === replaceVersion(prior.entries.get(oldVersion)!, oldVersion, newVersion) &&
+      (await read(head, LEDGER)).includes(`  // v${newVersion} slot\n${newEntry}`)
+      ? { oldVersion, newVersion } : null;
     for (const { path, oldMode, newMode, status } of differing) {
-      // Only a conflicted regular file's content may change: its mode, type and presence may not.
-      if (!conflicted.has(path) || status !== "M" || oldMode !== newMode || !REGULAR_FILE.test(newMode)) return null;
+      // Content only: modes, types, additions and deletions never receive the relaxation.
+      if (status !== "M" || oldMode !== newMode || !REGULAR_FILE.test(newMode)) return null;
       const [text, resolution] = await Promise.all([
         git(["cat-file", "blob", `${automatic.tree}:${path}`]), git(["cat-file", "blob", `${head}:${path}`]),
       ]);
-      if (Buffer.byteLength(text) > MAX_CONFLICTED_FILE_BYTES || Buffer.byteLength(resolution) > MAX_CONFLICTED_FILE_BYTES ||
-          !resolvedWithinConflicts(text, resolution, reference, merged)) return null;
+      if (Buffer.byteLength(text) > MAX_CONFLICTED_FILE_BYTES || Buffer.byteLength(resolution) > MAX_CONFLICTED_FILE_BYTES) return null;
+      if (conflicted.has(path) && resolvedWithinConflicts(text, resolution, reference, merged)) continue;
+      if (!renumber) return null;
+      if (path === BUILT_IN_SKILLS) {
+        const [beforeOutput, afterOutput] = await Promise.all([
+          reproduceBuiltInSkills(git, automatic.tree), reproduceBuiltInSkills(git, head),
+        ]);
+        if (beforeOutput === text && afterOutput === resolution) continue;
+        return null;
+      }
+      if (generated(path, text) || generated(path, resolution)) return null;
+      const { oldVersion: old, newVersion: next } = renumber;
+      const normalized = replaceVersion(text, old, next);
+      if (path === LEDGER && renumberedLedger(text, resolution, old, next)) continue;
+      if (path === LEDGER && conflicted.has(path)) {
+        const prior = ledgerEntries(await read(reference, LEDGER));
+        const current = ledgerEntries(resolution);
+        const entry = current?.entries.get(next);
+        if (entry && prior?.entries.get(old) && replaceVersion(prior.entries.get(old)!, old, next) === entry &&
+            resolvedWithinConflicts(text, resolution.replace(entry, ""), reference, merged)) continue;
+      }
+      if (conflicted.has(path) ? resolvedWithinConflicts(normalized, resolution, reference, merged) : normalized === resolution) continue;
+      return null;
     }
-    const mergeBase = async (revision: string) => (await git(["merge-base", "--end-of-options", baseSha, revision])).trim();
     const own = async (revision: string) => git(["diff", "--raw", "--no-abbrev", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
       "--end-of-options", await mergeBase(revision), revision]);
     const [before, after] = await Promise.all([own(reference), own(head)]);
-    return before === after ? "equivalent" : "resolution";
+    if (before === after) return "equivalent";
+    if (!renumber) return "resolution";
+    // Compare the PR's own diff again with its renumber undone. Base-side blobs must still match;
+    // any actual conflict resolution or changed base content retains a reviewer.
+    const beforeFields = before.split("\0"), afterFields = after.split("\0");
+    if (beforeFields.length !== afterFields.length) return "resolution";
+    for (let i = 0; i + 1 < beforeFields.length; i += 2) {
+      const a = /^(:\d{6} \d{6} [0-9a-f]{40}) ([0-9a-f]{40}) ([A-Z])$/u.exec(beforeFields[i]!);
+      const b = /^(:\d{6} \d{6} [0-9a-f]{40}) ([0-9a-f]{40}) ([A-Z])$/u.exec(afterFields[i]!);
+      const path = beforeFields[i + 1]!;
+      if (!a || !b || a[3] !== b[3] || path !== afterFields[i + 1]) return "resolution";
+      if (path === LEDGER && a[1]!.slice(0, 14) === b[1]!.slice(0, 14)) {
+        const [baseBefore, baseAfter, prior, current] = await Promise.all([
+          read(await mergeBase(reference), path), read(await mergeBase(head), path), read(reference, path), read(head, path),
+        ]);
+        const delta = ledgerDelta(baseBefore, prior, renumber.oldVersion, renumber.newVersion);
+        if (delta === null || delta !== ledgerDelta(baseAfter, current, renumber.newVersion, renumber.newVersion)) return "resolution";
+        continue;
+      }
+      if (a[1] !== b[1]) return "resolution";
+      if (a[2] === b[2]) continue;
+      if (!/^:(?:000000|100(?:644|755)) 100(?:644|755) /u.test(a[1]!)) return "resolution";
+      const [left, right] = await Promise.all([read(reference, path), read(head, path)]);
+      if (Buffer.byteLength(left) > MAX_CONFLICTED_FILE_BYTES || Buffer.byteLength(right) > MAX_CONFLICTED_FILE_BYTES) return "resolution";
+      if (path === BUILT_IN_SKILLS) {
+        const [beforeOutput, afterOutput] = await Promise.all([
+          reproduceBuiltInSkills(git, reference), reproduceBuiltInSkills(git, head),
+        ]);
+        if (beforeOutput !== left || afterOutput !== right) return "resolution";
+      } else if (generated(path, left) || generated(path, right)) return "resolution";
+      if (path === LEDGER ? !renumberedLedger(left, right, renumber.oldVersion, renumber.newVersion) :
+          replaceVersion(left, renumber.oldVersion, renumber.newVersion) !== right) return "resolution";
+    }
+    return "equivalent";
   } catch {
     return null;
   }

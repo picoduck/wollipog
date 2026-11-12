@@ -7,6 +7,7 @@ import { Notice } from "./Notice.js";
 import { effortLabel, permissionModeLabel, resolvedModelLabel, serviceTierLabel } from "../format.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { Select } from "./ui/ChoiceControls.js";
+import { modelOptionLabel } from "../agent-presentation.js";
 
 const HANDOFF_DRIVERS = ["claude-code", "codex-app-server"];
 const REFUSAL_ID = "handoff-refusal";
@@ -61,6 +62,8 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceAgentId,
   const choices = listed.filter((item) => item.unavailable === null).map((item) => item.agent);
   const [agentId, setAgentId] = useState(choices[0]?.id ?? "");
   const agent = choices.find((item) => item.id === agentId);
+  const modelChoices = (agent?.capabilities?.models.filter((item) => !item.hidden) ?? [])
+    .map(item => ({ ...item, displayName: item.displayName ?? resolvedModelLabel(item.id) }));
   const [config, setConfig] = useState<SessionConfig>(() => seedConfig(agent, sourceServiceTier));
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -140,7 +143,7 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceAgentId,
         }} /></div>
       <div className="field-row">
         <div className="field"><span>Model</span><Select label="Model" value={config.model ?? ""} disabled={busy}
-          options={(agent?.capabilities?.models.filter((item) => !item.hidden) ?? []).map((item) => ({ value: item.id, label: item.displayName ?? resolvedModelLabel(item.id) }))}
+          options={modelChoices.map((item) => ({ value: item.id, label: modelOptionLabel(item, modelChoices) }))}
           onChange={(value) => setConfig({ ...config, model: value, effort: undefined })} /></div>
         <div className="field"><span>Effort</span><Select label="Effort" value={config.effort ?? ""} disabled={busy}
           options={[{ value: "", label: "Default" }, ...(model?.efforts?.length ? model.efforts : agent?.capabilities?.effortLevels ?? []).map((item) => ({ value: item, label: effortLabel(item) }))]}

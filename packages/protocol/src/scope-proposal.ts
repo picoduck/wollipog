@@ -130,6 +130,8 @@ export interface CampaignScopeProposal {
    * proven to be written in the message; the `repository_limit` check judges whether the message
    * limits the work to them. Read it with `scopeProposalRepositoryConstraints`. */
   repositoryConstraints?: ScopeProposalRepositoryConstraint[];
+  /** Server-proven literal owner-named request in one repository (protocol 348). Never agent input. */
+  repositoryLimitVerified?: true;
   /** The one name a record from before the list held (#4118). Read as a one-entry list. */
   repositoryConstraint?: ScopeProposalRepositoryConstraint;
   requestedCount: number | null;
@@ -292,7 +294,7 @@ export function validScopeProposal(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
   const keys = ["initial", "messageDigest", "issues", "requestedCount", "constraints", "withheldOperations", "checks", "route", "ownerCause", "ownerMessage",
-    "constraintCheck", "repositoryConstraint", "repositoryConstraints"];
+    "constraintCheck", "repositoryConstraint", "repositoryConstraints", "repositoryLimitVerified"];
   if (Object.keys(v).some((key) => !keys.includes(key))) return false;
   if (typeof v.initial !== "boolean" || typeof v.messageDigest !== "string" || !/^[0-9a-f]{64}$/u.test(v.messageDigest)) return false;
   if (!Array.isArray(v.issues) || v.issues.length > SCOPE_PROPOSAL_LIMITS.issues || v.issues.some((raw) => {
@@ -314,8 +316,10 @@ export function validScopeProposal(value: unknown): boolean {
   const unresolved = list.some((named) => (named as { repository: unknown }).repository === null);
   // A name that resolved to nothing grants nothing, for the whole list: it is always the owner's.
   if (unresolved !== (Array.isArray(v.checks) && v.checks.includes("repository_name_unresolved"))) return false;
-  // Names that all matched one are only the agent's claim of a limit: they never take the no-model path.
-  if ((list.length > 0 && !unresolved) !== (Array.isArray(v.checks) && v.checks.includes("repository_limit"))) return false;
+  // An agent's claim still needs the check. Only the server's literal owner-named proof may omit it.
+  if (v.repositoryLimitVerified !== undefined && (v.repositoryLimitVerified !== true || !v.initial || unresolved || list.length !== 1 ||
+      v.issues.some((raw) => (raw as { origin: string }).origin !== "owner_named"))) return false;
+  if ((list.length > 0 && !unresolved && !v.repositoryLimitVerified) !== (Array.isArray(v.checks) && v.checks.includes("repository_limit"))) return false;
   if (v.requestedCount !== null && (!Number.isSafeInteger(v.requestedCount) || (v.requestedCount as number) < 1 || (v.requestedCount as number) > 100)) return false;
   if (!Array.isArray(v.constraints) || v.constraints.length > SCOPE_PROPOSAL_LIMITS.constraints ||
       v.constraints.some((c) => !plainText(c, SCOPE_PROPOSAL_LIMITS.constraintChars))) return false;

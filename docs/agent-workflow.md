@@ -121,16 +121,21 @@ the forge at request time from the sources scope admission accepts (GitHub sub-i
 epic body's member checklist), never from agent text, and binds that read into the closure. The
 closure is Orchestrator-owned when every member is in the campaign's scope and closed as
 completed, and every work item of the epic itself is either delivered under the existing proof or
-a placeholder that was never dispatched. Anything else keeps the closure human-owned and names the
+server-derived epic tracking work. A tracking item has no open attempt, delivered attempt,
+verification, delivery, PR or recorded delivery-stage activity; ended tracking attempts alone do
+not disqualify it. Titles do not establish this fact. Incomplete migrated history retains ordinary
+delivery proof. Anything else keeps the closure human-owned and names the
 member: open (`epic_member_open`; close it through its own closure request first, then ask again),
 closed another way, outside scope (including a member added after launch that scope never
 admitted), or unreadable. An epic never closes while a member is open on the forge, even one whose
 own closure would pass. If a member joins, leaves or changes state before execution, the runner
-refuses the approval with `epic_members_changed`. A placeholder item of an epic closed this way no
-longer holds the campaign's completion, so the root need not mark it `scope_removed`; any epic
-item with an attempt still needs its own delivery. Not-planned closures, issues with a fixed-by
+refuses the approval with `epic_members_changed`. A tracking item of an epic closed this way no
+longer holds the campaign's completion, so the root need not mark it `scope_removed`. Campaign
+Status uses the same tracking predicate and closure receipt for item states, counts and recovery.
+An item with delivery activity or an open attempt still needs its own delivery. Not-planned closures, issues with a fixed-by
 plan and issues without members are unchanged. The member read needs runner protocol 278 and a
-GitHub repository; elsewhere the epic keeps the own-work proof and its closure stays human-owned.
+GitHub repository; the expanded tracking rule needs a control plane with the tracking history. Elsewhere the epic keeps the
+own-work proof and its closure stays human-owned.
 
 Custom preserves existing user approval rules. Full Control delegates an eligible exact decision
 only when the server-established human boundary, current occurrence owner and repository rules
@@ -142,6 +147,26 @@ permit bounded worker reservations/allocations; never expand allowances or use u
 For issue publication follow `.github/ISSUE_REPORTING.md` and the contributor reporting skill:
 retain the drafting context, exact sanitized payload, fresh duplicate checks and verified readback.
 Follow-up recommendations go to the parent for recording and deduplication before anyone acts.
+One relatedness refusal is not a precedent for deferring other follow-ups; evaluate each on its
+own evidence. With runner protocol 351, a specific GitHub Actions job URL
+(`/actions/runs/RUN/job/JOB`) in the sanitized publication payload is only a lookup hint. The
+server matches the origin item's recorded PR to a head admitted for
+that item's child through a valid completed review session or consumed merge gate. Its runner reads GitHub to
+prove a failed merge-group run with that PR/head queue ref and ancestry, or a failed required check
+whose run names that PR/head. The exact job must belong to that run and point to the exact failed
+check run; cancelled, skipped and passing jobs/checks do not qualify. The sanitized title or body
+must contain the check name verbatim, compared server-side to the name the runner reads from the
+forge. Only relatedness skips the Decision Model. Structural floors and
+safe-payload/duplicate inspection remain mandatory. Unknown ownership, unrelated/passing runs,
+unreadable evidence and older runners retain the ordinary check and its existing outcomes.
+The server-created admission records `failed_campaign_run` with the exact PR/head/run/job/check id
+and forge-read check name, or
+`decision_model`. Requesters on older runners retain their original snapshot shape and the model
+basis remains in the admission log. Lookup has a shared 20-second deadline, with at most five seconds
+per read; a failed read immediately returns to the ordinary check. No agent-written claim or
+supplied admission can establish this basis. This proves the follow-up names a real failed check
+of the campaign's own PR, not causality. The Orchestrator's accept/adjudicate step and exact-payload
+publication review remain the semantic gate; all structural floors remain required.
 Scope and closure use their dedicated exact typed routes. Current hosts without eligible issue
 authority retain human review even when the campaign requests Full Control. Use non-closing PR
 references in campaigns so merge cannot bypass the closure gate: write "Refs #N", and never put
@@ -155,6 +180,24 @@ accepts implement and "-ing" forms ("closing", "implements"), closes every refer
 one keyword, reads code and the title, and may differ per instance, so GitLab's own list of the issues
 a merge request closes decides where it disagrees with Wollipog's match. Delivery comments compare every
 acceptance criterion and cite the actual merge commit; report remaining original work candidly.
+
+An approved issue closure does not expire on age alone. Execution rechecks its payload digest,
+issue scope, policy revision, authority, bound child work, delivery proof and forge evidence.
+A changed binding refuses the approval; the refusal identifies the condition that changed.
+Human-owned closures remain human-owned. Offline runners and temporary evidence-read failures
+retain their existing retry and recovery rules; an approval is never proof of forge execution.
+
+An uncertain consumed issue closure is recovered by the server's read-only forge reconciliation
+(runner protocol 355+). It never repeats the comment or closure. The issue must read closed with
+the approved state reason and a unique exact-body comment by the runner's forge login, posted
+after consumption. Incomplete, ambiguous or unreadable evidence leaves an Owner Question naming
+the issue and original occurrence. Answering or dismissing it acknowledges the uncertainty and
+clears recovery bookkeeping; it grants no new closure authority and leaves the recorded outcome
+uncertain. A lost reconciliation read also goes to that question rather than being replayed.
+The ordinary sweep discovers pre-upgrade uncertain closures; no agent assertion settles them.
+Temporary runner disconnects and upgrades preserve the read opportunity for five minutes before
+falling back to the owner's actionable question. A repository removed from the campaign goes to
+that question immediately. Unavailable transport never repeats a closure or comment.
 
 Use `wollipog review session run` (MCP `request_review_session`) for your own pushed PR's required
 cross-model review, including from an isolated campaign child. Follow the shipped `using-wollipog`
@@ -203,6 +246,29 @@ after merge and after preserving/retargeting stacked dependents. Retire managed 
 Wollipog; report provider-exit deferrals. Parent verification, rather than idleness, attests delivery.
 
 ## Child Worktree Inspection Recovery
+
+For a failed child, use `verify_campaign_child` with its exact last completed top-level report.
+The report must still stand: a newer completed report, a real later prompt or a later campaign
+assignment supersedes it. A system notice that produced no completed response does not supersede
+it only when durable server-recorded command provenance proves it was an informational restart
+notice. Decision resumes, review continuations, PR-watch wakes and campaign continuations can
+carry work, so they still supersede reports. Unknown legacy
+provenance fails closed; notice-looking text is never proof. An active work-carrying command
+without a correlated earlier user message remains unresolved, even if staged or sent before the
+report: the runner may have queued it without starting its assigned work. Stage/send positions
+and CP/runner timestamps are never proof of delivery. A confirmed stopped child follows
+the same rule. A provisional stop still needs the runner's confirmation.
+
+`record_campaign_work_item_delivery` accepts that report inside its attempt, including an attempt
+ended as failed, and records delivery independently of session verification and archival. Failure
+alone never counts as delivery. With no standing report, end the failed attempt and dispatch a
+successor. Once a later attempt independently delivers the item and its child's current report is
+verified, the earlier failed child no longer counts as unverified campaign work. This applies only
+when every one of its attempts is ended and covered by a verified successor; open decisions or
+descendants still block settlement. It does not invent a report attestation for the failed child.
+Archive the failed session through the normal lifecycle. Preserved worktrees remain cleanup;
+never make throwaway commits, delete uncommitted files or create a replacement child solely to
+clear the campaign's status. Worktree inspection and retirement keep their independent checks.
 
 `verify_campaign_child` inspects managed worktrees before Stop and Archive. A refusal names the
 child, the worktree's position in its deduplicated managed-path inventory, and the first 12 hex

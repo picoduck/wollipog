@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { execFileSync } from "@wollipog/test-support/bounded-child-process";
+import { playwrightInventory as inventory } from "./playwright-inventory.mjs";
 import { browserFiles, browserProfile, browserShards, BROWSER_SHARD_COUNT } from "../playwright.shards.ts";
 import base from "../playwright.config.ts";
 import ci from "../playwright.ci.config.ts";
@@ -12,15 +12,6 @@ import { REQUIRED } from "./main-rolling-validation.mjs";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const workflow = read("../.github/workflows/ci.yml");
-
-function inventory(config) {
-  return JSON.parse(execFileSync(process.execPath, ["node_modules/@playwright/test/cli.js", "test",
-    "--config", config, "--list", "--reporter=json"], {
-    cwd: new URL("../", import.meta.url), timeout: 30_000, maxBuffer: 32 * 1024 * 1024,
-    env: { ...process.env, CI: "", SYNTHETIC_ARTIFACT_FAILURE: "false", FORCE_COLOR: "0" },
-    stdio: ["ignore", "pipe", "pipe"],
-  }));
-}
 
 function identities(report) {
   const rows = [];

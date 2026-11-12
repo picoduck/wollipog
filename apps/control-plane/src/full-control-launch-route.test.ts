@@ -4902,7 +4902,117 @@ test("a limit the check can't confirm goes to the owner, whose approval applies 
   } finally { await c.server.close(); c.f.db.close(); }
 });
 
-test("a message naming a repository with no limit proposed always reaches the check, and a limit left out goes to the owner (#4117)", async () => {
+test("exact owner-named repository scope needs no model and keeps later work inside the limit (#4402)", async () => {
+  const messages = ["Fix #12 and #13 in owner/repo.",
+    "Use the orchestrate-issues skill to fix #4398, #4399, #4400, #4401, #4402, #4403, #4404 and #4405 in owner/repo."];
+  for (const message of messages) {
+    const c = await threeRepositoryProposals(message);
+    try {
+      const numbers = [...message.matchAll(/#(\d+)/gu)].map((match) => Number(match[1]));
+      const proposed = await c.propose(numbers.map((number) => named(number)));
+      assert.equal(proposed.ok, true, proposed.error ?? "");
+      assert.equal(proposed.data!.authority, "orchestrator");
+      const record = (proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+      assert.deepEqual(record.repositoryConstraints, [{ name: "owner/repo", repository: "owner/repo" }]);
+      assert.equal(record.repositoryLimitVerified, true);
+      assert.deepEqual(record.checks, []);
+      assert.equal(c.f.decision.checkCalls.length, 0);
+      assert.equal(c.ownerRequests().length, 0);
+      assert.equal(c.apply(proposed.data!.occurrenceId).ok, true);
+      assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo"]);
+      assert.deepEqual((await c.propose([otherNamed(60)])).errorDetails, { code: "repository_outside_boundary", repository: "other/repo" });
+    } finally { await c.server.close(); c.f.db.close(); }
+  }
+});
+
+test("exact repository proof retains other constraint checks and lists the repository for completeness (#4402)", async () => {
+  const c = await threeRepositoryProposals("Fix #12 and #13 in owner/repo. Only open bugs; do not merge.");
+  try {
+    c.f.decision.state.check = (message) => {
+      assert.match(JSON.stringify(message), /repositoryConstraints/u);
+      assert.doesNotMatch(JSON.stringify(message), /repository_limit__/u);
+      return scopeCheckAnswer(message);
+    };
+    const proposed = await c.propose([named(12), named(13)], { constraints: ["Only open bugs"], withheldOperations: ["pr_merge"] });
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "orchestrator");
+    const record = (proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+    assert.deepEqual(record.checks, ["constraints", "withheld_operations"]);
+    assert.equal(record.repositoryLimitVerified, true);
+    assert.equal(c.f.decision.checkCalls.length, 1);
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
+test("an older root runner keeps the repository check for an exact owner-named request (#4402)", async () => {
+  const c = await multiRepositoryProposals("Fix #12 and #13 in owner/repo.");
+  try {
+    c.f.db.registerRunner({ runnerId: "r", hostname: "fixture", os: "linux", version: "test", agents: c.f.db.getRunner("r")!.agents,
+      workspaces: [{ id: "w", name: "Fixture Repo", path: "/fixture/repository" }], runtime }, Date.now(),
+    RUNNER_CAPABILITY_MIN_PROTOCOL.exactNamedRepositoryScope - 1);
+    c.f.decision.state.check = (message) => scopeCheckAnswer(message);
+    const proposed = await c.propose([named(12), named(13)]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    const record = (proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+    assert.equal(record.repositoryLimitVerified, undefined);
+    assert.ok(record.checks.includes("repository_mentioned"));
+    assert.equal(c.f.decision.checkCalls.length, 1);
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
+test("trailing restrictions and counts cannot disappear behind the repository fast path (#4402)", async () => {
+  const c = await threeRepositoryProposals("Fix #12 and #13 in owner/repo. These two issues must be open; do not merge.");
+  try {
+    c.f.decision.state.check = (message) => scopeCheckAnswer(message, (question) => question === "constraints_complete"
+      ? { value: "missing_constraint" } : undefined);
+    const proposed = await c.propose([named(12), named(13)], { requestedCount: 2 });
+    assert.equal(proposed.ok, false);
+    assert.equal(proposed.errorDetails?.code, "constraint_check_refused");
+    assert.equal(c.f.decision.checkCalls.length, 1);
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
+test("a broad trailing invitation keeps the literal named repository as the admitted limit (#4402)", async () => {
+  const c = await threeRepositoryProposals("Fix #12 in owner/repo. Afterwards feel free to pick follow-ups from any of the campaign's repositories.");
+  try {
+    c.f.decision.state.check = (message) => {
+      assert.doesNotMatch(JSON.stringify(message), /repository_limit__/u);
+      return scopeCheckAnswer(message);
+    };
+    const proposed = await c.propose([named(12)]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "orchestrator");
+    const record = (proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!;
+    assert.equal(record.repositoryLimitVerified, true);
+    assert.deepEqual(record.checks, ["constraints"]);
+    assert.equal(c.f.decision.checkCalls.length, 1);
+    assert.equal(c.apply(proposed.data!.occurrenceId).ok, true);
+    assert.deepEqual(repositoriesOf(c.boundary()), ["owner/repo"]);
+    const first = c.policy().firstMessageScope!;
+    assert.deepEqual(first.state === "established" ? first.initialScope?.repositoryLimits : null, ["owner/repo"]);
+    assert.deepEqual((await c.propose([otherNamed(60)])).errorDetails, { code: "repository_outside_boundary", repository: "other/repo" });
+  } finally { await c.server.close(); c.f.db.close(); }
+});
+
+test("ambiguous and incomplete owner-named repository requests keep the check (#4402)", async () => {
+  for (const [message, issues] of [
+    ["Fix #12 and #13 in owner/repo.", [named(12)]],
+    ["Fix #12 not in owner/repo.", [named(12)]],
+    ["Fix #12 in owner/repo. Also consider third/repo.", [named(12)]],
+    ["Fix #12 in owner/repo. Also other/repo#40.", [named(12), otherNamed(40)]],
+  ] as const) {
+    const c = await threeRepositoryProposals(message);
+    try {
+      c.f.decision.state.check = (message) => scopeCheckAnswer(message, (question) => question === "repository_limits_complete" ? { value: "cannot_tell" } : undefined);
+      const proposed = await c.propose([...issues]);
+      assert.equal(proposed.ok, true, proposed.error ?? "");
+      assert.equal((proposed.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.repositoryLimitVerified, undefined);
+      assert.equal(c.f.decision.checkCalls.length, 1);
+      assert.equal(proposed.data!.authority, "human");
+    } finally { await c.server.close(); c.f.db.close(); }
+  }
+});
+
+test("an ambiguous repository mention with no limit proposed reaches the check (#4117)", async () => {
   const c = await threeRepositoryProposals("Fix #12, in r2 c's sibling only if it reads the same; stay in Fixture Repo.");
   const { f } = c;
   try {
@@ -5472,10 +5582,11 @@ test("a Location's closure gets no commit when the campaign's authority changes 
       closures.length = 0;
       return decision;
     };
-    const refused = (occurrenceId: string, reason: string) => {
+    const refused = (occurrenceId: string, reason: string, changedBinding?: string) => {
       const after = f.db.workflowDecisionByOccurrence(occurrenceId)!;
       assert.equal(after.status, "consumed");
       assert.deepEqual([after.issueClosureResult?.outcome, after.issueClosureResult?.refusal?.reason], ["refused", reason]);
+      if (changedBinding) assert.match(after.issueClosureResult?.refusal?.runnerError ?? "", new RegExp(changedBinding, "u"));
       assert.deepEqual(operations(), ["execute"], "the Location's runner never got a commit, so it wrote nothing");
     };
 
@@ -5484,7 +5595,7 @@ test("a Location's closure gets no commit when the campaign's authority changes 
     const workspacePath = f.db.getWorkspacePath.bind(f.db);
     state.duringChecks = () => { f.db.getWorkspacePath = (runnerId, workspaceId) => workspaceId === "a" ? "/fixture/elsewhere" : workspacePath(runnerId, workspaceId); };
     assert.equal((await f.sessions.executeGithubIssueClosure(id, moved.occurrenceId, moved.resourceDigest)).ok, true);
-    refused(moved.occurrenceId, "campaign_authority_changed");
+    refused(moved.occurrenceId, "campaign_authority_changed", "repository Location changed");
     f.db.getWorkspacePath = workspacePath;
 
     // A malformed answer can't prove readiness, and no write can have happened without a commit: not
@@ -5505,7 +5616,7 @@ test("a Location's closure gets no commit when the campaign's authority changes 
     state.duringChecks = () => { f.db.setPendingApproval(id, { requestId: "continue", kind: "authentication", title: "Authentication Required",
       options: [{ optionId: "auth:revalidate", name: "Recheck Authentication", kind: "allow_once" }] }); };
     assert.equal((await f.sessions.executeGithubIssueClosure(id, asked.occurrenceId, asked.resourceDigest)).ok, true);
-    refused(asked.occurrenceId, "campaign_authority_changed");
+    refused(asked.occurrenceId, "campaign_authority_changed", "session guardrails changed");
     f.db.setPendingApproval(id, null);
 
     // So does a policy hook's approval.
@@ -5513,7 +5624,7 @@ test("a Location's closure gets no commit when the campaign's authority changes 
     const openHooks = f.db.listOpenPolicyHookApprovals.bind(f.db);
     state.duringChecks = () => { f.db.listOpenPolicyHookApprovals = () => [{}] as unknown as ReturnType<typeof openHooks>; };
     assert.equal((await f.sessions.executeGithubIssueClosure(id, hooked.occurrenceId, hooked.resourceDigest)).ok, true);
-    refused(hooked.occurrenceId, "campaign_authority_changed");
+    refused(hooked.occurrenceId, "campaign_authority_changed", "session guardrails changed");
     f.db.listOpenPolicyHookApprovals = openHooks;
 
     // The owner removes the issue from the scope while the checks run, after the last check before
@@ -5525,14 +5636,14 @@ test("a Location's closure gets no commit when the campaign's authority changes 
       assert.equal(approve(removal.data!.occurrenceId).ok, true);
     };
     assert.equal((await f.sessions.executeGithubIssueClosure(id, removed.occurrenceId, removed.resourceDigest)).ok, true);
-    refused(removed.occurrenceId, "campaign_authority_changed");
+    refused(removed.occurrenceId, "campaign_authority_changed", "issue scope changed");
     assert.equal(p.other.runnerId, "r2");
 
     // The campaign ends while the checks run.
     const ended = await approved("close-40-ended", 40);
     state.duringChecks = () => { f.db.updateSessionStatus(id, "completed", Date.now()); };
     assert.equal((await f.sessions.executeGithubIssueClosure(id, ended.occurrenceId, ended.resourceDigest)).ok, true);
-    refused(ended.occurrenceId, "campaign_authority_changed");
+    refused(ended.occurrenceId, "campaign_authority_changed", "campaign session changed");
   } finally { await server.close(); f.db.close(); }
 });
 

@@ -18,21 +18,45 @@ function errorCode(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException | undefined)?.code;
 }
 
+export type ManagedProfileDirectoryComponent = "manager_root" | "profiles_root" | "profile_home";
+export type ManagedProfileDirectoryReason = "symlink" | "not_directory" | "wrong_owner" | "group_or_other_write" | "unavailable";
+
+/** Safe metadata for account setup diagnostics. Never retain a filesystem error as its cause:
+ * those errors carry paths. Callers may serialize only this fixed vocabulary. */
+export class ManagedProfileDirectoryError extends Error {
+  readonly code = "managed_profile_directory";
+  constructor(readonly component: ManagedProfileDirectoryComponent, readonly reason: ManagedProfileDirectoryReason) {
+    super(reason === "unavailable"
+      ? "The managed provider profile directory could not be created."
+      : "The managed provider profile directory is not a private directory.");
+  }
+  toJSON(): { code: string; component: ManagedProfileDirectoryComponent; reason: ManagedProfileDirectoryReason } {
+    return { code: this.code, component: this.component, reason: this.reason };
+  }
+}
+
+function privateDirectoryReason(stat: Stats): ManagedProfileDirectoryReason | undefined {
+  if (stat.isSymbolicLink()) return "symlink";
+  if (!stat.isDirectory()) return "not_directory";
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return "wrong_owner";
+  if ((stat.mode & 0o022) !== 0) return "group_or_other_write";
+  return undefined;
+}
+
 /** A directory this runner may treat as private: a real directory (never a link) owned by this OS
  * account and not writable by group or others. */
 function privateDirectory(stat: Stats): boolean {
-  if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
-  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return false;
-  return (stat.mode & 0o022) === 0;
+  return privateDirectoryReason(stat) === undefined;
 }
 
-function ensurePrivateDirectory(path: string): void {
+function ensurePrivateDirectory(path: string, component: ManagedProfileDirectoryComponent): void {
   try { mkdirSync(path, { mode: 0o700 }); } catch (error) {
-    if (errorCode(error) !== "EEXIST") throw new Error("The managed provider profile directory could not be created.");
+    if (errorCode(error) !== "EEXIST") throw new ManagedProfileDirectoryError(component, "unavailable");
   }
   let stat: Stats;
-  try { stat = lstatSync(path); } catch { throw new Error("The managed provider profile directory could not be created."); }
-  if (!privateDirectory(stat)) throw new Error("The managed provider profile directory is not a private directory.");
+  try { stat = lstatSync(path); } catch { throw new ManagedProfileDirectoryError(component, "unavailable"); }
+  const reason = privateDirectoryReason(stat);
+  if (reason) throw new ManagedProfileDirectoryError(component, reason);
 }
 
 /** The two components Wollipog owns, `.agent-manager` and `profiles`, are private real
@@ -53,15 +77,18 @@ function verifiedRoot(root: string): boolean {
 export function createManagedProviderProfileHome(root: string, profileId: string, platform: NodeJS.Platform = process.platform): string {
   if (platform === "win32") throw new Error("Managed provider profiles are not supported on this Machine.");
   if (!isAbsolute(root) || !isProviderProfileId(profileId)) throw new Error("The managed provider profile path is invalid.");
-  ensurePrivateDirectory(dirname(root));
-  ensurePrivateDirectory(root);
+  ensurePrivateDirectory(dirname(root), "manager_root");
+  ensurePrivateDirectory(root, "profiles_root");
   const home = join(root, profileId);
   try { mkdirSync(home, { mode: 0o700 }); } catch (error) {
     throw new Error(errorCode(error) === "EEXIST"
       ? "A managed provider profile with this identity already exists."
       : "The managed provider profile directory could not be created.");
   }
-  if (!privateDirectory(lstatSync(home))) throw new Error("The managed provider profile directory is not a private directory.");
+  let stat: Stats;
+  try { stat = lstatSync(home); } catch { throw new ManagedProfileDirectoryError("profile_home", "unavailable"); }
+  const reason = privateDirectoryReason(stat);
+  if (reason) throw new ManagedProfileDirectoryError("profile_home", reason);
   return home;
 }
 

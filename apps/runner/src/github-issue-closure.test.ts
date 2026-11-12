@@ -1,9 +1,44 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GithubIssueClosureSnapshot } from "@wollipog/protocol";
-import { executeGithubIssueClosure, inspectGithubIssueClosure, IssueClosureInspectionError, issueClosureRun } from "./github-issue-closure.js";
+import { executeGithubIssueClosure, inspectGithubIssueClosure, reconcileGithubIssueClosure, IssueClosureInspectionError, issueClosureRun } from "./github-issue-closure.js";
 
 const connection = (nodes: unknown[] = []) => ({ nodes, pageInfo: { hasNextPage: false } });
+test("uncertain closure recovery reads exact state, reason, author and body without mutations (#4398)", async () => {
+  const approved = await snapshot(fixture());
+  const at = Date.parse("2026-01-01T00:00:00Z");
+  const comment = { id: "IC_1", body: approved.comment, author: { login: "closer" }, createdAt: "2026-01-01T00:00:01Z" };
+  for (const [name, change, expected] of [
+    ["closed with comment", {}, true], ["without comment", { comments: [] }, false],
+    ["open", { state: "OPEN" }, false], ["wrong reason", { stateReason: "COMPLETED" }, false],
+    ["other author", { comments: [{ ...comment, author: { login: "other" } }] }, false],
+    ["substring", { comments: [{ ...comment, body: `${approved.comment}\nextra` }] }, false],
+    ["newline mismatch", { comments: [{ ...comment, body: `${approved.comment}\n` }] }, false],
+    ["duplicate", { comments: [comment, { ...comment, id: "IC_2" }] }, false],
+    ["old comment", { comments: [{ ...comment, createdAt: "2025-01-01T00:00:00Z" }] }, false],
+    ["truncated", { truncated: true }, false],
+  ] as const) {
+    const value = change as { comments?: unknown[]; state?: string; stateReason?: string; truncated?: boolean };
+    const calls: string[][] = [];
+    const run = async (command: string, args: string[]) => {
+      calls.push([command, ...args]);
+      if (command === "git") return "https://github.com/team/repo.git";
+      return JSON.stringify({ data: { viewer: { login: "closer" }, repository: { nameWithOwner: approved.repository,
+        issue: { number: approved.issue, url: approved.url, state: value.state ?? "CLOSED", stateReason: value.stateReason ?? "NOT_PLANNED",
+          comments: { nodes: value.comments ?? [comment], pageInfo: { hasPreviousPage: value.truncated ?? false } } } } } });
+    };
+    const read = await reconcileGithubIssueClosure(approved, at, run);
+    assert.equal(read, expected, name);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1]![1], "api");
+    assert.ok(!calls.flat().some(arg => /mutation|closeIssue|addComment/.test(arg)));
+    if (expected) {
+      assert.equal(await reconcileGithubIssueClosure({ ...approved, comment: undefined }, at, run), false);
+      assert.equal(await reconcileGithubIssueClosure(approved, at + 1500, run), true, "GitHub timestamps have whole-second precision");
+    }
+  }
+  await assert.rejects(() => reconcileGithubIssueClosure(approved, at, async () => { throw Error("unreadable"); }));
+});
 test("#4164 merge-queue delivery survives a comparison larger than the command buffer", async () => {
   const f = fixture();
   const bounded = issueClosureRun({ kind: "native" }, process.cwd());
@@ -115,6 +150,61 @@ function relatedPullRequest(number: number, change: { title?: string; body?: str
     headRefOid: change.headRefOid ?? "a".repeat(40), updatedAt: change.updatedAt ?? "2026-11-01T16:55:00Z",
     closingIssuesReferences: connection(change.closes ? [{ number: 123, repository: { nameWithOwner: "team/repo" } }] : []) };
 }
+
+test("#4403 only closing references or campaign membership make an open PR related when both facts are known", async () => {
+  const f = fixture();
+  f.repository.pullRequests.nodes = [relatedPullRequest(77), relatedPullRequest(78, { closes: true }),
+    relatedPullRequest(79, { body: "No issue reference" })];
+  const current = await inspectGithubIssueClosure(123, f.run, undefined, false, [79]);
+  assert.deepEqual(current.openPullRequests.map((pr) => pr.number), [78, 79]);
+  assert.deepEqual(current.campaignPullRequests, [79]);
+  const legacy = await inspectGithubIssueClosure(123, f.run);
+  assert.deepEqual(legacy.openPullRequests.map((pr) => pr.number), [77, 78]);
+  assert.deepEqual((await inspectGithubIssueClosure(123, f.run, undefined, false, null)).openPullRequests.map((pr) => pr.number), [77, 78, 79],
+    "an unreadable campaign ledger cannot exclude even a PR without a mention");
+  // An unreadable closing-reference connection is related even outside the campaign.
+  const unreadable = relatedPullRequest(77);
+  unreadable.closingIssuesReferences.pageInfo.hasNextPage = true;
+  f.repository.pullRequests.nodes = [unreadable];
+  assert.deepEqual((await inspectGithubIssueClosure(123, f.run, undefined, false, [])).openPullRequests.map((pr) => pr.number), [77]);
+  await assert.rejects(inspectGithubIssueClosure(123, f.run, undefined, false, [0]), /identities are incomplete/u);
+});
+
+test("#4403 execution uses the same relatedness rule, ignoring new outside mentions and refusing closing or campaign PRs", async () => {
+  for (const mode of ["outside", "closing", "campaign", "unreadable"] as const) {
+    const f = fixture();
+    const { state: _state, ...inspection } = await inspectGithubIssueClosure(123, f.run, undefined, false, [79]);
+    const approved: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: "not_planned",
+      explanation: "Retire obsolete work", evidence: ["Verified"], activeChildren: [] };
+    const pr = relatedPullRequest(mode === "campaign" ? 79 : 77, { closes: mode === "closing" });
+    if (mode === "unreadable") pr.closingIssuesReferences.pageInfo.hasNextPage = true;
+    f.repository.pullRequests.nodes = [pr];
+    let begun = false;
+    const result = await executeGithubIssueClosure(approved, f.run, () => { begun = true; return true; });
+    assert.equal(result.outcome, mode === "outside" ? "closed" : "refused", mode);
+    assert.equal(begun, mode === "outside", mode);
+    assert.equal(f.calls.some((call) => call.args[0] === "issue"), mode === "outside", mode);
+  }
+});
+
+test("#4403 execution refreshes campaign identities without invalidating unrelated closed history", async () => {
+  for (const mode of ["closed-history", "new-campaign-pr", "outside-mention", "missing-ledger", "shrunk-history"] as const) {
+    const f = fixture();
+    const { state: _state, ...inspection } = await inspectGithubIssueClosure(123, f.run, undefined, false, [79]);
+    const approved: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: "not_planned",
+      explanation: "Retire obsolete work", evidence: ["Verified"], activeChildren: [] };
+    f.repository.pullRequests.nodes = mode === "closed-history" || mode === "shrunk-history" ? [] : [relatedPullRequest(80)];
+    const context = mode === "missing-ledger" ? null : mode === "shrunk-history" ? [] :
+      mode === "outside-mention" ? [79] : [79, 80];
+    let begun = false;
+    const result = await executeGithubIssueClosure(approved, f.run, () => { begun = true; return true; }, context);
+    const allowed = mode === "closed-history" || mode === "outside-mention";
+    assert.equal(result.outcome, allowed ? "closed" : "refused", mode);
+    assert.equal(begun, allowed, mode);
+    assert.equal(f.calls.some((call) => call.args[0] === "issue"), allowed, mode);
+    if (!allowed) assert.equal(result.refusal?.reason, "related_pull_requests_changed", mode);
+  }
+});
 
 test("routine activity on a related open PR keeps an approved closure (#4059)", async () => {
   for (const activity of [

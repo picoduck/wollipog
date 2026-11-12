@@ -36,11 +36,38 @@ export class IssueClosureInspectionError extends Error {
  * whether it closes the issue. Its title, body, head and updatedAt are left out, so a push, a merge
  * from the default branch or a body edit keeps an approval unless it changes one of these, or
  * whether the PR is related at all. */
-export function closureDigestPullRequest(pr: { number: number; url: string; closesIssue: boolean }) {
+export function closureDigestPullRequest(pr: { number: number; url: string; closesIssue?: boolean }) {
   return { number: pr.number, url: pr.url, closesIssue: pr.closesIssue };
 }
 
 type Run = (command: string, args: string[]) => Promise<string>;
+/** Recovery never calls the mutation executor. Bounded/incomplete/ambiguous evidence fails closed.
+ * The current forge login must own exactly one byte-identical comment posted after consumption;
+ * an account change or edited/missing comment conservatively goes to the owner. */
+export async function reconcileGithubIssueClosure(snapshot: GithubIssueClosureSnapshot, consumedAt: number, run: Run): Promise<boolean> {
+  const origin = githubSlug((await run("git", ["remote", "get-url", "origin"])).trim());
+  if (!origin || origin.toLowerCase() !== snapshot.repository.toLowerCase() || !Number.isSafeInteger(consumedAt)) return false;
+  const [owner, repo] = origin.split("/");
+  const response = object(JSON.parse(await run("gh", ["api", "graphql", "--hostname", "github.com", "-f",
+    `query=query($owner:String!,$repo:String!,$number:Int!){viewer{login} repository(owner:$owner,name:$repo){nameWithOwner issue(number:$number){number url state stateReason comments(last:100){nodes{id body createdAt author{login}} pageInfo{hasPreviousPage}}}}}`,
+    "-f", `owner=${owner}`, "-f", `repo=${repo}`, "-F", `number=${snapshot.issue}`])));
+  if (response.errors) return false;
+  const data = object(response.data), repository = object(data.repository), issue = object(repository.issue);
+  if (text(repository.nameWithOwner).toLowerCase() !== snapshot.repository.toLowerCase() || issue.number !== snapshot.issue ||
+      issue.url !== snapshot.url || issue.state !== "CLOSED" || issue.stateReason !== snapshot.reason.toUpperCase()) return false;
+  // State alone cannot attribute a comment-less closure to the consumed operation.
+  if (snapshot.comment === undefined) return false;
+  const login = text(object(data.viewer).login);
+  const comments = object(issue.comments);
+  if (!login || object(comments.pageInfo).hasPreviousPage !== false || !Array.isArray(comments.nodes)) return false;
+  const digest = (body: string) => createHash("sha256").update(body).digest("hex");
+  const matches = comments.nodes.filter(raw => {
+    const comment = object(raw);
+    return typeof comment.id === "string" && text(object(comment.author).login) === login &&
+      digest(text(comment.body)) === digest(snapshot.comment!) && Date.parse(text(comment.createdAt)) >= Math.floor(consumedAt / 1000) * 1000;
+  });
+  return matches.length === 1;
+}
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new IssueClosureInspectionError("GitHub returned incomplete issue evidence");
   return value as Record<string, unknown>;
@@ -70,7 +97,11 @@ export function issueClosureRun(context: AgentContext, cwd: string, agentEnv: Re
 /** Inspect an issue of the origin's repository: GitHub through `gh`, or a GitLab project (#3539,
  * v249) through `glab` with the same result shape and digest. */
 export async function inspectGithubIssueClosure(issue: number, run: Run, deliveryPullRequests?: Array<{number:number;headSha:string}>,
-  epicMembers = false): Promise<GithubIssueClosureInspection> {
+  epicMembers = false, campaignPullRequests?: number[] | null): Promise<GithubIssueClosureInspection> {
+  if (campaignPullRequests !== undefined && campaignPullRequests !== null && (!Array.isArray(campaignPullRequests) || campaignPullRequests.length > 10_000 ||
+      campaignPullRequests.some((number) => !Number.isSafeInteger(number) || number < 1))) {
+    throw new IssueClosureInspectionError("Campaign pull-request identities are incomplete");
+  }
   if (!Number.isSafeInteger(issue) || issue < 1) throw new IssueClosureInspectionError("issue must be a positive integer");
   const origin = (await run("git", ["remote", "get-url", "origin"])).trim();
   const repository = githubSlug(origin);
@@ -105,13 +136,16 @@ export async function inspectGithubIssueClosure(issue: number, run: Run, deliver
     if (!Number.isSafeInteger(pr.number) || (pr.number as number) < 1 ||
         pr.url !== `https://github.com/${canonicalRepository}/pull/${pr.number}` ||
         !/^[0-9a-f]{40}$/u.test(text(pr.headRefOid))) throw new IssueClosureInspectionError("GitHub pull-request evidence is invalid");
-    const closing = nodes(pr.closingIssuesReferences).some((rawIssue) => {
+    const closing = (() => { try { return nodes(pr.closingIssuesReferences).some((rawIssue) => {
       const linked = object(rawIssue);
       return linked.number === issue && object(linked.repository).nameWithOwner === canonicalRepository;
-    });
+    }); } catch { return undefined; } })();
     const body = text(pr.body);
     const title = text(pr.title);
-    return closing || referenced.includes(pr.number) || mention.test(`${title}\n${body}`) || body.includes(url)
+    const related = campaignPullRequests === undefined
+      ? closing !== false || referenced.includes(pr.number) || mention.test(`${title}\n${body}`) || body.includes(url)
+      : campaignPullRequests === null || closing !== false || campaignPullRequests.includes(pr.number as number);
+    return related
       ? [{ number: pr.number as number, title, url: text(pr.url), headSha: text(pr.headRefOid), closesIssue: closing }] : [];
   }).sort((a, b) => a.number - b.number);
   const title = text(target.title);
@@ -156,6 +190,7 @@ export async function inspectGithubIssueClosure(issue: number, run: Run, deliver
     ...(members ? { epicMembers: members } : {}),
   })).digest("hex");
   return { repository: canonicalRepository, issue, title, url, state: target.state as "OPEN" | "CLOSED", forgeDigest,
+    ...(campaignPullRequests === undefined ? {} : { campaignPullRequests: campaignPullRequests === null ? null : [...campaignPullRequests] }),
     openPullRequests: relevant, ...(deliveryPullRequests === undefined ? {} : { delivery }), ...(members ? { epicMembers: members } : {}) };
 }
 
@@ -192,12 +227,17 @@ export async function executeGithubIssueClosure(
   snapshot: GithubIssueClosureSnapshot,
   run: Run,
   begin: () => boolean | Promise<boolean>,
+  campaignPullRequests: number[] | null | undefined = snapshot.campaignPullRequests,
 ): Promise<GithubIssueClosureResult> {
   const result = (outcome: GithubIssueClosureResult["outcome"]): GithubIssueClosureResult => ({ outcome, completedAt: Date.now() });
   // Every refusal precedes the mutation fence, so it names its reason and nothing was written.
   const refused = (refusal: GithubIssueClosureRefusal): GithubIssueClosureResult => ({ ...result("refused"), refusal });
+  if (snapshot.campaignPullRequests && campaignPullRequests !== null &&
+      snapshot.campaignPullRequests.some((number) => !campaignPullRequests?.includes(number))) {
+    return refused(githubIssueClosureRefusal("related_pull_requests_changed", { pullRequests: snapshot.campaignPullRequests.filter((number) => !campaignPullRequests?.includes(number)) }));
+  }
   const current = await inspectGithubIssueClosure(snapshot.issue, run, snapshot.delivery?.map(({number,headSha}) => ({number,headSha})),
-    snapshot.epicMembers !== undefined);
+    snapshot.epicMembers !== undefined, campaignPullRequests);
   if (current.repository !== snapshot.repository) return refused(githubIssueClosureRefusal("repository_changed"));
   if (current.state === "CLOSED") return result("already_closed");
   if (current.forgeDigest !== snapshot.forgeDigest) return refused(forgeChange(snapshot, current));

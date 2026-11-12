@@ -1,5 +1,12 @@
+export * from "./assistant-connections.js";
+export type {OrphanedSkillCopy, OrphanedSkillCopyRef} from "./orphaned-skill-copies.js";
 export * from "./shared-predicates.js";
+export * from "./provider-command-home-write-separation.js";
+import type { ProviderCommandHomeWriteSeparation } from "./provider-command-home-write-separation.js";
 export * from "./provider-account-selection.js";
+export * from "./provider-readiness.js";
+export * from "./managed-profile-directory-diagnostic.js";
+import type { ManagedProfileDirectoryDiagnostic } from "./managed-profile-directory-diagnostic.js";
 import { isProviderHomeRecoveryCause, PROVIDER_HOME_RECOVERY_CAUSE_CODES, type ProviderHomeRecoveryCause, type ProviderHomeBlockingProcess } from "./provider-home-recovery.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } from "./orchestrator-review-policy.js";
 export * from "./orchestrator-review-policy.js";
@@ -296,6 +303,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v180 current-identity inspection and account selection from an Authentication Required card. */
   providerAuthenticationAccountRecovery: 180,
   providerAccounts: 170,
+  providerSetupReadiness: 357,
   /** v334 (#4353): a runner reports each account's billing and cooldown and rechecks a policy-chosen
    * account at launch, so the control plane may enforce a non-fixed account selection policy. */
   providerAccountSelectionPolicy: 334,
@@ -321,6 +329,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   fineGrainedDiff: 50,
   githubReviewReconciliation: 51,
   forgeIntegration: 106,
+  requestDiff: 345,
   podReconciliation: 52,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
@@ -455,12 +464,14 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * the control plane by the runner, because an older control plane would ignore the field and ask
    * the question as an approval, and against the root's runner by the control plane. */
   ownerQuestions: 303,
+  issueClosureReconciliation: 355,
   /** v332 (#4359): explicit child clarifications, with free text and no consumable action grant. */
   childQuestions: 332,
   /** v308 (#4282): structured scope proposals, `proposal` on request_campaign_issue_scope_change.
    * Checked against the control plane by the runner, and against the root's runner by the control
    * plane, which sends an older runner's proposal to the owner. */
   campaignScopeProposals: 308,
+  exactNamedRepositoryScope: 348,
   /** v296 (#4137): `ownerRule` on request_workflow_decision. Checked against the control plane by
    * the runner, because an older control plane ignores the field and would let the Orchestrator
    * decide a gate its owner kept. */
@@ -494,6 +505,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v278 issue-closure inspection reads an epic's sub-issues and member checklist with each member's
    * state (#4060). Without it an epic's completed closure has only the work-item proof. */
   epicClosureMembers: 278,
+  closureCampaignPullRequests: 360,
+  closureApprovalSteering: 360,
   /** v282 runner delivers a Full Control standing dismissal or decline with text naming the policy
    * rather than a person (#4063). Older runners keep the fixed text and the separate notices. */
   fullControlResponseAttribution: 282,
@@ -522,6 +535,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** Runner attests `AgentCapabilities.imageToolResults`. Before it, nothing states whether a
    * harness shows the model an image returned by a tool, so review cannot be delegated. */
   orchestratorImageToolResults: 179,
+  uiEvidenceReceiptReuse: 356,
   orchestratorVideoFrameReview: 189,
   /** Pi driver never reports a provider-acknowledged steer as a definite `stale_turn` (#1433).
    * Gates Pi's admission to the automatic mid-turn steering lane; an older runner would re-queue
@@ -653,6 +667,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   locationForgeObservation: 326,
   /** v327 creates an approved follow-up issue in a named Location's repository (#4119). */
   locationIssuePublication: 327,
+  campaignFailedRunEvidence: 351,
   /** The highest floor of the three gates above: a Location on an older runner doesn't join a campaign (#4319). */
   campaignLocationGates: CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL,
   /** v330 reads a consumed merge's closures in any state and dequeues it (#4323). */
@@ -2924,6 +2939,9 @@ export interface HarnessUpdateAssessment {
 }
 
 export interface AgentDefinition {
+  /** v361: runner-owned provider/command credential-home WRITE separation only. Omission is
+   * unknown, not protected. Independent of any provider's nested command sandbox. */
+  providerCommandHomeWriteSeparation?: ProviderCommandHomeWriteSeparation;
   id: string;
   name: string;
   command: string;
@@ -2940,6 +2958,8 @@ export interface AgentDefinition {
    * environment names, environment values, or provider diagnostics. */
   unavailableReason?: string;
   authStatus?: "authenticated" | "unauthenticated" | "unknown";
+  /** Protocol v357: timestamped setup observations, independent of launch readiness. */
+  providerReadiness?: import("./provider-readiness.js").ProviderReadiness;
   /** Opaque runner-local account selected when a client omits an explicit account. */
   defaultProviderAccountId?: string;
   /** Secret-free observations; aggregate availability may offer a ready explicit account while
@@ -3020,6 +3040,7 @@ export interface ProviderAccountDefinition {
   label: string;
   provider: "claude" | "codex";
   authStatus: "authenticated" | "unauthenticated" | "unknown";
+  providerReadiness?: import("./provider-readiness.js").ProviderReadiness;
   /** Protocol v225: the account HOME's stable provider profile identity and whether this control
    * plane may use it. Absent means a legacy, unadopted HOME. Older control planes never receive
    * it, nor any profile-bearing account they are not granted. */
@@ -3707,6 +3728,8 @@ export interface BoxView {
   /** Runner id the orchestrator launches the box's runner with. */
   runnerId: string;
   status: BoxStatus;
+  /** Protocol v357: replacement verification, independent of the connected SSH transport. */
+  harnessReadiness?: import("./provider-readiness.js").SshHarnessReadiness;
   /** Last bootstrap/connection error, if any. */
   lastError: string | null;
   createdAt: number;
@@ -4639,7 +4662,21 @@ export interface CampaignIssueScopeRepositoryChange {
   removals: number[];
 }
 
+export interface CampaignFailedRunEvidence {
+  /** Repository/PR/head from the origin work item's server-proven ownership; IDs locate forge reads. */
+  repository: string;
+  pullRequest: number;
+  headSha: string;
+  runId: number;
+  jobId: number;
+  /** Read from the exact job's check_run_url and check run, never supplied by the requester. */
+  checkRunId: number;
+  checkName: string;
+}
+
 export interface CampaignIssueAdmission {
+  /** Server-derived relatedness basis. */
+  relatedness?: { basis: "decision_model" } | ({ basis: "failed_campaign_run" } & CampaignFailedRunEvidence);
   boundaryRevision: number;
   evidenceDigest: string;
   /** Original publication authority survives compatible reauthorization, never a new grant. */
@@ -4863,6 +4900,7 @@ export type CampaignIssueScopeMessage = {
 } & ({ operation: "inspect"; epic?: number; issues?: number[]; publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] };
        /** v291 (#4103): also report `issueFacts` for each of `issues`. */
        facts?: true } |
+     { operation: "failed_run_inspect"; evidence: Omit<CampaignFailedRunEvidence, "checkRunId" | "checkName"> } |
      { operation: "publication_inspect"; sanitizedTitle: string; sanitizedBody: string; labels: string[] } |
      { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl;
        /** v310 (#3363): the campaign root's policy revision `control` was read at. A runner never
@@ -4898,7 +4936,17 @@ export type CampaignIssueNumberGrantRefusal =
    * numbers come only from its scope. */
   | "issue_scope_held";
 
+/** Bounded diagnostics only; never surface raw forge output. */
+export type PublishedIssueFailure = "title" | "body" | "labels" | "read_failed";
+export function publishedIssueFailure(value: unknown): PublishedIssueFailure {
+  return value === "title" || value === "body" || value === "labels" ? value : "read_failed";
+}
+
 export interface CampaignIssueScopeResultMessage {
+  /** v351: exact forge-verified failure; absent when unproven. */
+  failedRun?: CampaignFailedRunEvidence;
+  /** v347: absent or unknown failures remain failed reads. */
+  publicationFailure?: PublishedIssueFailure;
   type: "campaign_issue_scope_result";
   requestId: string;
   sessionId: string;
@@ -4957,6 +5005,10 @@ export function validCampaignIssueFacts(value: unknown): value is CampaignIssueF
 }
 
 export interface GithubIssueClosureInspection {
+  /** v360 (#4403): complete server-derived campaign PR identities in this repository. Missing
+   * retains conservative mention matching; null means unreadable and relates every open PR.
+   * Execution reuses this exact binding. */
+  campaignPullRequests?: number[] | null;
   repository: string;
   issue: number;
   title: string;
@@ -5008,7 +5060,11 @@ export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspe
   explanation: string;
   evidence: string[];
   comment?: string;
-  activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
+  /** v360: server-derived issue attempt identities, including children that ended before execution. */
+  issueAttemptDigest?: string;
+  activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string;
+    /** v360: server-derived issue work, stable across leaving for proven unrelated work. */
+    issueWorkDigest?: string }>;
   /** Server-derived (#3237): the live campaign children the ledger proves unrelated, so left out of
    * `activeChildren`, each with the ledger facts that excluded it. Read-only: it stays outside the
    * resource digest and is not sent to the runner. A snapshot from an earlier release omits it. */
@@ -5026,6 +5082,10 @@ export interface GithubIssueClosureResult {
   /** Why a `refused` outcome was refused (#4059). The control plane records one for every refusal;
    * a result stored by an older control plane omits it. */
   refusal?: GithubIssueClosureRefusal;
+  /** Read-only recovery of an uncertain mutation (#4398), never a new closure grant. */
+  reconciliation?: { checkedAt: number; verified?: true; ownerDecisionOccurrenceId?: string; acknowledgedAt?: number };
+  /** Start of the bounded reconnect/runner-upgrade grace period, before any read is dispatched. */
+  reconciliationWaitingSince?: number;
 }
 
 export interface AutomationCreationRequest {
@@ -5247,6 +5307,10 @@ export type MergeReviewEvidence =
  * child-facing message is the exception by design: its audience is the child, so it is retained
  * on the decision and delivered, while audit still records only its digest. */
 export interface WorkflowDecisionView {
+  /** v344 (#4242): server-derived canonical action for an approved PR merge, available before
+   * consumption. Informational only: consume the unchanged snapshot with this exact action to
+   * arm it. Absent on older servers and on decisions that are not currently approved merges. */
+  approvedAction?: WorkflowDecisionAction;
   /** Server-derived current verification of the optional merge citation. Never caller supplied. */
   reviewEvidence?: MergeReviewEvidence;
   requestId: string;
@@ -5722,6 +5786,9 @@ export interface GovernanceAuditEntry {
       frameCount: number;
     };
     reviewReceiptIds?: string[];
+    /** Original acknowledged image deliveries reused without another provider delivery. */
+    reusedReviewReceipts?: { receiptId: string; occurrenceId: string; evidenceId: string;
+      reviewedAt: number; reviewerSessionId: string }[];
     /** v276 (#4074): the delegated image reviewer and the digest of the verdict an approval rests on. */
     delegatedImageReview?: { reviewId: string; verdictId: string; reviewerSessionId: string;
       recommendation: "approve" | "deny"; verdictSha256: string };
@@ -9491,15 +9558,24 @@ export type OutboundEventKind =
   | "cost.checkpoint"
   | "cost.budget_exhausted";
 
+/** The content-minimized Assistant transport and receiver share this lifecycle contract. */
+export const ASSISTANT_WORK_EVENT_KINDS: readonly OutboundEventKind[] = [
+  "session.created", "session.input_required", "session.idle", "session.completed",
+  "session.failed", "session.stopped",
+];
+
 export type OutboundEventSubscriptionScope =
   | { kind: "project"; projectId: string }
-  | { kind: "automation"; automationId: string };
+  | { kind: "automation"; automationId: string }
+  | { kind: "assistant"; connectionId: string };
 
 export type OutboundEventSubscriptionState = "active" | "paused";
 
 export interface OutboundEventSubscriptionView {
   subscriptionId: string;
   callbackUrl: string;
+  /** Owner-visible exact-address policy; never included in event envelopes or journals. */
+  privateAddresses?: string[];
   scope: OutboundEventSubscriptionScope;
   eventKinds: OutboundEventKind[];
   includeSessionName: boolean;
@@ -9553,6 +9629,7 @@ export interface OutboundEventDeliveryView {
 
 export interface OutboundEventEnvelope {
   version: "v1";
+  assistant?: { controlPlaneId: string; connectionId: string; work: { workId: string; revision: number; attentionRevision: number }[] };
   eventId: string;
   kind: OutboundEventKind;
   occurredAt: number;
@@ -9949,9 +10026,15 @@ export type GithubIssueClosureMessage = {
   location?: GithubIssueClosureLocation;
 } & (
   | { operation: "inspect"; issue: number; scopeRevision?: number; deliveryPullRequests?: Array<{ number: number; headSha: string }>;
+      campaignPullRequests?: number[] | null;
       /** v278 (#4060): also read the issue's epic members into the inspection and its digest. */
       epicMembers?: true }
-  | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot }
+  | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot;
+      /** v360: fresh server-derived campaign context. Null relates every open PR. */
+      campaignPullRequests?: number[] | null;
+      /** v360: root execution also stops at the forge fence for a final control-plane recheck. */
+      prepare?: true }
+  | { operation: "reconcile"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot; consumedAt: number }
   /** v323 (#4119): only with `location`. A Location's runner holds no copy of the campaign's scope,
    * so its `execute` stops at the mutation fence and answers `prepared`. The control plane rechecks
    * the campaign's authority after those forge reads, and this lets the prepared closure go on. */
@@ -9966,6 +10049,8 @@ export interface GithubIssueClosureResultMessage {
   ok: boolean;
   inspection?: GithubIssueClosureInspection;
   result?: GithubIssueClosureResult;
+  /** Only a read of the exact issue state, reason and unique approved comment can prove this. */
+  reconciled?: boolean;
   /** v323 (#4119): a Location's `execute` passed every forge check and waits for `commit`. Nothing was written. */
   prepared?: true;
   error?: string;
@@ -10224,6 +10309,8 @@ export interface ProviderLoginResultMessage {
   ok: boolean;
   login?: ProviderLoginView;
   error?: string;
+  /** v362: optional path-free start failure observation. Older peers omit/ignore it. */
+  directoryDiagnostic?: ManagedProfileDirectoryDiagnostic;
 }
 
 export interface RemoveProviderAccountResultMessage {
@@ -10789,6 +10876,9 @@ export interface StartSessionMessage {
 }
 
 export interface PromptSessionMessage {
+  /** v360: server-created approved root issue-closure notification. This marks only its durable
+   * receipt as eligible for safe queue promotion; public prompt APIs never accept this field. */
+  issueClosureResume?: true;
   artifactUploads?: ArtifactUploadPreference;
   projectMemory?: SessionProjectMemory;
   type: "prompt_session";
@@ -11895,6 +11985,7 @@ export type GitAction =
   | { kind: "status" }
   | { kind: "summary" }
   | { kind: "diff"; scope: GitDiffScope }
+  | { kind: "request_diff"; requestUrl: string }
   /** `all` forces the legacy commit-everything (`git add -A`) even when hunks are staged.
    * `expectStaged` is the client's belief about whether anything is staged — when it no longer
    * matches reality the runner refuses with GIT_STALE instead of committing a different set
@@ -12463,6 +12554,10 @@ export interface GitPrSummary {
   /** Additive forge identity. Missing means a pre-v106 GitHub summary. */
   provider?: ForgeProvider;
   kind?: ForgeChangeRequestKind;
+  /** Read-only context; absent on older runners. */
+  baseRef?: string;
+  headRef?: string;
+  mergeability?: string;
 }
 
 /** Check rollup for that PR (CheckRuns + commit StatusContexts combined). */
@@ -12472,6 +12567,10 @@ export interface GitChecksSummary {
   passing: number;
   /** Names of the failing checks (bounded) — feeds the "Fix" prompt. */
   failingNames: string[];
+  /** Bounded named checks using the rollup's latest-run selection. */
+  jobs?: { name: string; state: "passing" | "failing" | "pending"; url: string | null }[];
+  /** Named checks are unavailable or only a bounded subset was read. */
+  jobsIncomplete?: boolean;
   /** The PR's checks tab, when the PR is known. */
   url: string | null;
 }
@@ -12569,6 +12668,19 @@ export interface GitDiffInfo {
   stats: GitDiffStats;
   stagedStats?: GitDiffStats;
   unstagedStats?: GitDiffStats;
+}
+
+/** Forge-owned diff, bracketed by identical request revision reads; never derived from local HEAD. */
+export interface GitRequestDiffInfo {
+  requestUrl: string;
+  headOid: string;
+  baseOid: string;
+  targetOid: string;
+  baseRef: string;
+  headRef: string;
+  readAt: number;
+  incomplete: boolean;
+  diff: GitDiffInfo;
 }
 
 export interface GitPrInfo {
@@ -12669,6 +12781,7 @@ export interface GitActionData {
   status?: GitStatusInfo;
   summary?: GitSummaryInfo;
   diff?: GitDiffInfo;
+  requestDiff?: GitRequestDiffInfo;
   commit?: GitCommitInfo;
   pr?: GitPrInfo;
   githubReview?: GitHubReviewSyncInfo;
@@ -13380,6 +13493,7 @@ export interface SetProjectRequest {
 /** Body for POST /api/sessions/:id/git — the action plus its parameters. */
 export interface GitActionRequest {
   action: GitAction["kind"];
+  requestUrl?: string;
   /** For diff. */
   scope?: GitDiffScope;
   /** For commit. */

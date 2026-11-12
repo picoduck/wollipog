@@ -1,4 +1,9 @@
+import { createSessionGitManagement } from "./session-git-management.js";
+import { AssistantPromptImages } from "./assistant-prompt-images.js";
+import { createCampaignReviewManagement } from "./campaign-review-management.js";
+import { registerAssistantCampaignManagement } from "./assistant-campaign-management.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
+import { providerLoginStartFailure } from "./provider-login-start-failure.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
 import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js";
@@ -15,7 +20,7 @@ import { AutomationCreationService } from "./automation-creation.js";
  */
 
 import os from "node:os";
-import { handoffDestinationError, locationSwitchRole, sessionRole, withRepositoryMismatchGuidance, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest, type ReleaseCampaignSlotRequest, type SetCampaignFollowUpLimitRequest, type SetScopeGrantSelectionCountRequest } from "@wollipog/protocol";
+import { locationSwitchRole, sessionRole, withRepositoryMismatchGuidance, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest, type ReleaseCampaignSlotRequest, type SetCampaignFollowUpLimitRequest, type SetScopeGrantSelectionCountRequest } from "@wollipog/protocol";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -47,7 +52,6 @@ import {
 import type { StagedSessionEventPayload } from "./event-payloads.js";
 import { installStartupReadinessGate } from "./startup-readiness.js";
 import { WorktreeCreateCoordinator } from "./worktree-create-coordinator.js";
-import { legacyPeerWorktreeRetirement } from "./worktree-retirement.js";
 import { KeyedSerialTaskQueue } from "./keyed-serial-task-queue.js";
 import {
   AUTOMATION_TRIGGER_MAX_BODY_BYTES,
@@ -62,7 +66,6 @@ import {
   SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
   parseMessage,
   CONTROL_PLANE_SERVICE,
-  providerSupportsConversationFork,
   runnerCapabilityRequirementError,
   parseProviderAccountPolicyWrite,
   PROVIDER_ACCOUNT_POLICY_NOT_FIXED,
@@ -70,12 +73,8 @@ import {
   type RunnerCapabilityRequirementDetails,
   type ProviderHomeLaunchRefusalView,
   runnerSupportsProtocol,
-  workspaceRemovalBlockedMessage,
   validProviderHomeLaunchRefusal,
-  scopeAudienceContained,
-  isPromptImageReference,
   isWorkspaceReference,
-  validatePromptImageInputs,
   type AddBoxRequest,
   type AccessScopeChangePreview,
   type AddPodMemberRequest,
@@ -115,21 +114,11 @@ import {
   type RecordCampaignWorkItemDeliveryRequest,
   type VerifyOrchestratorChildRequest,
   type CreateWorkspaceReferenceRequest,
-  type CreateProjectRequest,
-  type UpdateProjectRequest,
   providerAccountChoiceRequiredForAgent,
-  providerAccountSelectionPreviewForAgent,
   runnerViewForAgent,
-  type AddProjectLocationRequest,
-  type ProjectLocationView,
-  type CreateProjectLocationRequest,
-  type MoveProjectLocationRequest,
-  type RenameProjectLocationRequest,
-  type GitActionRequest,
   type GovernancePolicy,
   type OnboardingInfo,
   type OrganizationRole,
-  type ResourceOwner,
   type ResourceScope,
   type ParentControlMode,
   type ParentControlDecisionPolicy,
@@ -137,7 +126,6 @@ import {
   type ShellView,
   type UserStatus,
   type PromptRequest,
-  type PromptImageInput,
   type InvokeSessionCommandRequest,
   type SteerRequest,
   type RelayPodRequest,
@@ -149,8 +137,6 @@ import {
   type SetColumnRequest,
   type SessionProviderAccountOptionsResponse,
   type SetSessionTitleRequest,
-  type SetWorkspaceRequest,
-  type SetProjectRequest,
   type StartPodOrchestrationRequest,
   type UpdatePodMemberRequest,
   type UpdatePodOrchestrationRequest,
@@ -203,7 +189,6 @@ import { finishControlPlaneShutdown } from "./control-plane-shutdown.js";
 import { PUBLIC_ORIGIN_ENV, resolvePublicOrigin } from "./public-origin.js";
 import { defaultArtifactBlobRoot } from "./artifact-blob-store.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
-import { childSessionDefaultsError } from "./child-session-guardrails.js";
 import { ChildSessionRegistryProjector } from "./child-session-registry.js";
 import {
   decideScopedBoxLifecycle,
@@ -270,18 +255,10 @@ import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosu
 import { composeHostingVideoEvidence, registerHostingVideoEvidenceRoutes } from "./hosting-video-evidence.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
 import {
-  canAssignSessionProject,
   resolveSessionCreationOwnership,
 } from "./session-creation-route.js";
 import { registerInstanceRoute } from "./instance-route.js";
-import {
-  gitActionAllowed,
-  gitActionCapability,
-  gitActionRequiresLinkedWorktree,
-  parseGitAction,
-} from "./git-route.js";
 import { editorAdvertisesLocation, parseSessionHostAction } from "./host-actions.js";
-import { validateForgeReviewSync, validateGitHubReviewSync } from "./review-findings.js";
 import {
   Hub,
   INDEFINITE_SESSION_REMINDER_UI_PROTOCOL,
@@ -303,13 +280,37 @@ import {
 import {
   RUNTIME_UPDATE_RUN_LIMIT,
   SESSION_COMMAND_INVOCATION_RETENTION_MS,
-  sessionBlocksConversationFork,
   SessionsService,
   type PreparedLiveSessionEvent,
 } from "./sessions.js";
 import { videoFrameValidationSessionId } from "./video-frame-validation.js";
 import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
+import { registerAssistantRoutes } from "./assistant-routes.js";
+import { registerAssistantConnectionOperations } from "./assistant-connection-operations.js";
+import { createSessionWorktreeManagement } from "./session-worktree-management.js";
+import { OwnerManagement, type OwnerManagementReply } from "./owner-management.js";
+import { registerAssistantStatusOperations } from "./assistant-status-operations.js";
+import { registerAssistantOwnerManagement } from "./assistant-owner-management.js";
+import { registerAssistantMachineManagement } from "./assistant-machine-management.js";
+import { createSessionQueueManagement } from "./session-queue-management.js";
+import { createSessionLifecycleManagement } from "./session-lifecycle-management.js";
+import { createSessionContentManagement } from "./session-content-management.js";
+import { createSessionShellManagement } from "./session-shell-management.js";
+import { registerAssistantSessionWork } from "./assistant-session-work.js";
+import { registerAssistantSessionLifecycle } from "./assistant-session-lifecycle.js";
+import { registerAssistantSessionContent } from "./assistant-session-content.js";
+import { createOwnerRunnerManagement } from "./owner-runner-management.js";
+import { createOwnerMachineManagement } from "./owner-machine-management.js";
+import { readProviderAccountSelection } from "./owner-provider-selection.js";
+import { createOwnerProjectManagement } from "./owner-project-management.js";
+import { projectName, requestedAccessScope, accessScopeOwnerFromQuery,
+  accessScopeTransitionError as sharedAccessScopeTransitionError,
+  accessScopePreviewForPrincipal as sharedAccessScopePreviewForPrincipal } from "./project-management-validation.js";
+import { OwnerManagementInventory } from "./owner-management-inventory.js";
+import { registerAssistantWorkOwnerRoutes } from "./assistant-work-routes.js";
+import { registerAssistantDiscordIngress } from "./assistant-discord-ingress.js";
+import { createAssistantManagement } from "./assistant-composition.js";
 import { sessionCredentialRefusal } from "./session-credential-refusal.js";
 import { pushDecision } from "./push-decision.js";
 import { automationPushMessage } from "./automation-push-decision.js";
@@ -343,6 +344,14 @@ import { registerWorkflowArtifactExportRoute } from "./artifact-export-route.js"
 import { registerRunnerCredentialRoutes } from "./runner-credential-route.js";
 import { SessionRoleConversions, registerSessionRoleRoutes } from "./session-role-conversion.js";
 import { makeSkillsSyncPusher, registerSkillRoutes } from "./skills-route.js";
+import { assistantRequestDigest } from "./assistant-command-receipts.js";
+import { ManagementMutations } from "./assistant-management-command.js";
+import { registerAssistantSkills } from "./assistant-skills.js";
+import { registerAssistantTriggerParity } from "./assistant-trigger-parity.js";
+import { AssistantCommandConfirmations } from "./assistant-command-confirmations.js";
+import { registerAssistantSkillParity } from "./assistant-skill-parity.js";
+import { createExtendedSkillsManagement } from "./skill-extended-management.js";
+import { registerAssistantAutomations } from "./assistant-automations.js";
 import { builtInSkills, seedBuiltInSkills } from "./built-in-skills.js";
 import { repairLegacySkillDescriptions } from "./skills.js";
 import { SKILL_GIT_AUTO_UPDATE_SWEEP_MS, SkillGitAutoUpdater, skillGitAutoUpdateIntervalMs } from "./skill-git-auto-update.js";
@@ -375,19 +384,15 @@ import {
   backgroundJobStopActor,
   backgroundJobStopAuthorizationError,
   boundedTargetId,
-  forkProjectAssignment,
-  forkSnapshotIdentityError,
-  providerForkCleanupTarget,
-  providerForkSnapshotIdError,
   canAdministerIdentity,
+  humanGlobalResourceAuthorizationError,
   isMutationMethod,
   PERSONAL_ORGANIZATION_ID,
   mutationAuthorizationError,
-  orchestratorSelfWorktreeAuthorizationError,
-  worktreeRequestedBySession,
   type AuthPrincipal,
   type HumanPrincipal,
   workflowActorForPrincipal,
+  validParentControlCoordinate,
 } from "./identity.js";
 
 // Consume inherited launch material before initialization can create any descendants.
@@ -491,7 +496,7 @@ const providerProfileInventoryRevocations = new ProviderProfileInventoryRevocati
 const worktreeCreates = new WorktreeCreateCoordinator();
 const shellRegistry = new ShellRegistry(db);
 // Larger body limit so pasted screenshots (base64) fit comfortably.
-const app = Fastify({
+export const app = Fastify({
   bodyLimit: 32 * 1024 * 1024,
   logger: {
     // /ui carries the device token as ?token= (browsers can't set WS headers). Redact it from
@@ -505,6 +510,8 @@ const app = Fastify({
 });
 // Checkpoint the write-ahead log off the event loop (#2761). Only failures, a stalled worker
 // (#2834), and a runtime whose SQLite cannot safely checkpoint from a second connection are logged.
+export const ownerManagementInventory = new OwnerManagementInventory();
+ownerManagementInventory.attach(app);
 db.startWalCheckpoints({ onEvent: (event) => logWalCheckpointerEvent(app.log, event) });
 
 const CHILD_SESSION_REGISTRY_CACHE_LIMIT = 128;
@@ -720,11 +727,6 @@ function requestHuman(req: FastifyRequest): HumanPrincipal | null {
   return principal?.kind === "human" ? principal : null;
 }
 
-function validParentControlCoordinate(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= 256 &&
-    !/[\u0000-\u001f\u007f]/u.test(value);
-}
-
 function humanActorId(req: FastifyRequest): string {
   return requestHuman(req)?.userId ?? db.localIdentityContext().userId;
 }
@@ -759,55 +761,10 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   if (mutationError) return mutationError;
   if (!principal) return null;
 
-  const memberScopedRoute = routePath === "/api/remote-access" || routePath === "/api/instance" || routePath === "/api/compatibility" ||
-    routePath === "/api/identity" || routePath === "/api/runners" ||
-    (routePath === "/api/session-naming" || routePath.startsWith("/api/session-naming/")) ||
-    routePath === "/api/projects" || routePath.startsWith("/api/projects/") ||
-    routePath === "/api/sessions" || routePath.startsWith("/api/sessions/") ||
-    routePath === "/api/search" || routePath === "/api/usage" || routePath === "/api/usage/retention" ||
-    routePath === "/api/usage/daily-budget" || routePath === "/api/usage/users" ||
-    routePath === "/api/usage/pricing/refresh" || routePath === "/api/usage/subscriptions" ||
-    routePath === "/api/usage/subscriptions/refresh" ||
-    routePath === "/api/push/vapid-public-key" || routePath === "/api/push/subscriptions" ||
-    routePath === "/api/push/unsubscribe" ||
-    routePath === "/api/artifacts/:artifactId/export" ||
-    // Skills record per-resource ownership rows, so like /api/projects they are member-scoped
-    // rather than personal-organization-global resources.
-    routePath === "/api/skills" || routePath.startsWith("/api/skills/") ||
-    routePath === "/api/skill-groups" || routePath.startsWith("/api/skill-groups/") ||
-    routePath === "/api/skill-assignments" || routePath.startsWith("/api/skill-assignments/") ||
-    routePath === "/api/runners/:id/skills" ||
-    routePath === "/api/runners/:id/capacity" ||
-    routePath === "/api/runners/:id/provider-logins" ||
-    routePath === "/api/runners/:id/provider-logins/:operationId/code" ||
-    routePath === "/api/runners/:id/provider-logins/:operationId/dismiss" ||
-    routePath === "/api/runners/:id/provider-logins/:operationId" ||
-    routePath === "/api/runners/:id/skills/sync" ||
-    routePath === "/api/runners/:id/skill-snapshots" ||
-    routePath.startsWith("/api/skill-machine/") ||
-    routePath.startsWith("/api/runners/:id/skill-drift/") || routePath.startsWith("/api/skill-drift/") ||
-    routePath.startsWith("/api/runners/:id/orphaned-skill-copies/") || routePath.startsWith("/api/orphaned-skill-copies/") ||
-    routePath === "/api/runners/:runnerId/host-action" ||
-    routePath === "/api/runners/:runnerId/workspaces/:workspaceId/rename" ||
-    routePath === "/api/runners/:runnerId/workspaces/:workspaceId/access-scope";
-  const organizationAdminRoute = routePath === "/api/identity" || routePath.startsWith("/api/identity/") ||
-    routePath === "/api/runner-credentials" || routePath.startsWith("/api/runner-credentials/") ||
-    routePath === "/api/devices" || routePath.startsWith("/api/devices/");
   const organizationAdmin = principal.kind === "human" && (principal.role === "owner" || principal.role === "admin");
   if (principal.kind === "human") {
-    if (!organizationAdmin && req.method === "POST" && routePath === "/api/projects/:id/locations/new") {
-      return "organization owner or admin permission is required to register an arbitrary host path";
-    }
-    if (!organizationAdmin && !memberScopedRoute) {
-      return "organization owner or admin permission is required for this global resource";
-    }
-    if (organizationAdmin && !memberScopedRoute && !organizationAdminRoute &&
-        principal.organizationId !== PERSONAL_ORGANIZATION_ID) {
-      return "this global resource belongs to the personal control-plane organization";
-    }
-    if (!organizationAdmin && routePath === "/api/sessions/adopt") {
-      return "organization owner or admin permission is required to adopt unscoped provider sessions";
-    }
+    const error = humanGlobalResourceAuthorizationError(req.method, routePath, principal);
+    if (error) return error;
   }
   if (principal.kind === "agent") {
     const delegationError = agentDelegationAuthorizationError(routePath, principal);
@@ -815,6 +772,14 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   }
 
   const params = (req.params ?? {}) as Record<string, unknown>;
+  if (routePath.startsWith("/api/outbound-event-subscriptions/") && typeof params.id === "string") {
+    const subscription = db.getOutboundEventSubscription(params.id);
+    if (subscription?.scope.kind === "assistant") {
+      const connection = db.assistantConnections.get(subscription.scope.connectionId);
+      if (principal.kind !== "human" || principal.role !== "owner" || !connection || connection.ownerUserId !== principal.userId ||
+          connection.organizationId !== principal.organizationId) return {statusCode: 404, error: "outbound event subscription not found"};
+    }
+  }
   const sessionId = typeof params.id === "string" && routePath.startsWith("/api/sessions/") ? params.id
     : typeof params.sessionId === "string" ? params.sessionId : null;
   if (sessionId && principal.kind === "agent") {
@@ -1155,7 +1120,7 @@ const refreshCampaignForge = (campaignId: string, refs: readonly CampaignPullReq
 });
 svc.campaignForgeRefresh = refreshCampaignForge;
 svc.campaignForgeReadNow = (campaignId, refs) => campaignForgeObserver.readNow(campaignId, refs);
-registerCampaignStatusRoutes(app, {
+const campaignStatusManagement = registerCampaignStatusRoutes(app, {
   db,
   requestPrincipal,
   refreshForge: refreshCampaignForge,
@@ -2382,86 +2347,11 @@ app.get("/api/runners", async (req) => {
 
 /* ------------------------------- Projects -------------------------------- */
 
-const projectName = (value: unknown): string | null => {
-  if (typeof value !== "string") return null;
-  const name = value.trim().replace(/\s+/g, " ");
-  return name && name.length <= 120 && !/[\0-\x1f\x7f]/.test(name) ? name : null;
-};
 
-const requestedAccessScope = (
-  principal: HumanPrincipal,
-  value: unknown,
-  fallback?: ResourceScope,
-): { ok: true; scope: ResourceScope } | { ok: false; status: 400 | 403; error: string } => {
-  const requestedValue = value === undefined ? fallback?.owner : value;
-  if (!requestedValue || typeof requestedValue !== "object" || Array.isArray(requestedValue)) {
-    return { ok: false, status: 400, error: "owner must select a valid access scope" };
-  }
-  const owner = requestedValue as Partial<ResourceOwner>;
-  const administers = canAdministerIdentity(principal.role);
-  if (owner.kind === "organization") {
-    if (owner.organizationId !== principal.organizationId) {
-      return { ok: false, status: 400, error: "organization access must use the current organization" };
-    }
-    if (!administers) {
-      return { ok: false, status: 403, error: "organization owner or admin permission is required for organization access" };
-    }
-    return { ok: true, scope: { organizationId: principal.organizationId, owner: {
-      kind: "organization", organizationId: principal.organizationId,
-    } } };
-  }
-  if (owner.kind === "user") {
-    if (owner.userId !== principal.userId) {
-      return { ok: false, status: 403, error: "a private scope can only be assigned to the current user" };
-    }
-    return { ok: true, scope: { organizationId: principal.organizationId, owner: {
-      kind: "user", userId: principal.userId,
-    } } };
-  }
-  if (owner.kind === "team" && typeof owner.teamId === "string") {
-    const team = db.identityAdministration(principal).teams.find((candidate) => candidate.teamId === owner.teamId);
-    if (!team || (!administers && !team.memberUserIds.includes(principal.userId))) {
-      return { ok: false, status: 403, error: "the selected team is not available to the current user" };
-    }
-    return { ok: true, scope: { organizationId: principal.organizationId, owner: {
-      kind: "team", teamId: owner.teamId,
-    } } };
-  }
-  return { ok: false, status: 400, error: "owner must select a valid access scope" };
-};
-
-const accessScopeTransitionError = (
-  principal: HumanPrincipal,
-  currentScope: ResourceScope,
-  targetScope: ResourceScope,
-): string | null => {
-  if (canAdministerIdentity(principal.role)) return null;
-  const sameAudience = scopeAudienceContained(currentScope, targetScope) &&
-    scopeAudienceContained(targetScope, currentScope);
-  if (sameAudience || (db.scopeAudienceContainedWithMembership(targetScope, currentScope) &&
-      !db.scopeAudienceContainedWithMembership(currentScope, targetScope))) return null;
-  return "organization owner or admin permission is required unless the access change only narrows the current audience";
-};
-
-const accessScopeOwnerFromQuery = (query: unknown): ResourceOwner | undefined => {
-  const { ownerKind, ownerId } = (query ?? {}) as { ownerKind?: unknown; ownerId?: unknown };
-  if (ownerKind === "organization" && typeof ownerId === "string") {
-    return { kind: "organization", organizationId: ownerId };
-  }
-  if (ownerKind === "user" && typeof ownerId === "string") return { kind: "user", userId: ownerId };
-  if (ownerKind === "team" && typeof ownerId === "string") return { kind: "team", teamId: ownerId };
-  return undefined;
-};
-
-/** Keep relationship evidence internal when a Location manager cannot access an attached Project. */
-const accessScopePreviewForPrincipal = (
-  principal: AuthPrincipal,
-  preview: AccessScopeChangePreview,
-): AccessScopeChangePreview => ({
-  ...preview,
-  affectedProjects: preview.affectedProjects.filter((project) =>
-    db.canAccessProject(principal, project.projectId)),
-});
+const accessScopeTransitionError = (principal: HumanPrincipal, current: ResourceScope, target: ResourceScope) =>
+  sharedAccessScopeTransitionError(db, principal, current, target);
+const accessScopePreviewForPrincipal = (principal: AuthPrincipal, preview: AccessScopeChangePreview) =>
+  sharedAccessScopePreviewForPrincipal(db, principal, preview);
 
 const accessibleProject = (req: FastifyRequest, projectId: string) => {
   const principal = requestPrincipal(req);
@@ -2475,117 +2365,9 @@ const manageableProject = (req: FastifyRequest, projectId: string) => {
     : null;
 };
 
-const canManageAffectedSessions = (
-  principal: HumanPrincipal,
-  predicate: (session: SessionView) => boolean,
-) => db.listSessions({ includeArchived: true })
-  .filter(predicate)
-  .every((session) => db.canAccessSession(principal, session.id));
-
 app.get("/api/projects", async (req) => {
   const principal = requestPrincipal(req);
   return { projects: principal ? db.listProjectsForPrincipal(principal, true) : [] };
-});
-
-app.get("/api/projects/:id", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const project = accessibleProject(req, id);
-  return project ? { project } : reply.code(404).send({ error: "project not found" });
-});
-
-app.post("/api/projects", async (req, reply) => {
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  const body = (req.body ?? {}) as CreateProjectRequest;
-  const name = projectName(body.name);
-  if (!name) return reply.code(400).send({ error: "name must be 1-120 characters" });
-  const defaultScope: ResourceScope = {
-    organizationId: principal.organizationId,
-    owner: principal.role === "owner" || principal.role === "admin"
-      ? { kind: "organization", organizationId: principal.organizationId }
-      : { kind: "user", userId: principal.userId },
-  };
-  const requestId = body.requestId;
-  if (requestId !== undefined && (typeof requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/u.test(requestId))) {
-    return reply.code(400).send({ error: "requestId must be 1-128 letters, digits, dashes or underscores" });
-  }
-  const requested = requestedAccessScope(principal, body.owner, defaultScope);
-  if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
-  if (requestId === undefined) {
-    const project = db.createProject({
-      name,
-      scope: requested.scope,
-    });
-    hub.projectChanged(project);
-    return reply.code(201).send({ project: db.getProjectForPrincipal(principal, project.id)! });
-  }
-  // A retry after a lost reply (#3468) returns the project the first request created. It is keyed
-  // by this human, and the replayed project must still be one they can see.
-  const result = db.createProjectForRequest({
-    userId: principal.userId,
-    requestId,
-    name,
-    scope: requested.scope,
-  });
-  if ("refused" in result) {
-    return reply.code(409).send(result.refused === "reused"
-      ? { error: "This request id was already used for a project with a different name or access.", code: "PROJECT_REQUEST_ID_REUSED" }
-      : { error: "The project this request created is no longer available.", code: "PROJECT_REQUEST_UNAVAILABLE" });
-  }
-  const visible = db.getProjectForPrincipal(principal, result.project.id);
-  if (!visible) {
-    return reply.code(409).send({ error: "The project this request created is no longer available.", code: "PROJECT_REQUEST_UNAVAILABLE" });
-  }
-  if (result.created) hub.projectChanged(result.project);
-  return reply.code(result.created ? 201 : 200).send({ project: visible });
-});
-
-app.patch("/api/projects/:id", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  const body = (req.body ?? {}) as UpdateProjectRequest;
-  if (body.name === undefined && body.hidden === undefined && body.childSessionDefaults === undefined && body.memorySharing === undefined) {
-    return reply.code(400).send({ error: "name, hidden, childSessionDefaults, or memorySharing is required" });
-  }
-  const name = body.name === undefined ? undefined : projectName(body.name);
-  if (body.name !== undefined && !name) return reply.code(400).send({ error: "name must be 1-120 characters" });
-  if (body.hidden !== undefined && typeof body.hidden !== "boolean") {
-    return reply.code(400).send({ error: "hidden must be a boolean" });
-  }
-  if (body.memorySharing !== undefined && body.memorySharing !== "separate" && body.memorySharing !== "shared") {
-    return reply.code(400).send({ error: "memorySharing must be separate or shared" });
-  }
-  if (body.childSessionDefaults !== undefined) {
-    const error = childSessionDefaultsError(body.childSessionDefaults);
-    if (error) return reply.code(400).send({ error });
-  }
-  db.updateProject(id, {
-    ...(name ? { name } : {}),
-    ...(body.hidden !== undefined ? { hidden: body.hidden } : {}),
-    ...(body.childSessionDefaults !== undefined ? { childSessionDefaults: body.childSessionDefaults } : {}),
-    ...(body.memorySharing !== undefined ? { memorySharing: body.memorySharing } : {}),
-  });
-  const project = db.getProject(id)!;
-  if (body.memorySharing !== undefined) hub.syncProjectMemory(id);
-  hub.projectChanged(project);
-  return { project: db.getProjectForPrincipal(principal, id)! };
-});
-
-app.get("/api/projects/:id/access-scope", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  const requested = requestedAccessScope(principal, accessScopeOwnerFromQuery(req.query));
-  if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
-  const currentScope = db.projectScope(id);
-  if (!currentScope) return reply.code(404).send({ error: "project not found" });
-  const transitionError = accessScopeTransitionError(principal, currentScope, requested.scope);
-  if (transitionError) return reply.code(403).send({ error: transitionError });
-  const preview = db.previewProjectAccessScope(id, requested.scope);
-  return preview ? { preview } : reply.code(404).send({ error: "project not found" });
 });
 
 app.put("/api/projects/:id/access-scope", async (req, reply) => {
@@ -2594,7 +2376,7 @@ app.put("/api/projects/:id/access-scope", async (req, reply) => {
   if (!principal) return reply.code(403).send({ error: "human identity is required" });
   if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
   const body = (req.body ?? {}) as { owner?: unknown; confirmationToken?: unknown };
-  const requested = requestedAccessScope(principal, body.owner);
+  const requested = requestedAccessScope(db, principal, body.owner);
   if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
   const currentScope = db.projectScope(id);
   if (!currentScope) return reply.code(404).send({ error: "project not found" });
@@ -2618,284 +2400,16 @@ app.put("/api/projects/:id/access-scope", async (req, reply) => {
   }
 });
 
-app.delete("/api/projects/:id", async (req, reply) => {
+
+app.get("/api/projects/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  if (!canManageAffectedSessions(principal, (session) => session.projectId === id)) {
-    return reply.code(409).send({ error: "project contains sessions you cannot manage" });
-  }
-  // What deleting it ends of an unread Location's refusal leaves its pauses like any revocation, and
-  // names who deleted it, whose action led to it (#4319, #3916).
-  let deleted: ReturnType<typeof db.deleteProject>;
-  try {
-    deleted = db.deleteProject(id, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
-  } catch (error) {
-    // Only the sessions this person can see are named (#4319).
-    return reply.code(409).send({ error: error instanceof OccupiedUnreadLocationError ? error.describe((sessionId) => db.canAccessSession(principal, sessionId)) : (error as Error).message });
-  }
-  if (!deleted) return reply.code(404).send({ error: "project not found" });
-  hub.projectRemoved(id);
-  for (const sessionId of deleted.sessionIds) hub.sessionChangedById(sessionId);
-  return { deleted: true };
-});
-
-app.post("/api/projects/:id/locations", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  const body = (req.body ?? {}) as AddProjectLocationRequest;
-  if (typeof body.runnerId !== "string" || !body.runnerId || typeof body.workspaceId !== "string" || !body.workspaceId) {
-    return reply.code(400).send({ error: "runnerId and workspaceId are required" });
-  }
-  if (!db.canAccessWorkspace(principal, body.runnerId, body.workspaceId)) {
-    return reply.code(404).send({ error: "workspace not found" });
-  }
-  let added: ProjectLocationView;
-  try {
-    added = db.addProjectLocation(id, { runnerId: body.runnerId, workspaceId: body.workspaceId, addedByUserId: principal.userId });
-  } catch (error) {
-    return reply.code(400).send({ error: (error as Error).message });
-  }
-  const project = db.getProject(id)!;
-  hub.projectChanged(project);
-  // Campaigns in this Project inspect it in the background (#4117); the response never waits.
-  void campaignLocations.locationAdded(added.id, principal);
-  return { project: db.getProjectForPrincipal(principal, id)! };
-});
-
-app.post("/api/projects/:id/locations/new", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  const body = (req.body ?? {}) as Partial<CreateProjectLocationRequest>;
-  const runnerId = typeof body.runnerId === "string" ? body.runnerId : "";
-  const name = projectName(body.name);
-  const path = typeof body.path === "string" ? body.path.trim() : "";
-  if (!runnerId || !name || !path || path.length > 4096 || /[\0-\x1f\x7f]/.test(path)) {
-    return reply.code(400).send({ error: "runnerId, a 1-120 character name, and a valid path are required" });
-  }
-  if (!db.canAccessRunner(principal, runnerId)) return reply.code(404).send({ error: "runner not found" });
-  const projectScope = db.projectScope(id);
-  if (!projectScope) return reply.code(404).send({ error: "project not found" });
-  const requested = requestedAccessScope(principal, body.owner, projectScope);
-  if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
-  if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(runnerId, "directoryListing", "directory browsing");
-  if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  const browsed = await svc.listDirectory(runnerId, path);
-  if (!browsed.ok) {
-    const message = browsed.status === 404
-      ? "The selected folder was not found on this Machine. It may have moved or been deleted; browse for the folder again."
-      : `The selected folder could not be verified on this Machine: ${browsed.error}`;
-    return reply.code(browsed.status).send({ error: message });
-  }
-  if (!browsed.data?.path) return reply.code(502).send({ error: "the runner did not return the selected directory" });
-  let created: { id: string };
-  try {
-    created = db.createProjectWorkspace(id, runnerId, { name, path: browsed.data.path }, Date.now(), requested.scope, principal.userId);
-  } catch (error) {
-    const message = (error as Error).message;
-    // The code tells Add Location this refusal apart: after a lost reply, the retry is refused this
-    // way when the first request registered the folder (#3468).
-    return message.includes("already registered")
-      ? reply.code(409).send({ error: message, code: "LOCATION_ALREADY_REGISTERED" })
-      : reply.code(400).send({ error: message });
-  }
-  const project = db.getProject(id)!;
-  hub.runnerChanged(runnerId);
-  hub.projectChanged(project);
-  const createdLocation = db.findProjectLocationForProject(id, runnerId, created.id);
-  if (createdLocation) void campaignLocations.locationAdded(createdLocation.id, principal);
-  return reply.code(201).send({ project: db.getProjectForPrincipal(principal, id)! });
-});
-
-app.post("/api/projects/:id/locations/move", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  const locationId = (req.body as MoveProjectLocationRequest | undefined)?.locationId;
-  const location = typeof locationId === "string" ? db.projectLocation(locationId) : null;
-  if (!location || !db.canManageProject(principal, location.projectId)) {
-    return reply.code(404).send({ error: "project location not found" });
-  }
-  if (!canManageAffectedSessions(principal, (session) => session.projectLocationId === location.id)) {
-    return reply.code(409).send({ error: "project location contains sessions you cannot manage" });
-  }
-  const sourceProjectId = location.projectId;
-  const affectedSessionIds = db.listSessions({ includeArchived: true })
-    .filter((session) => session.projectLocationId === location.id)
-    .map((session) => session.id);
-  let moved: ProjectLocationView | null;
-  try {
-    // What a move ends of an unread Location's refusal leaves its pauses like any revocation, and
-    // names who moved it, whose action led to it (#4319, #3916).
-    moved = db.moveProjectLocation(location.id, id, Date.now(), principal.userId,
-      (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
-  } catch (error) {
-    return reply.code(400).send({ error: (error as Error).message });
-  }
-  hub.projectChangedById(sourceProjectId);
-  hub.projectChangedById(id);
-  for (const sessionId of affectedSessionIds) hub.sessionChangedById(sessionId);
-  if (moved && sourceProjectId !== id) void campaignLocations.locationAdded(moved.id, principal);
-  return { project: db.getProjectForPrincipal(principal, id)! };
-});
-
-app.delete("/api/projects/:id/locations/:locationId", async (req, reply) => {
-  const { id, locationId } = req.params as { id: string; locationId: string };
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  const location = db.projectLocation(locationId);
-  if (!location || location.projectId !== id) {
-    return reply.code(404).send({ error: "project location not found" });
-  }
-  if (!canManageAffectedSessions(principal, (session) => session.projectLocationId === locationId)) {
-    return reply.code(409).send({ error: "project location contains sessions you cannot manage" });
-  }
-  // What removing it ends of an unread Location's refusal leaves its pauses like any revocation, and
-  // names who removed it, whose action led to it (#4319, #3916).
-  // A campaign session running on an unread Location keeps it in place, so a read can still end its
-  // refusal; the refusal says so (#4319).
-  try {
-    db.removeProjectLocation(locationId, Date.now(), (root, revoked) => svc.settleCampaignBoundaryChange(root, revoked, principal.userId));
-  } catch (error) {
-    return reply.code(409).send({ error: error instanceof OccupiedUnreadLocationError ? error.describe((sessionId) => db.canAccessSession(principal, sessionId)) : (error as Error).message });
-  }
-  const project = db.getProject(id)!;
-  hub.projectChanged(project);
-  for (const session of db.listSessions({ includeArchived: true })) {
-    if (session.projectId === id) hub.sessionChanged(session, false);
-  }
-  return { project: db.getProjectForPrincipal(principal, id)! };
-});
-
-// Rename a Location within this Project (#4151): its label here only. The workspace, its folder, and
-// the same workspace's Locations in other Projects keep their names, so the machine need not be online.
-app.patch("/api/projects/:id/locations/:locationId", async (req, reply) => {
-  const { id, locationId } = req.params as { id: string; locationId: string };
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  const location = db.projectLocation(locationId);
-  if (!location || location.projectId !== id) {
-    return reply.code(404).send({ error: "project location not found" });
-  }
-  const name = projectName((req.body as Partial<RenameProjectLocationRequest> | undefined)?.name);
-  if (!name) {
-    return reply.code(400).send({ error: "Enter a location name of 1–120 characters, without control characters." });
-  }
-  if (!db.renameProjectLocation(id, locationId, name)) {
-    return reply.code(404).send({ error: "project location not found" });
-  }
-  hub.projectChangedById(id);
-  return { project: db.getProjectForPrincipal(principal, id)! };
-});
-
-app.post("/api/projects/:id/locations/:locationId/default", async (req, reply) => {
-  const { id, locationId } = req.params as { id: string; locationId: string };
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  const location = db.projectLocation(locationId);
-  if (!location || location.projectId !== id) {
-    return reply.code(404).send({ error: "project location not found" });
-  }
-  try {
-    const project = db.setProjectDefaultLocation(id, locationId);
-    if (!project) return reply.code(404).send({ error: "project not found" });
-    hub.projectChanged(project);
-    return { project: db.getProjectForPrincipal(principal, id)! };
-  } catch (error) {
-    return reply.code(409).send({ error: (error as Error).message });
-  }
-});
-
-async function projectLocationWorktreeSetup(
-  req: FastifyRequest,
-  reply: FastifyReply,
-  operation: "inspect" | "generate",
-) {
-  const { id, locationId } = req.params as { id: string; locationId: string };
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
   const project = accessibleProject(req, id);
-  const location = db.projectLocation(locationId);
-  if (!project || !location || location.projectId !== id) {
-    return reply.code(404).send({ error: "project location not found" });
-  }
-  if (operation === "generate" && !db.canManageProject(principal, id)) {
-    return reply.code(404).send({ error: "project not found" });
-  }
-  if (location.availability !== "available" || !hub.isRunnerOnline(location.runnerId)) {
-    return reply.code(409).send({ error: "project location is unavailable" });
-  }
-  const unsupported = runnerCapabilityError(location.runnerId, "worktreeSetupConfig", "worktree setup configuration");
-  if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  const requestId = `workspace_setup_${randomUUID().slice(0, 8)}`;
-  try {
-    const result = await hub.requestFromRunner(location.runnerId, requestId, {
-      type: "workspace_worktree_setup",
-      requestId,
-      workspaceId: location.workspaceId,
-      workspacePath: location.path,
-      operation,
-    }, 150_000);
-    if (result.type !== "workspace_worktree_setup_result") {
-      return reply.code(502).send({ error: "unexpected runner reply" });
-    }
-    if (!result.ok || !result.status) {
-      return reply.code(409).send({ error: result.error ?? "worktree setup operation failed" });
-    }
-    return {
-      locationId,
-      status: result.status,
-      ...(result.path ? { path: result.path } : {}),
-      ...(result.detected ? { detected: result.detected } : {}),
-    };
-  } catch (error) {
-    return reply.code(502).send({ error: error instanceof Error ? error.message : String(error) });
-  }
-}
-
-app.get("/api/projects/:id/locations/:locationId/worktree-setup", async (req, reply) =>
-  projectLocationWorktreeSetup(req, reply, "inspect"));
-
-app.post("/api/projects/:id/locations/:locationId/worktree-setup", async (req, reply) =>
-  projectLocationWorktreeSetup(req, reply, "generate"));
-
-app.put("/api/projects/:id/worktree-setup-notice/dismiss", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!accessibleProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  db.dismissWorktreeSetupNotice(principal.userId, id);
-  hub.worktreeSetupNoticeDismissed(principal.userId, id);
-  return { dismissed: true };
+  return project ? { project } : reply.code(404).send({ error: "project not found" });
 });
 
-app.post("/api/projects/:id/archive-sessions", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  if (!canManageAffectedSessions(principal, (session) => session.projectId === id)) {
-    return reply.code(409).send({ error: "project contains sessions you cannot manage" });
-  }
-  const outcome = svc.archiveProjectSessions(id);
-  if (!outcome.ok || !outcome.data) return respond(reply, outcome);
-  const project = db.getProject(id)!;
-  hub.projectChanged(project);
-  return {
-    project: db.getProjectForPrincipal(principal, id)!,
-    ...outcome.data,
-  };
-});
+const ownerProjectManagement = createOwnerProjectManagement({db, hub, svc,
+  locationAdded: (id, owner) => campaignLocations.locationAdded(id, owner), runnerCapabilityError});
+ownerProjectManagement.registerHttp(app, requestHuman);
 
 registerRemoteAccessRoutes(app, remoteAccess, (req) => {
   const human = requestHuman(req);
@@ -2948,6 +2462,21 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
 });
 
 registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
+const {operations: assistantOperations, ingress: assistantDiscordIngress, receipts: assistantCommandReceipts} = createAssistantManagement(db, svc);
+export { assistantOperations };
+const assistantManagementMutations = new ManagementMutations(assistantCommandReceipts, db.instanceId(), assistantRequestDigest,
+  id => db.assistantConnections.get(id)!, id => db.assistantConnections.destructiveConfirmation(id),
+  new AssistantCommandConfirmations(db.raw()));
+registerAssistantAutomations(assistantOperations, db, automations, assistantManagementMutations);
+registerAssistantTriggerParity(assistantOperations, db, automations, assistantManagementMutations);
+registerAssistantSkills(assistantOperations, {db, hub, requestHuman, requestPrincipal, pushSkillsSync}, assistantManagementMutations);
+const extendedSkillsDeps = {db, hub, requestHuman, requestPrincipal, pushSkillsSync, builtInSkills: builtInSkills()};
+const extendedSkillsManagement = createExtendedSkillsManagement(extendedSkillsDeps);
+registerAssistantSkillParity(assistantOperations, extendedSkillsDeps, extendedSkillsManagement, assistantManagementMutations);
+registerAssistantConnectionOperations(assistantOperations, {db, outbound: outboundEvents, receipts: assistantCommandReceipts});
+registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });
+registerAssistantWorkOwnerRoutes(app, { db, outboundEvents, requestHuman });
+registerAssistantDiscordIngress(app, { db, ingress: assistantDiscordIngress, requestHuman });
 
 /* ------------------------------- Skills ---------------------------------- */
 
@@ -2971,6 +2500,7 @@ try {
 }
 registerSkillRoutes(app, {
   db, hub, requestHuman, requestPrincipal, pushSkillsSync, builtInSkills: releaseBuiltInSkills,
+  extendedManagement: extendedSkillsManagement,
 });
 db.skillGitAutoUpdateIntervalMs = skillGitAutoUpdateIntervalMs(process.env.CONTROL_PLANE_SKILL_GIT_UPDATE_INTERVAL_MS);
 const skillGitAutoUpdater = new SkillGitAutoUpdater({ db, intervalMs: db.skillGitAutoUpdateIntervalMs, pushSkillsSync });
@@ -3293,14 +2823,6 @@ app.post("/api/push/unsubscribe", async (req, reply) => {
 
 // Ask a runner to re-probe its installed agents; the refreshed list arrives
 // asynchronously via an agents_updated message.
-app.post("/api/runners/:id/rediscover", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
-  const sent = hub.sendToRunner(id, { type: "rediscover", runnerId: id });
-  if (!sent) return reply.code(503).send({ error: "runner not reachable" });
-  return { ok: true };
-});
-
 app.post("/api/runners/:id/provider-logins", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = requestPrincipal(req);
@@ -3381,7 +2903,7 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
     }
     if (!result.ok || !result.login) {
       settleProfileGrant({ started: false });
-      return reply.code(409).send({ error: result.error ?? "Provider sign-in could not be started" });
+      return reply.code(409).send(providerLoginStartFailure(result));
     }
     settleProfileGrant({ started: true, accountId: result.login.accountId });
     return reply.code(201).send({ login: result.login });
@@ -3569,128 +3091,12 @@ app.post("/api/runners/:id/acp-registry/:agentId/approval", async (req, reply) =
   }
 });
 
-// Remove a stale/offline runner (and its sessions/runs) from the dashboard. Online runners must be
-// stopped first — otherwise they'd just re-register.
-app.patch("/api/runners/:id", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const body = (req.body ?? {}) as { displayName?: unknown };
-  if (typeof body.displayName !== "string") {
-    return reply.code(400).send({ error: "displayName must be a string" });
-  }
-  const displayName = body.displayName.trim();
-  if (displayName && !projectName(displayName)) {
-    return reply.code(400).send({ error: "displayName must be 120 characters or fewer and contain no control characters" });
-  }
-  const boxId = db.boxIdForRunner(id);
-  if (!db.getRunner(id) && !boxId) return reply.code(404).send({ error: "runner not found" });
-  db.setMachineDisplayName(id, displayName);
-  hub.runnerChanged(id);
-  if (boxId) hub.boxChanged(boxId);
-  return { ok: true };
-});
 
-app.put("/api/runners/:id/harness-installation", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestPrincipal(req);
-  if (!principal || !db.canManageRunner(principal, id)) {
-    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
-  }
-  const body = req.body as { agentId?: unknown; installationId?: unknown } | undefined;
-  const agentId = body?.agentId;
-  const installationId = body?.installationId;
-  if (typeof agentId !== "string" || !agentId || agentId.length > 256) {
-    return reply.code(400).send({ error: "agentId must identify a discovered installation" });
-  }
-  if (typeof installationId !== "string" || !installationId || installationId.length > 256) {
-    return reply.code(400).send({ error: "installationId must match the installation shown" });
-  }
-  const runner = db.getRunner(id);
-  if (!runner) return reply.code(404).send({ error: "runner not found" });
-  if (!runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations")) {
-    return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "harnessInstallations", "harness installation selection"));
-  }
-  const selection = db.selectHarnessInstallation(id, agentId, installationId);
-  if (!selection) return reply.code(409).send({ error: "This installation is no longer available for selection" });
-  db.replaceSubscriptionUsageSnapshots(id, []);
-  const effectiveSwitching = automaticAccountSwitchForRunner(
-    db.machineAutomaticAccountSwitchConfiguration(id),
-    runner.protocolVersion,
-    db.getRunner(id)?.harnessSelections,
-  );
-  if (runner.status === "online" && effectiveSwitching && !effectiveSwitching.enabled) {
-    hub.sendToRunner(id, { type: "configure_automatic_account_switch", ...effectiveSwitching });
-  }
-  if (runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers")) {
-    hub.sendToRunner(id, {
-      type: "configure_harness_installation_choices",
-      choices: db.getRunner(id)?.harnessSelections?.map((item) => ({
-        family: item.family, context: item.context, installationId: item.installationId,
-      })) ?? [],
-    });
-  }
-  hub.runnerChanged(id);
-  return { selection };
-});
-
-app.put("/api/runners/:id/target-harness-installation", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestPrincipal(req);
-  if (!principal || !db.canManageRunner(principal, id)) {
-    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
-  }
-  const body = (req.body ?? {}) as { targetId?: unknown; agentId?: unknown; installationId?: unknown };
-  if (typeof body.targetId !== "string" || !body.targetId || body.targetId.length > 512 ||
-      typeof body.agentId !== "string" || !body.agentId || body.agentId.length > 128 ||
-      typeof body.installationId !== "string" || !/^[a-f0-9]{24}$/.test(body.installationId)) {
-    return reply.code(400).send({ error: "Target, agent, and installation must match a discovered candidate" });
-  }
-  const runner = db.getRunner(id);
-  if (!runner) return reply.code(404).send({ error: "runner not found" });
-  if (!runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations")) {
-    return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "targetHarnessInstallations", "target harness installation selection"));
-  }
-  const selection = db.selectTargetHarnessInstallation(id, body.targetId, body.agentId, body.installationId);
-  if (!selection) return reply.code(409).send({ error: "This target installation is no longer available for selection" });
-  hub.runnerChanged(id);
-  return { selection };
-});
-
-app.put("/api/runners/:id/capacity", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestPrincipal(req);
-  if (!principal || !db.canManageRunner(principal, id)) {
-    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
-  }
-  const body = (req.body ?? {}) as { configuredUnits?: unknown; expectedRevision?: unknown };
-  if (!Number.isInteger(body.configuredUnits) || (body.configuredUnits as number) < 1 ||
-      (body.configuredUnits as number) > 256) {
-    return reply.code(400).send({ error: "configuredUnits must be an integer from 1 to 256" });
-  }
-  if (!Number.isSafeInteger(body.expectedRevision) || (body.expectedRevision as number) < 0) {
-    return reply.code(400).send({ error: "expectedRevision must be a non-negative integer" });
-  }
-  const runner = db.getRunner(id);
-  const boxId = db.boxIdForRunner(id);
-  if (!runner && !boxId) return reply.code(404).send({ error: "runner not found" });
-  if (runner?.status === "online" && !runnerSupportsProtocol(runner.protocolVersion, "machineRunnerCapacity")) {
-    return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "machineRunnerCapacity", "runner capacity changes"));
-  }
-  const changed = db.setMachineRunnerCapacity(
-    id,
-    body.configuredUnits as number,
-    body.expectedRevision as number,
-    Date.now(),
-  );
-  if (!changed.ok) {
-    return reply.code(409).send({ error: "Runner Capacity changed in another client", current: changed.configuration });
-  }
-  if (runner?.status === "online") {
-    hub.sendToRunner(id, { type: "configure_runner_capacity", ...changed.configuration });
-  }
-  hub.runnerChanged(id);
-  if (boxId) hub.boxChanged(boxId);
-  return { capacity: changed.configuration };
-});
+const ownerRunnerManagement = createOwnerRunnerManagement(db, hub);
+ownerRunnerManagement.registerHttp(app, requestHuman);
+const ownerMachineManagement = createOwnerMachineManagement(db, hub, svc);
+// This read retains its existing human/agent HTTP principal projection below.
+ownerMachineManagement.registerHttp(app, requestHuman, 403, ["GET /api/runners/:id/provider-account-selection", "POST /api/assistant-connections/installation"]);
 
 registerReviewerSecurityRoutes(app, db, hub, requestPrincipal);
 
@@ -3846,83 +3252,9 @@ app.put("/api/runners/:id/provider-account-policies/:provider", async (req, repl
 });
 
 app.get("/api/runners/:id/provider-account-selection", async (req, reply) => {
-  const { id } = req.params as { id: string };
-  const principal = requestPrincipal(req);
-  if (!principal || !db.canAccessRunner(principal, id)) return reply.code(404).send({ error: "runner not found" });
-  const query = req.query as { agentId?: string; provider?: string; projectId?: string; workspaceId?: string; noProject?: string; model?: string };
-  if (query.provider !== undefined && query.provider !== "claude" && query.provider !== "codex") {
-    return reply.code(400).send({ error: "provider must be Claude or Codex" });
-  }
-  if (!query.agentId && !query.provider) return reply.code(400).send({ error: "agentId or provider is required" });
-  if (query.workspaceId && !db.canAccessWorkspace(principal, id, query.workspaceId)) {
-    return reply.code(404).send({ error: "workspace not found" });
-  }
-  // The project this caller's own launch would have. An agent's child follows its parent, as a human's
-  // session follows its choice or, when it names none, the workspace's Location.
-  const parentSessionId = principal.kind === "agent" ? principal.credentialSessionId : undefined;
-  let project: { projectId?: string | null; scope?: ResourceScope } = {};
-  if (principal.kind === "human") {
-    const named = query.noProject ? { projectId: null } : query.projectId ? { projectId: query.projectId } : {};
-    const ownership = query.workspaceId || "projectId" in named
-      ? resolveSessionCreationOwnership(db, principal, { runnerId: id, workspaceId: query.workspaceId ?? "", agentId: query.agentId ?? "", ...named })
-      : null;
-    if (ownership && !ownership.ok) return reply.code(ownership.status).send({ error: ownership.error });
-    if (ownership?.ok) {
-      project = { ...(ownership.body.projectId !== undefined ? { projectId: ownership.body.projectId } : {}),
-        ...(ownership.scope ? { scope: ownership.scope } : {}) };
-    }
-  }
-  const preview = svc.providerAccountSelectionPreview(id, {
-    ...(query.agentId ? { agentId: query.agentId } : {}),
-    ...(query.provider ? { provider: query.provider as "claude" | "codex" } : {}),
-    ...(query.workspaceId ? { workspaceId: query.workspaceId } : {}),
-    ...(parentSessionId ? { parentSessionId } : {}),
-    ...(query.model ? { model: query.model } : {}),
-    ...project,
-  });
-  return respond(reply, principal.kind === "agent" && preview.ok && preview.data
-    ? { ...preview, data: providerAccountSelectionPreviewForAgent(preview.data) }
-    : preview);
-});
-
-app.delete("/api/runners/:id", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  if (hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is online — stop it before removing" });
-  // A box's runner must be removed through the box (DELETE /api/boxes/:id): that path also tears
-  // down the orchestrator's runtime/timer state and tells UIs to drop the box card. deleteRunner()
-  // would delete the persisted box row but leave both unsignaled, orphaning the box.
-  if (db.boxIdForRunner(id)) {
-    return reply.code(409).send({ error: "this runner belongs to a box — remove the box instead (DELETE /api/boxes/:id)" });
-  }
-  const projectIds = db.projectIdsForRunner(id);
-  const res = db.deleteRunner(id);
-  if (!res) return reply.code(404).send({ error: "runner not found" });
-  for (const sid of res.sessionIds) hub.sessionRemoved(sid, false);
-  for (const rid of res.runIds) hub.runRemoved(rid);
-  for (const podId of res.podIds) {
-    const pod = db.reconcilePodAfterMembershipLoss(podId, Date.now());
-    if (pod) hub.podChanged(pod);
-  }
-  hub.runnerRemoved(id);
-  for (const projectId of projectIds) hub.projectChangedById(projectId);
-  return reply.code(204).send();
-});
-
-// Phase 3: list external (CLI-started) sessions on a runner host, and adopt one into Wollipog.
-app.get("/api/runners/:id/external-sessions", async (req, reply) => {
-  const query = req.query as { agentId?: string };
-  const r = await svc.listExternalSessions((req.params as { id: string }).id, query.agentId || undefined);
-  if (!r.ok) return reply.code(r.status).send(failureBody(r));
-  return { sessions: r.data };
-});
-
-// Browse the runner machine's filesystem for the workspace directory picker.
-app.get("/api/runners/:id/list-directory", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const q = req.query as { path?: string; distro?: string };
-  const r = await svc.listDirectory(id, q.path ?? "", q.distro || undefined);
-  if (!r.ok) return reply.code(r.status).send(failureBody(r));
-  return r.data;
+  const result = readProviderAccountSelection(db, svc, requestPrincipal(req), (req.params as {id: string}).id,
+    req.query as Parameters<typeof readProviderAccountSelection>[4]);
+  return reply.code(result.status).send(result.body);
 });
 
 // Files panel: browse / read files under a session's root (worktree or repo, runner-resolved).
@@ -3939,9 +3271,11 @@ app.get("/api/sessions/:id/files", async (req, reply) => {
   return r.data;
 });
 
+const ownerSessionStatus = new OwnerManagement<AuthPrincipal>();
+
 // Per-session usage split by the model that produced it. Route access already resolved through
 // canAccessSession; the ledger stores only bounded model ids and counts.
-app.get("/api/sessions/:id/usage", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/usage", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (!db.getSession(id)) return reply.code(404).send({ error: "session not found" });
   return { sessionId: id, ...db.sessionUsageByModel(id), pricing: usagePricing.status() };
@@ -3987,124 +3321,30 @@ app.post("/api/sessions/:id/workspace-references", async (req, reply) => {
   return { reference: r.data };
 });
 
-// Drop one not-yet-started queued prompt (the running turn is unaffected). The runner echoes the
-// updated queue back via session_queue, which refreshes the session — so this is fire-and-forget.
+const sessionQueueManagement = createSessionQueueManagement({db, hub, svc, runnerCapabilityError,
+  warn: error => app.log.warn({error: error instanceof Error ? error.message : String(error)}, "prepared queued-edit image lease cleanup deferred")});
+registerAssistantSessionWork(assistantOperations, {db, svc, receipts: assistantCommandReceipts, queue: sessionQueueManagement});
+const sessionLifecycleManagement = createSessionLifecycleManagement({db, hub, svc, runnerCapabilityError, shellRegistry,
+  locationAdded: (id, principal) => campaignLocations.locationAdded(id, principal)});
+registerAssistantSessionLifecycle(assistantOperations, {db, svc, receipts: assistantCommandReceipts, lifecycle: sessionLifecycleManagement, roles: roleConversions});
+
 app.post("/api/sessions/:id/cancel-queued", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const body = (req.body ?? {}) as { promptId?: unknown };
-  if (typeof body.promptId !== "string" || !body.promptId) {
-    return reply.code(400).send({ error: "promptId (string) is required" });
-  }
-  const session = db.getSession(id);
-  if (!session) return reply.code(404).send({ error: "session not found" });
-  if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptCancellation", "queued prompt cancellation");
-  if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  if (!hub.sendToRunner(session.runnerId, { type: "cancel_queued_prompt", sessionId: id, promptId: body.promptId })) {
-    return reply.code(409).send({ error: "runner is offline" });
-  }
-  return reply.code(204).send();
+  const result = sessionQueueManagement.cancel((req.params as {id: string}).id, (req.body as {promptId?: unknown} | null)?.promptId);
+  return reply.code(result.status).send(result.body);
 });
-
 app.get("/api/sessions/:id/queued/:promptId/edit", async (req, reply) => {
-  const { id, promptId } = req.params as { id: string; promptId: string };
-  if (!promptId) return reply.code(400).send({ error: "promptId is required" });
-  const session = db.getSession(id);
-  if (!session) return reply.code(404).send({ error: "session not found" });
-  if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptEditing", "queued prompt editing");
-  if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  const requestId = `read_queue_${randomUUID().slice(0, 12)}`;
+  const {id, promptId} = req.params as {id: string; promptId: string};
   try {
-    const result = await hub.requestFromRunner(session.runnerId, requestId, {
-      type: "read_queued_prompt", requestId, sessionId: id, promptId,
-    }, 10_000);
-    if (result.type !== "read_queued_prompt_result" || result.sessionId !== id || result.promptId !== promptId) {
-      return reply.code(502).send({ error: "unexpected runner reply" });
-    }
-    if (!result.ok || !result.prompt) {
-      return reply.code(409).send({ error: result.error ?? "queued message cannot be edited", reason: result.reason });
-    }
-    return { prompt: result.prompt };
-  } catch (error) {
-    return reply.code(502).send({ error: (error as Error).message });
-  }
+    const result = await sessionQueueManagement.read(id, promptId);
+    return reply.code(result.status).send(result.body);
+  } catch (error) { return reply.code(502).send({error: (error as Error).message}); }
 });
-
 app.post("/api/sessions/:id/queued/:promptId/edit", async (req, reply) => {
-  const { id, promptId } = req.params as { id: string; promptId: string };
-  const body = (req.body ?? {}) as {
-    submissionId?: unknown;
-    expectedRevision?: unknown;
-    text?: unknown;
-    images?: unknown;
-  };
-  if (typeof body.submissionId !== "string" || !body.submissionId.trim()) {
-    return reply.code(400).send({ error: "submissionId is required" });
-  }
-  if (typeof body.expectedRevision !== "string" || !body.expectedRevision.trim()) {
-    return reply.code(400).send({ error: "expectedRevision is required" });
-  }
-  if (typeof body.text !== "string") return reply.code(400).send({ error: "text must be a string" });
-  const images = body.images === undefined ? [] : body.images;
-  if (!Array.isArray(images)) return reply.code(400).send({ error: "images must be an array" });
-  const typedImages = images as PromptImageInput[];
-  const imageValidation = validatePromptImageInputs(typedImages);
-  if (!imageValidation.ok) return reply.code(400).send({ error: imageValidation.error });
-  if (!body.text.trim() && typedImages.length === 0) {
-    return reply.code(400).send({ error: "a queued message cannot be empty" });
-  }
-  const session = db.getSession(id);
-  if (!session) return reply.code(404).send({ error: "session not found" });
-  if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptEditing", "queued prompt editing");
-  if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  if (typedImages.some(isWorkspaceReference)) {
-    const unsupportedWorkspaceReferences = runnerCapabilityError(
-      session.runnerId,
-      "workspaceReferences",
-      "workspace references",
-    );
-    if (unsupportedWorkspaceReferences) {
-      return reply.code(409).send(failureBody(unsupportedWorkspaceReferences));
-    }
-  }
-  const preparedImages = svc.prepareQueuedPromptEditImages(id, typedImages);
-  if (!preparedImages.ok || !preparedImages.data) {
-    return reply.code(preparedImages.status).send(failureBody(preparedImages, "queued message images are invalid"));
-  }
-  const requestId = `edit_queue_${randomUUID().slice(0, 12)}`;
+  const {id, promptId} = req.params as {id: string; promptId: string};
   try {
-    const result = await hub.requestFromRunner(session.runnerId, requestId, {
-      type: "edit_queued_prompt",
-      requestId,
-      submissionId: body.submissionId,
-      sessionId: id,
-      promptId,
-      expectedRevision: body.expectedRevision,
-      text: body.text,
-      images: preparedImages.data,
-    }, 10_000);
-    if (result.type !== "edit_queued_prompt_result" || result.sessionId !== id || result.promptId !== promptId ||
-        result.submissionId !== body.submissionId) {
-      return reply.code(502).send({ error: "unexpected runner reply" });
-    }
-    if (!result.applied || !result.prompt) {
-      return reply.code(409).send({ error: result.error ?? "queued message could not be saved", reason: result.reason });
-    }
-    try {
-      db.commitPreparedPromptImages(preparedImages.data.flatMap((image) =>
-        isWorkspaceReference(image) || !isPromptImageReference(image) ? [] : [image.artifactId]));
-    } catch (error) {
-      // Runner acceptance is authoritative. Lease cleanup is outcome-neutral; never turn an
-      // applied edit into an ambiguous client failure.
-      req.log.warn({ error: error instanceof Error ? error.message : String(error) },
-        "prepared queued-edit image lease cleanup deferred");
-    }
-    return { prompt: result.prompt };
-  } catch (error) {
-    return reply.code(502).send({ error: (error as Error).message });
-  }
+    const result = await sessionQueueManagement.edit(id, promptId, req.body);
+    return reply.code(result.status).send(result.body);
+  } catch (error) { return reply.code(502).send({error: (error as Error).message}); }
 });
 
 app.post("/api/sessions/:id/pending-prompts/:commandId/resolve", async (req, reply) => {
@@ -4123,7 +3363,7 @@ app.post("/api/sessions/:id/pending-prompts/:commandId/resolve", async (req, rep
 
 // Shells panel: durable bounded history and detachable runner-owned processes.
 app.get("/api/sessions/:id/shells", async (req) => {
-  return { shells: shellRegistry.list((req.params as { id: string }).id) };
+  return sessionShellManagement.list((req.params as { id: string }).id);
 });
 
 app.get("/api/sessions/:id/shells/:shellId/history", async (req, reply) => {
@@ -4155,7 +3395,7 @@ type OpenSessionShellResult =
 async function openSessionShell(
   sessionId: string,
   body: { cols?: unknown; rows?: unknown; kind?: unknown },
-  options: { initialNativeTui?: boolean } = {},
+  options: { initialNativeTui?: boolean; recheck?: () => Promise<unknown> } = {},
 ): Promise<OpenSessionShellResult> {
   const session = db.getSession(sessionId);
   if (!session) return { ok: false, status: 404, error: "session not found" };
@@ -4224,6 +3464,7 @@ async function openSessionShell(
         ...(providerHomeRefusal ? { providerHomeRefusal } : {}),
       };
     }
+    await options.recheck?.();
     const shell = shellRegistry.setPty(shellId, Boolean(res.pty), Date.now());
     if (!shell) {
       forgetAmbiguousOpen();
@@ -4240,6 +3481,8 @@ async function openSessionShell(
     };
   }
 }
+
+const sessionShellManagement = createSessionShellManagement({hub, registry: shellRegistry, open: openSessionShell});
 
 app.post("/api/sessions/:id/shells", async (req, reply) => {
   const result = await openSessionShell(
@@ -4288,14 +3531,8 @@ app.post("/api/sessions/:id/shells/:shellId/input", async (req, reply) => {
 
 app.delete("/api/sessions/:id/shells/:shellId", async (req, reply) => {
   const { id, shellId } = req.params as { id: string; shellId: string };
-  const entry = shellRegistry.get(shellId);
-  if (!entry || entry.sessionId !== id) return reply.code(404).send({ error: "shell not found" });
-  // Delete means kill + forget. A tombstone prevents an already-in-flight reconnect snapshot
-  // from resurrecting the tab; collapsing the dock is a separate local detach action.
-  hub.sendToRunner(entry.runnerId, { type: "shell_close", shellId });
-  shellRegistry.remove(shellId, entry.runnerId, Date.now());
-  hub.shellExit(entry.sessionId, shellId, null, entry.outputEndSeq);
-  return reply.code(204).send();
+  const result = sessionShellManagement.close(id, shellId);
+  return reply.code(result.status).send(result.body);
 });
 
 app.post("/api/sessions/adopt", async (req, reply) => {
@@ -4497,15 +3734,15 @@ app.get("/api/sessions", async (req,reply) => {
     : '{"sessions":[]}');
 });
 
-app.get("/api/sessions/archive-page", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/archive-page", async (req, reply) => {
   const raw = req.query as Record<string, unknown>;
   const query = parseArchiveSessionPageQuery(raw);
   if ("error" in query) return reply.code(400).send(query);
   const q = (query.q ?? "").trim();
   if (q.length > 256) return reply.code(400).send({ error: "q is too long (max 256 characters)" });
-  const principal = requestPrincipal(req);
+  const principal = req.principal;
   const candidatePage = principal
-    ? db.archiveSessionCandidatePageForPrincipal(principal, query)
+    ? db.archiveSessionCandidatePageForPrincipal(principal, query, req.projectIds)
     : { sessions: [], transcriptSessionIds: [], facets: { projects: [], locations: [], agents: [] } };
   if ("error" in candidatePage) return reply.code(400).send(candidatePage);
   const page = archiveSessionPage({
@@ -4533,11 +3770,11 @@ app.get("/api/sessions/archive-page", async (req, reply) => {
 
 registerSessionLookupRoute(app, { db, requestPrincipal,withQueue: (session) => hub.withQueue(session,true) });
 
-app.get("/api/sessions/:id", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const session = db.getSession(id);
   if (!session) return reply.code(404).send({ error: "session not found" });
-  return { session: withSessionCommandPermissions(db, requestPrincipals.get(req) ?? requestPrincipal(req), session) };
+  return { session: withSessionCommandPermissions(db, req.principal, session) };
 });
 
 registerSessionRoleRoutes(app, {
@@ -4575,15 +3812,6 @@ app.post("/api/sessions/:id/parent-control-policy", async (req, reply) => {
 // A running campaign's Child Harness, Model, Effort, Follow-Ups and Completion (#3580): a person's
 // compare-and-set on the campaign's own behavior revision. No agent allowlist entry exists for these
 // endpoints, so neither the Orchestrator nor any child can read the form or change the values.
-app.get("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const human = requestHuman(req);
-  if (!human) return reply.code(403).send({ error: "only an authenticated human may change campaign behavior" });
-  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
-  reply.header("cache-control", "no-store");
-  return respond(reply, svc.campaignBehaviorView(id, (behavior, exactRow) => orchestratorSettings.campaignCapabilities(human, behavior, exactRow)));
-});
-
 app.post("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const human = requestHuman(req);
@@ -4593,21 +3821,9 @@ app.post("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) 
     (behavior, exactRow) => orchestratorSettings.campaignBehaviorError(human, behavior, exactRow)));
 });
 
-// #4146: Campaign Status's **Delete Merged Branches**. Wollipog performs the campaign's approved
-// merged_branch_deletion decisions it still can, through the existing forge action and its checks;
-// a person who can read the root and each requester asks. It approves nothing, so a branch without
-// an approved deletion keeps its exact command. No agent allowlist entry exists for this endpoint.
-app.post("/api/sessions/:id/orchestrator-campaign/cleanup/delete-merged-branches", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const human = requestHuman(req);
-  if (!human) return reply.code(403).send({ error: "only an authenticated human may ask Wollipog to delete merged branches" });
-  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
-  return respond(reply, await svc.deleteApprovedMergedBranches(id, (sessionId) => db.canAccessSession(human, sessionId)));
-});
-
-app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestPrincipal(req);
+// The Orchestrator's own protocol projection; owner inspection and approved branch cleanup
+// use the shared campaign management services registered below.
+async function readCampaignProjection(id: string, principal: AuthPrincipal, reply: FastifyReply) {
   if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
     return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
   }
@@ -4629,6 +3845,15 @@ app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
       ...(modelMachines ? { childModelMachines: modelMachines } : {}),
     } }
     : projection);
+}
+
+app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
+    return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
+  }
+  return readCampaignProjection(id, principal, reply);
 });
 
 app.post("/api/sessions/:id/orchestrator-campaign/follow-ups", async (req, reply) => {
@@ -4716,8 +3941,7 @@ function sessionReviewRequester(req: FastifyRequest, reply: FastifyReply, id: st
   }
   return principal;
 }
-function canReadSessionReviews(req: FastifyRequest, id: string): boolean {
-  const principal = requestPrincipal(req);
+function canReadSessionReviews(principal: AuthPrincipal, id: string): boolean {
   return Boolean(principal && db.canAccessSession(principal, id) &&
     (principal.kind !== "agent" || principal.credentialSessionId === id));
 }
@@ -4728,9 +3952,9 @@ app.post("/api/sessions/:id/cross-model-reviews", async (req, reply) => {
   return respond(reply, svc.requestSessionReviewJob(id, req.body as SessionReviewJobRequest,
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
-app.get("/api/sessions/:id/cross-model-reviews", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/cross-model-reviews", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
+  if (!canReadSessionReviews(req.principal, id)) return reply.code(404).send({ error: "session not found" });
   const query = req.query as { limit?: string; afterJobId?: string };
   reply.header("cache-control", "no-store");
   return respond(reply, svc.sessionReviewJobs(id, {
@@ -4738,15 +3962,15 @@ app.get("/api/sessions/:id/cross-model-reviews", async (req, reply) => {
     ...(query.afterJobId === undefined ? {} : { afterJobId: query.afterJobId }),
   }));
 });
-app.get("/api/sessions/:id/cross-model-reviews/:jobId", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/cross-model-reviews/:jobId", async (req, reply) => {
   const { id, jobId } = req.params as { id: string; jobId: string };
-  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
+  if (!canReadSessionReviews(req.principal, id)) return reply.code(404).send({ error: "session not found" });
   reply.header("cache-control", "no-store");
   return respond(reply, svc.sessionReviewJob(id, jobId));
 });
-app.get("/api/sessions/:id/cross-model-reviews/:jobId/artifacts", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/cross-model-reviews/:jobId/artifacts", async (req, reply) => {
   const { id, jobId } = req.params as { id: string; jobId: string };
-  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
+  if (!canReadSessionReviews(req.principal, id)) return reply.code(404).send({ error: "session not found" });
   reply.header("cache-control", "no-store");
   return respond(reply, svc.sessionReviewJobArtifacts(id, jobId));
 });
@@ -4779,22 +4003,6 @@ app.post("/api/sessions/:id/waits", async (req, reply) => {
   const principal = sessionReviewRequester(req, reply, id);
   if (!principal) return reply;
   return respond(reply, svc.reportSessionWait(id, req.body, (sessionId) => db.canAccessSession(principal, sessionId)));
-});
-app.get("/api/sessions/:id/review-sessions", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
-  const query = req.query as { limit?: string; afterReviewSessionId?: string };
-  reply.header("cache-control", "no-store");
-  return respond(reply, svc.reviewSessionsPage(id, {
-    ...(query.limit === undefined ? {} : { limit: Number(query.limit) }),
-    ...(query.afterReviewSessionId === undefined ? {} : { afterReviewSessionId: query.afterReviewSessionId }),
-  }));
-});
-app.get("/api/sessions/:id/review-sessions/:reviewSessionId", async (req, reply) => {
-  const { id, reviewSessionId } = req.params as { id: string; reviewSessionId: string };
-  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
-  reply.header("cache-control", "no-store");
-  return respond(reply, svc.reviewSessionView(id, reviewSessionId));
 });
 app.post("/api/sessions/:id/review-sessions/:reviewSessionId/cancel", async (req, reply) => {
   const { id, reviewSessionId } = req.params as { id: string; reviewSessionId: string };
@@ -4849,21 +4057,25 @@ app.post("/api/sessions/:id/orchestrator-campaign/plan", async (req, reply) => {
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
-app.get("/api/sessions/:id/orchestrator-campaign/work-items", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = campaignLedgerPrincipal(req, reply, id);
-  if (!principal) return reply;
-  const query = req.query as Record<string, unknown>;
+function campaignWorkItemsReadQuery(query: Record<string, unknown>): GetCampaignWorkItemsRequest {
   const text = (name: string) => typeof query[name] === "string" ? query[name] as string : undefined;
   const limit = text("limit");
-  return respond(reply, svc.campaignWorkItems(id, {
+  return {
     ...(text("cursor") !== undefined ? { cursor: text("cursor") } : {}),
     ...(limit !== undefined ? { limit: /^\d{1,4}$/u.test(limit) ? Number(limit) : Number.NaN } : {}),
     ...(text("origin") !== undefined ? { origin: text("origin") as GetCampaignWorkItemsRequest["origin"] } : {}),
     ...(text("state") !== undefined ? { state: text("state") as GetCampaignWorkItemsRequest["state"] } : {}),
     ...(text("sort") !== undefined ? { sort: text("sort") as GetCampaignWorkItemsRequest["sort"] } : {}),
     ...(text("includeRecommendations") === "true" ? { includeRecommendations: true } : {}),
-  }, (sessionId) => db.canAccessSession(principal, sessionId)));
+  };
+}
+
+app.get("/api/sessions/:id/orchestrator-campaign/work-items", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = campaignLedgerPrincipal(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.campaignWorkItems(id, campaignWorkItemsReadQuery(req.query as Record<string, unknown>),
+    (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
 app.get("/api/sessions/:id/orchestrator-campaign/work-items/:itemId", async (req, reply) => {
@@ -4911,7 +4123,18 @@ app.post("/api/sessions/:id/orchestrator-campaign/recommendations/:recommendatio
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
-registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
+const campaignScopeManagement = registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
+const campaignReviewManagement = createCampaignReviewManagement({db, svc,
+  behaviorView: (id, human, access) => svc.campaignBehaviorView(id, (behavior, exactRow) => orchestratorSettings.campaignCapabilities(human, behavior, exactRow, access?.runner)),
+  holdReader: principal => target => sessionHoldReaderFor(db, principal, target),
+});
+campaignReviewManagement.registerHttp(app, requestPrincipal);
+const sessionGitManagement = createSessionGitManagement({db, hub, svc, outboundEvents, runnerCapabilityError});
+sessionGitManagement.registerHttp(app, requestHuman);
+const assistantPromptImages = new AssistantPromptImages(db, svc);
+registerAssistantCampaignManagement(assistantOperations, {db, svc, receipts: assistantCommandReceipts, images: assistantPromptImages,
+  services: [campaignStatusManagement, campaignScopeManagement, campaignReviewManagement, sessionGitManagement, assistantPromptImages.management]});
+assistantPromptImages.registerHttp(app, assistantOperations);
 registerAutomationCreationRoutes(app, { service: new AutomationCreationService(db, svc, hub, scheduledCampaigns), requestPrincipal });
 registerCampaignRepositoryAdditionRoutes(app, { requestPrincipal, additions: new CampaignRepositoryAdditions({ db, hub, sessions: svc,
   // The same verified-Location inspection as a launch (#4117), on a runner that can hold the boundary.
@@ -4972,38 +4195,6 @@ app.post("/api/sessions/:id/workflow-decisions", async (req, reply) => {
     req.body as CreateWorkflowDecisionRequest,
     (sessionId) => db.canAccessSession(principal, sessionId),
   ));
-});
-
-// Read authority does not grant resolution or consumption authority. The target may be self,
-// or an accessible descendant of an Orchestrator's own credential session.
-function canInspectWorkflowDecisions(req: FastifyRequest, id: string): boolean {
-  const principal = requestPrincipal(req);
-  if (!principal || !db.canAccessSession(principal, id)) return false;
-  return principal.kind !== "agent" || principal.credentialSessionId === id ||
-    (principal.orchestrator === true && typeof principal.credentialSessionId === "string" &&
-      db.canAccessSession(principal, principal.credentialSessionId) &&
-      db.isSessionDescendant(principal.credentialSessionId, id));
-}
-
-app.get("/api/sessions/:id/workflow-decisions", async (req, reply) => {
-  const { id } = req.params as { id: string };
-  if (!canInspectWorkflowDecisions(req, id)) return reply.code(404).send({ error: "session not found" });
-  const query = req.query as { cursor?: string; limit?: string };
-  const limit = query.limit === undefined ? 50 : Number(query.limit);
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
-      (query.cursor !== undefined && !validParentControlCoordinate(query.cursor))) {
-    return reply.code(400).send({ error: "invalid workflow decision page" });
-  }
-  reply.header("cache-control", "no-store");
-  return respond(reply, svc.workflowDecisions(id, query.cursor, limit));
-});
-
-app.get("/api/sessions/:id/workflow-decisions/:occurrenceId", async (req, reply) => {
-  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
-  if (!canInspectWorkflowDecisions(req, id)) return reply.code(404).send({ error: "session not found" });
-  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
-  reply.header("cache-control", "no-store");
-  return respond(reply, svc.workflowDecision(id, occurrenceId));
 });
 
 app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/consume", async (req, reply) => {
@@ -5123,25 +4314,6 @@ app.post("/api/sessions/:id/campaign/decisions/:occurrenceId/classify", async (r
   if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
   return respond(reply, svc.classifyCampaignDecision(id, occurrenceId, req.body as ClassifyCampaignDecisionRequest,
     { kind: "human", id: humanActorId(req) }, (sessionId) => db.canAccessSession(human, sessionId)));
-});
-
-app.get("/api/sessions/:id/descendant-requests", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const principal = requestPrincipal(req);
-  if (!principal) return reply.code(403).send({ error: "authentication required" });
-  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
-  if (principal.kind === "agent" && principal.credentialSessionId !== id) {
-    return reply.code(404).send({ error: "session not found" });
-  }
-  return respond(reply, svc.descendantRequests(
-    id,
-    (sessionId) => db.canAccessSession(principal, sessionId),
-    principal.kind === "agent" ? "orchestrator" : "human",
-    true,
-    // A descendant is never the credential's own session, so Strict Project Isolation, which only
-    // refuses an Orchestrator's own worktrees, has no policy to read here.
-    (target) => sessionHoldReaderFor(db, principal, target),
-  ));
 });
 
 app.post("/api/sessions/:id/descendant-requests/resolve", async (req, reply) => {
@@ -5291,7 +4463,7 @@ app.post("/api/sessions/:id/delegated-image-review/verdict", async (req, reply) 
   return respond(reply, svc.submitDelegatedImageVerdict(id, body?.report, (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
-app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/child-sessions", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const query = req.query as { after?: string; limit?: string; eventEpoch?: string };
   const after = query.after === undefined ? 0 : Number(query.after);
@@ -5379,60 +4551,17 @@ registerPromptHistoryRoute(app, {
   requestPrincipal: (req) => requestPrincipals.get(req) ?? requestPrincipal(req),
 });
 
-app.get("/api/sessions/:id/retained-attachment-events", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const query = req.query as { after?: string; limit?: string; eventEpoch?: string };
-  const after = Number(query.after ?? 0);
-  const limit = Number(query.limit);
-  const eventEpoch = Number(query.eventEpoch);
-  if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200 ||
-      !Number.isSafeInteger(eventEpoch) || eventEpoch < 0) {
-    return reply.code(400).send({ error: "after, limit, and eventEpoch must be bounded non-negative integers" });
-  }
-  const state = db.getRunnerHistoryState(id);
-  if (!state) return reply.code(404).send({ error: "session not found" });
-  if (state.eventEpoch !== eventEpoch) {
-    return reply.code(409).send({ error: "session event history was replaced", code: "stale_event_epoch",
-      eventEpoch: state.eventEpoch });
-  }
-  const page = eventEpoch > 0
-    ? db.listRetainedAttachmentEventPage(id, after, limit)
-    : { events: [], nextAfterSeq: after, hasMore: false };
-  return { events: page.events, eventEpoch, nextAfter: page.nextAfterSeq, hasMore: page.hasMore };
-});
+app.get("/api/sessions/:id/retained-attachment-events", async (req, reply) => sessionContentManagement.retained(
+  (req.params as {id: string}).id, req.query, reply));
 
 const historyPreviews = new HistoryPreviewReader(db, hub);
+const sessionContentManagement = createSessionContentManagement({db, svc, historyPreviews});
+registerAssistantSessionContent(assistantOperations, {db, hub, svc, receipts: assistantCommandReceipts, content: sessionContentManagement, shells: sessionShellManagement});
 
-app.get("/api/sessions/:id/history-preview", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const query = req.query as Record<string, string | undefined>;
-  const values: Record<string, number> = {};
-  for (const key of ["eventEpoch", "logEpoch", "throughSeq", "turnStartSeq", "afterSeq", "beforeSeq", "handoffSeq", "handoffFirstSeq", "handoffLastSeq", "handoffAfter", "limit"]) {
-    if (query[key] === undefined) continue;
-    const value = Number(query[key]);
-    if (!Number.isSafeInteger(value) || value < 0) return reply.code(400).send({ error: "invalid history preview cursor" });
-    values[key] = value;
-  }
-  if (["eventEpoch", "logEpoch", "throughSeq", "turnStartSeq", "limit"].some(key => values[key] === undefined) ||
-      values.limit! < 1 || values.limit! > 200 || values.turnStartSeq! > values.throughSeq! ||
-      (values.afterSeq !== undefined && values.beforeSeq !== undefined) ||
-      [values.afterSeq, values.beforeSeq, values.handoffSeq, values.handoffFirstSeq, values.handoffLastSeq].some(value => value !== undefined && value > values.throughSeq! + 1)) {
-    return reply.code(400).send({ error: "invalid history preview cursor" });
-  }
-  const state = db.getRunnerHistoryState(id);
-  if (!state) return reply.code(404).send({ error: "session not found" });
-  if (state.eventEpoch !== values.eventEpoch || (state.historyEpoch !== null && state.historyEpoch !== values.logEpoch)) {
-    return reply.code(409).send({ error: "session event history was replaced", code: "stale_event_epoch", eventEpoch: state.eventEpoch });
-  }
-  // A ready preview ends opening recovery polls. Continue the existing deduplicated maintenance
-  // path if an earlier hydration RPC timed out; private rows never supply its cursor or writes.
-  if (!state.complete) void svc.hydrateHistory(id);
-  const read = { ...values, limit: values.limit! };
-  if (values.handoffSeq !== undefined) return { handoff: historyPreviews.handoff(id, values.eventEpoch!, read) };
-  return { preview: await historyPreviews.read(id, values.eventEpoch!, read) };
-});
+ownerSessionStatus.define("GET", "/api/sessions/:id/history-preview", async (req, reply) => sessionContentManagement.preview(
+  (req.params as {id: string}).id, req.query, reply));
 
-app.get("/api/sessions/:id/events", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/events", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const query = req.query as {
     after?: string;
@@ -5518,7 +4647,7 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
   // Installed old CLI/MCP readers use exactly this fallback shape, then slice the response as if
   // it contained the whole log. Their later tail probe can mark a first page as the true newest
   // window. Fence that identifiable agent call instead of silently supplying misleading rows.
-  const principal = requestPrincipal(req);
+  const principal = req.principal;
   if (query.limit === undefined && query.after !== undefined && query.eventEpoch === undefined &&
       principal?.kind === "agent" && principal.credentialSessionId) {
     const actor = db.getSession(principal.credentialSessionId);
@@ -5623,24 +4752,6 @@ app.delete("/api/sessions/:id/transcript-shares/:shareId", async (req, reply) =>
 // Exact auth-gate exception: this read still requires its independent share capability.
 registerPublicTranscriptShareRoute(app, { db });
 
-app.get("/api/sessions/:id/review-findings", async (req, reply) =>
-  respond(reply, svc.reviewFindings((req.params as { id: string }).id)),
-);
-
-app.post("/api/sessions/:id/review-findings", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  return respond(reply, svc.createReviewFinding(id, req.body, { kind: "human", id: humanActorId(req) }));
-});
-
-app.patch("/api/sessions/:id/review-findings/:findingId", async (req, reply) => {
-  const { id, findingId } = req.params as { id: string; findingId: string };
-  return respond(reply, svc.updateReviewFinding(id, findingId, req.body, { kind: "human", id: humanActorId(req) }));
-});
-
-app.post("/api/sessions/:id/review-findings/bundle", async (req, reply) =>
-  respond(reply, svc.bundleReviewFindings((req.params as { id: string }).id, req.body)),
-);
-
 app.post("/api/sessions", async (req, reply) => {
   const principal = requestHuman(req);
   const actor = requestPrincipal(req);
@@ -5741,10 +4852,10 @@ app.post("/api/sessions/:id/prompt", async (req, reply) => {
     : result);
 });
 
-app.post("/api/sessions/:id/result/handoff", async (req, reply) => {
+ownerSessionStatus.define("POST", "/api/sessions/:id/result/handoff", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const session = db.getSession(id);
-  const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
+  const principal = req.principal;
   if (!session || !principal || !db.canAccessSession(principal, id)) {
     return reply.code(404).send({ error: "session not found" });
   }
@@ -5762,9 +4873,9 @@ app.post("/api/sessions/:id/result/handoff", async (req, reply) => {
   return { handedOff, session: withSessionCommandPermissions(db, principal, db.getSession(id)!) };
 });
 
-app.post("/api/sessions/:id/result/acknowledge", async (req, reply) => {
+ownerSessionStatus.define("POST", "/api/sessions/:id/result/acknowledge", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const human = requestHuman(req);
+  const human = (req.principal.kind === "human" ? req.principal : null);
   if (!human) return reply.code(403).send({ error: "human identity is required" });
   if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
   const revision = (req.body as { revision?: unknown } | null)?.revision;
@@ -5813,55 +4924,8 @@ app.post("/api/sessions/:id/steering/:submissionId/resolve", async (req, reply) 
   return respond(reply, await svc.resolveSteeringAttempt(id, submissionId, body.action));
 });
 
-app.post("/api/sessions/:id/project", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const body = (req.body ?? {}) as Partial<SetProjectRequest>;
-  if (!("projectId" in body)) return reply.code(400).send({ error: "projectId is required" });
-  if (body.projectId !== null && (typeof body.projectId !== "string" || !body.projectId.trim())) {
-    return reply.code(400).send({ error: "projectId must be a non-empty string or null" });
-  }
-  if (body.linkLocation !== undefined && typeof body.linkLocation !== "boolean") {
-    return reply.code(400).send({ error: "linkLocation must be a boolean" });
-  }
-  if (body.linkLocation && body.projectId === null) {
-    return reply.code(400).send({ error: "linkLocation requires a target Project" });
-  }
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (typeof body.projectId === "string" && !db.canAccessProject(principal, body.projectId)) {
-    return reply.code(404).send({ error: "project not found" });
-  }
-  if (body.linkLocation && typeof body.projectId === "string" &&
-      !db.canManageProject(principal, body.projectId)) {
-    return reply.code(403).send({ error: "Project management permission is required to link a Location" });
-  }
-  if (body.linkLocation) {
-    const session = db.getSession(id);
-    const reusedWorkspaceId = session ? db.resolveAdoptedSessionLinkWorkspace(id)?.workspaceId : null;
-    if (reusedWorkspaceId && session &&
-        !db.canAccessWorkspace(principal, session.runnerId, reusedWorkspaceId)) {
-      return reply.code(404).send({ error: "workspace not found" });
-    }
-  }
-  if (!canAssignSessionProject(db, principal, id, body.projectId as string | null)) {
-    return reply.code(403).send({
-      error: "Project management permission or personal session ownership is required",
-    });
-  }
-  // Active only: linking a detached Location revives it under the same id, and that is an addition.
-  const existingLocations = new Set(body.linkLocation && typeof body.projectId === "string"
-    ? (db.getProject(body.projectId)?.locations ?? []).filter((location) => location.availability !== "runner_removed").map((location) => location.id) : []);
-  const moved = svc.setProject(
-    id,
-    body.projectId as string | null,
-    principal.userId,
-    { linkLocation: body.linkLocation },
-  );
-  // A Location this move added is a Location added to the Project, as Add Location's are (#4117).
-  const linkedLocationId = body.linkLocation && moved.ok ? moved.data?.projectLocationId : null;
-  if (linkedLocationId && !existingLocations.has(linkedLocationId)) void campaignLocations.locationAdded(linkedLocationId, principal);
-  return respond(reply, moved);
-});
+app.post("/api/sessions/:id/project", async (req, reply) => sessionLifecycleManagement.project(
+  (req.params as {id: string}).id, req.body, requestPrincipal(req), reply));
 
 app.post("/api/sessions/:id/stop", async (req, reply) =>
   respond(reply, svc.stop((req.params as { id: string }).id)),
@@ -6048,17 +5112,6 @@ app.post("/api/sessions/:id/approve", async (req, reply) => {
   body.evidenceReviewed, body.evidenceReviewDigest));
 });
 
-app.get("/api/sessions/:id/governance-audit", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const query = req.query as { limit?: string; before?: string };
-  const rawLimit = query.limit;
-  const limit = rawLimit == null ? 200 : Number(rawLimit);
-  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
-    return reply.code(400).send({ error: "limit must be an integer between 1 and 500" });
-  }
-  const before = typeof query.before === "string" && query.before ? query.before : undefined;
-  return respond(reply, svc.governanceAuditPage(id, limit, before));
-});
 
 function questionPolicyAdministrator(req: FastifyRequest) {
   const human = requestHuman(req);
@@ -6158,128 +5211,10 @@ registerUsageRoutes(app, db, requestPrincipal, hub, {
   },
 });
 
-async function runSessionWorktreeRequest(
-  sessionId: string,
-  request:
-    | { operation: "create"; baseRef?: string; branch: string; progress?: boolean }
-    | { operation: "attach" | "select" | "discard" | "retry_setup"; path: string }
-    | { operation: "generate_setup" }
-    | { operation: "delete_refs"; path?: string; refs: import("@wollipog/protocol").SessionWorktreeRefDeletion[] },
-  principal: AuthPrincipal | null,
-  reply: FastifyReply,
-) {
-  const session = db.getSession(sessionId);
-  if (!session) return reply.code(404).send({ error: "session not found" });
-  const reviewRefusal = svc.reviewSessionRefusal(sessionId, "reads its runner's checkout and takes no worktree");
-  if (reviewRefusal) return reply.code(409).send({ error: reviewRefusal });
-  const authorizationError = orchestratorSelfWorktreeAuthorizationError(
-    principal,
-    sessionId,
-    session.orchestratorPolicy?.execution.strictProjectIsolation !== false,
-  );
-  if (authorizationError) return reply.code(403).send({ error: authorizationError });
-  const unsupported = runnerCapabilityError(
-    session.runnerId,
-    request.operation === "discard" ? "sessionWorktreeDiscard"
-      : request.operation === "retry_setup" ? "worktreeSetup"
-      : request.operation === "generate_setup" ? "worktreeSetupConfig"
-      : request.operation === "delete_refs" ? "sessionWorktreeRefDeletion" : "sessionWorktrees",
-    request.operation === "discard" ? "session worktree discard"
-      : request.operation === "retry_setup" ? "worktree setup"
-      : request.operation === "generate_setup" ? "worktree setup generation"
-      : request.operation === "delete_refs" ? "runner-managed worktree ref deletion" : "session worktrees",
-  );
-  if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
-  if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
-  if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  // Only the session's own switch may continue by itself after its relaunch (#3810). A pre-v255
-  // runner gets no flag and keeps going idle once the relaunch has run.
-  const selfRequest = (request.operation === "create" || request.operation === "attach" || request.operation === "select") &&
-      worktreeRequestedBySession(principal, sessionId) &&
-      runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "worktreeSwitchContinuation")
-    ? { requestedBySession: true }
-    : {};
-  if (request.operation === "create" && request.progress === true && runnerSupportsProtocol(
-    db.getRunner(session.runnerId)?.protocolVersion,
-    "progressAwareSessionWorktrees",
-  )) {
-    const operation = worktreeCreates.startOrJoin({
-      runnerId: session.runnerId,
-      sessionId,
-      branch: request.branch,
-      ...(request.baseRef ? { baseRef: request.baseRef } : {}),
-      ...(session.worktreeRecovery ? { recoveryId: session.worktreeRecovery.recoveryId } : {}),
-    }, async (requestId) => {
-      const res = await hub.requestFromRunner(
-        session.runnerId,
-        requestId,
-        { ...request, ...selfRequest, type: "session_worktree", requestId, sessionId, progress: true },
-        SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
-      );
-      if (res.type !== "session_worktree_result") throw new Error("unexpected runner reply");
-      if (res.sessionId !== sessionId || res.operation !== "create") {
-        throw new Error("mismatched runner worktree reply");
-      }
-      if (!res.ok || !res.snapshot) throw new Error(res.error ?? "worktree operation failed");
-      db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
-      return { snapshot: res.snapshot, worktree: res.worktree, ...(res.isolation ? { isolation: res.isolation } : {}) };
-    });
-    if (operation.status === "in_progress") {
-      return reply.code(202).send({ operation });
-    }
-    worktreeCreates.releaseTerminal(operation.id);
-    if (operation.status === "failed") {
-      return reply.code(409).send({ operation, error: operation.error });
-    }
-    return {
-      operation: { id: operation.id, status: operation.status },
-      worktree: operation.worktree,
-      session: db.getSession(sessionId),
-      ...(operation.isolation ? { isolation: operation.isolation } : {}),
-    };
-  }
-  const requestId = `worktree_${randomUUID().slice(0, 8)}`;
-  try {
-    const res = await hub.requestFromRunner(
-      session.runnerId,
-      requestId,
-      { ...request, ...selfRequest, type: "session_worktree", requestId, sessionId },
-      request.operation === "create"
-        ? 65 * 60_000
-        : request.operation === "retry_setup" ? 65 * 60_000 : 150_000,
-    );
-    if (res.type !== "session_worktree_result") return reply.code(502).send({ error: "unexpected runner reply" });
-    if (!res.ok || !res.snapshot) {
-      const error = res.error ?? "worktree operation failed";
-      // A pre-v159 runner cannot answer a discard with a durable receipt, so its retention refusal
-      // is terminal rather than pending. Say so explicitly instead of letting the caller wait for a
-      // replay that was never journaled.
-      const legacy = request.operation === "discard"
-        ? legacyPeerWorktreeRetirement(db.getRunner(session.runnerId)?.protocolVersion, error)
-        : null;
-      // The session's own attach into another repository learns how to recover (#4138). A regular
-      // session is pointed at request_location_switch only when its runner has that tool.
-      const role = locationSwitchRole({ role: sessionRole(session), parentSessionId: session.parentSessionId });
-      const explained = request.operation === "attach" && worktreeRequestedBySession(principal, sessionId) &&
-          (role !== "offer" || runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "sessionLocationSwitch"))
-        ? withRepositoryMismatchGuidance(role, "worktree_attach", error)
-        : error;
-      return reply.code(409).send(legacy ?? { error: explained });
-    }
-    db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
-    if (request.operation !== "create" && request.operation !== "delete_refs") worktreeCreates.invalidateSession(sessionId);
-    // v133+ runners say whether a live platform sandbox can already write to an attached path.
-    // A pre-v133 runner omits it, and the field stays absent rather than being guessed here.
-    return { worktree: res.worktree, session: db.getSession(sessionId),
-      ...(res.isolation ? { isolation: res.isolation } : {}),
-      ...(res.retirement ? { retirement: res.retirement } : {}),
-      ...(res.refDeletion ? { refDeletion: res.refDeletion } : {}),
-      ...(res.generatedSetup ? { generatedSetup: res.generatedSetup } : {}) };
-  } catch (error) {
-    return reply.code(502).send({ error: (error as Error).message });
-  }
-}
+const runSessionWorktreeRequest = createSessionWorktreeManagement({db, hub, svc, worktreeCreates, runnerCapabilityError});
+registerAssistantOwnerManagement(assistantOperations, {db, svc, receipts: assistantCommandReceipts,
+  projects: ownerProjectManagement, runners: ownerRunnerManagement, worktree: runSessionWorktreeRequest});
+registerAssistantMachineManagement(assistantOperations, db, ownerMachineManagement, assistantCommandReceipts);
 
 app.post("/api/sessions/:id/worktrees", async (req, reply) => {
   const id = (req.params as { id: string }).id;
@@ -6303,7 +5238,7 @@ app.post("/api/sessions/:id/worktrees", async (req, reply) => {
 
 // Read-only view of this session's unconsumed progress-aware creates, so a reloaded client can
 // rejoin one by repeating its exact coordinates. It never starts, retries, or releases work.
-app.get("/api/sessions/:id/worktrees/operations", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/worktrees/operations", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (!db.getSession(id)) return reply.code(404).send({ error: "session not found" });
   return { operations: worktreeCreates.listForSession(id) };
@@ -6381,205 +5316,13 @@ app.post("/api/sessions/:id/worktrees/generate-setup", async (req, reply) => {
 
 // Per-turn checkpoint rewind (T3-style, files only — the conversation continues). The runner
 // re-checks authoritatively (turn running, checkpoint exists); guards here fail fast.
-app.post("/api/sessions/:id/rewind", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const turn = Number((req.body as { turn?: number })?.turn);
-  if (!Number.isInteger(turn) || turn < 1) return reply.code(400).send({ error: "turn must be a positive integer" });
-  const session = db.getSession(id);
-  if (!session) return reply.code(404).send({ error: "session not found" });
-  const reconciliationBlock = svc.podReconciliationMutationError(id);
-  if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
-  if (!session.worktreePath) return reply.code(409).send({ error: "rewind requires a worktree session" });
-  if (session.status === "running" || session.status === "starting") {
-    return reply.code(409).send({ error: "a turn is running — stop or wait before rewinding" });
-  }
-  if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  // Persisted checkpoint events can outlive a runner downgrade — a pre-v25 runner ignores the
-  // unknown command and the caller would eat a 30s timeout instead of a clear failure.
-  const unsupported = runnerCapabilityError(session.runnerId, "checkpointRewind", "checkpoint rewind");
-  if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  const requestId = `rew_${randomUUID().slice(0, 8)}`;
-  try {
-    const res = await hub.requestFromRunner(
-      session.runnerId,
-      requestId,
-      { type: "rewind_session", requestId, sessionId: id, turn, timeoutMs: 30_000 },
-      30_000,
-    );
-    if (res.type !== "rewind_result") return reply.code(502).send({ error: "unexpected runner reply" });
-    if (!res.ok) return reply.code(409).send({ error: res.error ?? "rewind failed" });
-    return { ok: true };
-  } catch (err) {
-    return reply.code(502).send({ error: (err as Error).message });
-  }
-});
+app.post("/api/sessions/:id/rewind", async (req, reply) => sessionLifecycleManagement.rewind(
+  (req.params as {id: string}).id, req.body, requestPrincipal(req), reply));
 
 // Provider-native conversation fork: the runner owns both the provider transcript and git object
 // database, so it creates the target atomically enough to return a complete box snapshot.
-const conversationBranchesInFlight = new Set<string>();
-app.post("/api/sessions/:id/fork", async (req, reply) => {
-  const sourceId = (req.params as { id: string }).id;
-  const reviewRefusal = svc.reviewSessionRefusal(sourceId, "cannot be forked");
-  if (reviewRefusal) return reply.code(409).send({ error: reviewRefusal });
-  const reconciliationBlock = svc.podReconciliationMutationError(sourceId);
-  if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
-  const turn = Number((req.body as { turn?: number })?.turn);
-  if (!Number.isInteger(turn) || turn < 1) return reply.code(400).send({ error: "turn must be a positive integer" });
-  const forkingHuman = requestHuman(req);
-  const source = db.getSession(sourceId);
-  if (!source) return reply.code(404).send({ error: "session not found" });
-  const sourceScope = db.sessionScope(sourceId);
-  if (!sourceScope) return reply.code(409).send({ error: "source session ownership is unavailable" });
-  const sourceAgent = db.getRunner(source.runnerId)?.agents.find((agent) => agent.id === source.agentId);
-  const handoff = (req.body as { handoff?: { agentId: string; config: SessionConfig } })?.handoff;
-  const destination = handoff ? db.getRunner(source.runnerId)?.agents.find((agent) => agent.id === handoff.agentId) : undefined;
-  // Recovering a quarantined conversation is the one fork whose destination may be the same
-  // provider: the invalid item is excluded by a new thread, not by a different vendor. Validate the
-  // request against the session's own durable quarantine so the allowance cannot be borrowed by an
-  // ordinary fork; the runner revalidates it again against its authoritative copy.
-  const recovery = (req.body as { recovery?: boolean })?.recovery === true;
-  const quarantine = source.historyQuarantine;
-  if (recovery) {
-    if (!quarantine) return reply.code(409).send({ error: "this session's provider conversation is not quarantined" });
-    if (quarantine.recoveryTurn === undefined) {
-      return reply.code(409).send({ error: "this quarantined conversation has no safe checkpoint to recover from" });
-    }
-    if (turn !== quarantine.recoveryTurn) {
-      return reply.code(409).send({ error: "recovery must start from the quarantined session's recorded safe checkpoint" });
-    }
-    if ((quarantine.recovery === "handoff") !== !!handoff) {
-      return reply.code(409).send({ error: `this quarantined conversation recovers by ${quarantine.recovery ?? "fork"}` });
-    }
-    const unsupported = runnerCapabilityError(source.runnerId, "providerHistoryQuarantine", "quarantine recovery");
-    if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  } else if (quarantine) {
-    return reply.code(409).send({ error: "this session's provider conversation is quarantined — use its recovery action" });
-  }
-  if (handoff) {
-    if (!handoff.config || typeof handoff.config !== "object" || Array.isArray(handoff.config)) return reply.code(400).send({ error: "handoff config is required" });
-    const error = handoffDestinationError(destination, source.driver, handoff.config, { allowSameProvider: recovery });
-    if (error) return reply.code(409).send({ error });
-    if (!db.getAgentLaunch(source.runnerId, handoff.agentId)) {
-      return reply.code(409).send({ error: "The destination harness installation is unavailable or not selected." });
-    }
-    const unsupported = runnerCapabilityError(source.runnerId, "conversationHandoff", "checkpoint handoffs");
-    if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  }
-  const supportsFork = providerSupportsConversationFork(source.driver, sourceAgent?.capabilities);
-  if (!supportsFork && !handoff) return reply.code(409).send({ error: "this provider session does not support conversation fork" });
-  if (!source.worktreePath && !handoff) return reply.code(409).send({ error: "conversation fork requires a worktree session" });
-  if (sessionBlocksConversationFork(source.status)) {
-    return reply.code(409).send({ error: "the source session is busy — wait before forking" });
-  }
-  if (!hub.isRunnerOnline(source.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(source.runnerId, "conversationFork", "conversation forks");
-  if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  const deferHistory = runnerSupportsProtocol(db.getRunner(source.runnerId)?.protocolVersion, "indexedHistory");
-  const sourceExecutionWorkspacePath = db.getAdHocWorkspacePath(sourceId);
-  const targetSessionId = `s_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
-  const requestId = `fork_${randomUUID().slice(0, 8)}`;
-  if (conversationBranchesInFlight.has(sourceId)) return reply.code(409).send({ error: "a conversation fork or handoff is already in progress" });
-  conversationBranchesInFlight.add(sourceId);
-  let forkCreatedOnRunner = false;
-  try {
-    const res = await hub.requestFromRunner(
-      source.runnerId,
-      requestId,
-      {
-        type: "fork_session",
-        requestId,
-        sourceSessionId: sourceId,
-        targetSessionId,
-        turn,
-        title: `${source.title} (${recovery ? "recovered" : handoff ? "handoff" : "fork"})`.slice(0, 120),
-        ...(handoff ? { handoff: {
-          agentId: handoff.agentId,
-          config: handoff.config,
-          ...(destination?.installation?.selection === "selected"
-            ? { expectedInstallationId: destination.installation.id } : {}),
-        } } : {}),
-        ...(recovery ? { recovery: true as const } : {}),
-        ...(deferHistory ? { deferHistory: true } : {}),
-      },
-      65 * 60_000,
-    );
-    if (res.type !== "fork_result") return reply.code(502).send({ error: "unexpected runner reply" });
-    if (!res.ok || !res.snapshot) {
-      // #3240: the fork's provider launch was refused at the account's lease; the client shows the
-      // same state a refused session launch does. A malformed refusal falls back to the text.
-      const providerHomeRefusal = res.providerHomeRefusal === undefined ? null
-        : validProviderHomeLaunchRefusal(res.providerHomeRefusal);
-      return reply.code(409).send({
-        error: handoff && !source.worktreePath && res.error === "conversation fork requires a worktree session"
-          ? "Update the runner to support handoffs from in-place sessions."
-          : res.error ?? "conversation fork failed",
-        ...(providerHomeRefusal ? { providerHomeRefusal } : {}),
-      });
-    }
-    const snapshotIdError = providerForkSnapshotIdError(targetSessionId, res.snapshot.id);
-    if (snapshotIdError) {
-      forkCreatedOnRunner = true;
-      throw new Error(snapshotIdError);
-    }
-    forkCreatedOnRunner = true;
-    if (handoff && (!res.handoffDraft || typeof res.handoffDraft.text !== "string" || !Array.isArray(res.handoffDraft.images))) throw new Error("runner returned no valid handoff draft");
-    const forkIdentityError = forkSnapshotIdentityError(
-      { ...source, ...(destination ? { agentId: destination.id, driver: destination.driver! } : {}), executionWorkspacePath: sourceExecutionWorkspacePath },
-      res.snapshot,
-    );
-    if (forkIdentityError) throw new Error(forkIdentityError);
-    const now = Date.now();
-    const activeSourceLocation = source.projectLocationId
-      ? db.projectLocation(source.projectLocationId)
-      : null;
-    const inheritedProject = forkProjectAssignment(source, activeSourceLocation, res.snapshot.workspaceId);
-    const session = db.createSessionFromSnapshot(
-      res.snapshot,
-      source.runnerId,
-      now,
-      sourceScope,
-      inheritedProject,
-      { sourceSessionId: sourceId, sourceTurn: turn, ...(forkingHuman ? { launcherUserId: forkingHuman.userId } : {}) },
-    );
-    let highWater = 0;
-    for (const event of deferHistory ? [] : (res.events ?? [])) {
-      db.appendEvent(targetSessionId, event.payload, event.ts);
-      highWater = event.seq;
-    }
-    db.setHydratedSeq(targetSessionId, highWater);
-    hub.sessionChangedById(session.id);
-    if (deferHistory) void svc.hydrateHistory(targetSessionId);
-    return reply.code(201).send({
-      ...db.getSession(targetSessionId),
-      ...(handoff ? { handoffDraft: res.handoffDraft } : {}),
-      // The source's unsent prompt travels to the client as a composer draft only.
-      ...(res.retainedPrompt ? { retainedPrompt: res.retainedPrompt } : {}),
-    });
-  } catch (err) {
-    const timedOut = isRunnerRequestTimeoutError(err);
-    const cleanupTargetSessionId = providerForkCleanupTarget(targetSessionId, forkCreatedOnRunner, timedOut);
-    if (cleanupTargetSessionId) {
-      // A timeout or malformed reply does not prove the runner failed before creating the fork.
-      // Retain this tombstone across absent reconnect snapshots so a later-created target cannot
-      // be adopted as an unassigned session.
-      db.addTombstone(cleanupTargetSessionId, source.runnerId, Date.now(), "retain");
-      hub.sendToRunner(source.runnerId, { type: "delete_session", sessionId: cleanupTargetSessionId });
-      if (db.getSession(cleanupTargetSessionId)) {
-        db.deleteSession(cleanupTargetSessionId);
-        hub.sessionRemoved(cleanupTargetSessionId);
-      }
-    }
-    const message = err instanceof Error ? err.message : String(err);
-    if (timedOut) {
-      return reply.code(409).send({
-        error: "the fork timed out and was discarded — retry when the runner is responsive",
-      });
-    }
-    return reply.code(502).send({ error: message });
-  } finally {
-    conversationBranchesInFlight.delete(sourceId);
-  }
-});
+app.post("/api/sessions/:id/fork", async (req, reply) => sessionLifecycleManagement.fork(
+  (req.params as {id: string}).id, req.body, requestPrincipal(req), reply));
 
 // Structured agent questions (AskUserQuestion): a sibling of /approve because the shapes
 // differ — N answers keyed by question id vs one optionId decision.
@@ -6603,133 +5346,6 @@ app.post("/api/sessions/:id/answer", async (req, reply) => {
     id: humanActorId(req),
   }, action, undefined, body.occurrenceId, undefined,
   (sessionId) => human ? db.canAccessSession(human, sessionId) : false));
-});
-
-// Git/PR workflow: run a git action (status/commit/open_pr) in the session's
-// worktree on its runner, and return the result. Requires a worktree session.
-app.post("/api/sessions/:id/git", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const session = db.getSession(id);
-  if (!session) return reply.code(404).send({ error: "session not found" });
-  if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-
-  const parsed = parseGitAction((req.body ?? {}) as GitActionRequest);
-  if ("error" in parsed) return reply.code(400).send({ error: parsed.error });
-  const { action } = parsed;
-  if (!session.worktreePath && gitActionRequiresLinkedWorktree(action)) {
-    return reply.code(409).send({ error: "this git action requires a linked worktree session" });
-  }
-  if (!session.worktreePath) {
-    const unsupported = runnerCapabilityError(
-      session.runnerId,
-      "gitVisibility",
-      "primary-checkout Git visibility",
-    );
-    if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  }
-  const gitCapability = gitActionCapability(action);
-  if (gitCapability) {
-    const unsupported = runnerCapabilityError(session.runnerId, gitCapability.capability, gitCapability.label);
-    if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  }
-
-  // Branch-relative diffs (all_branch / last_turn) only make sense on a worktree session; a
-  // WSL in-place session has no session branch to diff against. (uncommitted reads are fine —
-  // and today the worktreePath gate above already limits every git action to worktree sessions.)
-  if (action.kind === "diff" && action.scope !== "uncommitted" && !session.useWorktree) {
-    return reply.code(400).send({ error: `the '${action.scope}' diff scope requires a worktree session` });
-  }
-
-  // Don't mutate git mid-turn: a commit/PR while the agent is still editing would
-  // capture a partial snapshot and can race the post-turn diff capture.
-  const gate = gitActionAllowed(action, session.status);
-  if (!gate.ok) return reply.code(409).send({ error: gate.error });
-  if (!["status", "summary", "diff", "github_review_sync", "forge_review_sync"].includes(action.kind)) {
-    const reconciliationBlock = svc.podReconciliationMutationError(id);
-    if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
-  }
-
-  const requestId = randomUUID();
-  // Pushing + calling gh takes longer than a quick status read.
-  const timeoutMs = action.kind === "open_pr" || action.kind === "github_review_sync" || action.kind === "forge_review_sync"
-    ? 60_000
-    : 30_000;
-  try {
-    const result = await hub.requestFromRunner(
-      session.runnerId,
-      requestId,
-      // timeoutMs rides along so the runner can EXPIRE a queued mutation we've already
-      // reported as failed, instead of executing it late (ghost commits).
-      {
-        type: "git_action",
-        requestId,
-        sessionId: id,
-        ...(session.worktreePath ? { worktreePath: session.worktreePath } : {}),
-        action,
-        timeoutMs,
-      },
-      timeoutMs,
-    );
-    if (result.type !== "git_result") return reply.code(502).send({ error: "unexpected runner reply" });
-    if (!result.ok) {
-      // Typed Git failures are well-formed requests conflicting with current repository state —
-      // 409, with the code so callers can distinguish stale/apply/no-repository outcomes.
-      const status = result.code === "GIT_STALE" || result.code === "GIT_APPLY_FAILED" || result.code === "GIT_NO_REPOSITORY" ? 409 : 400;
-      return reply.code(status).send({ error: result.error ?? "git action failed", ...(result.code ? { code: result.code } : {}) });
-    }
-    // Version-skew guard: an older runner without the action falls through its switch and
-    // replies ok:true with empty data — forwarding that as 200 would render a mutation as a
-    // silent no-op "success" in the UI. Every local diff mutation returns {status, diff}.
-    if (["stage_hunk", "stage_lines", "discard_file"].includes(action.kind) &&
-        (result.data?.status == null || result.data?.diff == null)) {
-      return reply.code(502).send({ error: "the runner does not support this diff mutation — update the runner on this box" });
-    }
-    if (action.kind === "github_review_sync") {
-      if (!validateGitHubReviewSync(result.data?.githubReview)) {
-        return reply.code(502).send({ error: "the runner did not return GitHub review data — update the runner on this box" });
-      }
-      const reconciled = svc.reconcileGitHubReviewFindings(id, result.data.githubReview);
-      if (!reconciled.ok || !reconciled.data) {
-        return reply.code(reconciled.status).send(failureBody(reconciled, "GitHub reviews could not be reconciled"));
-      }
-      const { reconciliation, findings, summary } = reconciled.data;
-      return {
-        ...result.data,
-        reviewFindings: { findings, summary },
-        reviewReconciliation: reconciliation,
-      };
-    }
-    if (action.kind === "forge_review_sync") {
-      if (!validateForgeReviewSync(result.data?.forgeReview)) {
-        return reply.code(502).send({ error: "the runner did not return forge review data — update the runner on this box" });
-      }
-      const reconciled = svc.reconcileForgeReviewFindings(id, result.data.forgeReview);
-      if (!reconciled.ok || !reconciled.data) {
-        return reply.code(reconciled.status).send(failureBody(reconciled, "Forge reviews could not be reconciled"));
-      }
-      const { reconciliation, findings, summary } = reconciled.data;
-      return {
-        ...result.data,
-        reviewFindings: { findings, summary },
-        reviewReconciliation: reconciliation,
-      };
-    }
-    if (action.kind === "summary" && result.data?.summary) {
-      outboundEvents.recordChecksFromSummary(id, result.data.summary);
-    }
-    if (action.kind === "open_pr" && result.data?.pr &&
-        (result.data.pr.createdWithGh || result.data.pr.created === true)) {
-      db.recordOutboundPullRequestOpened({
-        sessionId: id,
-        branch: result.data.pr.branch,
-        pullRequestUrl: result.data.pr.url,
-        now: Date.now(),
-      });
-    }
-    return result.data ?? {};
-  } catch (err) {
-    return reply.code(504).send({ error: (err as Error).message });
-  }
 });
 
 // Host actions: open the session's working directory in a local editor on the runner host,
@@ -6772,48 +5388,6 @@ app.post("/api/sessions/:id/host-action", async (req, reply) => {
   }
 });
 
-// Create a project ("New project"). CP-owned workspace persisted in workspace_extras so it
-// survives runner re-registers. Requires the runner online — the path was browsed on its host.
-app.post("/api/runners/:runnerId/workspaces", async (req, reply) => {
-  const { runnerId } = req.params as { runnerId: string };
-  const body = (req.body ?? {}) as { name?: unknown; path?: unknown };
-  const name = typeof body.name === "string" ? body.name.trim() : "";
-  const path = typeof body.path === "string" ? body.path.trim() : "";
-  if (!name || !path) return reply.code(400).send({ error: "name and path are required" });
-  if (!db.getRunner(runnerId)) return reply.code(404).send({ error: "runner not found" });
-  if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const principal = requestHuman(req);
-  const scope: ResourceScope | undefined = principal ? {
-    organizationId: principal.organizationId,
-    owner: { kind: "user", userId: principal.userId },
-  } : undefined;
-  const workspace = db.createWorkspace(runnerId, { name, path }, scope);
-  hub.runnerChanged(runnerId);
-  for (const projectId of db.projectIdsForWorkspace(runnerId, workspace.id)) {
-    hub.projectChangedById(projectId);
-  }
-  return { workspace };
-});
-
-app.get("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (req, reply) => {
-  const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  if (!db.canManageWorkspace(principal, runnerId, workspaceId)) {
-    return reply.code(404).send({ error: "workspace not found" });
-  }
-  const requested = requestedAccessScope(principal, accessScopeOwnerFromQuery(req.query));
-  if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
-  const currentScope = db.workspaceScope(runnerId, workspaceId);
-  if (!currentScope) return reply.code(404).send({ error: "workspace not found" });
-  const transitionError = accessScopeTransitionError(principal, currentScope, requested.scope);
-  if (transitionError) return reply.code(403).send({ error: transitionError });
-  const preview = db.previewWorkspaceAccessScope(runnerId, workspaceId, requested.scope);
-  return preview
-    ? { preview: accessScopePreviewForPrincipal(principal, preview) }
-    : reply.code(404).send({ error: "workspace not found" });
-});
-
 app.put("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (req, reply) => {
   const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
   const principal = requestHuman(req);
@@ -6822,7 +5396,7 @@ app.put("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (re
     return reply.code(404).send({ error: "workspace not found" });
   }
   const body = (req.body ?? {}) as { owner?: unknown; confirmationToken?: unknown };
-  const requested = requestedAccessScope(principal, body.owner);
+  const requested = requestedAccessScope(db, principal, body.owner);
   if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
   const currentScope = db.workspaceScope(runnerId, workspaceId);
   if (!currentScope) return reply.code(404).send({ error: "workspace not found" });
@@ -6851,111 +5425,6 @@ app.put("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (re
   } catch (error) {
     return reply.code(409).send({ error: error instanceof Error ? error.message : "location access update failed" });
   }
-});
-
-// Rename a project (workspace display name). CP-owned override — the runner's own config
-// name stays untouched and the override survives re-registers. Empty name resets it.
-app.post("/api/runners/:runnerId/workspaces/register", async (req, reply) => {
-  const { runnerId } = req.params as { runnerId: string };
-  const body = (req.body ?? {}) as { name?: unknown; path?: unknown };
-  const name = typeof body.name === "string" ? body.name.trim() : "";
-  const path = typeof body.path === "string" ? body.path.trim() : "";
-  if (!name || !path) return reply.code(400).send({ error: "name and path are required" });
-  if (!db.getRunner(runnerId)) return reply.code(404).send({ error: "runner not found" });
-  if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const principal = requestHuman(req);
-  const scope: ResourceScope | undefined = principal ? {
-    organizationId: principal.organizationId,
-    owner: { kind: "user", userId: principal.userId },
-  } : undefined;
-  try {
-    const workspace = db.registerMachineWorkspace(runnerId, { name, path }, scope);
-    hub.runnerChanged(runnerId);
-    return { workspace };
-  } catch (error) {
-    const message = (error as Error).message;
-    return reply.code(message.includes("already registered") ? 409 : 400).send({ error: message });
-  }
-});
-
-// Remove Workspace (#4123): unregister one Workspace from a Machine with the authority that
-// registers one (owners and admins). Nothing on disk is deleted. Anything that still uses the
-// Workspace refuses removal with what to resolve; a configured Workspace is removed by its runner,
-// which keeps it removed across restarts, and older runners are refused with an update hint.
-app.delete("/api/runners/:runnerId/workspaces/:workspaceId", async (req, reply) => {
-  const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
-  // A person removes a workspace, never an agent credential, and only one they may manage.
-  const principal = requestHuman(req);
-  if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  const runner = db.getRunner(runnerId);
-  if (!runner) return reply.code(404).send({ error: "runner not found" });
-  if (!db.canManageWorkspace(principal, runnerId, workspaceId)) {
-    return reply.code(404).send({ error: "workspace not found" });
-  }
-  const source = db.workspaceSource(runnerId, workspaceId);
-  if (!source) return reply.code(404).send({ error: "workspace not found" });
-  if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  if (source === "configured") {
-    const unsupported = runnerCapabilityError(runnerId, "workspaceRemoval", "removing configured workspaces");
-    if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  }
-  // Checking what uses it and hiding it is one transaction, so nothing can come to depend on the
-  // workspace while its runner is asked; a managed workspace is gone at this point.
-  const started = db.beginWorkspaceRemoval(runnerId, workspaceId);
-  if (!started) return reply.code(404).send({ error: "workspace not found" });
-  if (!started.ok) {
-    return reply.code(409).send({ error: workspaceRemovalBlockedMessage(started.blockers), blockers: started.blockers });
-  }
-  hub.runnerChanged(runnerId);
-  if (started.source === "managed") return { removed: true };
-  const requestId = `workspace_remove_${randomUUID()}`;
-  try {
-    const result = await hub.requestFromRunner(runnerId, requestId, {
-      type: "remove_workspace",
-      requestId,
-      runnerId,
-      workspaceId,
-      path: started.path,
-    });
-    if (result.type !== "remove_workspace_result" || !result.ok) {
-      db.cancelWorkspaceRemoval(runnerId, workspaceId);
-      hub.runnerChanged(runnerId);
-      return result.type === "remove_workspace_result"
-        ? reply.code(409).send({ error: result.error ?? "The machine could not remove the workspace." })
-        : reply.code(502).send({ error: "unexpected runner reply" });
-    }
-  } catch (error) {
-    if (isRunnerRequestNotSentError(error)) {
-      db.cancelWorkspaceRemoval(runnerId, workspaceId);
-      hub.runnerChanged(runnerId);
-      return reply.code(409).send({ error: "runner is offline" });
-    }
-    // The runner may have recorded it. The workspace stays hidden; the runner's next registration
-    // restores it if the runner still has it.
-    return reply.code(504).send({
-      error: "The machine didn't confirm the removal. The workspace stays hidden, and comes back when the machine reconnects if it wasn't removed.",
-    });
-  }
-  db.finishWorkspaceRemoval(runnerId, workspaceId);
-  return { removed: true };
-});
-
-app.post("/api/runners/:runnerId/workspaces/:workspaceId/rename", async (req, reply) => {
-  const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
-  const body = (req.body ?? {}) as { name?: unknown };
-  if (typeof body.name !== "string") return reply.code(400).send({ error: "name must be a string" });
-  if (!db.getRunner(runnerId)) return reply.code(404).send({ error: "runner not found" });
-  const linkedProjectIds = db.projectIdsForWorkspace(runnerId, workspaceId);
-  const principal = requestHuman(req);
-  if (!principal || !db.canManageWorkspace(principal, runnerId, workspaceId)) {
-    return reply.code(404).send({ error: "workspace not found" });
-  }
-  db.renameWorkspace(runnerId, workspaceId, body.name);
-  hub.runnerChanged(runnerId);
-  for (const projectId of linkedProjectIds) hub.projectChangedById(projectId);
-  // Re-broadcast affected sessions so every open dashboard re-groups its sidebar immediately.
-  for (const id of db.sessionIdsForWorkspace(runnerId, workspaceId)) hub.sessionChangedById(id);
-  return { ok: true };
 });
 
 // Reveal a project root in the runner host's file manager ("Open in Explorer"). Only paths
@@ -7007,31 +5476,20 @@ app.post("/api/sessions/:id/retitle", async (req, reply) => {
   return respond(reply, await svc.retitleSession(id));
 });
 
-app.post("/api/sessions/:id/workspace", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const body = (req.body ?? {}) as Partial<SetWorkspaceRequest>;
-  const session = db.getSession(id);
-  const principal = requestPrincipal(req);
-  const location = session && body.workspaceId
-    ? db.findProjectLocation(session.runnerId, body.workspaceId)
-    : null;
-  if (location && (!principal || !db.canAccessProject(principal, location.projectId))) {
-    return reply.code(404).send({ error: "project not found" });
-  }
-  return respond(reply, svc.setWorkspace(id, body.workspaceId ?? null));
-});
+app.post("/api/sessions/:id/workspace", async (req, reply) => sessionLifecycleManagement.workspace(
+  (req.params as {id: string}).id, req.body, requestPrincipal(req), reply));
 
-app.put("/api/sessions/:id/reminder", async (req, reply) => {
+ownerSessionStatus.define("PUT", "/api/sessions/:id/reminder", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const human = requestHuman(req);
+  const human = (req.principal.kind === "human" ? req.principal : null);
   if (!human) return reply.code(403).send({ error: "session reminders require a human user" });
   return respond(reply, svc.setReminder(id, human.userId,
     (req.body ?? {}) as Partial<SetSessionReminderRequest>));
 });
 
-app.get("/api/sessions/:id/reminder", async (req, reply) => {
+ownerSessionStatus.define("GET", "/api/sessions/:id/reminder", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const human = requestHuman(req);
+  const human = (req.principal.kind === "human" ? req.principal : null);
   if (!human) return reply.code(403).send({ error: "session reminders require a human user" });
   // The central authorization gate has already required access to this exact session. The user id
   // remains part of the database key so an organization peer can never observe the owner's row.
@@ -7050,9 +5508,9 @@ app.get("/api/sessions/:id/reminder", async (req, reply) => {
   return { reminder };
 });
 
-app.delete("/api/sessions/:id/reminder", async (req, reply) => {
+ownerSessionStatus.define("DELETE", "/api/sessions/:id/reminder", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const human = requestHuman(req);
+  const human = (req.principal.kind === "human" ? req.principal : null);
   if (!human) return reply.code(403).send({ error: "session reminders require a human user" });
   const rawRevision = (req.query as { revision?: string }).revision;
   const revision = rawRevision === undefined ? undefined : Number(rawRevision);
@@ -7096,7 +5554,7 @@ app.post("/api/sessions/:id/retry-stop", async (req, reply) => {
   return respond(reply, svc.retryStop(id));
 });
 
-app.post("/api/sessions/:id/background-deliveries/acknowledge-blocked-results", async (req, reply) => {
+ownerSessionStatus.define("POST", "/api/sessions/:id/background-deliveries/acknowledge-blocked-results", async (req, reply) => {
   const { id } = req.params as { id: string };
   const body = req.body as { targets?: unknown } | null;
   if (!body || !Array.isArray(body.targets) || body.targets.length < 1 || body.targets.length > 32 ||
@@ -7109,12 +5567,12 @@ app.post("/api/sessions/:id/background-deliveries/acknowledge-blocked-results", 
   if (!db.getSession(id)) return reply.code(404).send({ error: "session not found" });
   const changed = db.acknowledgeBackgroundBlockedResults(id, body.targets, Date.now());
   if (changed) hub.sessionChangedById(id);
-  req.log.info({ event: "background_blocked_results_acknowledged", sessionId: id, changed,
-    requested: body.targets.length, entryPoint: "dashboard" }, "Blocked-result acknowledgement completed");
+  (req.log ?? app.log).info({ event: "background_blocked_results_acknowledged", entryPoint: req.entryPoint ?? "owner_management", sessionId: id, changed,
+    requested: body.targets.length }, "Blocked-result acknowledgement completed");
   return db.getSession(id);
 });
 
-app.post("/api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result", async (req, reply) => {
+ownerSessionStatus.define("POST", "/api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result", async (req, reply) => {
   const { id, continuationId } = req.params as { id: string; continuationId: string };
   const changed = db.acknowledgeBackgroundMissingResult(id, continuationId, Date.now());
   const session = db.getSession(id);
@@ -7128,7 +5586,7 @@ app.post("/api/sessions/:id/background-deliveries/:continuationId/acknowledge-mi
   return session;
 });
 
-app.post("/api/sessions/:id/background-deliveries/:continuationId/acknowledge-retry-exhaustion", async (req, reply) => {
+ownerSessionStatus.define("POST", "/api/sessions/:id/background-deliveries/:continuationId/acknowledge-retry-exhaustion", async (req, reply) => {
   const { id, continuationId } = req.params as { id: string; continuationId: string };
   const changed = db.acknowledgeBackgroundRetryExhaustion(id, continuationId, Date.now());
   const session = db.getSession(id);
@@ -7148,14 +5606,12 @@ app.post("/api/sessions/:id/config", async (req, reply) => {
   return respond(reply, svc.setConfig(id, body, workflowActor(req)));
 });
 
+ownerSessionStatus.registerHttp(app, requestPrincipal);
+registerAssistantStatusOperations(assistantOperations, {db, svc, hub, receipts: assistantCommandReceipts, status: ownerSessionStatus, campaign: campaignStatusManagement, scope: campaignScopeManagement, log: app.log});
+
 app.delete("/api/sessions/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  // The runner kills the session's shell processes on delete_session; purge the registry here
-  // too so offline-runner deletes don't leave ghost tabs.
-  const shells = shellRegistry.list(id);
-  shellRegistry.removeForSession(id);
-  for (const shell of shells) hub.shellExit(shell.sessionId, shell.shellId, null, shell.outputEndSeq);
-  return respond(reply, svc.delete(id));
+  return sessionLifecycleManagement.remove(id, reply);
 });
 
 app.get("/api/runs", async () => ({ runs: db.listRuns() }));

@@ -30,6 +30,7 @@ import { PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS,
 import { inspectPullRequestClosures, pullRequestClosures } from "./github-merge-preflight.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
+import { defaultProfileRootCliHost, runProfileRootCli } from "./provider-profile-root-cli.js";
 import {
   artifactHelp, decisionHelp, expandCommandAlias, initHelp, pairHelp, pullRequestHelp, resolveHelp, reviewHelp, rootHelp, sessionHelp,
   worktreeHelp,
@@ -991,6 +992,9 @@ export async function runWollipogCli(
   }
   const args = expandCommandAlias(invocation);
   const json = flag(args, "--json");
+  if (args[0] === "profile-root") {
+    return runProfileRootCli(args, defaultProfileRootCliHost(env), io);
+  }
   // A known pair verb expands above. Refuse an incomplete or unknown alias before credential
   // discovery so even usage mistakes retain the host-administration fail-closed boundary.
   if (args[0] === "pair") {

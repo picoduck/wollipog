@@ -8,6 +8,8 @@ import { Modal } from "./common.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { FieldError } from "./FieldError.js";
 import { Notice } from "./Notice.js";
+import { providerLoginStartFailure } from "../provider-login-start-failure.js";
+import { ProviderLoginStartFailure } from "./ProviderLoginStartFailure.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { ChoiceList, SegmentedControl } from "./ui/ChoiceControls.js";
 
@@ -27,8 +29,8 @@ type LabelError = { kind: "empty" } | { kind: "on_machine" | "running"; provider
 
 /** The runner's own refusals for a new label, mapped to the field's sentences. */
 function runnerLabelError(message: string, provider: Provider, label: string): LabelError | null {
-  if (/account with this label is already on this Machine/iu.test(message)) return { kind: "on_machine", provider, label };
-  if (/sign-in for an account with this label is already running/iu.test(message)) return { kind: "running", provider, label };
+  if (message === `A ${providerName(provider)} account with this label is already on this Machine. Use Sign In on that account to refresh its login.`) return { kind: "on_machine", provider, label };
+  if (message === "A sign-in for an account with this label is already running.") return { kind: "running", provider, label };
   return null;
 }
 
@@ -64,7 +66,7 @@ type Method = "sign_in" | "copy";
  * the new profile (#3719), after a confirmation that names the source and the new profile. Where
  * that isn't available, the dialog says why and keeps the sign-in.
  */
-export function AddProviderAccountDialog({ runnerId, machineName, accounts, logins, initialProvider = "claude", importOffer, onStarted, onImported, onClose }: {
+export function AddProviderAccountDialog({ runnerId, machineName, accounts, logins, initialProvider = "claude", importOffer, onStarted, onImported, onClose, installationIssues }: {
   runnerId: string;
   machineName: string;
   accounts: readonly ProviderAccountDefinition[];
@@ -73,6 +75,7 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
   initialProvider?: Provider;
   /** Owner/Admin only (#3719): copying an existing sign-in, or why it isn't available. */
   importOffer?: ProviderCredentialImportOffer;
+  installationIssues?: Partial<Record<Provider, string>>;
   /** The started sign-in, which names the account it will record. */
   onStarted?: (login: ProviderLoginView) => void;
   /** The account a copied sign-in recorded. */
@@ -92,12 +95,14 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
   const [sourceKey, setSourceKey] = useState<string | null>(importOffer?.available ? importOffer.sources[0]?.key ?? null : null);
   const [label, setLabel] = useState("");
   const [error, setError] = useState<LabelError | null>(null);
-  const [failure, setFailure] = useState<{ title: string; body: string } | null>(null);
+  const [failure, setFailure] = useState<{ title: string; body: ReactNode } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
 
   const copyOffered = provider === "codex" && importOffer?.available === true && importOffer.sources.length > 0;
   const copying = copyOffered && method === "copy";
+  // Copying an admitted API-key record does not execute the provider's sign-in command.
+  const installationIssue = copying ? undefined : installationIssues?.[provider];
   const source = copying ? importOffer.sources.find((choice) => choice.key === sourceKey) ?? importOffer.sources[0] : undefined;
   // A hidden email label shows numbered until the person reveals emails, so they can tell which
   // account's key and billing they are copying without exposing it before reveal (#3719).
@@ -120,7 +125,7 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
   };
 
   const submit = async () => {
-    if (submittingRef.current) return;
+    if (submittingRef.current || installationIssue) return;
     const trimmed = label.trim();
     setFailure(null);
     if (!trimmed) return refuse({ kind: "empty" });
@@ -162,10 +167,12 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
       onClose();
       return;
     } catch (cause) {
-      const message = (cause as Error).message;
+      const startFailure = source ? null : providerLoginStartFailure(cause);
+      const message = startFailure?.message ?? (cause as Error).message;
       const mapped = runnerLabelError(message, provider, trimmed);
       if (mapped) refuse(mapped);
-      else setFailure({ title: source ? "Couldn't Copy the Sign-In" : "Couldn't Start the Sign-In", body: message });
+      else setFailure({ title: source ? "Couldn't Copy the Sign-In" : "Couldn't Start the Sign-In",
+        body: startFailure ? <ProviderLoginStartFailure failure={startFailure} /> : message });
     }
     submittingRef.current = false;
     setSubmitting(false);
@@ -189,7 +196,7 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
       footer={(
         <>
           <button type="button" className="btn" disabled={submitting} onClick={close}>Cancel</button>
-          <BusyButton className="btn primary" type="submit" form={`${ids}-form`} busy={submitting}
+          <BusyButton className="btn primary" type="submit" form={`${ids}-form`} busy={submitting} disabled={!!installationIssue}
             progress={copying ? "Copying the sign-in…" : "Starting the sign-in…"}>
             {copying ? "Copy Sign-In" : "Start Sign-In"}
           </BusyButton>
@@ -205,6 +212,7 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
           void submit();
         }}
       >
+        {installationIssue && <Notice compact tone="warning" title="Installation Needed">{installationIssue}</Notice>}
         <div className="field">
           <div className="field-head"><span id={`${ids}-provider`}>Provider</span></div>
           <SegmentedControl<Provider>

@@ -152,6 +152,29 @@ function resultText(result: any): string {
   return result.content.map((c: { text: string }) => c.text).join("\n");
 }
 
+test("publication consumption schema preserves both server-derived relatedness bases", async () => {
+  const tool = TOOLS.find((candidate) => candidate.name === "consume_workflow_decision")!;
+  const schema = tool.inputSchema as any;
+  const publication = schema.properties.resourceSnapshot.oneOf.find((variant: any) =>
+    variant.properties?.category?.const === "follow_up_issue_publication");
+  const admission = publication.properties.issueAdmission;
+  const { deps, calls } = makeDeps();
+  for (const relatedness of [{ basis: "decision_model" }, { basis: "failed_campaign_run", repository: "team/repo",
+    pullRequest: 10, headSha: "a".repeat(40), runId: 123, jobId: 321, checkRunId: 456, checkName: "Broken Check" }]) {
+    const stored = { boundaryRevision: 1, evidenceDigest: "b".repeat(64), relatedness };
+    // Model a strict schema client: it can echo only advertised properties.
+    const echoed = Object.fromEntries(Object.entries(stored).filter(([key]) => key in admission.properties));
+    assert.deepEqual(echoed, stored);
+    const variant = admission.properties.relatedness.anyOf.find((entry: any) => entry.properties.basis.const === relatedness.basis);
+    assert.deepEqual(Object.keys(relatedness).sort(), Object.keys(variant.properties).sort());
+    const resourceSnapshot = { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Title",
+      sanitizedBody: "Body", labels: [], issueAdmission: echoed };
+    const result = await callTool(deps, "consume_workflow_decision", { occurrenceId: "publication", resourceSnapshot });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(calls.at(-1)?.body, { resourceSnapshot });
+  }
+});
+
 test("decision inspection targets descendants without changing mutation identity and fails closed on old control planes", async () => {
   const { deps, calls } = makeDeps();
   deps.orchestrator = true;
@@ -441,6 +464,19 @@ test("typed workflow decision tools preserve exact request, resolution, and cons
       evidenceReviewed: ["desktop"], rationale: "Inspected the exact evidence." },
   });
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/resolve`);
+});
+
+test("descendant merge resolution returns the server action before consumption (#4242)", async () => {
+  const approvedAction = { kind: "pr_merge_enqueue", command:
+    `glab api --method POST projects/group%2Fsubgroup%2Fproject/merge_trains/merge_requests/7 --hostname gitlab.example.com -f sha=${"c".repeat(40)} -F squash=false` };
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { id: "child", approvedAction } }));
+  deps.orchestrator = true;
+  const result = resultJson(await callTool(deps, "resolve_descendant_workflow_decision", {
+    sessionId: "child", occurrenceId: "workflow_1", outcome: "approve",
+  }));
+  assert.deepEqual(result.decision.approvedAction, approvedAction);
+  assert.equal(result.session.approvedAction, undefined, "action metadata belongs to the decision, not the compact session");
+  assert.equal(calls.length, 1, "the resolution response suffices; no inferred or separately reconstructed command");
 });
 
 test("descendant decision resolution and child verification return a compact child, not its full session view", async () => {
@@ -1516,6 +1552,27 @@ test("list_runners -> GET /api/runners, field-mapped", async () => {
   assert.deepEqual(data.runners[0].workspaces, [{ id: "ws", name: "ws", path: "/repo" }]);
   assert.equal(data.runners[0].agents[0].id, "claude-code");
   assert.equal(data.runners[0].agents[0].command, undefined, "launch params are not the calling session's business");
+});
+
+test("get_agent_capabilities discloses bounded runner command-home separation, including legacy absence", async () => {
+  for (const [report, expected] of [
+    [undefined, { status: "unknown", reason: "report_unavailable" }],
+    [{ version: 1, status: "unprotected", reason: "unsupported_command_mediation", secret: "must-not-escape" },
+      { version: 1, status: "unprotected", reason: "unsupported_command_mediation" }],
+    [{ version: 1, status: "unprotected", reason: "incomplete_adapter_coverage" },
+      { version: 1, status: "unprotected", reason: "incomplete_adapter_coverage" }],
+    [{ version: 1, status: "unavailable", reason: "unsupported_host" },
+      { version: 1, status: "unavailable", reason: "unsupported_host" }],
+    [{ version: 2, status: "protected", reason: "must-not-escape" }, { status: "unknown", reason: "report_unavailable" }],
+  ]) {
+    const { deps } = makeDeps(() => ({ status: 200, body: { runners: [{ runnerId: "r1", agents: [{
+      id: "fixture", name: "Fixture", driver: "acp", providerCommandHomeWriteSeparation: report,
+    }] }] } }));
+    const result = resultJson(await callTool(deps, "get_agent_capabilities", { runnerId: "r1", agentId: "fixture" }));
+    assert.deepEqual(result.agent.providerCommandHomeWriteSeparation, expected);
+    assert.equal(result.discovery.status, "unavailable", "disclosure must not fabricate model or harness readiness");
+    assert.doesNotMatch(JSON.stringify(result), /must-not-escape/);
+  }
 });
 
 test("get_agent_capabilities projects advertised metadata and exact effort fallback semantics", async () => {

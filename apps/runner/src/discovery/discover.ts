@@ -8,6 +8,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
+import { withProviderCommandHomeWriteSeparation } from "../provider-command-home-write-separation.js";
 import { join } from "node:path";
 import { agentContextKey, CODEX_EXEC_RETIRED_CONFIG_REASON, isRetiredCodexExec } from "@wollipog/protocol";
 import type {
@@ -39,6 +40,7 @@ import { probePiRpc, unavailablePiCapabilities } from "./pi-rpc.js";
 import { launchTargetStillMatches, listWslDistros, resolveInWsl, resolveInWslCandidates, resolveNativeCandidates, resolvedLaunchIdentity, run, type ResolvedBinary, type ResolvedLaunch } from "./resolve.js";
 import { invalidateStaleNativeInstallation } from "./stale-installation.js";
 import { ProviderHomeLeaseError } from "../provider-home-lease-worker-protocol.js";
+import { providerReadinessObservation } from "../provider-readiness.js";
 
 const CONFIGURED_ACP_PROBE_TIMEOUT_MS = 20_000;
 const MAX_CONCURRENT_CONFIGURED_ACP_PROBES = 4;
@@ -746,12 +748,15 @@ export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "a
           ? `Provider HOME ownership blocked discovery. ${error.message}`
           : "Provider HOME ownership could not be established for discovery. Preserve lease evidence and inspect the runner's recovery diagnostics.";
         const failure = { code: "probe_failed" as const, message, retryable: true };
-        nativeSlots[knownIndex]![index] = [{ ...unavailable,
+        const blocked: AgentDefinition = { ...unavailable,
           ...(unavailable.claudeCode ? { claudeCode: { ...unavailable.claudeCode, status: "unsupported" as const, failure } } : {}),
           ...(unavailable.codexAppServer ? { codexAppServer: { ...unavailable.codexAppServer, status: "unsupported" as const, failure } } : {}),
           command: bin.launch.command,
           args: bin.launch.args, bin: k.bin, installation, source: "discovered",
-          unavailableReason: message }];
+          unavailableReason: message };
+        blocked.providerReadiness = providerReadinessObservation(blocked, "unknown", error);
+        blocked.providerReadiness.installationAdmission = "blocked";
+        nativeSlots[knownIndex]![index] = [blocked];
         return;
       }
       const processes: Promise<boolean>[] = [];
@@ -768,6 +773,7 @@ export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "a
       let piRpc = k.bin === "pi" ? await probePiRpc(bin.launch, { kind: "native" }, { ...observer, installationOnly: true }) : undefined;
       let commandEnv = authorization.env;
       let launchHomeUnavailableReason: string | undefined;
+      let launchHomeError: unknown;
       if (options.authorizeLaunchHome) {
         let launchAuthorization: typeof authorization | undefined = undefined;
         const launchProcesses: Promise<boolean>[] = [];
@@ -794,6 +800,7 @@ export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "a
           commandEnv = launchAuthorization.env;
         } catch (error) {
           // Installation state proves no fact about an uninspected launch HOME's credentials.
+          launchHomeError = error;
           authStatus = "unknown";
           if (claudeCode && claudeCode.status === "unauthenticated") {
             claudeCode = { ...claudeCode, status: "ready", auth: { status: "unknown", billingSource: "unknown" }, failure: undefined };
@@ -842,6 +849,8 @@ export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "a
           k.bin === "claude" ? claudeCode?.streamJsonInput === true : codexAppServer?.appServerAvailable === true,
         ) } : {}),
       };
+      base.providerReadiness = providerReadinessObservation(base, base.authStatus ?? "unknown", launchHomeError);
+      base.providerReadiness.installationAdmission = "permitted";
       nativeSlots[knownIndex]![index] = nativeDiscoveredDefinitions(base, codexAppServer, slashCommands);
       } finally {
         await authorization.settle(processes);
@@ -944,7 +953,7 @@ export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "a
   // Defensive: collapse any duplicate ids (e.g. two distros that resolve identically).
   const byId = new Map<string, AgentDefinition>();
   for (const a of found) if (!byId.has(a.id)) byId.set(a.id, a);
-  return [...byId.values()];
+  return withProviderCommandHomeWriteSeparation([...byId.values()]);
 }
 
 /** Basename of a command, treating it as either a Windows or POSIX path. */
@@ -1159,7 +1168,7 @@ export function mergeAgents(
   }
   // A configured `driver: "codex"` entry stays listed so Machine Settings can name the fix, but it
   // never launches (#3259).
-  return [...enriched, ...extras].map((agent) => isRetiredCodexExec(agent)
+  return withProviderCommandHomeWriteSeparation([...enriched, ...extras].map((agent) => isRetiredCodexExec(agent)
     ? { ...agent, available: false, unavailableReason: CODEX_EXEC_RETIRED_CONFIG_REASON }
-    : agent);
+    : agent));
 }

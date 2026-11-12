@@ -81,6 +81,26 @@ test("an epic inspection returns the epic and its members, with no issue list to
   } finally { await rm(path, { recursive: true, force: true }); }
 });
 
+test("published-issue Location inspections return bounded field/read diagnostics (#4404)", async () => {
+  const path = await mkdtemp(join(tmpdir(), "campaign-launch-inspection-"));
+  try {
+    const publication = { sanitizedTitle: "Private title", sanitizedBody: "Private body", labels: ["feature"] };
+    for (const field of ["title", "body", "labels", "read_failed", null] as const) {
+      const result = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "payload-1", workspaceId: "w", issueNumbers: [1], publication },
+        [{ id: "w", path }], async (_cwd, command, args) => {
+          if (command === "git") return args[0] === "remote" ? "https://github.com/owner/api.git" : args.includes("--is-inside-work-tree") ? "true" : "a".repeat(40);
+          if (field === "read_failed") throw new Error("Private credential");
+          return JSON.stringify({ number: 1, title: field === "title" ? "Private other" : publication.sanitizedTitle,
+            body: field === "body" ? "Private changed" : publication.sanitizedBody + "\n", labels: [{ name: field === "labels" ? "bug" : "feature" }],
+            html_url: "https://github.com/owner/api/issues/1" });
+        });
+      assert.equal(result.ok, field === null);
+      assert.equal(result.publicationFailure, field ?? undefined);
+      assert.doesNotMatch(JSON.stringify(result), /Private|credential/);
+    }
+  } finally { await rm(path, { recursive: true, force: true }); }
+});
+
 test("inspection errors cannot expose credential-bearing origin or environment diagnostics", async () => {
   const result = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "read-1", workspaceId: "w", issueNumbers: [1] }, [{ id: "w", path: tmpdir() }],
     async () => { throw new Error("https://secret:token@github.com/owner/repo PRIVATE_ENV=value"); });

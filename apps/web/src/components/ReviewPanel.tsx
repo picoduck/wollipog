@@ -61,6 +61,7 @@ import { FindingSelectionBar, ReviewFindings, type FindingSyncControl } from "./
 import { ReviewRuns } from "./ReviewRuns.js";
 import { isOpenFinding } from "../review-finding-copy.js";
 import { ReviewSummary } from "./ReviewSummary.js";
+import { RequestDiff } from "./RequestDiff.js";
 import { ReviewToolbar } from "./ReviewToolbar.js";
 import { StaleContent } from "./StaleContent.js";
 import { State } from "./State.js";
@@ -331,6 +332,7 @@ export function ReviewPanel({
   const [diffReadAt, setDiffReadAt] = useState<number | null>(null);
   /** The header Refresh's own reload of status, diff and findings together. */
   const [refreshing, setRefreshing] = useState(false);
+  const [requestDiffRefresh, setRequestDiffRefresh] = useState(0);
   const [diffError, setDiffError] = useState<string | null>(null);
   // Per-hunk staging (PR-B): the in-flight mutation's `${path}#${index}` key.
   const [hunkBusy, setHunkBusy] = useState<string | null>(null);
@@ -994,6 +996,7 @@ export function ReviewPanel({
       // captured scope and revisions keep that from touching anything newer.
       if (mode === "push" ? !!pr : created) releaseSubmitted(submitted);
       if (pr && current()) {
+        setRequestDiffRefresh((value) => value + 1);
         if (mode === "push") {
           // Without forge tooling the runner returns a creation page; the request already exists.
           const url = created ? pr.url : pushTarget?.url ?? pr.url;
@@ -1124,6 +1127,7 @@ export function ReviewPanel({
   const fileCount = status?.files.length ?? 0;
 
   const refreshReview = async () => {
+    setRequestDiffRefresh((value) => value + 1);
     setRefreshing(true);
     try {
       await Promise.all([runnerOnline ? git.refresh() : null, loadDiff(), loadFindings(), loadReviewRuns()]);
@@ -1388,6 +1392,14 @@ export function ReviewPanel({
               onDismissNotice={() => setFindingNotice(null)}
               triggerRef={findingsTriggerRef}
             />
+            {summaryPr && <RequestDiff
+              key={`${session.id}:${summaryPr.url}`}
+              sessionId={session.id}
+              pr={summaryPr}
+              online={runnerOnline}
+              protocol={runnerProtocolVersion}
+              observation={requestDiffRefresh}
+            />}
             <ReviewRuns
               key={`runs-${session.id}`}
               runs={reviewRuns}

@@ -244,6 +244,32 @@ export function outcome(item) {
     cancelled: "cancelled", skipped: "skipped" })[item.conclusion] ?? "unmeasured";
 }
 
+const AGGREGATION_STATES = ["absent", "pending", "running", "passing", "failing", "cancelled", "skipped", "unmeasured"];
+
+/** Presence and outcome are independent of timing. This is diagnosis, never a merge gate. */
+function aggregationStatus(run, jobs, truncated) {
+  const matches = jobs.filter((job) => job.name === AGGREGATOR);
+  const result = (state, reason, job = null) => ({ state, reason, jobId: job?.id ?? null, conclusion: job?.conclusion ?? null });
+  if (truncated) return result("unmeasured", "incomplete-job-list");
+  if (matches.length > 1) return result("unmeasured", "multiple-aggregate-records");
+  if (!matches.length) {
+    if (run.status === "completed" || run.status == null && run.conclusion != null)
+      return result("absent", "terminal-run-without-aggregate");
+    if (["queued", "requested", "waiting", "pending", "in_progress"].includes(run.status))
+      return result("pending", "not-created");
+    return result("unmeasured", "unknown-run-status");
+  }
+  const job = matches[0];
+  if (["queued", "requested", "waiting", "pending"].includes(job.status)) return result("pending", "job-waiting", job);
+  if (job.status === "in_progress") return result("running", "job-running", job);
+  if (job.status != null && job.status !== "completed") return result("unmeasured", "unknown-job-status", job);
+  const state = outcome(job);
+  return result(AGGREGATION_STATES.includes(state) ? state : "unmeasured", "job-conclusion", job);
+}
+
+const aggregationSummary = (rows) => Object.fromEntries(AGGREGATION_STATES.map((state) =>
+  [state, rows.filter((row) => (row.aggregation?.state ?? "unmeasured") === state).length]));
+
 const duration = (from, to) => {
   const value = minutes(from, to);
   return value !== null && value >= 0 ? value : null;
@@ -257,8 +283,10 @@ export async function listJobs(api, repository, runId, attempt) {
     const body = await api(`/repos/${repository}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100${page === 1 ? "" : `&page=${page}`}`);
     if (!Array.isArray(body?.jobs)) throw new ReportError("Unreadable job listing");
     jobs.push(...body.jobs);
-    if (Number.isSafeInteger(body.total_count) ? jobs.length >= body.total_count : body.jobs.length < 100)
-      return { jobs: [...new Map(jobs.map((job, i) => [job.id ?? i, job])).values()], truncated: false };
+    if (Number.isSafeInteger(body.total_count) ? jobs.length >= body.total_count : body.jobs.length < 100) {
+      const unique = [...new Map(jobs.map((job, i) => [job.id ?? i, job])).values()];
+      return { jobs: unique, truncated: Number.isSafeInteger(body.total_count) && unique.length !== body.total_count };
+    }
   }
   return { jobs, truncated: true };
 }
@@ -279,6 +307,7 @@ export function attemptRecord(repository, run, jobs, window, jobsTruncated = fal
   const first = attempt === 1;
   const projected = jobs.map((job) => ({
     id: job.id ?? null, name: job.name, timingQuality: timingQuality(job),
+    status: job.status ?? null,
     state: outcome(job), conclusion: job.conclusion ?? null,
     createdAt: job.created_at ?? null, startedAt: jobHasStarted(job) ? job.started_at ?? null : null,
     apiStartedAt: job.started_at ?? null, completedAt: job.completed_at ?? null,
@@ -306,7 +335,8 @@ export function attemptRecord(repository, run, jobs, window, jobsTruncated = fal
     workflowRevision: { sourceSha: run.head_sha ?? null, executedBlobSha: null, state: "unmeasured" },
     runId: run.id, attempt, attemptClass: first ? "first" : "rerun", checkSuiteId: run.check_suite_id ?? null,
     pullRequest: pullRequestOf(run.head_branch) ?? run.pull_requests?.[0]?.number ?? null,
-    branch: run.head_branch, state: outcome(run), conclusion: run.conclusion ?? null,
+    branch: run.head_branch, state: outcome(run), status: run.status ?? null, conclusion: run.conclusion ?? null,
+    aggregation: aggregationStatus(run, jobs, jobsTruncated),
     createdAt: run.created_at, startedAt: hasStarted(run) ? run.run_started_at ?? null : null,
     apiStartedAt: run.run_started_at ?? null, updatedAt: run.updated_at ?? null,
     window, jobsTruncated, jobs: projected,
@@ -355,7 +385,7 @@ export function eventSummary(records, assumedRate = null) {
   const retryOnlyRuns = records.filter((row) => row.attempt > 1 && row.state === "passing" && records.some((first) =>
     first.repository === row.repository && first.runId === row.runId && first.attempt === 1 && first.sha === row.sha && first.state === "failing"))
     .map((row) => ({ repository: row.repository, runId: row.runId, attempt: row.attempt, sha: row.sha }));
-  return { cohorts, retryOnlyRuns, timingQuality: timingQualitySummary(records.flatMap((row) => row.jobs ?? [])),
+  return { cohorts, retryOnlyRuns, aggregation: aggregationSummary(records), timingQuality: timingQualitySummary(records.flatMap((row) => row.jobs ?? [])),
     // This is event duplication of exact SHAs, not equivalence of PR heads and integration SHAs.
     sharedEventShas: [...new Set(records.map((row) => row.sha).filter(Boolean))].map((sha) => ({ sha,
       events: [...new Set(records.filter((row) => row.sha === sha).map((row) => row.event))] })).filter((row) => row.events.length > 1),
@@ -535,17 +565,19 @@ export function applyTimingContext(record, summary) {
 
 /** Recompute historical timing from observations, preserving extra source context. */
 export function reprojectAttempt(row) {
-  const raw = (job) => ({ ...job, status: job.state === "unfinished" ? job.startedAt != null ? "in_progress" : "queued"
-    : job.startedAt != null ? undefined : "completed",
+  const raw = (job) => ({ ...job, status: job.status ?? (job.state === "unfinished" ? job.startedAt != null ? "in_progress" : "queued"
+    : job.startedAt != null ? undefined : "completed"),
     conclusion: job.conclusion ?? ({ passing: "success", skipped: "skipped", failing: "failure" }[job.state]),
     created_at: job.createdAt, started_at: job.apiStartedAt ?? job.startedAt, completed_at: job.completedAt,
     steps: (job.steps ?? []).map((step) => ({ ...step,
       conclusion: step.conclusion ?? ({ passing: "success", skipped: "skipped", failing: "failure" }[step.state]),
       started_at: step.startedAt, completed_at: step.completedAt })) });
   const fresh = attemptRecord(row.repository, { id: row.runId, run_attempt: row.attempt,
-    event: row.event, created_at: row.createdAt, head_branch: row.branch }, (row.jobs ?? []).map(raw), row.window, row.jobsTruncated,
+    event: row.event, created_at: row.createdAt, head_branch: row.branch,
+    status: row.status ?? (row.state === "unfinished" ? "in_progress" : undefined), conclusion: row.conclusion },
+    (row.jobs ?? []).map(raw), row.window, row.jobsTruncated || !Array.isArray(row.jobs),
     row.metrics?.browserShardImbalance?.expected ?? 5);
-  return { ...row, metrics: fresh.metrics, jobs: fresh.jobs.map((job, i) => ({ ...row.jobs[i], ...job })) };
+  return { ...row, aggregation: fresh.aggregation, metrics: fresh.metrics, jobs: fresh.jobs.map((job, i) => ({ ...row.jobs[i], ...job })) };
 }
 
 /** Recompute cohort percentiles from deduplicated raw attempts, never daily percentiles. */
@@ -632,6 +664,9 @@ export function eventMarkdown(report) {
     "", `Pagination: ${JSON.stringify(report.pagination)}; attempts truncated: ${report.attemptsTruncated}; removals truncated: ${report.removalsTruncated}.`,
     `Retry-only run outcomes: ${report.summary.retryOnlyRuns.length}. Missing timing is unmeasured; measured runner minutes can be a lower bound.`,
     `Unmeasured allocation jobs: ${report.summary.timingQuality?.unmeasuredAllocationJobs ?? 0}; excluded from measured timing.`,
+    `Required aggregation: ${Object.entries(aggregationSummary(report.records)).map(([state, count]) => `${state} ${count}`).join(", ")}.`,
+    ...report.records.filter((row) => row.aggregation?.state === "absent").map((row) =>
+      `- run ${row.runId}, attempt ${row.attempt}: absent (terminal-run-without-aggregate). Investigate using docs/ci-aggregation.md; missing results never authorize merging.`),
     "Billing unavailable. Validation lag not yet measurable (#3631/#3632). Historical per-test timing requires the safe log projection.",
     ...(report.comparison ? ["", "Before/after natural-window comparison:", "```json", JSON.stringify(report.comparison, null, 2), "```"] : []),
   ].join("\n");

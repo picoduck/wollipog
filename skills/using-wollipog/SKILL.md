@@ -846,8 +846,25 @@ wollipog decision get <occurrence-id> --json
 wollipog issue-closure execute <occurrence-id> --digest <resource-digest> --json
 ```
 
-Approval expires 30 minutes after resolution. Changed issue evidence, policy, or included child
-work requires renewed review, as does a child moving into or out of the included set.
+An approved closure does not expire on age alone. The payload, scope, policy revision, authority,
+issue-bound child work and freshly read forge evidence must still match; a changed binding is
+named in the refusal. A bound child moving to unrelated recorded work does not invalidate unchanged
+issue work on protocol 360+. A new child joining the issue or a new unconsumed issue-bound decision
+still does; incomplete history retains the stricter binding. Human-owned closures stay human-owned.
+On compatible runners an approval received mid-turn uses the existing durable steering lane at a
+safe tool boundary; rejected steering retains its queued continuation, and uncertain delivery is
+never replayed. Older runners keep queued delivery.
+
+On protocol 360+, an open PR is a closure gap when it closes the issue or belongs to this campaign.
+A mere mention by an outside PR is not a gap. Unreadable closing references or campaign history
+count the PR as related. Execution repeats these reads before writing; older runners retain the
+conservative mention and timeline rule.
+
+For a completed epic proven by in-scope members closed as completed, the server exempts only epic
+tracking items: no open attempts, delivered attempts, verification records, delivery records, PRs
+or recorded delivery-stage activity. An ended tracking attempt alone does not disqualify an item.
+Titles never establish this fact, and incomplete migrated history retains ordinary delivery proof.
+After the epic closes through this proof, Campaign Status uses the same test to finish those items.
 Never substitute a shell command or generic approval, and never
 approve a human-owned request. A root may resolve an eligible Full Control occurrence only from
 its server-recorded standing authorization; the server rechecks it when the root resolves. Under
@@ -1041,7 +1058,7 @@ The server derives the cause, explains it in plain words and states any Maximum 
 Keep published follow-up lineage: only server-verified consumed payloads settle their reserved slots
 on approval, so Maximum Issues counts the issue once. Denial changes nothing. Fixable errors
 (for example follow_up_not_single, publication_not_consumed, publication_already_admitted,
-payload_mismatch and epic_members_unverified) remain refusals; correct them and retry.
+payload_title_mismatch, payload_body_mismatch, payload_labels_mismatch and epic_members_unverified) remain refusals; correct them and retry. payload_read_failed means the published issue could not be read and verified; retry the read. Only trailing body whitespace is ignored; titles and labels stay exact. Older peers may report the generic payload_mismatch refusal.
 Never supply an owner-review cause or a settled publication yourself.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve
 only an eligible occurrence backed by its standing human authorization: when the effective owner is

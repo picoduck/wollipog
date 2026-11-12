@@ -70,6 +70,291 @@ function fixture() {
     changeRepository: (value: string) => { repository = value; } };
 }
 
+for (const mode of ["custom", "full_control"] as const) test(`Assistant Full Access ${mode} campaign uses current owner's ceiling and records Assistant/grant attribution`, async () => {
+  const f = fixture();
+  try {
+    const issued = f.db.assistantConnections.create(f.human, "Scheduled Assistant", {operations: "all", projects: "all"});
+    const actor = {kind: "agent" as const, id: issued.connection.id};
+    const saved = f.service.create(f.spec(mode), actor);
+    assert.equal(saved.ok, true, saved.error ?? "Schedule saved");
+    const edited = f.service.update(saved.data!.automationId, {...f.spec(mode), name: "Updated Campaign"}, actor);
+    assert.equal(edited.ok, true, edited.error ?? "Schedule edited");
+    f.service.tick(edited.data!.nextFireAt!);
+    await f.drain();
+    const detail = f.service.get(saved.data!.automationId).data!;
+    const execution = detail.executions[0]!;
+    assert.notEqual(execution.status, "failed", execution.error ?? "Campaign launched");
+    const root = f.db.getSession(execution.sessionId!)!;
+    assert.ok(root);
+    assert.equal(f.db.sessionScope(root.id)?.owner.kind, "user");
+    const scope = f.db.sessionScope(root.id)!;
+    assert.equal(scope.owner.kind === "user" ? scope.owner.userId : null, f.human.userId);
+    assert.equal(detail.events.find(e => e.kind === "created")?.actor.id, issued.connection.id);
+    const audit = detail.assistantAuthorizations as Array<{connection_id: string; grant_revision: number; owner_user_id: string; outcome: string}>;
+    assert.equal(audit[0]?.connection_id, issued.connection.id);
+    assert.equal(audit[0]?.grant_revision, issued.connection.revision);
+    assert.equal(audit[0]?.owner_user_id, f.human.userId);
+    assert.equal(audit[0]?.outcome, "authorized");
+    assert.ok(!JSON.stringify(audit).includes(issued.token));
+  } finally {f.db.close();}
+});
+
+for (const restriction of ["revoke", "operation", "projects", "owner", "target"] as const) test(`Assistant scheduled occurrence refuses current ${restriction} restriction before dispatch`, async () => {
+  const f = fixture();
+  try {
+    const issued = f.db.assistantConnections.create(f.human, "Scheduled Assistant", {operations: "all", projects: "all"});
+    const saved = f.service.create(f.spec(), {kind: "agent", id: issued.connection.id});
+    assert.equal(saved.ok, true, saved.error ?? "Schedule saved");
+    if (restriction === "revoke") f.db.assistantConnections.revoke(issued.connection.id);
+    if (restriction === "operation") f.db.assistantConnections.configure(issued.connection.id, {operations: ["auto_get"], projects: "all"});
+    if (restriction === "projects") f.db.assistantConnections.configure(issued.connection.id, {operations: "all", projects: []});
+    if (restriction === "owner") f.db.raw().prepare("UPDATE identity_memberships SET role='viewer' WHERE user_id=? AND organization_id=?").run(f.human.userId, f.human.organizationId);
+    if (restriction === "target") f.db.raw().prepare("UPDATE runner_ownership SET organization_id='foreign' WHERE runner_id='r'").run();
+    f.service.tick(saved.data!.nextFireAt!);
+    await f.drain();
+    const detail = f.service.get(saved.data!.automationId).data!;
+    const execution = detail.executions[0]!;
+    assert.equal(execution.status, "failed");
+    assert.match(execution.error!, /assistant_.*:.*owner/i);
+    assert.equal(f.db.listSessions().length, 0);
+    assert.equal(f.sent.some(m => m.type === "durable_session_command"), false);
+    const audit = detail.assistantAuthorizations as Array<{outcome: string; reason: string}>;
+    assert.equal(audit[0]?.outcome, "refused");
+    assert.match(audit[0]!.reason, /^assistant_/);
+  } finally {f.db.close();}
+});
+
+test("Assistant revocation during repository inspection refuses at the final authorization boundary", async () => {
+  const f = fixture();
+  try {
+    const issued = f.db.assistantConnections.create(f.human, "Scheduled Assistant", {operations: "all", projects: "all"});
+    const saved = f.service.create(f.spec(), {kind: "agent", id: issued.connection.id});
+    assert.equal(saved.ok, true, saved.error ?? "Schedule saved");
+    const send = f.hub.sendToRunner.bind(f.hub);
+    f.hub.sendToRunner = (runnerId, message) => {
+      if (message.type === "campaign_launch_inspect") f.db.assistantConnections.revoke(issued.connection.id);
+      return send(runnerId, message);
+    };
+    f.service.tick(saved.data!.nextFireAt!);
+    await f.drain();
+    const execution = f.service.get(saved.data!.automationId).data!.executions[0]!;
+    assert.equal(execution.status, "failed");
+    assert.match(execution.error!, /assistant_connection_revoked/);
+    assert.equal(f.db.listSessions().length, 0);
+    assert.equal(f.sent.some(m => m.type === "durable_session_command"), false);
+  } finally {f.db.close();}
+});
+
+test("Assistant outbox refuses revocation between materialization and first dispatch", async () => {
+  const f = fixture();
+  try {
+    const issued = f.db.assistantConnections.create(f.human, "Scheduled Assistant", {operations: "all", projects: "all"});
+    const saved = f.service.create(f.spec(), {kind: "agent", id: issued.connection.id}).data!;
+    const activate = f.db.activateAutomationCommands.bind(f.db);
+    f.db.activateAutomationCommands = (...args) => {
+      const result = activate(...args);
+      f.db.assistantConnections.revoke(issued.connection.id);
+      return result;
+    };
+    f.service.tick(saved.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.automationId)[0]!;
+    assert.equal(execution.status, "failed");
+    assert.match(execution.error!, /assistant_connection_revoked/);
+    assert.equal(f.db.listAutomationCommands(execution.executionId)[0]!.state, "rejected");
+    assert.equal(f.sent.some(m => m.type === "durable_session_command"), false);
+    assert.equal(f.db.getSession(execution.sessionId!)!.status, "stopped");
+  } finally {f.db.close();}
+});
+
+test("Assistant command retry retains original occurrence identity after another connection re-authorizes the schedule", async () => {
+  const f = fixture();
+  try {
+    const original = f.db.assistantConnections.create(f.human, "Original Assistant", {operations: "all", projects: "all"});
+    const replacement = f.db.assistantConnections.create(f.human, "Replacement Assistant", {operations: "all", projects: "all"});
+    const saved = f.service.create(f.spec(), {kind: "agent", id: original.connection.id}).data!;
+    f.service.tick(saved.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.automationId)[0]!;
+    const sentBefore = f.sent.filter(m => m.type === "durable_session_command").length;
+    assert.equal(sentBefore, 1);
+    const changed = f.service.update(saved.automationId, {...f.spec(), name: "New Author"}, {kind: "agent", id: replacement.connection.id});
+    assert.equal(changed.ok, true, changed.error ?? "Schedule changed");
+    f.db.assistantConnections.revoke(original.connection.id);
+    f.service.commandOutbox.flush(saved.nextFireAt! + 10_000);
+    assert.equal(f.sent.filter(m => m.type === "durable_session_command").length, sentBefore);
+    assert.equal(f.db.listAutomationCommands(execution.executionId)[0]!.state, "uncertain", "The previous send may have reached its runner");
+    const audit = f.service.get(saved.automationId).data!.assistantAuthorizations as Array<{connection_id: string; outcome: string}>;
+    assert.equal(audit[0]?.outcome, "refused");
+    assert.equal(audit[0]?.connection_id, original.connection.id);
+  } finally {f.db.close();}
+});
+
+test("Assistant recovery refuses a revoked grant for a staged campaign and preserves the original receipt", async () => {
+  const f = fixture();
+  try {
+    const issued = f.db.assistantConnections.create(f.human, "Scheduled Assistant", {operations: "all", projects: "all"});
+    const saved = f.service.create(f.spec(), {kind: "agent", id: issued.connection.id}).data!;
+    const activate = f.db.activateAutomationCommands.bind(f.db);
+    f.db.activateAutomationCommands = () => {throw new Error("Synthetic crash before activation");};
+    f.service.tick(saved.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.automationId)[0]!;
+    const command = f.db.listAutomationCommands(execution.executionId)[0]!;
+    assert.equal(command.state, "staged");
+    f.db.assistantConnections.revoke(issued.connection.id);
+    f.db.activateAutomationCommands = activate;
+    new AutomationsService(f.db, f.hub, f.sessions, {info() {}, warn() {}}, undefined, f.runtime).recover();
+    await f.drain();
+    assert.equal(f.db.listAutomationCommands(execution.executionId)[0]!.commandId, command.commandId);
+    assert.equal(f.db.listAutomationCommands(execution.executionId)[0]!.state, "rejected");
+    assert.equal(f.db.getAutomationExecution(execution.executionId)!.status, "failed");
+    assert.equal(f.db.getSession(execution.sessionId!)!.status, "stopped");
+    assert.equal(f.sent.some(m => m.type === "durable_session_command"), false);
+  } finally {f.db.close();}
+});
+
+test("Assistant campaign resume uses its explicitly granted operation without an extra creation permission", async () => {
+  const f = fixture();
+  try {
+    const issued = f.db.assistantConnections.create(f.human, "Scheduled Assistant", {operations: "all", projects: "all"});
+    const actor = {kind: "agent" as const, id: issued.connection.id};
+    const input = f.spec();
+    const saved = f.service.create({...input, enabled: false}, actor).data!;
+    f.db.assistantConnections.configure(issued.connection.id, {operations: ["auto_enable"], projects: "all"});
+    const enabled = f.service.update(saved.automationId, input, actor, undefined, "auto_enable");
+    assert.equal(enabled.ok, true, enabled.error ?? "Resume permitted");
+    f.service.tick(enabled.data!.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.automationId)[0]!;
+    assert.notEqual(execution.status, "failed", execution.error ?? "Campaign launched");
+    const audit = f.service.get(saved.automationId).data!.assistantAuthorizations as Array<{operation: string; grant_revision: number}>;
+    assert.equal(audit[0]?.operation, "auto_enable");
+    assert.equal(audit[0]?.grant_revision, f.db.assistantConnections.get(issued.connection.id)!.revision);
+  } finally {f.db.close();}
+});
+
+test("Assistant schedule and authorizing grant commit atomically when authority changes at save", () => {
+  const f = fixture();
+  try {
+    const issued = f.db.assistantConnections.create(f.human, "Scheduled Assistant", {operations: "all", projects: "all"});
+    const save = f.db.createAutomation.bind(f.db);
+    f.db.createAutomation = input => {
+      f.db.assistantConnections.revoke(issued.connection.id);
+      return save(input);
+    };
+    const result = f.service.create(f.spec(), {kind: "agent", id: issued.connection.id});
+    assert.equal(result.ok, false);
+    assert.match(result.error!, /assistant_connection_revoked/);
+    assert.equal(f.db.listAutomations().length, 0);
+    assert.equal(f.db.raw().prepare("SELECT count(*) AS n FROM assistant_automation_authority").get()!.n, 0);
+  } finally {f.db.close();}
+});
+
+test("ordinary Assistant automation retains its granting owner's launcher attribution", async () => {
+  const f = fixture();
+  try {
+    const issued = f.db.assistantConnections.create(f.human, "Scheduled Assistant", {operations: "all", projects: "all"});
+    const input = f.spec();
+    if (input.action.kind !== "create_session") assert.fail();
+    delete input.action.request.campaign;
+    delete input.action.request.role;
+    delete input.action.request.orchestrator;
+    input.action.request.config!.permissionMode = "default";
+    const saved = f.service.create(input, {kind: "agent", id: issued.connection.id});
+    assert.equal(saved.ok, true, saved.error ?? "Ordinary schedule saved");
+    f.service.tick(saved.data!.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.data!.automationId)[0]!;
+    assert.notEqual(execution.status, "failed", execution.error ?? "Session launched");
+    assert.equal(f.db.sessionLauncherUserId(execution.sessionId!), f.human.userId);
+  } finally {f.db.close();}
+});
+
+test("a human resumes an ordinary schedule after an Assistant pause without retaining stale Assistant authority", async () => {
+  const f = fixture();
+  try {
+    const input = f.spec();
+    if (input.action.kind !== "create_session") assert.fail();
+    delete input.action.request.campaign;
+    delete input.action.request.role;
+    delete input.action.request.orchestrator;
+    input.action.request.config!.permissionMode = "default";
+    const saved = f.service.create(input, f.actor).data!;
+    const issued = f.db.assistantConnections.create(f.human, "Pausing Assistant", {operations: "all", projects: "all"});
+    assert.equal(f.service.update(saved.automationId, {...input, enabled: false}, {kind: "agent", id: issued.connection.id}, undefined, "auto_pause").ok, true);
+    const resumed = f.service.update(saved.automationId, input, f.actor);
+    assert.equal(resumed.ok, true, resumed.error ?? "Human resume accepted");
+    f.db.assistantConnections.revoke(issued.connection.id);
+    f.service.tick(resumed.data!.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.automationId)[0]!;
+    assert.notEqual(execution.status, "failed", execution.error ?? "Human-resumed schedule ran");
+    assert.ok(f.db.getSession(execution.sessionId!));
+    assert.equal(f.db.raw().prepare("SELECT count(*) AS n FROM assistant_automation_authority WHERE automation_id=?").get(saved.automationId)!.n, 0);
+  } finally {f.db.close();}
+});
+
+test("ordinary Assistant recovery retains its occurrence launcher after a human edits the schedule", async () => {
+  const f = fixture();
+  try {
+    const input = f.spec();
+    if (input.action.kind !== "create_session") assert.fail();
+    delete input.action.request.campaign;
+    delete input.action.request.role;
+    delete input.action.request.orchestrator;
+    input.action.request.config!.permissionMode = "default";
+    const issued = f.db.assistantConnections.create(f.human, "Original Assistant", {operations: "all", projects: "all"});
+    const saved = f.service.create(input, {kind: "agent", id: issued.connection.id}).data!;
+    const activate = f.db.activateAutomationCommands.bind(f.db);
+    f.db.activateAutomationCommands = () => {throw new Error("Synthetic crash before activation");};
+    f.service.tick(saved.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.automationId)[0]!;
+    const command = f.db.listAutomationCommands(execution.executionId)[0]!;
+    assert.equal(command.state, "staged");
+    assert.equal(f.service.update(saved.automationId, {...input, name: "Human edit"}, f.actor).ok, true);
+    f.db.activateAutomationCommands = activate;
+    const launchers: Array<string | undefined> = [];
+    const createSession = f.sessions.createSession.bind(f.sessions);
+    f.sessions.createSession = (...args) => {
+      launchers.push(args[6]?.launcherUserId);
+      return createSession(...args);
+    };
+    new AutomationsService(f.db, f.hub, f.sessions, {info() {}, warn() {}}, undefined, f.runtime).recover();
+    await f.drain();
+    assert.deepEqual(launchers, [f.human.userId]);
+    assert.equal(f.db.listAutomationCommands(execution.executionId)[0]!.commandId, command.commandId);
+    assert.notEqual(f.db.listAutomationCommands(execution.executionId)[0]!.state, "staged");
+  } finally {f.db.close();}
+});
+
+test("Assistant schedule authority retains a numeric defining-event identity", () => {
+  const f = fixture();
+  try {
+    const issued = f.db.assistantConnections.create(f.human, "Scheduled Assistant", {operations: "all", projects: "all"});
+    const saved = f.service.create(f.spec(), {kind: "agent", id: issued.connection.id}).data!;
+    const row = f.db.raw().prepare("SELECT authorization_json FROM assistant_automation_authority WHERE automation_id=?").get(saved.automationId) as {authorization_json: string};
+    assert.equal(Number.isSafeInteger(JSON.parse(row.authorization_json).authorEventRowid), true);
+  } finally {f.db.close();}
+});
+
+test("an intervening trigger author cannot reuse an earlier Assistant campaign authorization", async () => {
+  const f = fixture();
+  try {
+    const issued = f.db.assistantConnections.create(f.human, "Scheduled Assistant", {operations: "all", projects: "all"});
+    const saved = f.service.create(f.spec(), {kind: "agent", id: issued.connection.id}).data!;
+    assert.equal(f.service.createTrigger(saved.automationId, {kind: "webhook", name: "Owner Trigger"}, f.actor).ok, true);
+    f.service.tick(saved.nextFireAt!);
+    await f.drain();
+    const execution = f.db.listAutomationExecutions(saved.automationId)[0]!;
+    assert.equal(execution.status, "failed");
+    assert.match(execution.error!, /assistant_schedule_author_changed/);
+    assert.equal(f.db.listSessions().length, 0);
+    assert.equal(f.sent.some(m => m.type === "durable_session_command"), false);
+  } finally {f.db.close();}
+});
+
 for (const mode of ["custom", "full_control"] as const) test(`${mode} occurrence atomically creates a campaign, allowance, task ledger and durable command`, async () => {
   const f = fixture();
   try {

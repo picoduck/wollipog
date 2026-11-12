@@ -1,5 +1,6 @@
 import { hostAdminUsage } from "./host-admin-cli.js";
 import { serviceUsage } from "./service-cli.js";
+import { profileRootUsage } from "./provider-profile-root-cli.js";
 
 export interface HelpResponse {
   ok: boolean;
@@ -33,6 +34,7 @@ export function rootHelp(): string {
     "  review              Start or inspect a review session for your own pushed pull request",
     "  admin               Administer a control plane from its host",
     "  service             Manage a headless Linux systemd deployment",
+    "  profile-root        Inspect managed profile roots; local human-confirmed Linux repair",
     "  help [topic]        Show root or topic-specific help",
     "",
     "Global Option: --version",
@@ -54,7 +56,7 @@ export function rootHelp(): string {
     "  wollipog admin runner-credential rotate --runner RUNNER_ID --output ./runner.token",
     "  wollipog service uninstall  # preserves data by default",
     "",
-    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, automation, decision, campaign, pr, review",
+    "Topics: init, doctor, update, pair, service, profile-root, admin, session, worktree, artifact, automation, decision, campaign, pr, review",
     "Run `wollipog help <topic>` for complete commands and options. Help is always text; operational commands use --json for stable machine-readable output.",
   ].join("\n");
 }
@@ -203,7 +205,7 @@ export function decisionHelp(): string {
     "Reads may target an accessible descendant with --session for an Orchestrator, and so may a withdrawal of a decision that Orchestrator owns; request, consume, execute, and reconcile remain self-scoped and refuse --session. Tools: request_workflow_decision, get_workflow_decision, list_workflow_decisions, consume_workflow_decision, execute_workflow_decision, reconcile_workflow_decision, withdraw_workflow_decision.",
     "Execute has Wollipog perform one approved forge action itself through this session's forge login: a merged_branch_deletion naming pullRequest and headSha (compare-and-delete pinned to that head), or an armed GitHub pr_merge (the canonical pinned enqueue). Use it when your provider refuses the approved command; never retry that command another way. Read forgeAction for the outcome. Requires control plane protocol v284.",
     "Descendant reads and lists require control plane v214. Follow nextCursor until absent. Older runners can use an updated CLI or GET /api/sessions/:id/workflow-decisions[/<occurrence-id>] against v214 where a session token is provisioned. Provider-isolated sessions have only a relay key: upgrade the runner/CLI instead of seeking a bearer token. Older control planes expose pending requests only through list_descendant_requests. A 404 or missing list entry never proves consumption.",
-    "Pass the exact typed resourceSnapshot as a JSON object in --snapshot. For a pr_merge consume, pass the exact WorkflowDecisionAction JSON object in --action; other categories omit it.",
+    "Pass the exact typed resourceSnapshot as a JSON object in --snapshot. For a pr_merge consume, pass the exact WorkflowDecisionAction JSON object in --action; other categories omit it. A pr_merge --action carries the canonical enqueue command byte-for-byte: GitHub is gh pr merge https://github.com/<owner>/<repo>/pull/<number> --squash --match-head-commit <approved-head>; a GitLab train merge is glab api --method POST projects/<percent-encoded-project-path>/merge_trains/merge_requests/<iid> --hostname <host> -f sha=<approved-head> -F squash=<bool>, and a direct merge is glab api --method PUT projects/<percent-encoded-project-path>/merge_requests/<iid>/merge --hostname <host> -f sha=<approved-head> -F squash=<bool> -F should_remove_source_branch=<bool>. A refused enqueue names the approved command in its error.",
     "Reconcile only an already-successful, exactly armed pr_merge action after the approved head has merged. Use its original snapshot; reconciliation never runs the merge command and requires control plane protocol v153.",
     "Withdraw a pending or approved decision that was never consumed or armed when it is no longer needed. It approves and consumes nothing, records you and the reason, and the decision then reads revoked with withdrawal provenance. Withdrawal requires control plane protocol v269.",
     "When an installed skill or user-authored instruction keeps the gate for a person (a per-PR merge approval, say), request the exact typed decision anyway and name the rule with --owner-rule-source (the file) and --owner-rule-quote (the requirement, on one line). The decision is then the owner's under any mode or grant, and so is every later request for the same resource; it reaches their Inbox and Campaign Status. It can never give the Orchestrator a decision. Requires control plane protocol v296. Never end a turn with such a gate only in prose.",
@@ -318,6 +320,8 @@ function helpForTopic(topic: string): string | null {
       return doctorHelp();
     case "service":
       return serviceUsage();
+    case "profile-root":
+      return `Usage: wollipog ${profileRootUsage}\nMetadata only; no credential reads. Linux repair requires local interactive confirmation for one fresh snapshot. macOS/Windows and uncertain ACLs require operator guidance. There is no --yes, remote repair or stored consent.`;
     case "admin":
       return hostAdminUsage();
     case "session":

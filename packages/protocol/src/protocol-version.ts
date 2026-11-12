@@ -1395,25 +1395,51 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   //      runner keeps reporting Claude usage from session responses alone.
   342,
   // v343 slot
+  // 343: Read-only forge summaries include base/head, mergeability and named CI checks (#1270).
+  343,
   // v344 slot
+  // 344: Approved PR merge decision reads and resolution prompts expose the canonical action (#4242).
+  344,
   // v345 slot
+  // 345: Read-only authoritative forge request diffs with pinned revision metadata (#1270).
+  345,
   // v346 slot
   // v347 slot
+  // 347: bounded published-issue field/read diagnostics and trailing body whitespace tolerance (#4404).
+  347,
   // v348 slot
+  // 348: Server-proven repository limits for exact owner-named scope proposals (#4402).
+  348,
   // v349 slot
   // v350 slot
   // v351 slot
+  // 351: Runner-verifiable failed campaign run evidence for follow-up relatedness (#4401).
+  351,
   // v352 slot
   // v353 slot
   // v354 slot
+  // 354: Runner-proven protocol renumbers in free base-merge review rounds (#4399).
+  354,
   // v355 slot
+  // 355: Read-only reconciliation of consumed uncertain issue closures (#4398).
+  355,
   // v356 slot
+  // 356: Audit byte-verified UI evidence receipt reuse across approval occurrences.
+  356,
   // v357 slot
+  // 357: Timestamped provider setup observations and transport-independent SSH readiness (#4438).
+  357,
   // v358 slot
   // v359 slot
   // v360 slot
+  // 360: Bind closure PR relatedness and child work to server facts; safely steer approved closure notices (#4403).
+  360,
   // v361 slot
+  // 361: Disclose runner-enforced provider/command credential-home write separation (#3922).
+  361,
   // v362 slot
+  // 362: Optional closed managed-profile directory diagnostic on provider-login start failures (#4437).
+  362,
   // v363 slot
   // v364 slot
   // v365 slot

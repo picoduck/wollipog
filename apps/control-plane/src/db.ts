@@ -1,4 +1,4 @@
-import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS } from "@wollipog/protocol";
+import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, issueClosureDeliveryGap, knownProviderCommandHomeWriteSeparation } from "@wollipog/protocol";
 import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
@@ -8,6 +8,10 @@ import { CAMPAIGN_CLEANUP_ITEMS_LIMIT, CAMPAIGN_LIVE_WORK_KINDS, CAMPAIGN_STUCK_
   worktreeRefusalAction, cleanupReasonSentence, PROTOCOL_VERSION, type CampaignActivityView, type CampaignCleanupItem, type CampaignLiveWorkKind,
   type CampaignRepairView, type CampaignStuckItem, type OrchestratorCampaignHandoff } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
+import { preserveSkillRemoval } from "./skill-removal-history.js";
+import { installSkillManagementRevisions } from "./skill-management-revisions.js";
+import { installAssistantAutomationAuthority, bindAssistantAutomation, type AssistantAutomationOperation } from "./assistant-automation-authority.js";
+import { safeProviderReadiness } from "@wollipog/protocol";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 /**
@@ -17,6 +21,9 @@ import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
  */
 
 import { DatabaseSync } from "node:sqlite";
+import { AssistantConnections } from "./assistant-connections.js";
+import { AssistantWorkStore } from "./assistant-work.js";
+import { installAssistantOutboundScope } from "./assistant-outbound-schema.js";
 import { runnerRetryConnection } from "./runner-persistence.js";
 import { AUTOMATION_APPROVAL_TTL_MS } from "./automation-creation-lifecycle.js";
 import {
@@ -457,7 +464,7 @@ const SESSION_PROMPT_TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60_000;
 export const PROJECT_CREATION_REQUESTS_PER_USER = 100;
 const SESSION_PROMPT_ATTEMPT_RETENTION_LIMIT = 128;
 
-function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullable<RunnerView["providerAccounts"]> {
+function safeProviderAccounts(value: RunnerView["providerAccounts"], readinessSupported = false): NonNullable<RunnerView["providerAccounts"]> {
   if (!Array.isArray(value) || value.length > 32) throw new Error("runner provider account inventory is invalid");
   const ids = new Set<string>();
   return value.map((account) => {
@@ -483,6 +490,7 @@ function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullabl
       label: account.label.trim(),
       provider: account.provider,
       authStatus: account.authStatus,
+      ...(readinessSupported && safeProviderReadiness(account.providerReadiness) ? { providerReadiness: safeProviderReadiness(account.providerReadiness)! } : {}),
       ...(account.profile ? { profile: { id: account.profile.id, access: account.profile.access } } : {}),
       // Protocol v334 (#4353). An unrecognized value reads as unverified, which selection passes over.
       ...(account.billing === "subscription" || account.billing === "api" || account.billing === "unknown"
@@ -823,6 +831,8 @@ CREATE TABLE IF NOT EXISTS runner_agents (
   native_tui_accounting TEXT,
   default_provider_account_id TEXT,
   provider_account_readiness TEXT,
+  provider_readiness TEXT,
+  provider_command_home_write_separation TEXT,
   wsl_agent_control TEXT,
   acp TEXT,
   registry TEXT,
@@ -1297,6 +1307,11 @@ CREATE TABLE IF NOT EXISTS provider_login_notice_dismissals (
 -- User-submitted prompts and recovered question answers use the runner's durable receipt lane.
 -- Unlike scheduler-owned automation commands these rows belong directly to a session and remain
 -- recoverable across a control-plane restart without manufacturing an automation execution.
+-- Server-only provenance survives outbox pruning. Unknown legacy messages remain assignments.
+CREATE TABLE IF NOT EXISTS session_system_notice_commands (
+  command_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS session_prompt_commands (
   command_id       TEXT PRIMARY KEY,
   session_id       TEXT NOT NULL,
@@ -2375,6 +2390,7 @@ CREATE TABLE IF NOT EXISTS boxes (
   last_error       TEXT,
   auto_reconnect   INTEGER NOT NULL DEFAULT 1,
   deployed_version TEXT,
+  harness_readiness TEXT,
   triple           TEXT,
   runner_data_dir  TEXT,
   legacy_adoption_epoch TEXT,
@@ -4549,7 +4565,8 @@ interface AutomationSessionOriginRow {
 
 interface OutboundEventSubscriptionRow {
   subscription_id: string; callback_url: string; secret_key: string; generation: number;
-  scope_kind: "project" | "automation"; project_id: string | null; automation_id: string | null;
+  scope_kind: "project" | "automation" | "assistant"; project_id: string | null; automation_id: string | null;
+  assistant_connection_id: string | null; private_addresses_json: string | null;
   event_kinds_json: string; include_session_name: number; include_question_title: number;
   state: OutboundEventSubscriptionState; pause_reason: string | null; consecutive_failures: number;
   created_by_kind: GovernanceActor["kind"]; created_by_id: string | null;
@@ -4574,6 +4591,7 @@ interface BoxRow {
   last_error: string | null;
   auto_reconnect: number;
   deployed_version: string | null;
+  harness_readiness: string | null;
   triple: string | null;
   runner_data_dir: string | null;
   legacy_adoption_epoch: string | null;
@@ -4970,6 +4988,8 @@ export class HourlyUsageUnavailableError extends RangeError {
 }
 
 export interface NewSessionInput {
+  /** Server-validated origin reserved alongside the Assistant command receipt. */
+  assistantWorkOrigin?: {connectionId: string; commandId: string};
   /** Server-owned campaign fields and the actual implementing harness, captured atomically. */
   reviewPolicyCapture?: ReviewPolicyCapture;
   /** Authenticated launching user for personal review settings, including shared Projects. */
@@ -5131,6 +5151,8 @@ export interface ClaimedOutboundEventDelivery {
   callbackUrl: string;
   secret: string;
   payloadJson: string;
+  assistantConnectionId?: string;
+  privateAddresses?: string[];
   attempt: number;
   leaseId: string;
 }
@@ -6014,6 +6036,8 @@ export class OccupiedUnreadLocationError extends Error {
 }
 
 export class ControlPlaneDb {
+  readonly assistantConnections: AssistantConnections;
+  readonly assistantWork: AssistantWorkStore;
   private readonly providerPublications: ProviderProfilePublicationStore;
   readonly campaignBudgets: CampaignBudgetLedger;
   readonly campaignReviewJobs: CampaignReviewJobs;
@@ -6059,6 +6083,11 @@ export class ControlPlaneDb {
   ) {
     this.db = db = runnerRetryConnection(db);
     if (!attached) {
+      AssistantConnections.install(db);
+      installAssistantAutomationAuthority(db);
+      installSkillManagementRevisions(db);
+      installAssistantOutboundScope(db);
+      AssistantWorkStore.install(db);
       CampaignBudgetLedger.install(db);
       CampaignReviewJobs.install(db);
       SessionReviewJobs.install(db);
@@ -6067,6 +6096,8 @@ export class ControlPlaneDb {
       PullRequestWatches.install(db);
       ReviewSettingsStore.install(db);
     }
+    this.assistantConnections = new AssistantConnections(db);
+    this.assistantWork = new AssistantWorkStore(db, this, this.assistantConnections);
     this.providerPublications = new ProviderProfilePublicationStore(db, controlPlaneInstanceId);
     this.campaignBudgets = new CampaignBudgetLedger(db);
     this.campaignReviewJobs = new CampaignReviewJobs(db,this.campaignBudgets,(rootId)=>{
@@ -6381,7 +6412,7 @@ export class ControlPlaneDb {
     const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
     const children = this.campaignDescendantIds(campaignId), verified = this.validCampaignChildReportIds(campaignId);
     const childRows = children.map(id => this.stmt("SELECT archived FROM sessions WHERE id=?").get(id) as { archived: number });
-    if (!row || !policy || children.length === 0 || children.some((id, i) => !verified.has(id) ||
+    if (!row || !policy || children.length === 0 || children.some((id, i) => !(verified.has(id) || this.campaignChildFailureSuperseded(campaignId, id)) ||
         policy.behavior.completion !== "retain" && (childRows[i]!.archived !== 1 || this.campaignWorktreeCleanup(id).length > 0)) ||
         pendingRequests(parseJson<PendingApproval>(row.pending_approval)).length > 0 ||
         this.stmt("SELECT 1 FROM workflow_decisions WHERE controlling_session_id=? AND status='pending'").get(campaignId)) {
@@ -6407,9 +6438,9 @@ export class ControlPlaneDb {
         if (handedOff.has(item.id)) continue;
         // Delivery is proven in the item's own repository, whichever of the campaign's it is (#4119).
         if (item.commitment !== "committed" || !item.issue || !campaignIssueInScope(policy, item.issue)) continue;
-        // A never-dispatched placeholder of an epic this campaign closed from its members (#4060) is
-        // finished by that closure. Any item with an attempt still needs its own delivery.
-        if (item.attemptCount === 0 && !item.currentAttempt && this.memberProvenEpicClosure(campaignId, item.issue.repository, item.issue.number)) continue;
+        // The same server-derived tracking predicate as closure proof and gaps (#4403), so an
+        // ended tracking attempt is finished by the epic's proven closure while delivery work isn't.
+        if (this.campaignWorkLedger.epicTrackingItem(campaignId, item.id) && this.memberProvenEpicClosure(campaignId, item.issue.repository, item.issue.number)) continue;
         // These are trusted work-item attestations, not agent stage prose or session-report verification.
         // Keep an unresolved incomplete attestation across new workers/heads. A legitimate later
         // delivery supersedes it; insertion order, not tied timestamps or random UUIDs, is chronology.
@@ -6505,7 +6536,9 @@ export class ControlPlaneDb {
   campaignRecoverySettledDecisions(campaignId: string): WorkflowDecisionView[] {
     return (this.stmt(`SELECT decision.* FROM workflow_decisions decision
       WHERE controlling_session_id=? AND (status='denied' OR
-        (status='consumed' AND json_extract(issue_closure_result,'$.outcome')='uncertain'))
+        (status='consumed' AND json_extract(issue_closure_result,'$.outcome')='uncertain'
+          AND json_extract(issue_closure_result,'$.reconciliation.acknowledgedAt') IS NULL))
+        AND NOT (category='owner_decision' AND request_id GLOB 'issue_closure_recovery_*')
         AND NOT EXISTS (SELECT 1 FROM campaign_recovery_denial_settlements settled
           WHERE decision.status='denied' AND settled.campaign_session_id=decision.controlling_session_id
             AND settled.occurrence_id=decision.occurrence_id)
@@ -6588,6 +6621,7 @@ export class ControlPlaneDb {
             pullRequest: { repository: snapshot.repository, number: snapshot.pullRequest } }] : [];
         }),
       campaignRepositories: (campaignId) => this.campaignRepositoriesOf(campaignId),
+      memberProvenEpicClosures: (campaignId) => this.memberProvenEpicClosures(campaignId),
     });
     return this.campaignWorkLedgerStore;
   }
@@ -7807,7 +7841,7 @@ export class ControlPlaneDb {
     );
     db.prepare("DELETE FROM driver_telemetry_hourly WHERE bucket_ts < ?").run(Date.now() - 180 * 86_400_000);
     // Additive migrations for DBs created before discovery columns existed.
-    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "unavailable_reason TEXT", "source TEXT", "installation TEXT", "update_assessment TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "default_provider_account_id TEXT", "provider_account_readiness TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
+    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "unavailable_reason TEXT", "source TEXT", "installation TEXT", "update_assessment TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "default_provider_account_id TEXT", "provider_account_readiness TEXT", "provider_readiness TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT", "provider_command_home_write_separation TEXT"]) {
       try {
         db.exec(`ALTER TABLE runner_agents ADD COLUMN ${col}`);
       } catch {
@@ -8336,6 +8370,7 @@ export class ControlPlaneDb {
     }
     for (const column of [
       "runner_data_dir TEXT",
+      "harness_readiness TEXT",
       "legacy_adoption_epoch TEXT",
       "legacy_adoption_pending INTEGER NOT NULL DEFAULT 0",
       "legacy_adoption_authorized_by TEXT",
@@ -8758,7 +8793,7 @@ export class ControlPlaneDb {
         reviewSession: safeReviewSessionCapability(meta.runtime.reviewSession),
       }) : null;
       const providerAccounts = runnerSupportsProtocol(protocolVersion, "providerAccounts")
-        ? JSON.stringify(safeProviderAccounts(meta.providerAccounts ?? []))
+        ? JSON.stringify(safeProviderAccounts(meta.providerAccounts ?? [], runnerSupportsProtocol(protocolVersion, "providerSetupReadiness")))
         : null;
       const providerLogins = runnerSupportsProtocol(protocolVersion, "providerLogin")
         ? JSON.stringify(safeProviderLogins(meta.providerLogins ?? []))
@@ -8846,6 +8881,7 @@ export class ControlPlaneDb {
         !runnerSupportsProtocol(protocolVersion, "runnerLocalAgentEnv"),
         runnerSupportsProtocol(protocolVersion, "nativeTuiAccountingDiagnostics"),
         runnerSupportsProtocol(protocolVersion, "wslSafeLauncher"),
+        runnerSupportsProtocol(protocolVersion, "providerSetupReadiness"),
       );
       if (manageTransaction) this.db.exec("COMMIT");
     } catch (err) {
@@ -8862,6 +8898,7 @@ export class ControlPlaneDb {
     persistEnvironment: boolean,
     persistNativeTuiAccounting: boolean,
     persistWslSafeLauncher: boolean,
+    persistProviderReadiness: boolean,
   ): void {
     this.stmt("DELETE FROM runner_agents WHERE runner_id = ?").run(runnerId);
     const upAgent = this.stmt(
@@ -8870,8 +8907,8 @@ export class ControlPlaneDb {
     );
     const insRa = this.stmt(
       `INSERT INTO runner_agents
-         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, unavailable_reason, source, installation, update_assessment, codex_app_server, claude_code, native_tui_accounting, default_provider_account_id, wsl_agent_control, acp, registry, acp_transport, provider_account_readiness)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, unavailable_reason, source, installation, update_assessment, codex_app_server, claude_code, native_tui_accounting, default_provider_account_id, wsl_agent_control, acp, registry, acp_transport, provider_account_readiness, provider_readiness, provider_command_home_write_separation)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const a of agents) {
       upAgent.run(a.id, a.name, now);
@@ -8902,6 +8939,8 @@ export class ControlPlaneDb {
         a.registry ? JSON.stringify(a.registry) : null,
         a.acpTransport ?? null,
         a.providerAccountReadiness ? JSON.stringify(a.providerAccountReadiness) : null,
+        persistProviderReadiness && safeProviderReadiness(a.providerReadiness) ? JSON.stringify(safeProviderReadiness(a.providerReadiness)) : null,
+        JSON.stringify(knownProviderCommandHomeWriteSeparation(a.providerCommandHomeWriteSeparation)) ?? null,
       );
     }
   }
@@ -8922,6 +8961,7 @@ export class ControlPlaneDb {
         !runnerSupportsProtocol(protocol?.protocol_version, "runnerLocalAgentEnv"),
         runnerSupportsProtocol(protocol?.protocol_version, "nativeTuiAccountingDiagnostics"),
         runnerSupportsProtocol(protocol?.protocol_version, "wslSafeLauncher"),
+        runnerSupportsProtocol(protocol?.protocol_version, "providerSetupReadiness"),
       );
       if (executionTargets !== undefined) {
         if (!runnerSupportsProtocol(protocol?.protocol_version, "targetHarnessInstallations") ||
@@ -8940,7 +8980,7 @@ export class ControlPlaneDb {
           "UPDATE runners SET agents_refreshed_at=?, updated_at=?, editors=COALESCE(?, editors), provider_accounts=COALESCE(?, provider_accounts) WHERE runner_id=?",
         )
         .run(now, now, editors ? JSON.stringify(editors) : null,
-          providerAccounts ? JSON.stringify(safeProviderAccounts(providerAccounts)) : null, runnerId);
+          providerAccounts ? JSON.stringify(safeProviderAccounts(providerAccounts, runnerSupportsProtocol(protocol?.protocol_version, "providerSetupReadiness"))) : null, runnerId);
       this.db.exec("COMMIT");
     } catch (err) {
       this.db.exec("ROLLBACK");
@@ -11261,6 +11301,7 @@ export class ControlPlaneDb {
 
   deleteSkill(skillId: string, now = Date.now()): boolean {
     return this.atomic(() => {
+      preserveSkillRemoval(this.db, skillId, now);
       this.stmt("DELETE FROM skill_machine_versions WHERE skill_id=?").run(skillId);
       this.stmt("DELETE FROM skill_machine_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
       this.stmt("DELETE FROM skill_git_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
@@ -14203,6 +14244,7 @@ export class ControlPlaneDb {
   archiveSessionCandidatePageForPrincipal(
     principal: AuthPrincipal,
     query: ArchiveSessionPageQuery,
+    projectIds?: readonly string[],
   ): {
     sessions: ArchiveSessionCandidate[];
     transcriptSessionIds: string[];
@@ -14211,6 +14253,12 @@ export class ControlPlaneDb {
     const window = archiveSessionCursorWindow(query);
     if ("error" in window) return window;
     const authorization = this.sessionAuthorizationSql(principal);
+    // Assistant project restrictions participate in both pagination and facets; filtering the
+    // returned page would leak counts/facets and could skip authorized rows behind hidden ones.
+    if (projectIds !== undefined) {
+      authorization.sql = `(${authorization.sql}) AND session.project_id IN (${projectIds.map(() => "?").join(",") || "NULL"})`;
+      authorization.params.push(...projectIds);
+    }
     const projectSql = "COALESCE(project.name, CASE WHEN session.project_id IS NOT NULL THEN 'Unknown Project' ELSE 'No Project' END)";
     const locationSql = `COALESCE(location.name, workspace_override.display_name, workspace.name,
       workspace_extra.name, session.workspace_id, 'No Location')`;
@@ -15076,6 +15124,10 @@ export class ControlPlaneDb {
       .run(status, lastError, now, boxId);
   }
 
+  setBoxHarnessReadiness(boxId: string, readiness: NonNullable<BoxView["harnessReadiness"]>): void {
+    this.stmt("UPDATE boxes SET harness_readiness=? WHERE box_id=?").run(JSON.stringify(readiness), boxId);
+  }
+
   authorizeBoxLegacyDataAdoption(input: {
     boxId: string;
     epoch: string;
@@ -15725,6 +15777,7 @@ export class ControlPlaneDb {
       sshTarget: row.ssh_target,
       runnerId: row.runner_id,
       status: row.status as BoxStatus,
+      harnessReadiness: parseJson<BoxView["harnessReadiness"]>(row.harness_readiness) ?? undefined,
       lastError: row.last_error,
       createdAt: row.created_at,
       deployedVersion: row.deployed_version,
@@ -15818,6 +15871,8 @@ export class ControlPlaneDb {
                   ra.native_tui_accounting AS native_tui_accounting,
                   ra.default_provider_account_id AS default_provider_account_id,
                   ra.provider_account_readiness AS provider_account_readiness,
+                  ra.provider_readiness AS provider_readiness,
+                  ra.provider_command_home_write_separation AS provider_command_home_write_separation,
                   ra.wsl_agent_control AS wsl_agent_control,
                   ra.acp AS acp, ra.registry AS registry, ra.acp_transport AS acp_transport
              FROM runner_agents ra JOIN agent_definitions ad ON ad.id = ra.agent_id
@@ -15844,6 +15899,8 @@ export class ControlPlaneDb {
         native_tui_accounting: string | null;
         default_provider_account_id: string | null;
         provider_account_readiness: string | null;
+        provider_readiness: string | null;
+        provider_command_home_write_separation: string | null;
         wsl_agent_control: string | null;
         acp: string | null;
         registry: string | null;
@@ -15872,6 +15929,8 @@ export class ControlPlaneDb {
       nativeTuiAccounting: parseJson<AgentDefinition["nativeTuiAccounting"]>(a.native_tui_accounting) ?? undefined,
       defaultProviderAccountId: a.default_provider_account_id ?? undefined,
       providerAccountReadiness: parseJson<AgentDefinition["providerAccountReadiness"]>(a.provider_account_readiness) ?? undefined,
+      providerReadiness: safeProviderReadiness(parseJson(a.provider_readiness)),
+      providerCommandHomeWriteSeparation: knownProviderCommandHomeWriteSeparation(parseJson(a.provider_command_home_write_separation)),
       wslAgentControl: parseJson<AgentDefinition["wslAgentControl"]>(a.wsl_agent_control) ?? undefined,
       acp: parseJson<AgentDefinition["acp"]>(a.acp) ?? undefined,
       registry: parseJson<AgentDefinition["registry"]>(a.registry) ?? undefined,
@@ -19414,6 +19473,7 @@ export class ControlPlaneDb {
         ?? (scope.owner.kind === "user" ? scope.owner.userId : null);
       if (reviewUserId) this.reviewSettings.attributeSession(input.id, reviewUserId);
       if (input.reviewPolicyCapture) this.reviewSettings.captureSessionPolicy(input.id, reviewUserId, projectId, input.reviewPolicyCapture);
+      if (input.assistantWorkOrigin) this.assistantWork.attachAcceptedOrigin(input.assistantWorkOrigin, input.id);
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-created:${input.id}`,
         kind: "session.created",
@@ -22411,8 +22471,9 @@ export class ControlPlaneDb {
   }
 
   /** Seq of the session's last top-level report when no later report or assignment superseded it,
-   * and null when its last word is not a report. The same predicate that keeps a stored
-   * attestation valid, so a stopped session's report stays attestable after it ends (#1440). */
+   * and null when its last word is not a report. Failed/stopped recovery also requires proof that
+   * active commands and ledger assignments did not supersede it. Ordinary idle/completed stored
+   * attestations retain their established rules until a new turn or user message invalidates them. */
   durableFinalReportSeq(sessionId: string): number | null {
     const row = this.stmt(
       `SELECT target.seq AS seq FROM session_events target
@@ -22430,9 +22491,27 @@ export class ControlPlaneDb {
             AND json_type(later.payload, '$.parentToolUseId') IS NULL)
          )
        ) AND NOT EXISTS (
+         SELECT 1 FROM session_prompt_commands command
+         WHERE command.session_id=target.session_id
+           AND command.state IN ('pending','sent','accepted','queued','started','uncertain')
+           AND NOT EXISTS (SELECT 1 FROM session_system_notice_commands notice
+             WHERE notice.command_id=command.command_id AND notice.session_id=command.session_id)
+           AND NOT EXISTS (SELECT 1 FROM session_events delivered
+             WHERE delivered.session_id=target.session_id AND delivered.seq<target.seq
+               AND delivered.kind='user_message'
+               AND json_extract(delivered.payload, '$.commandId')=command.command_id)
+       ) AND NOT EXISTS (
+         SELECT 1 FROM campaign_work_attempts assignment
+         WHERE assignment.session_id=target.session_id
+           AND assignment.start_event_epoch=(SELECT event_epoch FROM sessions WHERE id=target.session_id)
+           AND assignment.start_seq>=target.seq
+       ) AND NOT EXISTS (
          SELECT 1 FROM session_events assignment
          WHERE assignment.session_id=target.session_id AND assignment.seq>target.seq
            AND assignment.kind='user_message'
+           AND NOT EXISTS (SELECT 1 FROM session_system_notice_commands notice
+             WHERE notice.session_id=assignment.session_id
+               AND notice.command_id=json_extract(assignment.payload, '$.commandId'))
        ) LIMIT 1`,
     ).get(sessionId) as { seq: number } | undefined;
     return row?.seq ?? null;
@@ -22490,7 +22569,7 @@ export class ControlPlaneDb {
        JOIN session_events target ON target.session_id=child.id AND target.seq=verification.report_event_seq
        WHERE verification.report_digest IS NULL AND verification.report_event_epoch IS NULL
          AND child.event_epoch=0
-         AND (child.archived=1 OR child.status IN ('idle','completed','stopped')
+         AND (child.archived=1 OR child.status IN ('idle','completed','stopped','failed')
            OR (child.status='input_required' AND child.policy_resume_status='idle'))${childFilter}`,
     ).all(...(childSessionId === undefined ? [] : [childSessionId])) as Array<{
       campaign_session_id: string; child_session_id: string; report_event_seq: number; verified_at: number;
@@ -22567,6 +22646,9 @@ export class ControlPlaneDb {
   invalidateCampaignReportsForLiveEvent(sessionId: string, payload: SessionEventPayload, ts: number): void {
     const digest = this.campaignReportDigest(payload);
     if (payload.kind !== "user_message" && !digest) return;
+    if (payload.kind === "user_message" && payload.commandId && this.stmt(
+      "SELECT 1 FROM session_system_notice_commands WHERE session_id=? AND command_id=?",
+    ).get(sessionId, payload.commandId)) return;
     if (this.stmt(
       `SELECT 1 FROM orchestrator_campaign_child_reports WHERE child_session_id=?
        AND (report_digest IS NULL OR report_digest!=? OR report_ts!=?) LIMIT 1`,
@@ -22575,6 +22657,24 @@ export class ControlPlaneDb {
 
   campaignChildReportVerified(campaignSessionId: string, childSessionId: string): boolean {
     return this.validCampaignChildReportIds(campaignSessionId, childSessionId).has(childSessionId);
+  }
+
+  /** A failed attempt is never delivery. A separately verified successor can settle its owed
+   * work, leaving any preserved worktree visible as cleanup rather than unverified work. */
+  campaignChildFailureSuperseded(campaignId: string, childId: string): boolean {
+    const child = this.stmt("SELECT status FROM sessions WHERE id=?").get(childId) as { status: string } | undefined;
+    if (child?.status !== "failed" && !(child?.status === "stopped" && this.sessionStopProvenance(childId)?.confirmation)) return false;
+    const attempts = this.stmt("SELECT work_item_id, ordinal, ended_at, end_reason FROM campaign_work_attempts WHERE campaign_session_id=? AND session_id=?")
+      .all(campaignId, childId) as Array<{ work_item_id: string; ordinal: number; ended_at: number | null; end_reason: string | null }>;
+    if (!attempts.length || this.campaignDescendantIds(childId).length || this.unconsumedWorkflowDecisionsForSession(childId).length) return false;
+    return attempts.every((attempt) => {
+      if (attempt.ended_at === null || !["failed", "superseded", "reassigned"].includes(attempt.end_reason ?? "")) return false;
+      const item = this.campaignWorkLedger.detail(campaignId, attempt.work_item_id, Date.now());
+      if (item?.primaryState !== "delivered") return false;
+      return item.attempts.some((successor) => successor.ordinal > attempt.ordinal && successor.sessionId !== childId &&
+        successor.sessionId !== null && this.campaignChildReportVerified(campaignId, successor.sessionId) &&
+        item.verifications.some((v) => v.attemptId === successor.id && v.outcome === "delivered"));
+    });
   }
 
   /** The root campaign whose verification of this child is current. Verifications are keyed by the
@@ -22593,7 +22693,7 @@ export class ControlPlaneDb {
       `SELECT verification.child_session_id AS id FROM orchestrator_campaign_child_reports verification
        JOIN sessions child ON child.id=verification.child_session_id
        WHERE verification.campaign_session_id=? AND verification.report_digest IS NULL
-         AND (child.archived=1 OR child.status IN ('idle','completed','stopped'))`,
+         AND (child.archived=1 OR child.status IN ('idle','completed','stopped','failed'))`,
     ).all(campaignSessionId) as Array<{ id: string }>).map((row) => row.id);
   }
 
@@ -23130,7 +23230,7 @@ export class ControlPlaneDb {
          AND verification.report_event_epoch=child.event_epoch
        WHERE verification.campaign_session_id=?${childFilter}
          AND verification.report_digest IS NOT NULL
-         AND (child.archived=1 OR child.status IN ('idle','completed','stopped'))
+         AND (child.archived=1 OR child.status IN ('idle','completed','stopped','failed'))
          AND ((verification.report_digest IS NOT NULL AND verification.report_event_epoch!=child.event_epoch) OR (
          (
            target.kind='agent_response_completed' OR
@@ -23148,9 +23248,29 @@ export class ControlPlaneDb {
            )
          )
          AND NOT EXISTS (
+           SELECT 1 FROM session_prompt_commands command
+           WHERE child.status IN ('failed','stopped') AND command.session_id=target.session_id
+             AND command.state IN ('pending','sent','accepted','queued','started','uncertain')
+             AND NOT EXISTS (SELECT 1 FROM session_system_notice_commands notice
+               WHERE notice.command_id=command.command_id AND notice.session_id=command.session_id)
+             AND NOT EXISTS (SELECT 1 FROM session_events delivered
+               WHERE delivered.session_id=target.session_id AND delivered.seq<target.seq
+                 AND delivered.kind='user_message'
+                 AND json_extract(delivered.payload, '$.commandId')=command.command_id)
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM campaign_work_attempts assignment
+           WHERE child.status IN ('failed','stopped') AND assignment.session_id=target.session_id
+             AND assignment.start_event_epoch=child.event_epoch
+             AND assignment.start_seq>=target.seq
+         )
+         AND NOT EXISTS (
            SELECT 1 FROM session_events assignment
            WHERE assignment.session_id=target.session_id AND assignment.seq>target.seq
              AND assignment.kind='user_message'
+           AND NOT EXISTS (SELECT 1 FROM session_system_notice_commands notice
+             WHERE notice.session_id=assignment.session_id
+               AND notice.command_id=json_extract(assignment.payload, '$.commandId'))
          )))`,
     ).all(...params) as unknown as Array<{ id: string }>;
     return new Set(rows.map((row) => row.id));
@@ -23435,7 +23555,7 @@ export class ControlPlaneDb {
       if (childHasHumanRequest) waitingHuman += 1;
       // A retained child may receive more work after verification. Re-check both the exact
       // latest report and terminal-for-review state instead of trusting a durable row forever.
-      const reportVerified = verified.has(child.id);
+      const reportVerified = verified.has(child.id) || this.campaignChildFailureSuperseded(resolvedCampaignId, child.id);
       const childCleanup = reportVerified && policy.behavior.completion === "stop_and_archive"
         ? this.campaignWorktreeCleanup(child.id) : [];
       cleanupWorktrees.push(...childCleanup);
@@ -23581,11 +23701,16 @@ export class ControlPlaneDb {
     // Only a completion check that ran judged the in-scope original items; when it could not run
     // (a worktree retirement still pending, or no child at all), they count as agent work here.
     const scopeJudged = completion.state !== "children_unfinished";
-    const agentWork = ledger.agentUnfinished.filter((item) => !(scopeJudged && scope && item.origin === "original" && item.issue &&
+    const closedEpics = this.memberProvenEpicClosures(campaignId);
+    const unknownEpicHistory = new Set(ledger.agentUnfinished.filter((item) => item.issue &&
+      closedEpics.has(`${item.issue.repository.toLowerCase()}#${item.issue.number}`) &&
+      this.campaignWorkLedger.epicTrackingHistoryUnavailable(campaignId, item.id)).map((item) => item.id));
+    const agentWork = ledger.agentUnfinished.filter((item) => unknownEpicHistory.has(item.id) || !(scopeJudged && scope && item.origin === "original" && item.issue &&
       item.issue.repository.toLowerCase() === scope.repository.toLowerCase() && scope.issueNumbers.includes(item.issue.number) &&
       policy.issueNumbers?.includes(item.issue.number)));
     const stuckItems: CampaignStuckItem[] = agentWork.map((item) => ({ kind: "work_item", workItemId: item.id, issue: item.issue,
-      reason: "Committed work is not delivered and no agent is working on it." }));
+      reason: unknownEpicHistory.has(item.id) ? issueClosureDeliveryGap("epic_tracking_history_unavailable", { workItemId: item.id }).summary
+        : "Committed work is not delivered and no agent is working on it." }));
     const result = (status: "waiting_human" | "complete_needs_cleanup" | "verified_complete" | "stuck") =>
       ({ status, recoveryIds: completion.recoveryIds, stuckItems: status === "stuck" ? stuckItems : [], handoffs: ledger.handoffs });
     if (completion.state === "recovery_ready" || completion.state === "recovery_held") {
@@ -24989,7 +25114,7 @@ export class ControlPlaneDb {
         `UPDATE session_restart_notices SET state='delivering', command_id=?, updated_at=?
          WHERE occurrence_id=? AND session_id=? AND state='held'`,
       );
-      const staged = this.stageSessionPromptCommand(input.command);
+      const staged = this.stageSessionPromptCommand({ ...input.command, systemNotice: true });
       for (const occurrenceId of input.occurrenceIds) {
         if (Number(update.run(staged.commandId, input.command.now, occurrenceId, input.command.sessionId).changes) !== 1) {
           throw new Error("restart notice changed before it could be staged");
@@ -25527,11 +25652,15 @@ export class ControlPlaneDb {
     reviewerSessionId: string,
     now: number,
   ): UiEvidenceReviewReceipt[] {
-    return (this.stmt(
+    return this.uiEvidenceReceiptRows(this.stmt(
       `SELECT * FROM ui_evidence_review_receipts
        WHERE occurrence_id=? AND reviewer_session_id=? AND acknowledged_at IS NOT NULL
          AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at>? ORDER BY evidence_id`,
-    ).all(occurrenceId, reviewerSessionId, now) as unknown as Array<{
+    ).all(occurrenceId, reviewerSessionId, now));
+  }
+
+  private uiEvidenceReceiptRows(rows: unknown): UiEvidenceReviewReceipt[] {
+    return (rows as Array<{
       receipt_id: string; occurrence_id: string; reviewer_session_id: string; child_session_id: string;
       policy_revision: number; evidence_id: string; artifact_id: string; sha256: string; delivered_at: number;
       delivery_order: number | null; video_source_artifact_id: string | null;
@@ -25559,6 +25688,44 @@ export class ControlPlaneDb {
     }));
   }
 
+  /** A spent delivery can prove review again, without extending its expiry. Explicit revocation
+   * cannot; supersession by itself retains only the delivery proof, never the old approval. */
+  reusableUiEvidenceReviewReceipts(decision: WorkflowDecisionView, reviewerSessionId: string, now: number): UiEvidenceReviewReceipt[] {
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "ui_evidence_approval" || snapshot.videoReview) return [];
+    const controller = this.getSession(decision.controllingSessionId);
+    if (!controller || !runnerSupportsProtocol(this.uiEvidenceReviewClient(controller, "orchestrator").runnerProtocolVersion,
+      "uiEvidenceReceiptReuse")) return [];
+    const rows = this.stmt(`SELECT receipt.* FROM ui_evidence_review_receipts receipt
+      JOIN workflow_decisions source ON source.occurrence_id=receipt.occurrence_id
+      WHERE source.controlling_session_id=? AND source.authority='orchestrator'
+        AND source.category='ui_evidence_approval'
+        AND source.session_id=? AND source.policy_revision=? AND receipt.reviewer_session_id=?
+        AND receipt.child_session_id=? AND receipt.policy_revision=?
+        AND receipt.occurrence_id<>? AND receipt.acknowledged_at IS NOT NULL AND receipt.expires_at>?
+        AND receipt.video_source_artifact_id IS NULL
+        AND json_extract(source.resource_snapshot,'$.videoReview') IS NULL
+        AND ((source.status IN ('pending','approved','consumed') AND receipt.revoked_at IS NULL)
+          OR (source.status='superseded' AND source.superseded_by IS NOT NULL AND receipt.revoked_at IS NULL))
+      ORDER BY receipt.delivered_at DESC`).all(decision.controllingSessionId, decision.sessionId,
+      decision.policyRevision, reviewerSessionId, decision.sessionId, decision.policyRevision,
+      decision.occurrenceId, now);
+    const candidates = this.uiEvidenceReceiptRows(rows);
+    return snapshot.evidence.flatMap((item) => {
+      if (!item.artifactId || !item.mediaType?.startsWith("image/")) return [];
+      const receipt = candidates.find((candidate) => candidate.artifactId === item.artifactId && candidate.sha256 === item.sha256);
+      if (!receipt) return [];
+      const artifact = this.workflowArtifactExportPreflight(item.artifactId)?.artifact;
+      if (!artifact || artifact.sessionId !== decision.sessionId || artifact.kind !== "screenshot" ||
+          artifact.sha256 !== item.sha256 || artifact.mimeType !== item.mediaType) return [];
+      try {
+        const bytes = this.readWorkflowArtifactBytes(item.artifactId);
+        if (!bytes || createHash("sha256").update(bytes).digest("hex") !== item.sha256) return [];
+      } catch { return []; }
+      return [{ ...receipt, evidenceId: item.evidenceId }];
+    });
+  }
+
   consumeUiEvidenceReviewReceipts(occurrenceId: string, now: number): void {
     this.stmt(
       `UPDATE ui_evidence_review_receipts SET consumed_at=?
@@ -25571,7 +25738,7 @@ export class ControlPlaneDb {
   revokeUiEvidenceReviewReceipts(occurrenceId: string, now: number): void {
     this.stmt(
       `UPDATE ui_evidence_review_receipts SET revoked_at=?
-       WHERE occurrence_id=? AND consumed_at IS NULL AND revoked_at IS NULL`,
+       WHERE occurrence_id=? AND revoked_at IS NULL`,
     ).run(now, occurrenceId);
     // Whatever revoked the receipts (supersession, revocation, policy or ownership change) ends the
     // occurrence's delegated image review with them, so its verdict can never back an approval.
@@ -25741,9 +25908,16 @@ export class ControlPlaneDb {
   }
 
   recordGithubIssueClosureResult(occurrenceId: string, result: NonNullable<WorkflowDecisionView["issueClosureResult"]>): void {
+    const before = this.workflowDecisionByOccurrence(occurrenceId);
     this.stmt(`UPDATE workflow_decisions SET issue_closure_result=?
       WHERE occurrence_id=? AND category='issue_closure' AND status='consumed'`)
       .run(JSON.stringify(result), occurrenceId);
+    const snapshot = before?.resourceSnapshot;
+    if (result.outcome === "closed" && before?.issueClosureResult?.outcome !== "closed" && before?.status === "consumed" &&
+        before.authority === "orchestrator" && snapshot?.category === "issue_closure" && snapshot.reason === "completed" &&
+        snapshot.issueAdmission && snapshot.epicMembers?.readable && snapshot.epicMembers.members.length) {
+      this.campaignWorkLedger.observedChanged(before.sessionId, result.completedAt);
+    }
   }
 
   /** The refusal of this session's latest executed closure of `resourceKey`, when that execution was
@@ -25762,17 +25936,36 @@ export class ControlPlaneDb {
    * proven from the epic's members (#4060) that the runner confirmed closed. An uncertain, refused,
    * already-closed or person-owned closure does not count. */
   memberProvenEpicClosure(campaignId: string, repository: string, issue: number): boolean {
+    const key = `issue_closure:${repository.toLowerCase()}#${issue}`;
     const rows = this.stmt(`SELECT resource_snapshot, issue_closure_result FROM workflow_decisions
       WHERE session_id=? AND controlling_session_id=? AND category='issue_closure' AND resource_key=? AND status='consumed'
         AND authority='orchestrator' AND issue_closure_result IS NOT NULL`)
-      .all(campaignId, campaignId, `issue_closure:${repository.toLowerCase()}#${issue}`) as Array<{ resource_snapshot: string; issue_closure_result: string }>;
-    return rows.some((row) => {
-      const snapshot = parseJson<GithubIssueClosureSnapshot>(row.resource_snapshot);
-      const result = parseJson<GithubIssueClosureResult>(row.issue_closure_result);
-      return snapshot?.category === "issue_closure" && snapshot.reason === "completed" && snapshot.issue === issue &&
-        Boolean(snapshot.issueAdmission) && snapshot.epicMembers?.readable === true && snapshot.epicMembers.members.length > 0 &&
-        result?.outcome === "closed";
-    });
+      .all(campaignId, campaignId, key) as Array<{ resource_snapshot: string; issue_closure_result: string }>;
+    return rows.some((row) => this.memberProvenEpicClosureKey(row) === key);
+  }
+
+  /** One read per ledger projection, rather than one receipt query per planned issue item. */
+  memberProvenEpicClosures(campaignId: string): ReadonlySet<string> {
+    const rows = this.stmt(`SELECT resource_key, resource_snapshot, issue_closure_result FROM workflow_decisions
+      WHERE session_id=? AND controlling_session_id=? AND category='issue_closure' AND status='consumed'
+        AND authority='orchestrator' AND issue_closure_result IS NOT NULL`)
+      .all(campaignId, campaignId) as Array<{ resource_key: string; resource_snapshot: string; issue_closure_result: string }>;
+    const issues = new Set<string>();
+    for (const row of rows) {
+      const key = this.memberProvenEpicClosureKey(row);
+      if (key && key === row.resource_key) issues.add(key.slice("issue_closure:".length));
+    }
+    return issues;
+  }
+
+  private memberProvenEpicClosureKey(row: { resource_snapshot: string; issue_closure_result: string }): string | null {
+    const snapshot = parseJson<GithubIssueClosureSnapshot>(row.resource_snapshot);
+    const result = parseJson<GithubIssueClosureResult>(row.issue_closure_result);
+    return snapshot?.category === "issue_closure" && snapshot.reason === "completed" &&
+      typeof snapshot.repository === "string" && Number.isSafeInteger(snapshot.issue) && snapshot.issue > 0 &&
+      Boolean(snapshot.issueAdmission) && snapshot.epicMembers?.readable === true && Array.isArray(snapshot.epicMembers.members) &&
+      snapshot.epicMembers.members.length > 0 && result?.outcome === "closed"
+      ? `issue_closure:${snapshot.repository.toLowerCase()}#${snapshot.issue}` : null;
   }
 
   /** Consumption and its initial uncertainty are one durable write before dispatch. */
@@ -26247,14 +26440,19 @@ export class ControlPlaneDb {
   }
 
   setPendingApproval(id: string, approval: PendingApproval | null): void {
-    const existing = parseJson<PendingApproval>((this.stmt(
-      "SELECT pending_approval FROM sessions WHERE id=?",
-    ).get(id) as { pending_approval: string | null } | undefined)?.pending_approval ?? null);
-    const identified = this.withoutSubmittedAsyncQuestions(id,
-      approval ? pendingApprovalWithOccurrenceIds(approval, existing) : null);
-    this.stmt("UPDATE sessions SET pending_approval=? WHERE id=?")
-      .run(identified ? JSON.stringify(identified) : null, id);
-    if (JSON.stringify(existing) !== JSON.stringify(identified)) this.advanceSessionAttentionRevision(id);
+    this.atomic(() => {
+      const existing = parseJson<PendingApproval>((this.stmt(
+        "SELECT pending_approval FROM sessions WHERE id=?",
+      ).get(id) as { pending_approval: string | null } | undefined)?.pending_approval ?? null);
+      const identified = this.withoutSubmittedAsyncQuestions(id,
+        approval ? pendingApprovalWithOccurrenceIds(approval, existing) : null);
+      this.stmt("UPDATE sessions SET pending_approval=? WHERE id=?")
+        .run(identified ? JSON.stringify(identified) : null, id);
+      if (JSON.stringify(existing) !== JSON.stringify(identified)) {
+        this.advanceSessionAttentionRevision(id);
+        this.enqueueOutboundAssistantAttentionInTransaction(id, pendingRequests(identified), Date.now());
+      }
+    });
   }
 
   getPolicyHookApproval(sessionId: string, requestId: string): PolicyHookApprovalRecord | null {
@@ -28549,6 +28747,7 @@ export class ControlPlaneDb {
     payloadSha256: string;
     expiresAt: number;
     now: number;
+    systemNotice?: true;
   }): SessionPromptCommandRecord {
     JSON.parse(input.payloadJson);
     const existing = this.getSessionPromptCommand(input.commandId);
@@ -28568,6 +28767,9 @@ export class ControlPlaneDb {
       input.commandId, input.sessionId, input.runnerId, input.payloadJson, input.payloadSha256,
       input.now, input.expiresAt, input.now, input.now,
     );
+    if (input.systemNotice) this.stmt(
+      "INSERT INTO session_system_notice_commands (command_id,session_id) VALUES (?,?)",
+    ).run(input.commandId, input.sessionId);
     return this.getSessionPromptCommand(input.commandId)!;
   }
 
@@ -33864,6 +34066,7 @@ export class ControlPlaneDb {
     spec: AutomationSpec;
     nextFireAt: number | null;
     actor: GovernanceActor;
+    assistantAuthorization?: {connectionId: string; operation: AssistantAutomationOperation};
     now: number;
   }): AutomationSchedule {
     const { spec } = input;
@@ -33893,6 +34096,9 @@ export class ControlPlaneDb {
         detail: { enabled: spec.enabled, nextFireAt: input.nextFireAt,
           ...(input.approval ? { occurrenceId: input.approval.occurrenceId, resourceDigest: input.approval.resourceDigest } : {}) }, now: input.now,
       });
+      if (input.assistantAuthorization) bindAssistantAutomation(this, this.getAutomation(input.automationId)!,
+        input.assistantAuthorization.connectionId, input.assistantAuthorization.operation);
+      else this.stmt("DELETE FROM assistant_automation_authority WHERE automation_id=?").run(input.automationId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -33906,6 +34112,7 @@ export class ControlPlaneDb {
     spec: AutomationSpec;
     nextFireAt: number | null;
     actor: GovernanceActor;
+    assistantAuthorization?: {connectionId: string; operation: AssistantAutomationOperation};
     now: number;
   }): AutomationSchedule | null {
     const current = this.getAutomation(input.automationId);
@@ -33944,6 +34151,9 @@ export class ControlPlaneDb {
         automationId: input.automationId, kind, actor: input.actor,
         detail: { enabled: spec.enabled, nextFireAt: input.nextFireAt }, now: input.now,
       });
+      if (input.assistantAuthorization) bindAssistantAutomation(this, this.getAutomation(input.automationId)!,
+        input.assistantAuthorization.connectionId, input.assistantAuthorization.operation);
+      else this.stmt("DELETE FROM assistant_automation_authority WHERE automation_id=?").run(input.automationId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -33981,9 +34191,9 @@ export class ControlPlaneDb {
     }
   }
 
-  getAutomation(automationId: string): AutomationSchedule | null {
-    const row = this.stmt("SELECT * FROM automations WHERE automation_id=? AND deleted_at IS NULL")
-      .get(automationId) as unknown as AutomationRow | undefined;
+  getAutomation(automationId: string, includeDeleted = false): AutomationSchedule | null {
+    const row = this.stmt("SELECT * FROM automations WHERE automation_id=? AND (deleted_at IS NULL OR ?=1)")
+      .get(automationId, includeDeleted ? 1 : 0) as unknown as AutomationRow | undefined;
     return row ? this.automation(row) : null;
   }
 
@@ -34277,15 +34487,21 @@ export class ControlPlaneDb {
     includeQuestionTitle: boolean;
     actor: GovernanceActor;
     now: number;
+    privateAddresses?: string[];
   }): OutboundEventSubscriptionView | null {
     if (input.scope.kind === "project" && !this.getProject(input.scope.projectId)) return null;
     if (input.scope.kind === "automation" && !this.getAutomation(input.scope.automationId)) return null;
+    if (input.scope.kind === "assistant") {
+      const connection = this.assistantConnections.get(input.scope.connectionId);
+      if (!connection || connection.revoked || input.actor.kind !== "human" || input.actor.id !== connection.ownerUserId ||
+          this.operatingHumanPrincipal(connection.ownerUserId, connection.organizationId)?.role !== "owner") return null;
+    }
     this.stmt(
       `INSERT INTO outbound_event_subscriptions
        (subscription_id,callback_url,secret_key,generation,scope_kind,project_id,automation_id,
         event_kinds_json,include_session_name,include_question_title,state,created_by_kind,
-        created_by_id,created_at,updated_at)
-       VALUES (?,?,?,1,?,?,?,?,?,?,'active',?,?,?,?)`,
+        created_by_id,created_at,updated_at,assistant_connection_id,private_addresses_json)
+       VALUES (?,?,?,1,?,?,?,?,?,?,'active',?,?,?,?,?,?)`,
     ).run(
       input.subscriptionId,
       input.callbackUrl,
@@ -34300,13 +34516,15 @@ export class ControlPlaneDb {
       input.actor.id ?? null,
       input.now,
       input.now,
+      input.scope.kind === "assistant" ? input.scope.connectionId : null,
+      input.privateAddresses?.length ? JSON.stringify(input.privateAddresses) : null,
     );
     return this.getOutboundEventSubscription(input.subscriptionId);
   }
 
   listOutboundEventSubscriptions(): OutboundEventSubscriptionView[] {
     const rows = this.stmt(
-      `SELECT * FROM outbound_event_subscriptions WHERE revoked_at IS NULL
+      `SELECT * FROM outbound_event_subscriptions WHERE revoked_at IS NULL AND scope_kind<>'assistant'
        ORDER BY created_at, subscription_id`,
     ).all() as unknown as OutboundEventSubscriptionRow[];
     return rows.map((row) => this.outboundEventSubscription(row));
@@ -34385,7 +34603,7 @@ export class ControlPlaneDb {
          WHERE status='delivering' AND lease_expires_at<=?`,
       ).run(now, now, now);
       const rows = this.stmt(
-        `SELECT delivery.*,subscription.callback_url,subscription.secret_key
+        `SELECT delivery.*,subscription.callback_url,subscription.secret_key,subscription.assistant_connection_id,subscription.private_addresses_json
          FROM outbound_event_deliveries delivery INDEXED BY idx_outbound_event_deliveries_retry
          JOIN outbound_event_subscriptions subscription
            ON subscription.subscription_id=delivery.subscription_id
@@ -34394,7 +34612,7 @@ export class ControlPlaneDb {
            AND delivery.payload_json IS NOT NULL
          ORDER BY delivery.next_attempt_at,delivery.created_at,delivery.delivery_id LIMIT ?`,
       ).all(now, Math.max(1, Math.min(64, Math.floor(limit)))) as unknown as Array<
-        OutboundEventDeliveryRow & { callback_url: string; secret_key: string }
+        OutboundEventDeliveryRow & { callback_url: string; secret_key: string; assistant_connection_id: string | null; private_addresses_json: string | null }
       >;
       const claimed: ClaimedOutboundEventDelivery[] = [];
       for (const row of rows) {
@@ -34413,6 +34631,8 @@ export class ControlPlaneDb {
           callbackUrl: row.callback_url,
           secret: row.secret_key,
           payloadJson: row.payload_json!,
+          ...(row.assistant_connection_id ? {assistantConnectionId: row.assistant_connection_id} : {}),
+          ...(row.private_addresses_json ? {privateAddresses: JSON.parse(row.private_addresses_json)} : {}),
           attempt: row.attempt_count + 1,
           leaseId,
         });
@@ -34425,7 +34645,7 @@ export class ControlPlaneDb {
     deliveryId: string;
     subscriptionId: string;
     leaseId: string;
-    disposition: "delivered" | "retry" | "failed" | "deferred";
+    disposition: "delivered" | "retry" | "failed" | "deferred" | "dropped";
     now: number;
     statusCode?: number;
     nextAttemptAt?: number;
@@ -35629,9 +35849,11 @@ export class ControlPlaneDb {
     return {
       subscriptionId: row.subscription_id,
       callbackUrl: row.callback_url,
+      ...(row.private_addresses_json ? {privateAddresses: JSON.parse(row.private_addresses_json)} : {}),
       scope: row.scope_kind === "project"
         ? { kind: "project", projectId: row.project_id! }
-        : { kind: "automation", automationId: row.automation_id! },
+        : row.scope_kind === "automation" ? { kind: "automation", automationId: row.automation_id! }
+        : { kind: "assistant", connectionId: row.assistant_connection_id! },
       eventKinds: jsonArray(row.event_kinds_json).filter((kind): kind is OutboundEventKind =>
         OUTBOUND_EVENT_KINDS.has(kind as OutboundEventKind)),
       includeSessionName: row.include_session_name === 1,
@@ -35666,6 +35888,13 @@ export class ControlPlaneDb {
     };
   }
 
+  private enqueueOutboundAssistantAttentionInTransaction(sessionId: string, requests: PendingApproval[], now: number): void {
+    for (const request of requests) this.enqueueOutboundSessionEventInTransaction({
+      sourceKey: `assistant-attention:${sessionId}:${request.occurrenceId ?? request.requestId}`,
+      kind: "session.input_required", sessionId, occurredAt: now, assistantOnly: true,
+    });
+  }
+
   private enqueueOutboundStatusEventsInTransaction(input: {
     sessionId: string;
     previousStatus?: SessionStatus;
@@ -35694,6 +35923,10 @@ export class ControlPlaneDb {
         });
       }
     }
+    // Snapshot and direct pending/status producers share the occurrence fence. Async asks
+    // also wake while execution continues; a status change must not create a second wake.
+    this.enqueueOutboundAssistantAttentionInTransaction(input.sessionId, pendingRequests(input.pending)
+      .filter(request => input.status === "input_required" || (request.async && !isTerminal(input.status))), input.now);
     if (input.status !== "input_required") return;
     const sessionRow = this.stmt("SELECT * FROM sessions WHERE id=?")
       .get(input.sessionId) as unknown as SessionRow | undefined;
@@ -35711,6 +35944,7 @@ export class ControlPlaneDb {
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-input-required:${input.sessionId}:${occurrenceId}`,
         kind: "session.input_required",
+        excludeAssistant: true,
         sessionId: input.sessionId,
         occurredAt: input.now,
         ...(request.kind === "question" ? { questionTitle: request.title } : {}),
@@ -35777,6 +36011,8 @@ export class ControlPlaneDb {
     occurredAt: number;
     detail?: Pick<OutboundEventEnvelope, "branch" | "pullRequest" | "checks" | "cost">;
     questionTitle?: string;
+    assistantOnly?: boolean;
+    excludeAssistant?: boolean;
   }): number {
     const session = this.stmt(
       `SELECT id,project_id,title FROM sessions WHERE id=?`,
@@ -35792,10 +36028,14 @@ export class ControlPlaneDb {
       `SELECT * FROM outbound_event_subscriptions
        WHERE revoked_at IS NULL AND state='active'
          AND ((scope_kind='project' AND project_id=?) OR
-              (scope_kind='automation' AND automation_id=?))
+              (scope_kind='automation' AND automation_id=?) OR
+              (scope_kind='assistant' AND assistant_connection_id IN (SELECT connection_id FROM assistant_work WHERE session_id=?)))
        ORDER BY created_at,subscription_id`,
-    ).all(session.project_id, origin?.automation_id ?? null) as unknown as OutboundEventSubscriptionRow[])
-      .filter((row) => jsonArray(row.event_kinds_json).includes(input.kind));
+    ).all(session.project_id, origin?.automation_id ?? null, input.sessionId) as unknown as OutboundEventSubscriptionRow[])
+      .filter((row) => jsonArray(row.event_kinds_json).includes(input.kind))
+      .filter((row) => !input.assistantOnly || row.scope_kind === "assistant")
+      .filter((row) => !input.excludeAssistant || row.scope_kind !== "assistant")
+      .filter((row) => row.scope_kind !== "assistant" || this.assistantWork.authorizedForSession(row.assistant_connection_id!, input.sessionId).length > 0);
     if (matching.length === 0) return 0;
 
     const eventId = `oev_${randomUUID().replace(/-/g, "")}`;
@@ -35844,6 +36084,15 @@ export class ControlPlaneDb {
           ? { questionTitle: input.questionTitle.slice(0, 240) }
           : {}),
       };
+      if (row.scope_kind === "assistant") {
+        const work = this.assistantWork.authorizedForSession(row.assistant_connection_id!, input.sessionId);
+        // Assistant wakeups never inherit automation parameters, names, question text or results.
+        for (const key of Object.keys(envelope)) {
+          if (!["version", "eventId", "kind", "occurredAt", "sessionId", "projectId"].includes(key)) delete (envelope as unknown as Record<string, unknown>)[key];
+        }
+        envelope.assistant = {controlPlaneId: this.instanceId(), connectionId: row.assistant_connection_id!,
+          work: work.map(({workId, revision, attentionRevision}) => ({workId, revision, attentionRevision}))};
+      }
       const payload = JSON.stringify(envelope);
       if (Buffer.byteLength(payload) > OUTBOUND_EVENT_BODY_LIMIT_BYTES) {
         this.stmt(

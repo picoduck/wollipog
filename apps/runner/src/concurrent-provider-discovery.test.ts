@@ -16,6 +16,26 @@ import { managedProviderProfileRoot } from "./provider-profile-home.js";
 import { writeProviderProfileMarker } from "./provider-profile.js";
 import { providerAccountEnvironment, providerForDriver } from "./provider-accounts.js";
 import type { SessionMeta } from "./session-store.js";
+import { runnerHarnessReadiness } from "../../control-plane/src/host-admin-route.js";
+import { mergeInstallationAndAccountReadiness } from "./provider-readiness.js";
+
+test("native installation admission failures stay blocking through account projection and updater facts", { skip: process.platform === "win32" }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-typed-installation-admission-"));
+  const executable = join(root, "codex");
+  writeFileSync(executable, `#!${process.execPath}\nthrow new Error('installation admission must refuse before a provider starts');\n`, { mode: 0o700 });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${root}:${previousPath ?? "/usr/bin:/bin"}`;
+  t.after(() => { process.env.PATH = previousPath; rmSync(root, { recursive: true, force: true }); });
+  for (const error of [new ProviderHomeLeaseError("foreign_owner"), new ProviderHomeLeaseError("unavailable"), new Error("unverified admission")]) {
+    const discovered = await discoverAgents({ authorize: async () => { throw error; } });
+    const agent = discovered.find((candidate) => candidate.installation?.path === executable && candidate.driver === "codex-app-server");
+    assert.ok(agent?.providerReadiness);
+    assert.equal(agent.providerReadiness.installationAdmission, "blocked");
+    const projected = { ...agent, providerReadiness: mergeInstallationAndAccountReadiness(agent.providerReadiness,
+      { checkedAt: Date.now(), installation: "compatible", authentication: "authenticated", reason: "ready" }) };
+    assert.equal(runnerHarnessReadiness({ connectedAt: 1, agents: [projected] }).agents[0]!.ownershipBlocked, true);
+  }
+});
 
 // The discovery regression uses a deterministic ownership backend. The native journal and
 // worker have separate integration suites; no credential or actual provider process is used.

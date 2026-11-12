@@ -4,7 +4,7 @@ import { realpath } from "node:fs/promises";
 import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionMessage, type CampaignLaunchInspectionResult } from "@wollipog/protocol";
 import { githubSlug } from "./git-ops.js";
 import { gitlabIssueOrigin } from "./gitlab-issue-closure.js";
-import { inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+import { PublishedIssueMismatch, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
 
 /** Runner-side ceiling, independent of whether the caller's cancellation ever arrives. */
 export const CAMPAIGN_LAUNCH_INSPECTION_LIFETIME_MS = 60_000;
@@ -96,9 +96,11 @@ export async function inspectCampaignLaunch(
       ...(message.facts ? { issueFacts: issueFacts! } : {}),
       ...(message.epic !== undefined ? { candidates } : {}),
       ...(inspected ? { publicationDigest: inspected.publicationDigest, duplicateSearch: inspected.duplicateSearch } : {}) };
-  } catch {
+  } catch (error) {
     if (signal.aborted) return { ...base, ok: false, cancelled: true, error: "Inspection was cancelled before it completed; no launch was admitted." };
-    return { ...base, ok: false, failure, error: CAMPAIGN_LAUNCH_INSPECTION_ERRORS[failure] };
+    return { ...base, ok: false, failure,
+      ...(message.publication && message.issueNumbers.length ? { publicationFailure: error instanceof PublishedIssueMismatch ? error.field : "read_failed" as const } : {}),
+      error: CAMPAIGN_LAUNCH_INSPECTION_ERRORS[failure] };
   }
 }
 
