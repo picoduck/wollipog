@@ -24795,11 +24795,13 @@ export class ControlPlaneDb {
     actor?: GovernanceActor,
   ): WorkflowDecisionView | null {
     const owed = oweResume ? ", resume_state='held', resume_command_id=NULL, resume_updated_at=?" : "";
-    const questionAnswer = outcome === "approved" && isChildQuestionSnapshot(this.workflowDecisionByOccurrence(occurrenceId)?.resourceSnapshot);
+    const snapshot = this.workflowDecisionByOccurrence(occurrenceId)?.resourceSnapshot;
+    const questionAnswer = outcome === "approved" && (isChildQuestionSnapshot(snapshot) ||
+      (snapshot?.category === "owner_decision" && snapshot.ruleDelegation !== undefined));
     const result = this.stmt(
       `UPDATE workflow_decisions SET status=?, consumed_at=?, selected_option_id=?, evidence_reviewed=?,
        rationale_digest=?, child_message=?, delegated_video_evidence=?, delegated_image_review=?, resolved_at=?,
-       closure_approval=CASE WHEN category='issue_closure' AND ?='approved' THEN ? ELSE closure_approval END${owed}
+       closure_approval=CASE WHEN category IN ('issue_closure','owner_decision') AND ?='approved' THEN ? ELSE closure_approval END${owed}
        WHERE occurrence_id=? AND status='pending' AND authority=?`,
     ).run(
       questionAnswer ? "consumed" : outcome, questionAnswer ? now : null, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
@@ -24983,6 +24985,13 @@ export class ControlPlaneDb {
     ).all(controllingSessionId) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
     );
+  }
+
+  personalRuleDelegations(rootId: string): WorkflowDecisionView[] {
+    return (this.stmt(`SELECT * FROM workflow_decisions WHERE session_id=? AND controlling_session_id=?
+      AND category='owner_decision' AND status='consumed'
+      AND json_extract(resource_snapshot, '$.ruleDelegation') IS NOT NULL ORDER BY resolved_at DESC, rowid DESC`).all(rootId, rootId) as unknown[])
+      .map(workflowDecisionFromRow).filter((d): d is WorkflowDecisionView => d !== null);
   }
 
   setWorkflowDecisionResume(

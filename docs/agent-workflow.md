@@ -46,7 +46,7 @@ for nobody; the shipped authority reference lists what it names.
 
 Installed or user-authored workflows are independent instructions. Name any unresolved mandatory
 human rule with its exact file, quoted requirement and affected action before proceeding to that
-gate. For example, an installed issue-workflow may require per-PR user merge/deletion approval,
+gate. For example, an installed third-party workflow may require consent to a disputed scope change,
 external private-bucket uploads or human evidence review; an installed issue-reporting skill may
 require user payload review. Those instructions are not changed by this repository's Full Control
 policy. Do not edit installed skills or live provider configuration to remove the conflict.
@@ -59,8 +59,7 @@ only as prose (#4137):
 - The child still files the exact typed decision, such as `pr_merge`, with
   `request_workflow_decision` and names the rule in `ownerRule` (`source`: the file; `quote`: the
   requirement, on one line), or with `wollipog decision request ... --owner-rule-source <path>
-  --owner-rule-quote <text>`. The occurrence is created human-owned (`owner_kept`) under any mode
-  or grant, reaches the owner's Inbox and Campaign Status under Waiting for You with the rule, and
+  --owner-rule-quote <text>`. The occurrence is created human-owned (`owner_kept`) unless an authenticated campaign-scoped personal-rule approval applies, reaches the owner's Inbox and Campaign Status under Waiting for You with the rule, and
   later requests for the same resource stay the owner's. The rule only narrows authority.
 - The root hands any occurrence already filed without the rule to the owner with
   `hand_workflow_decision_to_owner`.
@@ -331,3 +330,13 @@ The hosting-stack restriction remains absolute for a hosted agent, including det
 Deployment is a separately authorized handoff to an operator proven to be outside that stack.
 Do not refresh primary main while its file watcher would deploy code. Report the deployed commit
 when known; a merge does not prove deployment.
+
+
+### Personal Instructions in Full Control
+
+For the authenticated, campaign-scoped personal-rule Owner Approval alternative (v364), follow
+[Personal Instructions in Full Control](../skills/using-wollipog/references/campaign-authority.md#personal-instructions-in-full-control).
+Never infer authorship from a path. Repository rules, installed skills, Human Required rules,
+Custom and unverifiable sources retain their human gates. The root first reports every exact
+rule set aside, its source/quote, categories and approval occurrence; report later confirmations
+before relying on them. Each action still requires its own exact typed approval and consumption.

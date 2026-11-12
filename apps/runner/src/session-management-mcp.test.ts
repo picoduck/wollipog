@@ -358,6 +358,10 @@ test("owner-decision tools are the root Orchestrator's, post to its own paths an
   assert.equal(asked.isError, undefined, resultText(asked));
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/owner-decisions`);
   assert.deepEqual(calls.at(-1)?.body, ask);
+  const ruleDelegation = { rule: { source: "~/.claude/CLAUDE.md", quote: "Ask before merging." }, categories: ["pr_merge"] };
+  const delegated = await callTool(deps, "request_owner_decision", { ...ask, ruleDelegation });
+  assert.equal(delegated.isError, undefined, resultText(delegated));
+  assert.deepEqual(calls.at(-1)?.body, { ...ask, ruleDelegation });
   const handed = await callTool(deps, "hand_workflow_decision_to_owner", { occurrenceId: "workflow_2", reason: "The owner kept it.", sessionId: "child" });
   assert.equal(handed.isError, undefined, resultText(handed));
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_2/hand-to-owner`);

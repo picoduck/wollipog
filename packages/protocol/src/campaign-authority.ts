@@ -119,6 +119,8 @@ export const FULL_CONTROL_DECLINED_CLASSES: ReadonlySet<FullControlRequestClass>
   new Set(["secrets_and_sign_in", "persistent_permissions", "provider_access_expansion"]);
 
 export interface CampaignAuthorityEvaluation {
+  /** Human approval superseding this exact personal rule within the current campaign. */
+  supersededOwnerRule?: { rule: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule; occurrenceId: string };
   owner: "human" | "orchestrator";
   basis: "human_required" | "custom_policy" | "campaign_delegation" | "standing_authorization" | "standing_decline";
   reason: "custom_owner" | "authorized_operation" | "outside_boundary" | "protected_request" |

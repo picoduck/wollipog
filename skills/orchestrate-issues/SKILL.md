@@ -74,7 +74,7 @@ Under Full Control, which launches with no form or question, the root makes this
 after launch in one first report before its first child; the reference says what it names. The
 report asks nothing and waits for nobody.
 
-Carry forward the user's actual campaign authorization and repository rules. Routine claims, isolated worktrees, testing, pushing, opening PRs, and required reviews need no repeated permission. Existing rules may still require per-PR merge authorization, UI evidence review, remote-branch deletion authorization, and approval of each exact sanitized issue payload. Do not silently convert a request for this workflow into a waiver of those gates.
+Carry forward the user's actual campaign authorization and repository rules. Routine claims, isolated worktrees, testing, pushing, opening PRs, and required reviews need no repeated permission. Repository rules, installed third-party skills and Human Required rules retain their approval requirements. Do not silently convert a request for this workflow into a waiver of those gates.
 
 Read the authoritative current campaign state and server-derived policy with `get_campaign` before dispatch and again before resolving a workflow decision; do not rely on a prompt copy when the server state is available. For typed action decisions such as `pr_merge`, `merged_branch_deletion`, `follow_up_issue_publication`, `ui_evidence_approval`, and `review_round_extension`, the child must use `request_workflow_decision`, `get_workflow_decision`, and `consume_workflow_decision` for the exact occurrence immediately before the matching action. The parent must not create or consume a child's gate on its behalf. Discover pending occurrences with `list_descendant_requests` and resolve only a currently Orchestrator-owned exact occurrence with `resolve_descendant_workflow_decision`. A child's clarification or design choice uses `implementation_question` with `kind: "question"` (protocol v332): a normal question with suggested options and free text, never a consumable action approval. Answer an owned occurrence with `resolve_descendant_workflow_decision`, putting free text in `childMessage`, optionally with `selectedOptionId`; `outcome: "approve"` delivers an answer, not authority. Legacy implementation requests without `kind` retain their fixed-choice approval behavior. Use `answer_descendant_question` and `resolve_descendant_approval` only for applicable non-workflow requests; they never substitute for a typed workflow gate. An ordinary prompt, a stale approval, or Parent Control availability is not authorization for a typed gate.
 
@@ -390,3 +390,13 @@ repository and lineage naming both, and it joins the scope as one repository-qua
 with its follow-up lineage. Outside the boundary it is a person's
 (`target_outside_boundary`): for a repository of the campaign's Project, request its addition with
 `request_campaign_repository_addition` naming the follow-up, and publish only after the addition.
+
+
+### Personal Instructions in Full Control
+
+For the authenticated, campaign-scoped personal-rule Owner Approval alternative (v364), follow
+[Personal Instructions in Full Control](../using-wollipog/references/campaign-authority.md#personal-instructions-in-full-control).
+Never infer authorship from a path. Repository rules, installed skills, Human Required rules,
+Custom and unverifiable sources retain their human gates. The root first reports every exact
+rule set aside, its source/quote, categories and approval occurrence; report later confirmations
+before relying on them. Each action still requires its own exact typed approval and consumption.

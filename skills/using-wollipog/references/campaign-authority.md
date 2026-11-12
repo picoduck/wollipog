@@ -77,7 +77,8 @@ only as prose:
 - The requester, usually a child, still files the exact typed decision, such as `pr_merge`, with
   `request_workflow_decision`, and names the rule in `ownerRule`: `source` is the file and `quote`
   the requirement, on one line (CLI `--owner-rule-source` and `--owner-rule-quote`; control plane
-  v296). The occurrence is created human-owned (`owner_kept`) under any mode, grant or category. It
+  v296). The occurrence is created human-owned (`owner_kept`) unless the authenticated personal-rule
+  approval below applies. It
   reaches the owner's Inbox and Campaign Status under Waiting for You with the rule, and every later
   request for the same resource stays the owner's. `ownerRule` only narrows authority.
 - A Full Control root hands an occurrence already filed without the rule to the owner with
@@ -159,3 +160,28 @@ bounded review-attempt limits required by the applicable review workflow.
 
 Never update or restart the stack hosting the session, even through a detached helper. A deployment
 needs a separately authorized operator proven to be outside that stack; report the handoff.
+
+
+### Personal Instructions in Full Control
+
+Do not infer authorship from a path or an agent's assertion. Under Full Control, the root can
+request one campaign-scoped Owner Approval using `request_owner_decision`, `kind: "approval"`,
+and `ruleDelegation: {rule: {source, quote}, categories: [...]}` (control plane v364). Supply the
+ordinary question/options fields; the server replaces their wording with the exact rule,
+categories, authorship confirmation and Delegate for This Campaign / Keep My Approval choices.
+Only the authenticated launching owner can confirm. This is the issue's one-time approval
+alternative, not automatic authorship recognition. Supported sources are `~/.claude/CLAUDE.md`
+and `~/.codex/AGENTS.md`; other sources fail closed. Installed skills, repository rules and
+Human Required rules are excluded. Custom and older peers retain `owner_kept` behavior.
+
+The approval applies only to the exact rule and already-delegated merge, branch-deletion,
+publication or UI-evidence categories in this campaign and boundary revision. Approval applies
+and consumes the exception automatically; do not consume it again. Each action still needs its
+own typed decision, review, evidence and consumption. Keep supplying the exact `ownerRule`:
+read the occurrence's owner and `authorityEvaluation.supersededOwnerRule`, which cites the
+authenticated approval. Unknown authorship or an undelegated category stays with the person.
+An explicit owner handoff is unchanged. Boundary or policy changes invalidate the exception.
+
+The root's first report must name each personal rule set aside, its exact source/quote, the
+delegated categories, approval occurrence and why the exception applies. If confirmation occurs
+later, report that update before relying on it. Never edit installed instructions to obtain it.

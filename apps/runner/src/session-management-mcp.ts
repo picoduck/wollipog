@@ -2754,7 +2754,7 @@ export const TOOLS: McpTool[] = [
         resourceSnapshot: WORKFLOW_DECISION_RESOURCE_SCHEMA,
         ownerRule: {
           type: "object",
-          description: "When an installed skill or user-authored instruction keeps this gate for a person, name it here: the decision is created human-owned under any mode or grant, so only the owner decides it, and its card shows the rule. It can never give the Orchestrator a decision. Requires control plane v296.",
+          description: "When an installed skill or user-authored instruction keeps this gate for a person, name it here: the decision is human-owned unless the owner has confirmed this exact personal rule through a campaign-scoped ruleDelegation approval. Repository, third-party and Human Required rules remain human-owned. Its card shows the rule. Requires control plane v296.",
           properties: {
             source: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_OWNER_RULE_SOURCE_MAX_CHARS,
               description: "The file that keeps the gate, such as ~/.claude/skills/issue-workflow/SKILL.md; letters, digits and ._~/\\@+:- without spaces" },
@@ -3025,6 +3025,15 @@ export const TOOLS: McpTool[] = [
         requestId: { type: "string", minLength: 1, maxLength: 256 },
         resourceKey: { type: "string", minLength: 1, maxLength: 512 },
         kind: { type: "string", enum: ["question", "approval"] },
+        ruleDelegation: {
+          type: "object",
+          description: "Campaign-scoped Owner Approval of an exact general personal rule. The owner confirms authorship; the server supplies visible wording/options. Only ~/.claude/CLAUDE.md or ~/.codex/AGENTS.md, never repository rules, installed skills or Human Required rules. Requires control plane v364. Unknown peers refuse the field.",
+          properties: {
+            rule: { type: "object", properties: { source: { type: "string" }, quote: { type: "string" } }, required: ["source", "quote"], additionalProperties: false },
+            categories: { type: "array", minItems: 1, maxItems: 4, uniqueItems: true, items: { type: "string", enum: ["pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval"] } },
+          },
+          required: ["rule", "categories"], additionalProperties: false,
+        },
         question: { type: "string", minLength: 1, maxLength: OWNER_DECISION_LIMITS.question },
         options: {
           type: "array",
@@ -3050,7 +3059,7 @@ export const TOOLS: McpTool[] = [
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("a session identity is required");
       if (args?.sessionId !== undefined) return errorResult("an owner decision is self-scoped and does not accept sessionId");
-      const { requestId, resourceKey, question, options, recommendedOptionId, material, kind } = args ?? {};
+      const { requestId, resourceKey, question, options, recommendedOptionId, material, kind, ruleDelegation } = args ?? {};
       if (kind !== undefined && kind !== "question" && kind !== "approval") return errorResult("kind must be question or approval");
       // An approval offers the owner an exact choice; only a question (#4270) may suggest fewer than two.
       if (kind !== "question" && (!Array.isArray(options) || options.length < OWNER_DECISION_LIMITS.minOptions)) {
@@ -3063,6 +3072,7 @@ export const TOOLS: McpTool[] = [
         requestId, resourceKey, question, options,
         ...(recommendedOptionId !== undefined ? { recommendedOptionId } : {}), ...(material !== undefined ? { material } : {}),
         ...(kind === "question" ? { kind } : {}),
+        ...(ruleDelegation !== undefined ? { ruleDelegation } : {}),
       });
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },

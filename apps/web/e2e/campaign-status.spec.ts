@@ -540,6 +540,25 @@ for (const theme of ["dark", "light"] as const) {
   }
 }
 
+for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+  test(`personal-rule approval shows the exact rule and campaign bounds at ${viewport.width}px (#4540)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=after&personalRule=1");
+    await page.getByRole("button", { name: "Open Request: Merge picoduck/wollipog#4141" }).click();
+    await page.getByRole("button", { name: "All Requests" }).click();
+    await page.getByText("Owner Decision Required", { exact: true }).click();
+    const detail = page.locator(".request-panel-detail");
+    await expect(detail).toContainText("~/.claude/CLAUDE.md");
+    await expect(detail).toContainText("Ask before merging a pull request.");
+    await expect(detail).toContainText("boundary revision 3");
+    await expect(detail).toContainText("Repository rules, installed skills and Human Required rules remain unchanged.");
+    await expect(detail.getByRole("button", { name: "Delegate for This Campaign", exact: true })).toBeVisible();
+    await expect(detail.getByRole("listitem").filter({ hasText: "Keep My Approval" })).toBeVisible();
+    await assertNoHorizontalOverflow(page, ".request-panel-detail");
+    if (process.env.PERSONAL_RULE_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.PERSONAL_RULE_EVIDENCE_DIR}/personal-rule-${viewport.width}.png` });
+  });
+}
+
 test("decisions the owner kept wait for them in Campaign Status, and each opens its card (#4064)", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=before");
   await expect(page.locator(".campaign-status-summary")).toBeVisible();
