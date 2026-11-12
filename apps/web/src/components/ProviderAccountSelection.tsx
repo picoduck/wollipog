@@ -168,23 +168,40 @@ export function providerAccountAutomationRefusalSentence(preview: ProviderAccoun
   }
 }
 
-/** What each run of a session automation is expected to use when the automation names no account
- * (#4512), from the same preview as New Session. Nothing shows until a reading for this exact target
- * arrives, or when the read fails: a run still resolves for itself. */
-export function AutomationExpectedProviderAccount({ runner, agentId, placement, choosable = false, id }: {
+/** What each run of a session automation is expected to use (#4512). An account the automation names
+ * is what each run uses, since an explicit account beats the policy. Otherwise this is the same
+ * preview as New Session, read even when the machine has no accounts left, because a saved Priority
+ * Order or Default Account still refuses those runs. Nothing shows until a reading for this exact
+ * target arrives, or when the read fails: a run still resolves for itself. */
+export function AutomationExpectedProviderAccount({ runner, agentId, placement, namedAccountId, choosable = false, id }: {
   runner: RunnerView;
   agentId: string;
   /** The run's project placement, or null when it can't be derived (the editor shows that error). */
   placement: Pick<ProviderAccountSelectionTarget, "projectId" | "workspaceId" | "noProject"> | null;
+  /** The account the automation itself names, if any. */
+  namedAccountId?: string;
   /** Whether the form offers its own account choice, which a refusal can point to. */
   choosable?: boolean;
   id?: string;
 }) {
   const agent = runner.agents.find((candidate) => candidate.id === agentId);
   const provider = agent ? providerForDriver(agent.driver ?? "acp") : null;
-  const hasAccounts = provider !== null && (runner.providerAccounts ?? []).some((account) => account.provider === provider);
-  const preview = useProviderAccountSelection(runner.runnerId, hasAccounts && placement ? { agentId, ...placement } : null,
+  const preview = useProviderAccountSelection(runner.runnerId, provider && placement && !namedAccountId ? { agentId, ...placement } : null,
     providerAccountSelectionRefreshKey(runner, runner.status === "online"));
+  if (namedAccountId) {
+    const named = runner.providerAccounts?.find((candidate) => candidate.id === namedAccountId);
+    return named ? (
+      <p className="field-helper" id={id}>
+        Each run uses{" "}
+        <AccountIdentifier identity={`${runner.runnerId}:${named.id}`} value={named.label} label="Account Email" />,
+        {" "}the account chosen for this automation.
+      </p>
+    ) : (
+      <FieldWarning id={id}>
+        The account chosen for this automation is no longer on this machine, so each run is refused when it starts.
+      </FieldWarning>
+    );
+  }
   if (!preview || preview.status === "none") return null;
   if (preview.status === "choice_required") {
     return (

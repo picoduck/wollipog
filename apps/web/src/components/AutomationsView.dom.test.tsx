@@ -3127,7 +3127,15 @@ function agentField(container: HTMLDivElement): HTMLElement {
 }
 
 test("under Priority Order a session automation names its expected account, why, and that each run rechecks it (#4512)", async () => {
-  const { fixture, targets } = await mountAccountEditor(accountPreview({}));
+  const targets: unknown[] = [];
+  const { fixture } = await mountAccountEditor(accountPreview({}), {
+    providerAccountSelection: async (runnerId: string, target: { agentId?: string }) => {
+      targets.push({ runnerId, target });
+      return target.agentId === "other-agent"
+        ? accountPreview({ provider: "codex", mode: "fixed", status: "none", source: "none", accountId: undefined, candidates: [] })
+        : accountPreview({});
+    },
+  });
   try {
     const text = agentField(fixture.container).textContent ?? "";
     assert.match(text, /Each run is expected to use work@example\.com\./);
@@ -3137,8 +3145,10 @@ test("under Priority Order a session automation names its expected account, why,
       "the preview asks about this exact agent and folder, placed as a run would be");
 
     await choose(fixture.container, "Agent", "Other Agent");
-    assert.doesNotMatch(agentField(fixture.container).textContent ?? "", /expected to use/,
-      "an agent of a provider with no accounts on this machine expects none");
+    assert.deepEqual((targets.at(-1) as { target: unknown }).target, { agentId: "other-agent", workspaceId: "runner-1-workspace" },
+      "another agent is previewed for itself, even with no accounts of its provider");
+    assert.doesNotMatch(agentField(fixture.container).textContent ?? "", /expected to use|Each run/,
+      "and a preview with nothing to bind shows nothing");
   } finally {
     await unmountFixture(fixture);
   }
@@ -3237,6 +3247,78 @@ test("an Orchestrator automation with no eligible account points to its own acco
     const field = choiceTrigger(fixture.container, "Orchestrator Provider Account")!.closest<HTMLElement>(".field")!;
     assert.match(field.querySelector(".field-warn")?.textContent ?? "",
       /^This machine's Claude Priority Order has no accounts\. Runs that start before this changes are refused\. Choose an account above, or review this machine's Provider Accounts\./);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+const ORCHESTRATOR_SETTINGS = {
+  orchestratorSettings: async (): Promise<OrchestratorSettingsView> => ({
+    defaults: structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), source: "system_default", controlModeSupported: true,
+  } as OrchestratorSettingsView),
+};
+
+test("with no accounts left, a saved policy's refusal still shows for both roles (#4512)", async () => {
+  const targets: unknown[] = [];
+  const creates: AutomationSpec[] = [];
+  const empty = accountPreview({ status: "choice_required", source: "none", accountId: undefined, refusal: "empty_order", candidates: [] });
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [{ ...runners[0]!, providerAccounts: [] }], [], {
+    ...ORCHESTRATOR_SETTINGS,
+    providerAccountSelection: async (_runnerId: string, target: unknown) => { targets.push(target); return empty; },
+    createAutomation: async (spec: AutomationSpec) => {
+      creates.push(structuredClone(spec));
+      return { ...schedule("created", spec.name), ...spec };
+    },
+  });
+  try {
+    assert.ok(targets.length > 0, "the preview is read although the machine has no accounts");
+    assert.match(agentField(fixture.container).querySelector(".field-warn")?.textContent ?? "",
+      /^This machine's Claude Priority Order has no accounts\. Runs that start before this changes are refused\. Review this machine's Provider Accounts\./);
+
+    await choose(fixture.container, "Session Role", "Orchestrator");
+    assert.equal(choiceTrigger(fixture.container, "Orchestrator Provider Account"), undefined, "there is no account to choose");
+    assert.match(agentField(fixture.container).querySelector(".field-warn")?.textContent ?? "", /has no accounts\. .* Review this machine's/,
+      "so the Orchestrator's refusal stays under Agent, without pointing to a choice that isn't there");
+
+    await choose(fixture.container, "Session Role", "Normal");
+    await setLabeledInput(fixture.container, "Name", "Nightly Review");
+    await act(async () => { button(fixture.container, "Create Automation").click(); });
+    await act(settle);
+    assert.equal(creates.length, 1, "Create Automation still saves");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an account named under Orchestrator and kept as Normal is what each run uses, not the policy's (#4512)", async () => {
+  const { fixture, creates } = await mountAccountEditor(accountPreview({ accountId: "spare" }), ORCHESTRATOR_SETTINGS);
+  try {
+    await choose(fixture.container, "Session Role", "Orchestrator");
+    await choose(fixture.container, "Orchestrator Provider Account", "Hidden Account");
+    await choose(fixture.container, "Session Role", "Normal");
+    const text = agentField(fixture.container).textContent ?? "";
+    assert.match(text, /Each run uses work@example\.com, the account chosen for this automation\./);
+    assert.doesNotMatch(text, /expected to use/, "no prediction of the policy's account");
+    await setLabeledInput(fixture.container, "Name", "Nightly Review");
+    await act(async () => { button(fixture.container, "Create Automation").click(); });
+    await act(settle);
+    const action = creates[0]?.action;
+    assert.ok(action?.kind === "create_session" && action.request.providerAccountId === "work", "and the saved run names it");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a named account no longer on the machine says each run is refused (#4512)", async () => {
+  const stored = schedule("gone-account", "Gone Account");
+  if (stored.action.kind !== "create_session") throw new Error("expected create-session action");
+  stored.action.request.providerAccountId = "removed";
+  const fixture = await mountAt(editRoute(stored.automationId), [stored], {}, {}, [], {}, [ACCOUNT_MACHINE], [], {
+    providerAccountSelection: async () => accountPreview({}),
+  });
+  try {
+    assert.equal(agentField(fixture.container).querySelector(".field-warn")?.textContent,
+      "The account chosen for this automation is no longer on this machine, so each run is refused when it starts.");
   } finally {
     await unmountFixture(fixture);
   }

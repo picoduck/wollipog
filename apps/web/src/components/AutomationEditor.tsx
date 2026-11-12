@@ -35,7 +35,7 @@ import { agentOptions } from "./agent-options.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { FieldError } from "./FieldError.js";
 import { AutomationScheduleFields } from "./AutomationScheduleFields.js";
-import { AutomationCampaignFields } from "./AutomationCampaignFields.js";
+import { AutomationCampaignFields, orchestratorProviderAccounts } from "./AutomationCampaignFields.js";
 import { automationProjectPlacement } from "../automation-project-placement.js";
 import { AutomationExpectedProviderAccount, providerAccountPreviewPlacement } from "./ProviderAccountSelection.js";
 import { AutomationsIcon } from "./Icons.js";
@@ -957,9 +957,11 @@ function AutomationEditorForm({
                     {primaryInstallationIssue && installationWarning(AUTOMATION_SAVED_INSTALLATION_UNAVAILABLE,
                       Boolean(installationFor(selectedRunner, form.agentId)),
                       () => update((current) => ({ ...current, rebindPrimary: true })))}
-                    {/* An Orchestrator's runs can name an account, so its expectation sits under that choice. */}
-                    {!form.campaign && selectedRunner && form.agentId && (
-                      <AutomationExpectedProviderAccount runner={selectedRunner} agentId={form.agentId} placement={accountPlacement} />
+                    {/* An Orchestrator offered an account choice has its expectation under that choice. */}
+                    {(!form.campaign || orchestratorProviderAccounts(selectedRunner, form.agentId).length === 0) &&
+                      selectedRunner && form.agentId && (
+                      <AutomationExpectedProviderAccount runner={selectedRunner} agentId={form.agentId} placement={accountPlacement}
+                        namedAccountId={form.providerAccountId} />
                     )}
                   </div>
                 ) : (

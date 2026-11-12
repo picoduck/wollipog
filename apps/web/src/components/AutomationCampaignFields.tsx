@@ -14,6 +14,13 @@ import { Notice } from "./Notice.js";
 import { AutomationExpectedProviderAccount } from "./ProviderAccountSelection.js";
 import { Select } from "./ui/ChoiceControls.js";
 
+/** The accounts an Orchestrator automation offers to name: its agent's provider's, on its machine. */
+export function orchestratorProviderAccounts(runner: RunnerView | undefined, agentId: string) {
+  const agent = runner?.agents.find(a => a.id === agentId);
+  const provider = agent?.driver === "claude-code" ? "claude" : agent?.driver === "codex-app-server" ? "codex" : null;
+  return (runner?.providerAccounts ?? []).filter(account => account.provider === provider);
+}
+
 /** The same policy dialog as New Session. The stored schedule holds the applied settings rather
  * than silently following changes to the owner's account defaults on a later day. */
 export function AutomationCampaignFields({ form, runner, accountPlacement, onChange }: {
@@ -36,8 +43,7 @@ export function AutomationCampaignFields({ form, runner, accountPlacement, onCha
   }, [api]);
   const campaign = form.campaign;
   const agent = runner?.agents.find(a => a.id === form.agentId);
-  const provider = agent?.driver === "claude-code" ? "claude" : agent?.driver === "codex-app-server" ? "codex" : null;
-  const accounts = (runner?.providerAccounts ?? []).filter(account => account.provider === provider);
+  const accounts = orchestratorProviderAccounts(runner, form.agentId);
   const accountTitles = maskedAccountTitles(accounts.map(account => account.label));
   const tiers = agent?.capabilities?.models.find(model => model.id === form.model || (!form.model && model.default))?.serviceTiers ?? [];
   const base = view?.defaults ?? DEFAULT_ORCHESTRATOR_DEFAULTS;
