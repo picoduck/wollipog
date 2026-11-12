@@ -718,7 +718,16 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       if (optionPresent(args, "--full-reason") && (!fullReason?.trim() || fullReason.startsWith("--"))) {
         return { error: "review session run --full-reason needs text" };
       }
-      return { tool: "request_review_session", input: { repository, number: Number(number), headSha, brief, ...(fullReason ? { fullReason } : {}) } };
+      const mode = option(args, "--mode");
+      if (mode !== undefined && mode !== "contributor") return { error: "review session run --mode must be contributor" };
+      const harness = option(args, "--reviewer");
+      const model = option(args, "--model");
+      const effort = option(args, "--effort");
+      if ((harness || model || effort) && (mode !== "contributor" || !["codex", "claude-code"].includes(harness ?? "") || !model || !effort)) {
+        return { error: "explicit review selection requires --mode contributor --reviewer codex|claude-code --model <model> --effort <effort>" };
+      }
+      return { tool: "request_review_session", input: { repository, number: Number(number), headSha, brief,
+        ...(mode ? { mode } : {}), ...(harness ? { reviewer: { harness, model, effort } } : {}), ...(fullReason ? { fullReason } : {}) } };
     }
     if ((verb === "get" || verb === "cancel") && words[3]) {
       return { tool: verb === "get" ? "get_review_session" : "cancel_review_session", input: { reviewSessionId: words[3] } };
@@ -1115,6 +1124,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
     : parsed.tool === "allocate_campaign_budget"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission
+    : parsed.tool === "request_review_session" && parsed.input.mode === "contributor"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.contributorReviews
     : ["request_review_session", "get_review_session", "list_review_sessions", "cancel_review_session"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.reviewSession
     : parsed.tool === "record_campaign_work_item_delivery"

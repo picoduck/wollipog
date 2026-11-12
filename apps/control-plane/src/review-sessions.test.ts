@@ -371,6 +371,59 @@ function requested(h: ReturnType<typeof harness>, sessionId = "s1") {
   return result.data;
 }
 
+test("contributor requests refuse old peers and missing capability without launching", () => {
+  for (const options of [{ protocol: 362, reviewSession: { ...CAPABILITY, contributorReviews: true as const } }, {}]) {
+    const h = harness(options);
+    try {
+      assert.match(h.svc.requestReviewSession("s1", request({ mode: "contributor" })).error!, /does not support contributor/u);
+      assert.equal(h.starts().length, 0);
+    } finally { h.db.close(); }
+  }
+});
+
+test("contributor review refuses an ad-hoc checkout even when the runner supports it", () => {
+  const h = harness({ reviewSession: { ...CAPABILITY, contributorReviews: true } });
+  try {
+    h.db.raw().prepare("UPDATE sessions SET workspace_id=NULL WHERE id='s1'").run();
+    assert.match(h.svc.requestReviewSession("s1", request({ mode: "contributor" })).error!, /registered project workspace/u);
+    assert.equal(h.starts().length, 0);
+  } finally { h.db.close(); }
+});
+
+test("explicit contributor reviewer preserves model, effort, isolation and budget admission", () => {
+  const h = harness({ configuration: true, reviewSession: { ...CAPABILITY, configuration: true, contributorReviews: true } });
+  const selected = request({ mode: "contributor", reviewer: { harness: "codex", model: "gpt-6.1-sol", effort: "high" } });
+  try {
+    const result = h.svc.requestReviewSession("s1", selected);
+    assert.ok(result.ok, result.error ?? "review refused");
+    const start = h.starts().at(-1)!;
+    assert.equal(start.spec.agentId, "codex");
+    assert.equal(start.spec.config?.model, "gpt-6.1-sol");
+    assert.equal(start.spec.config?.effort, "high");
+    assert.equal(start.spec.config?.permissionMode, "read-only");
+    assert.equal(start.spec.review?.mode, "contributor");
+    assert.match(h.svc.requestReviewSession("s2", { ...selected, reviewer: { ...selected.reviewer!, model: "missing" } }).error!, /unavailable/u);
+    assert.equal(h.starts().length, 1);
+  } finally { h.db.close(); }
+});
+
+test("contributor reviews select Claude explicitly and cannot bypass exhausted cost ceilings or same-family consent", () => {
+  const h = harness({ driver: "codex-app-server", configuration: true,
+    reviewSession: { ...CAPABILITY, configuration: true, contributorReviews: true } });
+  try {
+    const selected = request({ mode: "contributor", reviewer: { harness: "claude-code", model: "claude-opus-5-5", effort: "high" } });
+    h.db.updateSessionCostBudget("s1", 1, 4);
+    h.db.addSessionUsage("s1", { costUsd: 1 }, 5);
+    assert.match(h.svc.requestReviewSession("s1", selected).error!, /no cost budget left/u);
+    assert.equal(h.starts().length, 0);
+    assert.ok(h.svc.requestReviewSession("s2", selected).ok);
+    assert.equal(h.starts().at(-1)?.spec.agentId, "claude");
+    assert.equal(h.starts().at(-1)?.spec.config?.permissionMode, "dontAsk");
+    assert.match(h.svc.requestReviewSession("s1", request({ mode: "contributor",
+      reviewer: { harness: "codex", model: "gpt-6.1-sol", effort: "high" } })).error!, /same.*family/u);
+  } finally { h.db.close(); }
+});
+
 test("a session requests a review session: a typed reviewer of the other family, launched read-only for its exact head", () => {
   const h = harness();
   try {
@@ -2237,6 +2290,43 @@ function campaignReviewChild(h: ReturnType<typeof harness>, id = "snapshot-child
   h.db.updateSessionStatus(result.data.id, "running", Date.now());
   return result.data;
 }
+
+test("contributor reviewer selection cannot replace captured campaign or Automatic policy", () => {
+  for (const fixed of [true, false]) {
+    const h = harness({ campaign: true, configuration: true,
+      reviewSession: { ...CAPABILITY, configuration: true, contributorReviews: true },
+      ...(fixed ? { reviewPolicy: { reviewHarness: "codex" as const, reviewModel: "gpt-6.1-sol", reviewEffort: "high", reviewRoundBudget: 2 } } : {}) });
+    try {
+      const child = campaignReviewChild(h);
+      const reviewer = { harness: "codex" as const, model: "gpt-6.1-sol", effort: "high" };
+      const before = h.starts().length;
+      for (const changed of [{ harness: "claude-code" as const }, { model: "other" }, { effort: "low" }]) {
+        const result = h.svc.requestReviewSession(child.id, request({ mode: "contributor", reviewer: { ...reviewer, ...changed } }));
+        assert.match(result.error!, /conflicts.*review policy/u);
+      }
+      assert.equal(h.starts().length, before, "conflicting selections never launch or reserve a review");
+      const matching = h.svc.requestReviewSession(child.id, request({ mode: "contributor", reviewer }));
+      assert.ok(matching.ok, matching.error ?? "matching policy refused");
+      assert.equal(h.starts().at(-1)?.spec.config?.model, reviewer.model);
+      assert.equal(h.starts().at(-1)?.spec.review?.history?.roundBudget, fixed ? 2 : 4);
+    } finally { h.db.close(); }
+  }
+});
+
+test("contributor reviewer selection cannot replace current owner-configured settings", () => {
+  const h = harness({ configuration: true,
+    reviewSession: { ...CAPABILITY, configuration: true, contributorReviews: true } });
+  try {
+    h.db.reviewSettings.set(h.db.localIdentityContext().userId, null, { version: 1, roundBudget: 2, reviewers: [{
+      implementer: { agentId: "claude", driver: "claude-code", context: { kind: "native" } },
+      harness: "codex", model: "gpt-6.1-sol", effort: "high", allowSameFamily: false,
+    }] });
+    const before = h.starts().length;
+    assert.match(h.svc.requestReviewSession("s1", request({ mode: "contributor",
+      reviewer: { harness: "codex", model: "gpt-6.1-sol", effort: "low" } })).error!, /conflicts.*review policy/u);
+    assert.equal(h.starts().length, before);
+  } finally { h.db.close(); }
+});
 
 test("campaign review fields are captured at child launch and fixed policy wins over later personal changes", () => {
   const h = harness({ campaign: true, configuration: true, reviewPolicy: {

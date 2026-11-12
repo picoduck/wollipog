@@ -11514,7 +11514,7 @@ export class SessionsService {
     if (this.db.reviewSessions.isReviewSession(session.id)) return fail("A review session cannot request a review.", 409);
     const pullRequest = request?.pullRequest;
     if (!request || typeof request !== "object" || Array.isArray(request) ||
-        Object.keys(request).some((key) => !["pullRequest", "headSha", "brief", "fullReason"].includes(key)) ||
+        Object.keys(request).some((key) => !["pullRequest", "headSha", "brief", "fullReason", "mode", "reviewer"].includes(key)) ||
         !pullRequest || typeof pullRequest !== "object" || Object.keys(pullRequest).some((key) => !["repository", "number"].includes(key)) ||
         typeof pullRequest.repository !== "string" ||
         // A GitHub `owner/name`, or (v244, #3539) a GitLab `<host>/group[/subgroup…]/project`.
@@ -11524,6 +11524,15 @@ export class SessionsService {
       return fail("a review needs pullRequest {repository: \"owner/name\" or a GitLab \"<host>/group/project\", number: a positive pull request number or merge request IID}", 400);
     }
     const gitlab = campaignRepositoryLocation(pullRequest.repository)?.forge === "gitlab";
+    if (request.mode !== undefined && request.mode !== "contributor" ||
+        request.reviewer !== undefined && (request.mode !== "contributor" || !request.reviewer ||
+          typeof request.reviewer !== "object" || Array.isArray(request.reviewer) ||
+          Object.keys(request.reviewer).some(k => !["harness", "model", "effort"].includes(k)) ||
+          !["codex", "claude-code"].includes(request.reviewer.harness) ||
+          typeof request.reviewer.model !== "string" || !request.reviewer.model.trim() ||
+          typeof request.reviewer.effort !== "string" || !request.reviewer.effort.trim())) {
+      return fail("contributor review needs an explicit mode and a supported reviewer harness, model and effort", 400);
+    }
     if (typeof request.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(request.headSha)) {
       return fail("headSha must be the pull request's full 40-character lowercase head commit", 400);
     }
@@ -11545,11 +11554,19 @@ export class SessionsService {
     if (!runnerSupportsProtocol(runner?.protocolVersion, "reviewSession")) {
       return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "reviewSession", "review sessions"));
     }
+    if (request.mode === "contributor" && (!session.workspaceId ||
+        !runner?.workspaces.some(workspace => workspace.id === session.workspaceId))) {
+      return fail("contributor reviews require a registered project workspace", 409);
+    }
     if (gitlab && !runnerSupportsProtocol(runner?.protocolVersion, "gitlabReviewSessions")) {
       return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "gitlabReviewSessions", "review sessions of GitLab merge requests"));
     }
     let configured: ReturnType<typeof configuredReview>;
-    try { configured = configuredReview(this.db, session, runner, resolveEffectiveModelEffort); }
+    if (request.mode === "contributor" && (!runnerSupportsProtocol(runner?.protocolVersion, "contributorReviews") ||
+        runner?.runtime?.reviewSession?.contributorReviews !== true)) {
+      return fail("This machine does not support contributor review sessions; update Wollipog before requesting one.", 409);
+    }
+    try { configured = configuredReview(this.db, session, runner, resolveEffectiveModelEffort, request.reviewer); }
     catch (error) {
       if (error instanceof ReviewSettingsError) {
         this.log.info(JSON.stringify({ event: "review_configuration_refused", entryPoint: "request_review_session", sessionId: session.id }));
@@ -11591,6 +11608,7 @@ export class SessionsService {
       if (!(costBudgetUsd > 0)) return fail("this session has no cost budget left for a review", 409);
     }
     const policy: ReviewLaunchPolicy = {
+      ...(request.mode ? { mode: request.mode } : {}),
       requesterSessionId: session.id,
       pullRequest: { repository: pullRequest.repository, number: pullRequest.number },
       headSha: request.headSha,
@@ -11638,6 +11656,7 @@ export class SessionsService {
     this.log.info(JSON.stringify({ event: "review_session_requested", sessionId: session.id, reviewSessionId: created.data.id,
       ...(budgetRoot ? { campaignRootSessionId: budgetRoot, allocation: this.db.campaignBudgets.allocation(created.data.id) } : {}),
       reviewer: harness, repository: pullRequest.repository, number: pullRequest.number, headSha: request.headSha,
+      mode: request.mode ?? "own",
       configuration: configured?.configuration ?? null }));
     return ok(this.db.reviewSessions.view(created.data.id)!, 201);
   }

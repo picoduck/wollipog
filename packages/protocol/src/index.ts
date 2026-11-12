@@ -359,6 +359,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   reviewRuns: 228,
   /** Reviews of any owned worktree, with concurrent admission per pull request (#4329). */
   parallelWorktreeReviews: 335,
+  contributorReviews: 363,
   /** v237 binds post-upvote extensions and enforces their delta scope (#3641). */
   postUpvoteReviewExtensions: 237,
   /** Review sessions preserve admitted campaign accounting through final usage settlement. */

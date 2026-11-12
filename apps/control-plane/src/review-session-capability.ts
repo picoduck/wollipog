@@ -30,6 +30,7 @@ export function safeReviewSessionCapability(value: unknown): ReviewSessionCapabi
   return {
     reviewers,
     ...(input.questionPreservation === true ? { questionPreservation: true as const } : {}),
+    ...(input.contributorReviews === true ? { contributorReviews: true as const } : {}),
     ...(input.configuration === true ? { configuration: true as const } : {}),
     ...(Object.keys(unavailable).length ? { unavailable } : {}),
   };

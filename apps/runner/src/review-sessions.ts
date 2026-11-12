@@ -610,7 +610,7 @@ export class ReviewSessionLauncher {
         unavailable[harness] = reviewSessionDiscoveryReason(error);
       }
     }
-    return { reviewers, configuration: true, questionPreservation: true, ...(Object.keys(unavailable).length ? { unavailable } : {}) };
+    return { reviewers, configuration: true, contributorReviews: true, questionPreservation: true, ...(Object.keys(unavailable).length ? { unavailable } : {}) };
   }
 
   checkoutPath(sessionId: string): string {
@@ -662,7 +662,8 @@ export class ReviewSessionLauncher {
       meta: requester, tools: verified, env, exec: this.deps.exec, pullRequest: this.deps.pullRequest,
       mergeRequest: this.deps.mergeRequest,
       gitlabHostConfigured: this.deps.gitlabHostConfigured,
-      request: { repository: policy.pullRequest.repository, number: policy.pullRequest.number, headSha: policy.headSha },
+      request: { repository: policy.pullRequest.repository, number: policy.pullRequest.number, headSha: policy.headSha,
+        ...(policy.mode ? { mode: policy.mode } : {}) },
     });
     try {
       const mirror = await this.snapshots.syncScope(verified, env, policy.pullRequest.repository, scope, policy.headSha);

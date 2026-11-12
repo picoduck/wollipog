@@ -1441,6 +1441,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 362: Optional closed managed-profile directory diagnostic on provider-login start failures (#4437).
   362,
   // v363 slot
+  // 363: Explicit contributor review admission and configured reviewer selection.
+  363,
   // v364 slot
   // v365 slot
   // v366 slot
