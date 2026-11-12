@@ -3742,10 +3742,11 @@ export class SessionManager {
         materializedWorktree: async (path) => {
           // Git has made a new worktree here, which it does only where none is, so one once kept here
           // has gone. Not before: a reservation can still be refused by what is at the path.
-          this.forgetWorktreeKept(sessionId, path);
           // So has whatever an earlier worktree on this path recorded under its id: this one's teardown
-          // and marker are only what its own setup gives it, and its rollback inherits none (#4209).
+          // and marker are only what its own setup gives it, and its rollback inherits none (#4209). That
+          // goes first, since it refuses the attempt while that worktree's processes will not stop.
           await this.forgetWorktreeRecordsAt(sessionId, path, worktreeIdForPath(path));
+          this.forgetWorktreeKept(sessionId, path);
           const proof = randomUUID();
           await stampWorktreeRollbackProof(path, proof, options);
           materializing.record!.rollbackProof = proof;
@@ -19201,7 +19202,8 @@ export class SessionManager {
    * What that earlier worktree started can outlive its directory, a service listening on its ports
    * say. Those processes are stopped by their marker first, and only then is the block given back, so
    * the next allocation cannot hand those ports to a worktree whose services would collide with them.
-   * Processes that will not stop keep their marker, and their id keeps its block. */
+   * Processes that will not stop refuse the attempt before anything is forgotten: the earlier row, its
+   * block and its marker stay, so the next attempt, or deleting the session, tries them again. */
   private async forgetWorktreeRecordsAt(sessionId: string, path: string, worktreeId: string): Promise<void> {
     const found = this.store.readMeta(sessionId);
     if (!found) return;
@@ -19210,16 +19212,16 @@ export class SessionManager {
     const staleIds = [...new Set(rows.filter((row) => here(row) && row.id !== worktreeId).map((row) => row.id))]
       .filter((id) => !rows.some((row) => row.id === id && !here(row)));
     const ids = [worktreeId, ...staleIds];
-    const stillRunning = new Set<string>();
     for (const id of ids) {
       const marker = found.worktreeProcessMarkers?.[id];
       if (marker && !await this.terminateRollbackProcesses(marker)) {
-        stillRunning.add(id);
-        this.log(`session ${boundedSessionIdForLog(sessionId)} kept an earlier worktree's port block: its processes did not stop`);
+        // Nothing is forgotten, or no record would be left to stop them later and give back their ports:
+        // the attempt is refused, and gives back the worktree it has just made.
+        throw new Error(`processes an earlier worktree at ${path} started are still running and could not be stopped, so its ` +
+          "port block cannot go to a new worktree yet. Stop what is still running from that worktree, then ask again");
       }
     }
     for (const id of staleIds) {
-      if (stillRunning.has(id)) continue;
       try {
         this.worktreePortAllocator.release(this.worktreePortOwner(sessionId, id));
       } catch (error) {
@@ -19232,7 +19234,7 @@ export class SessionManager {
     const worktreeProcessMarkers = { ...latest.worktreeProcessMarkers };
     for (const id of ids) {
       delete worktreeHooks[id];
-      if (!stillRunning.has(id)) delete worktreeProcessMarkers[id];
+      delete worktreeProcessMarkers[id];
     }
     this.store.patchMeta(sessionId, {
       worktreeHooks: Object.keys(worktreeHooks).length ? worktreeHooks : undefined,

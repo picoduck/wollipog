@@ -3966,7 +3966,7 @@ test("a requested worktree stored before ids came from the whole path keeps its 
 for (const [shared, stuck] of [[false, false], [true, false], [false, true]] as const) {
 test(`a requested worktree made again where a row stored under its branch's id was ${shared
   ? "leaves that id's records to the other Location's row that shares it"
-  : stuck ? "keeps that id's port block while its processes will not stop" : "stops its processes, then gives that id's port block back"}`, async () => {
+  : stuck ? "is refused, keeping everything of that id's, until its processes stop" : "stops its processes, then gives that id's port block back"}`, async () => {
   if (process.platform === "win32") return;
   await withSession(`request-remade-stored-id-${shared ? "shared" : stuck ? "stuck" : "alone"}`, async (h) => {
     const teardownLog = join(h.root, "teardown-log");
@@ -4023,6 +4023,19 @@ test(`a requested worktree made again where a row stored under its branch's id w
     };
     const release = allocator.release.bind(allocator);
     allocator.release = (owner) => { order.push(`release ${owner}`); return release(owner); };
+    if (stuck) {
+      // While they will not stop, nothing is forgotten: the request is refused and gives back what it made.
+      await assert.rejects(h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/legacy" }),
+        /still running and could not be stopped/u);
+      assert.ok(order.includes(`stop ${markerBefore}`), `the earlier worktree's processes were asked to stop (${order.join(", ")})`);
+      assert.deepEqual(allocator.get(oldOwner), block, "they keep their ports, so nothing new collides with them");
+      assert.equal(meta().worktreeProcessMarkers?.[oldId], markerBefore, "and their marker, so they can still be stopped");
+      assert.ok(meta().worktrees!.some((row) => row.id === oldId && row.path === worktree.path), "and the row that names them");
+      assert.equal(existsSync(worktree.path), false, "the worktree the attempt made is given back");
+      // Once they stop, asking again goes ahead and gives the earlier block back.
+      keep.terminateRollbackProcesses = async (marker) => { order.push(`stop ${marker}`); return terminate(marker); };
+      order.length = 0;
+    }
     const again = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/legacy" });
     allocator.release = release;
     keep.terminateRollbackProcesses = terminate;
@@ -4031,11 +4044,6 @@ test(`a requested worktree made again where a row stored under its branch's id w
     if (!shared) {
       assert.ok(markerBefore, "the earlier worktree's setup gave it a process marker");
       assert.ok(order.includes(`stop ${markerBefore}`), `the earlier worktree's processes are stopped (${order.join(", ")})`);
-    }
-    if (stuck) {
-      assert.deepEqual(allocator.get(oldOwner), block, "processes that will not stop keep their ports, so nothing new collides with them");
-      assert.equal(meta().worktreeProcessMarkers?.[oldId], markerBefore, "and their marker, so they can still be stopped");
-      return;
     }
     if (!shared) {
       assert.ok(order.indexOf(`stop ${markerBefore}`) < order.indexOf(`release ${oldOwner}`),
