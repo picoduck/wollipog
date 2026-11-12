@@ -61,6 +61,15 @@ compare the exact verified preimage under the fence, and recheck acquired author
 selection and every retirement operation. The Linux helper receives a parent-death signal;
 Windows additionally verifies that the parent's creation time predates the helper's creation.
 
+During interrupted retirement, the selected checkpoint can itself be the acquired tip. The
+POSIX helper compares its exact bytes once under the exclusive fence, correlates that verified
+inode with the open selected-anchor descriptor, and then reuses the existing anchor identity and
+full-stamp pin at every ownership boundary. All journal publishers hold the same fence, and the
+selected checkpoint is immutable until selection replaces it; selection invalidates the cached
+verification. Other acquired tips retain their byte checks, allowing legacy mirror link changes.
+This keeps maximal recovery within the existing verification byte budget without changing the
+per-entry identity and byte checks before retirement.
+
 The supported coherent local backends are Linux flock on ext4, tmpfs, btrfs, overlay, XFS, ZFS,
 and F2FS; native macOS flock on APFS/HFS; and native Windows LockFileEx on local NTFS. A guard
 names its fence backend. Incompatible/shared-network filesystems and incompatible reader versions

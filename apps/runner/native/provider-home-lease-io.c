@@ -298,7 +298,13 @@ static void owned(const Entry *tip, const char *future, int copied) {
      * re-reading it twice per retired alias exhausts a maximal recovery's byte budget.
      * Other tips retain byte checks: legacy mirrors may legitimately change nlink. */
     int selected_tip = tip->dir == 0 && !strcmp(tip->name, ANCHOR);
-    if (!selected_tip || !owned_anchor_verified) verify_entry(tip, 0);
+    if (!selected_tip || !owned_anchor_verified) {
+      verify_entry(tip, 0);
+      if (selected_tip) {
+        expected_identity(&anchor_identity, tip->dev, tip->ino);
+        pinned();
+      }
+    }
     if (selected_tip) owned_anchor_verified = 1;
   }
 }
