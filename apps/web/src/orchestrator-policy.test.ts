@@ -75,6 +75,20 @@ test("a new Child Harness starts its model over, and Reset puts one field back",
   assert.deepEqual([...policyOverrides(reset, settings.defaults)], ["behavior.childHarness"]);
 });
 
+test("the child model selector distinguishes colliding names without changing choice values", () => {
+  const settings = view();
+  const harness = settings.capabilities.harnesses![0]!;
+  harness.models = [{ id: "opus", displayName: "Opus 5.5" }, { id: "claude-opus-5-5", displayName: "Opus 5.5" }];
+  harness.supportedPairs = harness.models.map(model => ({ modelId: model.id, effortLevels: ["low"] }));
+  settings.defaults.behavior.childHarness = { agentId: harness.agentId, driver: harness.driver, context: harness.context };
+  settings.defaults.behavior.childModel = "opus";
+  const evaluated = evaluateOrchestratorPolicy(context(settings), policyDraftFromDefaults(settings.defaults));
+  assert.deepEqual(evaluated.model.options.slice(1).map(({ value, label }) => ({ value, label })), [
+    { value: "opus", label: "Opus 5.5 (opus)" },
+    { value: "claude-opus-5-5", label: "Opus 5.5 (claude-opus-5-5)" },
+  ]);
+});
+
 test("the evaluation counts changes per tab and names capability gaps by machine, never by protocol", () => {
   const settings = view();
   const draft = withFollowUps(policyDraftFromDefaults(settings.defaults), "recommend_only");

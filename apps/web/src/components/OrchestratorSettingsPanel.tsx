@@ -9,7 +9,7 @@ import {
   type OrchestratorSettingsView,
   type DelegatableWorkflowDecisionCategory,
 } from "@wollipog/protocol";
-import { agentHarnessMachinesDescription, agentHarnessOptionLabel, modelDriftText, pinnedModelChoices } from "../agent-presentation.js";
+import { agentHarnessMachinesDescription, agentHarnessOptionLabel, modelDriftText, modelOptionLabel, pinnedModelChoices } from "../agent-presentation.js";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import {
@@ -304,10 +304,11 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         models.set(model.id, { names: new Set<string>(), displayName: model.displayName ?? model.id });
       }
     }
+    const choices = [...models].map(([id, model]) => ({ id, displayName: model.displayName }));
     for (const [modelId, model] of models) {
       options.push({
         value: modelId,
-        label: model.displayName,
+        label: modelOptionLabel({ id: modelId, displayName: model.displayName }, choices),
         description: selectedHarness
           ? `Use ${model.displayName} through the selected Child Harness.`
           : `Resolve ${model.displayName} through a compatible harness: ${[...model.names].sort().join(", ")}.`,

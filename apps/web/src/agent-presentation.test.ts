@@ -1,7 +1,27 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentDefinition } from "@wollipog/protocol";
-import { agentDisplayName, agentStatus } from "./agent-presentation.js";
+import { agentDisplayName, agentStatus, modelOptionLabel } from "./agent-presentation.js";
+
+test("model picker labels distinguish IDs sharing a name without rewriting the catalog", () => {
+  const models = [
+    { id: "opus", displayName: "Opus 5.5" },
+    { id: "claude-opus-5-5", displayName: "Opus 5.5" },
+    { id: "sonnet", displayName: "Sonnet" },
+  ];
+  const original = structuredClone(models);
+  assert.deepEqual(models.map(model => modelOptionLabel(model, models)),
+    ["Opus 5.5 (opus)", "Opus 5.5 (claude-opus-5-5)", "Sonnet"]);
+  assert.deepEqual(models, original);
+});
+
+test("model picker labels fall back to IDs and ignore repeated entries for the same ID", () => {
+  const models = [{ id: "custom-model" }, { id: "empty", displayName: "" },
+    { id: "opus", displayName: "Opus 5.5" }, { id: "opus", displayName: "Opus 5.5" }];
+  assert.deepEqual(models.map(model => modelOptionLabel(model, models)),
+    ["custom-model", "empty", "Opus 5.5", "Opus 5.5"]);
+  assert.equal(modelOptionLabel({ id: "pin", displayName: "custom-model" }, models), "custom-model (pin)");
+});
 
 test("installed native harnesses blocked by HOME ownership are unavailable, never missing or outdated", () => {
   const failure = { code: "probe_failed" as const, message: "Provider HOME ownership blocked discovery. The previous process is uninspectable.", retryable: true };
