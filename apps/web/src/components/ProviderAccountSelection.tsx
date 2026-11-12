@@ -6,6 +6,7 @@ import {
   providerAccountSkipSummary,
   providerForDriver,
   isProviderAccountRef,
+  runnerSupportsProtocol,
   type ProviderAccountSelectionCandidate,
   type ProviderAccountSelectionPreview,
   type ProviderAccountSkipReason,
@@ -72,7 +73,8 @@ export function providerAccountSelectionRefreshKey(runner: RunnerView | undefine
   ]);
 }
 
-const REFRESH_MS = 60_000;
+/** How often a shown preview is read again, as usage and cooldowns move. */
+export const PROVIDER_ACCOUNT_PREVIEW_REFRESH_MS = 60_000;
 
 /** Where a launch would go, in the terms its request uses, so the server predicts that launch's own
  * project. A project is what was chosen, No Project is a choice too, and with neither (a server
@@ -112,7 +114,7 @@ export function useProviderAccountSelection(
       }
     };
     void load();
-    const timer = window.setInterval(() => void load(), REFRESH_MS);
+    const timer = window.setInterval(() => void load(), PROVIDER_ACCOUNT_PREVIEW_REFRESH_MS);
     return () => { current = false; window.clearInterval(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `key` and `refreshKey` carry the target and everything it reads
   }, [key, refreshKey]);
@@ -187,8 +189,11 @@ export function AutomationExpectedProviderAccount({ runner, agentId, placement, 
 }) {
   const agent = runner.agents.find((candidate) => candidate.id === agentId);
   const provider = agent ? providerForDriver(agent.driver ?? "acp") : null;
-  // With neither accounts nor a saved policy for this provider there is nothing to bind or refuse.
-  const applies = provider !== null && ((runner.providerAccounts ?? []).some((account) => account.provider === provider) ||
+  // With neither accounts nor a saved policy for this provider there is nothing to bind or refuse. An
+  // older runner's view omits both, though a saved Priority Order still refuses its launches, so only
+  // a view that carries them can rule the preview out.
+  const applies = provider !== null && (!runnerSupportsProtocol(runner.protocolVersion, "providerAccounts") ||
+    (runner.providerAccounts ?? []).some((account) => account.provider === provider) ||
     (runner.providerAccountDefaults ?? []).some((policy) => policy.provider === provider));
   const preview = useProviderAccountSelection(runner.runnerId, applies && placement && !namedAccountId ? { agentId, ...placement } : null,
     providerAccountSelectionRefreshKey(runner, runner.status === "online"));

@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS } from "@wollipog/protocol";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
 import type {
   AutomationCreationSnapshot,
   AutomationExecution,
@@ -3085,6 +3085,8 @@ test("editing an automation keeps its retired exec agent unavailable with the co
 // #4512: the editor shows which account each run is expected to use, from the launch dialogs' preview.
 const ACCOUNT_MACHINE: RunnerView = {
   ...runners[0]!,
+  // A runner whose view carries its accounts and saved policies, so an empty list is authoritative.
+  protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountSelectionPolicy,
   providerAccounts: [
     { id: "work", label: "work@example.com", provider: "claude", authStatus: "authenticated" },
     { id: "spare", label: "Spare", provider: "claude", authStatus: "unauthenticated" },
@@ -3254,7 +3256,7 @@ test("with no accounts left, a saved policy's refusal still shows for both roles
   const targets: unknown[] = [];
   const creates: AutomationSpec[] = [];
   const empty = accountPreview({ status: "choice_required", source: "none", accountId: undefined, refusal: "empty_order", candidates: [] });
-  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [{ ...runners[0]!, providerAccounts: [],
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [{ ...ACCOUNT_MACHINE, providerAccounts: [],
     providerAccountDefaults: [{ provider: "claude", accountId: null, revision: 2, mode: "priority", priorityAccountIds: [] }] }], [], {
     ...ORCHESTRATOR_SETTINGS,
     providerAccountSelection: async (_runnerId: string, target: unknown) => { targets.push(target); return empty; },
@@ -3278,6 +3280,27 @@ test("with no accounts left, a saved policy's refusal still shows for both roles
     await act(async () => { button(fixture.container, "Create Automation").click(); });
     await act(settle);
     assert.equal(creates.length, 1, "Create Automation still saves");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an older runner's view omits accounts and policies, so its refusal is still read and shown (#4512)", async () => {
+  const targets: unknown[] = [];
+  const older = { ...runners[0]!, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts - 1 };
+  assert.equal(older.providerAccounts, undefined);
+  assert.equal(older.providerAccountDefaults, undefined);
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [older], [], {
+    providerAccountSelection: async (_runnerId: string, target: unknown) => {
+      targets.push(target);
+      return accountPreview({ status: "choice_required", source: "none", accountId: undefined,
+        refusal: "runner_update_required", candidates: [], enforcement: "runner_update_required" });
+    },
+  });
+  try {
+    assert.ok(targets.length > 0, "the preview is read although the view lists no accounts or policies");
+    assert.match(agentField(fixture.container).querySelector(".field-warn")?.textContent ?? "",
+      /^This machine's runner can't enforce the Claude Priority Order\. Runs that start before this changes are refused\./);
   } finally {
     await unmountFixture(fixture);
   }
