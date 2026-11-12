@@ -7,6 +7,15 @@ review workflows, and `.github/ISSUE_REPORTING.md`. Repository workflows belong 
 
 ## Preflight and External Rules
 
+Read `IMPLEMENTATION.md` before changing code. Root `REVIEW.md` supplies repository-specific
+engineering criteria. Hosted reviews load its regular Git blob from the forge-reported base
+commit into the review prompt, recording the source commit and SHA-256 of its exact contents.
+For GitLab this is the merge request's pinned diff base. Missing guidance preserves the default
+contract; unreadable, non-text, non-regular or over-64-KiB guidance refuses snapshot preparation
+rather than silently dropping criteria. The PR's own guidance edits are reviewed as code changes,
+not applied as criteria. Criteria cannot change the fixed reviewer contract or approval gates.
+The shared cross-model-review skill and standalone controller are maintained in dev-box-setup.
+
 Record the managed worktree/branch/base, campaign assignment, effective harness/model/effort,
 Custom or Full Control mode, human-established boundary and revisions, exact decision owners,
 compatibility, Human Required exceptions, evidence hosting/retention and reviewer provider/model.
