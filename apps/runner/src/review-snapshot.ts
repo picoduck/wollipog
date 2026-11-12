@@ -2,8 +2,9 @@
  * The reviewed snapshot of a session's pull request (#3306, #561): which pull request a session
  * may have reviewed, and a runner-owned checkout of its exact pushed head.
  *
- * Scope: the session's own runner-owned native worktree, an open pull request from the same repository
- * whose head branch is that worktree's branch, at a head equal to the pull request's pushed head.
+ * Scope: normally the session's own runner-owned native worktree and its open pull request.
+ * Explicit contributor mode instead binds an open PR targeting the registered base repository,
+ * including forks, through that base forge's PR ref. Both require the exact pushed head.
  * The repository is read from the runner-recorded project checkout, never through the worktree's
  * own `.git` pointer, which the session can rewrite.
  *
@@ -100,6 +101,7 @@ export type ReviewExec = (
 ) => Promise<string>;
 
 export interface ReviewScopeRequest {
+  mode?: "contributor";
   repository: string;
   number: number;
   headSha: string;
@@ -107,6 +109,8 @@ export interface ReviewScopeRequest {
 
 /** What `bindPullRequestScope` proved about a request. */
 export interface BoundPullRequestScope {
+  /** Forge-owned ref in the verified base repository, never a fork URL. */
+  contributorRef?: string;
   /** The runner-recorded project checkout, resolved. */
   repoPath: string;
   /** Its own `.git` directory, read over the pack protocol. */
@@ -119,8 +123,8 @@ export interface BoundPullRequestScope {
 }
 
 /**
- * Prove that `request` names the session's own open, same-repository pull request at its pushed
- * head, from the session's own runner-owned native worktree. Throws `ReviewScopeRefusal` otherwise.
+ * Prove the own-worktree scope, or the explicitly admitted contributor scope, at the forge's
+ * pushed head. Throws `ReviewScopeRefusal` otherwise.
  */
 export async function bindPullRequestScope(input: {
   meta: SessionMeta | null | undefined;
@@ -148,7 +152,7 @@ export async function bindPullRequestScope(input: {
       (meta.executionTarget?.adapter && meta.executionTarget.adapter !== "host")) {
     refuseReview("the review must cover the session's own native managed worktree");
   }
-  if (!meta!.worktrees?.length) {
+  if (request.mode !== "contributor" && !meta!.worktrees?.length) {
     if (!meta!.worktreePath) refuseReview("the review must cover the session's own native managed worktree");
     refuseReview("resume this session once so the runner can verify its automatic worktree before requesting a review");
   }
@@ -175,8 +179,24 @@ export async function bindPullRequestScope(input: {
     ? await input.pullRequest(tools.gh!, repository, request.number, env)
     : await input.mergeRequest!(tools.glab!, named!.host, named!.project, request.number, env);
   if (pr.state !== "open" || pr.baseRepository.toLowerCase() !== repository.toLowerCase() ||
-      pr.headRepository.toLowerCase() !== repository.toLowerCase()) {
+      (request.mode !== "contributor" && pr.headRepository.toLowerCase() !== repository.toLowerCase())) {
     refuseReview("the pull request is not this session's open, same-repository pull request");
+  }
+  if (request.mode === "contributor") {
+    if (!reviewRepository(pr.headRepository)) refuseReview("the review snapshot could not be prepared");
+    if (!PUSHED_HEAD.test(request.headSha) || pr.headSha !== request.headSha) {
+      refuseReview("the requested head is not the pull request's pushed head");
+    }
+    if (!PUSHED_HEAD.test(pr.baseSha)) refuseReview("the review snapshot could not be prepared");
+    const commonDir = join(repoPath, ".git");
+    if (!lstatSync(commonDir, { throwIfNoEntry: false })?.isDirectory() || existsSync(join(commonDir, "commondir"))) {
+      refuseReview("the review snapshot could not be prepared");
+    }
+    const host = named!.forge === "github" ? "github.com" : named!.host;
+    const path = named!.forge === "github" ? pr.baseRepository : named!.project;
+    const forgeUrl = /^https:\/\//iu.test(origin) || !tools.ssh ? `https://${host}/${path}.git` : `git@${host}:${path}.git`;
+    const contributorRef = named!.forge === "github" ? `refs/pull/${request.number}/head` : `refs/merge-requests/${request.number}/head`;
+    return { repoPath, commonDir, branch: "", pullRequest: pr, forgeUrl, contributorRef };
   }
   const matches = meta!.worktrees!.filter((candidate) => candidate.branch === pr.headRef);
   if (matches.length !== 1) refuseReview("the pull request is not this session's open, same-repository pull request");
@@ -294,6 +314,7 @@ export class ReviewSnapshotter {
    */
   async syncMirror(
     git: string, env: NodeJS.ProcessEnv, ssh: boolean, mirror: string, commonDir: string, branch: string, forgeUrl: string, commits: string[],
+    contributorRef?: string,
   ): Promise<void> {
     const previous = this.mirrorQueues.get(mirror) ?? Promise.resolve();
     const run = previous.then(async () => {
@@ -305,7 +326,14 @@ export class ReviewSnapshotter {
         .then(() => true, () => false);
       const missing = async () => (await Promise.all(commits.map(async (sha) => (await has(sha)) ? null : sha)))
         .filter((sha): sha is string => sha !== null);
-      if ((await missing()).length) {
+      if (contributorRef) {
+        // Always refresh the forge-owned PR ref, even when the object already exists in our mirror.
+        await this.exec(git, [...SAFE_GIT, ...fetchGit(ssh), "--git-dir", mirror, "fetch", "--quiet", "--no-tags",
+          "--no-write-fetch-head", "--end-of-options", forgeUrl, `+${contributorRef}:refs/review/contributor`],
+        { timeoutMs: MIRROR_FETCH_TIMEOUT_MS, env });
+        const fetched = (await this.exec(git, [...SAFE_GIT, "--git-dir", mirror, "rev-parse", "refs/review/contributor"], { env })).trim();
+        if (fetched !== commits[1]) refuseReview("the requested head is not the pull request's pushed head");
+      } else if ((await missing()).length) {
         await this.exec(git, [
           ...SAFE_GIT, ...fetchGit(ssh), "--git-dir", mirror, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
           // Only the session's own branch: nothing else in the checkout reaches the reviewer.
@@ -333,7 +361,7 @@ export class ReviewSnapshotter {
   async syncScope(tools: ReviewTools, env: NodeJS.ProcessEnv, repository: string, scope: BoundPullRequestScope, headSha: string): Promise<string> {
     const mirror = this.mirrorPath(repository);
     await this.syncMirror(tools.git, env, Boolean(tools.ssh), mirror, scope.commonDir, scope.branch, scope.forgeUrl,
-      [scope.pullRequest.baseSha, headSha]);
+      [scope.pullRequest.baseSha, headSha], scope.contributorRef);
     return mirror;
   }
 

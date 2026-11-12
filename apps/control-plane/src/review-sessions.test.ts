@@ -371,6 +371,59 @@ function requested(h: ReturnType<typeof harness>, sessionId = "s1") {
   return result.data;
 }
 
+test("contributor requests refuse old peers and missing capability without launching", () => {
+  for (const options of [{ protocol: 362, reviewSession: { ...CAPABILITY, contributorReviews: true as const } }, {}]) {
+    const h = harness(options);
+    try {
+      assert.match(h.svc.requestReviewSession("s1", request({ mode: "contributor" })).error!, /does not support contributor/u);
+      assert.equal(h.starts().length, 0);
+    } finally { h.db.close(); }
+  }
+});
+
+test("contributor review refuses an ad-hoc checkout even when the runner supports it", () => {
+  const h = harness({ reviewSession: { ...CAPABILITY, contributorReviews: true } });
+  try {
+    h.db.raw().prepare("UPDATE sessions SET workspace_id=NULL WHERE id='s1'").run();
+    assert.match(h.svc.requestReviewSession("s1", request({ mode: "contributor" })).error!, /registered project workspace/u);
+    assert.equal(h.starts().length, 0);
+  } finally { h.db.close(); }
+});
+
+test("explicit contributor reviewer preserves model, effort, isolation and budget admission", () => {
+  const h = harness({ configuration: true, reviewSession: { ...CAPABILITY, configuration: true, contributorReviews: true } });
+  const selected = request({ mode: "contributor", reviewer: { harness: "codex", model: "gpt-6.1-sol", effort: "high" } });
+  try {
+    const result = h.svc.requestReviewSession("s1", selected);
+    assert.ok(result.ok, result.error ?? "review refused");
+    const start = h.starts().at(-1)!;
+    assert.equal(start.spec.agentId, "codex");
+    assert.equal(start.spec.config?.model, "gpt-6.1-sol");
+    assert.equal(start.spec.config?.effort, "high");
+    assert.equal(start.spec.config?.permissionMode, "read-only");
+    assert.equal(start.spec.review?.mode, "contributor");
+    assert.match(h.svc.requestReviewSession("s2", { ...selected, reviewer: { ...selected.reviewer!, model: "missing" } }).error!, /unavailable/u);
+    assert.equal(h.starts().length, 1);
+  } finally { h.db.close(); }
+});
+
+test("contributor reviews select Claude explicitly and cannot bypass exhausted cost ceilings or same-family consent", () => {
+  const h = harness({ driver: "codex-app-server", configuration: true,
+    reviewSession: { ...CAPABILITY, configuration: true, contributorReviews: true } });
+  try {
+    const selected = request({ mode: "contributor", reviewer: { harness: "claude-code", model: "claude-opus-5-5", effort: "high" } });
+    h.db.updateSessionCostBudget("s1", 1, 4);
+    h.db.addSessionUsage("s1", { costUsd: 1 }, 5);
+    assert.match(h.svc.requestReviewSession("s1", selected).error!, /no cost budget left/u);
+    assert.equal(h.starts().length, 0);
+    assert.ok(h.svc.requestReviewSession("s2", selected).ok);
+    assert.equal(h.starts().at(-1)?.spec.agentId, "claude");
+    assert.equal(h.starts().at(-1)?.spec.config?.permissionMode, "dontAsk");
+    assert.match(h.svc.requestReviewSession("s1", request({ mode: "contributor",
+      reviewer: { harness: "codex", model: "gpt-6.1-sol", effort: "high" } })).error!, /same.*family/u);
+  } finally { h.db.close(); }
+});
+
 test("a session requests a review session: a typed reviewer of the other family, launched read-only for its exact head", () => {
   const h = harness();
   try {

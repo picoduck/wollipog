@@ -1861,6 +1861,16 @@ test("review session commands map to the session's own review session tools (#33
     assert.equal(await invoke(["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "3368", "--head", head, "--brief-file", brief,
       "--full-reason", "Rebased onto main", "--json"]), 0);
     assert.equal(JSON.parse(last().body!).fullReason, "Rebased onto main");
+    const contributor = ["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "3368", "--head", head,
+      "--brief-file", brief, "--mode", "contributor", "--reviewer", "codex", "--model", "gpt-6.1-sol", "--effort", "high", "--json"];
+    assert.equal(await invoke(contributor), 0);
+    assert.equal(JSON.parse(last().body!).mode, "contributor");
+    assert.deepEqual(JSON.parse(last().body!).reviewer, { harness: "codex", model: "gpt-6.1-sol", effort: "high" });
+    version = 362;
+    calls.length = 0;
+    assert.equal(await invoke(contributor), 1);
+    assert.ok(calls.every(call => call.url.endsWith("/api/compatibility")));
+    version = PROTOCOL_VERSION;
     assert.equal(await invoke(["review", "session", "get", "s_review", "--json"]), 0);
     assert.equal(last().url, "http://cp/api/sessions/self/review-sessions/s_review");
     assert.equal(await invoke(["review", "session", "list", "--limit", "5", "--cursor", "s_review", "--json"]), 0);

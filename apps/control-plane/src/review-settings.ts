@@ -174,22 +174,23 @@ export class ReviewSettingsError extends Error { constructor(message: string, re
 /** Null preserves the legacy launch exactly when there is no settings row. */
 export function configuredReview(db: ControlPlaneDb, session: SessionView, runner: RunnerView | null,
   resolveModelEffort: (config: { model?: string; effort?: string }, capabilities: AgentCapabilities | undefined,
-    driver: AgentDriverKind) => { value?: { model: string; effort: string }; error?: string }):
+    driver: AgentDriverKind) => { value?: { model: string; effort: string }; error?: string },
+  selection?: { harness: "codex" | "claude-code"; model: string; effort: string }):
   { harness: "codex" | "claude-code"; configuration: ReviewConfiguration } | null {
   const scope = db.sessionScope(session.id);
   const userId = db.reviewSettings.sessionUser(session.id) ?? (scope?.owner.kind === "user" ? scope.owner.userId : null);
   const snapshot = db.reviewSettings.sessionPolicy(session.id);
-  if (!userId && !snapshot) return null;
+  if (!userId && !snapshot && !selection) return null;
   const effective = userId ? db.reviewSettings.effective(userId, session.projectId ?? null)
     : { settings: DEFAULT_REVIEW_SETTINGS, source: "system_default" as const };
-  if (snapshot ? !snapshot.configured : effective.source === "system_default") return null;
+  if (!selection && (snapshot ? !snapshot.configured : effective.source === "system_default")) return null;
   const agent = runner?.agents.find(a => a.id === session.agentId);
   const identity = agent ? agentHarnessIdentityFor(agent) : { agentId: session.agentId ?? "unknown", driver: session.driver ?? "acp", context: { kind: "native" as const } };
   const rule = effective.settings.reviewers.find(r => agentHarnessIdentityKey(r.implementer) === agentHarnessIdentityKey(identity));
-  const harness = snapshot ? snapshot.reviewHarness : rule?.harness ?? reviewerHarnessFor(session.driver);
+  const harness = selection?.harness ?? (snapshot ? snapshot.reviewHarness : rule?.harness ?? reviewerHarnessFor(session.driver));
   if (!harness) throw new ReviewSettingsError("Choose a reviewer for this implementing harness in Settings → Reviews.", 409);
-  const requestedModel = snapshot ? snapshot.reviewModel : rule?.model;
-  const effort = (snapshot ? snapshot.reviewEffort : rule?.effort) ?? "high";
+  const requestedModel = selection?.model ?? (snapshot ? snapshot.reviewModel : rule?.model);
+  const effort = selection?.effort ?? (snapshot ? snapshot.reviewEffort : rule?.effort) ?? "high";
   if (runner?.runtime?.reviewSession?.configuration !== true) {
     throw new ReviewSettingsError(`This machine cannot apply the configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort). Update Wollipog on it before requesting a review.`, 409);
   }

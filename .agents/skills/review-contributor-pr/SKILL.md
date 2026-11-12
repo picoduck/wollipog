@@ -59,6 +59,16 @@ Use $review-contributor-pr to re-review <PR URL> after the author's fixes and po
 
 ## Review and Adjudicate
 
+Inside Wollipog, use the admitted managed contributor-review route on protocol 363+:
+`request_review_session` with `mode: "contributor"`, the verified base repository/PR/head and
+your brief, or `wollipog review session run --mode contributor`. You may explicitly select a
+discovered reviewer with `reviewer: {harness, model, effort}` (CLI `--reviewer`, `--model`,
+`--effort`); preserve required same-family consent and every account/budget gate. A missing
+profile or unsupported peer is a blocker, never a reason to substitute a native subprocess.
+The managed runner owns the immutable checkout, isolation, contract validation and accounting;
+the pinned local worktree is only for your independent inspection. This review-only route
+does not authorize publishing feedback, changing the contributor's branch or merging.
+
 Follow `cross-model-review` with the current harness as adjudicator. The contributor's
 coding tool is unknown and does not determine reviewer selection. Use its read-only
 reviewer and private ledger outside the repository. Record repository/PR/base/head/

@@ -1,7 +1,7 @@
 /**
  * Review sessions (#561, #3368): a typed, immutable session kind that reviews another session's
- * pull request. The control plane creates one only for a review request from the implementing
- * session itself; the runner launches it outside the requester's sandbox, read-only, against a
+ * pull request. The control plane admits own-PR requests and explicit contributor requests for
+ * a registered base repository; the runner launches outside the requester's sandbox, read-only, against a
  * runner-owned checkout of the exact pushed head, with a runner-owned launch preset that loads no
  * project settings, hooks, skills or MCP configuration. Review sessions are exempt from every
  * session limit; on protocol 335+ a requester may have one active review per pull request.
@@ -28,6 +28,8 @@ export interface ReviewSessionCapability {
   /** The runner preserves pending async questions through durable automatic review prompts.
    * Missing means unsupported, regardless of its numeric protocol version. */
   questionPreservation?: true;
+  /** Explicit contributor snapshots and reviewer selection. */
+  contributorReviews?: true;
   /** #3370: revalidates configured reviewer/model/effort, same-family consent and round budget. */
   configuration?: true;
   reviewers: Array<{ harness: SessionReviewHarness; agentId: string }>;
@@ -38,6 +40,7 @@ export interface ReviewSessionCapability {
 /** Runner-enforced review launch, carried on the review session's `start_session`. The runner
  * proves the scope again against the requester's own runner-recorded worktree. */
 export interface ReviewLaunchPolicy {
+  mode?: "contributor";
   /** Sent only to a runner advertising reviewSession.configuration. */
   configuration?: import("./review-settings.js").ReviewConfiguration;
   requesterSessionId: string;
@@ -60,6 +63,9 @@ export interface ReviewSessionLink {
 }
 
 export interface ReviewSessionRequest {
+  /** Review-only admission; never grants publication or merge authority. */
+  mode?: "contributor";
+  reviewer?: { harness: SessionReviewHarness; model: string; effort: string };
   /** A GitHub `owner/name` and pull request number, or (v244, #3539) a GitLab project named by its
    * host and full namespace and a merge request IID. */
   pullRequest: { repository: string; number: number };

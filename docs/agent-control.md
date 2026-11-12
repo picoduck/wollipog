@@ -1,5 +1,15 @@
 # Agent Control CLI and MCP
 
+Contributor review sessions (protocol 363+) are explicitly requested with `mode: "contributor"`.
+They use the same account, budget, isolation, validity and review-run accounting as own-PR
+sessions. The runner verifies the registered base repository and open PR/MR's pushed SHA,
+fetches its forge-owned PR ref from that base repository, and checks the fetched SHA before
+creating the private checkout. Fork URLs and contributor configuration are never fetch inputs.
+Optional `reviewer: {harness, model, effort}` selects a supported native Codex or Claude Code
+reviewer, without changing worker configuration or granting same-family consent. Unavailable
+selections and older peers refuse explicitly. Callers must compare the reviewed SHA with the
+current forge head before acting; a review does not authorize publication or merge.
+
 Wollipog protocol v100 gives each native host session a purpose-specific control credential. The
 runner sends only its SHA-256 digest to the control plane and waits for an exact positive
 acknowledgement before the CLI or MCP server makes its first request. Stopping the session makes

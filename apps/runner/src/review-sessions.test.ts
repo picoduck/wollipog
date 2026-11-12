@@ -67,6 +67,7 @@ function fixture(t: { after(fn: () => void): void }, options: {
   gitlab?: boolean;
   /** Leave out the GitLab merge request reader. */
   noMergeRequestReader?: boolean;
+  contributor?: boolean;
   deletedFile?: boolean;
   /** Hosts the user's global glab configuration names; `null` leaves out the host gate. */
   gitlabHosts?: string[] | null;
@@ -109,8 +110,13 @@ function fixture(t: { after(fn: () => void): void }, options: {
   const mergeRequestReads: unknown[][] = [];
   const hostChecks: string[] = [];
   const gitlabHosts = options.gitlabHosts === undefined ? ["gitlab.example.com"] : options.gitlabHosts;
-  const exec: ReviewSessionDependencies["exec"] = async (command, args, execOptions) =>
-    execFileSync(command, args, { encoding: "utf8", ...(execOptions?.cwd ? { cwd: execOptions.cwd } : {}), env: execOptions?.env });
+  if (options.contributor) git(repo, "update-ref", options.gitlab ? "refs/merge-requests/7/head" : "refs/pull/7/head", head);
+  const exec: ReviewSessionDependencies["exec"] = async (command, args, execOptions) => {
+    // A local stand-in for the verified base forge; a fork URL would not be intercepted.
+    const baseUrl = options.gitlab ? `https://${GITLAB}.git` : "https://github.com/acme/widget.git";
+    const redirected = options.contributor ? args.map(a => a === baseUrl ? `file://${repo}` : a) : args;
+    return execFileSync(command, redirected, { encoding: "utf8", ...(execOptions?.cwd ? { cwd: execOptions.cwd } : {}), env: execOptions?.env });
+  };
   const deps: ReviewSessionDependencies = {
     exec,
     pullRequest: async () => ({ ...facts }),
@@ -268,7 +274,7 @@ test("capability names one available native agent per reviewer harness and repor
   ] as unknown as AgentDefinition[];
   assert.equal(f.launcher.capability(agents, "darwin"), undefined);
   assert.deepEqual(f.launcher.capability(agents, "linux"), {
-    configuration: true, questionPreservation: true, reviewers: [{ harness: "claude-code", agentId: "claude" }],
+    configuration: true, contributorReviews: true, questionPreservation: true, reviewers: [{ harness: "claude-code", agentId: "claude" }],
     unavailable: { codex: "no available native agent uses this harness" },
   });
   const noTools = fixture(t, { tools: { unavailable: "git is not installed" } });
@@ -392,7 +398,7 @@ test("capability contains tool-root and agent discovery exceptions and recovers 
   });
   failure = null;
   assert.deepEqual(launcher.capability(undefined, "linux"), {
-    configuration: true, questionPreservation: true, reviewers: [{ harness: "claude-code", agentId: "claude" }, { harness: "codex", agentId: "codex" }],
+    configuration: true, contributorReviews: true, questionPreservation: true, reviewers: [{ harness: "claude-code", agentId: "claude" }, { harness: "codex", agentId: "codex" }],
   });
 });
 
@@ -490,6 +496,40 @@ test("prepare checks out the exact pushed head privately and pins the patch in t
   assert.equal(git(f.repo, "for-each-ref", "--format=%(refname)").split("\n").filter((ref) => ref.startsWith("refs/session/")).length, 0);
   f.launcher.release("s_review");
   assert.equal(existsSync(prepared.checkout), false);
+});
+
+test("contributor review binds a fork to the base forge PR ref without owning its branch", async (t) => {
+  const f = fixture(t, { contributor: true, pr: { headRepository: "contributor/widget", headRef: "external-change" } });
+  f.requester.worktrees = [];
+  const refs = git(f.repo, "show-ref");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ mode: "contributor" }), CODEX, "Review only.");
+  assert.equal(git(prepared.checkout, "rev-parse", "HEAD"), f.head);
+  assert.equal(lstatSync(join(prepared.checkout, "outside")).isSymbolicLink(), false);
+  assert.equal(git(f.repo, "show-ref"), refs);
+  assert.equal(git(f.worktree, "status", "--porcelain"), "");
+  // Refresh and verify the PR ref even when the requested object is already in the mirror.
+  git(f.repo, "update-ref", "refs/pull/7/head", f.base);
+  assert.equal(await refusal(f.launcher.prepare("s_moved", f.policy({ mode: "contributor" }), CODEX, "b")),
+    "the requested head is not the pull request's pushed head");
+});
+
+test("contributor mode still refuses unrelated bases, closed PRs and stale requested heads", async (t) => {
+  for (const pr of [{ baseRepository: "other/widget" }, { state: "closed" }, { headSha: "a".repeat(40) }]) {
+    const f = fixture(t, { contributor: true, pr });
+    await refusal(f.launcher.prepare("s_review", f.policy({ mode: "contributor", headSha: f.head }), CODEX, "b"));
+  }
+});
+
+test("GitLab contributor reviews fetch the registered base project's merge-request ref", async (t) => {
+  const f = fixture(t, { gitlab: true, contributor: true,
+    pr: { headRepository: "gitlab.example.com/contributor/widget", headRef: "external" } });
+  f.requester.worktrees = [];
+  const prepared = await f.launcher.prepare("s_review", f.policy({ mode: "contributor" }), CODEX, "b");
+  assert.equal(git(prepared.checkout, "rev-parse", "HEAD"), f.head);
+  assert.deepEqual(f.mergeRequestReads[0], ["/trusted/glab", "gitlab.example.com", "acme/team/widget", 7]);
+  git(f.repo, "update-ref", "refs/merge-requests/7/head", f.base);
+  assert.equal(await refusal(f.launcher.prepare("s_moved", f.policy({ mode: "contributor" }), CODEX, "b")),
+    "the requested head is not the pull request's pushed head");
 });
 
 test("prepare reviews an unselected owned worktree without changing selection, and refuses stale registration", async (t) => {
