@@ -136,7 +136,8 @@ const {interceptSpawnSyncForTest,spawnSync}=require(${JSON.stringify(bounded)});
 const restore=interceptSpawnSyncForTest((command,args,options)=>command==='/usr/bin/cc'&&!args.includes(${JSON.stringify(wrapper)})?spawnSync(command,[...args,${JSON.stringify(wrapper)},'-Wl,--wrap=unlinkat'],options):undefined);
 try {
 const {observeLeaseIoWorkForTest,observeLeaseIoRunsForTest}=require(${JSON.stringify(fileURLToPath(new URL('./provider-home-lease-io.ts', import.meta.url)))});
-let maximumBytes=0;const runs=[];observeLeaseIoWorkForTest(w=>maximumBytes=Math.max(maximumBytes,w.bytes));observeLeaseIoRunsForTest(r=>runs.push(r));
+const {LEASE_CHECKPOINT_LIMITS:limits}=require(${JSON.stringify(fileURLToPath(new URL('./provider-home-lease-checkpoint.ts', import.meta.url)))});
+let maximumBytes=0,maximumRecords=0;const runs=[];observeLeaseIoWorkForTest(w=>{maximumBytes=Math.max(maximumBytes,w.bytes);maximumRecords=Math.max(maximumRecords,w.records);});observeLeaseIoRunsForTest(r=>runs.push(r));
 const {ProviderHomeLeaseRegistry,providerHomeLeaseRefusalKind}=require(${JSON.stringify(registry)});
 const fs=require('node:fs'),{join}=require('node:path'),{hostname}=require('node:os'),{createHash,randomUUID}=require('node:crypto');
 const home=join(${JSON.stringify(root)},'home'),base=join(home,'.agent-manager/provider-home-leases-v1'),lock=join(base,'mutable-home.lock');
@@ -153,16 +154,18 @@ assert.equal(JSON.parse(fs.readFileSync(anchor)).version,4);
 const selected=fs.readFileSync(anchor);
 assert.equal(runs.filter(r=>r.signal==='SIGKILL').length,1,'spawnSync reaped the interrupted native helper');
 assert.equal(failures.length,1,'only the deliberately killed helper failed');
+maximumBytes=0;maximumRecords=0;
 const evidence=()=>[base,lock].flatMap(dir=>fs.readdirSync(dir).filter(name=>name!=='mutable-home.lock').sort().map(name=>[join(dir,name),hash(fs.readFileSync(join(dir,name)))]));
 if(process.env.WOLLIPOG_TEST_TAMPER!=='none') {
   // Replacement preserves bytes, rewriting preserves size. Both must be detected
   // by the pin before a further retirement unlink (wrapper exit 90 otherwise).
   r.releaseHome(home);
   assert.equal(failures.length,2);
-  assert.match(failures[1].message,/selected checkpoint changed/);
+  assert.equal(failures[1].kind,'refusal');
+  assert.equal(failures[1].message,'selected checkpoint changed','the anchor pin refuses before another retirement unlink');
   assert.equal(runs.some(r=>r.status===90),false,'no unlink after tip tampering');
   const before=evidence();
-  if(process.env.WOLLIPOG_TEST_TAMPER==='rewrite') assert.throws(()=>new ProviderHomeLeaseRegistry(owner).acquireHome(home));
+  if(process.env.WOLLIPOG_TEST_TAMPER==='rewrite') assert.throws(()=>new ProviderHomeLeaseRegistry(owner).acquireHome(home),e=>providerHomeLeaseRefusalKind(e)==='unverifiable');
   else assert.deepEqual(fs.readFileSync(anchor),selected,'replacement has the exact selected bytes');
   assert.deepEqual(evidence(),before);
 } else {
@@ -175,7 +178,9 @@ const foreign=new ProviderHomeLeaseRegistry('b'.repeat(64));assert.equal(foreign
 const before=evidence();assert.throws(()=>new ProviderHomeLeaseRegistry(owner,{isProcessAlive:()=>false}).acquireHome(home),e=>providerHomeLeaseRefusalKind(e)==='foreign_owner');assert.deepEqual(evidence(),before);assert.equal(foreign.releaseHome(home),true);
 fs.writeFileSync(anchor,'invalid journal');const malformed=evidence();assert.throws(()=>new ProviderHomeLeaseRegistry(owner).acquireHome(home),e=>providerHomeLeaseRefusalKind(e)==='unverifiable');assert.deepEqual(evidence(),malformed);
 }
-console.error('Maximum native verification bytes: '+maximumBytes);
+assert.ok(maximumBytes>0 && maximumBytes<=limits.verificationBytes,'recovery native transactions stay within the production verification byte budget');
+assert.ok(maximumRecords>0 && maximumRecords<=limits.verificationRecords,'recovery native transactions stay within the production verification record budget');
+console.error('Maximum recovery native verification work: '+JSON.stringify({bytes:maximumBytes,records:maximumRecords}));
 } finally { restore(); }
 `);
   const result = spawnSync(process.execPath, [fixture], { env: { ...process.env, WOLLIPOG_TEST_TAMPER: tamper }, encoding: "utf8", timeout: 120_000, maxBuffer: 64 * 1024 });
