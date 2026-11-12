@@ -5,7 +5,7 @@
  * needs access to the root session; an Orchestrator agent may read only the campaign its own
  * credential resolves to; every other agent is refused. Reads never change the ledger revision.
  */
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type {
   CampaignCostSummary,
   CampaignCostValue,
@@ -27,6 +27,7 @@ import { campaignSeedSubjectState } from "./campaign-issue-scope-seed.js";
 import type { ControlPlaneDb } from "./db.js";
 import { decisionOccurrenceView } from "./decision-runtime.js";
 import { selectionProposalView } from "./scope-selection.js";
+import { OwnerManagement, type OwnerManagementInput, type OwnerManagementReply } from "./owner-management.js";
 import type { AuthPrincipal } from "./identity.js";
 
 /* ------------------------------ Cost visibility ------------------------------ */
@@ -144,12 +145,13 @@ export function registerCampaignStatusRoutes(
     /** Slice 8: read these pull requests now, subject to the rate limit; never rejects. */
     refreshForge?(campaignId: string, refs: readonly CampaignPullRequestRef[]): Promise<void>;
   },
-): void {
+): OwnerManagement<AuthPrincipal> {
   const { db } = deps;
+  const management = new OwnerManagement<AuthPrincipal>();
 
   /** Resolve the root campaign for `:id` and authorize the reader, or send the refusal. */
-  const reader = (req: FastifyRequest, reply: FastifyReply, id: string): CampaignReader | null => {
-    const principal = deps.requestPrincipal(req);
+  const reader = (req: OwnerManagementInput<AuthPrincipal>, reply: OwnerManagementReply, id: string): CampaignReader | null => {
+    const principal = req.principal;
     if (!principal) {
       void reply.code(401).send({ error: "authentication required" });
       return null;
@@ -210,7 +212,7 @@ export function registerCampaignStatusRoutes(
   const everySessionVisible = (read: CampaignReader) =>
     read.canSee(read.rootId) && db.campaignDescendantIds(read.rootId).every((id) => read.canSee(id));
 
-  app.get("/api/sessions/:id/campaign/summary", async (req, reply) => {
+  management.define("GET","/api/sessions/:id/campaign/summary", async (req, reply) => {
     const { id } = req.params as { id: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
@@ -231,7 +233,7 @@ export function registerCampaignStatusRoutes(
 
   // Decision calls that served this campaign, with their verdicts, reasons and their own usage.
   // Kept apart from the managed worker cost above, so an unpriced call never reads as campaign spend.
-  app.get("/api/sessions/:id/campaign/decisions", async (req, reply) => {
+  management.define("GET","/api/sessions/:id/campaign/decisions", async (req, reply) => {
     const { id } = req.params as { id: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
@@ -256,7 +258,7 @@ export function registerCampaignStatusRoutes(
     return reply.send(response);
   });
 
-  app.get("/api/sessions/:id/campaign/work-items", async (req, reply) => {
+  management.define("GET","/api/sessions/:id/campaign/work-items", async (req, reply) => {
     const { id } = req.params as { id: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
@@ -280,7 +282,7 @@ export function registerCampaignStatusRoutes(
     });
   });
 
-  app.get("/api/sessions/:id/campaign/work-items/:itemId", async (req, reply) => {
+  management.define("GET","/api/sessions/:id/campaign/work-items/:itemId", async (req, reply) => {
     const { id, itemId } = req.params as { id: string; itemId: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
@@ -300,7 +302,7 @@ export function registerCampaignStatusRoutes(
   /** Slice 8 on-demand read, sent while the details are visible. A reader who may not see forge
    * facts cannot cause a forge read either. The wait is bounded; the read itself runs off the
    * session-update path and later changes reach readers through the revision. */
-  app.post("/api/sessions/:id/campaign/work-items/:itemId/forge-refresh", async (req, reply) => {
+  management.define("POST","/api/sessions/:id/campaign/work-items/:itemId/forge-refresh", async (req, reply) => {
     const { id, itemId } = req.params as { id: string; itemId: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
@@ -321,7 +323,7 @@ export function registerCampaignStatusRoutes(
     return reply.send(response);
   });
 
-  app.get("/api/sessions/:id/campaign/recommendations", async (req, reply) => {
+  management.define("GET","/api/sessions/:id/campaign/recommendations", async (req, reply) => {
     const { id } = req.params as { id: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
@@ -337,4 +339,6 @@ export function registerCampaignStatusRoutes(
     if (!page.ok) return reply.code(page.status).send({ ...page.details, error: page.error });
     return reply.send(page.data);
   });
+  management.registerHttp(app, deps.requestPrincipal, 401);
+  return management;
 }

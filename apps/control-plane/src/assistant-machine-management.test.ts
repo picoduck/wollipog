@@ -153,7 +153,7 @@ test("account preview uses the real selection service but returns only opaque ac
 
 test("real owner HTTP and MCP share Machine/Workspace mutations, stable receipts and short names", async () => {
   const h = harness(), app = Fastify();
-  h.service.registerHttp(app, () => h.owner, ["POST /api/assistant-connections/installation"]);
+  h.service.registerHttp(app, () => h.owner, 403, ["POST /api/assistant-connections/installation"]);
   registerAssistantRoutes(app, {db: h.db, operations: h.operations, requestHuman: () => h.owner});
   try {
     assert.deepEqual(h.service.keys().sort(), ASSISTANT_MACHINE_MANAGEMENT.map(([, route]) => route).sort());
