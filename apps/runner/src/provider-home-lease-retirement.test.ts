@@ -83,6 +83,7 @@ fs.writeFileSync(anchor,'invalid journal');assert.throws(()=>new ProviderHomeLea
 });
 
 test("interrupted maximal padded retirement recovers within existing verification work bounds", { skip: process.platform !== "linux" }, t => {
+  for (const tamper of ["none", "rewrite", "replace"]) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-retirement-recovery-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const log = join(root, "interrupted"), wrapper = join(root, "interrupt.c"), fixture = join(root, "fixture.cjs");
@@ -93,12 +94,36 @@ test("interrupted maximal padded retirement recovers within existing verificatio
 #include <unistd.h>
 #include <signal.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 int __real_unlinkat(int fd, const char *name, int flags);
 int __wrap_unlinkat(int fd, const char *name, int flags) {
   int result = __real_unlinkat(fd, name, flags);
   if (result == 0 && !strncmp(name, "next-", 5)) {
     int marker = open(${JSON.stringify(log)}, O_WRONLY|O_CREAT|O_EXCL, 0600);
     if (marker >= 0) { close(marker); kill(getpid(), SIGKILL); }
+    const char *mode = getenv("WOLLIPOG_TEST_TAMPER");
+    if (mode && strcmp(mode, "none")) {
+      // Change the selected tip after its first cleanup ownership check. A second
+      // retirement unlink after this point is always an error.
+      int changed = open(${JSON.stringify(log + '.tamper')}, O_WRONLY|O_CREAT|O_EXCL, 0600);
+      if (changed < 0) _exit(90);
+      close(changed);
+      const char *anchor = ${JSON.stringify(join(root, 'home/.agent-manager/provider-home-leases-v1/mutable-home.recovery.json'))};
+      if (!strcmp(mode, "replace")) {
+        const char *replacement = ${JSON.stringify(join(root, 'replacement'))};
+        int out = open(replacement, O_WRONLY|O_CREAT|O_EXCL, 0600);
+        int in = open(anchor, O_RDONLY); char buf[8192]; ssize_t n;
+        if (out < 0 || in < 0) _exit(91);
+        while ((n = read(in, buf, sizeof(buf))) > 0) if (write(out, buf, (size_t)n) != n) _exit(92);
+        close(in); close(out);
+        if (rename(replacement, anchor)) _exit(93);
+      } else {
+        int out = open(anchor, O_WRONLY);
+        if (out < 0 || pwrite(out, "[", 1, 0) != 1) _exit(94);
+        close(out);
+      }
+    }
   }
   return result;
 }
@@ -125,20 +150,36 @@ const failures=[];const r=new ProviderHomeLeaseRegistry(owner,{onCheckpointFailu
 assert.throws(()=>r.acquireHome(home),/bounded catch-up/);
 assert.ok(fs.existsSync(${JSON.stringify(log)}),'helper reached retirement after durable selection');
 assert.equal(JSON.parse(fs.readFileSync(anchor)).version,4);
+const selected=fs.readFileSync(anchor);
 assert.equal(runs.filter(r=>r.signal==='SIGKILL').length,1,'spawnSync reaped the interrupted native helper');
 assert.equal(failures.length,1,'only the deliberately killed helper failed');
+const evidence=()=>[base,lock].flatMap(dir=>fs.readdirSync(dir).filter(name=>name!=='mutable-home.lock').sort().map(name=>[join(dir,name),hash(fs.readFileSync(join(dir,name)))]));
+if(process.env.WOLLIPOG_TEST_TAMPER!=='none') {
+  // Replacement preserves bytes, rewriting preserves size. Both must be detected
+  // by the pin before a further retirement unlink (wrapper exit 90 otherwise).
+  r.releaseHome(home);
+  assert.equal(failures.length,2);
+  assert.match(failures[1].message,/selected checkpoint changed/);
+  assert.equal(runs.some(r=>r.status===90),false,'no unlink after tip tampering');
+  const before=evidence();
+  if(process.env.WOLLIPOG_TEST_TAMPER==='rewrite') assert.throws(()=>new ProviderHomeLeaseRegistry(owner).acquireHome(home));
+  else assert.deepEqual(fs.readFileSync(anchor),selected,'replacement has the exact selected bytes');
+  assert.deepEqual(evidence(),before);
+} else {
 assert.equal(r.releaseHome(home),true);
 assert.equal(failures.length,1,'cleanup completes without another checkpoint failure');
 const next=new ProviderHomeLeaseRegistry(owner);assert.equal(next.acquireHome(home),true);assert.equal(next.releaseHome(home),true);
 assert.ok(fs.readdirSync(base).length+fs.readdirSync(lock).length<36,'recovery retires the maximal manifest');
-const evidence=()=>[base,lock].flatMap(dir=>fs.readdirSync(dir).filter(name=>name!=='mutable-home.lock').sort().map(name=>[join(dir,name),hash(fs.readFileSync(join(dir,name)))]));
+
 const foreign=new ProviderHomeLeaseRegistry('b'.repeat(64));assert.equal(foreign.acquireHome(home),true);
 const before=evidence();assert.throws(()=>new ProviderHomeLeaseRegistry(owner,{isProcessAlive:()=>false}).acquireHome(home),e=>providerHomeLeaseRefusalKind(e)==='foreign_owner');assert.deepEqual(evidence(),before);assert.equal(foreign.releaseHome(home),true);
 fs.writeFileSync(anchor,'invalid journal');const malformed=evidence();assert.throws(()=>new ProviderHomeLeaseRegistry(owner).acquireHome(home),e=>providerHomeLeaseRefusalKind(e)==='unverifiable');assert.deepEqual(evidence(),malformed);
+}
 console.error('Maximum native verification bytes: '+maximumBytes);
 } finally { restore(); }
 `);
-  const result = spawnSync(process.execPath, [fixture], { encoding: "utf8", timeout: 120_000, maxBuffer: 64 * 1024 });
+  const result = spawnSync(process.execPath, [fixture], { env: { ...process.env, WOLLIPOG_TEST_TAMPER: tamper }, encoding: "utf8", timeout: 120_000, maxBuffer: 64 * 1024 });
   t.diagnostic(result.stderr);
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0, `${tamper}: ${result.stderr}`);
+  }
 });
