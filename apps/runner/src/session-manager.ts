@@ -8360,11 +8360,16 @@ export class SessionManager {
           // port block and process marker may be taken already, and nothing would ever give them back,
           // nor remove the worktree, once the session goes. It is this launch's to undo, as a failed
           // ownership claim's is just above.
-          const cleanup = launchWorktreeCleanup();
-          cleanup.checkpointGenerationDisposable = true;
-          this.cleanupJournal.add(cleanup);
-          worktreeOwnedByLaunch = false;
-          await this.reapWorktree(cleanup, true);
+          // Contained, so a rollback that cannot finish never stands in for the launch's own error.
+          try {
+            const cleanup = launchWorktreeCleanup();
+            cleanup.checkpointGenerationDisposable = true;
+            this.cleanupJournal.add(cleanup);
+            worktreeOwnedByLaunch = false;
+            await this.reapWorktree(cleanup, true);
+          } catch (rollbackError) {
+            this.log(`launch worktree rollback for ${boundedSessionIdForLog(spec.sessionId)} needs retry: ${errText(rollbackError)}`);
+          }
           worktree = null;
         }
         const selected = prior?.repoPath === repoPath &&
@@ -18890,14 +18895,23 @@ export class SessionManager {
     const key = `${record.sessionId}\0${record.worktreeId ?? "legacy"}`;
     const prior = this.worktreeReapsInFlight.get(key);
     const reap: Promise<void> = (prior ?? Promise.resolve()).catch(() => undefined).then(() => {
-      if (prior && !this.cleanupJournal.list().some((other) =>
-        `${other.sessionId}\0${other.worktreeId ?? "legacy"}` === key)) return;
+      // Only a record still on record is reaped: this one itself, or the same record read again from
+      // the journal (its key, trigger, path and creation time). One a reap already finished, or one
+      // another record replaced under that key, speaks for nothing now (#4209).
+      if (!this.recordStillOnRecord(record)) return;
       return this.reapWorktreeOnce(record, cleanupCurrentGeneration, isolationMeta);
     }).finally(() => {
       if (this.worktreeReapsInFlight.get(key) === reap) this.worktreeReapsInFlight.delete(key);
     });
     this.worktreeReapsInFlight.set(key, reap);
     return reap;
+  }
+
+  private recordStillOnRecord(record: WorktreeCleanupRecord): boolean {
+    return this.cleanupJournal.list().some((other) => other === record || (
+      other.sessionId === record.sessionId && (other.worktreeId ?? "legacy") === (record.worktreeId ?? "legacy") &&
+      other.trigger === record.trigger && other.createdAt === record.createdAt &&
+      sameWorktreePath(record.context, other.worktreePath, record.worktreePath)));
   }
 
   private async reapWorktreeOnce(
@@ -18916,15 +18930,23 @@ export class SessionManager {
     if (record.trigger === "session_delete" && !record.worktreeRemovedAt) {
       const rollback = this.rollbackBeside(record);
       if (rollback) {
+        // A rollback that replaced this record under the same key leaves it off record, so it never gets
+        // here. One under another id, as a row stored under a branch id beside the path id a rollback
+        // uses, leaves this record what its own id holds: what runs under its marker, and its port block.
         this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} left to the rollback still on record for it`);
-        if ((rollback.worktreeId ?? "legacy") === (record.worktreeId ?? "legacy")) {
-          // The journal holds one record per worktree, and the rollback, written after this one,
-          // replaced it there. That loses nothing this record owed: the rollback also stops what ran
-          // there and gives back its ports. This attempt already holds that record's reap.
-          await this.reapWorktreeOnce(rollback, false, isolationMeta);
-        } else if (this.removeWorktreeCleanupRecord(record)) {
-          await this.reapWorktree(rollback, false, isolationMeta);
+        if (record.processMarker && record.processMarker !== rollback.processMarker &&
+            !await this.terminateRollbackProcesses(record.processMarker)) {
+          this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry: its processes could not be stopped`);
+          return;
         }
+        if (record.worktreeId && record.worktreeId !== rollback.worktreeId) {
+          try {
+            this.worktreePortAllocator.release(this.worktreePortOwner(record.sessionId, record.worktreeId));
+          } catch (error) {
+            this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} kept its port block: ${errText(error)}`);
+          }
+        }
+        if (this.removeWorktreeCleanupRecord(record)) await this.reapWorktree(rollback, false, isolationMeta);
         return;
       }
     }

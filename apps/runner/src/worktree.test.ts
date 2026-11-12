@@ -4237,6 +4237,84 @@ test("startup replay reclaims a disposable failed-fork checkpoint generation", {
   }
 });
 
+for (const stale of ["a launch rollback a newer record replaced under its key", "a deletion record a settled rollback replaced"] as const) {
+test(`a reap of ${stale} removes nothing, since it is no longer on record`, { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-stale-reap-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const sessionId = "s_stale_reap";
+    const handle = await createWorktree(repo, sessionId, { dataDir });
+    writeFileSync(join(handle.path, "notes.txt"), "a person's work\n");
+    const base = { sessionId, worktreeId: "legacy", repoPath: repo, worktreePath: handle.path, context: { kind: "native" as const },
+      branch: handle.branch, source: "legacy" as const, removalMode: "force" as const };
+    // Each of these was once on record and would have removed the worktree as it stood then.
+    const staleRecord: WorktreeCleanupRecord = stale.startsWith("a launch")
+      ? { ...base, trigger: "creation_rollback", checkpointGenerationDisposable: true, createdAt: 1,
+        rollbackSnapshot: (await captureRollbackSnapshot(handle.path))! }
+      : { ...base, trigger: "session_delete", createdAt: 1 };
+    const journal = new WorktreeCleanupJournal(dataDir);
+    journal.add(staleRecord);
+    if (stale.startsWith("a launch")) {
+      // A newer launch's rollback took its key, as the journal holds one record per worktree.
+      journal.add({ ...base, trigger: "creation_rollback", createdAt: 2, rollbackSnapshot: "a snapshot of something else" });
+    } else {
+      // A rollback replaced the deletion's record, then settled, keeping the worktree, and left the journal.
+      journal.add({ ...base, trigger: "creation_rollback", auxiliaryWorktreeRollback: true, createdAt: 2 });
+      journal.remove(sessionId, "legacy");
+    }
+    const before = readFileSync(join(handle.path, "notes.txt"), "utf8");
+    const onRecord = journal.list().map((record) => record.createdAt);
+    manager = new SessionManager(() => {}, () => {}, new SessionStore(join(dataDir, "sessions")), "runner", undefined, undefined, dataDir);
+    const internals = manager as unknown as { reapWorktree(record: WorktreeCleanupRecord, cleanupCurrentGeneration?: boolean): Promise<void> };
+    await internals.reapWorktree(staleRecord, stale.startsWith("a launch"));
+
+    assert.equal(existsSync(handle.path), true, "the worktree is still there");
+    assert.equal(readFileSync(join(handle.path, "notes.txt"), "utf8"), before, "with the person's work");
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).list().map((record) => record.createdAt), onRecord,
+      "and what is on record is as it was");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+}
+
+test("a deletion record that gives way to a rollback under another id still gives back its own id's port block", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-deletion-gives-way-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const sessionId = "s_gives_way";
+    const handle = await createWorktree(repo, sessionId, { dataDir });
+    writeFileSync(join(handle.path, "notes.txt"), "a person's work\n");
+    const base = { sessionId, repoPath: repo, worktreePath: handle.path, context: { kind: "native" as const },
+      branch: handle.branch, removalMode: "force" as const, createdAt: 1 };
+    // The deletion's record names the row an earlier runner stored under a branch id. The rollback still
+    // pending for the same worktree uses its path id, so the two have different keys.
+    const deletion: WorktreeCleanupRecord = { ...base, worktreeId: "branch-id", source: "created", trigger: "session_delete" };
+    const journal = new WorktreeCleanupJournal(dataDir);
+    journal.add(deletion);
+    journal.add({ ...base, worktreeId: "path-id", source: "created", trigger: "creation_rollback", auxiliaryWorktreeRollback: true });
+    manager = new SessionManager(() => {}, () => {}, new SessionStore(join(dataDir, "sessions")), "runner", undefined, undefined, dataDir);
+    const internals = manager as unknown as {
+      reapWorktree(record: WorktreeCleanupRecord): Promise<void>;
+      worktreePortAllocator: { allocate(owner: string): unknown; get(owner: string): unknown };
+    };
+    internals.worktreePortAllocator.allocate(`${sessionId}\0branch-id`);
+
+    await internals.reapWorktree(new WorktreeCleanupJournal(dataDir).list().find((record) => record.trigger === "session_delete")!);
+    assert.equal(internals.worktreePortAllocator.get(`${sessionId}\0branch-id`), undefined, "the branch id's block is given back");
+    assert.equal(existsSync(handle.path), true, "and the rollback, not the deletion's forced removal, decided the worktree");
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).list(), []);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("superseded launch rollback preserves a replacement generation reusing the worktree", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-superseded-launch-rollback-"));
   const dataDir = join(root, "data");
