@@ -295,16 +295,6 @@ export function providerContainmentEmpty(): boolean {
   try { return !instance.io.populated(); } catch { return false; }
 }
 
-/** Observe without killing. Only live/unverified helpers retain an fd; empty leaves retire even
- * when the helper ended after its root. The timer never keeps a runner alive by itself. */
-export function retainLinuxCgroupUntilEmpty(boundary: LinuxCgroupBoundary): void {
-  const check = async () => {
-    if (await boundary.releaseIfEmpty().catch(() => false)) return;
-    setTimeout(() => { void check(); }, 1_000).unref();
-  };
-  void check();
-}
-
 /** One instance parent contains all launch leaves. Call before acquiring a lease to obtain the
  * identity a future journal may record. This issue does not persist it or change lease authority.
  * Availability is chosen once; after choosing cgroups, later launch failures refuse execution
@@ -435,24 +425,18 @@ function prepareLaunchIn(mount: CgroupLocation): LinuxCgroupLaunch {
 
 /** Native launch primitive shared by spawnAgent. Passing an fd prevents path replacement between
  * parent preparation and child admission; the provider receives none of the cgroup handles. */
-type CgroupStdio = ["pipe" | "ignore" | "inherit" | number, "pipe" | "ignore" | "inherit" | number, "pipe" | "ignore" | "inherit" | number];
 export function spawnWithLinuxCgroup(command: string, args: string[], options: SpawnOptionsWithoutStdio): {
   child: ChildProcessWithoutNullStreams; containment?: LinuxCgroupBoundary;
-};
-export function spawnWithLinuxCgroup(command: string, args: string[], options: SpawnOptionsWithoutStdio, stdio: CgroupStdio): {
-  child: ChildProcess; containment?: LinuxCgroupBoundary;
-};
-export function spawnWithLinuxCgroup(command: string, args: string[], options: SpawnOptionsWithoutStdio,
-  stdio: CgroupStdio = ["pipe", "pipe", "pipe"]): { child: ChildProcess; containment?: LinuxCgroupBoundary } {
+} {
   const group = launchGroup.getStore();
   group?.verify();
   const launch = group ? prepareLaunchIn(group.mount) : prepareLinuxCgroupLaunch();
-  if (!launch) return { child: spawn(command, args, { ...options, stdio }) };
+  if (!launch) return { child: spawn(command, args, { ...options, stdio: "pipe" }) };
   try {
     // Only selecting the launch belongs to the writer context. ProcessWrap/Pipe resources must
     // be created outside it: their later callbacks can schedule turns for unrelated sessions.
     const child = launchGroup.exit(() => spawn(launch.helper, ["--exec", command, ...args], {
-      ...options, shell: false, stdio: [...stdio, launch.directoryFd, "pipe", "pipe"],
+      ...options, shell: false, stdio: ["pipe", "pipe", "pipe", launch.directoryFd, "pipe", "pipe"],
     })) as ChildProcessWithoutNullStreams;
     launch.boundary.bind(child);
     // Node's declaration enumerates only fds 0..4, although spawn accepts additional pipes.
@@ -476,13 +460,4 @@ export function spawnWithLinuxCgroup(command: string, args: string[], options: S
     launch.boundary.cancelSpawn();
     throw error;
   }
-}
-
-/** Raw provider-controller launch, preserving interpreter/argv/environment/I/O and detached
- * lifecycle. Helpers are admitted before exec, but never killed just because their root closes. */
-export function spawnProviderHelper(command: string, args: string[], options: SpawnOptionsWithoutStdio,
-  stdio: CgroupStdio): ChildProcess {
-  const { child, containment } = spawnWithLinuxCgroup(command, args, options, stdio);
-  if (containment) child.once("close", () => retainLinuxCgroupUntilEmpty(containment));
-  return child;
 }

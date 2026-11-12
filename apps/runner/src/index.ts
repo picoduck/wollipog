@@ -4617,7 +4617,7 @@ function shutdown(exitCode = 0): void {
           } catch (error) {
             log(`shutdown retirement proof failed: ${errText(error)}`);
           }
-          if (!providerBoundaryEmpty) log("provider-HOME boundary is still populated or uninspectable; a detached provider review controller can retain ownership until its work finishes");
+          if (!providerBoundaryEmpty) log("provider-HOME boundary is still populated or uninspectable; retaining provider-HOME leases until containment is proven empty");
           if (!await sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped && providerBoundaryEmpty)) {
             log("process-tree cleanup was incomplete — retaining provider-home lease; inspect the preceding survivor diagnostic before restarting this runner");
           }
