@@ -43,19 +43,20 @@ test("the liveness check rejects live leftovers but excludes unreaped zombies", 
     'process.stdout.write(String(child.pid) + "\\n");',
     'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);',
   ].join("\n")], { stdio: ["ignore", "pipe", "inherit"] });
+  const exited = once(parent, "close");
   let pid: number | undefined;
   t.after(async () => {
     if (pid && await alive(pid)) process.kill(pid, "SIGKILL");
-    const exited = once(parent, "close");
     parent.kill("SIGKILL");
     await exited;
   });
-  const [output] = await once(parent.stdout, "data");
+  const [output] = await Promise.race([
+    once(parent.stdout, "data"),
+    exited.then(() => { throw new Error("the helper parent exited before reporting its child PID"); }),
+  ]);
   pid = Number(String(output).trim());
   assert.ok(Number.isSafeInteger(pid) && pid > 1);
-  const live = await alive(pid);
-  assert.equal(live, true);
-  assert.throws(() => assert.equal(live, false), /true !== false/, "a real leftover fails the gone assertion");
+  assert.equal(await alive(pid), true, "the child starts as live work");
   process.kill(pid, "SIGKILL");
   for (let attempt = 0; attempt < 100 && !(await processState(pid)).startsWith("Z"); attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 10));
