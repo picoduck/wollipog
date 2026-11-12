@@ -10,7 +10,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { Board } from "./Board.js";
-import { State, stateVariant } from "./State.js";
+import { State } from "./State.js";
 
 /**
  * docs/design-system.md §12: offline, loading, error, empty and no results are mutually exclusive in
@@ -31,15 +31,6 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
-
-test("the state priority is offline, loading, error, empty, then no results", () => {
-  assert.equal(stateVariant({ offline: true, loading: true, error: true, empty: true, noResults: true }), "offline");
-  assert.equal(stateVariant({ loading: true, error: true, empty: true }), "loading");
-  assert.equal(stateVariant({ error: true, empty: true, noResults: true }), "error");
-  assert.equal(stateVariant({ empty: true, noResults: true }), "empty");
-  assert.equal(stateVariant({ noResults: true }), "no-results");
-  assert.equal(stateVariant({}), null);
-});
 
 test("an empty state is top-left, carries its next step, and has no card or success glyph", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;

@@ -477,20 +477,6 @@ export function ArtifactPreviewBody({ model, onOpenImage }: {
 }
 
 /**
- * A preview inside a host that already names the artifact (a transcript row): Download over the body.
- * Download Original File still carries the one warning about raw bytes.
- */
-export function ArtifactInlinePreview({ artifact }: { artifact: WorkflowArtifactView }) {
-  const model = useArtifactPreview(artifact);
-  return (
-    <div className="art-view">
-      <div className="toolbar art-inline-actions"><ArtifactDownloadMenu model={model} /></div>
-      <ArtifactPreviewBody model={model} />
-    </div>
-  );
-}
-
-/**
  * Run detail's preview (#2855; §7.1, §7.5): a large dialog, a sheet on a phone, titled with the
  * artifact over its meta line, with Enlarge in the header and Download and Done in the footer.
  */

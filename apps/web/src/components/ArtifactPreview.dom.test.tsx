@@ -7,7 +7,7 @@ import { Window } from "happy-dom";
 import type { WorkflowArtifactView } from "@wollipog/protocol";
 import { api } from "../api.js";
 import { DEVICE_TOKEN_CHANGED_EVENT } from "../device-token.js";
-import { ArtifactInlinePreview } from "./ArtifactPreview.js";
+import { useArtifactPreview, ArtifactPreviewBody } from "./ArtifactPreview.js";
 import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -21,6 +21,11 @@ for (const [name, value] of Object.entries({
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+
+function PreviewHarness({ artifact }: { artifact: WorkflowArtifactView }) {
+  const model = useArtifactPreview(artifact);
+  return <ArtifactPreviewBody model={model} />;
+}
 
 function artifact(id: string, bytes: Uint8Array): WorkflowArtifactView {
   return {
@@ -85,8 +90,8 @@ test("artifact preview fences stale loads and revokes its selected image URL on 
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   try {
-    await act(async () => { root.render(<ArtifactInlinePreview artifact={first} />); });
-    await act(async () => { root.render(<ArtifactInlinePreview artifact={artifact("second", secondBytes)} />); });
+    await act(async () => { root.render(<PreviewHarness artifact={first} />); });
+    await act(async () => { root.render(<PreviewHarness artifact={artifact("second", secondBytes)} />); });
     await act(async () => { resolveSecond(new Blob([secondBytes], { type: "image/png" })); });
     await waitForPreview(() => !!container.querySelector("img")?.getAttribute("src"), "the selected image");
     assert.equal(container.querySelector("img")?.getAttribute("src"), "blob:preview-1");
@@ -124,7 +129,7 @@ test("verified video artifacts render a private inline player and release their 
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(<ArtifactInlinePreview artifact={item} />));
+    await act(async () => root.render(<PreviewHarness artifact={item} />));
     await waitForPreview(
       () => !!container.querySelector("video.art-video")?.getAttribute("src"),
       "the verified video player",
@@ -170,7 +175,7 @@ test("transcript screenshot remount reuses verified bytes until credentials or s
     await act(async () => root.render(
       <React.StrictMode>
         <TranscriptImageCacheProvider key={session}>
-          {item && <ArtifactInlinePreview artifact={item} />}
+          {item && <PreviewHarness artifact={item} />}
         </TranscriptImageCacheProvider>
       </React.StrictMode>,
     ));
@@ -240,7 +245,7 @@ test("a mismatched transcript image is never cached and can load on a later moun
   const root = createRoot(container);
   const render = async (show: boolean) => {
     await act(async () => root.render(
-      <TranscriptImageCacheProvider>{show && <ArtifactInlinePreview artifact={item} />}</TranscriptImageCacheProvider>,
+      <TranscriptImageCacheProvider>{show && <PreviewHarness artifact={item} />}</TranscriptImageCacheProvider>,
     ));
   };
   try {

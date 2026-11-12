@@ -3,7 +3,6 @@ import { isTerminal, type ArchiveSessionMetadata, type SessionView } from "@woll
 import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
 import { readArchiveBrowse, writeArchiveBrowse } from "../archive-browse-history.js";
-import { ARCHIVE_SEARCH_EVENT, pendingArchiveSearch, takeArchiveSearch } from "../archive-search-handoff.js";
 import { sessionUnarchiveRestarts, unarchiveAndRestartFailureMessage } from "../archive-actions.js";
 import { pendingQueuedPromptCount } from "../session-actions.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
@@ -142,14 +141,14 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
   const hasBeenOnlineRef = useRef(false);
   const connectionLostRef = useRef(false);
   const revalidateAfterLoadRef = useRef(false);
-  // A query handed over by the palette's "Search Archived Sessions" (#1978) is the first search.
-  const [restored] = useState(() => restoreBrowse && initialSearch === undefined && pendingArchiveSearch() === null ? readArchiveBrowse() : null);
+  // An initial search from navigation takes precedence over restored browse history.
+  const [restored] = useState(() => restoreBrowse && initialSearch === undefined ? readArchiveBrowse() : null);
   const restorePositionRef = useRef(restored);
   const sectionRef = useRef<HTMLElement>(null);
   const lastRowRef = useRef(restored?.rowId ?? null);
   const [pageChanged, setPageChanged] = useState(false);
-  const [filters, setFilters] = useState(() => restored?.filters ?? { ...DEFAULT_FILTERS, query: initialSearch ?? pendingArchiveSearch() ?? "" });
-  const [queryInput, setQueryInput] = useState(() => restored?.filters.query ?? initialSearch ?? pendingArchiveSearch() ?? "");
+  const [filters, setFilters] = useState(() => restored?.filters ?? { ...DEFAULT_FILTERS, query: initialSearch ?? "" });
+  const [queryInput, setQueryInput] = useState(() => restored?.filters.query ?? initialSearch ?? "");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const filtersDoneRef = useRef<HTMLButtonElement>(null);
@@ -288,24 +287,6 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
   }, []);
 
   useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
-
-  useEffect(() => {
-    takeArchiveSearch();
-    const onArchiveSearch = () => {
-      const query = takeArchiveSearch();
-      if (query !== null) {
-        restorePositionRef.current = null;
-        lastRowRef.current = null;
-        setPageChanged(false);
-        setQueryInput(query);
-        setFilters({ ...DEFAULT_FILTERS, query });
-        setPage(1);
-        setCursors([null]);
-      }
-    };
-    window.addEventListener(ARCHIVE_SEARCH_EVENT, onArchiveSearch);
-    return () => window.removeEventListener(ARCHIVE_SEARCH_EVENT, onArchiveSearch);
-  }, []);
 
   useEffect(() => {
     if (filters.query === queryInput) return;

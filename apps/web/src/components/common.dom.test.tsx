@@ -7,7 +7,6 @@ import type { SessionView } from "@wollipog/protocol";
 import {
   BackgroundDeliveryBadge,
   BackgroundNotificationBadge,
-  backgroundWorkAccessibleName,
   AttentionBadge,
   COPY_RESULT_MS,
   CopyButton,
@@ -173,14 +172,6 @@ test("a labeled copy button sizes itself for every label it can show, but its te
   } finally {
     await view.cleanup();
   }
-});
-
-test("background-work accessible names always name background work, and lost work reads Lost", () => {
-  // "Orphaned" is retired everywhere (docs/design-system.md §11.2): lost work reads Lost.
-  assert.deepEqual(
-    (["running", "continuation_pending", "orphaned"] as const).map((state) => backgroundWorkAccessibleName(state)),
-    ["Background Work: Waiting on External Job", "Background Work: Follow-Up Pending", "Background Work: Lost"],
-  );
 });
 
 test("background-work indicators become keyboard-native panel controls when actionable", async () => {

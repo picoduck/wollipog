@@ -50,7 +50,7 @@ const viewer: ViewerIdentity = { userId: "usr_8f2c41", shared: false, names: new
 function Preview({ item }: { item: WorkflowArtifactView }) {
   const model = useArtifactPreview(item);
   return (
-    <div className="art-view">
+    <div>
       <div className="rpanel-actions"><ArtifactPageActions model={model} /></div>
       <ArtifactPreviewMeta model={model} />
       <ArtifactPreviewBody model={model} />
