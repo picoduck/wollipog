@@ -33,3 +33,26 @@ export const CAMPAIGN_SESSION_PROTOCOL_ROUTES = [
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/reconcile",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw",
 ] as const;
+
+/** Residual scope: each exact route independently refuses the owner credential in production. */
+export const RESIDUAL_SESSION_PROTOCOL_ROUTES = [
+  "POST /api/sessions/:id/automation-proposals",
+  "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute",
+  "POST /api/sessions/:id/cross-model-reviews",
+  "POST /api/sessions/:id/cross-model-reviews/:jobId/cancel",
+  "POST /api/sessions/:id/delegated-image-review/acknowledge",
+  "POST /api/sessions/:id/delegated-image-review/image",
+  "POST /api/sessions/:id/delegated-image-review/verdict",
+  "POST /api/sessions/:id/github-issue-closures",
+  "POST /api/sessions/:id/github-issue-closures/:occurrenceId/execute",
+  "POST /api/sessions/:id/location-switch-requests",
+  "POST /api/sessions/:id/location-switch-requests/:occurrenceId/execute",
+  "POST /api/sessions/:id/video-evidence-review/acknowledge",
+  "POST /api/sessions/:id/video-evidence-review/acknowledge-frames",
+  "POST /api/sessions/:id/video-evidence-review/frame",
+  "POST /api/sessions/:id/video-evidence-review/frames",
+  "POST /api/sessions/:id/video-evidence-review/prepare",
+  "POST /api/sessions/:id/video-evidence-review/provenance",
+  "POST /api/sessions/:id/video-evidence-review/verdict",
+  "POST /api/sessions/:id/worktrees/delete-refs",
+] as const;

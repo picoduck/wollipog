@@ -6,8 +6,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { OwnerManagementInventory, type OwnerOperationCoverage } from "./owner-management-inventory.js";
 import { ASSISTANT_CONNECTION_OPERATIONS } from "./assistant-connection-operations.js";
-import { ASSISTANT_CAMPAIGN_MANAGEMENT, ASSISTANT_CAMPAIGN_HUMAN_ROUTES } from "./assistant-campaign-management.js";
-import { CAMPAIGN_SESSION_PROTOCOL_ROUTES } from "./campaign-session-protocol.js";
+import { ASSISTANT_CAMPAIGN_MANAGEMENT, ASSISTANT_CAMPAIGN_HUMAN_ROUTES, ASSISTANT_RESIDUAL_MANAGEMENT, ASSISTANT_RESIDUAL_HUMAN_ROUTES } from "./assistant-campaign-management.js";
+import { CAMPAIGN_SESSION_PROTOCOL_ROUTES, RESIDUAL_SESSION_PROTOCOL_ROUTES } from "./campaign-session-protocol.js";
 
 test("parity gate observes generated owner routes and fails unregistered or undocumented operations", async () => {
   const app = Fastify(), inventory = new OwnerManagementInventory();
@@ -89,7 +89,7 @@ test("production composition inventory is exhaustive; unresolved gaps cannot cou
     assert.ok(snapshot.tools.includes(tool), `${tool}: production lost a group-5 connection operation`);
     assert.deepEqual(manifest[route], {tools: [tool]}, `${route}: group-5 audit drift`);
   }
-  for (const [tool, route] of ASSISTANT_CAMPAIGN_MANAGEMENT) {
+  for (const [tool, route] of [...ASSISTANT_CAMPAIGN_MANAGEMENT, ...ASSISTANT_RESIDUAL_MANAGEMENT]) {
     assert.ok(snapshot.tools.includes(tool), `${tool}: production lost a group-7 operation`);
     assert.deepEqual(manifest[route], {tools: [tool]}, `${route}: group-7 audit drift`);
   }
@@ -99,6 +99,12 @@ test("production composition inventory is exhaustive; unresolved gaps cannot cou
   assert.equal(group7.filter(([, entry]) => "tools" in entry).length, 18);
   assert.equal(group7.filter(([, entry]) => "exclusion" in entry && entry.exclusion === "human_authority").length, 9);
   assert.equal(group7.filter(([, entry]) => "exclusion" in entry && entry.exclusion === "session_protocol").length, 30);
+  const residualRoutes = new Set<string>([...ASSISTANT_RESIDUAL_MANAGEMENT.map(([, route]) => route), ...ASSISTANT_RESIDUAL_HUMAN_ROUTES, ...RESIDUAL_SESSION_PROTOCOL_ROUTES]);
+  const residual = Object.entries(manifest).filter(([route]) => residualRoutes.has(route));
+  assert.equal(residual.length, 29);
+  assert.equal(residual.filter(([, entry]) => "tools" in entry).length, 3);
+  assert.equal(residual.filter(([, entry]) => "exclusion" in entry && entry.exclusion === "human_authority").length, 7);
+  assert.equal(residual.filter(([, entry]) => "exclusion" in entry && entry.exclusion === "session_protocol").length, 19);
   assert.deepEqual(snapshot.routes, Object.keys(manifest).sort(), "An owner-route candidate was added/removed: classify it explicitly; never regenerate to hide a gap.");
   const inventory = new OwnerManagementInventory();
   const app = Fastify();
@@ -124,7 +130,7 @@ test("campaign protocol accepts only its exact no-owner-equivalent entries and r
   inventory.attach(app);
   const manifest = JSON.parse(readFileSync(new URL("../../../docs/assistant-owner-capabilities.json", import.meta.url), "utf8"));
   const coverage: Record<string, OwnerOperationCoverage> = {};
-  for (const route of CAMPAIGN_SESSION_PROTOCOL_ROUTES) {
+  for (const route of [...CAMPAIGN_SESSION_PROTOCOL_ROUTES, ...RESIDUAL_SESSION_PROTOCOL_ROUTES]) {
     const [method, url] = route.split(" ") as ["GET" | "POST", string];
     app.route({method, url, handler: () => ({})});
     coverage[route] = manifest[route];
@@ -144,6 +150,9 @@ test("campaign protocol accepts only its exact no-owner-equivalent entries and r
 test("every campaign protocol classification is explicitly allowlisted and proved owner-403 in production HTTP", {timeout: 30_000}, () => {
   assert.equal(CAMPAIGN_SESSION_PROTOCOL_ROUTES.length, 30, "Only the 30 adjudicated group-7 routes are admitted");
   assert.equal(new Set(CAMPAIGN_SESSION_PROTOCOL_ROUTES).size, 30);
+  assert.equal(RESIDUAL_SESSION_PROTOCOL_ROUTES.length, 19);
+  const protocolRoutes = [...CAMPAIGN_SESSION_PROTOCOL_ROUTES, ...RESIDUAL_SESSION_PROTOCOL_ROUTES];
+  assert.equal(new Set(protocolRoutes).size, 49);
   const child = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../test-support/owner-parity-snapshot.ts", import.meta.url)), "--verify-campaign-protocol"],
     {encoding: "utf8", timeout: 25_000, maxBuffer: 1024 * 1024});
   assert.equal(child.status, 0, "Isolated production protocol authorization test failed; raw logs withheld.");
@@ -152,9 +161,9 @@ test("every campaign protocol classification is explicitly allowlisted and prove
   const evidence = JSON.parse(line.slice("OWNER_CAMPAIGN_PROTOCOL_FENCES ".length));
   assert.equal(evidence.ownerRead, 200);
   assert.equal(evidence.effects, 0);
-  assert.deepEqual(evidence.ownerDeniedRoutes.sort(), [...CAMPAIGN_SESSION_PROTOCOL_ROUTES].sort());
+  assert.deepEqual(evidence.ownerDeniedRoutes.sort(), protocolRoutes.sort());
   const manifest = JSON.parse(readFileSync(new URL("../../../docs/assistant-owner-capabilities.json", import.meta.url), "utf8"));
-  const admitted = new Set<string>(CAMPAIGN_SESSION_PROTOCOL_ROUTES);
+  const admitted = new Set<string>(protocolRoutes);
   const verified = new Set<string>(evidence.ownerDeniedRoutes);
   for (const [route, entry] of Object.entries(manifest) as [string, {exclusion?: string; ownerTools?: string[]}][]) {
     if (entry.exclusion !== "session_protocol" || route === "POST /api/sessions/:id/waits" || route === "POST /api/sessions/:id/pull-request-watch") continue;
@@ -171,4 +180,14 @@ test("real owner HTTP and Assistant MCP cannot write runtime wait/watch state un
   const line = child.stdout.split("\n").find(value => value.startsWith("OWNER_RUNTIME_IDENTITY_FENCES "));
   assert.ok(line, "Production HTTP/MCP did not return identity-fence evidence.");
   assert.deepEqual(JSON.parse(line.slice("OWNER_RUNTIME_IDENTITY_FENCES ".length)), {ownerReads: 1, ownerWritesDenied: 2, assistantWritesDenied: 2, effects: 0});
+});
+
+test("production owner HTTP, MCP and binary image ingress use the same residual services", {timeout: 30_000}, () => {
+  const child = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../test-support/owner-parity-snapshot.ts", import.meta.url)), "--verify-residual-management"],
+    {encoding: "utf8", timeout: 25_000, maxBuffer: 1024 * 1024});
+  assert.equal(child.status, 0, "Isolated production residual equivalence regression; raw fixture logs withheld.");
+  const line = child.stdout.split("\n").find(value => value.startsWith("OWNER_RESIDUAL_EQUIVALENCE "));
+  assert.ok(line, "Missing production residual service evidence");
+  assert.deepEqual(JSON.parse(line.slice("OWNER_RESIDUAL_EQUIVALENCE ".length)), {ownerRead: 200, tools: 3,
+    binaryUpload: "succeeded", opaqueReference: "succeeded", grantRefused: 403});
 });

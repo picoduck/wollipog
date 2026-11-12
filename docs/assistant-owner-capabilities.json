@@ -193,7 +193,9 @@
     ]
   },
   "GET /api/sessions/:id/authentication/accounts": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Exposes authentication-recovery account and sign-in context; authentication remains human-only.",
+    "remedy": "Use the authenticated owner Authentication Required recovery UI."
   },
   "GET /api/sessions/:id/automation-proposals/:occurrenceId": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -264,7 +266,9 @@
     "remedy": "Launch or prompt an authorized session to do workspace work; use the authenticated owner terminal, file/reference picker or transcript-share UI for interactive content I/O. Results/status remain app-management requirements."
   },
   "GET /api/sessions/:id/governance-audit": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "governance_audit"
+    ]
   },
   "GET /api/sessions/:id/history-preview": {
     "tools": [
@@ -320,7 +324,9 @@
     ]
   },
   "GET /api/sessions/:id/provider-accounts": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Returns raw provider-account identities, labels and authentication/usage context rather than the opaque account preview.",
+    "remedy": "Use the authenticated owner account settings; use the separate opaque account-preview Assistant tool for harness selection."
   },
   "GET /api/sessions/:id/queued/:promptId/edit": {
     "tools": [
@@ -692,10 +698,14 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/sessions/:id/automation-proposals": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
   },
   "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
   },
   "POST /api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
@@ -752,19 +762,29 @@
     ]
   },
   "POST /api/sessions/:id/cross-model-reviews": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine session historical protocol for old jobs, and current review-sessions for new reviews; the retired bridge is not revived."
   },
   "POST /api/sessions/:id/cross-model-reviews/:jobId/cancel": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine session historical protocol for old jobs, and current review-sessions for new reviews; the retired bridge is not revived."
   },
   "POST /api/sessions/:id/delegated-image-review/acknowledge": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
   },
   "POST /api/sessions/:id/delegated-image-review/image": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
   },
   "POST /api/sessions/:id/delegated-image-review/verdict": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
   },
   "POST /api/sessions/:id/descendant-requests/delegated-image-review": {
     "exclusion": "session_protocol",
@@ -797,25 +817,37 @@
     ]
   },
   "POST /api/sessions/:id/git": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "session_git"
+    ]
   },
   "POST /api/sessions/:id/github-issue-closures": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
   },
   "POST /api/sessions/:id/github-issue-closures/:occurrenceId/execute": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
   },
   "POST /api/sessions/:id/host-action": {
     "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
   },
   "POST /api/sessions/:id/location-switch-requests": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
   },
   "POST /api/sessions/:id/location-switch-requests/:occurrenceId/execute": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
   },
   "POST /api/sessions/:id/logout-agent": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Changes provider authentication by logging the agent out.",
+    "remedy": "Use the authenticated owner logout control."
   },
   "POST /api/sessions/:id/orchestrator-campaign/behavior": {
     "exclusion": "human_authority",
@@ -923,10 +955,14 @@
     "remedy": "Use this exact authenticated owner API or its owner settings/approval UI, then resume ordinary Assistant management."
   },
   "POST /api/sessions/:id/parent-control": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Changes persistent Parent Control delegation authority.",
+    "remedy": "Use authenticated owner Parent Control settings."
   },
   "POST /api/sessions/:id/parent-control-policy": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Changes persistent decision-delegation policy and its revision.",
+    "remedy": "Use authenticated owner Parent Control policy settings."
   },
   "POST /api/sessions/:id/pending-prompts/:commandId/resolve": {
     "tools": [
@@ -934,7 +970,9 @@
     ]
   },
   "POST /api/sessions/:id/policy-hook": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Evaluates the privileged runner policy-hook protocol under configured governance; it is not an owner management action.",
+    "remedy": "Use the genuine configured runner hook under the existing human-established policy."
   },
   "POST /api/sessions/:id/project": {
     "tools": [
@@ -947,10 +985,14 @@
     ]
   },
   "POST /api/sessions/:id/prompt-images": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "tools": [
+      "prompt_image_add"
+    ]
   },
   "POST /api/sessions/:id/provider-account": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "human_authority",
+    "reason": "Switches the provider identity and account binding used by the session.",
+    "remedy": "Use the authenticated owner account-switch settings; Assistant previews grant no switching authority."
   },
   "POST /api/sessions/:id/pull-request-watch": {
     "exclusion": "session_protocol",
@@ -1077,25 +1119,39 @@
     ]
   },
   "POST /api/sessions/:id/video-evidence-review/acknowledge": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
   },
   "POST /api/sessions/:id/video-evidence-review/acknowledge-frames": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
   },
   "POST /api/sessions/:id/video-evidence-review/frame": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
   },
   "POST /api/sessions/:id/video-evidence-review/frames": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
   },
   "POST /api/sessions/:id/video-evidence-review/prepare": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
   },
   "POST /api/sessions/:id/video-evidence-review/provenance": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
   },
   "POST /api/sessions/:id/video-evidence-review/verdict": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine bound reviewer or controlling session protocol with exact evidence authority and delivery receipts. Owner credentials cannot attest as the reviewer."
   },
   "POST /api/sessions/:id/waits": {
     "exclusion": "session_protocol",
@@ -1156,7 +1212,9 @@
     ]
   },
   "POST /api/sessions/:id/worktrees/delete-refs": {
-    "gap": "Not yet mapped to an equivalent Assistant service. This is an unresolved parity candidate, not an allowed exclusion."
+    "exclusion": "session_protocol",
+    "reason": "Requires the matching caller or bound reviewer's own session credential; the isolated production owner HTTP test verifies credential-specific 403. No owner equivalent is claimed.",
+    "remedy": "Use the genuine requesting session protocol and all existing exact approvals, digests, ownership and forge/runner checks."
   },
   "POST /api/sessions/:id/worktrees/discard": {
     "tools": [

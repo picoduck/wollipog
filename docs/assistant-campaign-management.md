@@ -72,6 +72,43 @@ Orchestrator ledger and evidence-review protocol. The retired campaign-review-jo
 service stays retired; historical job and repository-addition reads have no claimed owner
 equivalent. No Assistant tool may impersonate those credentials.
 
+## Residual Owner Capabilities
+
+The residual audit adds three tools. `governance_audit` reads the owner's bounded session audit
+(`query.limit`, 1–500, and optional `query.before`); it cannot change governance. `session_git`
+calls the same shared operation as owner HTTP, accepting exactly the existing parser's eleven
+actions in `payload`: status, summary, diff, request_diff, commit, open_pr, stage_hunk, stage_lines,
+discard_file, github_review_sync and forge_review_sync. No arbitrary command or runner-protocol
+extra is accepted. Local mutations and review reconciliation require `commandId` and durable
+receipts. Discard honors `destructiveConfirmation`, binding the diff hash, file and current
+worktree/runner placement. Existing busy-session, managed-worktree, capability, stale-selection,
+runner deadline and review-result validation remain shared. A timeout can leave an uncertain
+receipt; inspect it and current state instead of redispatching.
+
+`prompt_image_add` accepts `sessionId`, `commandId` and optional `sourceArtifactId`. The source
+is an opaque existing image artifact reference, and both source and destination require current
+owner, operation and Project access. For a new image, a client sends allowed raw image bytes to
+`POST /assistant/sessions/:sessionId/prompt-images/:commandId` using its current Assistant bearer.
+Authorization runs before body parsing, cross-origin browser requests are refused, and the
+endpoint dispatches the same operation. It takes no filesystem path or base64 model argument.
+The existing prompt-image service enforces MIME/signature/size, content-addressed storage,
+deduplication and prepared-image retention. Responses and receipts contain opaque metadata and
+artifact references; receipt identity binds MIME, byte count and SHA-256, never stored image
+bytes. Reusing a command with different bytes is refused.
+
+Seven residual routes remain human-authority exclusions: authentication recovery, raw provider
+account choices, logout, account switching, Parent Control mode/policy and the configured policy
+hook. Raw account choices expose account IDs/labels and authentication/usage context; use the
+separate opaque preview tool for harness selection. Governance *reads* are an owner capability;
+governance changes and lasting delegation remain human-only.
+
+Nineteen additional exact session-protocol routes cover genuine runtime automation proposals,
+Location-switch requests, issue closures, historical cross-model review jobs, reviewer media
+delivery/acknowledgment/verdict, and managed ref cleanup. Every route has its own isolated
+production owner-403 proof. These are credential boundaries, not tool equivalents, and the
+retired review bridge stays retired. A refusal test establishes no production media-delivery or
+video-readiness claim.
+
 ## Verification Limits
 
 Tests use actual SQLite, Fastify HTTP/MCP, application services, command receipts and synthetic

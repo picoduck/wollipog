@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { CAMPAIGN_SESSION_PROTOCOL_ROUTES } from "./campaign-session-protocol.js";
+import { CAMPAIGN_SESSION_PROTOCOL_ROUTES, RESIDUAL_SESSION_PROTOCOL_ROUTES } from "./campaign-session-protocol.js";
 
 export type OwnerOperationCoverage =
   | {tools: string[]}
@@ -13,7 +13,7 @@ const SESSION_PROTOCOL_WRITES = new Set([
   "POST /api/sessions/:id/waits",
   "POST /api/sessions/:id/pull-request-watch",
 ]);
-const CAMPAIGN_SESSION_PROTOCOL = new Set<string>(CAMPAIGN_SESSION_PROTOCOL_ROUTES);
+const CAMPAIGN_SESSION_PROTOCOL = new Set<string>([...CAMPAIGN_SESSION_PROTOCOL_ROUTES, ...RESIDUAL_SESSION_PROTOCOL_ROUTES]);
 
 /** Observe actual Fastify registration, including routes generated in loops and shared services.
  * Source-string snapshots miss those routes and cannot prove that the production composition

@@ -6,6 +6,24 @@ import type { OwnerManagement } from "./owner-management.js";
 import { AssistantRefusal, type AssistantOperation, type AssistantOperations, type AssistantTarget } from "./assistant-connections.js";
 import { AssistantCommandReceipts, assistantRequestDigest } from "./assistant-command-receipts.js";
 import { AssistantCommandConfirmations } from "./assistant-command-confirmations.js";
+import {parseGitAction} from "./git-route.js";
+import type {GitActionRequest} from "@wollipog/protocol";
+import type {AssistantPromptImages} from "./assistant-prompt-images.js";
+
+export const ASSISTANT_RESIDUAL_MANAGEMENT = [
+  ["governance_audit", "GET /api/sessions/:id/governance-audit"],
+  ["session_git", "POST /api/sessions/:id/git"],
+  ["prompt_image_add", "POST /api/sessions/:id/prompt-images"],
+] as const;
+export const ASSISTANT_RESIDUAL_HUMAN_ROUTES = [
+  "GET /api/sessions/:id/authentication/accounts",
+  "GET /api/sessions/:id/provider-accounts",
+  "POST /api/sessions/:id/logout-agent",
+  "POST /api/sessions/:id/parent-control",
+  "POST /api/sessions/:id/parent-control-policy",
+  "POST /api/sessions/:id/policy-hook",
+  "POST /api/sessions/:id/provider-account",
+] as const;
 
 export const ASSISTANT_CAMPAIGN_MANAGEMENT = [
   ["campaign_summary", "GET /api/sessions/:id/campaign/summary"],
@@ -43,6 +61,9 @@ export const ASSISTANT_CAMPAIGN_HUMAN_ROUTES = [
 
 const str = {type: "string"}, obj = {type: "object"};
 const descriptions: Record<string, string> = {
+  governance_audit: "Read the owner's session governance audit with bounded query limit and before cursor. Reading grants no policy-changing authority.",
+  session_git: "Use exactly the owner's Git parser: status, summary, diff, request_diff, commit, open_pr, stage_hunk, stage_lines, discard_file, github_review_sync or forge_review_sync. Supply payload; mutations require commandId and discard_file honors destructive confirmation. Stale worktree and runner checks still apply.",
+  prompt_image_add: "Add a prompt image using sourceArtifactId, an opaque image artifact reference under current access. For new bytes POST an allowed raw image with this Assistant bearer to /assistant/sessions/:sessionId/prompt-images/:commandId. Supply commandId. Never supply base64, image bytes or filesystem paths in tool arguments.",
   campaign_summary: "Read campaign progress, obligations and visible cost totals. Requires access to every Project represented in the aggregate.",
   campaign_decisions: "Read campaign decision verdicts and their separate usage without resolving or classifying them.",
   campaign_scope: "Inspect authorized campaign issues and bounded forge candidates. This cannot propose or expand human scope authority.",
@@ -73,7 +94,7 @@ function coordinate(value: unknown, key: string): string {
 
 /** Transport-independent operations. No session credential is minted, selected or impersonated. */
 export function registerAssistantCampaignManagement(operations: AssistantOperations, deps: {
-  db: ControlPlaneDb; svc: SessionsService; receipts: AssistantCommandReceipts; services: OwnerManagement<AuthPrincipal>[];
+  db: ControlPlaneDb; svc: SessionsService; receipts: AssistantCommandReceipts; services: OwnerManagement<AuthPrincipal>[]; images?: AssistantPromptImages;
 }): void {
   const {db, receipts} = deps;
   AssistantCommandConfirmations.install(db.raw());
@@ -88,6 +109,7 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
   // across excluded Projects rather than releasing unfiltered subjects, costs or recommendations.
   // The shared service still applies the owner's narrower row/forge/cost visibility projections.
   const scope = (args: Record<string, unknown>, ctx: Context, name: string, owner: HumanPrincipal) => {
+    if (ASSISTANT_RESIDUAL_MANAGEMENT.some(([tool]) => tool === name)) return;
     const id = coordinate(args.sessionId, "sessionId"), root = db.campaignRootForMember(id) ?? id;
     const grant = db.assistantConnections.get(ctx.connection.id)!.grant;
     if (grant.projects !== "all") {
@@ -106,31 +128,45 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
       }
     }
   };
-  for (const [name, route] of ASSISTANT_CAMPAIGN_MANAGEMENT) {
+  for (const [name, route] of [...ASSISTANT_CAMPAIGN_MANAGEMENT, ...ASSISTANT_RESIDUAL_MANAGEMENT.filter(([, route]) => deps.services.some(service => service.keys().includes(route)))]) {
     const service = deps.services.find(candidate => candidate.keys().includes(route));
     if (!service) throw new Error(`Missing shared campaign operation ${route}`);
-    const mutation = name === "campaign_branch_clean" || name === "review_find_add" || name === "review_find_set" || name === "review_find_send";
+    const command = name === "campaign_branch_clean" || name === "review_find_add" || name === "review_find_set" || name === "review_find_send";
+    const image = name === "prompt_image_add", git = name === "session_git";
     const parameters = [...route.matchAll(/:([A-Za-z]+)/g)].map(match => match[1]!).filter(key => key !== "id");
     const properties: Record<string, unknown> = {sessionId: str, ...Object.fromEntries(parameters.map(key => [key, str])),
-      ...(mutation ? {commandId: str, confirmationId: str, ...(name === "campaign_branch_clean" ? {} : {payload: obj})} : {query: obj})};
+      ...(image ? {commandId: str, sourceArtifactId: str} : git ? {commandId: str, confirmationId: str, payload: obj} : command ? {commandId: str, confirmationId: str, ...(name === "campaign_branch_clean" ? {} : {payload: obj})} : {query: obj})};
     operations.register({name, description: descriptions[name]!,
       inputSchema: {type: "object", additionalProperties: false, properties,
-        required: ["sessionId", ...parameters, ...(mutation ? ["commandId", ...(name === "campaign_branch_clean" ? [] : ["payload"])] : [])]},
+        required: ["sessionId", ...parameters, ...(image ? ["commandId"] : git ? ["payload"] : command ? ["commandId", ...(name === "campaign_branch_clean" ? [] : ["payload"])] : [])]},
       resolveTarget: target,
       ownerCanAccess: (owner, resource) => resource.kind === "session" && db.canAccessSession(owner, resource.id),
       execute: async (value, ctx) => {
         const args = object(value);
         if (Object.keys(args).some(key => !Object.hasOwn(properties, key))) throw new AssistantRefusal("Unknown campaign-management argument.");
         const params = {id: coordinate(args.sessionId, "sessionId"), ...Object.fromEntries(parameters.map(key => [key, coordinate(args[key], key)]))};
-        const body = mutation && name !== "campaign_branch_clean" ? object(args.payload) : {};
+        let body = (command && name !== "campaign_branch_clean" || git) ? object(args.payload) : {};
+        const parsedGit = git ? parseGitAction(body as unknown as GitActionRequest) : undefined;
+        if (parsedGit && "error" in parsedGit) throw new AssistantRefusal(parsedGit.error);
+        const gitKind = parsedGit && "action" in parsedGit ? parsedGit.action.kind : undefined;
+        const mutation = command || image || !!gitKind && !["status", "summary", "diff", "request_diff"].includes(gitKind);
         const query = args.query === undefined ? {} : object(args.query);
         let owner = await ctx.recheck();
         scope(args, ctx, name, owner);
         const revision = db.assistantConnections.get(ctx.connection.id)!.revision;
+        const gitSession = git ? db.getSession(params.id)! : undefined;
+        const gitPlacement = gitSession ? {runnerId: gitSession.runnerId, worktreePath: gitSession.worktreePath} : undefined;
+        const preparedImage = image ? deps.images!.prepare(args, ctx.connection.id, operations) : undefined;
+        if (preparedImage) body = preparedImage.body;
         const recheck = async () => {
           owner = await ctx.recheck();
           if (db.assistantConnections.get(ctx.connection.id)?.revision !== revision) throw new AssistantRefusal("The connection changed during this operation. Reconcile under current authority.");
           scope(args, ctx, name, owner);
+          preparedImage?.recheck();
+          if (gitPlacement) {
+            const current = db.getSession(params.id);
+            if (!current || current.runnerId !== gitPlacement.runnerId || current.worktreePath !== gitPlacement.worktreePath) throw new AssistantRefusal("The Git target changed. Inspect current state and confirm the current worktree before retrying.");
+          }
           return owner;
         };
         const currentOwner = () => {
@@ -161,7 +197,7 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
         }
         const commandId = coordinate(args.commandId, "commandId"), {confirmationId, ...request} = args;
         const identity = {controlPlaneId: db.instanceId(), connectionId: ctx.connection.id, operationId: commandId, operation: name,
-          argumentsDigest: assistantRequestDigest(request), grantRevision: revision, target: target(args)};
+          argumentsDigest: assistantRequestDigest({...request, ...(preparedImage ? {image: preparedImage.fingerprint} : {})}), grantRevision: revision, target: target(args)};
         const prior = receipts.get(ctx.connection.id, commandId);
         if (prior) {
           operations.authorize(ctx.connection.id, name, prior.target);
@@ -174,8 +210,8 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
             const decision = db.workflowDecisionByOccurrence(item.action.occurrenceId);
             return decision ? [{occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, digest: decision.resourceDigest,
               status: decision.status, resource: decision.resourceSnapshot}] : [];
-          }) : undefined;
-        const destructive = name === "campaign_branch_clean" || name === "review_find_set" && (body.status === "resolved" || body.status === "dismissed");
+          }) : gitKind === "discard_file" ? gitPlacement : undefined;
+        const destructive = gitKind === "discard_file" || name === "campaign_branch_clean" || name === "review_find_set" && (body.status === "resolved" || body.status === "dismissed");
         const binding = {connectionId: ctx.connection.id, grantRevision: revision, operation: name,
           argumentsDigest: identity.argumentsDigest, targetDigest: assistantRequestDigest({target: identity.target, impact: impact ?? null})};
         const confirm = destructive && db.assistantConnections.destructiveConfirmation(ctx.connection.id) === "confirm";
@@ -189,7 +225,8 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
         if (!reservation.created) return {receipt: reservation.receipt};
         try {
           const result = await execute();
-          const receipt = receipts.settle(ctx.connection.id, commandId, result.status < 400 ? "succeeded" : result.status >= 500 ? "uncertain" : "failed");
+          const reference = image && result.status < 400 && result.body && typeof result.body === "object" && "artifactId" in result.body && typeof result.body.artifactId === "string" ? result.body.artifactId : undefined;
+          const receipt = receipts.settle(ctx.connection.id, commandId, result.status < 400 ? "succeeded" : result.status >= 500 ? "uncertain" : "failed", reference);
           await recheck();
           return {receipt, ...result, meaning: "Application service accepted or refused the command; inspect current state. Never redispatch an accepted or uncertain receipt."};
         } catch (error) {

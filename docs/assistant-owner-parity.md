@@ -25,16 +25,15 @@ Each exact route has one classification:
   classification. A gap is never an allowed exclusion. This deliberately overinclusive audit also
   exposes session-credential-only protocol endpoints; those need explicit owner-counterpart
   classification rather than being silently discarded.
-- `exclusion: session_protocol`: restricted to exactly `POST /api/sessions/:id/waits` and
-  `POST /api/sessions/:id/pull-request-watch`. Actual owner HTTP receives 403: these writes
-  require the matching session's own credential to attest runtime progress/watch ownership.
-  They are not owner capabilities. Each entry records this fence, the registered owner-facing
-  read counterpart `session_watch_get`, and the supported remedy: the genuine session runtime
-  performs these writes. The audit rejects this classification for every other route, requires
-  the read counterpart to be registered, and tests both real owner HTTP and Assistant MCP
-  denial. This narrow contract extension was approved by the controlling Orchestrator in
-  clarification `workflow_37bd52c7276345768122bfe742ceadb6`; it does not exempt ordinary work
-  management or allow an Assistant to impersonate a session from its `sessionId`.
+- `exclusion: session_protocol`: restricted to an explicit per-route allowlist, with production
+  HTTP proof that an otherwise authorized owner receives a credential-specific 403. The original
+  `POST /api/sessions/:id/waits` and `POST /api/sessions/:id/pull-request-watch` attest runtime
+  progress/watch ownership and retain their exact registered read counterpart `session_watch_get`.
+  The 49 campaign/review/residual protocol entries described below claim no owner equivalent.
+  The audit rejects this classification for every other route. The original narrow extension was
+  approved in clarification `workflow_37bd52c7276345768122bfe742ceadb6`; the controlling
+  Orchestrator separately adjudicated the exact 30 and 19 additions. No classification allows
+  an Assistant to impersonate a session from its `sessionId`.
 
 No external technical limitation is claimed by this slice. The inventory supports such an entry
 only with a concrete reason and supported remedy. The parent authorized staged delivery through
@@ -47,12 +46,18 @@ owner HTTP returns 403 because they require matching self/parent/Orchestrator cr
 Unlike wait/watch writes, these entries make no equivalent-owner-tool claim. Historical
 campaign-review-job and repository-addition protocol reads have no asserted owner equivalent;
 their remedy is the genuine credential protocol. New legacy review-job creation stays retired.
-The inventory rejects every route outside the two original wait/watch entries and these 30
+Residual discovery adds exactly 19 further entries in that same file: runtime automation
+proposals, Location-switch requests, issue closures, historical cross-model review jobs,
+reviewer image/video delivery and attestations, and managed-worktree ref cleanup. Each has
+its own credential-specific owner-403 production proof; media refusal tests do not establish
+actual evidence inspection or production video readiness.
+
+The inventory rejects every route outside the two original wait/watch entries and these 49
 explicit entries. A production HTTP test exercises every added route with an authenticated owner
 who can read the target session, requires the credential-specific 403 and no protocol-domain
 effects, and checks every campaign classification against that verified set. There is no prefix
 or category exemption. The two original wait/watch entries retain their exact registered
-`session_watch_get` requirement. The 18 owner capabilities and nine human-authority boundaries
+`session_watch_get` requirement. The 21 owner capabilities and 16 human-authority boundaries
 are described in [Assistant Campaign and Review Management](assistant-campaign-management.md).
 
 Run the audit contract and new behavior tests:

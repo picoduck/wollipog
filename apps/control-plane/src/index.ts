@@ -1,3 +1,5 @@
+import { createSessionGitManagement } from "./session-git-management.js";
+import { AssistantPromptImages } from "./assistant-prompt-images.js";
 import { createCampaignReviewManagement } from "./campaign-review-management.js";
 import { registerAssistantCampaignManagement } from "./assistant-campaign-management.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
@@ -117,7 +119,6 @@ import {
   providerAccountChoiceRequiredForAgent,
   providerAccountSelectionPreviewForAgent,
   runnerViewForAgent,
-  type GitActionRequest,
   type GovernancePolicy,
   type OnboardingInfo,
   type OrganizationRole,
@@ -261,14 +262,7 @@ import {
   resolveSessionCreationOwnership,
 } from "./session-creation-route.js";
 import { registerInstanceRoute } from "./instance-route.js";
-import {
-  gitActionAllowed,
-  gitActionCapability,
-  gitActionRequiresLinkedWorktree,
-  parseGitAction,
-} from "./git-route.js";
 import { editorAdvertisesLocation, parseSessionHostAction } from "./host-actions.js";
-import { validateForgeReviewSync, validateGitHubReviewSync } from "./review-findings.js";
 import {
   Hub,
   INDEFINITE_SESSION_REMINDER_UI_PROTOCOL,
@@ -4359,8 +4353,12 @@ const campaignReviewManagement = createCampaignReviewManagement({db, svc,
   holdReader: principal => target => sessionHoldReaderFor(db, principal, target),
 });
 campaignReviewManagement.registerHttp(app, requestPrincipal);
-registerAssistantCampaignManagement(assistantOperations, {db, svc, receipts: assistantCommandReceipts,
-  services: [campaignStatusManagement, campaignScopeManagement, campaignReviewManagement]});
+const sessionGitManagement = createSessionGitManagement({db, hub, svc, outboundEvents, runnerCapabilityError});
+sessionGitManagement.registerHttp(app, requestHuman);
+const assistantPromptImages = new AssistantPromptImages(db, svc);
+registerAssistantCampaignManagement(assistantOperations, {db, svc, receipts: assistantCommandReceipts, images: assistantPromptImages,
+  services: [campaignStatusManagement, campaignScopeManagement, campaignReviewManagement, sessionGitManagement, assistantPromptImages.management]});
+assistantPromptImages.registerHttp(app, assistantOperations);
 registerAutomationCreationRoutes(app, { service: new AutomationCreationService(db, svc, hub, scheduledCampaigns), requestPrincipal });
 registerCampaignRepositoryAdditionRoutes(app, { requestPrincipal, additions: new CampaignRepositoryAdditions({ db, hub, sessions: svc,
   // The same verified-Location inspection as a launch (#4117), on a runner that can hold the boundary.
@@ -5338,17 +5336,6 @@ app.post("/api/sessions/:id/approve", async (req, reply) => {
   body.evidenceReviewed, body.evidenceReviewDigest));
 });
 
-app.get("/api/sessions/:id/governance-audit", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const query = req.query as { limit?: string; before?: string };
-  const rawLimit = query.limit;
-  const limit = rawLimit == null ? 200 : Number(rawLimit);
-  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
-    return reply.code(400).send({ error: "limit must be an integer between 1 and 500" });
-  }
-  const before = typeof query.before === "string" && query.before ? query.before : undefined;
-  return respond(reply, svc.governanceAuditPage(id, limit, before));
-});
 
 function questionPolicyAdministrator(req: FastifyRequest) {
   const human = requestHuman(req);
@@ -5582,134 +5569,6 @@ app.post("/api/sessions/:id/answer", async (req, reply) => {
     id: humanActorId(req),
   }, action, undefined, body.occurrenceId, undefined,
   (sessionId) => human ? db.canAccessSession(human, sessionId) : false));
-});
-
-// Git/PR workflow: run a git action (status/commit/open_pr) in the session's
-// worktree on its runner, and return the result. Requires a worktree session.
-app.post("/api/sessions/:id/git", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const session = db.getSession(id);
-  if (!session) return reply.code(404).send({ error: "session not found" });
-  if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-
-  const parsed = parseGitAction((req.body ?? {}) as GitActionRequest);
-  if ("error" in parsed) return reply.code(400).send({ error: parsed.error });
-  const { action } = parsed;
-  if (!session.worktreePath && gitActionRequiresLinkedWorktree(action)) {
-    return reply.code(409).send({ error: "this git action requires a linked worktree session" });
-  }
-  if (!session.worktreePath) {
-    const unsupported = runnerCapabilityError(
-      session.runnerId,
-      "gitVisibility",
-      "primary-checkout Git visibility",
-    );
-    if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  }
-  const gitCapability = gitActionCapability(action);
-  if (gitCapability) {
-    const unsupported = runnerCapabilityError(session.runnerId, gitCapability.capability, gitCapability.label);
-    if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  }
-
-  // Branch-relative diffs (all_branch / last_turn) only make sense on a worktree session; a
-  // WSL in-place session has no session branch to diff against. (uncommitted reads are fine —
-  // and today the worktreePath gate above already limits every git action to worktree sessions.)
-  if (action.kind === "diff" && action.scope !== "uncommitted" && !session.useWorktree) {
-    return reply.code(400).send({ error: `the '${action.scope}' diff scope requires a worktree session` });
-  }
-
-  // Don't mutate git mid-turn: a commit/PR while the agent is still editing would
-  // capture a partial snapshot and can race the post-turn diff capture.
-  const gate = gitActionAllowed(action, session.status);
-  if (!gate.ok) return reply.code(409).send({ error: gate.error });
-  if (!["status", "summary", "diff", "request_diff", "github_review_sync", "forge_review_sync"].includes(action.kind)) {
-    const reconciliationBlock = svc.podReconciliationMutationError(id);
-    if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
-  }
-
-  const requestId = randomUUID();
-  // Pushing + calling gh takes longer than a quick status read.
-  const timeoutMs = action.kind === "request_diff" ? 180_000
-    : action.kind === "open_pr" || action.kind === "github_review_sync" || action.kind === "forge_review_sync"
-    ? 60_000
-    : 30_000;
-  try {
-    const result = await hub.requestFromRunner(
-      session.runnerId,
-      requestId,
-      // timeoutMs rides along so the runner can EXPIRE a queued mutation we've already
-      // reported as failed, instead of executing it late (ghost commits).
-      {
-        type: "git_action",
-        requestId,
-        sessionId: id,
-        ...(session.worktreePath ? { worktreePath: session.worktreePath } : {}),
-        action,
-        timeoutMs,
-      },
-      timeoutMs,
-    );
-    if (result.type !== "git_result") return reply.code(502).send({ error: "unexpected runner reply" });
-    if (!result.ok) {
-      // Typed Git failures are well-formed requests conflicting with current repository state —
-      // 409, with the code so callers can distinguish stale/apply/no-repository outcomes.
-      const status = result.code === "GIT_STALE" || result.code === "GIT_APPLY_FAILED" || result.code === "GIT_NO_REPOSITORY" ? 409 : 400;
-      return reply.code(status).send({ error: result.error ?? "git action failed", ...(result.code ? { code: result.code } : {}) });
-    }
-    // Version-skew guard: an older runner without the action falls through its switch and
-    // replies ok:true with empty data — forwarding that as 200 would render a mutation as a
-    // silent no-op "success" in the UI. Every local diff mutation returns {status, diff}.
-    if (["stage_hunk", "stage_lines", "discard_file"].includes(action.kind) &&
-        (result.data?.status == null || result.data?.diff == null)) {
-      return reply.code(502).send({ error: "the runner does not support this diff mutation — update the runner on this box" });
-    }
-    if (action.kind === "github_review_sync") {
-      if (!validateGitHubReviewSync(result.data?.githubReview)) {
-        return reply.code(502).send({ error: "the runner did not return GitHub review data — update the runner on this box" });
-      }
-      const reconciled = svc.reconcileGitHubReviewFindings(id, result.data.githubReview);
-      if (!reconciled.ok || !reconciled.data) {
-        return reply.code(reconciled.status).send(failureBody(reconciled, "GitHub reviews could not be reconciled"));
-      }
-      const { reconciliation, findings, summary } = reconciled.data;
-      return {
-        ...result.data,
-        reviewFindings: { findings, summary },
-        reviewReconciliation: reconciliation,
-      };
-    }
-    if (action.kind === "forge_review_sync") {
-      if (!validateForgeReviewSync(result.data?.forgeReview)) {
-        return reply.code(502).send({ error: "the runner did not return forge review data — update the runner on this box" });
-      }
-      const reconciled = svc.reconcileForgeReviewFindings(id, result.data.forgeReview);
-      if (!reconciled.ok || !reconciled.data) {
-        return reply.code(reconciled.status).send(failureBody(reconciled, "Forge reviews could not be reconciled"));
-      }
-      const { reconciliation, findings, summary } = reconciled.data;
-      return {
-        ...result.data,
-        reviewFindings: { findings, summary },
-        reviewReconciliation: reconciliation,
-      };
-    }
-    if (action.kind === "summary" && result.data?.summary) {
-      outboundEvents.recordChecksFromSummary(id, result.data.summary);
-    }
-    if (action.kind === "open_pr" && result.data?.pr &&
-        (result.data.pr.createdWithGh || result.data.pr.created === true)) {
-      db.recordOutboundPullRequestOpened({
-        sessionId: id,
-        branch: result.data.pr.branch,
-        pullRequestUrl: result.data.pr.url,
-        now: Date.now(),
-      });
-    }
-    return result.data ?? {};
-  } catch (err) {
-    return reply.code(504).send({ error: (err as Error).message });
-  }
 });
 
 // Host actions: open the session's working directory in a local editor on the runner host,
