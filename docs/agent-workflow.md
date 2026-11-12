@@ -7,6 +7,22 @@ review workflows, and `.github/ISSUE_REPORTING.md`. Repository workflows belong 
 
 ## Preflight and External Rules
 
+Read `IMPLEMENTATION.md` before changing code. Root `REVIEW.md` supplies repository-specific
+engineering criteria. Hosted reviews load its regular Git blob from the forge-reported base
+commit into the review prompt, recording the source commit and SHA-256 of its exact contents.
+For GitLab this is the merge request's pinned diff base. Missing guidance preserves the default
+contract; unreadable, non-text, non-regular or over-64-KiB guidance refuses snapshot preparation
+rather than silently dropping criteria. The PR's own guidance edits are reviewed as code changes,
+not applied as criteria. Criteria cannot change the fixed reviewer contract or approval gates.
+The shared cross-model-review skill and standalone controller are maintained in dev-box-setup.
+For a stacked PR, the source is its target branch's base commit, which may itself be unmerged;
+it is not proof that those criteria have passed review. Review the parent against its own base
+before landing the stack. Invalid base guidance also refuses a PR that repairs that file: a head
+edit cannot bypass the base policy. The runner log records the specific `REVIEW.md` error; the
+protocol reports the existing generic snapshot refusal. Repair requires the repository's existing
+authorized recovery process. Pure base-merge equivalence checks do not launch a reviewer or load
+criteria and retain their existing behavior.
+
 Record the managed worktree/branch/base, campaign assignment, effective harness/model/effort,
 Custom or Full Control mode, human-established boundary and revisions, exact decision owners,
 compatibility, Human Required exceptions, evidence hosting/retention and reviewer provider/model.

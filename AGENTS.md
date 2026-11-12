@@ -1,5 +1,11 @@
 # Agent Instructions
 
+## Engineering Guidance
+
+- Read `IMPLEMENTATION.md` before implementing changes.
+- `REVIEW.md` defines repository-specific review criteria. The review workflow supplies its
+  committed base version to reviewers; changes in a pull request do not govern their own review.
+
 ## UI Copy
 
 - Use Title Case for all non-prose visible button text and UI labels, including navigation items,
