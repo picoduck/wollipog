@@ -131,6 +131,10 @@ export interface RequestedWorktreeOptions extends WorktreeOptions {
   /** Awaited once Git has registered the worktree `reserveWorktree` announced, before it holds any
    * file, so what the caller reserved is tied to what resulted before there is anything to lose. */
   materializedWorktree?: (path: string) => Promise<void>;
+  /** Whether the caller's own records prove the worktree registered at `path` on `branch` is its own,
+   * and no one else holds it (#4209). Only then may a registration whose directory has gone be dropped
+   * and the worktree made again: a slot's path alone says nothing about who made what is there. */
+  ownsMissingRegistration?: (path: string, branch: string) => boolean;
 }
 
 export interface WorktreeCleanupRecord {
@@ -924,11 +928,17 @@ export async function createRequestedWorktree(
   options.onProgress?.("validating");
   let listed = await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]);
   let matching = parseWorktreePorcelain(listed).find((entry) => sameWorktreePath(context, entry.path, path));
-  // This session's own slot, registered on this branch, whose directory someone deleted (#4209). It
-  // holds no file, so only its own registration goes, never another worktree's, and the worktree is
-  // made again on the branch as it stands. A locked registration stays, and Git then says why.
+  // The slot, registered on this branch, whose directory has gone (#4209). Its registration still holds
+  // an index, a reflog and private refs, so it goes only when the caller proves it is its own and no
+  // one else's: then just it goes, never another worktree's, and the worktree is made again on the
+  // branch as it stands. Otherwise it is left exactly as it is. A locked one stays, and Git says why.
   let branchPreexisted = false;
   if (matching?.branch === branch && await removalPathIdentity(context, path).catch(() => undefined) === null) {
+    if (!options.ownsMissingRegistration?.(path, branch)) {
+      throw new Error(`the requested worktree for ${branch} is registered at ${path}, but its directory is not there, and nothing ` +
+        "shows this session made it, so it was left as it is. Put the directory back, or, if nothing needs what Git keeps for " +
+        "it, remove that one registration (its entry under the repository's .git/worktrees), then try again");
+    }
     await pruneOwnRegistration(context, repoPath, path);
     listed = await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]);
     matching = parseWorktreePorcelain(listed).find((entry) => sameWorktreePath(context, entry.path, path));

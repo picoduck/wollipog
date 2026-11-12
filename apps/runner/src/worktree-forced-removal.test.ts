@@ -4,7 +4,10 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createRequestedWorktree, createWorktree, discardWorktreeIfSafe, releaseRecoveredWorktree, removeWorktree } from "./worktree.js";
+import {
+  createRequestedWorktree, createWorktree, discardWorktreeIfSafe, releaseRecoveredWorktree, removeWorktree, requestedSlot,
+  requestedWorktreeBoundary,
+} from "./worktree.js";
 
 // The forced removal paths left after #4395 (#4209 follow-ups): a removal never takes what it cannot
 // prove holds nothing of a person's, and never drops another worktree's registration.
@@ -229,6 +232,30 @@ test("a removal Git cannot finish leaves another worktree that is only away regi
     assert.deepEqual(bytes(away.admin), awayAdmin, "Git's prune after the failed removal would have dropped it");
     away.back();
     assert.equal(git(away.path, "status", "--porcelain"), "A  notes.txt");
+  });
+});
+
+test("a requested slot a person registered, directory away, is refused and its registration left byte for byte", async () => {
+  if (process.platform === "win32") return;
+  await withRepository("unowned-slot", async (root, repo) => {
+    const options = { dataDir: join(root, "data") };
+    const branch = "fix/unowned";
+    const slot = join(await requestedWorktreeBoundary(repo, "s_unowned", options), requestedSlot(branch));
+    // A person makes a worktree at the session's slot by hand, stages work in it, and moves it away for now.
+    git(repo, "worktree", "add", "--quiet", "-b", branch, slot);
+    writeFileSync(join(slot, "notes.txt"), "staged personal work\n");
+    git(slot, "add", "notes.txt");
+    const admin = git(slot, "rev-parse", "--absolute-git-dir");
+    renameSync(slot, `${slot}.away`);
+    const before = bytes(admin);
+
+    for (const owns of [undefined, () => false]) {
+      await assert.rejects(createRequestedWorktree(repo, "s_unowned", { baseRef: "HEAD", branch }, { ...options,
+        ...(owns ? { ownsMissingRegistration: owns } : {}) }), /nothing shows this session made it, so it was left as it is/u);
+      assert.deepEqual(bytes(admin), before, "its index, HEAD and reflog stay");
+    }
+    renameSync(`${slot}.away`, slot);
+    assert.equal(git(slot, "status", "--porcelain"), "A  notes.txt");
   });
 });
 

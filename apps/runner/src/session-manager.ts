@@ -3726,6 +3726,15 @@ export class SessionManager {
         branch: request.branch,
       }, {
         ...options,
+        // A slot whose directory went is this session's to make again only while its own row names that
+        // worktree, made by it on that branch, and nothing of another session's claims the path (#4209).
+        // The slot's path proves nothing on its own: a person, or another session's attach, can be there.
+        ownsMissingRegistration: (path, branch) => {
+          const latest = this.store.readMeta(sessionId);
+          return !!latest && this.attributedWorktrees(latest).some((item) => item.source === "created" &&
+              item.branch === branch && sameWorktreePath(latest.context, item.path, path)) &&
+            !this.worktreeHolder(sessionId, latest.context, path, { othersOnly: true });
+        },
         reserveWorktree: (path, branch, createsBranchAt) => {
           const view: SessionWorktreeView = { id: worktreeIdForPath(path), path, branch, baseRef, source: "created" };
           const record = this.cleanupRecordForWorktree(meta, view, "creation_rollback", "force");

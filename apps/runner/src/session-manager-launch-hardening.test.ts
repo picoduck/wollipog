@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
-import type { WorktreeCleanupRecord } from "./worktree.js";
+import { requestedSlot, requestedWorktreeBoundary, type WorktreeCleanupRecord } from "./worktree.js";
 
 // #4209 follow-ups to #4413, #4418 and #4419: a worktree launch, and what it leaves when it fails.
 
@@ -189,6 +189,39 @@ test("a requested worktree whose directory was deleted by hand is made again on 
     assert.deepEqual(bytes(awayAdmin), awayBytes, "the worktree that is only away keeps its registration, byte for byte");
   });
 });
+
+for (const holder of ["a person, with no row of this session's", "another session that lists it"] as const) {
+  test(`a requested slot whose directory went is left byte for byte when ${holder} has it`, async () => {
+    if (process.platform === "win32") return;
+    await withSession(`stale-registration-${holder.startsWith("a person") ? "unowned" : "held"}`, async (h) => {
+      const branch = "fix/held";
+      let path: string;
+      if (holder.startsWith("a person")) {
+        // The person makes the worktree at the session's slot by hand and stages work there.
+        path = join(await requestedWorktreeBoundary(h.app, h.sessionId, { dataDir: join(h.root, "data") }), requestedSlot(branch));
+        git(h.app, "worktree", "add", "--quiet", "-b", branch, path);
+      } else {
+        ({ worktree: { path } } = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch }));
+        await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/other" });
+        // Another session lists the same worktree as one it attached.
+        const other = { ...h.spec, sessionId: `${h.sessionId}_other` };
+        await h.manager.start(other);
+        h.store.patchMeta(other.sessionId, { worktrees: [{ id: "attached-id", path, branch, source: "attached" }] });
+      }
+      writeFileSync(join(path, "notes.txt"), "staged work\n");
+      git(path, "add", "notes.txt");
+      const admin = git(path, "rev-parse", "--absolute-git-dir");
+      renameSync(path, `${path}.away`);
+      const before = bytes(admin);
+
+      await assert.rejects(h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch }),
+        /nothing shows this session made it, so it was left as it is/u);
+      assert.deepEqual(bytes(admin), before, "its registration, index and reflog stay");
+      renameSync(`${path}.away`, path);
+      assert.equal(git(path, "status", "--porcelain"), "A  notes.txt");
+    });
+  });
+}
 
 test("a worktree made again on its own branch that fails to activate is given back, and the branch stays", async () => {
   if (process.platform === "win32") return;
