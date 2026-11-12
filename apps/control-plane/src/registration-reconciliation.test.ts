@@ -364,6 +364,33 @@ test("an interleaved immediate publication never consumes an unreported deferred
   } finally { db.close(); }
 });
 
+test("runtime attention publication does not project campaigns for control-only checks", async () => {
+  const { db, svc, snapshots } = fixture(30);
+  try {
+    const batch = svc.beginRunnerAttentionBatch("runner");
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, pendingApproval: question("deferred") }, batch);
+    let projections = 0;
+    const project = db.campaignProjection.bind(db);
+    db.campaignProjection = (...args) => { projections++; return project(...args); };
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.ok(projections <= 3, `one campaign publication built ${projections} full projections`);
+    assert.equal(db.deferredCampaignAttentionIds("runner").length, 0);
+    assert.equal(db.getSession("campaign-0")?.orchestratorCampaign?.pendingRequests?.human, 1);
+  } finally { db.close(); }
+});
+
+test("runtime attention captures each campaign projection once per batch", () => {
+  const { db, svc, snapshots } = fixture(30);
+  try {
+    const batch = svc.beginRunnerAttentionBatch("runner");
+    let projections = 0;
+    const project = db.campaignProjection.bind(db);
+    db.campaignProjection = (...args) => { projections++; return project(...args); };
+    svc.applySessionRuntimeUpdates("runner", snapshots.slice(0, 20).map(snapshot => ({ ...snapshot, preview: "Changed" })), batch);
+    assert.equal(projections, 10, "the ten campaigns need one before-view each, even for multiple children");
+  } finally { db.close(); }
+});
+
 test("registration attention scans scale with campaigns, not retained children", () => {
   const { db, svc, snapshots } = fixture();
   try {
