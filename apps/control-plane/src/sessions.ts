@@ -14987,11 +14987,13 @@ export class SessionsService {
     // any campaign member, is the person's too, so withdrawing and asking again cannot move it back.
     const supersession = ownerRule.rule && authority === "orchestrator"
       ? this.approvedPersonalRule(controller.session.id, category, ownerRule.rule) : undefined;
-    if (supersession && ownerRule.rule) authorityEvaluation.supersededOwnerRule = { rule: ownerRule.rule, occurrenceId: supersession };
     const kept = this.ownerKeptBy(controller.session.id, category, request.resourceKey, normalized.data);
     if (authority === "orchestrator" && kept.length) {
       authority = "human";
       Object.assign(authorityEvaluation, { owner: "human", basis: "human_required", reason: "owner_kept" });
+    }
+    if (authority === "orchestrator" && supersession && ownerRule.rule) {
+      authorityEvaluation.supersededOwnerRule = { rule: ownerRule.rule, occurrenceId: supersession };
     }
     // An installed or user-authored rule that keeps the gate for a person (#4137) makes it theirs at
     // creation, under any mode, grant or category. It only narrows: a question the owner must first
@@ -15518,28 +15520,38 @@ export class SessionsService {
   /** Only authenticated, exact human confirmation establishes personal authorship. */
   private approvedPersonalRule(rootId: string, category: WorkflowDecisionCategory,
     rule: import("@wollipog/protocol").WorkflowDecisionOwnerRule): string | undefined {
+    return this.personalRuleLookup(rootId, category)(rule);
+  }
+
+  /** Snapshot once for a check that may inspect many owner-kept occurrences. */
+  private personalRuleLookup(rootId: string, category: WorkflowDecisionCategory):
+    (rule: import("@wollipog/protocol").WorkflowDecisionOwnerRule) => string | undefined {
     const root = this.db.getSession(rootId);
     const control = root?.orchestratorPolicy?.control;
-    if (control?.mode !== "full_control" || !control.boundary.operations.includes(category)) return undefined;
-    const latest = this.db.personalRuleDelegations(rootId).find((d) => {
+    if (control?.mode !== "full_control" || !control.boundary.operations.includes(category)) return () => undefined;
+    const current = this.db.personalRuleDelegations(rootId).filter((d) => {
       const s = d.resourceSnapshot;
       return s.category === "owner_decision" && s.ruleDelegation?.boundaryRevision === control.boundary.revision &&
-        s.ruleDelegation.categories.some((c) => c === category) && sameWorkflowDecisionOwnerRule(s.ruleDelegation.rule, rule) &&
+        s.ruleDelegation.categories.some((c) => c === category) &&
         d.policyRevision === root?.parentControlPolicy?.revision && d.approval?.actor.kind === "human" &&
         d.approval.actor.id === control.boundary.authorizedByUserId;
     });
-    return latest?.selectedOptionId === "delegate" ? latest.occurrenceId : undefined;
+    return (rule) => {
+      const latest = current.find((d) => d.resourceSnapshot.category === "owner_decision" &&
+        sameWorkflowDecisionOwnerRule(d.resourceSnapshot.ruleDelegation?.rule, rule));
+      return latest?.selectedOptionId === "delegate" ? latest.occurrenceId : undefined;
+    };
   }
 
   /** The occurrences, oldest first, through which the owner kept this resource. */
   private ownerKeptBy(controllerId: string, category: WorkflowDecisionCategory, resourceKey: string,
     snapshot: WorkflowDecisionResourceSnapshot): WorkflowDecisionView[] {
-    const kept = this.db.ownerKeptWorkflowDecisions(controllerId).filter((d) =>
-      d.ownerHandoff || !d.ownerRule || !this.approvedPersonalRule(controllerId, category, d.ownerRule));
-    if (!kept.length) return [];
     const targets = new Set(ownerKeptTargets(category, resourceKey, snapshot));
-    return kept.filter((decision) =>
+    const kept = this.db.ownerKeptWorkflowDecisions(controllerId).filter((decision) =>
       ownerKeptTargets(decision.category, decision.resourceKey, decision.resourceSnapshot).some((target) => targets.has(target)));
+    if (!kept.length) return [];
+    const approved = this.personalRuleLookup(controllerId, category);
+    return kept.filter((d) => d.ownerHandoff || !d.ownerRule || !approved(d.ownerRule));
   }
 
   /** A requester's new publication never silently replaces one a person owns (#4066). A request
@@ -17346,15 +17358,21 @@ export class SessionsService {
     options: { recordingCompletedMerge?: boolean } = {},
   ): boolean {
     const superseded = decision.authorityEvaluation?.supersededOwnerRule;
-    if (superseded && this.approvedPersonalRule(controller.id, decision.category, superseded.rule) !== superseded.occurrenceId) return false;
+    // Keep removes authority to start new work. Recording an exact, already-armed merge after
+    // forge proof is bookkeeping only; it never approves or re-executes the enqueue.
+    const recordingSupersededMerge = options.recordingCompletedMerge === true && decision.category === "pr_merge" &&
+      decision.actionAdmission?.kind === "pr_merge_enqueue" && superseded !== undefined;
+    if (superseded && !recordingSupersededMerge &&
+        this.approvedPersonalRule(controller.id, decision.category, superseded.rule) !== superseded.occurrenceId) return false;
     if (decision.category === "automation_creation" || decision.category === "location_switch" ||
         decision.category === "campaign_repository_addition") return decision.authority === "human" &&
       decision.controllingSessionId === decision.sessionId;
     // A decision the owner kept (#4064) stays the person's whatever the boundary would now delegate.
     // An Orchestrator-owned occurrence for a resource the owner kept (one requested before the
     // handoff) is never current: nobody acting for the campaign can approve or consume it.
-    const ownerKept = decision.category === "owner_decision" ||
-      this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot);
+    const ownerKept = decision.category === "owner_decision" || decision.ownerRule !== undefined || decision.ownerHandoff !== undefined ||
+      this.ownerKeptBy(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot).some((kept) =>
+        !recordingSupersededMerge || kept.ownerHandoff || !sameWorkflowDecisionOwnerRule(kept.ownerRule, superseded.rule));
     if (ownerKept && decision.authority !== "human") return false;
     // Human scope approval intentionally invalidates prior standing authorization. The
     // independent human issue routes remain usable under the current workflow policy.
