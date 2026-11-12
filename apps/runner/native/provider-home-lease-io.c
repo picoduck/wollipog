@@ -531,12 +531,18 @@ int main(int argc, char **argv) {
       else { require(errno == ENOENT, "unsafe checkpoint candidate"); boundary("before-candidate"); write_new(0, j->name, j->raw, j->size, 0); boundary("candidate-durable"); }
       owned(tip, future, copied); select_checkpoint(j->name); if (j->copies_owner) copied = 1;
     }
+    unsigned changed_directories[2] = {0, 0};
     for (uint32_t k = 0; k < j->count; k++) { Entry *e = &expected[j->retire[k]]; struct stat info;
       if (fstatat(directory(e->dir), e->name, &info, AT_SYMLINK_NOFOLLOW) != 0) { require(errno == ENOENT, "retirement evidence unavailable"); continue; }
       require(copied || strcmp(e->name, tip->name) || e->dir != tip->dir, "cannot retire the acquired active tip before selecting its checkpoint");
       owned(tip, future, copied); boundary("before-retire"); owned(tip, future, copied); verify_entry(e, 0);
-      require(unlinkat(directory(e->dir), e->name, 0) == 0, "checkpoint evidence retirement failed"); sync_fd(directory(e->dir)); boundary("after-retire");
+      require(unlinkat(directory(e->dir), e->name, 0) == 0, "checkpoint evidence retirement failed"); changed_directories[e->dir] = 1; boundary("after-retire");
     }
+    /* The selected, durable checkpoint already authorizes every exact retired tuple and
+     * accepts either presence or absence after interruption. Flush each changed directory
+     * once before acknowledging retirement, rather than once per alias. All identity/byte
+     * checks above still precede each unlink; a crash may retain any subset of the manifest. */
+    for (unsigned dir = 0; dir < 2; dir++) if (changed_directories[dir]) sync_fd(directory(dir));
     boundary("retirement-durable");
   }
   out8('D'); out32(work_reads); out64(work_bytes); fflush(stdout); return 0;
