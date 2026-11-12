@@ -10554,9 +10554,10 @@ export class SessionsService {
   private campaignAttentionController(session: SessionView | null, batch?: RunnerAttentionBatch): SessionView | null {
     if (session?.kind === "review") return null;
     if (batch) return batch.capture(session);
-    return session?.parentSessionId
-      ? this.campaignEventController(this.db.getSession(session.parentSessionId))
-      : null;
+    // Resolve ancestry before building a view. Reading the immediate parent first constructs
+    // its full campaign projection, only to build the same root projection a second time.
+    const root = session?.parentSessionId ? this.db.campaignAncestryRoot(session.parentSessionId) : "none";
+    return typeof root === "object" && root.hasPolicy ? this.db.getSession(root.id) : null;
   }
 
   private publishCampaignAttentionTransition(before: SessionView | null, batch?: RunnerAttentionBatch, notificationBefore?: SessionView): void {
