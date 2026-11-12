@@ -2267,6 +2267,10 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
    * consent, so the owner can always end a refusal resting on a runner or Location they don't control.
    * A separate list, so a control plane that doesn't know it keeps every unread record. */
   unreadByConsent?: string[];
+  /** Set when a stored `excludedLocations` wasn't a list at all (#4319), so nothing showed what it
+   * refused: each Location of the campaign's Project on a runner below the gates' floor counts as
+   * unread, and startup writes those into `unreadLocations` and clears this. It only ever refuses. */
+  exclusionsLost?: true;
   /** What the Full Control launch or enable that set `control` disclosed about capabilities and
    * evidence (#2940). Server-owned and informational: it grants nothing, a revoke to Custom drops
    * it, and a campaign authorized before it existed has none. */
@@ -8422,8 +8426,14 @@ export interface SessionView {
   importLocationReady?: boolean;
   agentId: string | null;
   agentName: string | null;
+  /** The bound account's id and label. An agent's credential receives neither (#4508): account ids
+   * are derived from labels, which are personal data. */
   providerAccountId?: string;
   providerAccountLabel?: string;
+  /** #4508: the bound account as the opaque `acct:` reference `get_provider_account_selection`
+   * lists, set only in what an agent's credential receives, in place of `providerAccountId`. Older
+   * control planes omit it. */
+  providerAccountRef?: string;
   /** True when the current binding was chosen by the Machine's opt-in automatic policy. */
   providerAccountAutomaticallySelected?: boolean;
   /** Protocol v334 (#4353): why this session started on its account. Fixed at creation, so a later

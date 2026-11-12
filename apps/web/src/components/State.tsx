@@ -6,27 +6,6 @@ import { Spinner } from "./common.js";
 export type StateVariant = "offline" | "loading" | "error" | "empty" | "no-results";
 
 /**
- * The one state a collection shows instead of its content (docs/design-system.md §12). The states
- * are mutually exclusive in this priority order — offline, then loading, then error, then empty,
- * then no results — so a list never says "No … Yet" while it is still loading or disconnected.
- * Returns null when the content itself should render.
- */
-export function stateVariant(conditions: {
-  offline?: boolean;
-  loading?: boolean;
-  error?: boolean;
-  empty?: boolean;
-  noResults?: boolean;
-}): StateVariant | null {
-  if (conditions.offline) return "offline";
-  if (conditions.loading) return "loading";
-  if (conditions.error) return "error";
-  if (conditions.empty) return "empty";
-  if (conditions.noResults) return "no-results";
-  return null;
-}
-
-/**
  * Whether the live snapshot can vouch for an empty collection. Before the first snapshot a list is
  * loading; while the socket is down it is offline, even after a snapshot has loaded, because the
  * last-known content may no longer be true. The store retries a dropped socket, so a loaded

@@ -85,7 +85,6 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `CloudOffIcon` | Lucide | `CloudOff` | A Project whose only Locations are on offline machines: the Sessions Location Offline state (#2220). |
 | `CloseIcon` | Lucide | `X` | Generic close action. |
 | `SettingsIcon` | Lucide | `Settings` | Generic settings navigation. |
-| `UserPlusIcon` | Lucide | `UserPlus` | Add a collaborator. |
 | `DeviceIcon` | Lucide | `Smartphone` | Paired device. |
 | `TeamIcon` | Lucide | `Users` | Team or access group; access shared with a team. |
 | `EditIcon` | Lucide | `Pencil` | Generic edit action. |

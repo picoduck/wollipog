@@ -76,9 +76,6 @@ function socketIdentity(path: string): string | null {
   }
 }
 
-/** Where a session's protection list comes from; throwing is a refusal, exactly as a missing file is. */
-export type GuardProtectionsLoader = () => ManagedWorktreeProtection[];
-
 /**
  * The runner's side of a relayed manager policy hook event (#1472): the hook response to print,
  * for the session that owns the socket. Only an `abstract` socket relays; it is the socket of a

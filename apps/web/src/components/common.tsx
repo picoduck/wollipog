@@ -7,7 +7,6 @@ import {
   type StopOperationView,
   type BackgroundDeliveryWatchdogState,
   type BackgroundNotificationReceiptState,
-  type BackgroundWorkState,
   type SessionStatus,
   type SessionView,
   type SessionAttentionGroup,
@@ -333,14 +332,6 @@ export function SessionStatusIndicators({
         aria-label={`${summary.more} More: ${extraNames}`} onClick={openExtras}>+{summary.more}</button>
       : <span title={extraNames} aria-label={`${summary.more} More: ${extraNames}`}>+{summary.more}</span>)}
   </span>;
-}
-
-/** The accessible name of a background-work badge: "Background Work:" and the state, as every other
- * background-work status is announced, so lost work is "Background Work: Lost". It always names
- * background work, because the short visible forms ("Job", "Lost") do not. */
-export function backgroundWorkAccessibleName(state: Exclude<BackgroundWorkState, "resumed">): string {
-  const label = state === "orphaned" ? statusMeta("job", "lost").label : statusMeta("background_work", state).label;
-  return `Background Work: ${label}`;
 }
 
 export function BackgroundDeliveryBadge({ state, onOpen }: { state: BackgroundDeliveryWatchdogState; onOpen?: () => void }) {

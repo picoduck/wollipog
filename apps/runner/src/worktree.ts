@@ -131,6 +131,10 @@ export interface RequestedWorktreeOptions extends WorktreeOptions {
   /** Awaited once Git has registered the worktree `reserveWorktree` announced, before it holds any
    * file, so what the caller reserved is tied to what resulted before there is anything to lose. */
   materializedWorktree?: (path: string) => Promise<void>;
+  /** Whether the caller's own records prove the worktree registered at `path` on `branch` is its own,
+   * and no one else holds it (#4209). Only then may a registration whose directory has gone be dropped
+   * and the worktree made again: a slot's path alone says nothing about who made what is there. */
+  ownsMissingRegistration?: (path: string, branch: string) => boolean;
 }
 
 export interface WorktreeCleanupRecord {
@@ -922,13 +926,46 @@ export async function createRequestedWorktree(
     ? `${boundary}/${requestedSlot(branch)}`
     : join(boundary, requestedSlot(branch));
   options.onProgress?.("validating");
-  const listed = await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]);
-  const matching = parseWorktreePorcelain(listed).find((entry) => sameWorktreePath(context, entry.path, path));
+  let listed = await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]);
+  let matching = parseWorktreePorcelain(listed).find((entry) => sameWorktreePath(context, entry.path, path));
+  // The slot, registered on this branch, whose directory has gone (#4209). Its registration still holds
+  // an index, a reflog and private refs, so it goes only when the caller proves it is its own and no
+  // one else's: then just it goes, never another worktree's, and the worktree is made again on the
+  // branch as it stands. Otherwise it is left exactly as it is. One the drop leaves, because it is
+  // locked or its admin directory cannot be told apart from another's, is refused by name.
+  let branchPreexisted = false;
+  if (matching?.branch === branch && await removalPathIdentity(context, path).catch(() => undefined) === null) {
+    if (!options.ownsMissingRegistration?.(path, branch)) {
+      throw new Error(`the requested worktree for ${branch} is registered at ${path}, but its directory is not there, and nothing ` +
+        "shows this session made it, so it was left as it is. Put the directory back, or, if nothing needs what Git keeps for " +
+        "it, remove that one registration (its entry under the repository's .git/worktrees), then try again");
+    }
+    await pruneOwnRegistration(context, repoPath, path);
+    listed = await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]);
+    matching = parseWorktreePorcelain(listed).find((entry) => sameWorktreePath(context, entry.path, path));
+    if (matching) {
+      // Returned as it stands, it would read as an existing worktree whose directory is not there.
+      throw new Error(`the requested worktree for ${branch} is registered at ${path}, but its directory is not there, and its ` +
+        `registration was left as it is: ${matching.locked ? `it is locked, so unlock it (git worktree unlock ${path})`
+          : "Git's records for it could not be told apart from another worktree's, so remove that one registration by hand"}, ` +
+        "or put the directory back, then try again");
+    }
+    branchPreexisted = true;
+  }
   if (matching) {
     if (matching.branch === branch) {
       return { path: matching.path, branch, baseRef, baseCommit, attached: false, created: false };
     }
     throw new Error("requested worktree slot is already registered with different Git coordinates");
+  }
+  if (branchPreexisted) {
+    // Its branch may hold the session's commits, so it is checked out as it is, never reset or made
+    // again, and a rollback of this worktree keeps it: no branch is made here for one to give back.
+    options.onProgress?.("materializing");
+    options.reserveWorktree?.(path, branch);
+    await removeExternalDirectory(context, repoPath, path, options);
+    await materializeWorktree(context, repoPath, path, [path, branch], options);
+    return { path, branch, baseRef, baseCommit, attached: false, created: true, branchPreexisted: true };
   }
   // Never delete the deterministic leaf while the requested branch exists. Git may have
   // canonicalized a symlinked path differently from the runner; a branch/registration collision is

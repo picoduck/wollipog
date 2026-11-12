@@ -224,6 +224,8 @@ async function stack(t: TestContext, providerAccounts?: ProviderAccountDefinitio
     base, databasePath, org, admin, operator, projectId, peerPath: join(temp, PEER_WORKSPACE), started, credentials,
     /** The runner started this session and the control plane accepted its own credential. */
     running: (sessionId: string, what: string) => waitFor(() => bound.has(sessionId), what),
+    /** Send one frame as the synthetic organization runner. */
+    fromRunner: (message: unknown) => socket.send(JSON.stringify(message)),
     /** POST as a Human, through that Human's paired device. */
     human: (path: string, body: unknown, token = ADMIN_TOKEN) => post({ authorization: `Bearer ${token}` }, path, body),
     /** POST with one session's own credential, exactly as the CLI and MCP tools send it. */
@@ -440,6 +442,92 @@ test("an agent's credential reads account selection in references only, over the
     ["first-person-example-com-1234", "second-person-example-com-5678"]);
   const personRefused = await s.human("/api/sessions", { runnerId: RUNNER, workspaceId: WORKSPACE, agentId: AGENT, useWorktree: false });
   assert.equal((personRefused.json.providerAccountSelection as { candidates: unknown[] }).candidates.length, 2);
+});
+
+test("an agent's credential reads sessions with their account named only by reference, over the raw routes (#4508)", {
+  timeout: 120_000,
+}, async (t) => {
+  const s = await stack(t, [
+    { id: "first-person-example-com-1234", label: "first.person@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+    { id: "second-person-example-com-5678", label: "second.person@example.com", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+  ]);
+  const launch: FullControlLaunchRequest = { runnerId: RUNNER, workspaceId: WORKSPACE, issueNumbers: [12],
+    task: "Deliver issue 12", overrides: { session: { agentId: AGENT, config: { model: MODEL, permissionMode: "orchestrator" },
+      orchestrator: { behavior: { childModel: MODEL,
+        childHarness: { agentId: AGENT, driver: "claude-code", context: { kind: "native" } } } } } } };
+  const checked = await s.human("/api/full-control-campaigns/preflight", launch);
+  const preflight = checked.json.preflight as CampaignLaunchPreflight;
+  const admitted = await s.human("/api/full-control-campaigns", { ...launch, requestId: "launch-4508", preflightDigest: preflight.digest });
+  assert.equal(admitted.status, 201, JSON.stringify(admitted.json));
+  const rootId = admitted.json.id as string;
+  await s.running(rootId, "the root starts");
+  const assertNamesNoAccount = (text: string) => {
+    for (const personal of ["first-person", "second-person", "first.person", "second.person", "example.com"]) {
+      assert.ok(!text.includes(personal), text);
+    }
+  };
+
+  // The root names the second account by its reference and launches a child on it.
+  const selection = await s.get(`/api/runners/${RUNNER}/provider-account-selection?agentId=${AGENT}`, rootId);
+  const choices = (JSON.parse(selection.text) as { choices: Array<{ accountRef: string; canName: boolean }> }).choices;
+  assert.equal(choices.length, 2, selection.text);
+  const accountRef = choices[1]!.accountRef;
+  assert.equal(choices[1]!.canName, true, selection.text);
+  const created = await s.tool(rootId, "create_session", { runnerId: RUNNER, workspaceId: WORKSPACE, agentId: AGENT,
+    prompt: "Implement issue 12", useWorktree: false, providerAccountId: accountRef });
+  assert.equal(created.isError, false, created.text);
+  assertNamesNoAccount(created.text);
+  const childId = (created.json!.session as { id: string }).id;
+  await s.running(childId, "the child starts");
+  const start = s.started.find((message) => message.spec.sessionId === childId)!;
+  assert.equal(start.spec.providerAccountId, "second-person-example-com-5678", "the runner still gets the real account");
+  // The runner reports a usage-limit switch to the first account, as an event naming both.
+  s.fromRunner({ type: "session_event", sessionId: childId, payload: { kind: "provider_account_switched",
+    providerAccountId: "first-person-example-com-1234", providerAccountLabel: "first.person@example.com", automatic: true } });
+  let events = "";
+  for (let attempt = 0; attempt < 100 && !events.includes("provider_account_switched"); attempt++) {
+    events = (await s.get(`/api/sessions/${childId}/events?after=0`)).text;
+    if (!events.includes("provider_account_switched")) await delay(20);
+  }
+  assert.match(events, /first\.person@example\.com/u, "a person reads the event as before");
+
+  // Every raw session read with the root's own credential names the account only by reference.
+  type Row = { id: string; providerAccountId?: string; providerAccountLabel?: string; providerAccountRef?: string };
+  const listed = await s.get("/api/sessions", rootId);
+  assert.equal(listed.status, 200, listed.text);
+  assertNamesNoAccount(listed.text);
+  const listedChild = (JSON.parse(listed.text) as { sessions: Row[] }).sessions.find((row) => row.id === childId)!;
+  assert.equal(listedChild.providerAccountId, undefined);
+  assert.equal(listedChild.providerAccountLabel, undefined);
+  assert.equal(listedChild.providerAccountRef, accountRef, "the reference is the one the root named");
+  const detail = await s.get(`/api/sessions/${childId}`, rootId);
+  assert.equal(detail.status, 200, detail.text);
+  assertNamesNoAccount(detail.text);
+  assert.equal((JSON.parse(detail.text) as { session: Row }).session.providerAccountRef, accountRef);
+  const agentEvents = await s.get(`/api/sessions/${childId}/events?after=0`, rootId);
+  assert.equal(agentEvents.status, 200, agentEvents.text);
+  assert.match(agentEvents.text, /provider_account_switched/u, "the event itself still reaches the agent");
+  assertNamesNoAccount(agentEvents.text);
+
+  // The tools keep working, and get_session gives the reference.
+  const got = await s.tool(rootId, "get_session", { sessionId: childId });
+  assert.equal(got.isError, false, got.text);
+  assertNamesNoAccount(got.text);
+  assert.equal((got.json!.session as Row).providerAccountRef, accountRef);
+  const tools = await s.tool(rootId, "list_sessions");
+  assert.equal(tools.isError, false, tools.text);
+  assertNamesNoAccount(tools.text);
+  assertNamesNoAccount((await s.tool(rootId, "get_session_events", { sessionId: childId, after: 0 })).text);
+
+  // A person's reads keep both fields, whichever audience read first.
+  const asPerson = JSON.parse((await s.get("/api/sessions")).text) as { sessions: Row[] };
+  const personChild = asPerson.sessions.find((row) => row.id === childId)!;
+  assert.equal(personChild.providerAccountId, "second-person-example-com-5678");
+  assert.equal(personChild.providerAccountLabel, "second.person@example.com");
+  assert.equal(personChild.providerAccountRef, undefined);
+  const personDetail = JSON.parse((await s.get(`/api/sessions/${childId}`)).text) as { session: Row };
+  assert.equal(personDetail.session.providerAccountLabel, "second.person@example.com");
+  assertNamesNoAccount((await s.get("/api/sessions", rootId)).text);
 });
 
 test("a user-delegated agent cannot launch into a workspace or host path its Human cannot (#2940 review CR-1.1)", {

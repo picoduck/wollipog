@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { cgroupDelegationDirectory, currentCgroupDirectory, LinuxCgroupBoundary, prepareLinuxCgroupLaunch, providerContainmentEmpty, providerContainmentIdentity, providerContainmentStatus, spawnProviderHelper, systemdUserDelegationReply, type LinuxCgroupBoundaryIo } from "./linux-cgroup.js";
+import { cgroupDelegationDirectory, currentCgroupDirectory, LinuxCgroupBoundary, prepareLinuxCgroupLaunch, providerContainmentEmpty, providerContainmentIdentity, providerContainmentStatus, spawnWithLinuxCgroup, systemdUserDelegationReply, type LinuxCgroupBoundaryIo } from "./linux-cgroup.js";
 import { linuxCgroupHelper, stageLinuxCgroupHelper } from "./linux-cgroup-helper.js";
 import { PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 import { provenProcessTreeExit, ProviderProcessLedger, spawnAgent, waitForPendingKills } from "./spawn.js";
@@ -488,21 +488,25 @@ for (const mode of ["detached-controller", "user-owned-shell"] as const) {
     const compiled = spawnSync("/usr/bin/cc", ["-std=c11", "-Wall", "-Wextra", "-Werror", source, "-o", helper], { encoding: "utf8", timeout: 30_000 });
     assert.equal(compiled.status, 0, compiled.stderr);
     let pid: number | undefined;
+    let containment: LinuxCgroupBoundary | undefined;
     t.after(async () => {
       if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* exited */ } }
       await waitUntil(() => providerContainmentEmpty());
+      if (containment) assert.equal(await containment.releaseIfEmpty(), true);
       rmSync(directory, { recursive: true, force: true });
     });
-    const child = mode === "detached-controller"
-      ? spawnProviderHelper(helper, ["nondumpable", pidfile], { cwd: directory, detached: true, env: {} }, ["ignore", "ignore", "ignore"])
-      : spawnAgent({ command: helper, args: ["nondumpable", pidfile], cwd: directory, trackDescendants: false });
+    const launch = mode === "detached-controller"
+      ? spawnWithLinuxCgroup(helper, ["nondumpable", pidfile], { cwd: directory, detached: true, env: {} })
+      : { child: spawnAgent({ command: helper, args: ["nondumpable", pidfile], cwd: directory, trackDescendants: false }) };
+    const { child } = launch;
+    containment = "containment" in launch ? launch.containment : undefined;
     await new Promise<void>((resolve, reject) => { child.once("close", () => resolve()); child.once("error", reject); });
     await waitUntil(() => { try { return readFileSync(pidfile, "utf8").length > 0; } catch { return false; } });
     pid = Number(readFileSync(pidfile, "utf8"));
     assert.equal(alive(pid), true);
     const identity = providerContainmentIdentity()!;
     const member = readFileSync(`/proc/${pid}/cgroup`, "utf8").includes(`/${identity.cgroupPath}/`);
-    assert.equal(member, mode === "detached-controller", "review provider controllers are contained; ordinary user daemons are outside provider ownership");
+    assert.equal(member, mode === "detached-controller", "detached provider processes are contained; ordinary user daemons are outside provider ownership");
     assert.equal(providerContainmentEmpty(), mode === "user-owned-shell", "only provider-HOME users participate in shutdown's boundary proof");
     await new Promise((resolve) => setTimeout(resolve, 2_300));
     assert.equal(alive(pid), true, "root close must not turn a user-owned/detached lifetime into killing cleanup");

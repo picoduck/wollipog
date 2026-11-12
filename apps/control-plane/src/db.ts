@@ -1,5 +1,6 @@
 import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, issueClosureDeliveryGap, knownProviderCommandHomeWriteSeparation } from "@wollipog/protocol";
 import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
+import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
   type CampaignBoundaryRepository, type CampaignRepositoryAdditionResult,
@@ -6646,8 +6647,23 @@ export class ControlPlaneDb {
    * either: it was judged when the Location was excluded, so an update before the next read doesn't
    * end the refusal. */
   unnamedBelowGatesLocations(root: Pick<SessionView, "id" | "orchestratorPolicy">): Array<{ locationId: string; name: string }> {
-    return this.unreadNow(root.orchestratorPolicy, this.campaignOwnerForRoot(root.id, root.orchestratorPolicy))
+    const recorded = this.unreadNow(root.orchestratorPolicy, this.campaignOwnerForRoot(root.id, root.orchestratorPolicy))
       .filter((item) => Boolean(this.getProjectLocation(item.locationId)));
+    const lost = this.lostExclusionLocations(root.id, root.orchestratorPolicy).filter((item) => !recorded.some((other) => other.locationId === item.locationId));
+    return [...recorded, ...lost];
+  }
+
+  /** While a stored exclusion list that wasn't a list stands (`exclusionsLost`, #4319): each Location of
+   * the root's Project on a runner below the gates' floor or of no known version, outside every entry,
+   * since nothing shows which of them it refused. Startup writes these into the durable record. */
+  private lostExclusionLocations(rootId: string, policy: OrchestratorCampaignPolicy | undefined): Array<{ locationId: string; name: string }> {
+    if (policy?.exclusionsLost !== true) return [];
+    const projectId = (this.stmt("SELECT project_id FROM sessions WHERE id=?").get(rootId) as { project_id: string | null } | undefined)?.project_id;
+    if (!projectId) return [];
+    const placed = new Set(campaignScopeRepositories({ orchestratorPolicy: policy }).flatMap((entry) => entry.locationIds));
+    return (this.getProject(projectId)?.locations ?? []).filter((location) => !placed.has(location.id) &&
+      !runnerSupportsProtocol(this.getRunner(location.runnerId)?.protocolVersion, "campaignLocationGates"))
+      .map((location) => ({ locationId: location.id, name: location.name }));
   }
 
   /** The person a campaign's Locations rest on (#4319): the boundary's author, or the Custom owner. */
@@ -9947,6 +9963,26 @@ export class ControlPlaneDb {
   }
 
   /** Reconcile discovery without reviving a user-removed or runner-deletion tombstone. */
+  /** A Location whose folder changed in place (#4319, Orchestrator's read of 43a2a41): nothing shows it
+   * still holds the repository its latest read named. Each campaign keeps that refusal in its durable
+   * record, drops the name from the exclusion, so the Location's own requester is no longer exempt, and
+   * counts the Location as unread, as it was counted by name whoever added it, until a read names it
+   * again. Its runner's next registration reads it, as for any exclusion left for its version. */
+  private unnameMovedLocation(locationId: string, now: number): void {
+    for (const rootId of this.campaignRootIdsRecording(new Set([locationId]))) {
+      const policy = this.sessionOrchestratorPolicy(rootId);
+      const exclusion = policy?.excludedLocations?.find((item) => item.locationId === locationId && item.repository);
+      if (!policy || !exclusion) continue;
+      rememberRefusedRepositories(policy);
+      const owner = this.campaignOwnerForRoot(rootId, policy);
+      const unreadBefore = this.unreadNow(policy, owner);
+      const { repository: _named, ...unnamed } = exclusion;
+      policy.excludedLocations = policy.excludedLocations!.map((item) => item === exclusion ? unnamed : item);
+      this.trackUnreadLocations(policy, unreadBefore, new Set(), owner, new Set([locationId]));
+      this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
+    }
+  }
+
   private reconcileWorkspaceProjectLocation(
     runnerId: string,
     workspace: { id: string; name: string; path: string },
@@ -9954,11 +9990,12 @@ export class ControlPlaneDb {
     now: number,
   ): ProjectLocationView | null {
     const rows = this.stmt(
-      `SELECT id, project_id, detached_at, removed_at FROM project_locations
+      `SELECT id, project_id, path, detached_at, removed_at FROM project_locations
        WHERE runner_id=? AND workspace_id=? ORDER BY created_at DESC, id DESC`,
     ).all(runnerId, workspace.id) as unknown as Array<{
       id: string;
       project_id: string;
+      path: string;
       detached_at: number | null;
       removed_at: number | null;
     }>;
@@ -9970,6 +10007,8 @@ export class ControlPlaneDb {
            path=?, source=?, last_seen_at=?, updated_at=?
          WHERE runner_id=? AND workspace_id=? AND detached_at IS NULL AND removed_at IS NULL`,
       ).run(workspace.name, workspace.path, source, now, now, runnerId, workspace.id);
+      // A folder that changed in place may hold another repository now (#4319).
+      for (const link of active) if (link.path !== workspace.path) this.unnameMovedLocation(link.id, now);
       for (const link of active) {
         this.stmt(
           `UPDATE projects SET name=?, name_source=?, updated_at=?
@@ -10298,21 +10337,28 @@ export class ControlPlaneDb {
    * it, and revokes then (`CampaignLocations.runnerReconnected`). */
   recordEarlierUnreadLocations(now: number): void {
     // Whatever the root's state: its children can outlive it, and its refusal still binds them.
+    // Any stored exclusion list, a list or not, and any campaign already marked as having lost one.
     for (const { id } of this.stmt(`SELECT id FROM sessions WHERE parent_session_id IS NULL
-      AND CASE WHEN json_valid(orchestrator_policy) THEN json_type(orchestrator_policy, '$.excludedLocations') ELSE NULL END='array'`)
+      AND CASE WHEN json_valid(orchestrator_policy) THEN json_type(orchestrator_policy, '$.excludedLocations') IS NOT NULL
+        OR json_extract(orchestrator_policy, '$.exclusionsLost') = 1 ELSE 0 END`)
       .all() as Array<{ id: string }>) {
       const policy = this.sessionOrchestratorPolicy(id);
       if (!policy) continue;
       const owner = this.campaignOwnerForRoot(id, policy);
       const before = JSON.stringify(policy.unreadLocations ?? []);
+      const lostBefore = policy.exclusionsLost === true;
       const recorded = campaignUnreadLocations(policy);
-      const marks = policy.unreadByConsent ?? [];
+      // What a lost list may have refused is written into the record, so a runner's update before a read
+      // doesn't lift it; someone else's Location is marked as counted by consent, so a revoke can end it.
+      const lost = this.lostExclusionLocations(id, policy);
+      const marks = [...policy.unreadByConsent ?? [], ...lost.filter((item) => !owner || this.projectLocationAddedBy(item.locationId) !== owner).map((item) => item.locationId)];
+      delete policy.exclusionsLost;
       this.trackUnreadLocations(policy, this.unreadNow(policy, owner), new Set(), owner);
-      const unread = new Map([...recorded, ...policy.unreadLocations ?? []].map((item) => [item.locationId, item]));
+      const unread = new Map([...recorded, ...lost, ...policy.unreadLocations ?? []].map((item) => [item.locationId, item]));
       if (unread.size) policy.unreadLocations = [...unread.values()];
       const marked = [...new Set([...marks, ...policy.unreadByConsent ?? []])].filter((locationId) => unread.has(locationId));
       if (marked.length) policy.unreadByConsent = marked;
-      if (JSON.stringify(policy.unreadLocations ?? []) !== before) {
+      if (JSON.stringify(policy.unreadLocations ?? []) !== before || lostBefore) {
         this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, id);
       }
     }
@@ -13828,7 +13874,9 @@ export class ControlPlaneDb {
       this.sessionSummaryReads.clear();
       this.sessionSummaryReadBytes=0;
     }
-    const sessions=this.listSessionSummaries(principal,includeArchived);
+    // The entry is keyed by its principal, so an agent's narrowed list (#4508) never serves a person.
+    const listed=this.listSessionSummaries(principal,includeArchived);
+    const sessions=principal.kind==="agent" ? withoutProviderAccountNames(listed) : listed;
     const json=JSON.stringify({ sessions });
     const bytes=Buffer.byteLength(json);
     const entry: { revision: string; sessions: SessionView[]; json: string; legacyJson?: string; bytes: number }={ revision,sessions,json,bytes };
@@ -29641,12 +29689,15 @@ export class ControlPlaneDb {
     return deleted;
   }
 
-  getSession(id: string): SessionView | null {
+  /** Control-only readers can omit the descendant-derived campaign projection. Public session
+   * views and notification before/after views keep the default, fully projected result. */
+  getSession(id: string, options: { includeCampaignProjection?: boolean } = {}): SessionView | null {
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(id) as unknown as
       | SessionRow
       | undefined;
     return row
-      ? this.sessionView(row, undefined, this.sessionStopIntent(id), true, this.childSessionAllocations(id).liveCount)
+      ? this.sessionView(row, undefined, this.sessionStopIntent(id), true, this.childSessionAllocations(id).liveCount,
+        options.includeCampaignProjection ?? true)
       : null;
   }
 
@@ -30019,7 +30070,7 @@ export class ControlPlaneDb {
     stopIntent?: SessionStopIntentRecord,
     includeBackgroundJobs = true,
     liveChildSessions = 0,
-    /** False only for the campaign video fact's root view, which must not embed its own projection. */
+    /** Control-only and campaign video fact views do not need the descendant-derived projection. */
     includeCampaignProjection = true,
   ): SessionView {
     const agentName = row.agent_id
@@ -36497,10 +36548,40 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       first.state === "established" && digest(first.messageDigest) && Number.isSafeInteger(first.establishedAt) && context(first.contextIssueNumbers)))) return null;
   if (value.issueNumbersSource !== undefined && value.issueNumbersSource !== "human_launch_request") return null;
   // Informational only (#4117): a malformed list is dropped instead of discarding the policy.
-  if (value.excludedLocations !== undefined && !validExcludedLocations(value.excludedLocations)) delete value.excludedLocations;
-  // Each reason reads as today's fixed sentence, so stored text never reaches a person, and a raised
-  // version floor (#4319) names the new version rather than dropping the list its reconnects retry.
-  else if (value.excludedLocations) value.excludedLocations = value.excludedLocations.map((item) => ({ ...item, reason: PROJECT_LOCATION_INSPECTION_FAILURES[item.failure] }));
+  // Each item stands alone (#4319 follow-on C): a malformed one no longer drops the rest, with any
+  // refusal they hold that the durable record hasn't copied yet. A malformed item that still names a
+  // Location fails closed: nothing shows which repository it holds, so it counts as unread.
+  if (value.excludedLocations !== undefined) {
+    // One that isn't a list at all names no Location, so nothing shows what it refused: the campaign then
+    // counts each Location of its Project on a runner below the floor as unread (`exclusionsLost`), which
+    // startup writes into the durable record (Orchestrator's read of 43a2a41).
+    if (!Array.isArray(value.excludedLocations)) value.exclusionsLost = true;
+    const items: unknown[] = Array.isArray(value.excludedLocations) ? value.excludedLocations : [];
+    const wellFormed = items.filter((item) => validExcludedLocations([item])) as CampaignExcludedLocation[];
+    // Past the cap, the latest are kept, as every write keeps them; an earlier one counts as unread.
+    const valid = wellFormed.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX);
+    const overflow = wellFormed.slice(0, Math.max(0, wellFormed.length - CAMPAIGN_BOUNDARY_LOCATIONS_MAX));
+    const unread = [...items.filter((item) => !validExcludedLocations([item])), ...overflow].flatMap((item) => {
+      const entry = item as Record<string, unknown> | null;
+      const locationId = entry && typeof entry === "object" ? entry.locationId : undefined;
+      if (typeof locationId !== "string" || !locationId || locationId.length > 256) return [];
+      return [{ locationId, name: typeof entry!.name === "string" && entry!.name.length <= 256 ? entry!.name : "a Location" }];
+    });
+    if (unread.length) {
+      const recorded = Array.isArray(value.unreadLocations) ? value.unreadLocations : [];
+      const added = unread.filter((item) => !recorded.some((other) => (other as { locationId?: unknown })?.locationId === item.locationId));
+      value.unreadLocations = [...recorded, ...added];
+      // Each recovered one is marked as counted by consent (review round 5): a revoke keeps a marked
+      // Location that is the owner's own and ends someone else's, as for any count by consent, so the
+      // owner can always clear one resting on a runner or Location they don't control.
+      const marks = Array.isArray(value.unreadByConsent) ? value.unreadByConsent : [];
+      if (added.length) value.unreadByConsent = [...marks, ...added.map((item) => item.locationId)];
+    }
+    // Each reason reads as today's fixed sentence, so stored text never reaches a person, and a raised
+    // version floor (#4319) names the new version rather than dropping the list its reconnects retry.
+    if (valid.length) value.excludedLocations = valid.map((item) => ({ ...item, reason: PROJECT_LOCATION_INSPECTION_FAILURES[item.failure] }));
+    else delete value.excludedLocations;
+  }
   if (value.refusedRepositories !== undefined) {
     const refused = validRefusedRepositories(value.refusedRepositories);
     if (refused.length) value.refusedRepositories = refused; else delete value.refusedRepositories;
@@ -36510,6 +36591,8 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
     const unread = (Array.isArray(value.unreadLocations) ? value.unreadLocations : []).filter((item) => locationRecord(item, ["locationId", "name"]));
     if (unread.length) value.unreadLocations = unread; else delete value.unreadLocations;
   }
+  // Only `true` means anything; it only ever adds refusals.
+  if (value.exclusionsLost !== undefined && value.exclusionsLost !== true) delete value.exclusionsLost;
   // A consent mark only ever lets a revoke end a record, so one that names no unread Location is dropped.
   if (value.unreadByConsent !== undefined) {
     const unread = new Set((value.unreadLocations ?? []).map((item) => item.locationId));

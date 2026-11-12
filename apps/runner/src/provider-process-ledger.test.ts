@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { EventEmitter } from "node:events";
+import { execFile, spawn } from "node:child_process";
+import { EventEmitter, once } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -19,9 +19,52 @@ async function closed(child: AgentProcess): Promise<void> {
   });
 }
 
-function alive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+async function processState(pid: number): Promise<string> {
+  try {
+    const { stdout } = await promisify(execFile)("ps", ["-p", String(pid), "-o", "stat="]);
+    return stdout.trim();
+  } catch (error) {
+    // ps exits 1 when the PID is absent. Enumeration failures must fail the test.
+    if ((error as { code?: unknown }).code === 1) return "";
+    throw error;
+  }
 }
+
+async function alive(pid: number): Promise<boolean> {
+  // kill(pid, 0) also succeeds for an exited child awaiting its parent's waitpid.
+  const state = await processState(pid);
+  return state !== "" && !state.startsWith("Z");
+}
+
+test("the liveness check rejects live leftovers but excludes unreaped zombies", posixOnly, async (t) => {
+  // Block the parent's event loop so Node cannot reap its child until cleanup.
+  const parent = spawn(process.execPath, ["-e", [
+    'const child = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
+    'process.stdout.write(String(child.pid) + "\\n");',
+    'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);',
+  ].join("\n")], { stdio: ["ignore", "pipe", "inherit"] });
+  const exited = once(parent, "close");
+  let pid: number | undefined;
+  t.after(async () => {
+    if (pid && await alive(pid)) process.kill(pid, "SIGKILL");
+    parent.kill("SIGKILL");
+    await exited;
+  });
+  const [output] = await Promise.race([
+    once(parent.stdout, "data"),
+    exited.then(() => { throw new Error("the helper parent exited before reporting its child PID"); }),
+  ]);
+  pid = Number(String(output).trim());
+  assert.ok(Number.isSafeInteger(pid) && pid > 1);
+  assert.equal(await alive(pid), true, "the child starts as live work");
+  process.kill(pid, "SIGKILL");
+  for (let attempt = 0; attempt < 100 && !(await processState(pid)).startsWith("Z"); attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.match(await processState(pid), /^Z/u, "the parent still holds the exited child unreaped");
+  assert.doesNotThrow(() => process.kill(pid!, 0), "the old check wrongly counts this zombie as live");
+  assert.equal(await alive(pid), false);
+});
 
 test("a finished provider process with no descendants proves its tree gone", posixOnly, async () => {
   const ledger = new ProviderProcessLedger();
@@ -42,7 +85,7 @@ test("background work left by an exited provider fails the non-killing proof and
   const provider = path.join(dir, "provider.cjs");
   let backgroundPid: number | undefined;
   t.after(async () => {
-    if (backgroundPid && alive(backgroundPid)) process.kill(backgroundPid, "SIGKILL");
+    if (backgroundPid && await alive(backgroundPid)) process.kill(backgroundPid, "SIGKILL");
     await fs.rm(dir, { recursive: true, force: true });
   });
   await fs.writeFile(background, [
@@ -66,9 +109,9 @@ test("background work left by an exited provider fails the non-killing proof and
   assert.ok(backgroundPid, "the background descendant started");
   await closed(child);
   assert.equal(await ledger.prove({ terminate: false }), false, "live background work is never proven gone");
-  assert.equal(alive(backgroundPid!), true, "the non-killing proof left it running");
+  assert.equal(await alive(backgroundPid!), true, "the non-killing proof left it running");
   assert.equal(await ledger.prove({ terminate: true }), true, "the killing proof ends it and then proves the tree gone");
-  assert.equal(alive(backgroundPid!), false);
+  assert.equal(await alive(backgroundPid!), false);
 });
 
 test("a process without a POSIX boundary makes every proof false", async () => {
@@ -100,7 +143,7 @@ test("no proof succeeds while untracked work may still be starting processes", a
 test("untracked work that has finished still leaves its survivors unproven", posixOnly, async (t) => {
   const ledger = new ProviderProcessLedger();
   let survivor = 0;
-  t.after(() => { if (survivor && alive(survivor)) process.kill(survivor, "SIGKILL"); });
+  t.after(async () => { if (survivor && await alive(survivor)) process.kill(survivor, "SIGKILL"); });
   // A probe that starts a helper in its own process group, then exits: the probe's group kill
   // cannot reach the helper, and no boundary recorded it.
   const { stdout } = await ledger.untracked(() => promisify(execFile)(process.execPath, ["-e", [
@@ -108,7 +151,7 @@ test("untracked work that has finished still leaves its survivors unproven", pos
     "child.unref(); process.stdout.write(String(child.pid));",
   ].join("\n")]));
   survivor = Number(stdout.trim());
-  assert.equal(alive(survivor), true, "the helper outlived the probe");
+  assert.equal(await alive(survivor), true, "the helper outlived the probe");
   assert.equal(await ledger.prove({ terminate: true }), false, "a finished probe's survivor is never proven gone");
 });
 

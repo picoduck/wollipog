@@ -13,6 +13,7 @@ import type {
   OutboundEventDeliveryView,
   OutboundEventSubscriptionView,
   ProjectView,
+  ProviderAccountSelectionPreview,
   RunnerView,
   SessionView,
   UiSnapshotMessage,
@@ -66,6 +67,33 @@ if (params.has("capabilities")) runner.agents[0]!.capabilities = {
   supportsImages: false,
   supportsApprovals: true,
 };
+
+// `?accounts=priority|default|none` gives the machine two Claude accounts and answers the account
+// preview (#4512) as its Priority Order, its Default Account, or a Priority Order nothing can start.
+const accountPolicy = params.get("accounts");
+const accountPreview: ProviderAccountSelectionPreview | null = accountPolicy === "priority" ? {
+  provider: "claude", mode: "priority", policyRevision: 2, status: "selected", source: "priority", accountId: "work",
+  candidates: [
+    { accountId: "personal", position: 1, eligible: false, reason: "usage_exhausted", limitLabel: "Session Window" },
+    { accountId: "work", position: 2, eligible: true, selected: true },
+  ], enforcement: "enforced", generatedAt: 1,
+} : accountPolicy === "default" ? {
+  provider: "claude", mode: "fixed", policyRevision: 1, status: "selected", source: "fixed_default", accountId: "work",
+  candidates: [], enforcement: "enforced", generatedAt: 1,
+} : accountPolicy === "none" ? {
+  provider: "claude", mode: "priority", policyRevision: 3, status: "choice_required", source: "none", refusal: "no_eligible_account",
+  candidates: [
+    { accountId: "personal", position: 1, eligible: false, reason: "usage_exhausted", limitLabel: "Session Window" },
+    { accountId: "work", position: 2, eligible: false, reason: "signed_out" },
+  ], enforcement: "enforced", generatedAt: 1,
+} : null;
+// Email-shaped labels, so Hide Account Emails has something to mask.
+const personalEmail = "personal@example.com";
+const workEmail = "work@example.com";
+if (accountPreview) runner.providerAccounts = [
+  { id: "personal", label: personalEmail, provider: "claude", authStatus: "authenticated" },
+  { id: "work", label: workEmail, provider: "claude", authStatus: accountPolicy === "none" ? "unauthenticated" : "authenticated" },
+];
 
 const items: AutomationSchedule[] = [
   {
@@ -699,6 +727,7 @@ const client = {
           supportedPairs: [{ modelId: "child-model", effortLevels: ["medium", "high"] }] },
       ] },
   }),
+  ...(accountPreview ? { providerAccountSelection: async () => structuredClone(accountPreview) } : {}),
   ...(params.has("campaign") ? {
     updateAutomation: async (id: string, spec: AutomationSpec) => {
       const index = items.findIndex(item => item.automationId === id);

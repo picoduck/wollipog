@@ -23,6 +23,7 @@ import { FeedbackProvider } from "./FeedbackProvider.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { withScopedClockOverrides } from "./test-clock-overrides.js";
+import { PROVIDER_ACCOUNT_PREVIEW_REFRESH_MS } from "./ProviderAccountSelection.js";
 
 /**
  * What the empty-state actions actually DO.
@@ -387,12 +388,20 @@ test("serialized polling lists a newly discovered automation that Edit can then 
   // polling the list can no longer discard an unsaved draft; Edit opens the newer automation's.
   const held: Array<() => void> = [];
   const polls = new Map<number, () => void>();
+  // The editor's expected-account preview refreshes on its own interval (#4512); it isn't list or
+  // page polling, so it is kept apart.
+  const previews = new Set<number>();
   let nextTimerId = 1;
   let calls = 0;
   let items = [automation("automation-1", "Nightly")];
   await withScopedClockOverrides(domWindow, {
-    setInterval: (poll: () => void) => { const id = nextTimerId++; polls.set(id, poll); return id; },
-    clearInterval: (id: number) => { polls.delete(id); },
+    setInterval: (poll: () => void, ms?: number) => {
+      const id = nextTimerId++;
+      if (ms === PROVIDER_ACCOUNT_PREVIEW_REFRESH_MS) previews.add(id);
+      else polls.set(id, poll);
+      return id;
+    },
+    clearInterval: (id: number) => { polls.delete(id); previews.delete(id); },
   }, async () => {
     const { container, socket, unmount } = await mount({
       automations: async () => {

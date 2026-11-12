@@ -67,10 +67,10 @@ delivery guarantee. Duplicate or coalesced health wakes retain incident deduplic
 The event is only a wakeup. Live forge evidence decides the tested target, attempt and verdict.
 Rolling check runs attach to the dispatch-time SHA, which may differ from the tested SHA. The
 observer uses the worker's target/claim run-name identity and successful exact-checkout assertions
-in all nine checkout jobs, independently verifies workflow-source and target ancestry against
+in every expected checkout job, independently verifies workflow-source and target ancestry against
 pinned live main, and retains the executed worker, CI and Windows workflow blob identities. It
 checks the workflow-to-checkout input bindings and the complete expected job and test-step
-inventory, including all five browser shards, rendered production smoke, WebKit, engine boundaries
+inventory, including all ten browser shards, rendered production smoke, WebKit, engine boundaries
 and bundles. A successful aggregator alone certifies nothing. Then:
 
 - **Red, no alert open:** it opens one issue titled **Main CI Is Failing**, labelled `main-ci-red`

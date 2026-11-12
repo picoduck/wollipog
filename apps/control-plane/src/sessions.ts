@@ -4,8 +4,9 @@ import { AssistantRefusal } from "./assistant-connections.js";
 import { normalizeDeliveryVerificationFailure, publishedIssueFailure, type PublishedIssueFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import { failedCampaignRun } from "./campaign-failed-run.js";
+import { providerAccountRef } from "./agent-account-view.js";
 import {
-  isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_REF_PREFIX, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
+  isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
   memberProviderAccountsError, providerAccountExplicitRecord, providerAccountIneligibility, providerAccountNamedRefusal, providerAccountNamedRefusalSentence,
   providerAccountSelectionRecord, providerForDriver, resolveProviderAccountSelection,
   supportsClaudeProjectMemory, type AgentDefinition, type ProviderAccountChoice, type ProviderAccountChoiceRequired, type ProviderAccountDefinition, type ProviderAccountSelectionPreview,
@@ -73,7 +74,7 @@ import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, 
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision, outstandingDecisionsBearOnScopeRequest, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
-import { boundedDecisionString, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
+import { boundedDecisionString, boundedDecisionStringProblem, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
 import { needsCampaignIssueScopeSeed } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureCampaignPullRequests, closureCrossRepositoryDelivery, closureCrossRepositoryPullRequests, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
@@ -920,13 +921,6 @@ export interface PreStagedDeliveryOptions {
 function ok<T>(data: T, status = 200): ServiceResult<T> {
   return { ok: true, status, data };
 }
-/** The opaque name agent tools use for an account (#4353), since an account's id embeds its label.
- * It is stable for one account on one Machine and means nothing outside this control plane's check. */
-function providerAccountRef(runnerId: string, accountId: string): string {
-  const digest = createHash("sha256").update(`wollipog-provider-account-ref\0${runnerId}\0${accountId}`).digest("hex");
-  return `${PROVIDER_ACCOUNT_REF_PREFIX}${digest.slice(0, 16)}`;
-}
-
 function fail<T>(error: string, status = 400): ServiceResult<T> {
   return { ok: false, status, error };
 }
@@ -1283,35 +1277,48 @@ function unrenderableEvidenceArtifact(item: { artifactId?: string; mediaType?: s
   return item.artifactId !== undefined && !RENDERABLE_EVIDENCE_MEDIA_TYPES.includes(item.mediaType as string);
 }
 
+/** The refusal for an evidence artifact the review card cannot show; `index` counts from 0. */
+function unrenderableEvidenceRefusal(index: number): string {
+  return `evidence item ${index + 1}: a Session artifact needs a mediaType the review card can show ` +
+    `(${RENDERABLE_EVIDENCE_MEDIA_TYPES.join(", ")})`;
+}
+
 /** Normalize untrusted JSON into a canonical key order before hashing or persistence. */
 /** A question with 2 to 12 uniquely identified options, one of which may be recommended. `noun`
  * names the decision kind in refusals ("implementation questions"). */
 function normalizeDecisionQuestion(value: Record<string, unknown>, noun: string, maxQuestion: number, minOptions = 2): ServiceResult<{
   question: string; options: WorkflowDecisionOption[]; recommendedOptionId?: string;
 }> {
-  if (!boundedDecisionString(value.question, maxQuestion) || !Array.isArray(value.options) ||
-      value.options.length < minOptions || value.options.length > 12) {
-    return fail(`${noun} require text and ${minOptions} to 12 options`);
+  // Each refusal names the field and its limit, never the submitted text (#4511).
+  const singular = noun.replace(/s$/u, "");
+  const questionProblem = boundedDecisionStringProblem(value.question, maxQuestion);
+  if (questionProblem) return fail(`${singular} text ${questionProblem}`);
+  if (!Array.isArray(value.options) || value.options.length < minOptions || value.options.length > 12) {
+    return fail(`${noun} require a list of ${minOptions} to 12 options` +
+      (Array.isArray(value.options) ? `; ${value.options.length} given` : ""));
   }
-  const options = value.options.flatMap((raw) => {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  const options: WorkflowDecisionOption[] = [];
+  for (const [index, raw] of value.options.entries()) {
+    const at = `${singular} option ${index + 1}`;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail(`${at} must be an object`);
     const option = raw as Record<string, unknown>;
-    return boundedDecisionString(option.optionId, 128) && boundedDecisionString(option.label, 200) &&
-      (option.description === undefined || boundedDecisionString(option.description, 1000))
-      ? [{ optionId: option.optionId, label: option.label,
-          ...(typeof option.description === "string" ? { description: option.description } : {}) }]
-      : [];
-  });
-  if (options.length !== value.options.length || options.some((option) => option.optionId === "__workflow_deny__") ||
-      new Set(options.map((option) => option.optionId)).size !== options.length) {
-    return fail(`${noun.replace(/s$/u, "")} options must have unique valid ids and labels`);
+    for (const [field, max] of [["optionId", 128], ["label", 200], ["description", 1000]] as const) {
+      if (field === "description" && option.description === undefined) continue;
+      const problem = boundedDecisionStringProblem(option[field], max);
+      if (problem) return fail(`${at}: ${field} ${problem}`);
+    }
+    if (option.optionId === "__workflow_deny__") return fail(`${at} uses an optionId Wollipog reserves`);
+    const repeated = options.findIndex((earlier) => earlier.optionId === option.optionId);
+    if (repeated >= 0) return fail(`${at} repeats the optionId of option ${repeated + 1}`);
+    options.push({ optionId: option.optionId as string, label: option.label as string,
+      ...(typeof option.description === "string" ? { description: option.description } : {}) });
   }
   const recommended = value.recommendedOptionId;
   if (recommended !== undefined &&
       (typeof recommended !== "string" || !options.some((option) => option.optionId === recommended))) {
     return fail("recommendedOptionId must identify an offered option");
   }
-  return ok({ question: value.question, options, ...(typeof recommended === "string" ? { recommendedOptionId: recommended } : {}) });
+  return ok({ question: value.question as string, options, ...(typeof recommended === "string" ? { recommendedOptionId: recommended } : {}) });
 }
 
 export function normalizeWorkflowDecisionSnapshot(
@@ -1415,6 +1422,7 @@ export function normalizeWorkflowDecisionSnapshot(
     new RegExp(`^[0-9a-f]{${length}}$`, "u").test(candidate) ? candidate : null;
   const checkedAt = (candidate: unknown) => Number.isSafeInteger(candidate) && (candidate as number) > 0
     ? candidate as number : null;
+  const httpsUrlRule = "an HTTPS URL of at most 4096 characters without a username or password";
   const safeHttpsUrl = (candidate: unknown) => {
     if (!boundedDecisionString(candidate, 4096)) return false;
     try {
@@ -1457,14 +1465,21 @@ export function normalizeWorkflowDecisionSnapshot(
     const checks = value.requiredChecks && typeof value.requiredChecks === "object" && !Array.isArray(value.requiredChecks)
       ? value.requiredChecks as Record<string, unknown> : null;
     const checked = checks && checkedAt(checks.checkedAt);
-    const checkRows = checks && Array.isArray(checks.checks) ? checks.checks.flatMap((raw) => {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    // Each row's refusal names the row and its field, never the submitted value (#4511).
+    const checkRows: { name: string; state: "passed"; url?: string }[] = [];
+    for (const [index, raw] of (checks && Array.isArray(checks.checks) ? checks.checks : []).entries()) {
+      const at = `requiredChecks.checks item ${index + 1}`;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail(`${at} must be an object`);
       const check = raw as Record<string, unknown>;
-      if (!boundedDecisionString(check.name, 256) || check.state !== "passed") return [];
-      if (check.url !== undefined && !safeHttpsUrl(check.url)) return [];
-      return [{ name: check.name, state: "passed" as const,
-        ...(typeof check.url === "string" ? { url: check.url } : {}) }];
-    }) : [];
+      const nameProblem = boundedDecisionStringProblem(check.name, 256);
+      if (nameProblem) return fail(`${at}: name ${nameProblem}`);
+      if (check.state !== "passed") return fail(`${at}: state must be passed`);
+      if (check.url !== undefined && !safeHttpsUrl(check.url)) {
+        return fail(`${at}: url must be ${httpsUrlRule}`);
+      }
+      checkRows.push({ name: check.name as string, state: "passed",
+        ...(typeof check.url === "string" ? { url: check.url } : {}) });
+    }
     // #4119: a GitHub repository without required checks cites every reported check instead; with
     // none at all the merge is the person's, so an empty list is accepted only on that basis.
     if (value.checksBasis !== undefined && (gitlab || value.checksBasis !== "all_reported")) {
@@ -1570,30 +1585,40 @@ export function normalizeWorkflowDecisionSnapshot(
   if (!Array.isArray(value.evidence) || value.evidence.length < 1 || value.evidence.length > 32) {
     return fail("UI evidence decisions require at least one evidence reference");
   }
-  const evidence = value.evidence.flatMap((raw) => {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  // Each refusal names the item, its field and the rule, never the submitted value (#4511).
+  const evidence: { evidenceId: string; uri?: string; sha256: string; artifactId?: string; mediaType?: string }[] = [];
+  for (const [index, raw] of value.evidence.entries()) {
+    const at = `evidence item ${index + 1}`;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail(`${at} must be an object`);
     const item = raw as Record<string, unknown>;
-    if (!boundedDecisionString(item.evidenceId, 256) || !sha(item.sha256, 64)) return [];
-    if (item.uri !== undefined && !safeHttpsUrl(item.uri)) return [];
-    if (item.artifactId !== undefined && !boundedDecisionString(item.artifactId, 256)) return [];
+    const idProblem = boundedDecisionStringProblem(item.evidenceId, 256);
+    if (idProblem) return fail(`${at}: evidenceId ${idProblem}`);
+    if (!sha(item.sha256, 64)) return fail(`${at}: sha256 must be 64 lowercase hexadecimal characters`);
+    if (item.uri !== undefined && !safeHttpsUrl(item.uri)) {
+      return fail(`${at}: uri must be ${httpsUrlRule}`);
+    }
+    const artifactProblem = item.artifactId === undefined ? null : boundedDecisionStringProblem(item.artifactId, 256);
+    if (artifactProblem) return fail(`${at}: artifactId ${artifactProblem}`);
     if (item.mediaType !== undefined &&
-        (typeof item.mediaType !== "string" || !/^[a-z0-9][a-z0-9.+-]{0,62}\/[a-z0-9][a-z0-9.+-]{0,62}$/u.test(item.mediaType))) return [];
+        (typeof item.mediaType !== "string" || !/^[a-z0-9][a-z0-9.+-]{0,62}\/[a-z0-9][a-z0-9.+-]{0,62}$/u.test(item.mediaType))) {
+      return fail(`${at}: mediaType must be a lowercase type/subtype media type, such as image/png`);
+    }
     // Without an external link, the human fallback must have an artifact the browser can display.
     // The Orchestrator still applies its own stricter client and artifact checks before delivery.
-    if (item.uri === undefined && (!item.artifactId ||
-        !RENDERABLE_EVIDENCE_MEDIA_TYPES.includes(item.mediaType as string))) return [];
+    if (item.uri === undefined && item.artifactId === undefined) return fail(`${at} needs a uri or an artifactId`);
+    if (item.uri === undefined && !RENDERABLE_EVIDENCE_MEDIA_TYPES.includes(item.mediaType as string)) {
+      return fail(unrenderableEvidenceRefusal(index));
+    }
+    const repeated = evidence.findIndex((earlier) => earlier.evidenceId === item.evidenceId);
+    if (repeated >= 0) return fail(`${at} repeats the evidenceId of item ${repeated + 1}`);
     // Optional fields are emitted only when present so a pre-v167 snapshot keeps its digest.
-    return [{
-      evidenceId: item.evidenceId,
+    evidence.push({
+      evidenceId: item.evidenceId as string,
       ...(item.uri !== undefined ? { uri: item.uri as string } : {}),
       sha256: item.sha256 as string,
       ...(item.artifactId !== undefined ? { artifactId: item.artifactId as string } : {}),
       ...(item.mediaType !== undefined ? { mediaType: item.mediaType as string } : {}),
-    }];
-  });
-  if (evidence.length !== value.evidence.length ||
-      new Set(evidence.map((item) => item.evidenceId)).size !== evidence.length) {
-    return fail("UI evidence references must be unique HTTPS resources or renderable Session artifacts with SHA-256 integrity");
+    });
   }
   if (value.videoReview === undefined) return ok({ category: "ui_evidence_approval", evidence });
   if (!trustedDerivedVideo || !value.videoReview || typeof value.videoReview !== "object" ||
@@ -2408,7 +2433,7 @@ const DELEGATED_IMAGE_REVIEW = Symbol("server-created image reviewer");
 const PREPARED_MEDIA_CAPTURE = Symbol("private prepared media Session capture");
 /** Why a gate refuses a repository left out for a runner's version (#4319), and, when the refusal is
  * an unread Location's rather than a named repository's, that Location's name. */
-type ExcludedRepositoryDetail = { sentence: string; unread: string | null; unreadOld?: string; unreadMissing?: string };
+type ExcludedRepositoryDetail = { sentence: string; unread: string | null; unreadOld?: string; unreadMissing?: string; entryBelow?: string };
 type PreparedMediaCapture = { identity: PreparedMediaIdentity; subject: PreparedMediaSubject; decision: WorkflowDecisionView; operatorValidation?: OperatorVideoValidationPurpose; command: Extract<DurableSessionCommand, { type: "start_session" }> | null };
 
 export class SessionsService {
@@ -10554,9 +10579,10 @@ export class SessionsService {
   private campaignAttentionController(session: SessionView | null, batch?: RunnerAttentionBatch): SessionView | null {
     if (session?.kind === "review") return null;
     if (batch) return batch.capture(session);
-    return session?.parentSessionId
-      ? this.campaignEventController(this.db.getSession(session.parentSessionId))
-      : null;
+    // Resolve ancestry before building a view. Reading the immediate parent first constructs
+    // its full campaign projection, only to build the same root projection a second time.
+    const root = session?.parentSessionId ? this.db.campaignAncestryRoot(session.parentSessionId) : "none";
+    return typeof root === "object" && root.hasPolicy ? this.db.getSession(root.id) : null;
   }
 
   private publishCampaignAttentionTransition(before: SessionView | null, batch?: RunnerAttentionBatch, notificationBefore?: SessionView): void {
@@ -10564,9 +10590,12 @@ export class SessionsService {
     if (!before) return;
     // A yielded batch may outlive deletion or reparenting of its controlling campaign. Do not
     // write continuation events for a stale owner (or a deleted row's foreign key).
-    if (this.campaignEventController(this.db.getSession(before.id))?.id !== before.id) return;
+    const root = this.db.campaignAncestryRoot(before.id);
+    if (typeof root !== "object" || !root.hasPolicy || root.id !== before.id) return;
     const now = Date.now();
-    const currentCampaign = this.db.getSession(before.id);
+    // Control and request admission need current policy, not the expensive descendant status
+    // projection. Build that projection below only where publication actually consumes it.
+    const currentCampaign = this.db.getSession(before.id, { includeCampaignProjection: false });
     if (currentCampaign?.orchestratorPolicy?.control?.mode === "full_control") {
       this.campaignRecovery.synchronize(currentCampaign, now);
     }
@@ -11837,6 +11866,13 @@ export class SessionsService {
       if (decision.status !== "approved" || decision.resourceSnapshot.category !== "pr_merge" || decision.actionAdmission?.kind !== "pr_merge_enqueue" ||
           (approval && decision.actionAdmission.command !== command)) continue;
       const refusal = this.excludedRepositoryRefusalDetail(session, null, decision.resourceSnapshot);
+      // A boundary repository whose runners all dropped below the floor lifts only when one updates; no
+      // replacement is admitted while it stands (#4319 follow-on A).
+      if (refusal?.entryBelow) {
+        return `${refusal.sentence} Command tools are blocked while this session's armed merge can't run, since it must not. If it already ran, reconcile it. ` +
+          `Otherwise this lifts when a runner of a Location of that repository is updated and restarted to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer; ` +
+          "a new pr_merge decision for it is refused until then.";
+      }
       // An unread Location's refusal ends by a read or its removal, not by a join (#4319).
       if (refusal) return `${refusal.sentence} Command tools are blocked while this session's armed merge can't run, since it must not. If it already ran, reconcile it. ` +
         (refusal.unread
@@ -12371,6 +12407,8 @@ export class SessionsService {
     // Asking anyone to approve what no login may carry out helps no one (#4319). The exception replaces
     // an armed merge left out after arming, which is how its session gets its shell back.
     const requesting = normalized.ok && normalized.data ? this.db.getSession(sessionId) : null;
+    // A boundary repository whose runners all dropped below the floor admits no replacement either; that
+    // is refused where the decision is created, after every await (#4319 follow-on A).
     const excludedRepository = requesting && normalized.data && !this.armedMergesOf(requesting, normalized.data).length
       ? this.excludedRepositoryRefusal(requesting, null, normalized.data) : null;
     if (excludedRepository) return fail(excludedRepository, 409);
@@ -12747,10 +12785,15 @@ export class SessionsService {
     // The durable record, not the latest read: a later read that fails, a move to waiting or a revoke
     // never turns a refused repository back into an unknown one. Only an entry ends it.
     const excluded = campaignRefusedRepositories(root).filter((item) => item.repository === named);
-    const here = (item: { locationId: string }) => {
-      const location = this.db.getProjectLocation(item.locationId);
+    const sits = (locationId: string) => {
+      const location = this.db.getProjectLocation(locationId);
       return location?.runnerId === requester.runnerId && location?.workspaceId === requester.workspaceId;
     };
+    // A requester in that very Location acts in its own repository, but only while the Location's
+    // latest read still names it (#4319 follow-on B): a revival, or a read that failed since, drops that
+    // exclusion, and the folder may hold another repository now, so the durable record alone exempts no one.
+    const here = (item: { locationId: string }) => sits(item.locationId) &&
+      Boolean(root.orchestratorPolicy?.excludedLocations?.some((exclusion) => exclusion.locationId === item.locationId && exclusion.repository === named));
     if (excluded.length && !excluded.some(here)) {
       return { sentence: `${named} isn't in this campaign because the runner of ${excluded.map((item) => item.name).join(", ")} can't perform its gates. ` +
         `${this.refusedRepositoryWayIn(root, named, excluded)} Until then no other login stands in, and nothing was performed.`, unread: null };
@@ -12759,7 +12802,8 @@ export class SessionsService {
     // without an entry is refused while it stands, including ones the campaign never had. That comes
     // before a named Location's own exemption, since the unnamed one may hold that repository too, and
     // a requester in the unnamed Location can't show which repository it acts in either.
-    if (campaignScopeRepositories(root).some((entry) => entry.repository === named)) return null;
+    const entry = campaignScopeRepositories(root).find((item) => item.repository === named);
+    if (entry) return this.entryBelowGatesDetail(root, entry, requester, sits);
     const unnamed = this.db.unnamedBelowGatesLocations(root);
     if (!unnamed.length) return null;
     const names = unnamed.map((item) => item.name).join(", ");
@@ -12790,6 +12834,27 @@ export class SessionsService {
       (occupied.length ? `${occupied.join(", ")} can be removed once no session of this campaign runs there. ` : "") +
       "Until then no other login stands in, and nothing was performed.", unread: names,
       ...(old.length ? { unreadOld: old.join(", ") } : {}), ...(missing.length ? { unreadMissing: missing.join(", ") } : {}) };
+  }
+
+  /** A repository in the boundary none of whose places can perform the campaign's gates (#4319
+   * follow-on A): every Location of its entry, the launch repository's own Location included,
+   * is on a runner below the gates' floor or of no known version. A Location keeps its entry when its
+   * runner drops, so nothing else refuses it, and a merge or branch deletion there would run with the
+   * requester's login. Read live at each gate: an update that brings a runner back lifts it with
+   * nothing to revoke, since every request made while it stood was refused, and an approval it then
+   * lets through was made while the repository could perform its gates. A requester sitting in one of
+   * those places acts on that place's own runner, so it is exempt, as in a refused Location. */
+  private entryBelowGatesDetail(root: SessionView, entry: CampaignBoundaryRepository, requester: Pick<SessionView, "runnerId" | "workspaceId">,
+    sits: (locationId: string) => boolean): ExcludedRepositoryDetail | null {
+    const current = (runnerId: string) => runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "campaignLocationGates");
+    // The launch repository's entry holds the root's own Location, so its checkout is judged with the rest.
+    // An entry with no Location left judges nothing, and keeps the rule it had.
+    const locations = entry.locationIds.flatMap((id) => { const location = this.db.getProjectLocation(id); return location ? [location] : []; });
+    if (!locations.length || locations.some((location) => current(location.runnerId) || sits(location.id))) return null;
+    const names = locations.map((location) => location.name).join(", ");
+    return { sentence: `${entry.repository} can't be acted on: every Location of it in this campaign (${names}) is on a runner that can't perform its gates. ` +
+      `Update and restart that runner to protocol version ${CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL} or newer. ` +
+      "Until then no other login stands in, and nothing was performed.", unread: null, entryBelow: names };
   }
 
   /** What actually brings a refused repository in (#4319), so the refusal never promises a join that
@@ -14769,10 +14834,9 @@ export class SessionsService {
     // An item naming an artifact is reviewed as that artifact's checked bytes, so the human review
     // card must be able to show it; its `uri` never stands in. Checked only for new requests, so an
     // occurrence approved before this rule can still be consumed with its unchanged snapshot.
-    if (normalized.data.category === "ui_evidence_approval" &&
-        normalized.data.evidence.some(unrenderableEvidenceArtifact)) {
-      return fail("UI evidence references must be unique HTTPS resources or renderable Session artifacts with SHA-256 integrity", 400);
-    }
+    const unrenderable = normalized.data.category === "ui_evidence_approval"
+      ? normalized.data.evidence.findIndex(unrenderableEvidenceArtifact) : -1;
+    if (unrenderable >= 0) return fail(unrenderableEvidenceRefusal(unrenderable), 400);
     const child = this.db.getSession(sessionId);
     if (!child) return fail("session not found", 404);
     if (isTerminal(child.status)) {
@@ -14955,7 +15019,12 @@ export class SessionsService {
     const resourceDigest = workflowDecisionResourceDigest(normalized.data);
     // #4319: the refusal tells a blocked session to ask again for this pull request, under whatever
     // key it chooses, so the armed merge left out after arming is replaced by name, not by key.
-    const replacedArmed = child && this.excludedRepositoryRefusal(child, controller.session, normalized.data) ? this.armedMergesOf(child, normalized.data) : [];
+    const refusalNow = child ? this.excludedRepositoryRefusalDetail(child, controller.session, normalized.data) : null;
+    // Read again here, after every await before it (review round 2): a boundary repository whose runners
+    // all dropped below the floor admits no request at all while it stands, a replacement included
+    // (#4319 follow-on A), so none can supersede the armed merge or be approved during the drop.
+    if (refusalNow?.entryBelow) return { ok: false, status: 409, error: refusalNow.sentence };
+    const replacedArmed = refusalNow ? this.armedMergesOf(child!, normalized.data) : [];
     const created = this.db.createWorkflowDecision({
       requestId: request.requestId,
       occurrenceId: `workflow_${randomUUID().replace(/-/gu, "")}`,
@@ -15496,6 +15565,14 @@ export class SessionsService {
           ? { message: resolution.childMessage ?? "Full Control declined this question as a request for credentials, sign-in or access." }
           : undefined);
       return answered.ok ? ok(this.db.workflowDecisionByOccurrence(occurrenceId)!) : failAs(answered);
+    }
+    // Nothing is approved in a boundary repository whose runners all dropped below the floor while that
+    // stands (#4319 follow-on A, review round 2): a request made before the drop waits, and can be
+    // approved once a runner updates. So its lift, read live, has nothing approved during it to revoke.
+    if (decision && resolution?.outcome === "approve" && decision.sessionId === childSessionId) {
+      const requester = this.db.getSession(childSessionId);
+      const refusal = requester ? this.excludedRepositoryRefusalDetail(requester, null, decision.resourceSnapshot) : null;
+      if (refusal?.entryBelow) return fail(refusal.sentence, 409);
     }
     if (decision?.category === "automation_creation") {
       if (decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
@@ -18836,7 +18913,7 @@ export class SessionsService {
     // Writes each held child's recovery advice for the calling Orchestrator (#1863).
     holdReaderFor?: (target: { id: string; parentSessionId: string | null }) => HoldAdviceReader | undefined,
   ): ServiceResult<DescendantRequestsView> {
-    const parent = this.db.getSession(parentSessionId);
+    const parent = this.db.getSession(parentSessionId, { includeCampaignProjection: false });
     if (!parent) return fail("session not found", 404);
     const rootCampaign = this.orchestratorCampaignController(parent);
     if (rootCampaign === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);

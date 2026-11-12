@@ -3734,6 +3734,15 @@ export class SessionManager {
         branch: request.branch,
       }, {
         ...options,
+        // A slot whose directory went is this session's to make again only while its own row names that
+        // worktree, made by it on that branch, and nothing of another session's claims the path (#4209).
+        // The slot's path proves nothing on its own: a person, or another session's attach, can be there.
+        ownsMissingRegistration: (path, branch) => {
+          const latest = this.store.readMeta(sessionId);
+          return !!latest && this.attributedWorktrees(latest).some((item) => item.source === "created" &&
+              item.branch === branch && sameWorktreePath(latest.context, item.path, path)) &&
+            !this.worktreeHolder(sessionId, latest.context, path, { othersOnly: true });
+        },
         reserveWorktree: (path, branch, createsBranchAt) => {
           const view: SessionWorktreeView = { id: worktreeIdForPath(path), path, branch, baseRef, source: "created" };
           const record = this.cleanupRecordForWorktree(meta, view, "creation_rollback", "force");
@@ -3811,6 +3820,9 @@ export class SessionManager {
         baseRef: created.baseRef,
         baseCommit: created.baseCommit,
         source: "created",
+        // Made again on this session's own branch after its directory went (#4209): removing this
+        // worktree keeps the branch, which may hold the session's commits.
+        ...(created.branchPreexisted ? { branchPreexisted: true } : {}),
         ...(defaultBranch ? { defaultBranch } : {}),
       };
       try {
@@ -8403,7 +8415,18 @@ export class SessionManager {
           message: `worktree isolation failed: ${errText(err)}`,
         });
         meta.worktreePending = false;
-        this.store.patchMeta(spec.sessionId, { worktreePending: false });
+        // The launch's row starts with no selection and only finalization writes one. A failure before
+        // that leaves the session selecting the worktree it had (#4209), or the next launch, finding none,
+        // would run in the Location's own checkout. It is still there: `persistedWorktreeFailure` just
+        // verified it, or the branch above would have taken the session to recovery instead.
+        const current = selected ? this.store.readMeta(spec.sessionId) : undefined;
+        const restore = !!current && !current.worktreePath && current.worktreeBranch === prior!.worktreeBranch;
+        const restored = this.store.patchMeta(spec.sessionId, { worktreePending: false, ...(restore ? { worktreePath: selected } : {}) });
+        if (restore && restored) {
+          meta.worktreePath = selected;
+          // The session holds this worktree again, so no earlier launch's rollback may take it.
+          this.endLaunchRollbacksAt(spec.sessionId, context, selected!);
+        }
         if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
         this.releaseAdmissionIfInactive(spec.sessionId);
         this.emitStatus(spec.sessionId, "failed", "Worktree isolation could not be established");
@@ -17899,6 +17922,12 @@ export class SessionManager {
         locationHistory: undefined,
         keptWorktreePaths: undefined,
         keptWorktreesTracked: true,
+        // A Location switch is approved for the session its person approved it for (#4138). The fork
+        // starts where the source is and never carries out, resumes or shows the source's switch: a
+        // move of its own needs its own approval.
+        pendingLocationSwitch: undefined,
+        pendingLocationContinuation: undefined,
+        locationSwitchFailure: undefined,
         agentSessionId: forkedThreadId,
         status: "idle",
         tokensIn: 0,

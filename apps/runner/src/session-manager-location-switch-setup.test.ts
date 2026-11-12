@@ -3343,6 +3343,35 @@ test("deleting a session while its request's rollback is still pending lets that
   });
 });
 
+test("deleting a session while its request's rollback is still pending removes that worktree when nothing in it changed", async () => {
+  await withSession("delete-pending-rollback-unchanged", async (h) => {
+    git(h.docs, "checkout", "--quiet", "-b", "config-base");
+    writeFileSync(join(h.docs, ".wollipog.json"), JSON.stringify({ version: 1, setup: [LOG_STEP(h)] }));
+    git(h.docs, "add", ".wollipog.json");
+    git(h.docs, "commit", "--quiet", "-m", "setup");
+    git(h.docs, "checkout", "--quiet", "main");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.providers[1]?.prompts.length === 1 && h.store.readMeta(h.sessionId)?.status === "idle", "the move did not finish");
+    const internals = internalsOf(h);
+    const activate = internals.activateWorktreeWithNotice.bind(h.manager);
+    internals.activateWorktreeWithNotice = async () => { throw new Error("activation failed"); };
+    const removal = stickRemoval(h);
+    const failing = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/other" });
+    await answerTrust(h, "trust");
+    await assert.rejects(failing, /activation failed/u);
+    internals.activateWorktreeWithNotice = activate;
+    const [rollback] = journal(h);
+    assert.ok(rollback?.auxiliaryWorktreeRollback, "the request's rollback is pending");
+    const slot = rollback!.worktreePath;
+    removal.free();
+    await h.manager.delete(h.sessionId);
+    assert.equal(existsSync(slot), false, "the rollback finds what the runner left, and removes it");
+    assert.equal(docsWorktrees(h).includes(slot), false);
+    assert.throws(() => git(h.docs, "rev-parse", "--verify", "refs/heads/fix/other"), "with the branch it made");
+    assert.deepEqual(journal(h), []);
+  });
+});
+
 test("a kept mark goes once the runner itself removes that worktree", async () => {
   await withSession("mark-forgotten-on-removal", async (h) => {
     serveOriginLocally(h);

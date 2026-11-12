@@ -1,9 +1,30 @@
 import React from "react";
-import type { AutomationCreationSnapshot } from "@wollipog/protocol";
+import type { AutomationCreationSnapshot, CreateSessionRequest } from "@wollipog/protocol";
 import { CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE } from "@wollipog/protocol";
+import { useHasStore, useStoreSelector } from "../store.js";
+import { AccountIdentifier } from "./AccountIdentifier.js";
+import { AutomationExpectedProviderAccount, providerAccountPreviewPlacement } from "./ProviderAccountSelection.js";
+
+/** The account a scheduled session names, or what Default is expected to resolve to (#4512). Account
+ * ids are derived from account labels, so a named one follows Hide Account Emails like its label. */
+function ProviderAccountFact({ request }: { request: CreateSessionRequest }) {
+  const runner = useStoreSelector((state) => state.runners.get(request.runnerId));
+  const projectsSupported = useStoreSelector((state) => state.projectsSupported);
+  if (request.providerAccountId) {
+    const account = runner?.providerAccounts?.find((candidate) => candidate.id === request.providerAccountId);
+    return <AccountIdentifier identity={`${request.runnerId}:${request.providerAccountId}`}
+      value={account?.label ?? request.providerAccountId} label="Account Email" />;
+  }
+  return <>
+    Default
+    {runner && <AutomationExpectedProviderAccount runner={runner} agentId={request.agentId}
+      placement={providerAccountPreviewPlacement({ projectsSupported, projectId: request.projectId, workspaceId: request.workspaceId })} />}
+  </>;
+}
 
 /** The human reviews the complete saved configuration, not a summary supplied by the agent. */
 export function AutomationCreationSummary({ snapshot }: { snapshot: AutomationCreationSnapshot }) {
+  const hasStore = useHasStore();
   const { spec } = snapshot;
   const action = spec.action;
   const prompt = action.kind === "prompt_session" ? action.request.text :
@@ -24,7 +45,6 @@ export function AutomationCreationSummary({ snapshot }: { snapshot: AutomationCr
         <div><dt>Campaign Repository</dt><dd>{action.request.campaign.repository}</dd></div>
         <div><dt>Campaign Settings</dt><dd><div className="code-well"><pre>{JSON.stringify(action.request.orchestrator, null, 2)}</pre></div></dd></div>
         <div><dt>Full Control Overrides</dt><dd><div className="code-well"><pre>{JSON.stringify(action.request.campaign.fullControl ?? {}, null, 2)}</pre></div></dd></div>
-        <div><dt>Provider Account</dt><dd>{action.request.providerAccountId ?? "Default"}</dd></div>
         <div><dt>Execution Target</dt><dd>{action.request.executionTargetId ?? "Host"}</dd></div>
         <div><dt>Recurring Child Tasks</dt><dd>{action.request.campaign.tasks.map(task => <div key={task.key}>
           <strong>{task.title}</strong><div className="code-well"><pre>{task.prompt}</pre></div>
@@ -39,6 +59,9 @@ export function AutomationCreationSummary({ snapshot }: { snapshot: AutomationCr
         <div><dt>Project</dt><dd>{action.request.projectId ?? "Workspace Assignment"}</dd></div>
         <div><dt>Workspace Strategy</dt><dd>{action.request.useWorktree ? "Worktree" : "In Place"}</dd></div>
       </>}
+      {action.kind === "create_session" && <div><dt>Provider Account</dt><dd>{hasStore
+        ? <ProviderAccountFact request={action.request} />
+        : action.request.providerAccountId ?? "Default"}</dd></div>}
       <div><dt>Model</dt><dd>{action.request.config?.model ?? "Inherit at Run Time"}</dd></div>
       <div><dt>Reasoning Effort</dt><dd>{action.request.config?.effort ?? "Inherit at Run Time"}</dd></div>
       <div><dt>Permission Mode</dt><dd>{action.request.config?.permissionMode ?? "Inherit at Run Time"}</dd></div>

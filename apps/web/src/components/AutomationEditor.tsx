@@ -35,7 +35,9 @@ import { agentOptions } from "./agent-options.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { FieldError } from "./FieldError.js";
 import { AutomationScheduleFields } from "./AutomationScheduleFields.js";
-import { AutomationCampaignFields } from "./AutomationCampaignFields.js";
+import { AutomationCampaignFields, orchestratorProviderAccounts } from "./AutomationCampaignFields.js";
+import { automationProjectPlacement } from "../automation-project-placement.js";
+import { AutomationExpectedProviderAccount, providerAccountPreviewPlacement } from "./ProviderAccountSelection.js";
 import { AutomationsIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { DetailBar } from "./PageHeader.js";
@@ -336,6 +338,18 @@ function AutomationEditorForm({
     setForm((current) => ({ ...current, [key]: value }));
 
   const selectedRunner = runners.get(form.runnerId);
+  // Where a run would start, placed as the saved spec places it, so the account preview predicts
+  // that run's own resolution (#4512). An ambiguous placement already refuses Save with its reason.
+  const accountPlacement = useMemo(() => {
+    if (form.actionKind !== "create_session" || !form.runnerId || !form.workspaceId) return null;
+    try {
+      const { projectId } = automationProjectPlacement(projectsSupported, projects.values(),
+        { runnerId: form.runnerId, workspaceId: form.workspaceId });
+      return providerAccountPreviewPlacement({ projectsSupported, projectId, workspaceId: form.workspaceId });
+    } catch {
+      return null;
+    }
+  }, [form.actionKind, form.runnerId, form.workspaceId, projects, projectsSupported]);
   const selectedFallback = runners.get(form.fallbackRunnerId);
   const selectedWorkflow = workflows.find((workflow) => workflow.workflowId === form.workflowId &&
     workflow.version === (editingSpec?.action.kind === "workflow_run" &&
@@ -943,6 +957,12 @@ function AutomationEditorForm({
                     {primaryInstallationIssue && installationWarning(AUTOMATION_SAVED_INSTALLATION_UNAVAILABLE,
                       Boolean(installationFor(selectedRunner, form.agentId)),
                       () => update((current) => ({ ...current, rebindPrimary: true })))}
+                    {/* An Orchestrator offered an account choice has its expectation under that choice. */}
+                    {(!form.campaign || orchestratorProviderAccounts(selectedRunner, form.agentId).length === 0) &&
+                      selectedRunner && form.agentId && (
+                      <AutomationExpectedProviderAccount runner={selectedRunner} agentId={form.agentId} placement={accountPlacement}
+                        namedAccountId={form.providerAccountId} />
+                    )}
                   </div>
                 ) : (
                   <>
@@ -972,7 +992,8 @@ function AutomationEditorForm({
             )}
             {form.actionKind === "create_session" && (
               <>
-                <AutomationCampaignFields form={form} runner={runners.get(form.runnerId)} onChange={next => setForm(() => next)} />
+                <AutomationCampaignFields form={form} runner={runners.get(form.runnerId)} accountPlacement={accountPlacement}
+                  onChange={next => setForm(() => next)} />
                 {(modelOptions.length > 0 || effortOptions.length > 0) && (
                   <div className="field-row">
                     {modelOptions.length > 0 && (

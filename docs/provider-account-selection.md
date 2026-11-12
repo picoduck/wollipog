@@ -81,8 +81,11 @@ Explicit choices win. A session or child that names an account uses it, whatever
 would skip. A run or workflow names one per member (`providerAccountIds` by agent id,
 `providerAccountBindings` by role, `orchestratorProviderAccountId`), and a member it doesn't name
 follows the policy. All of them resolve through one function (`launchProviderAccount`), and multi-agent
-runs and workflows bind the same account a session would, including a fixed default. Automations can't
-name one: they resolve at each launch. WSL agents keep their context-local account, because a POSIX path
+runs and workflows bind the same account a session would, including a fixed default. Of automations,
+only an Orchestrator session automation can name one; every other run resolves when it starts. The
+automation editor and an agent's Create Automation approval show that resolution from the preview below
+as an expectation, rechecked when each run starts, and a session automation with no eligible account still
+saves (#4512). WSL agents keep their context-local account, because a POSIX path
 doesn't identify its owning distribution, so a machine policy doesn't apply to them.
 
 Resolution happens at dispatch and again at launch. The runner rechecks a Priority Order choice
@@ -192,10 +195,34 @@ Account labels are personal data and account ids are derived from them. Refusal 
 the runner's launch refusal and the reason stored on a session (`providerAccountSelection`: source,
 mode, policy revision and skip counts by reason) name no account. Only `candidates` and a saved
 default's `accountId`, returned to a person who can read the machine's account inventory, carry
-account ids. An agent's credential gets references and reason codes instead, on the selection route, on
-a launch's refusal and on `GET /api/runners`, which omits the Machine's accounts, saved policies and sign-in
-operations for that credential, along with each agent's default account and readiness. Each agent's
-`available` and `authStatus` stay. People read the same route as before.
+account ids. A session's own fields carry them too, for a person. An agent's credential gets references
+and reason codes instead. These are narrowed for it:
+
+| Route | What an Agent's Credential Gets |
+| --- | --- |
+| `GET /api/runners/:id/provider-account-selection` | `choices` by `accountRef`; no `candidates` and no `accountId`. |
+| A launch's `PROVIDER_ACCOUNT_CHOICE_REQUIRED` refusal | `refusal`, `actions` and `retryAt`; no `candidates`. |
+| `GET /api/runners` | No accounts, saved policies or sign-in operations, and no default account or readiness on each agent. Each agent's `available` and `authStatus` stay. |
+| `GET /api/sessions` and `GET /api/sessions/:id` | No `providerAccountId` or `providerAccountLabel`; `providerAccountRef` names the bound account instead. |
+| Every other JSON response to that credential | No `providerAccountId` or `providerAccountLabel` anywhere in it. |
+
+Every other JSON response covers what returns or embeds a session: launches, stop, restart,
+configuration and worktree commands, `POST /api/runs`, `POST /api/workflow-runs`, and the Orchestrator's
+campaign reads. It also covers a session's account-switch failure, provider-HOME refusal and wait, and
+`provider_account_switched` events on `GET /api/sessions/:id/events`, which keep their other fields. A
+reference an agent sent stays as it is. Account ids and labels are removed in the response serializer for
+every agent principal (`withoutProviderAccountNames`). The session list's cached entry is narrowed before
+it is stored. That cache is keyed by principal, so an agent's narrowed list never serves a person and a
+person's full list never serves an agent.
+
+`providerAccountRef` is the same `acct:` reference `get_provider_account_selection` lists, so an agent can
+pass it to `create_session` to launch on the account a session used. `get_session` returns it. A control
+plane older than #4508 sends neither the reference nor any narrowing, and an older runner's tools never
+read a session's account fields, so mixed versions keep working.
+
+Agent credentials can't reach the archive page (`GET /api/sessions/archive-page`), session lookup
+(`GET /api/sessions/lookup/by-id`) or the dashboard's live session stream (`/ui`). The Orchestrator's
+descendant request cards already omit both fields (#2714). People read every route as before.
 
 ## Stored Policy Shape
 
