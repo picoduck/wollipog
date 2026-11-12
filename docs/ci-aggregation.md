@@ -9,13 +9,14 @@ work results must be `success`. With the routing variable absent or ordinarily o
 the plan must be `skipped` with no output; an activated PR requires a successful
 plan with an explicit `full` or `fast` output. Failure, cancellation, missing or
 unknown output and unexpected skipping produce a failing shell exit with a named
-diagnostic. [The exact proposed assurance contract](ci-pr-assurance.md) requires
-separate human activation approval; merging its machinery activates nothing.
+diagnostic. [The assurance contract](ci-pr-assurance.md) records owner activation of
+`CI_PR_BROWSER_ROUTING=enabled` at 2026-11-05T14:55:12Z; merging its machinery
+alone did not activate it.
 GitHub's case-insensitive expression matching admits a plan for case variants of
 `enabled`, but exact raw shell checks force those variants to full and reject a
 fast aggregate. The absent/ordinary off state still adds no executed jobs.
 
-Full coverage remains five browser shards on every event while routing is off,
+Full coverage uses ten browser shards on every event while routing is off,
 and always on main, ordinary manual dispatch and reusable rolling validation. Merge groups
 stay full unless the disabled merge-group gate below is separately activated.
 Only an activated, trusted `CI_PR_BROWSER_ROUTING` plan uses critical-plus-changed
@@ -231,7 +232,7 @@ the newest `--runs` completed merge-group runs created after the switch-back eac
 prove full coverage on their exact attempt: the trusted workflow blobs; a successful
 queue run of `ci.yml`; the rolling full
 inventory (`Typecheck & Bundles` with every engine, containment and bundle step, the
-four `Unit Tests (n)` shards each with its `Unit Tests` step, all five browser shards and no extra leg, shard 1's production smoke,
+four `Unit Tests (n)` shards each with its `Unit Tests` step, all ten browser shards and no extra leg, shard 1's production smoke,
 WebKit, the win32 change detection, the aggregator); the path-scoped win32 comparison
 succeeded or was skipped; and `Merge Group Gate` absent or skipped with no reduced-coverage
 record. A failing, in-progress, partial or gate-active run is a refusal, not a pass. The

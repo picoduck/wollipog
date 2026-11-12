@@ -298,7 +298,8 @@ required check, squash merge, bypass actors, branch conditions and maximum
 merge batch of 5 were preserved. This document records the applied setting;
 merging it does not apply another ruleset update.
 
-The current workflow can request eight initial worker jobs per merge group:
+At the time of this October 19 trial, the workflow could request eight initial
+worker jobs per merge group:
 unit/build, five browser shards, WebKit and settings-row change detection.
 Five groups can therefore request 40 worker jobs; two request 16. Against the
 20-job hosted-runner ceiling measured in #2674, this removes the queue's own
