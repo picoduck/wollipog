@@ -23,7 +23,7 @@ Workflow `CI` remains at `.github/workflows/ci.yml`. Protected result
 | Benchmark Caller Dispatch | Isolated browser simulation | All results prefixed; no exact protected name |
 | Direct CI Dispatch With Benchmark Flag | Unsafe for PR-head status isolation | Fails protected result explicitly; use caller instead |
 
-Every PR retains all three full Node shards, typecheck, engine boundaries,
+Every PR retains all four full Node shards, typecheck, engine boundaries,
 web/control-plane/runner bundles, delegated Linux containment/recovery, Platform
 Isolation, full WebKit, Windows change detection and conditional comparison.
 Only development Chromium shrinks. Full coverage uses ten duration-balanced
