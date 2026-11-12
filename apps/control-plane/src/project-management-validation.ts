@@ -1,6 +1,24 @@
-import type { ResourceScope, ResourceOwner } from "@wollipog/protocol";
+import { scopeAudienceContained, type AccessScopeChangePreview, type ResourceScope, type ResourceOwner } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
-import { canAdministerIdentity, type HumanPrincipal } from "./identity.js";
+import { canAdministerIdentity, type AuthPrincipal, type HumanPrincipal } from "./identity.js";
+
+export function accessScopeOwnerFromQuery(query: unknown): ResourceOwner | undefined {
+  const {ownerKind, ownerId} = (query ?? {}) as {ownerKind?: unknown; ownerId?: unknown};
+  if (ownerKind === "organization" && typeof ownerId === "string") return {kind: "organization", organizationId: ownerId};
+  if (ownerKind === "user" && typeof ownerId === "string") return {kind: "user", userId: ownerId};
+  if (ownerKind === "team" && typeof ownerId === "string") return {kind: "team", teamId: ownerId};
+  return undefined;
+}
+export function accessScopeTransitionError(db: ControlPlaneDb, principal: HumanPrincipal, current: ResourceScope, target: ResourceScope): string | null {
+  if (canAdministerIdentity(principal.role)) return null;
+  const same = scopeAudienceContained(current, target) && scopeAudienceContained(target, current);
+  if (same || (db.scopeAudienceContainedWithMembership(target, current) && !db.scopeAudienceContainedWithMembership(current, target))) return null;
+  return "organization owner or admin permission is required unless the access change only narrows the current audience";
+}
+/** Keep attached relationship evidence internal unless the current principal can read it. */
+export function accessScopePreviewForPrincipal(db: ControlPlaneDb, principal: AuthPrincipal, preview: AccessScopeChangePreview): AccessScopeChangePreview {
+  return {...preview, affectedProjects: preview.affectedProjects.filter(project => db.canAccessProject(principal, project.projectId))};
+}
 
 export const projectName = (value: unknown): string | null => {
   if (typeof value !== "string") return null;

@@ -44,8 +44,9 @@ export class OwnerManagement<P extends AuthPrincipal = HumanPrincipal> {
     const returned = await handler(input, reply);
     return {status, body: sent ? body : returned, ...(Object.keys(headers).length ? {headers} : {})};
   }
-  registerHttp(app: FastifyInstance, principal: (request: FastifyRequest) => P | null, unauthenticatedStatus = 403): void {
+  registerHttp(app: FastifyInstance, principal: (request: FastifyRequest) => P | null, unauthenticatedStatus = 403, exclude: readonly string[] = []): void {
     for (const key of this.keys()) {
+      if (exclude.includes(key)) continue;
       const space = key.indexOf(" ");
       app.route({method: key.slice(0, space) as "GET" | "POST" | "PUT" | "PATCH" | "DELETE", url: key.slice(space + 1),
         handler: async (request, reply) => {

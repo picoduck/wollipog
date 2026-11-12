@@ -85,7 +85,8 @@ test("production composition inventory is exhaustive; unresolved gaps cannot cou
     Record<string, OwnerOperationCoverage | {gap: string}>;
   for (const [tool, route] of ASSISTANT_CONNECTION_OPERATIONS) {
     assert.ok(snapshot.tools.includes(tool), `${tool}: production lost a group-5 connection operation`);
-    assert.deepEqual(manifest[route], {tools: [tool]}, `${route}: group-5 audit drift`);
+    const tools = tool === "install_name" ? ["installation_rename", tool] : [tool];
+    assert.deepEqual(manifest[route], {tools}, `${route}: group-5 audit drift`);
   }
   assert.deepEqual(snapshot.routes, Object.keys(manifest).sort(), "An owner-route candidate was added/removed: classify it explicitly; never regenerate to hide a gap.");
   const inventory = new OwnerManagementInventory();
