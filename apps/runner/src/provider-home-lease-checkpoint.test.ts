@@ -405,6 +405,35 @@ os.close(home_fd)`);
   }
 });
 
+test("non-prefix retirement leftovers recover across native and Python readers", { timeout: 60_000, skip: process.platform !== "linux" }, async t => {
+  for (const reader of ["native", "helper"] as const) {
+    const reapers: Array<() => Promise<void>> = [];
+    const home = fixture(t, reapers); seed(home);
+    const marker = join(home, "ready"), script = join(home, "writer.mts");
+    fs.writeFileSync(script, `import {ProviderHomeLeaseRegistry} from ${JSON.stringify(nativeModule)};
+const r=new ProviderHomeLeaseRegistry(${JSON.stringify(owner)},{nativeCheckpointBarrierForTest:{boundary:'before-retire',marker:${JSON.stringify(marker)}}});r.acquireHome(${JSON.stringify(home)});`);
+    const { child, output } = crashWriter(t, home, process.execPath, ["--import", "tsx", script], reapers);
+    await ready(child, marker, output, t.signal);
+    await kill(child);
+    const checkpoint = JSON.parse(fs.readFileSync(paths(home).anchor, "utf8"));
+    const retired = checkpoint.checkpoint.retired as Array<{ directory: "root" | "lock"; name: string }>;
+    const removed = new Set<string>(), retained = new Set<string>();
+    // Model independently persisted directory blocks after power loss: keep early and late
+    // tuples while dropping a non-prefix subset in both directories, including split aliases.
+    for (const [i, entry] of retired.entries()) {
+      const path = join(entry.directory === "root" ? paths(home).root : paths(home).lock, entry.name);
+      if (!fs.existsSync(path)) continue;
+      if (i % 3 === 1) { fs.unlinkSync(path); removed.add(entry.directory); }
+      else retained.add(entry.directory);
+    }
+    assert.deepEqual([...removed].sort(), ["lock", "root"]);
+    assert.deepEqual([...retained].sort(), ["lock", "root"]);
+    if (reader === "native") assert.equal(nativePass(home).getDiagnostics().length, 0);
+    else { const result = helperPass(home); assert.equal(result.status, 0, String(result.stderr)); }
+    for (const entry of retired) assert.equal(fs.existsSync(join(entry.directory === "root" ? paths(home).root : paths(home).lock, entry.name)), false, entry.name);
+  }
+});
+
 test("repeated killed candidate publishers recover without exhausting bounded staging", { timeout: 120_000, skip: process.platform !== "linux" }, async (t) => {
   for (const sequence of [["native", "native"], ["helper", "helper"], ["native", "helper"], ["helper", "native"]]) {
     if (t.signal.aborted) return;
