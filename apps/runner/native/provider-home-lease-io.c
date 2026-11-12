@@ -55,6 +55,8 @@ static char *ancestry_names[1024];
 static struct stat ancestry_ids[1024];
 static unsigned ancestry_count;
 static struct stat root_identity, lock_identity, guard_identity, anchor_identity;
+static int tip_fd = -1;
+static struct stat tip_identity;
 
 static void out8(unsigned value) { unsigned char b = (unsigned char)value; if (fwrite(&b, 1, 1, stdout) != 1) _exit(1); }
 static void out32(uint32_t value) { for (unsigned i = 0; i < 4; i++) out8(value >> (8 * i)); }
@@ -291,7 +293,23 @@ static void owned(const Entry *tip, const char *future, int copied) {
   pinned(); struct stat info;
   require(fstatat(root_fd, future, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT, "acquired lease has a future successor");
   if (tip->dir == 1) require(fstatat(lock_fd, future, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT, "legacy acquired lease has a future successor");
-  if (!copied) verify_entry(tip, 0);
+  if (!copied) {
+    if (tip_fd < 0) {
+      verify_entry(tip, 0);
+      tip_fd = openat(directory(tip->dir), tip->name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+      char fingerprint[160];
+      require(tip_fd >= 0 && fstat(tip_fd, &tip_identity) == 0, "acquired lease descriptor unavailable");
+      stamp(&tip_identity, fingerprint);
+      char dev[32], ino[32]; decimal((uint64_t)tip_identity.st_dev, dev); decimal((uint64_t)tip_identity.st_ino, ino);
+      require(!strcmp(dev, tip->dev) && !strcmp(ino, tip->ino) && !strcmp(fingerprint, tip->stamp), "verified lease evidence changed");
+    }
+    /* The exact bytes were verified above. Keep the inode open to prevent reuse and
+     * revalidate both names and metadata at every boundary, as for the selected anchor.
+     * Re-reading a maximal checkpoint twice per retired alias exhausts the byte budget. */
+    require(fstat(tip_fd, &info) == 0 && same_stamp(&info, &tip_identity) &&
+      fstatat(directory(tip->dir), tip->name, &info, AT_SYMLINK_NOFOLLOW) == 0 && same_stamp(&info, &tip_identity),
+      "verified lease evidence changed");
+  }
 }
 static void select_checkpoint(const char *name) {
   pinned(); int fd = openat(root_fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); require(fd >= 0, "checkpoint candidate unavailable");
