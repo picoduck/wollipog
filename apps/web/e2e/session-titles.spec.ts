@@ -33,7 +33,9 @@ async function cutPlaceholders(dialog: Locator): Promise<string[]> {
     const style = getComputedStyle(field);
     const context = document.createElement("canvas").getContext("2d")!;
     context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-    const room = field.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
+    // Input clientWidth excludes padding in Chromium 158; measure the border box consistently.
+    const room = field.getBoundingClientRect().width - Number.parseFloat(style.borderLeftWidth) - Number.parseFloat(style.borderRightWidth)
+      - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
     return context.measureText(field.placeholder).width > room ? [field.placeholder] : [];
   }));
 }
