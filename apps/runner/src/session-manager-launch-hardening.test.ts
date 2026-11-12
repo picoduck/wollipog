@@ -190,6 +190,14 @@ test("a requested worktree whose directory was deleted by hand is made again on 
   });
 });
 
+/** Selecting a worktree relaunches the provider there. Under a managed sandbox that launch reserves an
+ * empty `config.worktree` in each of the session's other managed worktrees, so a test comparing their
+ * Git admin directories byte for byte waits for it first. */
+async function relaunchedIn(h: Harness, path: string): Promise<void> {
+  await waitFor(() => h.providers.at(-1)?.cwd === path && h.store.readMeta(h.sessionId)?.status !== "starting",
+    `the session did not relaunch in ${path}`);
+}
+
 for (const holder of ["a person, with no row of this session's", "another session that lists it"] as const) {
   test(`a requested slot whose directory went is left byte for byte when ${holder} has it`, async () => {
     if (process.platform === "win32") return;
@@ -202,7 +210,8 @@ for (const holder of ["a person, with no row of this session's", "another sessio
         git(h.app, "worktree", "add", "--quiet", "-b", branch, path);
       } else {
         ({ worktree: { path } } = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch }));
-        await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/other" });
+        const { worktree: elsewhere } = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/other" });
+        await relaunchedIn(h, elsewhere.path);
         // Another session lists the same worktree as one it attached.
         const other = { ...h.spec, sessionId: `${h.sessionId}_other` };
         await h.manager.start(other);
@@ -227,7 +236,8 @@ test("a requested slot whose directory went is refused by name when its registra
   if (process.platform === "win32") return;
   await withSession("stale-registration-locked", async (h) => {
     const { worktree } = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/locked" });
-    await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/other" });
+    const { worktree: elsewhere } = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/other" });
+    await relaunchedIn(h, elsewhere.path);
     git(h.app, "worktree", "lock", "--reason", "on a removable disk", worktree.path);
     const admin = git(worktree.path, "rev-parse", "--absolute-git-dir");
     rmSync(worktree.path, { recursive: true, force: true });
