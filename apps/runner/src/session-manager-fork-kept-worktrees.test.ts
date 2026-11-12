@@ -130,6 +130,52 @@ test("a fork does not take on the worktrees its source left in other Locations, 
   });
 });
 
+test("a failed fork whose rollback keeps its worktree still stops what ran there and gives back its port block", async () => {
+  if (process.platform === "win32") return;
+  await withSource("fork-kept-rollback", async (f) => {
+    const internals = f.manager as unknown as {
+      prepareWorktreeSetup: (...args: unknown[]) => Promise<string>;
+      terminateRollbackProcesses: (marker: string) => Promise<boolean>;
+      worktreePortAllocator: { allocate(owner: string, preferred?: unknown): unknown; get(owner: string): unknown };
+    };
+    const owners: string[] = [];
+    const allocate = internals.worktreePortAllocator.allocate.bind(internals.worktreePortAllocator);
+    internals.worktreePortAllocator.allocate = (owner, preferred) => {
+      owners.push(owner);
+      return allocate(owner, preferred);
+    };
+    const stopped: string[] = [];
+    internals.terminateRollbackProcesses = async (marker) => { stopped.push(marker); return true; };
+    let forkWorktree = "";
+    const prepare = internals.prepareWorktreeSetup.bind(f.manager);
+    internals.prepareWorktreeSetup = async (...args) => {
+      // Setup takes the fork's port block and process marker, then is canceled. An index flag left in
+      // the worktree means nothing can prove what is in it, so its rollback keeps it.
+      await prepare(...args);
+      forkWorktree = (args[1] as { path: string }).path;
+      git(forkWorktree, ["update-index", "--assume-unchanged", "file.txt"]);
+      throw new Error("worktree setup was canceled");
+    };
+    const result = await f.manager.forkConversation(f.source.sessionId, "s_fork_kept_target", 1, "Fork");
+    assert.equal(result.ok, false);
+    assert.ok(forkWorktree, "the fork made a worktree and set it up");
+    const forkOwners = owners.filter((owner) => owner.startsWith("s_fork_kept_target\0"));
+    assert.ok(forkOwners.length > 0, "its setup took a port block");
+    assert.equal(readdirSync(forkWorktree).includes("file.txt"), true, "the worktree is kept");
+    assert.equal(f.store.has("s_fork_kept_target"), false, "the fork's row is gone");
+    assert.deepEqual(forkOwners.filter((owner) => internals.worktreePortAllocator.get(owner) !== undefined), [],
+      "and no port block outlives it");
+    assert.ok(stopped.length > 0, "and what its setup started there is stopped");
+    // The fork's row is gone, so the session it was forked from is told, and no next launch is promised.
+    const notices = f.store.readEvents(f.source.sessionId).map((event) => event.payload)
+      .filter((payload) => payload.kind === "error").map((payload) => String((payload as { message?: string }).message));
+    const notice = notices.find((text) => text.includes(forkWorktree));
+    assert.ok(notice, "the fork's source is told the worktree was kept");
+    assert.match(notice, /a fork of this session that failed made/u);
+    assert.doesNotMatch(notice, /next launch/u);
+  });
+});
+
 for (const how of ["in its history", "as its selected worktree", "as one of its worktrees"] as const) {
   test(`deleting a session leaves a worktree another session lists ${how}`, async () => {
     if (process.platform === "win32") return;
