@@ -24,8 +24,8 @@ importers:
         specifier: ^4.10.2
         version: 4.10.2
       semver:
-        specifier: 7.8.5
-        version: 7.8.5
+        specifier: 7.8.6
+        version: 7.8.6
       tsx:
         specifier: ^4.23.15
         version: 4.23.15
@@ -1374,8 +1374,8 @@ packages:
   secure-json-parse@4.1.1:
     resolution: {integrity: sha512-lnd81MQEZKjhW/Gd2TQqdd4XP6QYNdDW/EP+I7nTrFHP9y2LmaGPIHk9xsnzcOiEr1c39c/e84xFgGviQKBTRw==}
 
-  semver@7.8.5:
-    resolution: {integrity: sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==}
+  semver@7.8.6:
+    resolution: {integrity: sha512-9lpSSU4Mly3mrtruwLs1eLK6+gzbzqeBFwRNjIjE+9LuDpWdYctrQlQ3ej1Ilgi7gknpsTRnPoLP8DpCHqHIJw==}
     engines: {node: '>=10'}
     hasBin: true
 
@@ -2116,7 +2116,7 @@ snapshots:
       process-warning: 5.1.1
       rfdc: 1.4.1
       secure-json-parse: 4.1.1
-      semver: 7.8.5
+      semver: 7.8.6
       toad-cache: 3.7.4
 
   fastq@1.20.3:
@@ -2872,7 +2872,7 @@ snapshots:
 
   secure-json-parse@4.1.1: {}
 
-  semver@7.8.5: {}
+  semver@7.8.6: {}
 
   set-cookie-parser@3.2.2: {}
 
