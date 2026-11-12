@@ -17940,7 +17940,10 @@ export class SessionsService {
       location_switch: "Location Switch Approval Required",
       campaign_repository_addition: "Add Repository to Campaign Approval Required",
     };
-    const options = snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
+    const options = snapshot.category === "owner_decision" && snapshot.ruleDelegation
+      ? snapshot.options.map((option) => ({ optionId: option.optionId, name: option.label,
+          kind: option.optionId === "keep" ? "reject_once" as const : "allow_once" as const }))
+      : snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
         snapshot.category === "location_switch"
       ? [
           ...snapshot.options.map((option) => ({

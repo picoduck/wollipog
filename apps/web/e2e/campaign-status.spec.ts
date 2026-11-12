@@ -553,7 +553,9 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await expect(detail).toContainText("boundary revision 3");
     await expect(detail).toContainText("Repository rules, installed skills and Human Required rules remain unchanged.");
     await expect(detail.getByRole("button", { name: "Delegate for This Campaign", exact: true })).toBeVisible();
-    await expect(detail.getByRole("listitem").filter({ hasText: "Keep My Approval" })).toBeVisible();
+    await expect(detail.getByRole("button", { name: "Keep My Approval", exact: true })).toBeVisible();
+    await expect(detail.getByRole("listitem")).toHaveCount(0);
+    await expect(detail.getByRole("button", { name: "Do Not Proceed", exact: true })).toHaveCount(0);
     await assertNoHorizontalOverflow(page, ".request-panel-detail");
     if (process.env.PERSONAL_RULE_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.PERSONAL_RULE_EVIDENCE_DIR}/personal-rule-${viewport.width}.png` });
   });

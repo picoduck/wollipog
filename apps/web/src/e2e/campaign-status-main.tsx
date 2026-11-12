@@ -726,8 +726,9 @@ const ownerSnapshot = params.get("closureRecovery") === "owner" ? {
   ] };
 const ownerCard: import("@wollipog/protocol").PendingApproval | null = ownerScenario === "after" ? {
   requestId: "workflow_owner_1", occurrenceId: "workflow_owner_1", kind: "workflow_decision", title: "Owner Decision Required", async: true,
-  options: [...ownerSnapshot.options.map((option) => ({ optionId: option.optionId, name: option.label, description: option.description, kind: "allow_once" as const })),
-    { optionId: "__workflow_deny__", name: "Do Not Proceed", kind: "reject_once" }],
+  options: [...ownerSnapshot.options.map((option) => ({ optionId: option.optionId, name: option.label, description: option.description,
+    kind: params.has("personalRule") && option.optionId === "keep" ? "reject_once" as const : "allow_once" as const })),
+    ...(params.has("personalRule") ? [] : [{ optionId: "__workflow_deny__", name: "Do Not Proceed", kind: "reject_once" as const }])],
   context: { toolName: "Typed Workflow Decision", input: JSON.stringify(ownerSnapshot, null, 2) },
   workflowDecision: { requestId: "credential-design", occurrenceId: "workflow_owner_1", sessionId: "s_root", controllingSessionId: "s_root",
     category: "owner_decision", resourceKey: "credential-design", resourceSnapshot: ownerSnapshot, resourceDigest: "e".repeat(64), policyRevision: 1,

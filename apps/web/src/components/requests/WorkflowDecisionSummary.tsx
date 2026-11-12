@@ -79,7 +79,7 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
       return <>
         <p>{snapshot.question}</p>
         {snapshot.material && <div><StructuredQuestionText>{snapshot.material}</StructuredQuestionText></div>}
-        {snapshot.options.length > 0 && <ul>{snapshot.options.map((option) => <li key={option.optionId}>
+        {!snapshot.ruleDelegation && snapshot.options.length > 0 && <ul>{snapshot.options.map((option) => <li key={option.optionId}>
           {option.label}{option.optionId === snapshot.recommendedOptionId ? " (Recommended)" : ""}
           {option.description ? <>: {option.description}</> : null}
         </li>)}</ul>}

@@ -31,10 +31,14 @@ test("one authenticated campaign approval delegates the owner's exact personal r
       ruleDelegation: { rule: personal, categories: ["pr_merge"] } });
     assert.ok(requested.ok && requested.data, requested.error ?? "approval requested");
     const grant = requested.data;
+    const card = h.svc.descendantRequests("root", () => true, "human").data?.requests.find((r) => r.occurrenceId === grant.occurrenceId)?.request;
+    assert.deepEqual(card?.options?.map((o) => [o.optionId, o.name, o.kind]),
+      [["delegate", "Delegate for This Campaign", "allow_once"], ["keep", "Keep My Approval", "reject_once"]]);
     assert.match(grant.resourceSnapshot.category === "owner_decision" ? grant.resourceSnapshot.material! : "", /Ask before merging/);
     assert.equal(h.rootResolve("root", grant).ok, false, "an agent cannot establish authorship");
     assert.ok(h.svc.approve("root", grant.occurrenceId, "delegate", h.owner).ok);
     assert.equal(h.db.workflowDecisionByOccurrence(grant.occurrenceId)?.status, "consumed");
+    assert.equal(h.db.workflowDecisionByOccurrence(before.data!.occurrenceId)?.status, "pending", "delegating never approves the gated merge");
     for (const pullRequest of [7, 8]) {
       const d = h.merge(`after-${pullRequest}`, { pullRequest, ownerRule: personal });
       assert.ok(d.ok && d.data, d.error ?? "merge requested");
@@ -95,6 +99,23 @@ test("Custom, questions and Human Required rules cannot acquire a personal-rule 
       assert.equal(secret.ok, false, "the untrusted quote still passes the credential floor");
     } finally { h.db.close(); }
   }
+});
+
+test("Keep My Approval leaves the gated merge pending for its owner rather than stopping work (#4540)", async () => {
+  const h = harness();
+  try {
+    const rule = { source: "~/.codex/AGENTS.md", quote: "Ask before merging." };
+    const gated = h.merge("gated", { ownerRule: rule });
+    assert.ok(gated.data);
+    const asked = await h.svc.createOwnerDecision("root", { requestId: "keep-first", resourceKey: "keep-first", question: "Keep?", options: [],
+      ruleDelegation: { rule, categories: ["pr_merge"] } });
+    assert.ok(asked.data);
+    assert.ok(h.svc.approve("root", asked.data.occurrenceId, "keep", h.owner).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(gated.data.occurrenceId)?.status, "pending");
+    assert.equal(h.rootResolve("child", gated.data).ok, false);
+    assert.ok(h.svc.approve("child", gated.data.occurrenceId, "approve", h.owner).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(gated.data.occurrenceId)?.status, "approved", "owner can still approve the merge normally");
+  } finally { h.db.close(); }
 });
 
 function harness(options: { mode?: "full_control" | "custom"; videoFrameReviewCandidate?: boolean } = {}) {
