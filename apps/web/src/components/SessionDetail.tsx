@@ -8367,15 +8367,6 @@ function useProjectButtonFold(
   // element alone cannot say where focus was; `focusin` never fires for that drop.
   const focusHeld = useRef(false);
   useEffect(() => {
-    const onFocusIn = (event: FocusEvent) => {
-      const target = event.target as Node | null;
-      focusHeld.current = target !== null &&
-        (target === triggerRef.current || Boolean(surfaceRef.current?.contains(target)));
-    };
-    document.addEventListener("focusin", onFocusIn);
-    return () => document.removeEventListener("focusin", onFocusIn);
-  }, [triggerRef, surfaceRef]);
-  useEffect(() => {
     const trigger = triggerRef.current;
     if (!trigger || typeof ResizeObserver === "undefined") return;
     const bar = trigger.closest<HTMLElement>(".session-bar");
@@ -8394,9 +8385,28 @@ function useProjectButtonFold(
         trigger.ownerDocument.getElementById("page-title")?.focus();
       }
     });
-    observer.observe(trigger);
-    if (bar) observer.observe(bar);
-    return () => observer.disconnect();
+    const observe = () => {
+      observer.observe(trigger);
+      if (bar) observer.observe(bar);
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target as Node | null;
+      focusHeld.current = target !== null &&
+        (target === trigger || Boolean(surfaceRef.current?.contains(target)));
+      if (!focusHeld.current) return;
+      // ResizeObserver coalesces size changes between deliveries. An unfold, focus, and refold
+      // can end at the last reported compact sizes, producing no notification at all. Start a
+      // fresh observation when focus enters: the visible bar guarantees an initial delivery even
+      // if the trigger has already folded back to zero size by then.
+      observer.disconnect();
+      observe();
+    };
+    trigger.ownerDocument.addEventListener("focusin", onFocusIn);
+    observe();
+    return () => {
+      trigger.ownerDocument.removeEventListener("focusin", onFocusIn);
+      observer.disconnect();
+    };
   }, [open, close, triggerRef, surfaceRef]);
 }
 
