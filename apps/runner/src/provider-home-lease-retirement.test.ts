@@ -138,7 +138,7 @@ try {
 const {observeLeaseIoWorkForTest,observeLeaseIoRunsForTest}=require(${JSON.stringify(fileURLToPath(new URL('./provider-home-lease-io.ts', import.meta.url)))});
 const {LEASE_CHECKPOINT_LIMITS:limits}=require(${JSON.stringify(fileURLToPath(new URL('./provider-home-lease-checkpoint.ts', import.meta.url)))});
 let maximumBytes=0,maximumRecords=0;const runs=[];observeLeaseIoWorkForTest(w=>{maximumBytes=Math.max(maximumBytes,w.bytes);maximumRecords=Math.max(maximumRecords,w.records);});observeLeaseIoRunsForTest(r=>runs.push(r));
-const {ProviderHomeLeaseRegistry,providerHomeLeaseRefusalKind}=require(${JSON.stringify(registry)});
+const {ProviderHomeLeaseRegistry,providerHomeLeaseRefusalKind,observeLeaseVerificationWorkForTest}=require(${JSON.stringify(registry)});
 const fs=require('node:fs'),{join}=require('node:path'),{hostname}=require('node:os'),{createHash,randomUUID}=require('node:crypto');
 const home=join(${JSON.stringify(root)},'home'),base=join(home,'.agent-manager/provider-home-leases-v1'),lock=join(base,'mutable-home.lock');
 fs.mkdirSync(lock,{recursive:true,mode:0o700});
@@ -155,6 +155,9 @@ const selected=fs.readFileSync(anchor);
 assert.equal(runs.filter(r=>r.signal==='SIGKILL').length,1,'spawnSync reaped the interrupted native helper');
 assert.equal(failures.length,1,'only the deliberately killed helper failed');
 maximumBytes=0;maximumRecords=0;
+let attemptBytes=0,attemptRecords=0;
+// This observer runs in finally, including after a cumulative budget refusal.
+observeLeaseVerificationWorkForTest(w=>{attemptBytes=Math.max(attemptBytes,w.bytes);attemptRecords=Math.max(attemptRecords,w.records);});
 const evidence=()=>[base,lock].flatMap(dir=>fs.readdirSync(dir).filter(name=>name!=='mutable-home.lock').sort().map(name=>[join(dir,name),hash(fs.readFileSync(join(dir,name)))]));
 if(process.env.WOLLIPOG_TEST_TAMPER!=='none') {
   // Replacement preserves bytes, rewriting preserves size. Both must be detected
@@ -180,7 +183,10 @@ fs.writeFileSync(anchor,'invalid journal');const malformed=evidence();assert.thr
 }
 assert.ok(maximumBytes>0 && maximumBytes<=limits.verificationBytes,'recovery native transactions stay within the production verification byte budget');
 assert.ok(maximumRecords>0 && maximumRecords<=limits.verificationRecords,'recovery native transactions stay within the production verification record budget');
+assert.ok(attemptBytes>0 && attemptBytes<=limits.verificationBytes,'complete recovery attempts stay within the production verification byte budget');
+assert.ok(attemptRecords>0 && attemptRecords<=limits.verificationRecords,'complete recovery attempts stay within the production verification record budget');
 console.error('Maximum recovery native verification work: '+JSON.stringify({bytes:maximumBytes,records:maximumRecords}));
+console.error('Maximum complete recovery attempt work: '+JSON.stringify({bytes:attemptBytes,records:attemptRecords}));
 } finally { restore(); }
 `);
   const result = spawnSync(process.execPath, [fixture], { env: { ...process.env, WOLLIPOG_TEST_TAMPER: tamper }, encoding: "utf8", timeout: 120_000, maxBuffer: 64 * 1024 });
