@@ -64,7 +64,7 @@ test("valid UI evidence normalizes to the same snapshot, in the same key order (
     { ...EXTERNAL, ...ARTIFACT, evidenceId: "both" },
     EXTERNAL,
   ] });
-  assert.ok(result.ok, result.error);
+  assert.ok(result.ok, result.error ?? "refused without a message");
   // The digest hashes this canonical form, so its exact serialization must not change.
   assert.equal(JSON.stringify(result.data), JSON.stringify({ category: "ui_evidence_approval", evidence: [
     { evidenceId: "after", sha256: ARTIFACT.sha256, artifactId: "artifact-1", mediaType: "image/png" },
@@ -106,7 +106,7 @@ test("an implementation question's text, option count and each option field have
     "owner decisions require a list of 2 to 12 options; 0 given", "an owner decision names its own kind");
   const valid = normalizeWorkflowDecisionSnapshot(ask({ options: [{ label: "One", description: "First", optionId: "o1" }, options(2)[1]],
     recommendedOptionId: "o1" }));
-  assert.ok(valid.ok, valid.error);
+  assert.ok(valid.ok, valid.error ?? "refused without a message");
   assert.equal(JSON.stringify(valid.data), JSON.stringify({ category: "implementation_question", question: "Which one?",
     options: [{ optionId: "o1", label: "One", description: "First" }, { optionId: "o2", label: "Option 2" }], recommendedOptionId: "o1" }));
 });
@@ -129,7 +129,7 @@ test("a merge decision's required check rows name the row and the field that fai
     assert.ok(!message.includes(PRIVATE), `${name}: the refusal does not echo the submitted value`);
   }
   const valid = normalizeWorkflowDecisionSnapshot(merge({ state: "passed", name: "Lint" }));
-  assert.ok(valid.ok, valid.error);
+  assert.ok(valid.ok, valid.error ?? "refused without a message");
   assert.equal(JSON.stringify((valid.data as { requiredChecks: unknown }).requiredChecks), JSON.stringify({ headSha: head, status: "passed",
     checkedAt: 10, checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed", url: "https://github.com/picoduck/wollipog/actions/runs/1" },
       { name: "Lint", state: "passed" }] }));
