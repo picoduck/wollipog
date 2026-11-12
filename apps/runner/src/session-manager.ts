@@ -18067,6 +18067,11 @@ export class SessionManager {
           this.log(`failed to journal orphaned worktree cleanup for ${targetSessionId}: ${errText(cleanupErr)}`);
         }
         await this.reapWorktree(cleanup, true);
+        // A rollback that kept the worktree left the fork's ports and processes to the fork's row, which
+        // goes next, with nothing after it to give them back (#4209). They are the fork's, so they go now.
+        if (!cleanup.worktreeRemovedAt && !this.cleanupJournal.list().includes(cleanup)) {
+          await this.releaseFailedForkWorktree(targetSessionId, cleanup);
+        }
       }
       if (this.store.has(targetSessionId)) this.store.remove(targetSessionId);
       this.forgetCapacityInventorySession(targetSessionId);
@@ -19158,6 +19163,27 @@ export class SessionManager {
     }
     this.removeWorktreeCleanupRecord(record, true);
     return true;
+  }
+
+  /** A failed fork's rollback that kept its worktree ended while the fork's row still named it, so it left
+   * what that row held there: the processes setup started and the port block. The row goes next, and
+   * nothing would ever give them back, so they go here (#4209). Processes that will not stop keep the
+   * block, rather than let its ports go to something that would collide with them. */
+  private async releaseFailedForkWorktree(sessionId: string, record: WorktreeCleanupRecord): Promise<void> {
+    const id = record.worktreeId ?? "legacy";
+    const markers = new Set([record.processMarker, this.store.readMeta(sessionId)?.worktreeProcessMarkers?.[id]]
+      .filter((marker): marker is string => !!marker));
+    for (const marker of markers) {
+      if (!await this.terminateRollbackProcesses(marker)) {
+        this.log(`failed fork ${boundedSessionIdForLog(sessionId)} kept its worktree's port block: its processes did not stop`);
+        return;
+      }
+    }
+    try {
+      this.worktreePortAllocator.release(this.worktreePortOwner(sessionId, id));
+    } catch (error) {
+      this.log(`failed fork ${boundedSessionIdForLog(sessionId)} kept its worktree's port block: ${errText(error)}`);
+    }
   }
 
   /** Remember that the runner kept the worktree at `path` for whatever someone may have in it, so that
