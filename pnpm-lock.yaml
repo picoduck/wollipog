@@ -93,8 +93,8 @@ importers:
         specifier: ^1.9.1
         version: 1.9.1
       ws:
-        specifier: ^8.22.0
-        version: 8.22.0
+        specifier: ^8.22.1
+        version: 8.22.1
     devDependencies:
       '@agentclientprotocol/sdk':
         specifier: 1.2.1
@@ -2154,7 +2154,7 @@ snapshots:
       buffer-image-size: 0.6.4
       entities: 7.0.1
       whatwg-mimetype: 3.0.0
-      ws: 8.22.0
+      ws: 8.22.1
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
