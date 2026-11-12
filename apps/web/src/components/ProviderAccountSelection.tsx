@@ -5,6 +5,7 @@ import {
   providerAccountSelectionSentence,
   providerAccountSkipSummary,
   providerForDriver,
+  isProviderAccountRef,
   type ProviderAccountSelectionCandidate,
   type ProviderAccountSelectionPreview,
   type ProviderAccountSkipReason,
@@ -190,13 +191,25 @@ export function AutomationExpectedProviderAccount({ runner, agentId, placement, 
     providerAccountSelectionRefreshKey(runner, runner.status === "online"));
   if (namedAccountId) {
     const named = runner.providerAccounts?.find((candidate) => candidate.id === namedAccountId);
-    return named ? (
-      <p className="field-helper" id={id}>
-        Each run uses{" "}
-        <AccountIdentifier identity={`${runner.runnerId}:${named.id}`} value={named.label} label="Account Email" />,
-        {" "}the account chosen for this automation.
-      </p>
-    ) : (
+    if (named) {
+      return (
+        <p className="field-helper" id={id}>
+          Each run uses{" "}
+          <AccountIdentifier identity={`${runner.runnerId}:${named.id}`} value={named.label} label="Account Email" />,
+          {" "}the account chosen for this automation.
+        </p>
+      );
+    }
+    // An agent or API caller may name an account by its opaque reference, which only the control
+    // plane resolves (a digest this page can't compute everywhere), so it can't be called missing.
+    if (isProviderAccountRef(namedAccountId)) {
+      return (
+        <p className="field-helper" id={id}>
+          Each run uses the account this automation names. It was named by reference, so this page can't show which one.
+        </p>
+      );
+    }
+    return (
       <FieldWarning id={id}>
         The account chosen for this automation is no longer on this machine, so each run is refused when it starts.
       </FieldWarning>

@@ -3324,6 +3324,25 @@ test("a named account no longer on the machine says each run is refused (#4512)"
   }
 });
 
+test("an account named by opaque reference is never called missing (#4512)", async () => {
+  const stored = schedule("ref-account", "Ref Account");
+  if (stored.action.kind !== "create_session") throw new Error("expected create-session action");
+  stored.action.request.providerAccountId = "acct:0123456789abcdef";
+  const targets: unknown[] = [];
+  const fixture = await mountAt(editRoute(stored.automationId), [stored], {}, {}, [], {}, [ACCOUNT_MACHINE], [], {
+    providerAccountSelection: async (_runnerId: string, target: unknown) => { targets.push(target); return accountPreview({}); },
+  });
+  try {
+    const field = agentField(fixture.container);
+    assertNoDomNode(field.querySelector(".field-warn"), "no claim that the account is gone or that runs are refused");
+    assert.match(field.textContent ?? "",
+      /Each run uses the account this automation names\. It was named by reference, so this page can't show which one\./);
+    assert.equal(targets.length, 0, "and no policy prediction is read for it");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("an agent's Create Automation approval shows what Default is expected to resolve to (#4512)", async () => {
   const { automationId: _id, revision: _revision, createdBy: _by, createdAt: _at, updatedAt: _updated, ...spec } =
     schedule("proposed", "Proposed");
