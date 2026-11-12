@@ -566,6 +566,15 @@ function agentContextKey(context: AgentContext): string {
   return context.kind === "native" ? "native" : `wsl:${context.distro}`;
 }
 
+/** Whether two cleanup records are the same record, the same object or one read again from the journal:
+ * the same key, trigger, worktree and creation time. Another record under the same key replaced it. */
+function sameCleanupRecord(a: WorktreeCleanupRecord, b: WorktreeCleanupRecord): boolean {
+  return a === b || (
+    a.sessionId === b.sessionId && (a.worktreeId ?? "legacy") === (b.worktreeId ?? "legacy") &&
+    a.trigger === b.trigger && a.createdAt === b.createdAt &&
+    sameWorktreePath(b.context, a.worktreePath, b.worktreePath));
+}
+
 function targetIdentity(target: SessionMeta["executionTarget"]): string {
   return target ? `${target.adapter}:${target.id}` : "host:";
 }
@@ -19025,10 +19034,7 @@ export class SessionManager {
   }
 
   private recordStillOnRecord(record: WorktreeCleanupRecord): boolean {
-    return this.cleanupJournal.list().some((other) => other === record || (
-      other.sessionId === record.sessionId && (other.worktreeId ?? "legacy") === (record.worktreeId ?? "legacy") &&
-      other.trigger === record.trigger && other.createdAt === record.createdAt &&
-      sameWorktreePath(record.context, other.worktreePath, record.worktreePath)));
+    return this.cleanupJournal.list().some((other) => sameCleanupRecord(other, record));
   }
 
   private async reapWorktreeOnce(
@@ -19050,15 +19056,25 @@ export class SessionManager {
         // A rollback that replaced this record under the same key leaves it off record, so it never gets
         // here. One under another id, as a row stored under a branch id beside the path id a rollback
         // uses, leaves this record what its own id holds: what runs under its marker, and its port block.
+        // A record with no id is an older runner's, for the row whose block is the session's "legacy" one.
+        // Its block goes only once what may use those ports has stopped: so its marker's processes are
+        // stopped here even when the rollback carries the same marker, rather than left for the rollback.
+        // A session still on this runner (startup replays every record) may have a row that still carries
+        // that marker or uses that id: those processes and that block stay that row's.
         this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} left to the rollback still on record for it`);
-        if (record.processMarker && record.processMarker !== rollback.processMarker &&
+        const ownId = record.worktreeId ?? "legacy";
+        const { idInUse, markerInUse } = this.recordHoldingsInUse(record, ownId);
+        const ownBlock = ownId !== (rollback.worktreeId ?? "legacy") && !idInUse && !markerInUse;
+        if (record.processMarker && !markerInUse && (ownBlock || record.processMarker !== rollback.processMarker) &&
             !await this.terminateRollbackProcesses(record.processMarker)) {
           this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry: its processes could not be stopped`);
           return;
         }
-        if (record.worktreeId && record.worktreeId !== rollback.worktreeId) {
+        // A newer record that took this one's key while its processes stopped holds that block now.
+        if (!this.recordStillOnRecord(record)) return;
+        if (ownBlock) {
           try {
-            this.worktreePortAllocator.release(this.worktreePortOwner(record.sessionId, record.worktreeId));
+            this.worktreePortAllocator.release(this.worktreePortOwner(record.sessionId, ownId));
           } catch (error) {
             this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} kept its port block: ${errText(error)}`);
           }
@@ -19153,8 +19169,16 @@ export class SessionManager {
     const launchRollback = this.isLaunchRollback(record);
     if (!worktreeRemoved && launchRollback && await this.settleLaunchRollbackTarget(record)) return;
     if (!worktreeRemoved) {
+      // Everything awaited since the reap began gave other work time to replace this record under its
+      // key, with one that keeps the worktree, say. Only a record still on record removes anything, and
+      // only it writes its outcome back, since the journal holds one record per key (#4209).
+      if (!this.recordStillOnRecord(record)) return;
       const removal = await this.removeRecordedWorktree(record, isolationMeta);
       worktreeRemoved = removal.removed;
+      if (!this.recordStillOnRecord(record)) {
+        this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} left its outcome to the record that replaced it`);
+        return;
+      }
       if (worktreeRemoved) {
         record.worktreeRemovedAt = Date.now();
         this.cleanupJournal.add(record);
@@ -19291,6 +19315,19 @@ export class SessionManager {
     return true;
   }
 
+  /** Whether a row of the record's session, if that session is still on this runner, still uses the
+   * worktree id `id` (and so its port block) or carries the record's process marker. Those stay that
+   * row's: a record never stops its processes or gives back its block. */
+  private recordHoldingsInUse(record: WorktreeCleanupRecord, id: string | undefined): { idInUse: boolean; markerInUse: boolean } {
+    const meta = this.store.readMeta(record.sessionId);
+    if (!meta) return { idInUse: false, markerInUse: false };
+    const rows = [...this.attributedWorktrees(meta), ...(meta.locationHistory ?? []).flatMap((left) => left.worktrees)];
+    return {
+      idInUse: rows.some((item) => item.id === id),
+      markerInUse: Object.values(meta.worktreeProcessMarkers ?? {}).includes(record.processMarker ?? ""),
+    };
+  }
+
   /** Whether every process carrying a rollback's marker has ended. */
   private terminateRollbackProcesses(marker: string): Promise<boolean> {
     return terminatePosixProcessesByMarker(marker).catch(() => false);
@@ -19301,10 +19338,7 @@ export class SessionManager {
    * runs here, since that is repository code in a tree that is not (or no longer only) the attempt's.
    * Its ports go only once those processes have, and only if no row uses its id. */
   private async endRollbackUnremoved(record: WorktreeCleanupRecord): Promise<boolean> {
-    const meta = this.store.readMeta(record.sessionId);
-    const rows = meta ? [...this.attributedWorktrees(meta), ...(meta.locationHistory ?? []).flatMap((left) => left.worktrees)] : [];
-    const idInUse = rows.some((item) => item.id === record.worktreeId);
-    const markerInUse = !!meta && Object.values(meta.worktreeProcessMarkers ?? {}).includes(record.processMarker ?? "");
+    const { idInUse, markerInUse } = this.recordHoldingsInUse(record, record.worktreeId);
     if (record.processMarker && !markerInUse && !await this.terminateRollbackProcesses(record.processMarker)) {
       this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} needs retry: its setup processes could not be stopped`);
       this.noteRollbackFailure(record);
@@ -19906,10 +19940,17 @@ export class SessionManager {
     else await this.runWorktreeOperation(record.sessionId, reap);
   }
 
+  /** Take `record` off record. The journal holds one record per key, so the one there now may be a newer
+   * record that replaced this one while it was being reaped: that one is left alone, with its retained
+   * refs and retry timers, and this one is already off record (#4209). */
   private removeWorktreeCleanupRecord(
-    record: Pick<WorktreeCleanupRecord, "sessionId" | "worktreeId" | "cleanupId">,
+    record: WorktreeCleanupRecord,
     removeUnarmedRetainedRefs = false,
   ): boolean {
+    const key = `${record.sessionId}\0${record.worktreeId ?? "legacy"}`;
+    const current = this.cleanupJournal.list()
+      .find((other) => `${other.sessionId}\0${other.worktreeId ?? "legacy"}` === key);
+    if (current && !sameCleanupRecord(current, record)) return true;
     try {
       if (removeUnarmedRetainedRefs) {
         this.cleanupJournal.removeUnarmedRetainedRefs(record.sessionId, record.worktreeId, record.cleanupId);

@@ -4325,6 +4325,193 @@ test("a deletion record that gives way to a rollback under another id still give
   }
 });
 
+/** A deleted session's worktree, a deletion record for it, and a manager over that journal. */
+async function deletedSessionWorktree(prefix: string, sessionId: string) {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  const dataDir = join(root, "data");
+  const { repo } = initRepoWithOrigin(root);
+  const handle = await createWorktree(repo, sessionId, { dataDir });
+  writeFileSync(join(handle.path, "notes.txt"), "a person's work\n");
+  const base = { sessionId, repoPath: repo, worktreePath: handle.path, context: { kind: "native" as const },
+    branch: handle.branch, removalMode: "force" as const, createdAt: 1 };
+  return { root, dataDir, handle, base };
+}
+
+type ReapInternals = {
+  reapWorktree(record: WorktreeCleanupRecord): Promise<void>;
+  removeWorktreeCleanupRecord(record: WorktreeCleanupRecord): boolean;
+  cleanupJournal: WorktreeCleanupJournal;
+  deleteCheckpointRefsSerialized(...args: unknown[]): Promise<void>;
+  terminateRollbackProcesses(marker: string): Promise<boolean>;
+  worktreePortAllocator: { allocate(owner: string): unknown; get(owner: string): unknown };
+};
+
+test("a reap whose record a newer one replaced while it ran removes nothing", { skip: !haveGit() }, async () => {
+  const { root, dataDir, handle, base } = await deletedSessionWorktree("wollipog-replaced-mid-reap-", "s_replaced_mid_reap");
+  let manager: SessionManager | undefined;
+  try {
+    const deletion: WorktreeCleanupRecord = { ...base, worktreeId: "legacy", source: "legacy", trigger: "session_delete" };
+    new WorktreeCleanupJournal(dataDir).add(deletion);
+    manager = new SessionManager(() => {}, () => {}, new SessionStore(join(dataDir, "sessions")), "runner", undefined, undefined, dataDir);
+    const internals = manager as unknown as ReapInternals;
+    const deleteRefs = internals.deleteCheckpointRefsSerialized.bind(manager);
+    // While the reap waits on its refs, a newer record takes its key: one that keeps the worktree.
+    internals.deleteCheckpointRefsSerialized = async (...args: unknown[]) => {
+      internals.cleanupJournal.add({ ...deletion, createdAt: 2, keepWorktree: true, preserveBranch: true });
+      await deleteRefs(...args);
+    };
+
+    await internals.reapWorktree(internals.cleanupJournal.list()[0]!);
+    assert.equal(readFileSync(join(handle.path, "notes.txt"), "utf8"), "a person's work\n",
+      "the record that started the reap no longer speaks for the worktree, so it is still there");
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).list().map((record) => record.createdAt), [2],
+      "and the record that replaced it is still on record");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a deletion record replaced while it gave way to a rollback leaves its replacement on record", { skip: !haveGit() }, async () => {
+  const { root, dataDir, base } = await deletedSessionWorktree("wollipog-replaced-giving-way-", "s_replaced_giving_way");
+  let manager: SessionManager | undefined;
+  try {
+    const deletion: WorktreeCleanupRecord = { ...base, worktreeId: "branch-id", source: "created", trigger: "session_delete",
+      processMarker: "marker-deletion" };
+    const journal = new WorktreeCleanupJournal(dataDir);
+    journal.add(deletion);
+    journal.add({ ...base, worktreeId: "path-id", source: "created", trigger: "creation_rollback", auxiliaryWorktreeRollback: true });
+    manager = new SessionManager(() => {}, () => {}, new SessionStore(join(dataDir, "sessions")), "runner", undefined, undefined, dataDir);
+    const internals = manager as unknown as ReapInternals;
+    internals.worktreePortAllocator.allocate(`${base.sessionId}\0branch-id`);
+    // While its processes stop, a newer deletion record takes its key.
+    internals.terminateRollbackProcesses = async (marker) => {
+      if (marker === "marker-deletion") internals.cleanupJournal.add({ ...deletion, createdAt: 2 });
+      return true;
+    };
+
+    await internals.reapWorktree(internals.cleanupJournal.list().find((record) => record.trigger === "session_delete")!);
+    assert.ok(new WorktreeCleanupJournal(dataDir).list().some((record) => record.trigger === "session_delete" && record.createdAt === 2),
+      "the replacement is still on record");
+    assert.notEqual(internals.worktreePortAllocator.get(`${base.sessionId}\0branch-id`), undefined,
+      "and the block its id holds is the replacement's to give back");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("removing a cleanup record that another has replaced under its key leaves the replacement", { skip: !haveGit() }, async () => {
+  const { root, dataDir, base } = await deletedSessionWorktree("wollipog-remove-by-identity-", "s_remove_by_identity");
+  let manager: SessionManager | undefined;
+  try {
+    const stale: WorktreeCleanupRecord = { ...base, worktreeId: "legacy", source: "legacy", trigger: "creation_rollback" };
+    new WorktreeCleanupJournal(dataDir).add({ ...stale, trigger: "session_delete", createdAt: 2 });
+    manager = new SessionManager(() => {}, () => {}, new SessionStore(join(dataDir, "sessions")), "runner", undefined, undefined, dataDir);
+    const internals = manager as unknown as ReapInternals;
+
+    assert.equal(internals.removeWorktreeCleanupRecord(stale), true, "the stale record is off record");
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).list().map((record) => record.trigger), ["session_delete"],
+      "and the record now holding its key is untouched");
+    assert.equal(internals.removeWorktreeCleanupRecord({ ...stale, trigger: "session_delete", createdAt: 2 }), true);
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).list(), [], "while that record itself, read again, is removed");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a deletion record with no worktree id that gives way to a rollback gives back the legacy block once its processes stop", { skip: !haveGit() }, async () => {
+  const { root, dataDir, handle, base } = await deletedSessionWorktree("wollipog-legacy-gives-way-", "s_legacy_gives_way");
+  let manager: SessionManager | undefined;
+  try {
+    // An older runner's deletion record names no worktree id; its row's block is the session's "legacy" one.
+    const journal = new WorktreeCleanupJournal(dataDir);
+    journal.add({ ...base, source: "legacy", trigger: "session_delete", processMarker: "marker-deletion" });
+    journal.add({ ...base, worktreeId: "path-id", source: "created", trigger: "creation_rollback", auxiliaryWorktreeRollback: true,
+      processMarker: "marker-rollback" });
+    manager = new SessionManager(() => {}, () => {}, new SessionStore(join(dataDir, "sessions")), "runner", undefined, undefined, dataDir);
+    const internals = manager as unknown as ReapInternals;
+    const legacyOwner = `${base.sessionId}\0legacy`;
+    internals.worktreePortAllocator.allocate(legacyOwner);
+    const stopped: Array<{ marker: string; blockHeld: boolean }> = [];
+    internals.terminateRollbackProcesses = async (marker) => {
+      stopped.push({ marker, blockHeld: internals.worktreePortAllocator.get(legacyOwner) !== undefined });
+      return true;
+    };
+
+    await internals.reapWorktree(internals.cleanupJournal.list().find((record) => record.trigger === "session_delete")!);
+    assert.equal(internals.worktreePortAllocator.get(legacyOwner), undefined, "the legacy block is given back");
+    assert.deepEqual(stopped.find((call) => call.marker === "marker-deletion"), { marker: "marker-deletion", blockHeld: true },
+      "only after the deletion's own processes were stopped");
+    assert.equal(existsSync(handle.path), true, "and the rollback decided the worktree");
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).list(), []);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a deletion record sharing its rollback's process marker keeps its block while those processes will not stop", { skip: !haveGit() }, async () => {
+  const { root, dataDir, base } = await deletedSessionWorktree("wollipog-shared-marker-", "s_shared_marker");
+  let manager: SessionManager | undefined;
+  try {
+    const journal = new WorktreeCleanupJournal(dataDir);
+    journal.add({ ...base, worktreeId: "branch-id", source: "created", trigger: "session_delete", processMarker: "marker-shared" });
+    journal.add({ ...base, worktreeId: "path-id", source: "created", trigger: "creation_rollback", auxiliaryWorktreeRollback: true,
+      processMarker: "marker-shared" });
+    manager = new SessionManager(() => {}, () => {}, new SessionStore(join(dataDir, "sessions")), "runner", undefined, undefined, dataDir);
+    const internals = manager as unknown as ReapInternals;
+    internals.worktreePortAllocator.allocate(`${base.sessionId}\0branch-id`);
+    internals.terminateRollbackProcesses = async () => false;
+
+    await internals.reapWorktree(internals.cleanupJournal.list().find((record) => record.trigger === "session_delete")!);
+    assert.notEqual(internals.worktreePortAllocator.get(`${base.sessionId}\0branch-id`), undefined,
+      "the branch id's block stays while what may use its ports still runs");
+    assert.ok(new WorktreeCleanupJournal(dataDir).list().some((record) => record.trigger === "session_delete"),
+      "and the deletion record stays to give it back on a retry");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a replayed deletion record never stops a marker or gives back a block a live session's row still holds", { skip: !haveGit() }, async () => {
+  const { root, dataDir, handle, base } = await deletedSessionWorktree("wollipog-live-shared-marker-", "s_live_shared_marker");
+  let manager: SessionManager | undefined;
+  try {
+    // Startup replays every record, a stale deletion record of a session still on this runner too. Its
+    // row works in the rollback's target and carries the marker both records name.
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: base.sessionId, agentId: "claude", workspaceId: "repo", repoPath: base.repoPath,
+      worktreePath: handle.path, worktreeBranch: handle.branch, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "live", config: {},
+      tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null, indexReset: true, seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    const rowId = (store.readMeta(base.sessionId)!.worktrees ?? [])[0]?.id ?? "path-id";
+    store.patchMeta(base.sessionId, { worktreeProcessMarkers: { [rowId]: "marker-shared" } });
+    const journal = new WorktreeCleanupJournal(dataDir);
+    journal.add({ ...base, worktreeId: "branch-id", source: "created", trigger: "session_delete", processMarker: "marker-shared" });
+    journal.add({ ...base, worktreeId: rowId, source: "created", trigger: "creation_rollback", auxiliaryWorktreeRollback: true,
+      processMarker: "marker-shared" });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const internals = manager as unknown as ReapInternals;
+    internals.worktreePortAllocator.allocate(`${base.sessionId}\0branch-id`);
+    const stopped: string[] = [];
+    internals.terminateRollbackProcesses = async (marker) => { stopped.push(marker); return true; };
+
+    await internals.reapWorktree(internals.cleanupJournal.list().find((record) => record.trigger === "session_delete")!);
+    assert.deepEqual(stopped, [], "the live row's processes are never stopped");
+    assert.notEqual(internals.worktreePortAllocator.get(`${base.sessionId}\0branch-id`), undefined,
+      "and the block stays while its live owner remains");
+    assert.equal(readFileSync(join(handle.path, "notes.txt"), "utf8"), "a person's work\n", "and the worktree is still there");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("superseded launch rollback preserves a replacement generation reusing the worktree", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-superseded-launch-rollback-"));
   const dataDir = join(root, "data");
