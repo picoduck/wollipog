@@ -328,6 +328,7 @@ import {
   removeWorktree,
   reclaimRetainedWorktreeRef,
   retainedWorktreeRefDiagnostics,
+  requestedSlot,
   requestedWorktreeBoundary,
   sameChangeRequestProject,
   sameWorktreePath,
@@ -3719,6 +3720,11 @@ export class SessionManager {
       // tracked remote HEAD, so preferring this avoids stamping a default that moved after clone.
       const advertised = request.baseRef ? null : await fetchRemoteDefaultBase(meta.repoPath, options);
       const baseRef = request.baseRef ?? advertised!.ref;
+      // Whatever an earlier worktree at this slot started stops before Git makes anything there (#4209).
+      if (meta.context.kind === "native") {
+        await this.stopEarlierWorktreeProcessesAt(sessionId, meta.context,
+          join(await requestedWorktreeBoundary(meta.repoPath, sessionId, options), requestedSlot(request.branch)));
+      }
       // On record only until Git has finished making it, so a failure or crash in between leaves an
       // ordinary rollback rather than a tree no one owns. Its proof goes on to the rollback below,
       // and is written before setup, so that rollback can prove what setup ran in.
@@ -19202,8 +19208,7 @@ export class SessionManager {
    * What that earlier worktree started can outlive its directory, a service listening on its ports
    * say. Those processes are stopped by their marker first, and only then is the block given back, so
    * the next allocation cannot hand those ports to a worktree whose services would collide with them.
-   * Processes that will not stop refuse the attempt before anything is forgotten: the earlier row, its
-   * block and its marker stay, so the next attempt, or deleting the session, tries them again. */
+   * The request already refused itself, before Git made anything, while they would not stop. */
   private async forgetWorktreeRecordsAt(sessionId: string, path: string, worktreeId: string): Promise<void> {
     const found = this.store.readMeta(sessionId);
     if (!found) return;
@@ -19212,16 +19217,19 @@ export class SessionManager {
     const staleIds = [...new Set(rows.filter((row) => here(row) && row.id !== worktreeId).map((row) => row.id))]
       .filter((id) => !rows.some((row) => row.id === id && !here(row)));
     const ids = [worktreeId, ...staleIds];
+    // The request stopped these before Git made anything (`stopEarlierWorktreeProcessesAt`), so one that
+    // will not stop now started since. Its marker stays: under this worktree's own id the new row takes
+    // it on, and a stale id keeps its block rather than hand those ports to the new worktree.
+    const stillRunning = new Set<string>();
     for (const id of ids) {
       const marker = found.worktreeProcessMarkers?.[id];
       if (marker && !await this.terminateRollbackProcesses(marker)) {
-        // Nothing is forgotten, or no record would be left to stop them later and give back their ports:
-        // the attempt is refused, and gives back the worktree it has just made.
-        throw new Error(`processes an earlier worktree at ${path} started are still running and could not be stopped, so its ` +
-          "port block cannot go to a new worktree yet. Stop what is still running from that worktree, then ask again");
+        stillRunning.add(id);
+        this.log(`session ${boundedSessionIdForLog(sessionId)} kept an earlier worktree's port block: its processes did not stop`);
       }
     }
     for (const id of staleIds) {
+      if (stillRunning.has(id)) continue;
       try {
         this.worktreePortAllocator.release(this.worktreePortOwner(sessionId, id));
       } catch (error) {
@@ -19234,12 +19242,33 @@ export class SessionManager {
     const worktreeProcessMarkers = { ...latest.worktreeProcessMarkers };
     for (const id of ids) {
       delete worktreeHooks[id];
-      delete worktreeProcessMarkers[id];
+      if (!stillRunning.has(id)) delete worktreeProcessMarkers[id];
     }
     this.store.patchMeta(sessionId, {
       worktreeHooks: Object.keys(worktreeHooks).length ? worktreeHooks : undefined,
       worktreeProcessMarkers: Object.keys(worktreeProcessMarkers).length ? worktreeProcessMarkers : undefined,
     });
+  }
+
+  /** Before Git makes a worktree at `path`, where none is, stop what an earlier worktree there started,
+   * by the markers of every row of this session naming the path (#4209). One that will not stop refuses
+   * the request while nothing has changed: no reservation, so no rollback can take that worktree's row,
+   * marker or port block, and the next request, or deleting the session, tries again. A path with a
+   * directory is not made again, so it is left to what finds it. Marker termination is native POSIX. */
+  private async stopEarlierWorktreeProcessesAt(sessionId: string, context: AgentContext, path: string): Promise<void> {
+    if (context.kind !== "native" || existsSync(path)) return;
+    const meta = this.store.readMeta(sessionId);
+    if (!meta) return;
+    const rows = [...this.attributedWorktrees(meta), ...(meta.locationHistory ?? []).flatMap((left) => left.worktrees)];
+    const ids = new Set([worktreeIdForPath(path),
+      ...rows.filter((row) => sameWorktreePath(meta.context, row.path, path)).map((row) => row.id)]);
+    for (const id of ids) {
+      const marker = meta.worktreeProcessMarkers?.[id];
+      if (marker && !await this.terminateRollbackProcesses(marker)) {
+        throw new Error(`processes an earlier worktree at ${path} started are still running and could not be stopped, so its ` +
+          "port block cannot go to a new worktree yet. Nothing was changed. Stop what is still running from that worktree, then ask again");
+      }
+    }
   }
 
   private worktreeKept(meta: SessionMeta, path: string): boolean {

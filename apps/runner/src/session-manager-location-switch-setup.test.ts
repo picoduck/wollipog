@@ -4067,6 +4067,48 @@ test(`a requested worktree made again where a row stored under its branch's id w
 });
 }
 
+test("a requested worktree made again under its own path id is refused, changing nothing, while the earlier one's processes will not stop", async () => {
+  if (process.platform === "win32") return;
+  await withSession("request-remade-same-id-stuck", async (h) => {
+    git(h.app, "checkout", "--quiet", "-b", "config-base");
+    writeFileSync(join(h.app, ".wollipog.json"), JSON.stringify({ version: 1, setup: [LOG_STEP(h)] }));
+    git(h.app, "add", ".wollipog.json");
+    git(h.app, "commit", "--quiet", "-m", "setup");
+    git(h.app, "checkout", "--quiet", "main");
+    const requesting = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/same" });
+    await answerTrust(h, "trust");
+    const { worktree } = await requesting;
+    await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/elsewhere" });
+    const meta = () => h.store.readMeta(h.sessionId)!;
+    const marker = meta().worktreeProcessMarkers?.[worktree.id];
+    assert.ok(marker, "its setup gave the worktree a process marker under its path id");
+    const allocator = internalsOf(h).worktreePortAllocator;
+    const owner = `${h.sessionId}\0${worktree.id}`;
+    const block = allocator.get(owner);
+    assert.ok(block);
+    // A person removes it and its branch by hand. Something its setup started is still running.
+    git(h.app, "worktree", "remove", "--force", worktree.path);
+    git(h.app, "branch", "--quiet", "-D", "fix/same");
+    const keep = keepInternalsOf(h);
+    const terminate = keep.terminateRollbackProcesses.bind(h.manager);
+    keep.terminateRollbackProcesses = async (candidate) => candidate === marker ? false : terminate(candidate);
+    const rowBefore = JSON.stringify(meta().worktrees!.find((row) => row.id === worktree.id));
+
+    await assert.rejects(h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/same" }),
+      /still running and could not be stopped.*Nothing was changed/su);
+    assert.equal(JSON.stringify(meta().worktrees!.find((row) => row.id === worktree.id)), rowBefore, "its row is as it was");
+    assert.equal(meta().worktreeProcessMarkers?.[worktree.id], marker, "with its marker");
+    assert.deepEqual(allocator.get(owner), block, "and its port block");
+    assert.equal(existsSync(worktree.path), false, "and nothing was made at its path");
+    assert.equal(journal(h).some((record) => record.worktreePath === worktree.path), false, "so no rollback is on record to take any of it");
+
+    // Once they stop, asking again goes ahead.
+    keep.terminateRollbackProcesses = terminate;
+    const again = await h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/same" });
+    assert.equal(again.worktree.path, worktree.path);
+  });
+});
+
 test("a requested worktree made again on a path an earlier one used rolls back with none of that one's teardown", async () => {
   if (process.platform === "win32") return;
   await withSession("request-remade-path", async (h) => {
