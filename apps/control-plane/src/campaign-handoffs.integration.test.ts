@@ -956,3 +956,23 @@ test("an updated handoff is screened again before replacing the card (#4541)", a
     assert.equal(h.db.campaignHandoffQuestion("root")!.authorityEvaluation?.reason, "owner_kept");
   } finally { h.db.close(); }
 });
+
+test("a denied handoff update is recorded and screened once across later ticks (#4541)", async () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    handOff(h, h.advisory, "human");
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    const screening = fakeScreenRuntime(h.db, () => ({ verdict: "ask" }));
+    h.svc.setDecisionRuntime(screening.runtime);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.advisory,
+      handoff: { responsibleActor: "human", reason: "Changed reason", nextAction: "Changed action" } }).ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(screening.calls.length, 1);
+    assert.equal(h.db.campaignHandoffQuestion("root")!.status, "revoked");
+    assert.deepEqual(h.db.campaignRecovery.declines("root", h.db.getSession("root")!.parentControlPolicy!.revision)
+      .map(item => [item.requestClass, item.count]), [["secrets_and_sign_in", 1]]);
+    assert.ok(h.db.campaignRecovery.activeRecords("root").some(item => item.reason === "request_declined"));
+  } finally { h.db.close(); }
+});

@@ -7609,12 +7609,16 @@ export class SessionsService {
     snapshot.material = material + "\n\nThis question authorizes nothing. Your answer grants no action authority.";
     const digest = workflowDecisionResourceDigest(snapshot);
     if (prior?.resourceDigest === digest && prior.status !== "revoked") return;
+    const declineCoordinate = recoveryCoordinate(`campaign_handoffs:${digest}`);
+    const revision = root.parentControlPolicy?.revision ?? 0;
+    if (this.db.campaignRecovery.hasDeclinedOccurrence(campaignId, campaignId, declineCoordinate, revision)) return;
     const requestId = prior?.status === "pending" ? prior.requestId : `campaign_handoffs_${digest}_${prior?.occurrenceId ?? "initial"}`;
     const blocked = () => {
       if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
         triggeredBy: { kind: "system", id: "campaign_handoffs" } });
       this.db.campaignRecovery.recordDecline(campaignId, campaignId, "secrets_and_sign_in",
-        recoveryCoordinate(`workflow:${campaignId}:${requestId}`), root.parentControlPolicy?.revision ?? 0, Date.now());
+        declineCoordinate, revision, Date.now());
+      this.campaignRecovery.synchronize(root, Date.now());
     };
     // Handoff text is agent-written. Server-owned coordinates do not make its content trusted.
     if (credentialFormFloor(snapshot)) { blocked(); return; }

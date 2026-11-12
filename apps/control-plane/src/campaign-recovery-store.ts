@@ -191,6 +191,11 @@ export class CampaignRecoveryStore {
     return { firstForClass: existing?.policy_revision !== policyRevision };
   }
 
+  hasDeclinedOccurrence(campaignId: string, sessionId: string, occurrenceId: string, policyRevision: number): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM campaign_recovery_declined_occurrences
+      WHERE campaign_session_id=? AND occurrence=?`).get(campaignId, `${policyRevision}:${sessionId}:${occurrenceId}`));
+  }
+
   /** Declines still shown as blocked work for the current revision. A revocation or newer
    * revision fences older ones out, so a re-enabled boundary starts without stale blocks. */
   declines(campaignId: string, policyRevision: number): CampaignRecoveryDecline[] {
