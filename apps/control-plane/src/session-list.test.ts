@@ -605,3 +605,30 @@ test("current and legacy serialized lists share bounded authorized reads without
     assert.equal(reads,2,"writes invalidate both cached views together");
   } finally { db.close(); }
 });
+
+test("an agent's cached session list names accounts only by reference, and never serves a person (#4508)", () => {
+  const db=ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,0);
+    db.createSession({ id: "child",runnerId: "r",workspaceId: null,agentId: null,title: "Child",useWorktree: false,
+      driver: "claude-code",config: {},providerAccountId: "first-person-example-com-1234",
+      providerAccountLabel: "first.person@example.com",now: 1 });
+    const agent: AgentPrincipal={ kind: "agent",actorId: "parent",organizationId: PERSONAL_ORGANIZATION_ID,
+      credentialSessionId: "parent",delegatedScope: db.sessionScope("child")! };
+    const read=(principal: HumanPrincipal | AgentPrincipal) =>
+      (JSON.parse(db.sessionListJsonForPrincipal(principal)) as { sessions: SessionView[] }).sessions.find((row) => row.id==="child")!;
+    const revision=db.sessionListRevision();
+    const asAgent=read(agent);
+    assert.doesNotMatch(db.sessionListJsonForPrincipal(agent),/first/u);
+    assert.equal(asAgent.providerAccountId,undefined);
+    assert.equal(asAgent.providerAccountLabel,undefined);
+    assert.match(asAgent.providerAccountRef ?? "",/^acct:[0-9a-f]{16}$/u);
+    const asPerson=read(sessionListPrincipal);
+    assert.equal(asPerson.providerAccountId,"first-person-example-com-1234","the agent's narrowed entry never serves a person");
+    assert.equal(asPerson.providerAccountLabel,"first.person@example.com");
+    assert.equal(asPerson.providerAccountRef,undefined);
+    assert.equal(read(agent).providerAccountLabel,undefined,"nor does the person's full entry serve the agent");
+    assert.equal(db.listSessionsForPrincipal(agent).find((row) => row.id==="child")!.providerAccountId,undefined);
+    assert.equal(db.sessionListRevision(),revision,"every read came from the same cached revision");
+  } finally { db.close(); }
+});

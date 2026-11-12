@@ -1,4 +1,5 @@
 import { createSessionGitManagement } from "./session-git-management.js";
+import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { AssistantPromptImages } from "./assistant-prompt-images.js";
 import { createCampaignReviewManagement } from "./campaign-review-management.js";
 import { registerAssistantCampaignManagement } from "./assistant-campaign-management.js";
@@ -1246,7 +1247,8 @@ const orchestrator = new BoxOrchestrator({
 app.register(cors, { origin: isLocalOrigin, methods: [...CORS_METHODS] });
 app.addHook("preSerialization", (req, _reply, payload, done) => {
   // Agent tools understand data rather than the UI enum; only human clients need this downgrade.
-  if (requestPrincipal(req)?.kind === "agent") { done(null, payload); return; }
+  // An agent's credential never receives an account label or raw account id (#4508).
+  if (requestPrincipal(req)?.kind === "agent") { done(null, withoutProviderAccountNames(payload)); return; }
   const protocol = parseUiProtocolVersion(req.query) ?? parseUiProtocolVersion({
     protocolVersion: req.headers["x-wollipog-ui-protocol"],
   });

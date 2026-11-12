@@ -4,8 +4,9 @@ import { AssistantRefusal } from "./assistant-connections.js";
 import { normalizeDeliveryVerificationFailure, publishedIssueFailure, type PublishedIssueFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import { failedCampaignRun } from "./campaign-failed-run.js";
+import { providerAccountRef } from "./agent-account-view.js";
 import {
-  isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_REF_PREFIX, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
+  isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
   memberProviderAccountsError, providerAccountExplicitRecord, providerAccountIneligibility, providerAccountNamedRefusal, providerAccountNamedRefusalSentence,
   providerAccountSelectionRecord, providerForDriver, resolveProviderAccountSelection,
   supportsClaudeProjectMemory, type AgentDefinition, type ProviderAccountChoice, type ProviderAccountChoiceRequired, type ProviderAccountDefinition, type ProviderAccountSelectionPreview,
@@ -920,13 +921,6 @@ export interface PreStagedDeliveryOptions {
 function ok<T>(data: T, status = 200): ServiceResult<T> {
   return { ok: true, status, data };
 }
-/** The opaque name agent tools use for an account (#4353), since an account's id embeds its label.
- * It is stable for one account on one Machine and means nothing outside this control plane's check. */
-function providerAccountRef(runnerId: string, accountId: string): string {
-  const digest = createHash("sha256").update(`wollipog-provider-account-ref\0${runnerId}\0${accountId}`).digest("hex");
-  return `${PROVIDER_ACCOUNT_REF_PREFIX}${digest.slice(0, 16)}`;
-}
-
 function fail<T>(error: string, status = 400): ServiceResult<T> {
   return { ok: false, status, error };
 }

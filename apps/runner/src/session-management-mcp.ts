@@ -1920,7 +1920,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_session",
-    description: "Get one session's full metadata by id, including any hold that keeps its next turn from starting and the recovery action that clears it. tokensIn keeps the provider's meaning: Claude Code counts only uncached input while Codex includes cache reads, as tokensInIncludesCachedInput says.",
+    description: "Get one session's full metadata by id, including any hold that keeps its next turn from starting and the recovery action that clears it. tokensIn keeps the provider's meaning: Claude Code counts only uncached input while Codex includes cache reads, as tokensInIncludesCachedInput says. providerAccountRef names the session's account as an opaque reference that create_session accepts in providerAccountId.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" } },
@@ -1947,6 +1947,9 @@ export const TOOLS: McpTool[] = [
                 driver: s.driver,
                 model: s.model ?? null,
                 effort: s.effort ?? null,
+                // The bound account as an opaque reference, never its id or label (#4508); a
+                // control plane older than that omits it, and so does a session with no account.
+                ...(typeof s.providerAccountRef === "string" ? { providerAccountRef: s.providerAccountRef } : {}),
                 permissionMode: s.permissionMode ?? null,
                 useWorktree: s.useWorktree ?? false,
                 worktreePath: s.worktreePath ?? null,
