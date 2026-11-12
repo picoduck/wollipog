@@ -1148,7 +1148,7 @@
         }
       }
     ],
-    "recovery": "After stopping new samples at 40 eligible v1.1 PRs, reparse/recover seven transient transport gaps in already attempted groups using cached responses; no new groups added."
+    "recovery": "After stopping new samples at 40 eligible v1.1 PRs, recover seven transient transport gaps in already attempted groups: reuse cached responses and make first successful network reads where the prior transport failure produced no cacheable response. Never refetch a cached HTTP response, including the HTTP-502 response. Recovery adds observations, not groups."
   },
   "population": {
     "runs": 293,
