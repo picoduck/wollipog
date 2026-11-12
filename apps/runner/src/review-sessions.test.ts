@@ -177,6 +177,7 @@ for (const launch of [CODEX, CLAUDE]) {
     const guidance = JSON.parse(section.split("\n")[1]!);
     assert.equal(guidance.sourceCommit, f.base);
     assert.equal(guidance.content, "Check authorization and recovery.\n");
+    assert.ok(prepared.prompt.indexOf("# Repository Review Criteria") < prepared.prompt.indexOf("# Review Scope"));
     assert.match(guidance.sha256, /^[0-9a-f]{64}$/u);
     assert.equal(prepared.round.scopeFiles.includes("REVIEW.md"), true, "the policy change itself is still reviewed");
   });
@@ -923,6 +924,23 @@ test("a pure base merge onto an upvoted head is recorded as an equivalence witho
     epoch: 1, round: 5, attempt: 1, mode: "equivalent", baseSha: base, scopeFiles: [], baseMerge: true, equivalentTo: f.head,
   } });
   assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false, "no checkout is left behind");
+});
+
+test("a pure base merge's equivalence does not load invalid review criteria", async (t) => {
+  const f = fixture(t);
+  moveBase(f, { "REVIEW.md": "rules\0invalid" });
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "UPVOTE") }), CODEX, "b");
+  assert.equal(prepared.equivalent, true);
+});
+
+test("invalid base criteria refuse even a PR that repairs them and log the specific cause", async (t) => {
+  const f = fixture(t, { reviewGuidance: "rules\0invalid" });
+  writeFileSync(join(f.worktree, "REVIEW.md"), "Repaired criteria.\n");
+  push(f, "-am", "repair policy");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy(), CODEX, "b")), "the review snapshot could not be prepared");
+  assert.ok(f.logs.some((line) => line.includes("REVIEW.md must contain UTF-8 text without NUL bytes")));
 });
 
 test("a non-merge fix after the budget is used still needs an extension (#4075)", async (t) => {
