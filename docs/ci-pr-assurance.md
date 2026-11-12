@@ -1,7 +1,9 @@
 # PR Browser Assurance Routing
 
-Refs #3630 and #3812. **Inactive until separate owner activation.** Independent
-policy `pr-browser-critical-v2` uses new variable `CI_PR_BROWSER_ROUTING=enabled`.
+Refs #3630 and #3812. **Activated by the owner at 2026-11-05T14:55:12Z**,
+with `CI_PR_BROWSER_ROUTING=enabled` read back via the Actions variables API
+([activation record](https://github.com/picoduck/wollipog/issues/3630#issuecomment-6661139734)).
+Independent policy `pr-browser-critical-v2` uses that variable.
 The former `CI_PR_SUITE_ROUTING` cannot activate it: legacy prose/Node-reduction
 approval must not silently activate a different assurance contract. Agents never
 create, change or delete repository variables or settings.
@@ -24,9 +26,13 @@ Workflow `CI` remains at `.github/workflows/ci.yml`. Protected result
 Every PR retains all three full Node shards, typecheck, engine boundaries,
 web/control-plane/runner bundles, delegated Linux containment/recovery, Platform
 Isolation, full WebKit, Windows change detection and conditional comparison.
-Only development Chromium shrinks. Shard 1 retains production build/smoke.
+Only development Chromium shrinks. Full coverage uses ten duration-balanced
+whole-file Chromium shards (1–10), introduced by
+[#4229](https://github.com/picoduck/wollipog/pull/4229), merge
+`d3c2644ff5d573257f0fc40491256fcec5ae0a4e` at 2026-11-06T00:42:15Z.
+The reduced lane uses one Chromium job. Shard 1 retains production build/smoke.
 The disabled fast-only merge-group gate and legacy selector are unchanged;
-this campaign does not authorize activation. Full queue regression remains the
+their activation requires separate owner approval. Full queue regression remains the
 premerge integration gate.
 
 ## Reviewed Critical Manifest
@@ -68,7 +74,7 @@ V2 replaces the unshipped v1 proposal that selected full for all 100 recent PRs.
 The tradeoff is explicit: a browser regression outside the selected journeys can
 escape PR CI, then fail the complete merge-group browser suite and eject the PR
 from the queue. Full Node/typecheck/platform/WebKit coverage still runs on PRs.
-After activation, watch the fraction of merge-group attempts with browser failures,
+Watch the fraction of merge-group attempts with browser failures,
 separately for routed PRs and full PRs. Record run/head, failing spec, prior PR
 coverage, retries and whether the same failure reproduces on main; distinguish
 new escaped regressions from existing flakes. Compare with the preactivation
@@ -148,11 +154,14 @@ full PR; report result latency, critical job/step, elapsed runner-minutes, runne
 wait, test execution and separate unmeasured timestamp conflicts. Never impute
 zero wait, subtract assumed offsets or translate elapsed minutes into billing
 dollars. Name Node/WebKit/platform bottlenecks even if 15 minutes is missed.
-Natural post-activation PR/queue/cancellation evidence remains required by #3630.
+Natural post-activation PR/queue/cancellation evidence is linked below, with its
+remaining accounting limitations recorded for #3630.
 
 ## Owner Activation and Rollback
 
-After merge, exact assurance approval and v1.1 shadow compatibility:
+The owner activated PR browser routing after implementation merge, exact assurance
+approval and v1.1 shadow compatibility. The activation record above is the source
+for the timestamp and readback; the original activation procedure was:
 
 ```sh
 # Owner only; never execute from this implementation session.
@@ -160,10 +169,10 @@ gh variable set CI_PR_BROWSER_ROUTING --repo picoduck/wollipog --body enabled
 gh variable get CI_PR_BROWSER_ROUTING --repo picoduck/wollipog
 ```
 
-Record revision, actor and UTC activation. A new ordinary source PR event must
-prove successful routing, all full Node shards, selected Chromium plus production,
+For any future activation, record revision, actor and UTC activation. A new
+ordinary source PR event must prove successful routing, all full Node shards, selected Chromium plus production,
 WebKit/Windows/platform work and the protected result. A workflow/helper edit
-must prove all Chromium shards. Queue integration must remain complete.
+must prove all ten Chromium shards. Queue integration must remain complete.
 
 Rollback restores full PR testing:
 
@@ -173,9 +182,9 @@ gh variable set CI_PR_BROWSER_ROUTING --repo picoduck/wollipog --body disabled
 gh variable get CI_PR_BROWSER_ROUTING --repo picoduck/wollipog
 ```
 
-Use a new PR event: verify skipped planning, all five full Chromium shards, all
-full Node shards and successful protected result. Failed-jobs reruns can retain
-an earlier plan/matrix and cannot prove rollback. In-flight observations do not
+Use a new PR event: verify skipped planning, every full Chromium shard (1–10)
+executes, all full Node shards and other mandatory work succeed, and the protected
+result succeeds. Failed-jobs reruns can retain an earlier plan/matrix and cannot prove rollback. In-flight observations do not
 prove later settings. No ruleset migration is needed.
 
 ## Coordinated Shadow Compatibility and Measurement Status
@@ -192,5 +201,8 @@ See [applicability and baseline measurements](ci-pr-browser-measurements-2026-11
 One premerge synthetic sample completed in 14.33 minutes, versus a 33.32-minute
 natural full-PR baseline, with the limitations recorded in the linked report.
 This establishes neither natural PR latency nor a distribution or billing saving.
-Repeat caller sampling follows implementation merge; post-activation natural PR
-and queue measurements remain afterward. Activation still requires the owner.
+The [November 9 post-activation measurement](ci-pr-browser-post-activation-2026-11-09.md)
+records natural PR/queue latency, routing share, cancellations and browser failures.
+Its historical five-/ten-shard cohorts and incomplete timing limit comparisons;
+it establishes neither a causal routing speedup nor complete consumption accounting.
+See also the [measurement delivery comment](https://github.com/picoduck/wollipog/issues/3630#issuecomment-6732911674).

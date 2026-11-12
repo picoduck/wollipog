@@ -79,7 +79,7 @@ No new secret, App, PAT, setting or external hosting is required.
 The worker first runs trusted main workflow-revision code with scoped write access,
 checks its exact run/attempt/claim, and checks the target is an ancestor of current
 main using the compare API. Only admitted work calls the existing complete CI with
-`contents: read`. The Node/engine/bundle jobs, five Chromium shards (including rendered
+`contents: read`. The Node/engine/bundle jobs, ten Chromium shards (including rendered
 production smoke), WebKit and Windows baseline jobs are shared unchanged. Every
 checkout job asserts its actual `git rev-parse HEAD` equals the admitted target.
 Dispatches always use main workflow definitions; arbitrary PR code never sees a
