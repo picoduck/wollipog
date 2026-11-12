@@ -19260,8 +19260,11 @@ export class SessionManager {
     const meta = this.store.readMeta(sessionId);
     if (!meta) return;
     const rows = [...this.attributedWorktrees(meta), ...(meta.locationHistory ?? []).flatMap((left) => left.worktrees)];
-    const ids = new Set([worktreeIdForPath(path),
-      ...rows.filter((row) => sameWorktreePath(meta.context, row.path, path)).map((row) => row.id)]);
+    const here = (row: SessionWorktreeView) => sameWorktreePath(meta.context, row.path, path);
+    // An id a row at another path still uses, as two Locations' rows an earlier runner gave the same
+    // branch id do, marks that worktree's processes too, so it is not this path's to stop.
+    const ids = [...new Set([worktreeIdForPath(path), ...rows.filter(here).map((row) => row.id)])]
+      .filter((id) => !rows.some((row) => row.id === id && !here(row)));
     for (const id of ids) {
       const marker = meta.worktreeProcessMarkers?.[id];
       if (marker && !await this.terminateRollbackProcesses(marker)) {

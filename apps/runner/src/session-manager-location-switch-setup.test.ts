@@ -4050,6 +4050,8 @@ test(`a requested worktree made again where a row stored under its branch's id w
         `and stop before their port block is given back (${order.join(", ")})`);
     }
     if (shared) {
+      assert.equal(order.includes(`stop ${markerBefore}`), false,
+        `the shared id's processes, the other Location's worktree's too, are never stopped (${order.join(", ")})`);
       assert.deepEqual(allocator.get(oldOwner), block, "the shared id keeps its port block");
       assert.deepEqual(meta().worktreeHooks?.[oldId], hooksBefore, "its teardown");
       assert.equal(meta().worktreeProcessMarkers?.[oldId], markerBefore, "and its marker");
