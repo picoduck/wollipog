@@ -19059,10 +19059,13 @@ export class SessionManager {
         // A record with no id is an older runner's, for the row whose block is the session's "legacy" one.
         // Its block goes only once what may use those ports has stopped: so its marker's processes are
         // stopped here even when the rollback carries the same marker, rather than left for the rollback.
+        // A session still on this runner (startup replays every record) may have a row that still carries
+        // that marker or uses that id: those processes and that block stay that row's.
         this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} left to the rollback still on record for it`);
         const ownId = record.worktreeId ?? "legacy";
-        const ownBlock = ownId !== (rollback.worktreeId ?? "legacy");
-        if (record.processMarker && (ownBlock || record.processMarker !== rollback.processMarker) &&
+        const { idInUse, markerInUse } = this.recordHoldingsInUse(record, ownId);
+        const ownBlock = ownId !== (rollback.worktreeId ?? "legacy") && !idInUse && !markerInUse;
+        if (record.processMarker && !markerInUse && (ownBlock || record.processMarker !== rollback.processMarker) &&
             !await this.terminateRollbackProcesses(record.processMarker)) {
           this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry: its processes could not be stopped`);
           return;
@@ -19312,6 +19315,19 @@ export class SessionManager {
     return true;
   }
 
+  /** Whether a row of the record's session, if that session is still on this runner, still uses the
+   * worktree id `id` (and so its port block) or carries the record's process marker. Those stay that
+   * row's: a record never stops its processes or gives back its block. */
+  private recordHoldingsInUse(record: WorktreeCleanupRecord, id: string | undefined): { idInUse: boolean; markerInUse: boolean } {
+    const meta = this.store.readMeta(record.sessionId);
+    if (!meta) return { idInUse: false, markerInUse: false };
+    const rows = [...this.attributedWorktrees(meta), ...(meta.locationHistory ?? []).flatMap((left) => left.worktrees)];
+    return {
+      idInUse: rows.some((item) => item.id === id),
+      markerInUse: Object.values(meta.worktreeProcessMarkers ?? {}).includes(record.processMarker ?? ""),
+    };
+  }
+
   /** Whether every process carrying a rollback's marker has ended. */
   private terminateRollbackProcesses(marker: string): Promise<boolean> {
     return terminatePosixProcessesByMarker(marker).catch(() => false);
@@ -19322,10 +19338,7 @@ export class SessionManager {
    * runs here, since that is repository code in a tree that is not (or no longer only) the attempt's.
    * Its ports go only once those processes have, and only if no row uses its id. */
   private async endRollbackUnremoved(record: WorktreeCleanupRecord): Promise<boolean> {
-    const meta = this.store.readMeta(record.sessionId);
-    const rows = meta ? [...this.attributedWorktrees(meta), ...(meta.locationHistory ?? []).flatMap((left) => left.worktrees)] : [];
-    const idInUse = rows.some((item) => item.id === record.worktreeId);
-    const markerInUse = !!meta && Object.values(meta.worktreeProcessMarkers ?? {}).includes(record.processMarker ?? "");
+    const { idInUse, markerInUse } = this.recordHoldingsInUse(record, record.worktreeId);
     if (record.processMarker && !markerInUse && !await this.terminateRollbackProcesses(record.processMarker)) {
       this.log(`worktree rollback for ${boundedSessionIdForLog(record.sessionId)} needs retry: its setup processes could not be stopped`);
       this.noteRollbackFailure(record);
