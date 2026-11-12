@@ -7457,6 +7457,7 @@ export class SessionsService {
     for (const campaignSessionId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
       // #4146: an idle campaign with leftovers gets the server's one repair before it reads
       // Complete, Needs Cleanup or Campaign Stuck. Its wake-up, if any, is delivered below.
+      this.reconcileCampaignHandoffQuestion(campaignSessionId);
       this.maybeRepairCampaign(campaignSessionId, now);
       // A waiting child's turn end records nothing (#4073). A job that reaches the stall bound ends
       // that wait without any runner update, so record what is now ready here.
@@ -7570,15 +7571,45 @@ export class SessionsService {
     }
   }
 
-  /**
-   * The server's automatic repair of an idle campaign's leftovers (#4146), tried once for each
-   * distinct set, within existing authority only. A campaign that would read Complete, Needs Cleanup
-   * or Campaign Stuck first gets: a forge re-read of its pending merged branches and unfinished
-   * items' pull requests, every approved `merged_branch_deletion` Wollipog can perform through the
-   * existing forge action, and, when an agent could still settle what is left, one `campaign_idle`
-   * continuation that wakes the root Orchestrator naming it. The campaign reads Active while this
-   * runs and while that continuation is pending or running; only then does its idle status show.
-   */
+  /** #4541: reconcile the Inbox from the ledger, also on restart. This informational question
+   * grants nothing. A pending occurrence is stable; an answered unchanged set is never reasked. */
+  reconcileCampaignHandoffQuestion(campaignId: string): void {
+    const root = this.db.getSession(campaignId);
+    if (!root || root.archived || isTerminal(root.status) || root.orchestratorPolicy?.control?.mode !== "full_control" ||
+        !runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "ownerQuestions")) return;
+    const prior = this.db.campaignHandoffQuestion(campaignId);
+    const handoffs = this.db.campaignWorkLedger.completionFacts(campaignId).handoffs;
+    if (!handoffs.some(item => item.handoff.responsibleActor === "human")) {
+      if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
+        triggeredBy: { kind: "system", id: "campaign_handoffs" } });
+      return;
+    }
+    const projection = this.db.campaignProjection(campaignId);
+    if (!prior && projection?.status !== "stuck" && projection?.status !== "complete_needs_cleanup") return;
+    const material = [...handoffs].sort((a, b) => a.workItemId.localeCompare(b.workItemId)).map(item => {
+      const issue = item.issue ? `${item.issue.repository}#${item.issue.number}: ` : "";
+      return `- ${issue}${item.title} (${item.handoff.responsibleActor})\n  Reason: ${item.handoff.reason}\n  Next action: ${item.handoff.nextAction}`;
+    }).join("\n\n");
+    const snapshot = { category: "owner_decision" as const, kind: "question" as const,
+      question: "This campaign handed work to you. What should happen next?",
+      material: material + "\n\nThis question authorizes nothing. Your answer grants no action authority.", options: [] };
+    const digest = workflowDecisionResourceDigest(snapshot);
+    if (prior?.resourceDigest === digest && prior.status !== "revoked") return;
+    if (prior?.status === "pending") {
+      if (this.db.updateCampaignHandoffQuestion(prior.occurrenceId, snapshot, digest)) {
+        this.db.setPendingApproval(campaignId, removePendingRequest(this.db.getSession(campaignId)?.pendingApproval ?? null, prior.occurrenceId));
+        this.restorePendingWorkflowDecisionCards(campaignId);
+        this.hub.sessionChangedById(campaignId);
+      }
+      return;
+    }
+    const result = this.createWorkflowDecision(campaignId, {
+      requestId: `campaign_handoffs_${randomUUID()}`, resourceKey: "campaign_handoffs:owner", resourceSnapshot: snapshot,
+    }, () => true, { trustedOwnerDecision: true, trustedCampaignHandoffs: true });
+    if (!result.ok) this.log.warn(`campaign handoff question for ${campaignId} was refused: ${result.error}`);
+  }
+
+  /** Try the server's automatic repair once per distinct set of idle leftovers (#4146). */
   private maybeRepairCampaign(campaignId: string, now: number): void {
     if (this.campaignRepairsInFlight.has(campaignId)) return;
     if (now - (this.campaignRepairCheckedAt.get(campaignId) ?? -Infinity) < CAMPAIGN_REPAIR_CHECK_INTERVAL_MS) return;
@@ -14826,6 +14857,7 @@ export class SessionsService {
       closingReferenceCheck?: PullRequestClosingReferenceCheck;
       /** A Full Control root's owner decision, checked by createOwnerDecision (#4064). */
       trustedOwnerDecision?: boolean;
+      trustedCampaignHandoffs?: boolean;
       /** The server's own report of a merge's closures (#4323): the only caller of its request ids. */
       trustedMergeClosureReport?: boolean;
       trustedIssueClosureRecovery?: boolean;
@@ -14846,10 +14878,18 @@ export class SessionsService {
       return fail(`requestId and resourceKey may not start with ${MERGE_CLOSURE_REPORT_REQUEST_PREFIX} or ${MERGE_CLOSURE_REPORT_RESOURCE_PREFIX}, ` +
         "which Wollipog reserves for its own reports", 400);
     }
+    if ((request.requestId.startsWith("campaign_handoffs_") || request.resourceKey === "campaign_handoffs:owner") &&
+        !internal?.trustedCampaignHandoffs) return fail("Campaign handoff question coordinates are reserved for the server", 400);
     const ownerRule = normalizeWorkflowDecisionOwnerRule(request.ownerRule);
     if (!ownerRule.ok) return fail(ownerRule.message, 400);
-    const normalized = normalizeWorkflowDecisionSnapshot(request.resourceSnapshot, internal?.trustedDerivedVideo);
+    // Handoff material is a complete report of the already bounded ledger, not an agent-authored
+    // question. It can exceed the ordinary 8k question background limit; do not silently omit items.
+    const handoffReport = internal?.trustedCampaignHandoffs && request.resourceSnapshot.category === "owner_decision"
+      && request.resourceSnapshot.kind === "question" ? request.resourceSnapshot.material : undefined;
+    const normalized = normalizeWorkflowDecisionSnapshot(handoffReport !== undefined
+      ? { ...request.resourceSnapshot, material: undefined } : request.resourceSnapshot, internal?.trustedDerivedVideo);
     if (!normalized.ok || !normalized.data) return failAs(normalized);
+    if (handoffReport !== undefined && normalized.data.category === "owner_decision") normalized.data.material = handoffReport;
     // An item naming an artifact is reviewed as that artifact's checked bytes, so the human review
     // card must be able to show it; its `uri` never stands in. Checked only for new requests, so an
     // occurrence approved before this rule can still be consumed with its unchanged snapshot.

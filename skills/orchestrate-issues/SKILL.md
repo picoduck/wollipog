@@ -236,6 +236,12 @@ Full Control nobody sees the root's own questions: the server dismisses them una
 the root to decide with these typed tools. When the root genuinely needs its owner's input on a
 design choice, clarification or preference, it asks an Owner Question with `request_owner_decision`
 and `kind: "question"`: the owner answers in their own words and the root keeps working meanwhile.
+A root's question to its owner, whatever the topic, always uses that Owner Question route, never
+only prose. Never end a turn with a blocker needing the owner without a typed request or a recorded
+handoff with the reason and next action. Decide what is yours, including Orchestrator-owned
+implementation questions and whether to accept, reject or defer a follow-up. Human handoffs on a
+settled Full Control campaign create one Inbox question updated from the ledger; external handoffs
+are included but do not create it alone. The answer grants no authority.
 Reserve Owner Approvals (`kind: "approval"`, or a typed decision handed over with
 `hand_workflow_decision_to_owner`) for exact actions the owner kept. Read `issueClosureResult`: `closed` and `already_closed`
 are verified outcomes. `refused` wrote nothing and used up the approval: its `refusal.reason` and

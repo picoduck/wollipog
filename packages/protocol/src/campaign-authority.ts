@@ -635,10 +635,12 @@ const FULL_CONTROL_ROOT_QUESTION_GUIDANCE = "You own every Orchestrator-owned " 
 /** The root guidance with the owner-decision route (#4064) in place of "report it instead of asking". */
 const FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_GUIDANCE = FULL_CONTROL_ROOT_QUESTION_GUIDANCE.slice(0,
   FULL_CONTROL_ROOT_QUESTION_GUIDANCE.indexOf("A human-owned decision")) +
-  "To ask the campaign's owner a design choice, clarification or preference, call request_owner_decision with kind " +
+  "Decide Orchestrator-owned implementation questions and follow-up acceptance, rejection or deferral yourself. " +
+  "Every question to the campaign's owner, whatever the topic, must use request_owner_decision with kind " +
   "\"question\", the question, any suggested options and the background as Markdown: the owner answers in their own words, " +
   "and the answer is delivered back to you. For an exact action the owner kept that has no typed category, use kind " +
   "\"approval\" with explicit options. Either reaches the owner's Inbox without stopping your turn or other work. " +
+  "Never end a turn with a blocker needing the owner without a typed request or a recorded handoff with its reason and next action. " +
   "To give the owner one of your pending Orchestrator-owned decisions instead, such as a " +
   "child's pr_merge, call hand_workflow_decision_to_owner; that cannot be undone. Never decide a human-owned decision yourself.";
 

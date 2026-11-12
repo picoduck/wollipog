@@ -83,6 +83,8 @@ test("a campaign whose merged branch still exists on origin is not verified comp
     // Not read yet: pending, never assumed deleted.
     let projection = h.db.campaignProjection("root")!;
     assert.equal(projection.status, "complete_needs_cleanup");
+    h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignHandoffQuestion("root"), null, "branch cleanup alone never asks the owner (#4541)");
     assert.deepEqual(projection.mergedBranches, { total: 1, pending: 1, retained: 0, items: [{ sessionId: "child",
       workItemId: h.item, repository: "picoduck/wollipog", pullRequest: 4100, branch: null, headSha: "a".repeat(40),
       state: "pending", reason: "The forge has not been read for this merged pull request yet." }] });

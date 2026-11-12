@@ -790,3 +790,87 @@ for (const category of ["unsupported_capability", "capability_unproven", "runner
     } finally { h.db.close(); }
   });
 }
+
+test("settled human handoffs reach one owner question and update in place (#4541)", () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    handOff(h, h.advisory, "human");
+    h.svc.retryDuePrompts();
+    const questions = () => h.db.pendingWorkflowDecisionsForController("root").filter(d => d.category === "owner_decision");
+    assert.equal(questions().length, 1);
+    const first = questions()[0]!;
+    assert.equal(first.authority, "human");
+    assert.equal(first.resourceSnapshot.category === "owner_decision" && first.resourceSnapshot.kind, "question");
+    assert.equal(h.db.getSession("root")!.attention!.humanActions.length, 1);
+    assert.match(JSON.stringify(first.resourceSnapshot), /4070.*File the Advisory/s);
+    assert.match(JSON.stringify(first.resourceSnapshot), /File the advisory from a maintainer account/);
+    const added = h.svc.recordCampaignPlan("root", { planComplete: true, items: [{ key: "original:4070:external", title: "External Review",
+      issue: { repository: "picoduck/wollipog", number: 4070 } }] });
+    assert.ok(added.ok, added.error ?? "plan refused");
+    handOff(h, added.data!.items[0]!.workItemId, "external");
+    h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(questions().length, 1);
+    assert.equal(questions()[0]!.occurrenceId, first.occurrenceId);
+    assert.match(JSON.stringify(questions()[0]!.resourceSnapshot), /External Review/);
+    assert.match(JSON.stringify(h.db.getSession("root")!.pendingApproval), /External Review/);
+    handOff(h, h.advisory, "external");
+    h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(questions().length, 0);
+    assert.equal(h.db.getSession("root")!.attention!.humanActions.length, 0);
+  } finally { h.db.close(); }
+});
+
+test("external handoffs and ordinary cleanup do not ask the owner (#4541)", () => {
+  const h = fixture("stop_and_archive");
+  try {
+    finishChildren(h, "stop_and_archive");
+    handOff(h, h.advisory, "external");
+    h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignHandoffQuestion("root"), null);
+    assert.equal(h.db.getSession("root")!.attention!.humanActions.length, 0);
+  } finally { h.db.close(); }
+});
+
+test("handoff reports keep every item beyond the ordinary question background limit (#4541)", () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    handOff(h, h.advisory, "human");
+    for (let index = 0; index < 5; index++) {
+      const added = h.svc.recordCampaignPlan("root", { planComplete: true, items: [{ key: `original:4070:long:${index}`,
+        title: `Item ${index}`, issue: { repository: "picoduck/wollipog", number: 4070 } }] });
+      assert.ok(added.ok);
+      assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: added.data!.items[0]!.workItemId,
+        handoff: { responsibleActor: "external", reason: "r".repeat(1000), nextAction: "n".repeat(1000) } }).ok);
+    }
+    h.svc.reconcileCampaignHandoffQuestion("root");
+    const report = h.db.campaignHandoffQuestion("root")!;
+    assert.ok(report);
+    const text = JSON.stringify(report.resourceSnapshot);
+    for (let index = 0; index < 5; index++) assert.match(text, new RegExp(`Item ${index}`));
+    assert.ok(text.length > 8000);
+  } finally { h.db.close(); }
+});
+
+test("stuck campaigns report handoffs once across retries and service recreation (#4541)", () => {
+  const h = fixture();
+  try {
+    h.db.updateSessionStatus("root", "idle", Date.now());
+    h.db.updateSessionStatus("child", "idle", Date.now());
+    h.db.updateSessionStatus("other", "idle", Date.now());
+    handOff(h, h.advisory, "human");
+    assert.equal(h.db.campaignProjection("root")!.status, "stuck");
+    h.svc.reconcileCampaignHandoffQuestion("root");
+    const question = h.db.campaignHandoffQuestion("root")!;
+    const restarted = new SessionsService(h.db, h.hub, { info() {}, warn() {}, error() {} });
+    restarted.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignHandoffQuestion("root")!.occurrenceId, question.occurrenceId);
+    const identity = h.db.localIdentityContext();
+    assert.ok(restarted.answerOwnerQuestion("root", question.occurrenceId, {}, "dismiss",
+      { kind: "human", id: identity.userId }).ok);
+    restarted.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignHandoffQuestion("root")!.occurrenceId, question.occurrenceId);
+    assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0);
+  } finally { h.db.close(); }
+});

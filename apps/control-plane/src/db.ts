@@ -24604,6 +24604,18 @@ export class ControlPlaneDb {
     ).get(occurrenceId));
   }
 
+  /** The server's informational handoff question, including its last settled set. */
+  campaignHandoffQuestion(rootId: string): WorkflowDecisionView | null {
+    return workflowDecisionFromRow(this.stmt(`SELECT * FROM workflow_decisions WHERE session_id=?
+      AND resource_key='campaign_handoffs:owner' AND category='owner_decision' ORDER BY rowid DESC LIMIT 1`).get(rootId));
+  }
+
+  updateCampaignHandoffQuestion(occurrenceId: string, snapshot: WorkflowDecisionView["resourceSnapshot"], digest: string): boolean {
+    return this.stmt(`UPDATE workflow_decisions SET resource_snapshot=?, resource_digest=? WHERE occurrence_id=?
+      AND resource_key='campaign_handoffs:owner' AND category='owner_decision' AND status='pending'
+      AND json_extract(resource_snapshot, '$.kind')='question'`).run(JSON.stringify(snapshot), digest, occurrenceId).changes === 1;
+  }
+
   /** Keyset pages keep a consumed/revoked cursor usable without retaining it in the result. */
   workflowDecisionPage(sessionId: string, cursor: WorkflowDecisionView | undefined, limit: number): WorkflowDecisionView[] {
     return (this.stmt(

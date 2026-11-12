@@ -12,6 +12,21 @@ async function openOwnerQuestion(page: Page) {
 }
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }]) {
+  test(`campaign handoffs ask for input without approval (${viewport.name})`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/agent-questions-e2e.html?set=owner-question&style=composer&handoffs=true");
+    const card = page.locator(".composer-answer");
+    await expect(card).toBeVisible();
+    await expect(card.locator(".answer-title")).toHaveText("This campaign handed work to you. What should happen next?");
+    await expect(page.getByLabel("Attention: Needs Your Input", { exact: true })).toBeVisible();
+    await expect(card.locator(".answer-context")).toContainText("Owner Handoff (human)");
+    await expect(card.locator(".answer-context")).toContainText("External Review (external)");
+    await expect(card.locator(".answer-context")).toContainText("Your answer grants no action authority.");
+    await expect(card.locator("input.composer-answer-input")).toBeEditable();
+    await expect(page.getByText("Approval Required")).toHaveCount(0);
+    if (process.env.WOLLIPOG_CAPTURE_HANDOFFS) await page.screenshot({ path: `/tmp/4541-handoffs-${viewport.name}.png`, fullPage: true });
+  });
+
   test(`an Owner Question is a composer question card with Markdown background and a Needs Your Input badge (${viewport.name})`, async ({ page }) => {
     await page.setViewportSize(viewport);
     const card = await openOwnerQuestion(page);
