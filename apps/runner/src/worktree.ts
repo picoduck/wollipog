@@ -931,7 +931,8 @@ export async function createRequestedWorktree(
   // The slot, registered on this branch, whose directory has gone (#4209). Its registration still holds
   // an index, a reflog and private refs, so it goes only when the caller proves it is its own and no
   // one else's: then just it goes, never another worktree's, and the worktree is made again on the
-  // branch as it stands. Otherwise it is left exactly as it is. A locked one stays, and Git says why.
+  // branch as it stands. Otherwise it is left exactly as it is. One the drop leaves, because it is
+  // locked or its admin directory cannot be told apart from another's, is refused by name.
   let branchPreexisted = false;
   if (matching?.branch === branch && await removalPathIdentity(context, path).catch(() => undefined) === null) {
     if (!options.ownsMissingRegistration?.(path, branch)) {
@@ -942,7 +943,14 @@ export async function createRequestedWorktree(
     await pruneOwnRegistration(context, repoPath, path);
     listed = await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]);
     matching = parseWorktreePorcelain(listed).find((entry) => sameWorktreePath(context, entry.path, path));
-    branchPreexisted = !matching;
+    if (matching) {
+      // Returned as it stands, it would read as an existing worktree whose directory is not there.
+      throw new Error(`the requested worktree for ${branch} is registered at ${path}, but its directory is not there, and its ` +
+        `registration was left as it is: ${matching.locked ? `it is locked, so unlock it (git worktree unlock ${path})`
+          : "Git's records for it could not be told apart from another worktree's, so remove that one registration by hand"}, ` +
+        "or put the directory back, then try again");
+    }
+    branchPreexisted = true;
   }
   if (matching) {
     if (matching.branch === branch) {

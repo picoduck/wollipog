@@ -223,6 +223,23 @@ for (const holder of ["a person, with no row of this session's", "another sessio
   });
 }
 
+test("a requested slot whose directory went is refused by name when its registration is locked, and left byte for byte", async () => {
+  if (process.platform === "win32") return;
+  await withSession("stale-registration-locked", async (h) => {
+    const { worktree } = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/locked" });
+    await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/other" });
+    git(h.app, "worktree", "lock", "--reason", "on a removable disk", worktree.path);
+    const admin = git(worktree.path, "rev-parse", "--absolute-git-dir");
+    rmSync(worktree.path, { recursive: true, force: true });
+    const before = bytes(admin);
+
+    await assert.rejects(h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/locked" }),
+      new RegExp(`it is locked, so unlock it \\(git worktree unlock ${worktree.path.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&")}\\)`, "u"));
+    assert.deepEqual(bytes(admin), before, "the locked registration stays as it was");
+    assert.ok(registered(h.app).includes(worktree.path));
+  });
+});
+
 test("a worktree made again on its own branch that fails to activate is given back, and the branch stays", async () => {
   if (process.platform === "win32") return;
   await withSession("stale-registration-rollback", async (h) => {

@@ -8143,8 +8143,6 @@ export class SessionManager {
     let worktree: WorktreeHandle | null = null;
     let worktreeIdentity: SessionWorktreeView | undefined;
     let worktreeOwnedByLaunch = false;
-    // A worktree this launch made and has given back, which no selection may name afterwards.
-    let launchRolledBack: string | undefined;
     const launchWorktreeCleanup = (): WorktreeCleanupRecord => {
       if (!worktree) throw new Error("worktree cleanup requested before materialization");
       const latest = this.store.readMeta(spec.sessionId) ?? meta;
@@ -8264,7 +8262,6 @@ export class SessionManager {
               const cleanup = launchWorktreeCleanup();
               cleanup.checkpointGenerationDisposable = true;
               this.cleanupJournal.add(cleanup);
-              launchRolledBack = worktree.path;
               await this.reapWorktree(cleanup, true);
             }
             worktree = null;
@@ -8388,9 +8385,9 @@ export class SessionManager {
         meta.worktreePending = false;
         // The launch's row starts with no selection and only finalization writes one. A failure before
         // that leaves the session selecting the worktree it had (#4209), or the next launch, finding none,
-        // would run in the Location's own checkout. Not one this launch made and gave back: that has gone.
-        const keepSelection = !!selected && !(launchRolledBack && sameWorktreePath(context, launchRolledBack, selected));
-        const current = keepSelection ? this.store.readMeta(spec.sessionId) : undefined;
+        // would run in the Location's own checkout. It is still there: `persistedWorktreeFailure` just
+        // verified it, or the branch above would have taken the session to recovery instead.
+        const current = selected ? this.store.readMeta(spec.sessionId) : undefined;
         const restore = !!current && !current.worktreePath && current.worktreeBranch === prior!.worktreeBranch;
         const restored = this.store.patchMeta(spec.sessionId, { worktreePending: false, ...(restore ? { worktreePath: selected } : {}) });
         if (restore && restored) {
