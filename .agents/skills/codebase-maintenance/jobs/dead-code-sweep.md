@@ -19,6 +19,15 @@ resolve the workspace, fall back to reference counting: for each exported symbol
 file, `git grep -n "<symbol>"` across `apps/`, `packages/`, and `scripts/`, and treat a symbol whose
 only hit is its own declaration as a candidate.
 
+`playwright.pr.config.ts` (#4149) calls `validateBrowserFiles(process.env.PR_BROWSER_FILES ?? "")`
+when loaded. Without that variable, both passes can exit 2 with only
+`Error loading playwright.pr.config.ts (Invalid PR browser selection)` on stderr while still
+writing full JSON. This alone is not an analysis failure. Confirm by rerunning both commands with
+`PR_BROWSER_FILES` set to a JSON array of every `browserFiles()` entry from `playwright.shards.ts`,
+each prefixed with `apps/web/e2e/`, and compare the saved reports and stderr. On 2026-11-09, both
+reruns exited 1 with empty stderr; each report differed by only one record, a `vite` binary under
+that config. Check any other stderr or report differences before trusting the analysis.
+
 Before counting or triaging either report, discard records whose repository-relative file path
 contains a `.worktrees/` directory segment. They describe nested worktree copies, not this
 checkout. Do this in a scratch script without changing repository configuration, and report the
@@ -54,6 +63,11 @@ Two classes the first sweeps re-derived independently, now named so no run deriv
   type, and an own-file reference count of one looks like dead code. Confirm every declaration-only
   candidate with a whole-repository `git grep -w <symbol>` before drafting (two types in
   `apps/web/src/skills.ts`, used from `apps/web/src/api.ts`, on 2026-09-21).
+- A same-named local declaration in another file can make a dead export look referenced to a
+  word grep. `GuardProtectionsLoader` at `apps/runner/src/managed-worktree-guard-socket.ts:79-80`
+  was unused on 2026-11-09, but `apps/runner/src/managed-worktree-guard-transport.ts:6` declared
+  its own copy. Before treating an outside hit as live, check that the referencing file actually
+  imports the declaring module.
 - `apps/web/src/e2e/*-main.tsx` files are Vite entry points referenced from sibling
   `apps/web/<name>-e2e.html` files. They are never unused, and neither is anything whose only
   importer is one of them. This was 15 of 17 knip "unused files" in one run.
