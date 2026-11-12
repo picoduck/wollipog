@@ -166,6 +166,13 @@ test("a failed fork whose rollback keeps its worktree still stops what ran there
     assert.deepEqual(forkOwners.filter((owner) => internals.worktreePortAllocator.get(owner) !== undefined), [],
       "and no port block outlives it");
     assert.ok(stopped.length > 0, "and what its setup started there is stopped");
+    // The fork's row is gone, so the session it was forked from is told, and no next launch is promised.
+    const notices = f.store.readEvents(f.source.sessionId).map((event) => event.payload)
+      .filter((payload) => payload.kind === "error").map((payload) => String((payload as { message?: string }).message));
+    const notice = notices.find((text) => text.includes(forkWorktree));
+    assert.ok(notice, "the fork's source is told the worktree was kept");
+    assert.match(notice, /a fork of this session that failed made/u);
+    assert.doesNotMatch(notice, /next launch/u);
   });
 });
 

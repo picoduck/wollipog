@@ -1944,7 +1944,11 @@ test("a file that appears while teardown runs is kept, whoever wrote it, since n
     assert.ok(slot, "the worktree stays");
     assert.equal(readFileSync(join(slot, written), "utf8"), "written while teardown waited\n");
     assert.deepEqual(journal(h), []);
-    assert.ok(errorText(h).some((text) => text.includes(slot) && /kept/iu.test(text)));
+    const notice = errorText(h).find((text) => text.includes(slot) && /kept/iu.test(text));
+    assert.ok(notice);
+    // Its teardown did run, so the notice never says nothing was changed (#4209).
+    assert.match(notice, /teardown had already run there when the change was found, but nothing in it was removed/u);
+    assert.doesNotMatch(notice, /Nothing in it was changed/u);
   });
 });
 
@@ -3664,6 +3668,48 @@ test("a worktree a launch makes again after a refused rollback is never removed 
     assert.equal(git(app, "rev-parse", "--verify", `refs/heads/agent/${sessionId}`).length, 40);
   } finally {
     for (const manager of managers) manager.shutdownAll();
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a launch that fails after its setup keeps work written once setup ended: its rollback proves against setup's end", async () => {
+  if (process.platform === "win32") return;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-launch-late-snapshot-")));
+  const fake = fakeProvider();
+  const sessionId = "s_launch_late_snapshot";
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, dataDir, 2);
+  try {
+    const app = join(root, "app");
+    mkdirSync(app);
+    git(app, "init", "--quiet", "--initial-branch=main");
+    writeFileSync(join(app, ".wollipog.json"), JSON.stringify({ version: 1, setup: [{ name: "Leave a File", command: write("from-setup", "'x'"), timeoutSeconds: 30 }] }));
+    git(app, "add", ".wollipog.json");
+    git(app, "commit", "--quiet", "-m", "base with setup");
+    manager.configureSharedDirectories([{ id: "app", name: "App", path: realpathSync(app) }] as never);
+    // Setup has resolved and the worktree is open to the Native TUI, shells and Files. Someone writes there,
+    // then the provider launch fails.
+    let worktree = "";
+    const internals = manager as unknown as { launch: (meta: { worktreePath: string | null }, ...rest: unknown[]) => Promise<boolean> };
+    internals.launch = async (meta) => {
+      worktree = meta.worktreePath!;
+      writeFileSync(join(worktree, "notes.txt"), "written after setup ended\n");
+      return false;
+    };
+    const starting = manager.start({ sessionId, workspaceId: "app", workspacePath: realpathSync(app), agentId: "claude-code", command: "claude-code",
+      args: [], env: {}, useWorktree: true, driver: "claude-code", context: { kind: "native" } }).catch(() => undefined);
+    const cards = () => store.readEvents(sessionId).map((event) => event.payload).filter((payload) => payload.kind === "permission_request");
+    await waitFor(() => store.has(sessionId) && cards().length > 0, "the launch's setup did not ask for trust");
+    manager.resolvePermission(sessionId, cards()[0]!.requestId, "trust");
+    await starting;
+    assert.ok(worktree, "the launch got as far as starting its provider");
+    assert.equal(readFileSync(join(worktree, "notes.txt"), "utf8"), "written after setup ended\n", "the work written since is kept");
+    assert.ok(store.readMeta(sessionId)?.keptWorktreePaths?.includes(worktree), "and so is the worktree, so deletion leaves it too");
+    assert.deepEqual((manager as unknown as { cleanupJournal: { list(): WorktreeCleanupRecord[] } }).cleanupJournal.list(), []);
+  } finally {
+    manager.shutdownAll();
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     rmSync(root, { recursive: true, force: true });
   }
