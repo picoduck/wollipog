@@ -1480,6 +1480,11 @@ function nativeRemovalPathIdentity(path: string): RemovalPathIdentity | null {
   }
 }
 
+/** Whether nothing is at `path`. Throws when that cannot be told, as on an unavailable WSL distro. */
+export async function worktreePathAbsent(path: string, options: WorktreeOptions = {}): Promise<boolean> {
+  return await removalPathIdentity(options.context ?? nativeContext, path) === null;
+}
+
 async function removalPathIdentity(context: AgentContext, path: string): Promise<RemovalPathIdentity | null> {
   if (context.kind === "native") return nativeRemovalPathIdentity(path);
   const result = (await runContextCommand(

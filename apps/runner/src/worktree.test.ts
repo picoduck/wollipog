@@ -4187,7 +4187,8 @@ test("failed requested-worktree creation preserves the live session's checkpoint
   }
 });
 
-test("startup replay reclaims a disposable failed-fork checkpoint generation", { skip: !haveGit() }, async () => {
+for (const snapshotted of [true, false]) {
+test(`startup replay reclaims a disposable failed-fork checkpoint generation${snapshotted ? "" : ", and keeps a worktree its record has no snapshot for"}`, { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-fork-rollback-replay-"));
   const dataDir = join(root, "data");
   let manager: SessionManager | undefined;
@@ -4204,6 +4205,9 @@ test("startup replay reclaims a disposable failed-fork checkpoint generation", {
       driver: "claude-code", command: "claude", args: [], env: {},
       context: { kind: "native" }, agentSessionId: null, status: "failed", title: "fork rollback",
       config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      // As every session this runner makes has it. Without it, startup's one-shot index reset rewrites
+      // the worktree's index, which is a change the rollback's snapshot sees.
+      indexReset: true,
       seq: 0, createdAt: 1, updatedAt: 1,
     });
     new WorktreeCleanupJournal(dataDir).add({
@@ -4218,15 +4222,20 @@ test("startup replay reclaims a disposable failed-fork checkpoint generation", {
       removalMode: "force",
       checkpointGenerationDisposable: true,
       createdAt: Date.now(),
+      // What the fork left there, as the runner records it when it journals the rollback (#4209). A
+      // record from an older runner has none, and nothing then proves the worktree untouched.
+      ...(snapshotted ? { rollbackSnapshot: (await captureRollbackSnapshot(handle.path))! } : {}),
     });
 
     manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
     manager.reconcileStore();
-    await waitForCondition(() => !existsSync(handle.path), "startup replay did not remove the failed fork worktree");
     await waitForCondition(
       () => new WorktreeCleanupJournal(dataDir).list().length === 0,
       "startup replay did not complete the failed fork cleanup receipt",
     );
+    assert.equal(existsSync(handle.path), !snapshotted, snapshotted
+      ? "startup replay removes the failed fork worktree it proves untouched"
+      : "and keeps one it cannot prove untouched");
     assert.equal(execFileSync(
       "git", ["-C", repo, "for-each-ref", "--format=%(refname)", `refs/wollipog/${sessionId}/`],
       { encoding: "utf8" },
@@ -4236,6 +4245,7 @@ test("startup replay reclaims a disposable failed-fork checkpoint generation", {
     rmSync(root, { recursive: true, force: true });
   }
 });
+}
 
 for (const stale of ["a launch rollback a newer record replaced under its key", "a deletion record a settled rollback replaced"] as const) {
 test(`a reap of ${stale} removes nothing, since it is no longer on record`, { skip: !haveGit() }, async () => {
