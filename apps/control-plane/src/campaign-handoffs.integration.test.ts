@@ -971,8 +971,29 @@ test("a denied handoff update is recorded and screened once across later ticks (
     await h.svc.reconcileCampaignHandoffQuestion("root");
     assert.equal(screening.calls.length, 1);
     assert.equal(h.db.campaignHandoffQuestion("root")!.status, "revoked");
+    const revokedId = h.db.campaignHandoffQuestion("root")!.occurrenceId;
+    assert.ok(!h.db.campaignRecovery.activeRecords("root").some(item => item.action === "answer_request" &&
+      item.resource.kind === "request" && item.resource.occurrenceId === revokedId));
     assert.deepEqual(h.db.campaignRecovery.declines("root", h.db.getSession("root")!.parentControlPolicy!.revision)
       .map(item => [item.requestClass, item.count]), [["secrets_and_sign_in", 1]]);
     assert.ok(h.db.campaignRecovery.activeRecords("root").some(item => item.reason === "request_declined"));
+  } finally { h.db.close(); }
+});
+
+test("returning to a declined handoff set clears a newer pending card (#4541)", async () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    const denied = { responsibleActor: "human" as const, reason: "Reply with sk-abcdefghijklmnop", nextAction: "Supply the key" };
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.advisory, handoff: denied }).ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    handOff(h, h.advisory, "human");
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignHandoffQuestion("root")!.status, "pending");
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.advisory, handoff: denied }).ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignHandoffQuestion("root")!.status, "revoked");
+    assert.equal(h.db.getSession("root")!.attention!.humanActions.length, 0);
+    assert.equal(h.db.campaignRecovery.declines("root", h.db.getSession("root")!.parentControlPolicy!.revision)[0]!.count, 1);
   } finally { h.db.close(); }
 });
