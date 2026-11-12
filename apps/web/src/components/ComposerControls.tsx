@@ -18,6 +18,7 @@ import type {
   SessionView,
 } from "@wollipog/protocol";
 import { runnerSupportsProtocol } from "@wollipog/protocol";
+import { modelOptionLabel } from "../agent-presentation.js";
 import {
   permissionModeDescription,
   permissionModeEmptyLabel,
@@ -575,17 +576,18 @@ export function ModelEffortMenuChoices({
     <SettingsRadioGroup label={`Model${modelSource === "cached" ? " (Cached)" : ""}`}>
       {models.map((model, index) => {
         const description = plainModelDescription(model);
+        const label = modelOptionLabel(model, models);
         return (
           <SettingsRadioOption
             key={model.id}
             checked={model.id === modelVal}
             tabStop={modelListed ? model.id === modelVal : index === 0}
             title={description}
-            ariaLabel={model.displayName ?? model.id}
+            ariaLabel={label}
             description={description}
             onSelect={() => apply({ model: model.id, effort: "", serviceTier: "" })}
           >
-            {model.displayName ?? model.id}
+            {label}
           </SettingsRadioOption>
         );
       })}

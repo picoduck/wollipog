@@ -13,7 +13,7 @@ import {
   type ParentControlMode,
   type RunnerView,
 } from "@wollipog/protocol";
-import { agentHarnessMachinesDescription, agentHarnessOptionLabel } from "./agent-presentation.js";
+import { agentHarnessMachinesDescription, agentHarnessOptionLabel, modelOptionLabel } from "./agent-presentation.js";
 import { SKILLS_UNAVAILABLE_ON_TARGET } from "./components/SkillsUnavailableNotice.js";
 import { titleCaseLabel } from "./format.js";
 import { FULL_CONTROL_LINE } from "./full-control-readiness.js";
@@ -370,11 +370,12 @@ export function evaluateOrchestratorPolicy(context: OrchestratorPolicyContext, d
           ? capabilities.effortLevels.includes(behavior.childEffort)
           : capabilities.installations > 0
       : capabilities?.status === "available";
+  const modelChoices = [...scopedModels].map(([id, model]) => ({ id, displayName: model.displayName }));
   const modelOptions: PolicyOption[] = [
     { value: AUTOMATIC_ORCHESTRATOR_VALUE, label: "Automatic", description: "Resolve from live child capabilities." },
     ...(fixedChildHarness || !harnessPolicyAvailable ? [...scopedModels.entries()] : []).map(([modelId, model]) => ({
       value: modelId,
-      label: model.displayName,
+      label: modelOptionLabel({ id: modelId, displayName: model.displayName }, modelChoices),
       description: fixedChildHarness
         ? `Use ${model.displayName} through the selected Child Harness.`
         : model.harnessNames.size > 0

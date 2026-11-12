@@ -67,3 +67,47 @@ test("a failed read shows an actionable retry and recovers without mounting stal
     assert.equal(container.querySelector("input")?.value, "4");
   } finally { await act(async () => root.unmount()); container.remove(); }
 });
+
+test("colliding reviewer model names remain distinguishable and save their exact IDs", async () => {
+  const implementer = { agentId: "codex-app", driver: "codex-app-server" as const,
+    context: { kind: "native" as const }, name: "Codex App Server" };
+  const models = [
+    { id: "opus", displayName: "Opus 5.5" },
+    { id: "claude-opus-5-5", displayName: "Opus 5.5" },
+    { id: "sonnet", displayName: "Sonnet" },
+    { id: "custom-model" },
+  ];
+  let view: ReviewSettingsView = { ...structuredClone(initial), implementers: [implementer],
+    reviewers: [{ harness: "claude-code", name: "Claude Code", runnerId: "machine", agentId: "claude-native",
+      capabilities: { models, effortLevels: ["high"], slashCommands: [], supportsImages: true, supportsApprovals: true } }] };
+  const saved: string[] = [];
+  const client: ApiClient = { ...api, reviewSettings: async () => structuredClone(view),
+    updateReviewSettings: async (_, settings) => {
+      view = { ...view, settings: settings!, source: "user_default" };
+      saved.push(settings!.reviewers[0]!.model!);
+      return structuredClone(view);
+    } };
+  const container = dom.document.createElement("div") as unknown as HTMLDivElement;
+  dom.document.body.append(container as never);
+  const root = createRoot(container);
+  const button = (label: string) => [...container.querySelectorAll("button")].find(b => b.textContent === label)!;
+  try {
+    await act(async () => root.render(<ApiProvider client={client}><FeedbackProvider><ReviewSettingsPanel /></FeedbackProvider></ApiProvider>));
+    for (const id of ["opus", "claude-opus-5-5"]) {
+      const trigger = container.querySelector<HTMLButtonElement>('button[aria-label^="Reviewer Model:"]')!;
+      await act(async () => { fireDomEvent.click(trigger); });
+      const options = [...dom.document.querySelectorAll('[role="option"]')];
+      const names = options.map(option => option.getAttribute("aria-labelledby")!.split(" ")
+        .map(labelId => dom.document.getElementById(labelId)!.textContent).join(" "));
+      assert.deepEqual(names, ["Automatic", "Opus 5.5 (opus)", "Opus 5.5 (claude-opus-5-5)", "Sonnet", "custom-model"]);
+      const chosen = options[names.indexOf(`Opus 5.5 (${id})`)]!;
+      assert.equal(chosen.textContent, `Opus 5.5 (${id})`, "visible text matches the accessible option name");
+      await act(async () => { fireDomEvent.click(chosen as unknown as Element); });
+      assert.equal(trigger.textContent, `Opus 5.5 (${id})`);
+      await act(async () => { fireDomEvent.click(button("Save Defaults")); });
+      assert.equal(saved.at(-1), id);
+    }
+    assert.deepEqual(saved, ["opus", "claude-opus-5-5"]);
+    assert.equal(models[0]!.displayName, "Opus 5.5", "the catalog's ordinary model name is unchanged");
+  } finally { await act(async () => root.unmount()); container.remove(); }
+});

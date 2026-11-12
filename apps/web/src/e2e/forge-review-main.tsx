@@ -1,7 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { PROTOCOL_VERSION, type GitStatusInfo, type ReviewFinding, type SessionView } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { ReviewPanel } from "../components/ReviewPanel.js";
@@ -11,6 +11,7 @@ import "../styles.css";
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
 const legacy = params.get("legacy") === "1";
+const request = params.get("request") === "1";
 
 const session: SessionView = {
   id: "gitlab-review-e2e", runnerId: "runner-1", workspaceId: "workspace-1", workspaceName: "Wollipog",
@@ -63,13 +64,34 @@ const git: GitStatus = {
 
 const client: ApiClient = {
   ...api,
+  git: async (_id, body) => {
+    if (body.action !== "request_diff") throw new Error("Unexpected action");
+    if (params.has("stale")) throw new Error("revisions changed");
+    if (params.has("authError")) throw new ApiError("Authenticated GitLab integration is unavailable on this machine.", 409);
+    return { requestDiff: {
+      requestUrl: params.has("wrong") ? "https://evil.test/other/pull/19" : body.requestUrl!,
+      headOid: "a".repeat(40), baseOid: "b".repeat(40), targetOid: "c".repeat(40),
+      baseRef: "release", headRef: "feature/gitlab", readAt: Date.now(), incomplete: params.has("partial"),
+      diff: { scope: "all_branch", diffHash: "d".repeat(64), stats: { filesChanged: 1, insertions: 1, deletions: 1 },
+        files: [{ path: "src/request.ts", status: "modified", binary: false,
+          hunks: [{ header: "@@ -1 +1 @@", oldStart: 1, oldCount: 1, newStart: 1, newCount: 1,
+            lines: [{ status: "-", text: "old target" }, { status: "+", text: "authoritative request head" }] }] }] },
+    } };
+  },
+  bundleReviewFindings: async (_id, body) => {
+    if (body.findings.length !== 1 || body.findings[0]?.findingId !== finding.findingId) throw new Error("Unexpected bundle");
+    return {
+      findings: [{ ...finding, status: "sent" }, remoteFinding],
+      summary: { total: 2, unresolved: 2, requiredUnresolved: 1, sent: 1, resolved: 0, dismissed: 0, completion: "blocked" },
+    };
+  },
   reviewFindings: async () => ({
     findings: [finding, remoteFinding],
     summary: { total: 2, unresolved: 2, requiredUnresolved: 1, sent: 0, resolved: 0, dismissed: 0, completion: "blocked" },
   }),
-  gitDiff: async () => ({
+  gitDiff: async (_id, scope) => ({
     diff: {
-      scope: "uncommitted", baseRef: "origin/main", headRef: "HEAD", raw: "", files: [],
+      scope, baseRef: "origin/main", headRef: "HEAD", raw: "", files: [],
       diffHash: "e".repeat(64), fineDiffHash: "f".repeat(64), stats: { filesChanged: 0, insertions: 0, deletions: 0 },
     },
   }),
@@ -84,8 +106,24 @@ function Fixture() {
             <ReviewPanel
               session={session}
               runnerOnline
-              runnerProtocolVersion={legacy ? 105 : PROTOCOL_VERSION}
+              runnerProtocolVersion={legacy ? 105 : params.has("oldDiff") ? 343 : PROTOCOL_VERSION}
               git={git}
+              forgeFacts={request ? {
+                pr: {
+                  number: 19, title: "Add GitLab Integration", state: "OPENED", provider: "gitlab", kind: "merge_request",
+                  url: "https://gitlab.example.test/team/sub/wollipog/-/merge_requests/19",
+                  baseRef: "release", headRef: "feature/gitlab", mergeability: "ci_must_pass",
+                },
+                checks: {
+                  passing: 0, failing: 1, pending: 0, failingNames: ["Pipeline #7"],
+                  url: "https://gitlab.example.test/team/sub/wollipog/-/pipelines/7",
+                  jobs: [
+                    { name: "unit", state: "failing", url: "https://gitlab.example.test/team/sub/wollipog/-/jobs/11" },
+                    { name: "typecheck", state: "passing", url: "https://gitlab.example.test/team/sub/wollipog/-/jobs/12" },
+                    { name: "browser", state: "pending", url: "https://gitlab.example.test/team/sub/wollipog/-/jobs/13" },
+                  ],
+                },
+              } : null}
               forge={legacy ? undefined : {
                 provider: "gitlab", host: "gitlab.example.test", project: "team/sub/wollipog", authenticated: true,
               }}

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BACKGROUND_JOB_STALL_MS, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+import { BACKGROUND_JOB_STALL_MS, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, issueClosureDeliveryGap,
   type CampaignBudgetAuthority, type CampaignForgePullRequestObservation, type PendingApproval, type RunnerMetadata,
   type GithubIssueClosureSnapshot, type SessionSnapshot } from "@wollipog/protocol";
 import { closureDeliveryGaps } from "./campaign-issue-authority.js";
 import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
-import { Hub } from "./hub.js";
+import { Hub, RunnerRequestNotSentError } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { fakeScreenRuntime, settleScreens } from "./credential-screen-test-fixture.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
@@ -1106,7 +1106,159 @@ function recordEpicClosure(h: ReturnType<typeof mergedWorkVerificationFixture>, 
     resource_snapshot, resource_digest, policy_revision, authority, status, created_at, issue_closure_result)
     VALUES (?, ?, 'root', 'root', 'issue_closure', 'issue_closure:picoduck/wollipog#2938', ?, ?, 1, ?, 'consumed', ?, ?)`)
     .run(occurrence, occurrence, JSON.stringify(snapshot), "f".repeat(64), change.authority ?? "orchestrator", h.now,
-      JSON.stringify({ outcome: change.outcome ?? "closed", completedAt: h.now }));
+      JSON.stringify({ outcome: "uncertain", completedAt: h.now }));
+  h.db.recordGithubIssueClosureResult(occurrence, { outcome: change.outcome ?? "closed", completedAt: h.now });
+}
+
+test("uncertain closures recover on upgrade, deduplicate reads, and release campaign status (#4398)", async () => {
+  const h = mergedWorkVerificationFixture("delivered");
+  try {
+    recordEpicClosure(h, "uncertain-upgrade", { outcome: "uncertain", authority: "human" });
+    h.recovery.maintain(h.now);
+    assert.equal(h.db.campaignProjection("root")!.status, "waiting_human");
+    let reads = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    h.hub.requestFromRunner = async (_runner, requestId, message) => {
+      assert.equal(message.type, "github_issue_closure");
+      assert.equal((message as {operation:string}).operation, "reconcile");
+      reads++;
+      await barrier;
+      return { type: "github_issue_closure_result", requestId, sessionId: "root", ok: true, reconciled: true };
+    };
+    const read = h.svc.reconcileUncertainIssueClosures("root");
+    await h.svc.reconcileUncertainIssueClosures("root");
+    assert.equal(reads, 1);
+    release(); await read;
+    await h.svc.reconcileUncertainIssueClosures("root");
+    const settled = h.db.workflowDecisionByOccurrence("uncertain-upgrade")!;
+    assert.equal(settled.issueClosureResult!.outcome, "closed");
+    assert.equal(settled.issueClosureResult!.reconciliation!.verified, true);
+    assert.equal(settled.authority, "human", "reconciliation changes no closure authority");
+    assert.equal(reads, 1);
+    assert.notEqual(h.db.campaignProjection("root")!.status, "waiting_human");
+  } finally { h.db.close(); }
+});
+
+for (const outcome of ["closed_without_comment", "open", "unreadable", "lost_read_on_restart"] as const) {
+  test(`uncertain closure ${outcome} creates one owner-only actionable request (#4398)`, async () => {
+    const h = mergedWorkVerificationFixture("delivered");
+    try {
+      recordEpicClosure(h, "uncertain-owner", { outcome: "uncertain" });
+      let reads = 0;
+      h.hub.requestFromRunner = async (_runner, requestId) => {
+        reads++;
+        if (outcome === "unreadable") throw Error("forge unavailable");
+        return { type: "github_issue_closure_result", requestId, sessionId: "root", ok: true, reconciled: false };
+      };
+      if (outcome === "lost_read_on_restart") h.db.recordGithubIssueClosureResult("uncertain-owner", {
+        outcome: "uncertain", completedAt: h.now, reconciliation: { checkedAt: h.now } });
+      for (let n = 0; n < 3; n++) await h.svc.reconcileUncertainIssueClosures("root");
+      assert.equal(reads, outcome === "lost_read_on_restart" ? 0 : 1);
+      const result = h.db.workflowDecisionByOccurrence("uncertain-owner")!.issueClosureResult!;
+      const question = h.db.workflowDecisionByOccurrence(result.reconciliation!.ownerDecisionOccurrenceId!)!;
+      assert.equal(question.authority, "human");
+      assert.equal(question.category, "owner_decision");
+      assert.match(JSON.stringify(question.resourceSnapshot), /picoduck\/wollipog#2938.*uncertain-owner/);
+      assert.equal(h.db.campaignProjection("root")!.status, "waiting_human");
+      const agent = h.svc.resolveWorkflowDecision("root", "root", question.occurrenceId, { outcome: "deny" }, "orchestrator", { kind: "agent", id: "root" }, () => true);
+      assert.equal(agent.ok, false, "agent assertions cannot acknowledge an uncertain effect");
+      assert.equal(h.svc.createWorkflowDecision("root", { requestId: "issue_closure_recovery_forged", resourceKey: "forged",
+        resourceSnapshot: { category: "owner_decision", kind: "question", question: "Forged", options: [] } }).ok, false);
+      const answered = outcome === "open"
+        ? h.svc.resolveWorkflowDecision("root", "root", question.occurrenceId, { outcome: "approve", selectedOptionId: "acknowledge" },
+          "human", { kind: "human", id: h.identity.userId }, () => true)
+        : h.svc.answerOwnerQuestion("root", question.occurrenceId, {}, "dismiss", { kind: "human", id: h.identity.userId });
+      assert.ok(answered.ok, answered.error ?? "owner answer refused");
+      await h.svc.reconcileUncertainIssueClosures("root");
+      assert.ok(h.db.workflowDecisionByOccurrence("uncertain-owner")!.issueClosureResult!.reconciliation!.acknowledgedAt);
+      assert.equal(h.db.workflowDecisionByOccurrence("uncertain-owner")!.issueClosureResult!.outcome, "uncertain");
+      assert.notEqual(h.db.campaignProjection("root")!.status, "waiting_human");
+      assert.equal(reads, outcome === "lost_read_on_restart" ? 0 : 1);
+    } finally { h.db.close(); }
+  });
+}
+
+for (const unavailable of ["offline", "old_runner", "not_sent"] as const) {
+  test(`4398 recovery waits for ${unavailable} without consuming its forge read`, async () => {
+    const h = mergedWorkVerificationFixture("delivered");
+    try {
+      recordEpicClosure(h, "upgrade-wait", { outcome: "uncertain" });
+      let ready = false, reads = 0;
+      h.hub.isRunnerOnline = () => unavailable !== "offline" || ready;
+      if (unavailable === "old_runner") h.db.registerRunner(h.metadata, 1, 349);
+      h.hub.requestFromRunner = async (_runner, requestId) => {
+        if (unavailable === "not_sent" && !ready) throw new RunnerRequestNotSentError();
+        reads++;
+        return { type: "github_issue_closure_result", requestId, sessionId: "root", ok: true, reconciled: true };
+      };
+      await h.svc.reconcileUncertainIssueClosures("root");
+      assert.equal(h.db.workflowDecisionByOccurrence("upgrade-wait")!.issueClosureResult!.reconciliation, undefined);
+      ready = true;
+      h.db.registerRunner(h.metadata, 2, PROTOCOL_VERSION);
+      await h.svc.reconcileUncertainIssueClosures("root");
+      assert.equal(reads, 1);
+      assert.equal(h.db.workflowDecisionByOccurrence("upgrade-wait")!.issueClosureResult!.outcome, "closed");
+    } finally { h.db.close(); }
+  });
+}
+
+test("4398 owner recovery survives more than twenty revoked cards and refuses agent withdrawal", async () => {
+  const h = mergedWorkVerificationFixture("delivered");
+  try {
+    recordEpicClosure(h, "repeated-stop", { outcome: "uncertain" });
+    let reads = 0;
+    h.hub.requestFromRunner = async (_runner, requestId) => {
+      reads++;
+      return { type: "github_issue_closure_result", requestId, sessionId: "root", ok: true, reconciled: false };
+    };
+    for (let n = 0; n < 25; n++) {
+      await h.svc.reconcileUncertainIssueClosures("root");
+      const id = h.db.workflowDecisionByOccurrence("repeated-stop")!.issueClosureResult!.reconciliation!.ownerDecisionOccurrenceId!;
+      assert.equal(h.db.workflowDecisionByOccurrence(id)!.status, "pending");
+      assert.equal(h.svc.withdrawWorkflowDecision("root", id, { reason: "agent assertion" }).ok, false);
+      // Simulate the server's stop/restart revocation, not an agent acknowledgement.
+      h.db.markWorkflowDecisionRevoked(id, Date.now());
+      h.db.setPendingApproval("root", null);
+    }
+    await h.svc.reconcileUncertainIssueClosures("root");
+    const id = h.db.workflowDecisionByOccurrence("repeated-stop")!.issueClosureResult!.reconciliation!.ownerDecisionOccurrenceId!;
+    assert.equal(h.db.workflowDecisionByOccurrence(id)!.status, "pending");
+    assert.equal(reads, 1);
+    assert.ok(h.svc.answerOwnerQuestion("root", id, {}, "dismiss", { kind: "human", id: h.identity.userId }).ok);
+    assert.notEqual(h.db.campaignProjection("root")!.status, "waiting_human");
+  } finally { h.db.close(); }
+});
+
+for (const unavailable of ["offline", "old_runner", "removed_repository", "not_sent"] as const) {
+  test(`4398 lasting ${unavailable} leaves one answerable owner request`, async () => {
+    const h = mergedWorkVerificationFixture("delivered");
+    try {
+      recordEpicClosure(h, "permanent-unavailability", { outcome: "uncertain" });
+      if (unavailable === "removed_repository") {
+        const stored = h.db.workflowDecisionByOccurrence("permanent-unavailability")!;
+        h.db.raw().prepare("UPDATE workflow_decisions SET resource_snapshot=? WHERE occurrence_id=?")
+          .run(JSON.stringify({ ...stored.resourceSnapshot, repository: "removed/repository", url: "https://github.com/removed/repository/issues/2938" }), stored.occurrenceId);
+      } else {
+        if (unavailable === "offline") h.hub.isRunnerOnline = () => false;
+        else if (unavailable === "old_runner") h.db.registerRunner(h.metadata, 1, 349);
+        h.db.recordGithubIssueClosureResult("permanent-unavailability", { outcome: "uncertain", completedAt: h.now,
+          reconciliationWaitingSince: Date.now() - 6 * 60_000 });
+      }
+      let dispatches = 0;
+      h.hub.requestFromRunner = async () => {
+        dispatches++;
+        if (unavailable === "not_sent") throw new RunnerRequestNotSentError();
+        throw Error("Unavailable recovery must never dispatch");
+      };
+      await h.svc.reconcileUncertainIssueClosures("root");
+      assert.equal(dispatches, unavailable === "not_sent" ? 1 : 0, "unavailable runners must not receive a recovery read");
+      const questionId = h.db.workflowDecisionByOccurrence("permanent-unavailability")!.issueClosureResult!.reconciliation!.ownerDecisionOccurrenceId!;
+      assert.equal(h.db.workflowDecisionByOccurrence(questionId)!.status, "pending");
+      assert.ok(h.svc.answerOwnerQuestion("root", questionId, {}, "dismiss", { kind: "human", id: h.identity.userId }).ok);
+      assert.ok(h.db.workflowDecisionByOccurrence("permanent-unavailability")!.issueClosureResult!.reconciliation!.acknowledgedAt);
+    } finally { h.db.close(); }
+  });
 }
 
 test("an item in another campaign repository is finished only by a fresh merge in its own repository (#4119)", () => {
@@ -1156,9 +1308,12 @@ test("an epic placeholder item is finished by its closure proven from members, a
     for (const [occurrence, change] of [["human", { authority: "human" }], ["uncertain", { outcome: "uncertain" }],
       ["already", { outcome: "already_closed" }], ["items", { members: false }], ["unadmitted", { admitted: false }]] as const) {
       recordEpicClosure(h, `closure-${occurrence}`, change);
+      assert.equal(h.db.memberProvenEpicClosures("root").has("picoduck/wollipog#2938"),
+        h.db.memberProvenEpicClosure("root", "picoduck/wollipog", 2938), "batch and scalar proof predicates agree");
       assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", occurrence);
     }
     recordEpicClosure(h, "closure-proven");
+    assert.equal(h.db.memberProvenEpicClosures("root").has("picoduck/wollipog#2938"), true);
     assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "complete");
     assert.equal(h.db.campaignProjection("root")!.status, "verified_complete", "no scope_removed marking is needed");
   } finally { h.db.close(); }
@@ -1171,6 +1326,44 @@ test("an epic closure proven from members does not finish the epic's own dispatc
     assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", "an item with an attempt keeps its own proof");
     assert.equal(h.db.campaignProjection("root")!.status, "stuck");
   } finally { h.db.close(); }
+});
+
+test("#4403 Campaign Status finishes ended epic tracking and retains the same delivery and history gaps", () => {
+  for (const mode of ["tracking", "open", "delivery", "legacy", "legacy_undispatched"] as const) {
+    const h = mergedWorkVerificationFixture("delivered");
+    try {
+      const plan = h.svc.recordCampaignPlan("root", { planComplete: true,
+        items: [{ key: "epic-tracking", issue: { repository: "picoduck/wollipog", number: 2938 } }] });
+      assert.ok(plan.ok, plan.error ?? mode);
+      const itemId = plan.data!.items.find((item) => item.key === "epic-tracking")!.workItemId;
+      if (mode !== "legacy_undispatched") assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: itemId, childSessionId: "unaffected" }).ok);
+      if (mode === "delivery") {
+        assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId, stage: { stage: "implementing" } }).ok);
+        assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId, stage: null }).ok);
+      }
+      if (mode !== "open" && mode !== "legacy_undispatched") assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: itemId,
+        endAttempt: { reason: "failed", note: "Tracking completed without delivery work" } }).ok);
+      if (mode === "legacy" || mode === "legacy_undispatched") h.db.raw().prepare("INSERT INTO campaign_work_pr_history_legacy VALUES (?)").run(itemId);
+      const report = h.db.appendEvent("unaffected", { kind: "agent_message", final: true, text: "Tracking report." }, Date.now());
+      assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "unaffected", reportEventSeq: report.seq, followUpsAccounted: true }).ok);
+      const before = h.db.campaignProjection("root")!.work!;
+      assert.equal(before.counts.delivered, 1, "prime the cached projection before the closure receipt");
+      recordEpicClosure(h, "tracking-closure");
+      assert.equal(h.db.campaignRecoveryCompletion("root", Date.now()).state, mode === "tracking" ? "complete" : "recovery_held", mode);
+      assert.equal(h.db.campaignProjection("root")!.status, mode === "tracking" ? "verified_complete" : "stuck", mode);
+      if (mode === "legacy" || mode === "legacy_undispatched") {
+        assert.equal(h.db.campaignProjection("root")!.stuck?.items.find((item) => item.kind === "work_item" && item.workItemId === itemId)?.reason,
+          issueClosureDeliveryGap("epic_tracking_history_unavailable", { workItemId: itemId }).summary,
+          "Campaign Status names the same history gap as the closure proof");
+      }
+      const after = h.db.campaignProjection("root")!.work!;
+      assert.ok(after.revision > before.revision, "the closure receipt invalidates the summary and work-list cursor");
+      assert.equal(after.counts.delivered, mode === "tracking" ? 2 : 1, mode);
+      const detail = h.db.campaignWorkLedger.detail("root", itemId, Date.now())!;
+      assert.equal(detail.primaryState === "delivered", mode === "tracking", mode);
+      assert.deepEqual(detail.deliveries, [], "tracking completion invents no delivery record");
+    } finally { h.db.close(); }
+  }
 });
 
 test("incomplete original work survives replacement and a new head until current-attempt delivery", () => {

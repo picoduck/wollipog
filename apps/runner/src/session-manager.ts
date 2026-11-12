@@ -1,15 +1,16 @@
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
 import { isProviderCapacityFailure, PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import { artifactGuidance } from "./artifact-guidance.js";
+import { providerCommandHomeWriteSeparationDiagnostic } from "./provider-command-home-write-separation.js";
 import { shellGuidance } from "./shell-guidance.js";
 import { restartResumeId } from "./restart-resume.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { type BackgroundFollowUpView, type CampaignRetirementHold, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
-import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+import { CampaignIssueScopeRefusal, PublishedIssueMismatch, inspectCampaignFailedRun, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
 import { launchOrchestratorMeta, nextCampaignControl, validControlRevision } from "./campaign-control-order.js";
 import { boundedIssueNumbers, campaignBoundaryRepository, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
-import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
+import { executeGithubIssueClosure, inspectGithubIssueClosure, reconcileGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureLocation, GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, GitLabMergeClosuresMessage, GitLabMergeClosuresResultMessage, ForgeDecisionAction, ForgeDecisionActionMessage, ForgeDecisionActionOutcome, ForgeDecisionActionRefusalReason, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
@@ -597,6 +598,7 @@ function canCarrySlashCommandCatalog(
  * before emitting the corresponding runner receipt. */
 export interface DurableCommandLifecycle {
   readonly commandId: string;
+  readonly issueClosureResume?: true;
   queued(error?: string, code?: DurableSessionCommandErrorCode): void;
   started(userEventSeq?: number): void;
   beginSteering?(): boolean | void;
@@ -1944,6 +1946,7 @@ export class SessionManager {
   private readonly stateDir: string;
   /** Closures at a Location waiting at their mutation fence for the control plane's commit (#4119). */
   private readonly preparedLocationClosures = new Map<string, { commit: () => void; finished: Promise<GithubIssueClosureResultMessage> }>();
+  private readonly preparedRootClosures = new Map<string, { commit: () => void; finished: Promise<GithubIssueClosureResultMessage> }>();
   /** Evidence for widening the provider-history classifier (#876). Nothing reads it to decide. */
   private readonly unclassifiedRejections: UnclassifiedRejectionJournal;
   private readonly providerStateReconcileTimer: ReturnType<typeof setInterval>;
@@ -10175,6 +10178,7 @@ export class SessionManager {
         this.send({ type: "review_session_update", sessionId, state: "running", admission });
       }
       const reviewWriter = this.beginProviderReviewWriter(meta, isolation);
+      this.log(providerCommandHomeWriteSeparationDiagnostic(meta));
       client = this.createDriver(
         meta.driver,
         {
@@ -11879,6 +11883,12 @@ export class SessionManager {
       prompt.durable?.beginSteering && prompt.durable.steeringRejected);
   }
 
+  private isSteerableIssueClosureResume(entry: ActiveSession, prompt: QueuedPrompt | undefined): boolean {
+    const meta = this.store.readMeta(entry.sessionId);
+    return Boolean(meta && isOrchestratorLaunch(meta) && prompt?.durable?.issueClosureResume === true &&
+      prompt.durable.beginSteering && prompt.durable.steeringRejected);
+  }
+
   /** #4022: direct text from the child's controlling Orchestrator into a turn its control plane
    * started from the durable prompt outbox. The control plane proves the ancestry and names the
    * exact command; an automation's command id never matches, and the steering attempt keeps its
@@ -11896,7 +11906,7 @@ export class SessionManager {
     source: QueuedPrompt | undefined,
     request: SteeringRequest | undefined,
   ): boolean {
-    return Boolean(entry.currentDurable) && !this.isSteerableAsyncAnswer(source) &&
+    return Boolean(entry.currentDurable) && !this.isSteerableAsyncAnswer(source) && !this.isSteerableIssueClosureResume(entry, source) &&
       !this.isControllingOrchestratorSteer(entry, request);
   }
 
@@ -11968,7 +11978,7 @@ export class SessionManager {
       };
     }
     if (!prompt) return { eligible: true };
-    if ((prompt.durable && !this.isSteerableAsyncAnswer(prompt)) ||
+    if ((prompt.durable && !this.isSteerableAsyncAnswer(prompt) && !this.isSteerableIssueClosureResume(entry, prompt)) ||
         prompt.sessionCommand || (prompt.syntheticRecovery || prompt.providerRecovery)) {
       return {
         eligible: false,
@@ -21539,6 +21549,7 @@ export class SessionManager {
     }
     try {
       const run = issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {});
+      if (message.operation === "failed_run_inspect") return { ...base, ok: true, ...await inspectCampaignFailedRun(run, message.evidence) };
       if (message.operation === "publication_inspect") return { ...base, ok: true, ...await inspectCampaignPublication(run, message) };
       if (message.operation === "inspect") {
         if (message.epic !== undefined && (!Number.isSafeInteger(message.epic) || message.epic < 1) ||
@@ -21591,7 +21602,9 @@ export class SessionManager {
         controlRevision: ordered.controlRevision ?? null }));
       return { ...base, ok: true, repository, revision: scope.revision };
     } catch (error) {
-      return { ...base, ok: false, error: error instanceof CampaignIssueScopeRefusal ? error.message
+      return { ...base, ok: false,
+        ...(message.operation === "inspect" && message.publication ? { publicationFailure: error instanceof PublishedIssueMismatch ? error.field : "read_failed" as const } : {}),
+        error: error instanceof CampaignIssueScopeRefusal ? error.message
         : "Cannot inspect or synchronize campaign scope; verify origin and gh or glab authentication" };
     }
   }
@@ -21696,12 +21709,24 @@ export class SessionManager {
     const base = { type: "github_issue_closure_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     if (message.location) return this.githubIssueClosureAtLocation(message, message.location, base, options.locationCommitWaitMs);
     const meta = this.store.readMeta(message.sessionId);
-    if (message.operation === "commit") return { ...base, ok: false, failure: "runner_failed", error: "Only a closure at a Location is committed separately" };
+    if (message.operation === "commit") {
+      const prepared = this.preparedRootClosures.get(`${message.sessionId}:${message.occurrenceId}`);
+      if (!prepared) return { ...base, ok: false, failure: "runner_failed", error: "No root closure is prepared for this approval; nothing was written" };
+      prepared.commit();
+      return { ...await prepared.finished, ...base };
+    }
     if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a runner-local Orchestrator repository" };
     }
     if (this.campaignHostTargetRefusal(meta)) {
       return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a valid local or SSH host execution target belonging to its runner" };
+    }
+    // A consumed operation's read-only outcome does not depend on current mutation scope.
+    if (message.operation === "reconcile") {
+      try {
+        return { ...base, ok: true, reconciled: await reconcileGithubIssueClosure(message.snapshot, message.consumedAt,
+          issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {})) };
+      } catch (error) { return issueClosureFailure(base, error); }
     }
     const issue = message.operation === "inspect" ? message.issue : message.snapshot.issue;
     if (!meta.orchestrator.issueNumbers?.includes(issue)) {
@@ -21723,13 +21748,16 @@ export class SessionManager {
     const run = issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {});
     try {
       if (message.operation === "inspect") {
-        const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests, message.epicMembers === true);
+        const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests, message.epicMembers === true, message.campaignPullRequests);
         if (meta.orchestrator.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the authorized scope" };
         return { ...base, ok: true, inspection };
       }
       if (meta.orchestrator.issueScope && message.snapshot.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the authorized scope" };
       const digest = createHash("sha256").update(JSON.stringify(message.snapshot)).digest("hex");
-      const result = await executeGithubIssueClosure(message.snapshot, run, () => {
+      if (message.snapshot.campaignPullRequests !== undefined && (message.prepare !== true || message.campaignPullRequests === undefined)) {
+        return { ...base, ok: false, failure: "campaign_authority_changed", error: "Filtered closure requires fresh campaign PR context and a separate commit" };
+      }
+      const begin = () => {
         const fresh = this.store.readMeta(message.sessionId);
         const attempts = fresh?.githubIssueClosureAttempts ?? {};
         if (!fresh || attempts[message.occurrenceId] || Object.keys(attempts).length >= 1000 ||
@@ -21746,7 +21774,31 @@ export class SessionManager {
         return this.store.patchMeta(message.sessionId, {
           githubIssueClosureAttempts: { ...attempts, [message.occurrenceId]: digest },
         }) !== null;
-      });
+      };
+      if (message.prepare === true) {
+        const key = `${message.sessionId}:${message.occurrenceId}`;
+        if (this.preparedRootClosures.has(key)) return { ...base, ok: false, failure: "runner_failed", error: "This root closure is already prepared; nothing more was written" };
+        let commit = () => {};
+        let answerCommit = (_granted: boolean) => {};
+        const committed = new Promise<boolean>((resolve) => { answerCommit = resolve; });
+        let atFence = () => {};
+        const reachedFence = new Promise<"prepared">((resolve) => { atFence = () => resolve("prepared"); });
+        const finished = executeGithubIssueClosure(message.snapshot, run, async () => {
+          const timer = setTimeout(() => answerCommit(false), options.locationCommitWaitMs ?? LOCATION_ISSUE_CLOSURE_COMMIT_WAIT_MS);
+          timer.unref();
+          commit = () => { clearTimeout(timer); answerCommit(true); };
+          atFence();
+          return await committed && begin();
+        }, message.campaignPullRequests).then((result): GithubIssueClosureResultMessage => {
+          this.log(JSON.stringify({ event: "github_issue_closure_result", entryPoint: "root_commit", sessionId: message.sessionId,
+            occurrenceId: message.occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
+          return { ...base, ok: true, result };
+        }, (error) => issueClosureFailure(base, error)).finally(() => this.preparedRootClosures.delete(key));
+        this.preparedRootClosures.set(key, { commit: () => commit(), finished });
+        const first = await Promise.race([reachedFence, finished]);
+        return first === "prepared" ? { ...base, ok: true, prepared: true } : first;
+      }
+      const result = await executeGithubIssueClosure(message.snapshot, run, begin);
       this.log(JSON.stringify({ event: "github_issue_closure_result", sessionId: message.sessionId,
         occurrenceId: message.occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
       return { ...base, ok: true, result };
@@ -21788,14 +21840,20 @@ export class SessionManager {
     }
     const run = issueClosureRun({ kind: "native" }, cwd);
     try {
+      if (message.operation === "reconcile") return { ...base, ok: true,
+        reconciled: message.snapshot.repository.toLowerCase() === repository &&
+          await reconcileGithubIssueClosure(message.snapshot, message.consumedAt, run) };
       if (message.operation === "inspect") {
-        const inspection = await inspectGithubIssueClosure(message.issue, run, message.deliveryPullRequests, message.epicMembers === true);
+        const inspection = await inspectGithubIssueClosure(message.issue, run, message.deliveryPullRequests, message.epicMembers === true, message.campaignPullRequests);
         if (inspection.repository.toLowerCase() !== repository) return { ...base, ok: false, failure: "repository_changed", error: "The Location's repository differs from the one this closure names" };
         return { ...base, ok: true, inspection };
       }
       if (message.snapshot.repository.toLowerCase() !== repository) return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the Location's" };
       if (this.preparedLocationClosures.has(message.occurrenceId)) return { ...base, ok: false, failure: "runner_failed", error: "This approval's closure is already prepared; nothing more was written" };
       const { occurrenceId, snapshot } = message;
+      if (snapshot.campaignPullRequests !== undefined && message.campaignPullRequests === undefined) {
+        return { ...base, ok: false, failure: "campaign_authority_changed", error: "Filtered closure requires fresh campaign PR context" };
+      }
       const digest = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
       let commit = () => {};
       let answerCommit = (_granted: boolean) => {};
@@ -21810,7 +21868,7 @@ export class SessionManager {
         atFence();
         // Nothing awaits between the commit and the durable record, and the mutation follows it.
         return await committed && this.beginLocationIssueClosure(occurrenceId, digest);
-      }).then((result): GithubIssueClosureResultMessage => {
+      }, message.campaignPullRequests).then((result): GithubIssueClosureResultMessage => {
         this.log(JSON.stringify({ event: "github_issue_closure_result", sessionId: message.sessionId, workspaceId: location.workspaceId,
           occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
         return { ...base, ok: true, result };

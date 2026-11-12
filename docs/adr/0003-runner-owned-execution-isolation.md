@@ -88,6 +88,29 @@ future execution-target sandbox, not a dishonest Job Object claim.
 
 ## Security boundary
 
+### Provider and command credential-home writes (#3922)
+
+The runner does not yet enforce a separate credential-home write boundary for model command
+subprocesses while allowing the provider process to refresh credentials and persist state.
+The `providerCommandHomeWriteSeparation` report describes only that runner-owned separation.
+It does not describe, disable, or replace a provider's nested command sandbox. A missing report
+from an older runner is unknown, never evidence of protection. Configuration, a successful
+provider launch, or a failed nested-sandbox probe cannot establish this capability.
+
+| Harness / Context | Current Runner Separation | Reason |
+| --- | --- | --- |
+| Claude Code, Native Linux/macOS | Unprotected | Built-in Bash spawning is not mediated by a runner command boundary |
+| Codex App Server, Native Linux/macOS | Unprotected | The runner does not replace built-in command execution; `externalSandbox` supplies no inner enforcement |
+| Pi RPC, Native Linux/macOS | Unprotected | Permission interception does not replace the native command backend |
+| ACP, Native Linux/macOS | Unprotected | Client terminals are mediated, but adapter-owned execution is not covered |
+| Native Windows, WSL, Other Hosts | Unavailable | No runner backend implements this separation in these contexts |
+
+The provider's existing writes remain unchanged: credential temp-file-and-rename refresh,
+transcripts/session state, and App Server configuration writes. Reads remain unchanged too.
+The issue stays open until enforcement and provider-versus-command conformance are delivered.
+See [the enforcement design](../provider-command-home-write-separation.md) for the primary-source
+audit, remaining dependencies, and synthetic verification plan.
+
 The bwrap and Seatbelt profiles are **write containment**, not read confidentiality. The read-only root remains visible so
 provider CLIs can load their installed runtimes, configuration, subscription credentials, certificates,
 and toolchains. Network denial blocks exfiltration through the isolated process namespace, but inherited

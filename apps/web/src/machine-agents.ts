@@ -149,6 +149,7 @@ export function agentNotice(
 
 /** The Sign-In fact: whether the agent is signed in, and for Claude Code or Codex, how it bills. */
 export function agentSignInFact(agent: AgentDefinition): string {
+  if (agent.providerReadiness && agent.providerReadiness.authentication === "unknown") return "Unknown";
   if (agent.authStatus === "unauthenticated" || agent.claudeCode?.status === "unauthenticated") return "Not Signed In";
   if (agent.authStatus !== "authenticated" && agent.claudeCode?.auth.status !== "authenticated") return "Unknown";
   const billing = agent.claudeCode?.auth.billingSource ?? agent.codexBillingSource;

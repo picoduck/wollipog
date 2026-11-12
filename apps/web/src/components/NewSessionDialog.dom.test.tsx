@@ -1423,7 +1423,7 @@ test("Agent lists Ready on the machine first, led by the saved default, then Nee
     assert.match(options[3]!.textContent ?? "", /Not installed on runner-1\./);
     assert.deepEqual(options.map((option) => option.getAttribute("aria-disabled")), [null, null, null, "true", "true"]);
     const footer = comboboxOptions(fixture.container, "Agent").at(-1)!;
-    assert.equal(footer.textContent, "Set Up Agents in Connections", "the footer action is the list's last row");
+    assert.equal(footer.textContent, "Account Setup…", "the footer action is the list's last row");
 
     const active = () => input.getAttribute("aria-activedescendant");
     for (let step = 0; step < 3; step += 1) await act(async () => { pressComboboxKey(input, "ArrowDown"); });
@@ -1458,7 +1458,7 @@ test("on a coarse pointer the Agent sheet shows the same groups, and arrows reac
       assert.ok(listbox);
       assert.deepEqual(agentGroups(listbox), SETUP_GROUPS);
       const rows = [...listbox.querySelectorAll<HTMLElement>('[role="option"]')];
-      assert.equal(rows.at(-1)?.textContent, "Set Up Agents in Connections");
+      assert.equal(rows.at(-1)?.textContent, "Account Setup…");
       const filter = fixture.container.querySelector<HTMLInputElement>('input[role="combobox"][aria-label="Search Agent Options"]');
       assert.ok(filter);
       const press = async (key: string) => act(async () => {
@@ -1506,7 +1506,7 @@ test("two installations of one agent name their folder on the second line, not i
   }
 });
 
-test("Set Up Agents in Connections closes New Session and opens the selected machine (#2953)", async () => {
+test("keyboard Account Setup returns to the existing New Session draft (#4438)", async () => {
   domWindow.localStorage.clear();
   const fixture = await mountFixture({ runners: [setupRunner] });
   try {
@@ -1519,8 +1519,14 @@ test("Set Up Agents in Connections closes New Session and opens the selected mac
     const footer = comboboxOptions(fixture.container, "Agent").at(-1)!;
     assert.equal(input.getAttribute("aria-activedescendant"), footer.id, "End reaches the footer action");
     await act(async () => { pressComboboxKey(input, "Enter"); });
-    assert.equal(dialogCloses.count, closesBefore + 1, "New Session is asked to close");
-    assert.deepEqual(navigated, [{ name: "runners", section: "machines", machineId: setupRunner.runnerId }]);
+    assert.equal(dialogCloses.count, closesBefore, "New Session stays mounted");
+    assert.deepEqual(navigated, []);
+    // React.lazy loads the actual Machine account surface, rather than replacing navigation.
+    await act(async () => { await import("./AccountSetupDialog.js"); });
+    assert.ok(buttonNamed(fixture.container, "Done"));
+    await act(async () => { buttonNamed(fixture.container, "Done")!.click(); });
+    assert.equal(combobox(fixture.container, "Project").value, project.name);
+    assert.equal(dialogCloses.count, closesBefore);
   } finally {
     await unmountFixture(fixture);
   }
@@ -3337,7 +3343,7 @@ test("an ambiguous Native TUI launch retains one session and prevents duplicate 
     assert.equal(notice.closest(".modal-body") !== null, true, "the notice is in the body");
     assert.equal(notice.parentElement?.lastElementChild === notice, true, "at the body's end, above the footer");
     const footerButtons = [...fixture.container.querySelectorAll(".modal-foot button")].map((button) => button.textContent);
-    assert.deepEqual(footerButtons, ["Cancel", "Create Session"], "the footer has only Cancel and Create Session");
+    assert.deepEqual(footerButtons, ["Account Setup…", "Cancel", "Create Session"], "setup remains separate from the creation actions");
     assertNoDomNode(fixture.container.querySelector(".modal-foot .form-error"));
 
     await assertCreateRefused(fixture);

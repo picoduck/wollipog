@@ -1,5 +1,19 @@
 # SSH runner lifecycle and durable-service design
 
+## Provider Setup and Connection Health
+
+Protocol v357 reports timestamped installation compatibility, authentication observations and
+bounded reasons for provider setup. Busy or inaccessible accounts remain uninspected, never
+implicitly signed out. Older peers omit these observations and remain unknown. Opening setup
+does not change account defaults, profile grants or session bindings.
+
+SSH registration establishes an online transport. `BoxView.harnessReadiness` separately records
+checking, ready or failed replacement verification, retaining installation/account regressions
+and discovery timeouts. Rediscovery can clear a readiness failure without replacing the tunnel.
+The service upgrader still enforces its independent fresh-discovery baseline and rollback checks;
+an online transport alone does not certify an upgrade. Conservative legacy updater facts remain
+available for older peers.
+
 ## Shipped policy: supervised tunnel mode
 
 An SSH-managed box currently runs in **supervised tunnel mode**. The control plane owns one local

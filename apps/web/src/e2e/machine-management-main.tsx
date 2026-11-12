@@ -171,6 +171,21 @@ if (signInFixture && runner.providerAccounts) {
     },
   ];
 }
+// Successful new-sign-in scenarios need compatible CLIs, even with no ready default account.
+if (new URLSearchParams(window.location.search).get("providerSetup") === "installed") {
+  runner.agents.push({ id: "claude", name: "Claude Code", command: "claude", args: [], env: {},
+    driver: "claude-code", context: { kind: "native" }, available: false, authStatus: "unauthenticated",
+    claudeCode: { status: "unauthenticated", effortLevels: [], permissionModes: [], streamJsonInput: true,
+      streamJsonImages: true, controlProtocol: true, forkSession: true, replayUserMessages: true,
+      auth: { status: "unauthenticated", billingSource: "unknown" } },
+    providerReadiness: { checkedAt: Date.now(), installation: "compatible", installationAdmission: "permitted",
+      authentication: "unauthenticated", reason: "sign_in_required" } });
+  runner.agents.push({ id: "codex", name: "Codex", command: "codex", args: [], env: {},
+    driver: "codex-app-server", context: { kind: "native" }, available: false, authStatus: "unauthenticated",
+    codexAppServer: { status: "supported", appServerAvailable: true },
+    providerReadiness: { checkedAt: Date.now(), installation: "compatible", installationAdmission: "permitted",
+      authentication: "unauthenticated", reason: "sign_in_required" } });
+}
 // Provider profiles (#3239): one account in each access state, and Codex Solo left a legacy HOME.
 if (new URLSearchParams(window.location.search).has("profiles") && runner.providerAccounts) {
   // A Windows runner refuses every adoption, so the Machine that adopts is a Linux one (#3240).
@@ -348,6 +363,9 @@ if (sshState && runner) {
   };
   if (sshState === "connecting") runner = null;
   else if (sshState !== "online" && sshState !== "legacy") Object.assign(runner, { status: "offline", lastSeen: Date.now() - 4 * 60_000 });
+}
+if (box && fixtureParams.has("readinessFailure")) {
+  box.harnessReadiness = { state: "failed", reason: "authentication_regressed", checkedAt: Date.now() };
 }
 /** A Machine Settings field whose saves fail until cleared: a partial save (#2991). */
 let failingSettingsSave: "capacity" | null = null;
@@ -717,6 +735,18 @@ const client = {
   ) => {
     if (!runner) throw new Error("runner not found");
     // Add Account's request failure (#2995): a label of "Unreachable" is refused as a timeout.
+    const startRefusal = new URLSearchParams(window.location.search).get("startRefusal");
+    if (startRefusal === "offline") throw new ApiError("runner is offline", 409);
+    if (startRefusal === "publication") throw new ApiError("private storage exception", 503, "PROVIDER_PUBLICATION_UNAVAILABLE");
+    const directoryFailure = new URLSearchParams(window.location.search).get("directoryFailure");
+    if (directoryFailure) {
+      const [component, reason] = directoryFailure.split(":");
+      throw new ApiError("Private peer exception /fixture/secret", 409, undefined, {
+        directoryDiagnostic: directoryFailure === "absent" ? undefined : {
+          code: "managed_profile_directory", component, reason, path: "/fixture/secret",
+        },
+      });
+    }
     if ("label" in body && body.label === "Unreachable") throw new ApiError("The runner did not answer in time.", 504);
     const existing = "accountId" in body
       ? runner.providerAccounts?.find((account) => account.id === body.accountId)

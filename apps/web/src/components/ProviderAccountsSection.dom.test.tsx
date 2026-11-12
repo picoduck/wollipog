@@ -223,7 +223,7 @@ test("offline account defaults save now and switching conflicts reload the serve
     assert.deepEqual(writes[1], { enabled: false, expectedRevision: 4 });
     assert.equal(toggle.getAttribute("aria-checked"), "false", "a conflict shows the server's current value despite stale props");
     assert.match(ui.container.textContent ?? "", /switch now shows the saved value/);
-    const add = ui.button(ui.container, "Add Account…");
+    const add = ui.button(ui.container, "Add Separate Sign-In…");
     assert.equal(add.disabled, true);
     assert.equal(ui.container.querySelector(`#${add.getAttribute("aria-describedby")}`)?.textContent, "This machine is offline.");
   } finally { await ui.unmount(); }
@@ -455,11 +455,11 @@ test("a running retry wins over an earlier failure the control plane kept for th
   }
 });
 
-test("with no accounts the section shows its intro and Add Account…; offline, Add Account… is disabled with the reason", async () => {
+test("with no accounts the section shows its intro and Add Separate Sign-In…; offline, Add Separate Sign-In… is disabled with the reason", async () => {
   const ui = await render({ runner: runnerView({ providerAccounts: [] }), online: false });
   try {
-    assert.match(ui.container.textContent ?? "", /Sign in to Claude or Codex on this machine without opening a shell\./);
-    const add = ui.button(ui.container, "Add Account…");
+    assert.match(ui.container.textContent ?? "", /A separate sign-in is optional\./);
+    const add = ui.button(ui.container, "Add Separate Sign-In…");
     assert.equal(add.disabled, true);
     const reason = ui.container.querySelector(`#${add.getAttribute("aria-describedby")}`);
     assert.equal(reason?.textContent, "This machine is offline.");
@@ -966,7 +966,7 @@ test("removal refusals read as one sentence, the raw error behind Show Details",
 // --- Add Account ---
 
 async function openAdd(ui: Awaited<ReturnType<typeof render>>) {
-  await act(async () => { ui.button(ui.container, "Add Account…").click(); });
+  await act(async () => { ui.button(ui.container, "Add Separate Sign-In…").click(); });
   await ui.settle();
   const dialog = ui.dialog()!;
   assert.ok(dialog);
@@ -1048,10 +1048,63 @@ test("Add Account maps the runner's duplicate refusals to the field, and other f
     assert.equal(add.fieldError(), null);
     const notice = add.dialog.querySelector<HTMLElement>('.notice[role="alert"]')!;
     assert.equal(notice.querySelector(".notice-title")?.textContent, "Couldn't Start the Sign-In");
-    assert.match(notice.textContent ?? "", /The runner did not answer\./);
+    assert.match(notice.textContent ?? "", /The runner did not answer in time\./);
   } finally {
     await ui.unmount();
   }
+});
+
+test("control-plane start admission failures stay useful in Add Account", async () => {
+  for (const [cause, expected] of [
+    [new ApiError("runner is offline", 409), /Machine is offline/],
+    [new ApiError("This machine needs a newer runner for provider sign-in. Update and restart the runner.", 409), /Update and restart/],
+    [new ApiError("secret", 503, "PROVIDER_PUBLICATION_UNAVAILABLE"), /control plane.*storage/],
+  ] as const) {
+    const api = client({ login: async () => { throw cause; } });
+    const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+    try {
+      const add = await openAdd(ui);
+      await add.type("Draft");
+      await add.submit();
+      assert.match(add.dialog.textContent ?? "", expected);
+      assert.doesNotMatch(add.dialog.textContent ?? "", /Preserve any existing profile directories|secret/);
+    } finally { await ui.unmount(); }
+  }
+});
+
+test("an existing account's Sign In uses the same sanitized start failure seam", async () => {
+  const api = client({ login: async () => { throw new ApiError("secret /private", 409, undefined, {
+    directoryDiagnostic: { code: "managed_profile_directory", component: "profile_home", reason: "unavailable" },
+  }); } });
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+  try {
+    await act(async () => ui.button(ui.row("Personal"), "Sign In").click());
+    await ui.settle();
+    assert.match(ui.notice()?.textContent ?? "", /the account directory could not be inspected/);
+    assert.doesNotMatch(ui.notice()?.textContent ?? "", /secret|\/private/);
+    assert.equal(api.calls.length, 1);
+  } finally { await ui.unmount(); }
+});
+
+test("Add Account keeps the draft and provider on structured start refusal without further requests", async () => {
+  const api = client({ login: async () => { throw new ApiError("secret /private", 409, undefined, {
+    directoryDiagnostic: { code: "managed_profile_directory", component: "manager_root", reason: "wrong_owner", path: "/private" },
+  }); } });
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+  try {
+    const add = await openAdd(ui);
+    await add.type("Draft");
+    await add.submit();
+    assert.match(add.dialog.textContent ?? "", /Wollipog's main directory belongs to a different OS user/);
+    assert.doesNotMatch(add.dialog.textContent ?? "", /secret|\/private/);
+    assert.equal(add.dialog.querySelector("input")?.value, "Draft");
+    assert.equal(api.calls.length, 1);
+    await ui.settle();
+    assert.equal(api.calls.length, 1);
+    await act(async () => ui.button(add.dialog, "Cancel").click());
+    await ui.settle();
+    assertNoDomNode(ui.dialog());
+  } finally { await ui.unmount(); }
 });
 
 test("a label held by a running new-account sign-in is refused without a request", async () => {
@@ -1853,6 +1906,34 @@ test("an Owner can copy a Codex API-key sign-in after a confirmation naming the 
     assert.deepEqual(api.calls, [], "no sign-in started");
     assert.ok(ui.toasts().some((toast) => toast.includes("Sign-in copied to the new profile.")));
     assertNoDomNode(ui.dialog(), "success closes the dialog");
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("a missing CLI blocks new sign-in while an admitted API-key copy still requires confirmation", async () => {
+  const api = importClient();
+  const ui = await render({ runner: runnerView({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.providerSetupReadiness,
+    agentsRefreshed: true, runtime: IMPORT_RUNTIME }), api: api.client });
+  try {
+    const add = await openAdd(ui);
+    await chooseRadio(ui, add.dialog, "Codex");
+    assert.equal(ui.button(add.dialog, "Start Sign-In").disabled, true);
+    assert.match(add.dialog.textContent ?? "", /Install Codex on this machine/);
+    await chooseRadio(ui, add.dialog, "Copy Existing Sign-In");
+    assert.equal(ui.button(add.dialog, "Copy Sign-In").disabled, false);
+    assert.doesNotMatch(add.dialog.textContent ?? "", /Installation Needed/);
+    await chooseRadio(ui, add.dialog, "New Sign-In");
+    assert.equal(ui.button(add.dialog, "Start Sign-In").disabled, true);
+    await chooseRadio(ui, add.dialog, "Copy Existing Sign-In");
+    await add.type("Copied");
+    await act(async () => { ui.button(add.dialog, "Copy Sign-In").click(); });
+    await ui.settle();
+    assert.deepEqual(api.imports, [], "an installation fact never bypasses copy confirmation");
+    await act(async () => { ui.button(dialogs().at(-1)!, "Copy Sign-In").click(); });
+    await ui.settle();
+    assert.equal(api.imports.length, 1);
+    assert.deepEqual(api.calls, [], "copy never starts a sign-in command");
   } finally {
     await ui.unmount();
   }

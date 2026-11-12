@@ -1,3 +1,6 @@
+import { createExtendedSkillsManagement } from "./skill-extended-management.js";
+import type { SkillApplicationService } from "./skills-management.js";
+import { createSkillsManagement } from "./skills-management.js";
 /**
  * REST surface for the managed skill library plus the per-machine sync trigger, and the shared
  * push-on-change helper. Registered from index.ts next to the other /api routes; extracted as a
@@ -6,23 +9,13 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { SkillImportConflictError } from "./db.js";
 import { registerSkillVersionPolicyRoutes } from "./skill-version-policy-route.js";
-import { registerSkillGitRoutes } from "./skill-git-route.js";
-import { registerMachineSkillRoutes } from "./skill-machine-route.js";
-import { registerSkillDriftRoutes } from "./skill-drift-route.js";
-import { registerSkillBuiltInRoutes, withSkillRecommendation } from "./skill-built-in-route.js";
 import type { BuiltInSkill } from "./built-in-skills.js";
-import { listOrphanedSkillCopies } from "./skill-orphan-route.js";
-import { skillStateResponse } from "./skill-edited-copy.js";
-import { deploymentImpactRefusal } from "./skill-deployment-impact.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   SKILL_MAX_TOTAL_BYTES,
   runnerCapabilityRequirementError,
   runnerSupportsProtocol,
-  type ResourceScope,
-  type SkillInvocationPolicy,
   type SkillsSyncContentMessage,
   type SkillsSyncManifestMessage,
   type SkillsSyncNeedMessage,
@@ -30,19 +23,15 @@ import {
 } from "@wollipog/protocol";
 import type {
   ControlPlaneDb,
-  SkillAssignmentScopeKind,
-  SkillAssignmentView,
 } from "./db.js";
 import type { Hub } from "./hub.js";
 import type { RunnerRequestResult } from "./hub.js";
 import type { HumanPrincipal, AuthPrincipal } from "./identity.js";
 import {
-  parseSkillAgentSelector,
   resolveDesiredSkillSnapshot,
   resolveDesiredSkills,
   SKILLS_SYNC_MAX_TOTAL_BYTES,
   skillsSyncMessageBytes,
-  validateSkillPayload,
 } from "./skills.js";
 
 /** The narrow hub surface the skill routes need (mockable in tests). */
@@ -296,6 +285,7 @@ export function makeSkillsSyncPusher(deps: {
 }
 
 export interface SkillsRouteDeps {
+  extendedManagement?: SkillApplicationService;
   db: ControlPlaneDb;
   hub: SkillsHub;
   requestHuman(req: FastifyRequest): HumanPrincipal | null;
@@ -305,499 +295,23 @@ export interface SkillsRouteDeps {
   builtInSkills?: readonly BuiltInSkill[];
 }
 
-/** Skill creation ownership defaults exactly like project creation: organization scope for
- * owners/admins, private scope otherwise. */
-function defaultSkillScope(principal: HumanPrincipal): ResourceScope {
-  return {
-    organizationId: principal.organizationId,
-    owner: principal.role === "owner" || principal.role === "admin"
-      ? { kind: "organization", organizationId: principal.organizationId }
-      : { kind: "user", userId: principal.userId },
-  };
-}
-
-/** The one refusal for an invalid selector, on create and on update alike. */
-const AGENT_SELECTOR_ERROR = "agentSelector must be {kind:'all'}, {kind:'driver',driver}, or {kind:'agent',agentId}";
-
-function parseInvocation(value: unknown): SkillInvocationPolicy | null | undefined {
-  if (value === undefined) return undefined;
-  return value === "agent" || value === "manual" ? value : null;
-}
-
-function parseNote(value: unknown): string | null | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string" || value.length > 2000) return null;
-  return value;
-}
-
 export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps): void {
-  registerSkillGitRoutes(app, deps);
-  registerMachineSkillRoutes(app, deps);
-  registerSkillDriftRoutes(app, deps);
   registerSkillVersionPolicyRoutes(app, deps);
-  registerSkillBuiltInRoutes(app, deps, deps.builtInSkills ?? []);
-  const { db, hub, pushSkillsSync } = deps;
-
-  /** Re-sync every machine whose desired set may have changed. Runner-scoped assignment
-   * mutations touch exactly one machine; everything else fans out (the pusher itself
-   * no-ops for offline or incapable runners). */
-  const pushAffected = (assignment?: Pick<SkillAssignmentView, "scopeKind" | "runnerId">): void => {
-    if (assignment?.scopeKind === "runner" && assignment.runnerId) {
-      pushSkillsSync(assignment.runnerId);
-      return;
-    }
-    for (const runner of db.listRunners()) pushSkillsSync(runner.runnerId);
-  };
-
-  /** An assignment is visible and mutable only to principals who can access the referenced skill
-   * AND, for runner-scoped rows, that runner — otherwise a skill-visible assignment would leak
-   * (and let a caller redeploy against) a machine the principal cannot access. */
-  const canAccessAssignment = (principal: AuthPrincipal, assignment: SkillAssignmentView): boolean =>
-    db.canAccessSkill(principal, assignment.skillId) &&
-    (assignment.scopeKind !== "runner" || !assignment.runnerId ||
-      db.canAccessRunner(principal, assignment.runnerId));
-
   /* ------------------------------ Skill library ------------------------------ */
 
   // Per-resource authorization mirrors /api/projects exactly: listings filter to the caller's
   // accessible scopes (db.canAccessSkill ≙ db.canAccessProject) and an inaccessible id answers
   // 404 "not found" — never 403 — so foreign-organization callers cannot probe for existence.
 
-  app.get("/api/skills", async (req) => {
-    const principal = deps.requestPrincipal(req);
-    if (!principal) return { skills: [] };
-    const dismissed = principal.kind === "human" ? db.skillRecommendationDismissals(principal.userId) : undefined;
-    return {
-      skills: db.listSkillsForPrincipal(principal)
-        .map((skill) => withSkillRecommendation(db, principal, skill, dismissed)),
-    };
-  });
+  const management = createSkillsManagement(deps);
+  for (const key of management.handlers.keys()) {
+    const [method, url] = key.split(" ");
+    app.route({ method: method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE", url: url!, handler: async (req, reply) => {
+      const principal = method === "GET" ? deps.requestPrincipal(req) : deps.requestHuman(req);
+      const result = await management.execute(key, {principal, params: req.params, body: req.body, query: req.query});
+      return reply.code(result.status).send(result.body);
+    }});
+  }
 
-  app.post("/api/skills", async (req, reply) => {
-    const principal = deps.requestHuman(req);
-    if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    const body = (req.body ?? {}) as {
-      name?: unknown; description?: unknown; groupId?: unknown; files?: unknown; note?: unknown;
-    };
-    const validated = validateSkillPayload({ name: body.name, description: body.description, files: body.files });
-    if (!validated.ok) return reply.code(400).send({ error: validated.error });
-    if (body.groupId !== undefined && body.groupId !== null && typeof body.groupId !== "string") {
-      return reply.code(400).send({ error: "groupId must be a string" });
-    }
-    if (typeof body.groupId === "string" && db.skillGroupScope(body.groupId) && !db.canAccessSkillGroup(principal, body.groupId)) {
-      return reply.code(404).send({ error: "skill group not found" });
-    }
-    const note = parseNote(body.note);
-    if (note === null) return reply.code(400).send({ error: "note must be 2000 characters or fewer" });
-    if (db.getSkillByName(validated.name)) {
-      return reply.code(409).send({ error: "a skill with this name already exists" });
-    }
-    let skill;
-    try {
-      skill = db.createSkill({
-        name: validated.name,
-        description: validated.description,
-        groupId: (body.groupId as string | null | undefined) ?? null,
-        files: validated.files,
-        manifest: validated.manifest,
-        digest: validated.digest,
-        note,
-        scope: defaultSkillScope(principal),
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "skill creation failed";
-      return reply.code(/already exists/.test(message) ? 409 : 400).send({ error: message });
-    }
-    pushAffected();
-    return reply.code(201).send({ skill });
-  });
-
-  app.get("/api/skills/:id", async (req, reply) => {
-    const principal = deps.requestPrincipal(req);
-    const id = (req.params as { id: string }).id;
-    if (!principal || !db.canAccessSkill(principal, id)) {
-      return reply.code(404).send({ error: "skill not found" });
-    }
-    const skill = db.getSkill(id);
-    if (!skill) return reply.code(404).send({ error: "skill not found" });
-    const latestVersion = skill.latestVersion ? db.getSkillVersion(skill.latestVersion.id) : null;
-    return {
-      skill: withSkillRecommendation(db, principal, skill),
-      latestVersion,
-      assignments: db.listSkillAssignments(id)
-        .filter((assignment) => canAccessAssignment(principal, assignment)),
-    };
-  });
-
-  app.put("/api/skills/:id", async (req, reply) => {
-    const principal = deps.requestHuman(req);
-    if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    const id = (req.params as { id: string }).id;
-    if (!db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
-    const body = (req.body ?? {}) as { description?: unknown; groupId?: unknown };
-    if (body.description !== undefined && body.description !== null &&
-        (typeof body.description !== "string" || body.description.length > 1024)) {
-      return reply.code(400).send({ error: "description must be a string of 1024 characters or fewer" });
-    }
-    if (body.groupId !== undefined && body.groupId !== null && typeof body.groupId !== "string") {
-      return reply.code(400).send({ error: "groupId must be a string" });
-    }
-    if (typeof body.groupId === "string" && db.skillGroupScope(body.groupId) && !db.canAccessSkillGroup(principal, body.groupId)) {
-      return reply.code(404).send({ error: "skill group not found" });
-    }
-    try {
-      const skill = db.updateSkill(id, {
-        ...(body.description === undefined ? {} : { description: body.description as string | null }),
-        ...(body.groupId === undefined ? {} : { groupId: body.groupId as string | null }),
-      });
-      if (!skill) return reply.code(404).send({ error: "skill not found" });
-      pushAffected();
-      return { skill: withSkillRecommendation(db, principal, skill) };
-    } catch (error) {
-      return reply.code(400).send({ error: error instanceof Error ? error.message : "skill update failed" });
-    }
-  });
-
-  app.post("/api/skills/:id/versions", async (req, reply) => {
-    const principal = deps.requestHuman(req);
-    if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    const id = (req.params as { id: string }).id;
-    if (!db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
-    const skill = db.getSkill(id);
-    if (!skill) return reply.code(404).send({ error: "skill not found" });
-    const body = (req.body ?? {}) as { files?: unknown; note?: unknown };
-    const validated = validateSkillPayload({ name: skill.name, files: body.files });
-    if (!validated.ok) return reply.code(400).send({ error: validated.error });
-    const note = parseNote(body.note);
-    if (note === null) return reply.code(400).send({ error: "note must be 2000 characters or fewer" });
-    const version = db.addSkillVersion(id, {
-      files: validated.files,
-      manifest: validated.manifest,
-      digest: validated.digest,
-      note,
-    });
-    if (!version) return reply.code(404).send({ error: "skill not found" });
-    pushAffected();
-    return reply.code(201).send({ version });
-  });
-
-  app.get("/api/skills/:id/versions", async (req, reply) => {
-    const principal = deps.requestPrincipal(req);
-    const { id } = req.params as { id: string };
-    if (!principal || !db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
-    const { before } = req.query as { before?: unknown };
-    if (before !== undefined && (typeof before !== "string" || !before || before.length > 100)) return reply.code(400).send({ error: "invalid version cursor" });
-    try { return db.listSkillVersions(id, before as string | undefined); }
-    catch { return reply.code(400).send({ error: "invalid version cursor" }); }
-  });
-
-  app.get("/api/skills/:id/versions/:versionId", async (req, reply) => {
-    const principal = deps.requestPrincipal(req);
-    const { id, versionId } = req.params as { id: string; versionId: string };
-    if (!principal || !db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
-    const skill = db.getSkill(id)!;
-    const version = db.getSkillVersion(versionId);
-    if (!version || version.skillId !== id) return reply.code(404).send({ error: "version not found" });
-    return { version, currentVersion: skill.latestVersion ? db.getSkillVersion(skill.latestVersion.id) : null,
-      deploymentImpact: db.skillDeploymentImpact(id).deploymentImpact };
-  });
-
-  app.post("/api/skills/:id/restore", async (req, reply) => {
-    const principal = deps.requestHuman(req);
-    if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    const { id } = req.params as { id: string };
-    if (!db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
-    const body = (req.body ?? {}) as { versionId?: unknown; expectedLatestVersionId?: unknown; expectedDeploymentImpact?: unknown };
-    if (typeof body.versionId !== "string" || !body.versionId || body.versionId.length > 100 ||
-        typeof body.expectedLatestVersionId !== "string" || !body.expectedLatestVersionId || body.expectedLatestVersionId.length > 100) {
-      return reply.code(400).send({ error: "versionId and expectedLatestVersionId are required" });
-    }
-    // Restoring content that differs from the latest version deploys it to every unpinned machine.
-    const target = db.getSkillVersion(body.versionId);
-    const latest = db.getSkill(id)?.latestVersion;
-    const refusal = target?.skillId === id && latest?.id === body.expectedLatestVersionId && target.digest !== latest.digest
-      ? deploymentImpactRefusal(db, id, body.expectedDeploymentImpact) : null;
-    if (refusal) return reply.code(refusal.status).send(refusal.body);
-    try {
-      const version = db.restoreSkillVersion(id, body.versionId, body.expectedLatestVersionId);
-      if (!version) return reply.code(404).send({ error: "version not found" });
-      pushAffected();
-      return { version };
-    } catch (error) {
-      if (error instanceof SkillImportConflictError) return reply.code(409).send({ error: error.message });
-      throw error;
-    }
-  });
-
-  app.delete("/api/skills/:id", async (req, reply) => {
-    const principal = deps.requestHuman(req);
-    if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    const id = (req.params as { id: string }).id;
-    if (!db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
-    if (!db.deleteSkill(id)) return reply.code(404).send({ error: "skill not found" });
-    pushAffected(); // Includes machines reached through dynamic group assignments.
-    return reply.code(204).send();
-  });
-
-  /* ------------------------------ Skill groups ------------------------------ */
-
-  // Legacy groups remain visible metadata until explicitly converted. Owned groups and every
-  // deployment rule are resource-scoped; no implicit ownership backfill grants deployment rights.
-  app.get("/api/skill-groups", async (req) => {
-    const principal = deps.requestPrincipal(req);
-    const human = deps.requestHuman(req);
-    return { groups: principal ? db.listSkillGroups().filter(g => !g.scope || db.canAccessSkillGroup(principal, g.id)) : [],
-      creationScope: human ? defaultSkillScope(human) : null };
-  });
-
-  app.post("/api/skill-groups", async (req, reply) => {
-    const principal = deps.requestHuman(req);
-    if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    const name = (req.body as { name?: unknown } | null)?.name;
-    if (typeof name !== "string" || !name.trim() || name.trim().length > 120) {
-      return reply.code(400).send({ error: "name must be 1-120 characters" });
-    }
-    return reply.code(201).send({ group: db.createSkillGroup(name, Date.now(), defaultSkillScope(principal)) });
-  });
-
-  app.post("/api/skill-groups/:id/convert", async (req, reply) => {
-    const principal = deps.requestHuman(req);
-    if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    const id = (req.params as { id: string }).id;
-    if (!db.listSkillGroups().some(g => g.id === id) ||
-        (db.skillGroupScope(id) && !db.canAccessSkillGroup(principal, id))) {
-      return reply.code(404).send({ error: "skill group not found" });
-    }
-    if ((req.body as { accepted?: unknown } | null)?.accepted !== true) {
-      return reply.code(400).send({ error: "explicit acceptance of group ownership is required" });
-    }
-    try { db.convertSkillGroup(id, defaultSkillScope(principal)); }
-    catch { return reply.code(409).send({ error: "group is already owned or its members do not share your default ownership scope" }); }
-    return { group: db.listSkillGroups().find(g => g.id === id) };
-  });
-
-  app.delete("/api/skill-groups/:id", async (req, reply) => {
-    const principal = deps.requestHuman(req);
-    if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    const id = (req.params as { id: string }).id;
-    if (db.skillGroupScope(id) && !db.canAccessSkillGroup(principal, id)) {
-      return reply.code(404).send({ error: "skill group not found" });
-    }
-    if (!db.deleteSkillGroup(id)) {
-      return reply.code(404).send({ error: "skill group not found" });
-    }
-    pushAffected();
-    return reply.code(204).send();
-  });
-
-  const accessibleGroupRule = (principal: AuthPrincipal, rule: { scopeKind: string; runnerId: string | null }) =>
-    rule.scopeKind !== "runner" || (!!rule.runnerId && db.canAccessRunner(principal, rule.runnerId));
-
-  app.get("/api/skill-groups/:id/assignments", async (req, reply) => {
-    const principal = deps.requestPrincipal(req);
-    const id = (req.params as { id: string }).id;
-    if (!principal || !db.canAccessSkillGroup(principal, id)) return reply.code(404).send({ error: "skill group not found" });
-    return { assignments: db.listSkillGroupAssignments(id).filter(a => accessibleGroupRule(principal, a)) };
-  });
-
-  app.post("/api/skill-groups/:id/assignments", async (req, reply) => {
-    const principal = deps.requestHuman(req);
-    if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    const id = (req.params as { id: string }).id;
-    if (!db.canAccessSkillGroup(principal, id)) return reply.code(404).send({ error: "owned skill group not found" });
-    const body = (req.body ?? {}) as { scopeKind?: unknown; runnerId?: unknown; agentSelector?: unknown; invocation?: unknown; enabled?: unknown };
-    if (body.scopeKind !== "runner" && body.scopeKind !== "instance") return reply.code(400).send({ error: "scopeKind must be instance or runner" });
-    if (body.scopeKind === "runner" && (typeof body.runnerId !== "string" || !db.getRunner(body.runnerId) || !db.canAccessRunner(principal, body.runnerId))) {
-      return reply.code(404).send({ error: "runner not found" });
-    }
-    const agentSelector = parseSkillAgentSelector(body.agentSelector);
-    const invocation = parseInvocation(body.invocation);
-    if (!agentSelector || invocation === null || (body.enabled !== undefined && typeof body.enabled !== "boolean")) {
-      return reply.code(400).send({ error: "invalid agentSelector, invocation, or enabled value" });
-    }
-    try {
-      const assignment = db.createSkillGroupAssignment({ groupId: id, scopeKind: body.scopeKind,
-        runnerId: body.scopeKind === "runner" ? body.runnerId as string : null,
-        agentSelector, invocation: invocation ?? "agent", enabled: body.enabled !== false });
-      pushAffected(assignment);
-      return reply.code(201).send({ assignment });
-    } catch { return reply.code(409).send({ error: "the group's access scope does not include this machine" }); }
-  });
-
-  for (const method of ["PATCH", "DELETE"] as const) app.route({
-    method, url: "/api/skill-groups/:id/assignments/:assignmentId",
-    handler: async (req, reply) => {
-      const principal = deps.requestHuman(req);
-      if (!principal) return reply.code(403).send({ error: "human identity is required" });
-      const { id, assignmentId } = req.params as { id: string; assignmentId: string };
-      if (!db.canAccessSkillGroup(principal, id)) return reply.code(404).send({ error: "skill group not found" });
-      const existing = db.listSkillGroupAssignments(id).find(a => a.id === assignmentId);
-      if (!existing || !accessibleGroupRule(principal, existing)) return reply.code(404).send({ error: "group assignment not found" });
-      if (method === "DELETE") {
-        db.deleteSkillGroupAssignment(id, assignmentId);
-        pushAffected(existing);
-        return reply.code(204).send();
-      }
-      const body = (req.body ?? {}) as { enabled?: unknown; invocation?: unknown };
-      const invocation = parseInvocation(body.invocation);
-      if (invocation === null || (body.enabled !== undefined && typeof body.enabled !== "boolean")) return reply.code(400).send({ error: "invalid enabled or invocation value" });
-      const assignment = db.updateSkillGroupAssignment(id, assignmentId, {
-        ...(body.enabled === undefined ? {} : { enabled: body.enabled as boolean }), ...(invocation === undefined ? {} : { invocation }),
-      });
-      pushAffected(existing);
-      return { assignment };
-    },
-  });
-
-  /* ---------------------------- Skill assignments ---------------------------- */
-
-  // Assignment authorization derives from the referenced skill: listings show only assignments of
-  // accessible skills, and creating/mutating/deleting one requires access to that skill (plus, for
-  // runner-scoped rows, the same canAccessRunner gate the other /api/runners/:id routes use).
-
-  app.get("/api/skill-assignments", async (req) => {
-    const principal = deps.requestPrincipal(req);
-    if (!principal) return { assignments: [] };
-    const skillId = (req.query as { skillId?: unknown }).skillId;
-    return {
-      assignments: db.listSkillAssignments(typeof skillId === "string" && skillId ? skillId : undefined)
-        .filter((assignment) => canAccessAssignment(principal, assignment)),
-    };
-  });
-
-  app.post("/api/skill-assignments", async (req, reply) => {
-    const principal = deps.requestHuman(req);
-    if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    const body = (req.body ?? {}) as {
-      skillId?: unknown; scopeKind?: unknown; runnerId?: unknown; agentSelector?: unknown; invocation?: unknown;
-    };
-    if (typeof body.skillId !== "string" || !db.canAccessSkill(principal, body.skillId)) {
-      return reply.code(404).send({ error: "skill not found" });
-    }
-    if (body.scopeKind !== "instance" && body.scopeKind !== "runner") {
-      return reply.code(400).send({ error: "scopeKind must be instance or runner" });
-    }
-    if (body.scopeKind === "runner" && (typeof body.runnerId !== "string" ||
-        !db.getRunner(body.runnerId) || !db.canAccessRunner(principal, body.runnerId))) {
-      return reply.code(404).send({ error: "runner not found" });
-    }
-    if (body.scopeKind === "runner") {
-      // Same containment rule resolveDesiredSkills applies at delivery time — rejecting here
-      // instead of returning a 201 for an assignment that could never deploy.
-      const skillScope = db.skillScope(body.skillId);
-      const runnerScope = db.runnerScope(body.runnerId as string);
-      if (!skillScope || !runnerScope || !db.scopeAudienceContainedWithMembership(skillScope, runnerScope)) {
-        return reply.code(409).send({ error: "the skill's access scope does not include this machine" });
-      }
-    }
-    const agentSelector = parseSkillAgentSelector(body.agentSelector);
-    if (!agentSelector) return reply.code(400).send({ error: AGENT_SELECTOR_ERROR });
-    const invocation = parseInvocation(body.invocation);
-    if (invocation === null) return reply.code(400).send({ error: "invocation must be agent or manual" });
-    const assignment = db.createSkillAssignment({
-      skillId: body.skillId,
-      scopeKind: body.scopeKind as SkillAssignmentScopeKind,
-      runnerId: body.scopeKind === "runner" ? (body.runnerId as string) : null,
-      agentSelector,
-      invocation,
-    });
-    pushAffected(assignment);
-    return reply.code(201).send({ assignment });
-  });
-
-  app.patch("/api/skill-assignments/:id", async (req, reply) => {
-    const principal = deps.requestHuman(req);
-    if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    const id = (req.params as { id: string }).id;
-    const existing = db.getSkillAssignment(id);
-    if (!existing || !canAccessAssignment(principal, existing)) {
-      return reply.code(404).send({ error: "skill assignment not found" });
-    }
-    const body = (req.body ?? {}) as { enabled?: unknown; invocation?: unknown; agentSelector?: unknown };
-    if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
-      return reply.code(400).send({ error: "enabled must be a boolean" });
-    }
-    const invocation = parseInvocation(body.invocation);
-    if (invocation === null) return reply.code(400).send({ error: "invocation must be agent or manual" });
-    // Optional, validated exactly as on create, so a rule's agents change in the same atomic update
-    // as anything else in the request (the skill notice's Limit to Claude Code, #1972).
-    const agentSelector = body.agentSelector === undefined ? undefined : parseSkillAgentSelector(body.agentSelector);
-    if (agentSelector === null) return reply.code(400).send({ error: AGENT_SELECTOR_ERROR });
-    const assignment = db.updateSkillAssignment(id, {
-      ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
-      ...(invocation === undefined ? {} : { invocation }),
-      ...(agentSelector === undefined ? {} : { agentSelector }),
-    });
-    if (!assignment) return reply.code(404).send({ error: "skill assignment not found" });
-    pushAffected(assignment);
-    return { assignment };
-  });
-
-  app.delete("/api/skill-assignments/:id", async (req, reply) => {
-    const principal = deps.requestHuman(req);
-    if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    const id = (req.params as { id: string }).id;
-    const existing = db.getSkillAssignment(id);
-    if (!existing || !canAccessAssignment(principal, existing)) {
-      return reply.code(404).send({ error: "skill assignment not found" });
-    }
-    const removed = db.deleteSkillAssignment(id);
-    if (!removed) return reply.code(404).send({ error: "skill assignment not found" });
-    pushAffected(removed);
-    return reply.code(204).send();
-  });
-
-  /* ------------------------------ Per-machine view ------------------------------ */
-
-  app.get("/api/runners/:id/skills", async (req, reply) => {
-    const id = (req.params as { id: string }).id;
-    const runner = db.getRunner(id);
-    if (!runner) return reply.code(404).send({ error: "runner not found" });
-    const principal = deps.requestPrincipal(req);
-    return {
-      // File contents stay out of the listing; the digest + targets are what the UI compares.
-      desired: resolveDesiredSkills(db, id).map((entry) => ({
-        name: entry.name,
-        versionDigest: entry.versionDigest,
-        targets: entry.targets,
-      })),
-      reported: skillStateResponse(db.getRunnerSkillState(id)),
-      removalReporting: runnerSupportsProtocol(
-        runner.protocolVersion,
-        "skillLinkRemovalReporting",
-      ) ? "supported" : "unsupported",
-      // An older runner never reports drift, so an empty list from it proves nothing.
-      driftReporting: runnerSupportsProtocol(runner.protocolVersion, "skillDrift") ? "supported" : "unsupported",
-      // Likewise for copies a restore kept aside, which only a v185 runner reports.
-      keptAsideReporting: runnerSupportsProtocol(runner.protocolVersion, "skillKeptAsideCopies") ? "supported" : "unsupported",
-      orphaned: principal ? listOrphanedSkillCopies(db, principal, id) : [],
-    };
-  });
-
-  app.post("/api/runners/:id/skills/sync", async (req, reply) => {
-    const id = (req.params as { id: string }).id;
-    const runner = db.getRunner(id);
-    if (!runner) return reply.code(404).send({ error: "runner not found" });
-    if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
-    if (!runnerSupportsProtocol(runner.protocolVersion, "agentSkills")) {
-      return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "agentSkills", "managed agent skills"));
-    }
-    const requestId = `skills_${randomUUID().slice(0, 8)}`;
-    try {
-      const result = await pushSkillsSync.request(id, requestId);
-      if (result.type !== "skills_state") {
-        return reply.code(502).send({ error: "unexpected runner reply" });
-      }
-      db.setRunnerSkillState(id, result, Date.now());
-      return { state: skillStateResponse(db.getRunnerSkillState(id)) };
-    } catch (error) {
-      if (error instanceof SkillsSyncInProgressError) {
-        return reply.code(409).send({ error: error.message });
-      }
-      if (error instanceof SkillsSyncBudgetError) {
-        return reply.code(409).send({ error: error.message });
-      }
-      return reply.code(504).send({ error: (error as Error).message });
-    }
-  });
+  (deps.extendedManagement ?? createExtendedSkillsManagement(deps)).registerHttp(app, deps);
 }

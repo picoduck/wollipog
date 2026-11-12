@@ -62,6 +62,50 @@ const facts = (host: HTMLElement) => Object.fromEntries([...host.querySelectorAl
 const contextGroup = (host: HTMLElement) => [...host.querySelectorAll("[role=group]")].find((group) =>
   document.getElementById(group.getAttribute("aria-labelledby") ?? "")?.textContent === "Context-Only References");
 
+for (const repository of ["team/repo", "gitlab.example/team/repo", "gitlab.example/group/subgroup/project"]) {
+  test(`typed additions and removals match ${repository} exactly, ignoring case (#4248)`, async () => {
+    const { host, proposals, unmount } = await mount(view({ repository, contextIssueNumbers: undefined }));
+    const type = async (label: string, value: string) => act(async () => {
+      const input = [...host.querySelectorAll("label.field")].find((node) => node.textContent?.startsWith(label))!.querySelector("input")!;
+      input.focus();
+      Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as unknown as Event);
+      input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as unknown as Event);
+    });
+    const submit = async () => {
+      await act(async () => { [...host.querySelectorAll("button")].find((button) => button.textContent === "Request Scope Approval")!.click(); });
+      await settle();
+    };
+    try {
+      await type("Issue Additions", `${repository.toUpperCase()}#54, ${repository}#54 ${repository}#55`);
+      await type("Issue Removals", `${repository.toUpperCase()}#33`);
+      await submit();
+      assert.equal(proposals.length, 1);
+      assert.deepEqual(proposals[0]!.additions, [{ repository, number: 54 }, { repository, number: 55 }]);
+      assert.deepEqual(proposals[0]!.removals, [{ repository, number: 33 }]);
+      assert.equal(proposals[0]!.expectedRevision, 2);
+      // Invalid entries prevent the entire request, including valid entries in the other field.
+      for (const label of ["Issue Additions", "Issue Removals"]) {
+        for (const invalid of [
+          `prefix${repository}#54`, `${repository}suffix#54`, `${repository}/extra#54`, "other/repo#54",
+          `${repository}//extra#54`, `${repository}/#54`, `/${repository}#54`,
+          `${repository}#0`, `${repository}#01`, `${repository}#-1`, `${repository}#1.5`,
+          `${repository}#9007199254740992`, `${repository}#54junk`, `${repository}##54`,
+          `https://${repository}#54`, "#54",
+        ]) {
+          await type("Issue Additions", `${repository}#56`);
+          await type("Issue Removals", `${repository}#31`);
+          await type(label, invalid);
+          await submit();
+          assert.equal(proposals.length, 1, `${label}: ${invalid}`);
+          assert.ok(host.querySelector("[role=alert]")!.textContent!.includes(
+            `Use repository-qualified issues from ${repository}, such as ${repository}#123.`), invalid);
+        }
+      }
+    } finally { await unmount(); }
+  });
+}
+
 test("Campaign Status shows the derived scope beside the first message's context-only references, and promotes one through scope approval (#3920)", async () => {
   const { host, proposals, unmount } = await mount(view());
   try {

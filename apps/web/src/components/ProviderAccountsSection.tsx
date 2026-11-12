@@ -2,6 +2,7 @@ import React, { Fragment, useEffect, useId, useRef, useState, type ReactNode } f
 import {
   PROVIDER_ACCOUNT_POLICY_NOT_FIXED, PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL, providerAccountPolicyMode, providerAccountPolicyFixedId,
   runnerSupportsProtocol, runnerSupportsProviderCredentialImport,
+  providerForDriver, providerLoginInstallationMissing,
   type ProviderAccountDefinition, type ProviderHomeLeaseInspection, type ProviderLoginView, type RunnerView,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
@@ -13,6 +14,7 @@ import { machineSettingsMutationError, runnerDisplay } from "../runners.js";
 import type { MachineAccountsIntent } from "../navigation.js";
 import { providerHomeBlockingProcessCopy, providerHomeRecoveryCauseCopy } from "../provider-home-refusal.js";
 import { statusMeta } from "../status-meta.js";
+import { providerReadinessSentence } from "../provider-readiness.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { activeSessionConflict } from "./active-session-conflict.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
@@ -25,6 +27,8 @@ import { ExpectedProviderAccount, providerAccountGroupRefusalSentence, providerA
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Notice } from "./Notice.js";
+import { providerLoginStartFailure } from "../provider-login-start-failure.js";
+import { ProviderLoginStartFailure } from "./ProviderLoginStartFailure.js";
 import { ProviderSignIn, providerSignInAlreadyOnMachine, providerSignInHiddenTitle } from "./ProviderLoginCard.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ProviderAccountUsage, useMachineAccountUsage } from "./ProviderAccountUsage.js";
@@ -169,6 +173,7 @@ type AccountStatus = "signed_in" | "sign_in_required" | "status_unknown" | "sign
 
 function accountStatus(account: ProviderAccountDefinition, signingIn: boolean): AccountStatus {
   if (signingIn) return "signing_in";
+  if (account.providerReadiness && ["in_use", "restricted", "unknown"].includes(account.providerReadiness.reason)) return "status_unknown";
   return account.authStatus === "authenticated" ? "signed_in"
     : account.authStatus === "unauthenticated" ? "sign_in_required"
     : "status_unknown";
@@ -312,7 +317,7 @@ function AccountMenu({ name, heading, busy, items }: {
  * expansion under it: its sign-in's steps or ending (#2996). While a sign-in runs for a label that is
  * a hidden email, `hiddenTitle` ("Signing In to Codex") replaces the mask, with "Email hidden" as line 2.
  */
-function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, status, actions, children, marker, rank, skip, usage }: {
+function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, status, actions, children, marker, rank, skip, usage, readinessNote }: {
   /** "Default", or "Next Session" for the account Priority Order expects to use. */
   marker?: string;
   /** The account's place in the Priority Order, leading its name. */
@@ -329,6 +334,7 @@ function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, stat
   status: AccountStatus | null;
   actions?: ReactNode;
   children?: ReactNode;
+  readinessNote?: string;
 }) {
   const meta = status && status !== "signed_in" ? statusMeta("provider_account", status) : null;
   return (
@@ -356,12 +362,12 @@ function ProviderAccountRow({ identity, label, hiddenTitle, profile, lease, stat
         {usage}
         {actions && <span className="provider-account-actions">{actions}</span>}
       </div>
-      {children && <div className="provider-account-expansion">{children}</div>}
+      {(children || readinessNote) && <div className="provider-account-expansion">{readinessNote && <p className="section-note">{readinessNote}</p>}{children}</div>}
     </>
   );
 }
 
-type SectionNotice = { title: ReactNode; body: string; details?: string };
+type SectionNotice = { title: ReactNode; body: ReactNode; details?: string };
 
 /** What Priority Order expects to do now, and whether this Machine can do it. */
 function PrioritySummary({ runner, preview }: {
@@ -448,7 +454,7 @@ function ProviderAccountGroup({ runner, online, provider, policy, canEdit, savin
  * and Add Account…, then one surface of account rows, each with one status. Removal and the profile
  * actions live in each row's ⋯; a refusal is one compact notice between the title and the rows.
  */
-export function ProviderAccountsSection({ runner, online, machineName, canManageProfiles = false, profileAccessKnown = true, intent }: {
+export function ProviderAccountsSection({ runner, online, machineName, canManageProfiles = false, profileAccessKnown = true, intent, showMachineSettings = true }: {
   runner: RunnerView;
   online: boolean;
   /** The machine's display name, for Add Account and the removal confirmation. */
@@ -462,6 +468,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   /** Set Up Managed Profile or Recover Existing Profile from a refused session (#3240): each new
    * activation scrolls here and opens it once. */
   intent?: MachineAccountsIntent;
+  /** Embedded setup keeps unrelated running-session policy in Machine detail. */
+  showMachineSettings?: boolean;
 }) {
   const privacy = useAccountEmailPrivacy();
   const api = useApi();
@@ -545,7 +553,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     try {
       await api.startProviderLogin(runner.runnerId, { accountId: account.id });
     } catch (cause) {
-      setNotice({ title: <>Couldn't Sign In to {identifier(account)}</>, body: (cause as Error).message });
+      setNotice({ title: <>Couldn't Sign In to {identifier(account)}</>, body: <ProviderLoginStartFailure failure={providerLoginStartFailure(cause)} /> });
     }
   });
 
@@ -967,6 +975,15 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
 
   if (!supported && accounts.length === 0) return null;
   const canAdd = supported && canManage;
+  const installationIssues: Partial<Record<ProviderAccountDefinition["provider"], string>> = {};
+  for (const provider of ["claude", "codex"] as const) {
+    const native = runner.agents.filter((agent) => providerForDriver(agent.driver ?? "acp") === provider &&
+      agent.context?.kind !== "wsl" && !agent.harnessSelectionBlocked && agent.installation?.selection !== "other");
+    if ((native.length > 0 && native.every(providerLoginInstallationMissing)) ||
+        (native.length === 0 && runner.agentsRefreshed === true && runnerSupportsProtocol(runner.protocolVersion, "providerSetupReadiness"))) {
+      installationIssues[provider] = `Install ${providerName(provider)} on this machine, then rediscover before starting sign-in.`;
+    }
+  }
   const count = accounts.length + newLogins.length;
   return (
     <section ref={sectionRef} className="section" aria-labelledby={headingId}>
@@ -978,14 +995,14 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           <div className="actions">
             <button type="button" className="btn sm" disabled={!online} aria-describedby={online ? undefined : offlineId}
               onClick={() => setAdding("claude")}>
-              Add Account…
+              Add Separate Sign-In…
             </button>
           </div>
         )}
       </div>
       {canAdd && !online && <p className="section-note" id={offlineId}>{OFFLINE}</p>}
       {supported && accounts.length === 0 && (
-        <p className="section-note">Sign in to Claude or Codex on this machine without opening a shell.</p>
+        <p className="section-note">Wollipog uses this machine's existing sign-ins where access is permitted. A separate sign-in is optional. Credentials stay on the machine; the provider's billing and usage limits still apply.</p>
       )}
       {supported && !canManage && (
         <p className="section-note">Only this machine's owner or an organization admin can add or remove its accounts.</p>
@@ -1064,6 +1081,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                 label={account.label}
                 hiddenTitle={login && providerSignInHiddenTitle(login, privacy.hide)}
                 profile={account.profile ? PROFILE_ACCESS[account.profile.access] : undefined}
+                readinessNote={account.providerReadiness ? providerReadinessSentence(account.providerReadiness, online && runner.agentsRefreshed === true) : undefined}
                 lease={leaseActions && leases[account.id]?.state === "stale" ? {
                   label: "Recovery Needed",
                   title: providerHomeLeaseDescription(leases[account.id]!) ?? "An earlier Wollipog runner left this account locked. Choose Recover Account in its menu to try unlocking it.",
@@ -1122,7 +1140,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           </>} />;
       })}
       </div> : null}
-      <RunningSessionAccountSettings key={runner.runnerId} runner={runner} online={online} canEdit={canManageProfiles && canManage} />
+      {showMachineSettings && <RunningSessionAccountSettings key={runner.runnerId} runner={runner} online={online} canEdit={canManageProfiles && canManage} />}
       {accessAccount && profileActions && canManage && <Modal title="Account Access" description={identifier(accessAccount)} size="sm"
         onClose={() => setAccessAccountId(null)} footer={<button type="button" className="btn" onClick={() => setAccessAccountId(null)}>Close</button>}>
         <p>{accessAccount.profile?.access === "granted"
@@ -1165,6 +1183,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           accounts={accounts}
           logins={logins}
           initialProvider={adding}
+          installationIssues={installationIssues}
           {...(canManageProfiles && canManage ? { importOffer: providerCredentialImportOffer(runner, online, accounts) } : {})}
           onStarted={(login) => setStarted({ operationId: login.operationId, accountId: login.accountId, provider: login.provider })}
           onImported={(account) => setStarted({ operationId: "", accountId: account.accountId, provider: account.provider })}

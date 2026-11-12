@@ -179,6 +179,7 @@ import { providerCredentialImportHostSupported } from "./provider-credential-imp
 import { inspectProviderHomeLeaseCommand, recoverProviderHomeLeaseCommand, type ProviderHomeLeaseCommandDeps } from "./provider-home-lease-commands.js";
 import { ProviderProfileGrants } from "./provider-profile-grants.js";
 import { managedProviderProfileRoot } from "./provider-profile-home.js";
+import { providerLoginStartFailure } from "./provider-login-start-failure.js";
 import { createProviderProfileLoginSettlement } from "./provider-profile-login-settlement.js";
 import { runnerCredentialRoots, setCampaignCredentialRoots } from "./campaign-operation-evidence.js";
 import {
@@ -203,6 +204,7 @@ import {
   skillReconciliationProviderAccountPlan,
 } from "./provider-accounts.js";
 import { providerHomeLaunchRefusal } from "./provider-home-launch-refusal.js";
+import { providerReadinessObservation, mergeInstallationAndAccountReadiness } from "./provider-readiness.js";
 import { inheritProviderPlugins, pluginProviderForDriver } from "./provider-plugins.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
 import {
@@ -704,6 +706,7 @@ function withMediaReviewerCapabilities<T extends AgentDefinition>(agents: T[]): 
 }
 
 const providerAccountAuthStatus = new Map<string, ProviderAccountDefinition["authStatus"]>();
+const providerAccountReadiness = new Map<string, NonNullable<ProviderAccountDefinition["providerReadiness"]>>();
 /** How each account's provider status check says it bills, from its latest probe (#4353). */
 const providerAccountBilling = new Map<string, import("@wollipog/protocol").ProviderAccountBilling>();
 /** Assigned once the session store opens; an inventory sent before then has no cooldowns to report. */
@@ -714,9 +717,9 @@ function providerAccountsForControlPlane() {
   // profile-bearing account, which it could not use (#3239).
   return providerProfileGrants.project(config.providerAccounts, (account) => ({
     ...providerAccountDefinition(account),
-    ...(providerAccountAuthStatus.has(account.id)
-      ? { authStatus: providerAccountAuthStatus.get(account.id)! }
-      : {}),
+    ...(providerAccountReadiness.has(account.id) ? { providerReadiness: providerAccountReadiness.get(account.id)! } : {}),
+    // A credential marker is not an authentication check (keyrings and busy homes differ).
+    authStatus: providerAccountAuthStatus.get(account.id) ?? "unknown",
     ...(providerAccountBilling.has(account.id) ? { billing: providerAccountBilling.get(account.id)! } : {}),
     ...selectionCooldownField(account.id),
   }));
@@ -949,6 +952,7 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
   },
   onAccountAdded: (account) => {
     providerAccountAuthStatus.set(account.id, "authenticated");
+    providerAccountReadiness.delete(account.id);
     sendUp({
       type: "agents_updated",
       runnerId: config.runnerId,
@@ -1003,6 +1007,7 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
   } : {}),
   onAccountRemoved: (account) => {
     providerAccountAuthStatus.delete(account.id);
+    providerAccountReadiness.delete(account.id);
     sendUp({
       type: "agents_updated",
       runnerId: config.runnerId,
@@ -1633,6 +1638,7 @@ function durableLifecycle(handle: DurableCommandHandle): DurableCommandLifecycle
   };
   return {
     commandId: handle.commandId,
+    ...(handle.issueClosureResume ? { issueClosureResume: true as const } : {}),
     beginSteering: () => {
       const prepared = handle.beginSteering();
       if (!prepared) sendDurableUpdate(handle.current);
@@ -2276,12 +2282,24 @@ async function discoverAndPublish(refreshModels: boolean, refreshSubscriptionUsa
       if (billing) providerAccountBilling.set(account.id, billing);
     }),
     failed: (account) => log(`${account.provider} provider-account authentication probe failed`),
+    observed: (account, report) => providerAccountReadiness.set(account.id, report),
   });
   for (const [accountId, status] of accountStatus) providerAccountAuthStatus.set(accountId, status);
   metadata.agents = projectProviderAccountDiscoveryReadiness(metadata.agents, config.providerAccounts, accountStatus,
     (account) => providerProfileGrants.usable(account));
+  metadata.agents = metadata.agents.map((agent) => {
+    if (agent.driver !== "claude-code" && agent.driver !== "codex-app-server") return agent;
+    const installationReport = agent.providerReadiness ?? providerReadinessObservation(agent, agent.authStatus ?? "unknown");
+    const accountId = agent.defaultProviderAccountId ?? agent.providerAccountReadiness?.defaultAccountId;
+    const accountReport = accountId ? providerAccountReadiness.get(accountId) : undefined;
+    return { ...agent, providerReadiness: mergeInstallationAndAccountReadiness(installationReport, accountReport) };
+  });
   log(JSON.stringify({ event: "provider_discovery_completed", runnerId: config.runnerId,
     nativeProbeHome: "isolated", agents: metadata.agents.length,
+    checkedAt: Date.now(),
+    inUse: metadata.agents.filter((agent) => agent.providerReadiness?.reason === "in_use").length,
+    restricted: metadata.agents.filter((agent) => agent.providerReadiness?.reason === "restricted").length,
+    uninspected: metadata.agents.filter((agent) => agent.providerReadiness?.reason === "unknown").length,
     available: metadata.agents.filter((agent) => agent.available === true).length,
     signInRequired: metadata.agents.filter((agent) => agent.authStatus === "unauthenticated").length }));
   discoveryDone = true;
@@ -3291,7 +3309,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         requestId: msg.requestId,
         action: "start",
         ok: false,
-        error: errText(error),
+        ...providerLoginStartFailure(error),
       })));
       break;
     case "import_provider_credential": {

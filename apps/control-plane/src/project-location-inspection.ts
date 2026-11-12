@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { publishedIssueFailure, type PublishedIssueFailure } from "@wollipog/protocol";
 import {
   PROJECT_LOCATION_INSPECTION_FAILURES, campaignPendingCause, campaignRepositoryLocation, runnerSupportsProtocol, validCampaignIssueFacts,
   type CampaignIssueFacts, type CampaignIssueRef, type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionMessage, type CampaignLaunchInspectionResult, type ProjectLocationInspection, type ProjectLocationView,
@@ -143,7 +144,8 @@ export async function inspectProjectLocation(
 /** Check a follow-up's payload in a boundary repository other than the root's own (#4119), through
  * the first of its entry's Locations that is active in the root's Project and whose runner is online
  * and inspects publications. That runner reads the Location's own path with its own forge login.
- * Only an exact success for that Location and repository is returned; null otherwise. */
+ * Only an exact success for that Location and repository is returned; callers inspecting a
+ * published issue may also request its bounded refusal diagnostic. */
 async function inspectPublicationAtLocation(
   dependencies: { db: ControlPlaneDb; hub: Hub },
   root: { projectId?: string | null },
@@ -151,6 +153,7 @@ async function inspectPublicationAtLocation(
   publication: NonNullable<CampaignLaunchInspectionMessage["publication"]>,
   issueNumbers: number[],
   timeoutMs: number,
+  includeFailure = false,
 ): Promise<CampaignLaunchInspectionResult | null> {
   const { db, hub } = dependencies;
   const inProject = (candidate: ProjectLocationView | null): candidate is ProjectLocationView => Boolean(candidate) &&
@@ -164,9 +167,11 @@ async function inspectPublicationAtLocation(
   const result = await inspectCampaignWorkspace(hub, runner, location.workspaceId, issueNumbers, new AbortController().signal, timeoutMs,
     workspacePath, false, publication);
   // Runner frames are not validated on the wire.
-  if (result?.ok !== true || result.cancelled !== undefined || result.workspaceId !== location.workspaceId ||
+  if (!result || result.cancelled !== undefined || result.workspaceId !== location.workspaceId) return null;
+  if (result.ok !== true && !includeFailure) return null;
+  if (result.ok === true && (result.publicationFailure !== undefined ||
       typeof result.repository !== "string" || result.repository.toLowerCase() !== entry.repository.toLowerCase() ||
-      JSON.stringify(result.issueNumbers ?? []) !== JSON.stringify(issueNumbers)) return null;
+      JSON.stringify(result.issueNumbers ?? []) !== JSON.stringify(issueNumbers))) return null;
   // The answer describes the path that was inspected; a Location removed, moved to another Project
   // or repointed meanwhile is not the Location the campaign's boundary lists.
   const current = db.getProjectLocation(location.id);
@@ -188,8 +193,8 @@ export async function inspectBoundaryPublication(
     ? result.publicationDigest : null;
 }
 
-/** Whether an issue of that repository was published with exactly this payload, before it joins the
- * campaign's scope: a v4 runner reads its title, body and labels, and refuses any difference. */
+/** Null proves the published payload matches; a bounded diagnostic otherwise refuses admission.
+ * Older runners retain strict body comparison and missing diagnostics become failed reads. */
 export async function verifyBoundaryPublishedIssue(
   dependencies: { db: ControlPlaneDb; hub: Hub },
   root: { projectId?: string | null },
@@ -197,8 +202,11 @@ export async function verifyBoundaryPublishedIssue(
   publication: NonNullable<CampaignLaunchInspectionMessage["publication"]>,
   issue: number,
   timeoutMs = CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS,
-): Promise<boolean> {
-  return Boolean(await inspectPublicationAtLocation(dependencies, root, entry, publication, [issue], timeoutMs));
+): Promise<PublishedIssueFailure | null> {
+  try {
+    const result = await inspectPublicationAtLocation(dependencies, root, entry, publication, [issue], timeoutMs, true);
+    return result?.ok === true ? null : publishedIssueFailure(result?.publicationFailure);
+  } catch { return "read_failed"; }
 }
 
 /** The Project Locations a campaign's repositories cover (#4117, #4118), for a Full Control launch

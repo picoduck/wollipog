@@ -13,6 +13,18 @@ import { statusMeta } from "./status-meta.js";
 
 /** The Machines list (#2985): one status per machine, sorted by what needs the person. */
 
+test("connected SSH machines keep provider and runner attention in list grouping without changing their Online badge", () => {
+  const remote: BoxView = { boxId: "box", runnerId: "remote", sshTarget: "user@remote", status: "online", lastError: null, createdAt: 1 };
+  const entries = machineListEntries(new Map([["remote", runner("remote", { protocolVersion: PROTOCOL_VERSION - 1 })]]), [remote]);
+  assert.equal(entries[0]!.status, "online");
+  assert.equal(entries[0]!.attentionStatus, "update_required");
+  assert.equal(groupMachineList(entries)[0]!.key, "needs_attention");
+  const failed = machineListEntries(new Map([["remote", runner("remote")]]), [{ ...remote,
+    harnessReadiness: { state: "failed", checkedAt: 1, reason: "authentication_regressed" } }]);
+  assert.equal(failed[0]!.status, "online");
+  assert.equal(groupMachineList(failed)[0]!.key, "needs_attention");
+});
+
 function runner(runnerId: string, overrides: Partial<RunnerView> = {}): RunnerView {
   return {
     runnerId,

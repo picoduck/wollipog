@@ -2,6 +2,7 @@ import { ORCHESTRATOR_REVIEW_POLICY_KEYS, type OrchestratorBehaviorDefaults, typ
 import type { ReactNode } from "react";
 import { SelectRow } from "./ui/SettingsRows.js";
 import { titleCaseLabel } from "../format.js";
+import { modelOptionLabel } from "../agent-presentation.js";
 
 const AUTO = "__automatic__";
 const automatic = [{ value: AUTO, label: "Automatic" }];
@@ -30,7 +31,7 @@ export function OrchestratorReviewFields({ value, reviewers, problem, onChange, 
       description="Automatic follows Reviews settings for each child's harness and project at launch." error={problem}
       onChange={harness => onChange({ reviewHarness: harness === AUTO ? null : harness as "codex" | "claude-code", reviewModel: null, reviewEffort: null })} />
     <SelectRow title="Review Model" value={value.reviewModel ?? AUTO} badge={badge?.("reviewModel")}
-      options={[...automatic, ...[...models.values()].map(m => ({ value: m.id, label: m.displayName ?? m.id })),
+      options={[...automatic, ...[...models.values()].map(m => ({ value: m.id, label: modelOptionLabel(m, models.values()) })),
         ...(value.reviewModel && !models.has(value.reviewModel) ? [{ value: value.reviewModel, label: `${value.reviewModel} (Unavailable)` }] : [])]}
       description="Automatic inherits the selected reviewer's saved model, then its discovered default. A missing fixed model refuses the review."
       onChange={model => onChange({ reviewModel: model === AUTO ? null : model, reviewEffort: null })} />

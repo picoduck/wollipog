@@ -1,6 +1,7 @@
 import React, { useId, useRef, useState } from "react";
 import type { ConfigureSessionNamingHarnessRequest, SessionNamingHarnessMachine } from "@wollipog/protocol";
 import { effortLabel } from "../format.js";
+import { modelOptionLabel } from "../agent-presentation.js";
 import { Modal } from "./common.js";
 import { FieldError } from "./FieldError.js";
 import { Notice } from "./Notice.js";
@@ -219,7 +220,7 @@ export function HarnessTargetDialog({
                   invalid={Boolean(errors.model)}
                   describedBy={describedBy("model")}
                   placeholder="Choose a model"
-                  options={(agent?.models ?? []).map((candidate) => ({ value: candidate.id, label: candidate.displayName }))}
+                  options={(agent?.models ?? []).map((candidate) => ({ value: candidate.id, label: modelOptionLabel(candidate, agent?.models ?? []) }))}
                   onChange={(id) => {
                     const next = agent?.models.find((candidate) => candidate.id === id);
                     const only = next?.efforts.length === 1 ? next.efforts[0]! : "";

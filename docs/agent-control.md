@@ -377,7 +377,9 @@ consent, checked at admission and again by the runner against the implementing s
 
 The round budget applies to all harnesses (1–32 valid rounds, default four). A review run pins its
 initial budget; changing settings does not expand an existing run, whose additional rounds still
-require the exact typed extension. The Project selector creates a personal project override by
+require the exact typed extension. Campaign review-setting changes affect future children only;
+raising campaign, personal or project budgets cannot repair a running child's pinned run.
+The extension cap stays unchanged for real code changes. The Project selector creates a personal project override by
 copying the user's current settings. That document replaces all user defaults for the user's
 sessions in that project; Reset to User Settings removes it. Missing settings rows retain the
 original opposite-family, high-effort, four-round launch without new configuration fields.
@@ -516,7 +518,8 @@ attempt, mode, base and the files in scope):
   control plane). The runner proves strictly that a head's only change since the last valid round
   is one merge of the moved base: a two-parent merge whose first parent is the last valid head,
   whose second is a commit of the pull request's current base that head did not contain, and whose
-  tree differs from Git's own merge only inside its conflicted hunks. Such a head gets a
+  tree differs from Git's own merge only inside its conflicted hunks or by a proven protocol
+  renumber (runner v354, #4399). Such a head gets a
   base-merge round (`round.baseMerge`): a delta round scoped to the merge's effect on the pull
   request's own diff, which does not count against the epoch's budget and needs no extension. When
   the last valid round was an upvote and the merge leaves the pull request's own diff byte-identical
@@ -525,10 +528,21 @@ attempt, mode, base and the files in scope):
   upvote and its findings, and a `pr_merge` decision may cite it. The control plane checks the
   claim against the run's current epoch and last valid head before recording it. An octopus
   merge, a merged parent outside the base branch, a path-level conflict, a change outside a
-  conflict block, a second merge before the first one's review, any commit after the merge, or a
-  requested full review is an ordinary commit and counts as before. That includes a protocol
-  renumber made inside the merge, which rewrites text outside any conflict block: the slotted ledger
-  (#975) removes the version-line conflict, but not the renumber when main passes a claim. A
+  conflict block other than the proven renumber, a second merge before the first one's review, any
+  commit after the merge, or a requested full review is an ordinary commit and counts as before.
+  The renumber proof reads the old and new ledger declarations without executing repository code.
+  The old entry must be a claim added by the PR, absent from its original base; the new entry must
+  be absent from the merged base and match that exact old entry under its new slot. A base-only
+  version advance cannot excuse edits to existing capability floors or other numbers.
+  Outside conflict blocks it accepts only exact replacements of the previous declared version with
+  the head's declared version, including moving that exact ledger entry to its new slot. Other
+  numbers, mixed edits, modes, types and unsupported declarations fail closed. Generated output
+  needs reproduction: the runner reproduces text-only built-in skills with its trusted renderer
+  against both trees. Binary skill sources, output mismatches and unsupported generators stay
+  ordinary commits; no generator from the pull request is executed.
+  Equivalence permits that same proven renumber in PR-side blobs and compares ledger entries
+  added or removed by the PR, excluding unchanged entries inherited from the base. Other changed
+  base-side blobs still require a reviewer. Except for that exact ledger-entry renumber, a
   conflict block's resolution is never equivalent; its round always has a reviewer, who gets the
   pull request's diff of the scoped files both before and after the merge, so a change the
   resolution dropped is visible. Each diff is capped per file, so one oversized file cannot hide the
@@ -1043,6 +1057,18 @@ turn can commit there too. Codex keeps each root's `.git` link read-only. A work
 launch is left out of the turn's roots.
 
 ### Codex's Sandbox Inside This Boundary
+
+Protocol v361 catalogs `AgentDefinition.providerCommandHomeWriteSeparation`, and launches log
+the fixed `provider_command_home_write_separation` diagnostic to the runner log without adding
+session-history events. Remote-target launch diagnostics remain unknown. Both describe only runner-enforced
+separation of provider credential-home writes from model command subprocess writes. Current native
+Linux/macOS harnesses report unprotected: unsupported command mediation for Claude/Codex/Pi,
+incomplete adapter coverage for ACP. Other native hosts and WSL report unavailable. An older
+runner's missing report is unknown. None of these reports asserts that the provider's own nested
+sandbox is ineffective. `externalSandbox`, ACP client-terminal support, isolation configuration,
+and failed probes never establish protection. Provider refresh, transcripts and configuration
+writes retain their existing behavior. The [enforcement plan](provider-command-home-write-separation.md)
+and [ADR 0003](adr/0003-runner-owned-execution-isolation.md) describe remaining #3922 work.
 
 Codex App Server's workspace sandbox starts its own bubblewrap. On a host that restricts
 unprivileged user namespaces, such as recent Ubuntu with `kernel.apparmor_restrict_unprivileged_userns=1`
@@ -1680,6 +1706,14 @@ command permission is then admitted and the decision is marked consumed only aft
 response is delivered to the runner. A changed command, failed delivery, stale policy, changed
 ancestry, ambiguous match, persistent grant, or unsupported provider cannot consume the grant.
 
+Protocol v344 (#4242) exposes `approvedAction: {kind: "pr_merge_enqueue", command}` on approved
+merge decision reads (including `get_workflow_decision`) and resolution results, and includes the
+same exact action in the child's approval prompt. Copy this server-derived action unchanged into
+consumption alongside the approved `resourceSnapshot`; do not reconstruct the shell command.
+Discovery does not arm or execute it. The existing consumption checks and one-shot admission still
+apply. Other decision categories and non-approved statuses have no approved action. Older servers
+omit this optional field; its absence never authorizes a guessed command or an external merge.
+
 Protocol v239 (#3602) adds GitLab merge requests. The snapshot's `repository` is the project with
 its host and full namespace (`<gitlab-host>/group/subgroup/project`), `pullRequest` is the merge
 request IID, and three fields exist only for GitLab and are then required: `mergeMethod`
@@ -2251,12 +2285,33 @@ parameters.
 
 Each delivery records a server-side review receipt bound to the reviewer, child, occurrence, policy
 revision, evidence identifier, artifact, and digest. `resolve_descendant_workflow_decision` approves a
-UI-evidence decision only when an acknowledged, unexpired (one hour), unconsumed, unrevoked receipt exists for every
+UI-evidence decision only when an acknowledged, unexpired (one hour), unrevoked receipt exists for every
 item; repeating `evidenceReviewed` identifiers is not sufficient. Denial needs no receipts and must omit
 `evidenceReviewed`, which accompanies only an approval. Receipts
-are spent by resolution and revoked with the decision, so a policy-revision or ownership change,
-supersession, or revocation invalidates them. The resolution audit lists evidence identifier and
+are spent by resolution and revoked with the decision. A policy-revision or ownership change or
+explicit revocation invalidates them; byte-identical images can retain delivery proof after
+supersession as described below. The resolution audit lists evidence identifier and
 digest pairs and the receipt ids spent; each delivery is a `review`-stage audit entry.
+
+With runner protocol 356 or later, an acknowledged image delivery can also support a new occurrence
+without delivering the image again (#4405). The server matches the controlling Orchestrator,
+reviewer Session, child Session, artifact id, SHA-256 and policy revision, and rehashes the stored
+artifact bytes. Its original one-hour expiry still applies. Resolution spends the old occurrence's
+receipt without erasing this delivery proof; supersession alone also preserves the proof, while
+explicit revocation, denial, missing acknowledgement or any mismatch requires fresh review.
+Only missing images appear in the approval refusal for a mixed set. The resolution audit lists
+`reusedReviewReceipts`, including each original receipt id, occurrence, reviewer and review time.
+No receipt is copied or given a fresh expiry. Video frames never use this path; older runners
+retain per-occurrence behavior.
+
+Delegated image review may reuse its original approving verdict only with that same reviewer
+Session's matching receipts and current audience checks. The current preparation must also have
+the same claims-and-criteria brief hash; the server binds that preparation to the new occurrence
+and resource digest, so forwarding an old reference cannot bypass a changed brief. Preparing an identical set returns the
+original review reference rather than launching another reviewer. A different reviewer receives
+fresh images; it cannot inherit deliveries to another Session. A changed set needs a fresh
+delegated review because the existing reviewer is restricted to its one pinned review task.
+Reusing a verdict does not consume the original occurrence's verdict while that occurrence is pending.
 
 Video evidence is reviewed by a separate managed reviewer, never by the Orchestrator itself.
 `prepare_descendant_video_evidence_review` (`sessionId`, `occurrenceId`, `evidenceId`) asks the

@@ -33,7 +33,7 @@ import { createHash, randomInt, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { get as httpsGet } from "node:https";
-import type { BoxStatus, RunnerCredentialSecret } from "@wollipog/protocol";
+import type { BoxStatus, BoxView, RunnerCredentialSecret } from "@wollipog/protocol";
 import type { BoxConfig, ControlPlaneDb } from "./db.js";
 import { readCompatibleEnv, type Environment } from "./env-compat.js";
 import type { Hub } from "./hub.js";
@@ -1434,6 +1434,7 @@ export class BoxOrchestrator {
     }
     if (rt?.readiness) {
       rt.readiness.registered = true;
+      this.setStatus(boxId, "online");
       this.onRunnerAgentsUpdated(runnerId);
     } else this.setStatus(boxId, "online");
   }
@@ -1450,16 +1451,17 @@ export class BoxOrchestrator {
     const readyBefore = pending.baseline?.agents.filter(agent => agent.installationAvailable ?? agent.available) ?? [];
     const authenticatedBefore = pending.baseline?.accounts?.filter(account => account.authStatus === "authenticated") ?? [];
     const previouslyBlocked = new Set(pending.baseline?.agents.filter(agent => agent.ownershipBlocked).map(agent => agent.id));
-    const problem = current.agents.some(agent => agent.ownershipBlocked && !previouslyBlocked.has(agent.id))
-      ? "Provider HOME ownership blocks harness discovery. Preserve ownership evidence and inspect recovery details; historical leases may need operator recovery."
+    const problem: NonNullable<BoxView["harnessReadiness"]>["reason"] = current.agents.some(agent => agent.ownershipBlocked && !previouslyBlocked.has(agent.id))
+      ? "ownership_blocked"
       : readyBefore.some(agent => !current.agents.some(next => next.id === agent.id && (next.installationAvailable ?? next.available)))
-        ? "A previously available harness became unavailable after reconnect. Inspect Agent Details before retrying."
+        ? "installation_regressed"
         : authenticatedBefore.some(account => !current.accounts?.some(next => next.id === account.id && next.authStatus === "authenticated"))
-          ? "A previously signed-in provider account became unavailable after reconnect. Inspect account recovery details."
-          : null;
+          ? "authentication_regressed"
+          : undefined;
     clearTimeout(pending.timer);
-    this.log(JSON.stringify({ event: "ssh_runner_readiness", boxId, epoch: rt.epoch, outcome: problem ? "failed" : "ready" }));
-    this.setStatus(boxId, problem ? "failed" : "online", problem);
+    this.log(JSON.stringify({ event: "ssh_runner_readiness", boxId, epoch: rt.epoch, outcome: problem ? "failed" : "ready", reason: problem ?? null, transport: "online" }));
+    this.deps.db.setBoxHarnessReadiness(boxId, { state: problem ? "failed" : "ready", checkedAt: Date.now(), ...(problem ? { reason: problem } : {}) });
+    this.deps.hub.boxChanged(boxId);
     if (!problem) rt.readiness = undefined;
   }
 
@@ -1662,13 +1664,16 @@ export class BoxOrchestrator {
     const baseline = rt.readiness?.baseline;
     if (rt.readiness) clearTimeout(rt.readiness.timer);
     const previous = this.deps.db.getRunner(cfg.runnerId);
+    this.deps.db.setBoxHarnessReadiness(cfg.boxId, { state: "checking", checkedAt: Date.now() });
     rt.readiness = {
       baseline: baseline ?? (previous ? runnerHarnessReadiness(previous) : null),
       registered: false,
       timer: setTimeout(() => {
         if (!this.live(rt, epoch) || !rt.readiness) return;
         this.log(JSON.stringify({ event: "ssh_runner_readiness", boxId: cfg.boxId, epoch, outcome: "timeout" }));
-        this.setStatus(cfg.boxId, "failed", "The SSH runner did not report fresh harness readiness within 90 seconds. Inspect the connection and runner discovery diagnostics.");
+        this.deps.db.setBoxHarnessReadiness(cfg.boxId, { state: "failed", reason: "report_timeout", checkedAt: Date.now() });
+        if (!rt.readiness.registered) this.setStatus(cfg.boxId, "failed", "The SSH runner did not connect and report fresh harness readiness within 90 seconds.");
+        else this.deps.hub.boxChanged(cfg.boxId);
       }, 90_000),
     };
     rt.readiness.timer.unref();

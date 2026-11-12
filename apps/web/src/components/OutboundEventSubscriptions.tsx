@@ -302,7 +302,7 @@ export function OutboundEventSubscriptions({
   // A scope the lists don't hold (yet) reads as its kind, never its id.
   const scopeOf = ({ scope }: OutboundEventSubscriptionView): SubscriptionScope => scope.kind === "project"
     ? { kind: "Project", name: projects.find((project) => project.id === scope.projectId)?.name }
-    : { kind: "Automation", name: automations.find((automation) => automation.automationId === scope.automationId)?.name };
+    : { kind: "Automation", name: automations.find((automation) => automation.automationId === (scope.kind === "automation" ? scope.automationId : undefined))?.name };
 
   const create = async (request: CreateOutboundEventSubscriptionRequest) => {
     const created = await api.createOutboundEventSubscription(request);

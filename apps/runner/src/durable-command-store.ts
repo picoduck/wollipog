@@ -46,6 +46,11 @@ interface DurableCommandRecord {
   userEventSeq?: number;
   /** An interrupted steering attempt stays started, including when read by older runners. */
   steeringPending?: boolean;
+  issueClosureResume?: true;
+}
+
+function steerableRecord(record: DurableCommandRecord): boolean {
+  return record.kind === "answer_recovered_question" || record.kind === "prompt_session" && record.issueClosureResume === true;
 }
 
 export interface DurableCommandReceipt {
@@ -122,6 +127,7 @@ export class DurableCommandStore {
       commandId: message.commandId,
       executionId: message.executionId,
       kind: message.command.type,
+      ...(message.command.type === "prompt_session" && message.command.issueClosureResume === true ? { issueClosureResume: true as const } : {}),
       sessionId: commandSessionId(message.command),
       payloadHmac,
       state: "accepted",
@@ -300,11 +306,11 @@ export class DurableCommandStore {
   recoverUnsubmittedSteering(prior: DurableCommandRecord): DurableCommandRecord | null {
     return this.withCommandLock(prior.commandId, () => {
       const current = this.read(prior.commandId);
-      if (!current || prior.kind !== "answer_recovered_question" || prior.state !== "queued" ||
+      if (!current || !steerableRecord(prior) || prior.state !== "queued" ||
           prior.userEventSeq !== undefined || current.ownerId !== this.ownerId ||
           current.ownerId !== prior.ownerId || current.commandId !== prior.commandId ||
           current.executionId !== prior.executionId ||
-          current.kind !== prior.kind || current.sessionId !== prior.sessionId ||
+          current.kind !== prior.kind || current.issueClosureResume !== prior.issueClosureResume || current.sessionId !== prior.sessionId ||
           current.payloadHmac !== prior.payloadHmac || current.userEventSeq !== undefined) return null;
       const unchanged = current.revision === prior.revision && current.state === "queued" &&
         !current.steeringPending;
@@ -337,7 +343,7 @@ export class DurableCommandStore {
     if (!current || current.revision !== prior.revision) throw new Error("durable command receipt changed concurrently");
     if (!takeOwnership && current.ownerId !== this.ownerId) throw new Error("durable command receipt is owned by another runner process");
     const replayReset = takeOwnership && current.state === "queued" && state === "accepted";
-    const rejectedSteeringReset = !takeOwnership && current.kind === "answer_recovered_question" &&
+    const rejectedSteeringReset = !takeOwnership && steerableRecord(current) &&
       current.state === "started" && state === "queued" && current.steeringPending === true &&
       patch.steeringPending === false && current.userEventSeq === undefined;
     if (!replayReset && !rejectedSteeringReset && !transitionAllowed(current.state, state)) {
@@ -525,6 +531,7 @@ export class DurableCommandHandle {
   }
 
   get commandId(): string { return this.record.commandId; }
+  get issueClosureResume(): true | undefined { return this.record.issueClosureResume; }
   get state(): DurableSessionCommandState { return this.record.state; }
   get current(): DurableCommandReceipt { return receipt(this.record, false); }
 
@@ -535,8 +542,8 @@ export class DurableCommandHandle {
   /** Persist before turn/steer writes. Keep this boundary local: the CP receipt remains queued
    * until acceptance, while a crashed runner (including an older version) sees started. */
   beginSteering(): boolean {
-    if (this.record.kind !== "answer_recovered_question" || this.record.state !== "queued") {
-      throw new Error("only a queued question answer can begin durable steering");
+    if (!steerableRecord(this.record) || this.record.state !== "queued") {
+      throw new Error("only a queued question answer or approved closure notification can begin durable steering");
     }
     try {
       this.nonterminal(() => this.store.transition(this.record, "started", { steeringPending: true }));
@@ -664,6 +671,7 @@ function isTerminal(state: DurableSessionCommandState): boolean {
 
 function validRecord(value: DurableCommandRecord): boolean {
   return value?.version === 1 && COMMAND_ID.test(value.commandId) && COMMAND_ID.test(value.executionId) &&
+    (value.issueClosureResume === undefined || value.issueClosureResume === true && value.kind === "prompt_session") &&
     (value.kind === "start_session" || value.kind === "prompt_session" ||
       value.kind === "answer_recovered_question") && typeof value.sessionId === "string" &&
     /^[a-f0-9]{64}$/.test(value.payloadHmac) && Number.isInteger(value.revision) && value.revision > 0 &&

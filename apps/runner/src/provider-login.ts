@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { agentContextKey, type AgentContext, type AgentDefinition, type ProviderCredentialImportCode, type ProviderCredentialImportSource, type ProviderLoginView } from "@wollipog/protocol";
+import { agentContextKey, providerLoginInstallationMissing, type AgentContext, type AgentDefinition, type ProviderCredentialImportCode, type ProviderCredentialImportSource, type ProviderLoginView } from "@wollipog/protocol";
 import type { CodexCredentialLayout } from "./provider-credential-import.js";
 import { LEASE_WORKER_ERRORS, ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import type { RunnerProviderAccount } from "./config.js";
@@ -445,7 +445,8 @@ export class ProviderLoginSupervisor {
       };
       persistAccount = true;
     }
-    const eligibleAgents = agentsMatchingHarnessInstallationSelections(this.options.agents(), installationSelections);
+    const eligibleAgents = agentsMatchingHarnessInstallationSelections(this.options.agents(), installationSelections)
+      .filter((agent) => !providerLoginInstallationMissing(agent));
     const agent = agentForProviderAccount(eligibleAgents, account, [
       "claude-code", "codex", "codex-app-server",
     ]);

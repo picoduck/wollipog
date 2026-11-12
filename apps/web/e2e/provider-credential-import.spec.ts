@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 /** #3719: Add Account can copy an existing Codex API-key sign-in into a new managed profile. */
 const DESIGN_WORKSTATION = "machine=native-t14s";
@@ -7,7 +8,7 @@ async function openAddAccount(page: Page, query: string) {
   await page.goto(`/machine-management-e2e.html?${query}&${DESIGN_WORKSTATION}`);
   await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
   const section = page.locator("section").filter({ has: page.getByRole("heading", { name: /^Provider Accounts/ }) });
-  await section.getByRole("button", { name: "Add Account…" }).click();
+  await section.getByRole("button", { name: "Add Separate Sign-In…" }).click();
   const dialog = page.getByRole("dialog", { name: "Add Account" });
   await expect(dialog).toBeVisible();
   return dialog;
@@ -23,6 +24,7 @@ test("an Owner copies a Codex API-key sign-in into a new profile after confirmin
   await expect(sources.getByRole("radio", { name: "This Machine's Codex Sign-In" })).toBeChecked();
   await sources.getByRole("radio", { name: "Codex Team" }).check();
   await dialog.getByLabel("Account Label").fill("Codex Copy");
+  await expect(dialog.getByRole("button", { name: "Copy Sign-In", exact: true })).toBeEnabled();
   await dialog.getByRole("button", { name: "Copy Sign-In" }).click();
   const confirmation = page.getByRole("dialog", { name: "Copy Sign-In" });
   await expect(confirmation).toContainText("Only the API key is copied from Codex Team into the new profile Codex Copy on Design Workstation");
@@ -37,12 +39,33 @@ test("a ChatGPT sign-in is refused in the dialog with the reason", async ({ page
   await dialog.getByRole("radio", { name: "Codex" }).click();
   await dialog.getByRole("radio", { name: "Copy Existing Sign-In" }).click();
   await dialog.getByLabel("Account Label").fill("ChatGPT");
+  await expect(dialog.getByRole("button", { name: "Copy Sign-In", exact: true })).toBeEnabled();
   await dialog.getByRole("button", { name: "Copy Sign-In" }).click();
   await page.getByRole("dialog", { name: "Copy Sign-In" }).getByRole("button", { name: "Copy Sign-In" }).click();
   const notice = dialog.locator('.notice[role="alert"]');
   await expect(notice).toContainText("Couldn't Copy the Sign-In");
   await expect(notice).toContainText("A ChatGPT sign-in, or one kept in the keyring, can't be shared safely");
 });
+
+for (const theme of ["light", "dark"]) {
+  for (const width of [1280, 390]) {
+    test(`missing CLI only blocks new sign-in at ${width}px in ${theme}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 900 });
+      const dialog = await openAddAccount(page, `credentialImport&theme=${theme}`);
+      await dialog.getByRole("radio", { name: "Codex", exact: true }).click();
+      await dialog.getByLabel("Account Label").fill("Codex Copy");
+      await expect(dialog.getByRole("button", { name: "Start Sign-In", exact: true })).toBeDisabled();
+      await expect(dialog.getByText("Installation Needed", { exact: true })).toBeVisible();
+      await dialogMotionSettled(page);
+      await page.screenshot({ path: testInfo.outputPath(`missing-cli-sign-in-${width}-${theme}.png`) });
+      await dialog.getByRole("radio", { name: "Copy Existing Sign-In", exact: true }).click();
+      await expect(dialog.getByRole("button", { name: "Copy Sign-In", exact: true })).toBeEnabled();
+      await expect(dialog.getByText("Installation Needed", { exact: true })).toHaveCount(0);
+      await dialogMotionSettled(page);
+      await page.screenshot({ path: testInfo.outputPath(`missing-cli-copy-${width}-${theme}.png`) });
+    });
+  }
+}
 
 test("a Windows machine explains why it can't copy an existing sign-in", async ({ page }) => {
   const windows = await openAddAccount(page, "windows");
