@@ -1,4 +1,4 @@
-import type { BackgroundJobStopActor, OrganizationRole } from "@wollipog/protocol";
+import type { BackgroundJobStopActor, LocationSwitchStateView, OrganizationRole } from "@wollipog/protocol";
 import { PERSONAL_ORGANIZATION_ID } from "@wollipog/protocol";
 import type { ResourceScope } from "@wollipog/protocol";
 import { matchWorkspaceId } from "./workspace-match.js";
@@ -314,6 +314,16 @@ export function forkSnapshotIdentityError(
   return fork.agentId === source.agentId && fork.driver === source.driver && sameExecutionWorkspace
     ? null
     : "runner returned a fork with a different agent or workspace identity";
+}
+
+/** A fork that reports a Location switch in progress took its source's (#4138): an approval is the
+ * session's its person approved it for, and a runner built before forks cleared it carries that
+ * switch out in the fork. Such a fork is discarded rather than adopted. A failed switch is only
+ * shown, never carried out, so it does not refuse the fork. */
+export function forkInheritedLocationSwitchError(fork: { locationSwitch?: LocationSwitchStateView | null }): string | null {
+  return fork.locationSwitch?.state === "pending"
+    ? "runner returned a fork carrying its source's approved Location switch; update the runner, then fork again"
+    : null;
 }
 
 export function forkProjectAssignment(

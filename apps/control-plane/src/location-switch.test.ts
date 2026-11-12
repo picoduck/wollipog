@@ -254,6 +254,47 @@ test("the session row follows its runner into the new Location only under a cons
   } finally { h.db.close(); }
 });
 
+test("a fork of the requesting session can neither read nor carry out its approval, and its row never follows a move", async () => {
+  const h = harness({ driver: "claude-code" });
+  try {
+    const decision = (await h.request()).data!;
+    assert.equal(h.resolve(decision.occurrenceId, `switch:${h.locations.docs.id}`).ok, true);
+    // The fork is created as the fork route creates it: from the runner's snapshot, in the source's
+    // Location and ownership, with its provenance.
+    const now = Date.now();
+    h.db.createSessionFromSnapshot({
+      id: "fork", workspaceId: "app", agentId: "agent", title: "App Session (fork)", status: "idle", driver: "claude-code",
+      useWorktree: true, worktreePath: "/worktrees/fork", config: { model: "model", effort: "high" }, preview: null,
+      pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: now, updatedAt: now,
+    } satisfies SessionSnapshot, "runner", now, h.db.sessionScope("self")!,
+    { projectId: h.project.id, projectLocationId: h.locations.app.id }, { sourceSessionId: "self", sourceTurn: 1 });
+    const scope = h.db.sessionScope("fork")!;
+    const fork: AgentPrincipal = { kind: "agent", actorId: "fork", credentialSessionId: "fork", organizationId: scope.organizationId, delegatedScope: scope };
+    // Under its own credential, the source's approval is not the fork's to read or carry out.
+    assert.equal(h.service.get("fork", decision.occurrenceId, fork).status, 404);
+    assert.equal((await h.service.execute("fork", decision.occurrenceId, decision.resourceDigest, fork)).status, 404);
+    // Nor can it act as the source.
+    assert.equal(h.service.get("self", decision.occurrenceId, fork).status, 404);
+    assert.equal((await h.service.execute("self", decision.occurrenceId, decision.resourceDigest, fork)).status, 404);
+    assert.equal(h.switches.length, 0, "no runner is asked to move anything");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved", "and the approval is still the source's");
+
+    // The source carries it out. A runner that moved the fork too never moves the fork's row.
+    const executed = await h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(executed.ok, true, executed.error ?? "");
+    assert.deepEqual(h.switches.map((item) => item.message.sessionId), ["self"]);
+    h.db.updateSessionFromSnapshot("fork", {
+      id: "fork", workspaceId: "docs", agentId: "agent", title: "App Session (fork)", status: "idle", driver: "claude-code",
+      useWorktree: true, worktreePath: "/worktrees/docs", config: { model: "model", effort: "high" }, preview: null,
+      pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: now, updatedAt: now,
+    } satisfies SessionSnapshot, Date.now());
+    const row = h.db.getSession("fork")!;
+    assert.deepEqual([row.workspaceId, row.projectLocationId], ["app", h.locations.app.id]);
+    reportWorkspace(h.db, "docs");
+    assert.equal(h.db.getSession("self")!.projectLocationId, h.locations.docs.id, "while the source's row follows its own switch");
+  } finally { h.db.close(); }
+});
+
 test("Stay Here leaves the session where it is and nothing can be executed", async () => {
   const h = harness();
   try {

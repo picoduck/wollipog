@@ -4,7 +4,7 @@ import type {ControlPlaneDb} from "./db.js";
 import {isRunnerRequestTimeoutError, type Hub} from "./hub.js";
 import {sessionBlocksConversationFork, type SessionsService} from "./sessions.js";
 import {canAssignSessionProject} from "./session-creation-route.js";
-import {forkProjectAssignment, forkSnapshotIdentityError, providerForkCleanupTarget, providerForkSnapshotIdError, type AuthPrincipal, type HumanPrincipal} from "./identity.js";
+import {forkInheritedLocationSwitchError, forkProjectAssignment, forkSnapshotIdentityError, providerForkCleanupTarget, providerForkSnapshotIdError, type AuthPrincipal, type HumanPrincipal} from "./identity.js";
 import {failureBody, type CapabilityRefusal} from "./capability-refusal.js";
 import type {OwnerManagementReply} from "./owner-management.js";
 import type {ShellRegistry} from "./shell-registry.js";
@@ -227,6 +227,9 @@ export function createSessionLifecycleManagement(deps: {
       res.snapshot,
     );
     if (forkIdentityError) throw new Error(forkIdentityError);
+    // Thrown after the fork exists on the runner, so the cleanup below deletes it there too.
+    const inheritedSwitchError = forkInheritedLocationSwitchError(res.snapshot);
+    if (inheritedSwitchError) throw new Error(inheritedSwitchError);
     await recheck?.();
     const now = Date.now();
     const activeSourceLocation = source.projectLocationId

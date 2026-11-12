@@ -7,6 +7,7 @@ import {
   orchestratorSelfWorktreeAuthorizationError,
   agentDelegationAuthorizationError,
   boundedTargetId,
+  forkInheritedLocationSwitchError,
   forkProjectAssignment,
   forkSnapshotIdentityError,
   mutationAuthorizationError,
@@ -237,6 +238,15 @@ test("a runner cannot change a fork's agent, driver, or workspace identity", () 
       workspacePath: "/repos/other",
     },
   )!, /different agent or workspace identity/);
+});
+
+test("a fork reporting a Location switch in progress took its source's and is refused; a failed one is only shown", () => {
+  const view = { repository: "acme/docs", workspaceId: "docs", locationName: "Docs", at: 1 };
+  assert.match(forkInheritedLocationSwitchError({ locationSwitch: { ...view, state: "pending" } })!,
+    /carrying its source's approved Location switch; update the runner/);
+  assert.equal(forkInheritedLocationSwitchError({ locationSwitch: { ...view, state: "failed", reason: "refused" } }), null);
+  assert.equal(forkInheritedLocationSwitchError({ locationSwitch: null }), null);
+  assert.equal(forkInheritedLocationSwitchError({}), null);
 });
 
 test("provider fork timeouts require cleanup even before the runner confirms creation", () => {
