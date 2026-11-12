@@ -807,7 +807,6 @@ export function InboxView({
           // smallest possible delta after the cached viewport is restored. Repeat briefly because
           // the virtualizer can refine offscreen estimates as measured rows settle.
           let framesRemaining = 8;
-          let restoredScroll = false;
           const cancelReveal = () => {
             if (listRevealFrameRef.current !== null) window.cancelAnimationFrame(listRevealFrameRef.current);
             listRevealFrameRef.current = null;
@@ -830,11 +829,10 @@ export function InboxView({
             }
             // The remounted list initially renders an estimate-backed sizer and hidden rows.
             // An early restore can clamp to zero and an early reveal can then adopt that position.
-            // Restore once its measured geometry is committed, before computing the minimum reveal.
+            // Retry the saved position as measurements settle, before computing the minimum reveal.
             const ready = list.querySelector('[data-virtual-measurements="ready"]') !== null;
-            if (ready && !restoredScroll) {
+            if (ready) {
               list.scrollTop = savedScrollTop;
-              restoredScroll = true;
             }
             const row = ready ? list.querySelector<HTMLElement>(`#inbox-session-${encodeResourceId(displayedSelection)}`) : null;
             if (row) {
