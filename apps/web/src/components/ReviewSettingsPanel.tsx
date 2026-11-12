@@ -4,6 +4,7 @@ import { agentHarnessIdentityKey, canonicalAgentHarnessIdentity, reviewerHarness
 import { useLeaveGuard } from "../leave-guard.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { useApi } from "../api-context.js";
+import { modelOptionLabel } from "../agent-presentation.js";
 import { Notice } from "./Notice.js";
 import { SaveBar } from "./SaveBar.js";
 import { useSettingsPanelHead } from "./SettingsView.js";
@@ -91,7 +92,7 @@ export function ReviewSettingsPanel() {
           error={refused ? "This reviewer belongs to the implementer's model family. Choose another harness or explicitly allow it below." : null}
           onChange={harness => changeRule(rule, { harness: harness as ReviewReviewerRule["harness"], model: null, effort: null })} />
         <SelectRow title="Reviewer Model" value={rule.model ?? AUTO} disabled={busy}
-          options={[...automatic, ...[...models.values()].map(m => ({ value: m.id, label: m.displayName ?? m.id })),
+          options={[...automatic, ...[...models.values()].map(m => ({ value: m.id, label: modelOptionLabel(m, models.values()) })),
             ...(rule.model && !models.has(rule.model) ? [{ value: rule.model, label: `${rule.model} (Unavailable)` }] : [])]}
           description="Automatic uses the selected reviewer's discovered default model. A missing configured model refuses the review."
           onChange={model => changeRule(rule, { model: model === AUTO ? null : model, effort: null })} />

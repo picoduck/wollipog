@@ -22,7 +22,7 @@ import {
 import {
   buildSpec, defaults, formFrom, scheduleError, specOf, validTimeZone, withAgent, withModel, type FormState,
 } from "../automation-form.js";
-import { agentDisplayName } from "../agent-presentation.js";
+import { agentDisplayName, modelOptionLabel } from "../agent-presentation.js";
 import { titleCaseLabel } from "../format.js";
 import { useLeaveGuard } from "../leave-guard.js";
 import { useReportEntityTitle } from "../entity-title.js";
@@ -983,7 +983,7 @@ function AutomationEditorForm({
                           options={[{ value: "", label: "Agent Default" },
                             ...modelOptions.map((model) => ({
                               value: model.id,
-                              label: model.displayName ?? model.id,
+                              label: modelOptionLabel(model, modelOptions),
                               ...(model.description ? { description: model.description } : {}),
                             }))]} />
                       </div>

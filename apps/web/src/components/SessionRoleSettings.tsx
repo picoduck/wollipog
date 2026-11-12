@@ -1,6 +1,6 @@
 import { MAX_LIVE_CHILD_LIMIT, WORKFLOW_DECISION_CATEGORIES, agentHarnessIdentityKey,
   type OrchestratorDefaults, type OrchestratorSettingsCapabilities } from "@wollipog/protocol";
-import { agentHarnessOptionLabel } from "../agent-presentation.js";
+import { agentHarnessOptionLabel, modelOptionLabel } from "../agent-presentation.js";
 import { Select, type SelectOption } from "./ui/ChoiceControls.js";
 import { effortLabel } from "../format.js";
 import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-disclosure.js";
@@ -59,7 +59,7 @@ export function SessionRoleSettings({ value, capabilities, disabled, onChange }:
           childModel: null, childEffort: null });
       }} />
     <RoleSelect label="Child Model" disabled={disabled} value={value.behavior.childModel ?? ""}
-      options={[{ value: "", label: "Automatic" }, ...models.map((model) => ({ value: model.id, label: model.displayName ?? model.id })),
+      options={[{ value: "", label: "Automatic" }, ...models.map((model) => ({ value: model.id, label: modelOptionLabel(model, models) })),
         ...(value.behavior.childModel && !models.some((model) => model.id === value.behavior.childModel)
           ? [{ value: value.behavior.childModel, label: value.behavior.childModel, disabled: true, disabledReason: "This saved model is unavailable." }] : [])]}
       onChange={(childModel) => behavior({ childModel: childModel || null, childEffort: null })} />

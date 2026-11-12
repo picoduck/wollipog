@@ -5,6 +5,7 @@ import {
   type AgentDefinition,
   type AgentDriverKind,
   type AgentHarnessIdentity,
+  type AgentModel,
   type ModelResolutionDrift,
   type OrchestratorHarnessCapability,
 } from "@wollipog/protocol";
@@ -71,6 +72,20 @@ export function modelDriftText(drift: ModelResolutionDrift): string {
 export function pinnedModelChoices(drift: ModelResolutionDrift): ModelResolutionDrift["pinned"] {
   const seen = new Set<string>();
   return drift.pinned.filter((choice) => !seen.has(choice.displayName) && Boolean(seen.add(choice.displayName)));
+}
+
+/** Distinguish colliding picker names without changing provider names or stored model IDs. */
+export function modelOptionLabel(
+  model: Pick<AgentModel, "id" | "displayName">,
+  options: Iterable<Pick<AgentModel, "id" | "displayName">>,
+): string {
+  const name = model.displayName?.trim() || model.id;
+  for (const other of options) {
+    if (other.id !== model.id && (other.displayName?.trim() || other.id) === name) {
+      return `${name} (${model.id})`;
+    }
+  }
+  return name;
 }
 
 /** Normalize only names emitted by earlier Wollipog onboarding, preserving custom agent names. */
