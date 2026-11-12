@@ -7,7 +7,6 @@ import { Window } from "happy-dom";
 import type { ControlPlaneToUi, SessionCommandPermissions, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { requestArchiveSearch, takeArchiveSearch } from "../archive-search-handoff.js";
 import { writeArchiveBrowse } from "../archive-browse-history.js";
 import { deleteSessionMessage, stopArchivedSessionMessage } from "../session-confirmation-copy.js";
 import { viewPath, type View, type ViewNavigation } from "../navigation.js";
@@ -126,7 +125,7 @@ let sequence = 0;
 async function mount(
   sessions: SessionView[],
   overrides: Partial<ApiClient> = {},
-  options: { initialConnection?: "online" | "unauthorized"; unarchiveAndRestart?: boolean; restoreBrowse?: boolean } = {},
+  options: { initialConnection?: "online" | "unauthorized"; unarchiveAndRestart?: boolean; restoreBrowse?: boolean; initialSearch?: string } = {},
 ) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -198,7 +197,7 @@ async function mount(
       <ApiProvider client={client}>
         <FeedbackProvider>
           <StoreProvider connection={connection} navigation={navigation}>
-            <ArchivedSessionsView restoreBrowse={options.restoreBrowse} />
+            <ArchivedSessionsView restoreBrowse={options.restoreBrowse} initialSearch={options.initialSearch} />
           </StoreProvider>
         </FeedbackProvider>
       </ApiProvider>,
@@ -578,16 +577,10 @@ test("search input debounces to one request and preserves server row order", asy
 });
 
 test("the palette's Search Archived Sessions opens the archive already searching its words (#1978)", async () => {
-  requestArchiveSearch("login");
-  const fixture = await mount([session(1, { id: "one", title: "Login work" })]);
+  const fixture = await mount([session(1, { id: "one", title: "Login work" })], {}, { initialSearch: "login" });
   const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
   assert.equal(input.value, "login");
   assert.equal(fixture.archiveInputs[0]?.q, "login", "the first page is already the search, not the whole archive");
-  assert.equal(takeArchiveSearch(), null, "the query is taken once");
-
-  // With the archive already open under the palette, the handoff arrives as an event.
-  await act(async () => { requestArchiveSearch("deploy"); });
-  assert.equal(input.value, "deploy");
   await fixture.unmount();
 });
 

@@ -118,15 +118,6 @@ export function instanceStatus(
   return { availability: active && (manager.phase === "loading" || manager.phase === "opening") ? "connecting" : "saved" };
 }
 
-/** The active instance's word (§11.2) given the banner's state: `instanceStatus`'s rule for one availability. */
-export function activeInstanceStatusMeta(
-  connection: ActiveInstanceConnection | null,
-  availability: InstanceAvailability,
-): StatusMeta | null {
-  return instanceAvailabilityMeta(connection === "reconnecting" ? "offline"
-    : connection === "sign-in-required" ? "authentication-required" : availability);
-}
-
 /** What the shell's banner says about the active instance. Null outside the shell (the recovery shell). */
 const ActiveInstanceConnectionContext = createContext<ActiveInstanceConnection | null>(null);
 

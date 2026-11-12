@@ -6055,7 +6055,6 @@ body.shell-dock-dragging * {
 
 /* Browser and authenticated artifact previews. Both iframe surfaces are sandboxed in markup; the
    application chrome remains outside the untrusted browsing context. */
-.art-view,
 .artifact-preview {
   min-width: 0;
   display: flex;
@@ -6242,7 +6241,6 @@ body.shell-dock-dragging * {
 }
 .art-code > .icon-btn { flex: none; }
 .art-markdown { overflow-wrap: anywhere; }
-.art-inline-actions { justify-content: flex-end; }
 /* Enlarge: the media fills a full dialog's stage, the way the Evidence Viewer shows it (#2207). */
 .art-enlarged .modal-body { gap: var(--space-3); }
 .art-stage {

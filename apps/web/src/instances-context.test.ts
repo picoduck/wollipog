@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   activeInstanceConnection,
-  activeInstanceStatusMeta,
   describeInstanceFailure,
   instanceAvailabilityMeta,
   instanceMonogram,
@@ -94,9 +93,6 @@ test("the active instance takes the banner's word, never Online beside it", () =
   assert.equal(instanceStatus(manager(undefined, "opening"), null, "r").availability, "connecting");
   assert.equal(instanceStatus(manager(undefined, "loading"), null, "r").availability, "connecting");
   assert.equal(instanceStatus(manager(undefined), null, "r").availability, "saved");
-  assert.equal(activeInstanceStatusMeta("reconnecting", "online")?.label, "Offline");
-  assert.equal(activeInstanceStatusMeta("sign-in-required", "online")?.label, "Pairing Required");
-  assert.equal(activeInstanceStatusMeta(null, "saved"), null);
 });
 
 test("a row's problem is one sentence about the other computer, never the transport error", () => {

@@ -151,7 +151,6 @@ import {
   Trash2 as LucideTrash2,
   TriangleAlert as LucideTriangleAlert,
   Upload as LucideUpload,
-  UserPlus as LucideUserPlus,
   UserX as LucideUserX,
   Users as LucideUsers,
   UsersRound as LucideUsersRound,
@@ -438,10 +437,6 @@ export function CloseIcon(props: IconProps) {
 
 export function SettingsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideSettings} {...props} />;
-}
-
-export function UserPlusIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideUserPlus} {...props} />;
 }
 
 export function DeviceIcon(props: IconProps) {
