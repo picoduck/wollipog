@@ -24610,10 +24610,11 @@ export class ControlPlaneDb {
       AND resource_key='campaign_handoffs:owner' AND category='owner_decision' ORDER BY rowid DESC LIMIT 1`).get(rootId));
   }
 
-  updateCampaignHandoffQuestion(occurrenceId: string, snapshot: WorkflowDecisionView["resourceSnapshot"], digest: string): boolean {
-    return this.stmt(`UPDATE workflow_decisions SET resource_snapshot=?, resource_digest=? WHERE occurrence_id=?
+  updateCampaignHandoffQuestion(occurrenceId: string, snapshot: WorkflowDecisionView["resourceSnapshot"], digest: string,
+    evaluation: NonNullable<WorkflowDecisionView["authorityEvaluation"]>): boolean {
+    return this.stmt(`UPDATE workflow_decisions SET resource_snapshot=?, resource_digest=?, authority_evaluation=? WHERE occurrence_id=?
       AND resource_key='campaign_handoffs:owner' AND category='owner_decision' AND status='pending'
-      AND json_extract(resource_snapshot, '$.kind')='question'`).run(JSON.stringify(snapshot), digest, occurrenceId).changes === 1;
+      AND json_extract(resource_snapshot, '$.kind')='question'`).run(JSON.stringify(snapshot), digest, JSON.stringify(evaluation), occurrenceId).changes === 1;
   }
 
   /** Keyset pages keep a consumed/revoked cursor usable without retaining it in the result. */

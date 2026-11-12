@@ -7457,7 +7457,8 @@ export class SessionsService {
     for (const campaignSessionId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
       // #4146: an idle campaign with leftovers gets the server's one repair before it reads
       // Complete, Needs Cleanup or Campaign Stuck. Its wake-up, if any, is delivered below.
-      this.reconcileCampaignHandoffQuestion(campaignSessionId);
+      void this.reconcileCampaignHandoffQuestion(campaignSessionId).catch(() =>
+        this.log.warn(`campaign handoff question for ${campaignSessionId} could not be reconciled`));
       this.maybeRepairCampaign(campaignSessionId, now);
       // A waiting child's turn end records nothing (#4073). A job that reaches the stall bound ends
       // that wait without any runner update, so record what is now ready here.
@@ -7573,7 +7574,17 @@ export class SessionsService {
 
   /** #4541: reconcile the Inbox from the ledger, also on restart. This informational question
    * grants nothing. A pending occurrence is stable; an answered unchanged set is never reasked. */
-  reconcileCampaignHandoffQuestion(campaignId: string): void {
+  private readonly handoffQuestionsInFlight = new Map<string, Promise<void>>();
+
+  reconcileCampaignHandoffQuestion(campaignId: string): Promise<void> {
+    const running = this.handoffQuestionsInFlight.get(campaignId);
+    if (running) return running;
+    const attempt = this.reconcileCampaignHandoffQuestionNow(campaignId).finally(() => this.handoffQuestionsInFlight.delete(campaignId));
+    this.handoffQuestionsInFlight.set(campaignId, attempt);
+    return attempt;
+  }
+
+  private async reconcileCampaignHandoffQuestionNow(campaignId: string): Promise<void> {
     const root = this.db.getSession(campaignId);
     if (!root || root.archived || isTerminal(root.status) || root.orchestratorPolicy?.control?.mode !== "full_control" ||
         !runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "ownerQuestions")) return;
@@ -7585,18 +7596,43 @@ export class SessionsService {
       return;
     }
     const projection = this.db.campaignProjection(campaignId);
-    if (!prior && projection?.status !== "stuck" && projection?.status !== "complete_needs_cleanup") return;
+    if (prior?.status !== "pending" && projection?.status !== "stuck" && projection?.status !== "complete_needs_cleanup") return;
     const material = [...handoffs].sort((a, b) => a.workItemId.localeCompare(b.workItemId)).map(item => {
       const issue = item.issue ? `${item.issue.repository}#${item.issue.number}: ` : "";
       return `- ${issue}${item.title} (${item.handoff.responsibleActor})\n  Reason: ${item.handoff.reason}\n  Next action: ${item.handoff.nextAction}`;
     }).join("\n\n");
-    const snapshot = { category: "owner_decision" as const, kind: "question" as const,
-      question: "This campaign handed work to you. What should happen next?",
-      material: material + "\n\nThis question authorizes nothing. Your answer grants no action authority.", options: [] };
+    // Use the exact normalized representation that creation persists, including property order.
+    const normalized = normalizeWorkflowDecisionSnapshot({ category: "owner_decision", kind: "question",
+      question: "This campaign handed work to you. What should happen next?", options: [] });
+    if (!normalized.ok || normalized.data?.category !== "owner_decision") return;
+    const snapshot = normalized.data;
+    snapshot.material = material + "\n\nThis question authorizes nothing. Your answer grants no action authority.";
     const digest = workflowDecisionResourceDigest(snapshot);
     if (prior?.resourceDigest === digest && prior.status !== "revoked") return;
+    const requestId = prior?.status === "pending" ? prior.requestId : `campaign_handoffs_${digest}_${prior?.occurrenceId ?? "initial"}`;
+    const blocked = () => {
+      if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
+        triggeredBy: { kind: "system", id: "campaign_handoffs" } });
+      this.db.campaignRecovery.recordDecline(campaignId, campaignId, "secrets_and_sign_in",
+        recoveryCoordinate(`workflow:${campaignId}:${requestId}`), root.parentControlPolicy?.revision ?? 0, Date.now());
+    };
+    // Handoff text is agent-written. Server-owned coordinates do not make its content trusted.
+    if (credentialFormFloor(snapshot)) { blocked(); return; }
+    const screen = await this.screenCredentialText(root, campaignId, "owner_decision", requestId, ownerDecisionScreenData(snapshot));
+    const latest = this.db.getSession(campaignId);
+    const current = this.db.campaignHandoffQuestion(campaignId);
+    if (!latest || latest.archived || isTerminal(latest.status) || latest.orchestratorPolicy?.control?.mode !== "full_control" ||
+        latest.parentControlPolicy?.revision !== root.parentControlPolicy?.revision ||
+        current?.occurrenceId !== prior?.occurrenceId || current?.status !== prior?.status ||
+        JSON.stringify(this.db.campaignWorkLedger.completionFacts(campaignId).handoffs) !== JSON.stringify(handoffs)) return;
+    const settled = this.db.campaignProjection(campaignId)?.status;
+    if (current?.status !== "pending" && settled !== "stuck" && settled !== "complete_needs_cleanup") return;
+    if (screen === null) return;
+    if (screen.state === "ask") { blocked(); return; }
     if (prior?.status === "pending") {
-      if (this.db.updateCampaignHandoffQuestion(prior.occurrenceId, snapshot, digest)) {
+      const authorityEvaluation = { ...prior.authorityEvaluation!, owner: "human" as const,
+        reason: screen.state === "discusses" ? "owner_kept" as const : "credential_screen_review" as const, credentialScreen: screen };
+      if (this.db.updateCampaignHandoffQuestion(prior.occurrenceId, snapshot, digest, authorityEvaluation)) {
         this.db.setPendingApproval(campaignId, removePendingRequest(this.db.getSession(campaignId)?.pendingApproval ?? null, prior.occurrenceId));
         this.restorePendingWorkflowDecisionCards(campaignId);
         this.hub.sessionChangedById(campaignId);
@@ -7604,8 +7640,8 @@ export class SessionsService {
       return;
     }
     const result = this.createWorkflowDecision(campaignId, {
-      requestId: `campaign_handoffs_${randomUUID()}`, resourceKey: "campaign_handoffs:owner", resourceSnapshot: snapshot,
-    }, () => true, { trustedOwnerDecision: true, trustedCampaignHandoffs: true });
+      requestId, resourceKey: "campaign_handoffs:owner", resourceSnapshot: snapshot,
+    }, () => true, { trustedOwnerDecision: true, trustedCampaignHandoffs: true, credentialScreen: screen });
     if (!result.ok) this.log.warn(`campaign handoff question for ${campaignId} was refused: ${result.error}`);
   }
 
@@ -15316,7 +15352,8 @@ export class SessionsService {
       const ownerDecision = subject.surface === "owner_decision";
       const decision = this.db.workflowDecisionByRequestId(subject.sessionId, subject.requestId);
       if (!decision || decision.status !== "pending" || decision.authority !== "human" ||
-          decision.authorityEvaluation?.reason !== "credential_screen_review") {
+          decision.authorityEvaluation?.reason !== "credential_screen_review" ||
+          decision.authorityEvaluation.credentialScreen?.occurrenceId !== occurrenceId) {
         return fail("this question no longer waits for a classification", 409);
       }
       if (!this.db.classifyCampaignDecision(occurrenceId, request.classification, actor.id, now)) {

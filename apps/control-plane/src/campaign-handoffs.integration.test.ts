@@ -7,6 +7,7 @@ import { ControlPlaneDb } from "./db.js";
 import { Hub, RunnerRequestTimeoutError, RunnerRequestNotSentError } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
+import { fakeScreenRuntime, settleScreens } from "./credential-screen-test-fixture.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
 
@@ -37,6 +38,7 @@ function fixture(completion: "retain" | "stop_and_archive" = "retain") {
   hub.sessionChangedById = () => {};
   hub.sendToRunner = () => true;
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+  svc.setDecisionRuntime(fakeScreenRuntime(db, () => ({ verdict: "discusses" })).runtime);
   const enabled = svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #4070",
     operations: ["implementation_question", "question", "tool_approval"], delegatablePolicyIds: [] }, 1,
   { ...identity, kind: "human", actorId: identity.userId });
@@ -791,15 +793,19 @@ for (const category of ["unsupported_capability", "capability_unproven", "runner
   });
 }
 
-test("settled human handoffs reach one owner question and update in place (#4541)", () => {
+test("settled human handoffs reach one owner question and update in place (#4541)", async () => {
   const h = fixture();
   try {
     finishChildren(h);
     handOff(h, h.advisory, "human");
     h.svc.retryDuePrompts();
+    await settleScreens();
     const questions = () => h.db.pendingWorkflowDecisionsForController("root").filter(d => d.category === "owner_decision");
     assert.equal(questions().length, 1);
     const first = questions()[0]!;
+    assert.equal(first.resourceSnapshot.category === "owner_decision" && first.resourceSnapshot.material,
+      "- picoduck/wollipog#4070: File the Advisory (human)\n  Reason: Private vulnerability reporting refused the agent's account.\n  Next action: File the advisory from a maintainer account.\n\n" +
+      "This question authorizes nothing. Your answer grants no action authority.");
     assert.equal(first.authority, "human");
     assert.equal(first.resourceSnapshot.category === "owner_decision" && first.resourceSnapshot.kind, "question");
     assert.equal(h.db.getSession("root")!.attention!.humanActions.length, 1);
@@ -809,30 +815,30 @@ test("settled human handoffs reach one owner question and update in place (#4541
       issue: { repository: "picoduck/wollipog", number: 4070 } }] });
     assert.ok(added.ok, added.error ?? "plan refused");
     handOff(h, added.data!.items[0]!.workItemId, "external");
-    h.svc.reconcileCampaignHandoffQuestion("root");
+    await h.svc.reconcileCampaignHandoffQuestion("root");
     assert.equal(questions().length, 1);
     assert.equal(questions()[0]!.occurrenceId, first.occurrenceId);
     assert.match(JSON.stringify(questions()[0]!.resourceSnapshot), /External Review/);
     assert.match(JSON.stringify(h.db.getSession("root")!.pendingApproval), /External Review/);
     handOff(h, h.advisory, "external");
-    h.svc.reconcileCampaignHandoffQuestion("root");
+    await h.svc.reconcileCampaignHandoffQuestion("root");
     assert.equal(questions().length, 0);
     assert.equal(h.db.getSession("root")!.attention!.humanActions.length, 0);
   } finally { h.db.close(); }
 });
 
-test("external handoffs and ordinary cleanup do not ask the owner (#4541)", () => {
+test("external handoffs and ordinary cleanup do not ask the owner (#4541)", async () => {
   const h = fixture("stop_and_archive");
   try {
     finishChildren(h, "stop_and_archive");
     handOff(h, h.advisory, "external");
-    h.svc.reconcileCampaignHandoffQuestion("root");
+    await h.svc.reconcileCampaignHandoffQuestion("root");
     assert.equal(h.db.campaignHandoffQuestion("root"), null);
     assert.equal(h.db.getSession("root")!.attention!.humanActions.length, 0);
   } finally { h.db.close(); }
 });
 
-test("handoff reports keep every item beyond the ordinary question background limit (#4541)", () => {
+test("handoff reports keep every item beyond the ordinary question background limit (#4541)", async () => {
   const h = fixture();
   try {
     finishChildren(h);
@@ -844,7 +850,7 @@ test("handoff reports keep every item beyond the ordinary question background li
       assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: added.data!.items[0]!.workItemId,
         handoff: { responsibleActor: "external", reason: "r".repeat(1000), nextAction: "n".repeat(1000) } }).ok);
     }
-    h.svc.reconcileCampaignHandoffQuestion("root");
+    await h.svc.reconcileCampaignHandoffQuestion("root");
     const report = h.db.campaignHandoffQuestion("root")!;
     assert.ok(report);
     const text = JSON.stringify(report.resourceSnapshot);
@@ -853,7 +859,7 @@ test("handoff reports keep every item beyond the ordinary question background li
   } finally { h.db.close(); }
 });
 
-test("stuck campaigns report handoffs once across retries and service recreation (#4541)", () => {
+test("stuck campaigns report handoffs once across retries and service recreation (#4541)", async () => {
   const h = fixture();
   try {
     h.db.updateSessionStatus("root", "idle", Date.now());
@@ -861,16 +867,92 @@ test("stuck campaigns report handoffs once across retries and service recreation
     h.db.updateSessionStatus("other", "idle", Date.now());
     handOff(h, h.advisory, "human");
     assert.equal(h.db.campaignProjection("root")!.status, "stuck");
-    h.svc.reconcileCampaignHandoffQuestion("root");
+    await h.svc.reconcileCampaignHandoffQuestion("root");
     const question = h.db.campaignHandoffQuestion("root")!;
     const restarted = new SessionsService(h.db, h.hub, { info() {}, warn() {}, error() {} });
-    restarted.reconcileCampaignHandoffQuestion("root");
+    restarted.setDecisionRuntime(fakeScreenRuntime(h.db, () => ({ verdict: "discusses" })).runtime);
+    await restarted.reconcileCampaignHandoffQuestion("root");
     assert.equal(h.db.campaignHandoffQuestion("root")!.occurrenceId, question.occurrenceId);
     const identity = h.db.localIdentityContext();
     assert.ok(restarted.answerOwnerQuestion("root", question.occurrenceId, {}, "dismiss",
       { kind: "human", id: identity.userId }).ok);
-    restarted.reconcileCampaignHandoffQuestion("root");
+    await restarted.reconcileCampaignHandoffQuestion("root");
     assert.equal(h.db.campaignHandoffQuestion("root")!.occurrenceId, question.occurrenceId);
     assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0);
+  } finally { h.db.close(); }
+});
+
+test("an immediately dismissed handoff question is not reasked (#4541)", async () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    handOff(h, h.advisory, "human");
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    const question = h.db.campaignHandoffQuestion("root")!;
+    assert.ok(h.svc.answerOwnerQuestion("root", question.occurrenceId, {}, "dismiss",
+      { kind: "human", id: h.db.localIdentityContext().userId }).ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignHandoffQuestion("root")!.occurrenceId, question.occurrenceId);
+    h.db.updateSessionStatus("root", "running", Date.now());
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.advisory,
+      handoff: { responsibleActor: "human", reason: "Changed reason", nextAction: "Changed action" } }).ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0);
+  } finally { h.db.close(); }
+});
+
+test("handoffs cannot ask the owner to supply a credential (#4541)", async () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.advisory,
+      handoff: { responsibleActor: "human", reason: "Reply with sk-abcdefghijklmnop", nextAction: "Supply the key" } }).ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignHandoffQuestion("root"), null);
+  } finally { h.db.close(); }
+});
+
+for (const verdict of ["ask", "uncertain"] as const) test(`handoff text gets the credential screen's ${verdict} outcome (#4541)`, async () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    handOff(h, h.advisory, "human");
+    const screened = fakeScreenRuntime(h.db, () => ({ verdict }));
+    h.svc.setDecisionRuntime(screened.runtime);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(screened.calls.length, 1);
+    const question = h.db.campaignHandoffQuestion("root");
+    if (verdict === "ask") assert.equal(question, null);
+    else {
+      assert.equal(question!.authorityEvaluation?.reason, "credential_screen_review");
+      assert.equal(h.svc.answerOwnerQuestion("root", question!.occurrenceId, {}, "dismiss",
+        { kind: "human", id: h.db.localIdentityContext().userId }).ok, false);
+    }
+  } finally { h.db.close(); }
+});
+
+test("an updated handoff is screened again before replacing the card (#4541)", async () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    handOff(h, h.advisory, "human");
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    const first = h.db.campaignHandoffQuestion("root")!;
+    let release!: () => void;
+    const held = new Promise<void>(done => { release = done; });
+    const screening = fakeScreenRuntime(h.db, async () => { await held; return { verdict: "uncertain" }; });
+    h.svc.setDecisionRuntime(screening.runtime);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.advisory,
+      handoff: { responsibleActor: "human", reason: "Changed reason", nextAction: "Changed action" } }).ok);
+    const pending = h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignHandoffQuestion("root")!.resourceDigest, first.resourceDigest);
+    release();
+    await pending;
+    const updated = h.db.campaignHandoffQuestion("root")!;
+    assert.equal(updated.occurrenceId, first.occurrenceId);
+    assert.equal(updated.authorityEvaluation?.reason, "credential_screen_review");
+    assert.ok(h.svc.classifyCampaignDecision("root", updated.authorityEvaluation!.credentialScreen!.occurrenceId!,
+      { classification: "orchestrator" }, { kind: "human", id: h.db.localIdentityContext().userId }).ok);
+    assert.equal(h.db.campaignHandoffQuestion("root")!.authorityEvaluation?.reason, "owner_kept");
   } finally { h.db.close(); }
 });

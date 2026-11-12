@@ -77,13 +77,13 @@ const observed = (tipSha: string | null, overrides: Partial<CampaignForgePullReq
 const observe = (h: ReturnType<typeof fixture>, observation: CampaignForgePullRequestObservation, at = Date.now()) =>
   h.db.campaignForgeObservations.record("root", "r", [{ ref: { repository: "picoduck/wollipog", number: 4100 }, observation }], at);
 
-test("a campaign whose merged branch still exists on origin is not verified complete (#4067)", () => {
+test("a campaign whose merged branch still exists on origin is not verified complete (#4067)", async () => {
   const h = fixture();
   try {
     // Not read yet: pending, never assumed deleted.
     let projection = h.db.campaignProjection("root")!;
     assert.equal(projection.status, "complete_needs_cleanup");
-    h.svc.reconcileCampaignHandoffQuestion("root");
+    await h.svc.reconcileCampaignHandoffQuestion("root");
     assert.equal(h.db.campaignHandoffQuestion("root"), null, "branch cleanup alone never asks the owner (#4541)");
     assert.deepEqual(projection.mergedBranches, { total: 1, pending: 1, retained: 0, items: [{ sessionId: "child",
       workItemId: h.item, repository: "picoduck/wollipog", pullRequest: 4100, branch: null, headSha: "a".repeat(40),
