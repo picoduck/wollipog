@@ -55,6 +55,7 @@ static char *ancestry_names[1024];
 static struct stat ancestry_ids[1024];
 static unsigned ancestry_count;
 static struct stat root_identity, lock_identity, guard_identity, anchor_identity;
+static int owned_anchor_verified;
 
 static void out8(unsigned value) { unsigned char b = (unsigned char)value; if (fwrite(&b, 1, 1, stdout) != 1) _exit(1); }
 static void out32(uint32_t value) { for (unsigned i = 0; i < 4; i++) out8(value >> (8 * i)); }
@@ -291,10 +292,24 @@ static void owned(const Entry *tip, const char *future, int copied) {
   pinned(); struct stat info;
   require(fstatat(root_fd, future, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT, "acquired lease has a future successor");
   if (tip->dir == 1) require(fstatat(lock_fd, future, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT, "legacy acquired lease has a future successor");
-  if (!copied) verify_entry(tip, 0);
+  if (!copied) {
+    /* pinned() already checks the selected anchor's identity and full stamp against
+     * its open descriptor. Verify its exact bytes once while that pin is unchanged;
+     * re-reading it twice per retired alias exhausts a maximal recovery's byte budget.
+     * Other tips retain byte checks: legacy mirrors may legitimately change nlink. */
+    int selected_tip = tip->dir == 0 && !strcmp(tip->name, ANCHOR);
+    if (!selected_tip || !owned_anchor_verified) {
+      verify_entry(tip, 0);
+      if (selected_tip) {
+        expected_identity(&anchor_identity, tip->dev, tip->ino);
+        pinned();
+      }
+    }
+    if (selected_tip) owned_anchor_verified = 1;
+  }
 }
 static void select_checkpoint(const char *name) {
-  pinned(); int fd = openat(root_fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); require(fd >= 0, "checkpoint candidate unavailable");
+  pinned(); owned_anchor_verified = 0; int fd = openat(root_fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); require(fd >= 0, "checkpoint candidate unavailable");
   sync_fd(fd); close(fd); sync_fd(root_fd); boundary("before-selection");
   require(renameat(root_fd, name, root_fd, ANCHOR) == 0, "checkpoint selection failed");
   legacy_anchor_absent = 0;
