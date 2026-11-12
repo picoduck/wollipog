@@ -3843,7 +3843,7 @@ export class SessionManager {
             );
             cleanup.auxiliaryWorktreeRollback = true;
             if (requestProof) cleanup.rollbackProof = requestProof;
-            if (!created.branchPreexisted) cleanup.rollbackBranchBase = created.baseCommit;
+            cleanup.rollbackBranchBase = created.baseCommit;
             await this.recordRollbackSnapshot(cleanup);
             await this.reapCreationRollback(cleanup, cleanupMeta);
             // Only a worktree that really went takes its row with it. One kept or still stuck stays

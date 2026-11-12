@@ -190,6 +190,23 @@ test("a requested worktree whose directory was deleted by hand is made again on 
   });
 });
 
+test("a worktree made again on its own branch that fails to activate is given back, and the branch stays", async () => {
+  if (process.platform === "win32") return;
+  await withSession("stale-registration-rollback", async (h) => {
+    const { worktree } = await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/gone" });
+    await h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/other" });
+    rmSync(worktree.path, { recursive: true, force: true });
+    const tip = git(h.app, "rev-parse", "refs/heads/fix/gone");
+    const internals = h.manager as unknown as { activateWorktreeWithNotice: (...args: unknown[]) => Promise<unknown> };
+    internals.activateWorktreeWithNotice = async () => { throw new Error("activation failed"); };
+
+    await assert.rejects(h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/gone" }), /activation failed/u);
+    assert.equal(existsSync(worktree.path), false, "the worktree this attempt made is given back");
+    // The branch was there before this attempt, even at its base with nothing on it, so it is not this attempt's to delete.
+    assert.equal(git(h.app, "rev-parse", "refs/heads/fix/gone"), tip);
+  });
+});
+
 test("a restart that finds the selected worktree on another branch keeps it, and ends an earlier launch's rollback of it", async () => {
   if (process.platform === "win32") return;
   await withSession("recovery-ends-rollback", async (h) => {
