@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -234,6 +234,35 @@ test("a removal Git cannot finish leaves another worktree that is only away regi
     assert.equal(git(away.path, "status", "--porcelain"), "A  notes.txt");
   });
 });
+
+for (const why of ["its records cannot be told apart from another worktree's", "its directory comes back meanwhile"] as const) {
+  test(`a requested slot's own stale registration the drop leaves, because ${why}, is refused by name and left byte for byte`, async () => {
+    if (process.platform === "win32") return;
+    await withRepository(why.startsWith("its records") ? "ambiguous-slot" : "slot-came-back", async (root, repo) => {
+      const options = { dataDir: join(root, "data") };
+      const branch = "fix/own";
+      const slot = join(await requestedWorktreeBoundary(repo, "s_own", options), requestedSlot(branch));
+      git(repo, "worktree", "add", "--quiet", "-b", branch, slot);
+      const admin = git(slot, "rev-parse", "--absolute-git-dir");
+      if (why.startsWith("its records")) {
+        // A second admin directory names the same worktree, so nothing says which one is its own.
+        cpSync(admin, `${admin}-copy`, { recursive: true });
+      }
+      renameSync(slot, `${slot}.away`);
+      const adminRoot = join(admin, "..");
+      const before = bytes(adminRoot);
+
+      await assert.rejects(createRequestedWorktree(repo, "s_own", { baseRef: "HEAD", branch }, { ...options,
+        ownsMissingRegistration: () => {
+          if (!why.startsWith("its records")) renameSync(`${slot}.away`, slot);
+          return true;
+        } }), why.startsWith("its records")
+        ? /could not be told apart from another worktree's, so remove that one registration by hand/u
+        : /came back while the runner was dropping its stale registration, so nothing was dropped or made/u);
+      assert.deepEqual(bytes(adminRoot), before, "every registration stays as it was");
+    });
+  });
+}
 
 test("a requested slot a person registered, directory away, is refused and its registration left byte for byte", async () => {
   if (process.platform === "win32") return;

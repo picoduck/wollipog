@@ -250,6 +250,36 @@ test("a requested slot whose directory went is refused by name when its registra
   });
 });
 
+test("a launch that makes the selected worktree again and gives it back ends in recovery, not a silent restore", async () => {
+  if (process.platform === "win32") return;
+  await withSession("rolled-back-selection", async (h) => {
+    const automatic = { ...h.spec, useWorktree: true };
+    const releaseLease = () => {
+      const lease = h.store.readWorktreeLease(h.sessionId);
+      if (lease) h.store.releaseWorktreeLease(h.sessionId, lease.owner);
+    };
+    releaseLease();
+    await h.manager.start(automatic);
+    const selected = h.store.readMeta(h.sessionId)!.worktreePath!;
+    assert.ok(selected, "the session works in its automatic worktree");
+    // Its records name only the selection, as an older runner left them, and the directory has gone, so
+    // the next launch makes that worktree again, and then its ownership claim fails and it is given back.
+    h.store.patchMeta(h.sessionId, { worktrees: [] });
+    git(h.app, "worktree", "remove", "--force", selected);
+    const ownership = (h.manager as unknown as { checkpointRefOwnership: { claim: (...args: unknown[]) => unknown } }).checkpointRefOwnership;
+    const claim = ownership.claim.bind(ownership);
+    ownership.claim = () => { throw new Error("checkpoint ownership could not be claimed"); };
+    releaseLease();
+    await h.manager.start(automatic).catch(() => undefined);
+    ownership.claim = claim;
+    await waitFor(() => h.store.readMeta(h.sessionId)?.worktreeRecovery !== undefined,
+      "the launch did not take the session to recovery");
+    assert.equal(existsSync(selected), false, "the launch gave back the worktree it made");
+    // The selection names that path only alongside the recovery card that says it has to be restored or replaced.
+    assert.ok(errorText(h).some((text) => text.includes(selected) && /restore/u.test(text)), "and the session is told what to do");
+  });
+});
+
 test("a worktree made again on its own branch that fails to activate is given back, and the branch stays", async () => {
   if (process.platform === "win32") return;
   await withSession("stale-registration-rollback", async (h) => {
