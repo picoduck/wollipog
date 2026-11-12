@@ -168,6 +168,34 @@ test("folding into the compact tier closes the project menu and hands its focus 
   await expect(moreActions).toBeFocused();
 });
 
+test("refolding before ResizeObserver reports the unfolded size still hands project focus to More Actions", async ({ page }) => {
+  await openBar(page, 1000);
+  const button = page.locator("header.session-bar .session-project-button");
+  await expect(button).toBeHidden();
+  // Pin the app container so the unfold/refold ends at precisely its last delivered size.
+  await page.locator(".main").evaluate((main) => {
+    main.style.flex = "none";
+    main.style.width = "1000px";
+  });
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
+  // All three actions happen between observer deliveries. No reported size changes: only the
+  // focus entry tells the fold handoff that it must observe again.
+  const focusedBeforeFold = await button.evaluate((trigger) => {
+    const main = trigger.closest<HTMLElement>(".main")!;
+    main.style.width = "1440px";
+    trigger.focus();
+    const focused = document.activeElement === trigger;
+    main.style.width = "1000px";
+    trigger.getBoundingClientRect();
+    return focused;
+  });
+  expect(focusedBeforeFold).toBe(true);
+  await expect(button).toBeHidden();
+  await expect(page.locator("header.session-bar").getByRole("button", { name: "More Actions" })).toBeFocused();
+});
+
 test("folding while More Actions is disabled by a running export hands focus to the page title", async ({ page }) => {
   // Hold the export open: More Actions is disabled until it settles.
   await page.route("**/api/sessions/*/export*", () => undefined);
