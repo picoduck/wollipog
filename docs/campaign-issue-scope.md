@@ -214,8 +214,12 @@ stands, since it can't tell them apart. The approval stays armed, because its co
 run. Reconciling it, a new request for the same pull request, or the join that ends the refusal lifts that.
 That join revokes the armed approval, in Full Control and in Custom, so the block never lifts with it still
 armed; a revoke to Custom revokes it too. A requester running in that very Location still acts in its own
-repository. The record keeps one repository per Location, the latest a read named, so a runner naming a
-new one each time can't grow it.
+repository, but only while that Location's latest read still names it: a revival or a later failed read
+drops that exclusion, and the folder may hold another repository by then, so the record alone exempts no
+one. The record keeps one repository per Location, the latest a read named, so a runner naming a new one
+each time can't grow it. Each exclusion item stands alone when the campaign is read: a malformed one no
+longer drops the rest, and one that still names a Location counts as unread, since nothing shows which
+repository it holds.
 
 While the owner's first message limits the campaign's repositories, a join leaves a repository with no
 entry available instead, so the refusal says only an approved repository addition brings it in.
@@ -253,7 +257,14 @@ requester act with its own login.
 
 This narrows only what joins. A Location the campaign already holds keeps its place on any runner, so a
 re-authorization or enable never drops a repository, and each gate still refuses a runner below its own
-floor by name, with no other login standing in. A revoke to Custom ends the boundary and its exclusions,
+floor by name, with no other login standing in. While every Location of a repository's entry, the launch
+repository's own included, is on a runner below the gates' floor or of no known version, a follow-up,
+merge or branch deletion in that repository is refused by those Locations' names and the version they
+need, at request, consume, arming and execute, and an armed merge there is blocked at the hook as an
+excluded one is. A requester sitting in one of those Locations acts on that Location's own runner, so it
+is exempt. This is read live at each gate, so a runner's update lifts it with nothing to revoke: every
+request made while it stood was refused, and an approval it then lets through was made while the
+repository could perform its gates. An entry with no Location left keeps the rule it had. A revoke to Custom ends the boundary and its exclusions,
 though not the repositories they refused, children stay live across it, and an enable after one surveys the Project again: a Location on an old
 runner is then excluded rather than carried. If a live child runs in it, the preflight reports that by
 the child's and Location's names and the version, and the enable is refused in the same words.
