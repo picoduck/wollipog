@@ -149,6 +149,19 @@ test("Git withholds post-dispatch results after revocation without replaying a p
   } finally {await h.close();}
 });
 
+test("Git rechecks busy-session state after asynchronous authority inspection before dispatch", async () => {
+  const h = await fixture();
+  try {
+    h.svc.podReconciliationMutationError = () => {
+      queueMicrotask(() => h.db.updateSessionStatus("target", "running", 3));
+      return null;
+    };
+    const result = await h.call("session_git", {commandId: "started-turn", payload: {action: "commit", message: "Fixture"}});
+    assert.equal(result.status, 409); assert.equal(result.receipt.status, "failed");
+    assert.equal(h.dispatched.length, 0);
+  } finally {await h.close();}
+});
+
 test("binary uploads and opaque MCP references share image validation/storage and content-bound receipts", async () => {
   const h = await fixture();
   try {

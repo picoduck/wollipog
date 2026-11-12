@@ -66,7 +66,20 @@ export function createSessionGitManagement(deps: {
     : action.kind === "open_pr" || action.kind === "github_review_sync" || action.kind === "forge_review_sync"
     ? 60_000
     : 30_000;
-  await req.recheck?.();
+  if (req.recheck) {
+    await req.recheck();
+    // Rechecking authority yields: a new turn or reconciliation may have started meanwhile.
+    const current = db.getSession(id);
+    if (!current || current.runnerId !== session.runnerId || current.worktreePath !== session.worktreePath) {
+      return reply.code(409).send({error: "the Git target changed; inspect the current worktree"});
+    }
+    const currentGate = gitActionAllowed(action, current.status);
+    if (!currentGate.ok) return reply.code(409).send({error: currentGate.error});
+    if (!["status", "summary", "diff", "request_diff", "github_review_sync", "forge_review_sync"].includes(action.kind)) {
+      const blocked = svc.podReconciliationMutationError(id);
+      if (blocked) return reply.code(409).send({error: blocked});
+    }
+  }
   if (!["status", "summary", "diff", "request_diff", "github_review_sync", "forge_review_sync"].includes(action.kind)) req.beforeEffect?.();
   try {
     const result = await hub.requestFromRunner(

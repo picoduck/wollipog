@@ -189,7 +189,13 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
         };
         let effectStarted = false;
         const execute = () => service.execute(route, {principal: owner, params, body, query, recheck, access,
-          beforeEffect: () => {effectStarted = true;}});
+          beforeEffect: () => {
+            if (!access.session(params.id)) throw new AssistantRefusal("Current owner, grant or session access changed before dispatch.");
+            operations.authorize(ctx.connection.id, name, target(args));
+            scope(args, ctx, name, currentOwner()!);
+            preparedImage?.recheck();
+            effectStarted = true;
+          }});
         if (!mutation) {
           const result = await execute();
           await recheck();
