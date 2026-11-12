@@ -19035,8 +19035,9 @@ export class ControlPlaneDb {
    * Human's approval under Full Control re-authorizes the boundary every decision was evaluated
    * under (re-minting it bumps the policy revision they are bound to), so it still revokes them all. */
   approveCampaignIssueScope(occurrenceId: string, userId: string, now: number, agentSessionId?: string):
-    { decision: WorkflowDecisionView; revoked: WorkflowDecisionView[] } | null {
+    { decision: WorkflowDecisionView; revoked: WorkflowDecisionView[] } | { refusal: string } {
     this.db.exec("BEGIN IMMEDIATE");
+    const refuse = (refusal: string) => { this.db.exec("ROLLBACK"); return { refusal }; };
     try {
       const decision = this.workflowDecisionByOccurrence(occurrenceId);
       const snapshot = decision?.resourceSnapshot;
@@ -19050,23 +19051,29 @@ export class ControlPlaneDb {
           JSON.stringify([...(policy.issueNumbers ?? [])].sort((a,b) => a-b)) !== JSON.stringify(snapshot.before) ||
           (policy.issueScope && policy.issueScope.repository.toLowerCase() !== snapshot.repository) ||
           JSON.stringify(canonicalCampaignIssues(held)) !== JSON.stringify(campaignScopeChangeBefore(snapshot))) {
-        this.db.exec("ROLLBACK"); return null;
+        return refuse("Scope revision, repository, held issues or pending decision authority changed");
       }
       const after = campaignScopeChangeResult(snapshot);
       const boundary = policy.control?.mode === "full_control" ? policy.control.boundary : null;
-      // An Orchestrator proposal the floors admitted (#4282) grows a derived Maximum Issues to fit,
-      // as a first message naming those issues derived it before; it never withholds operations.
+      // An admitted initial proposal may only narrow operations already authorized by the owner.
+      // Its constraint check is bound into the decision; later proposals cannot rewrite that boundary.
+      const firstScope = policy.firstMessageScope;
+      const admitsInitial = firstScope?.state === "established" && firstScope.grant?.status === "proposal" && !firstScope.initialScope;
+      const withheld = snapshot.scopeProposal?.withheldOperations ?? [];
+      const agentWithholds = Boolean(agentSessionId && withheld.length && admitsInitial &&
+        snapshot.scopeProposal?.initial && snapshot.scopeProposal.route === "admitted" && snapshot.scopeProposal.constraintCheck?.verdict === "admit");
+      // An Orchestrator proposal the floors admitted (#4282) grows a derived Maximum Issues to fit.
       const agentGrown = agentSessionId && boundary ? proposalMaxIssues(policy, snapshot, boundary, after.length) : undefined;
       if (agentSessionId && (!boundary?.issueAuthority || !snapshot.issueAdmission || agentSessionId !== root.id ||
           snapshot.issueAdmission.boundaryRevision !== boundary.revision || decision.policyRevision !== boundary.revision ||
           boundary.issueScopeRevision !== snapshot.expectedRevision || userId !== boundary.authorizedByUserId ||
-          snapshot.scopeProposal?.withheldOperations.length ||
+          (withheld.length && !agentWithholds) ||
           after.length > this.campaignIssueLimit(root.id, agentGrown ?? boundary.issueAuthority.maxIssues))) {
-        this.db.exec("ROLLBACK"); return null;
+        return refuse("Scope admission, boundary revision, withheld operations or issue capacity no longer match the Orchestrator's authority");
       }
       // Every repository the change names must still be one of the campaign's (#4118).
       const repositories = new Set([snapshot.repository, ...campaignScopeRepositories(root).map((entry) => entry.repository)]);
-      if (after.some((issue) => !repositories.has(issue.repository))) { this.db.exec("ROLLBACK"); return null; }
+      if (after.some((issue) => !repositories.has(issue.repository))) return refuse("A proposed issue's repository left the campaign boundary");
       const scope: import("@wollipog/protocol").CampaignIssueScope = campaignScopeWithIssues({ repository: snapshot.repository,
         issueNumbers: [], revision: snapshot.expectedRevision + 1, authorizedByUserId: userId,
         authorizedAt: agentSessionId ? policy.issueScope!.authorizedAt : now,
@@ -19078,21 +19085,19 @@ export class ControlPlaneDb {
       // it, and nothing is dispatched before it. The launch entry stays first: the root runs there
       // and the boundary requires it. Narrowing only removes entries, and any other repository's
       // Locations show as available. A boundary that can't be re-minted applies nothing.
-      const firstScope = policy.firstMessageScope;
-      const admitsInitial = firstScope?.state === "established" && firstScope.grant?.status === "proposal" && !firstScope.initialScope;
       const limits = admitsInitial ? scopeProposalRepositoryLimits(snapshot.scopeProposal) : [];
       const entries = boundary?.repositories;
       const kept = limits.length && entries ? entries.filter((entry, index) => index === 0 || limits.includes(entry.repository.toLowerCase())) : null;
       const narrowed = Boolean(kept && entries && kept.length !== entries.length);
-      if (narrowed && after.some((issue) => !kept!.some((entry) => entry.repository.toLowerCase() === issue.repository))) { this.db.exec("ROLLBACK"); return null; }
+      if (narrowed && after.some((issue) => !kept!.some((entry) => entry.repository.toLowerCase() === issue.repository))) return refuse("Proposed issues conflict with the initial repository limits");
       const leftOut = narrowed ? entries!.filter((entry) => !kept!.includes(entry)).flatMap((entry) => entry.locationIds.flatMap((locationId) => {
         // A Location no longer in the campaign's Project is never read live: its name isn't this campaign's to show.
         const location = this.getProjectLocation(locationId);
         return location && location.projectId === root.projectId ? [{ locationId, name: location.name, repository: entry.repository.toLowerCase() }] : [];
       })) : [];
-      const reminted = boundary && (agentSessionId ? narrowed : this.boundaryTrailsHumanScope(root.id, policy))
+      const reminted = boundary && (agentSessionId ? narrowed || agentWithholds : this.boundaryTrailsHumanScope(root.id, policy))
         ? remintCampaignBoundary(boundaryWithScopedEpics(narrowed ? { ...boundary, repositories: kept! } : boundary, scope), scope, userId, now) : null;
-      if (narrowed && reminted?.mode !== "full_control") { this.db.exec("ROLLBACK"); return null; }
+      if (narrowed && reminted?.mode !== "full_control") return refuse("The campaign boundary cannot apply the initial repository limits");
       // The owner approving the proposal a failed or uncertain scope grant routed to them (#4102)
       // also sets the derived issue limit that grant could not.
       const grown = reminted?.mode !== "full_control" ? undefined : agentSessionId ? agentGrown
@@ -19100,9 +19105,8 @@ export class ControlPlaneDb {
       if (grown !== undefined && reminted?.mode === "full_control") reminted.boundary.issueAuthority!.maxIssues = grown;
       // The owner approving an Orchestrator's proposal (#4282) also withholds the operations it says
       // the message withholds: narrowing only. An approval that cannot re-mint the boundary applies nothing.
-      const withheld = snapshot.scopeProposal?.withheldOperations ?? [];
       if (withheld.length) {
-        if (reminted?.mode !== "full_control") { this.db.exec("ROLLBACK"); return null; }
+        if (reminted?.mode !== "full_control") return refuse("The campaign boundary cannot apply the proposal's withheld operations");
         reminted.boundary.operations = reminted.boundary.operations.filter((operation) => !withheld.includes(operation));
       }
       // The owner approving an Orchestrator's proposal without lineage (#4267) also raises Maximum
@@ -19110,14 +19114,14 @@ export class ControlPlaneDb {
       // approval that cannot re-mint the boundary, or a limit that moved since, applies nothing.
       if (snapshot.ownerReview?.maxIssuesIncrease) {
         const raised = boundary && reminted?.mode === "full_control" ? ownerReviewMaxIssues(snapshot, boundary) : null;
-        if (raised == null || reminted?.mode !== "full_control") { this.db.exec("ROLLBACK"); return null; }
+        if (raised == null || reminted?.mode !== "full_control") return refuse("The owner-reviewed Maximum Issues or campaign boundary changed");
         reminted.boundary.issueAuthority!.maxIssues = raised;
       }
       // The re-minted boundary's issue limit holds the scope and every slot a consumed publication
       // still reserves, as an explicit authorization's does.
       if (reminted?.mode === "full_control" && reminted.boundary.issueAuthority && after.length +
           this.unsettledPublicationSlots(root.id, scopeSettlements(snapshot)) > this.campaignIssueLimit(root.id, reminted.boundary.issueAuthority.maxIssues)) {
-        this.db.exec("ROLLBACK"); return null;
+        return refuse("Issue capacity changed, counting unsettled publication slots");
       }
       for (const id of [root.id, ...this.campaignDescendantIds(root.id)]) {
         const memberPolicy = this.sessionOrchestratorPolicy(id);
@@ -19162,7 +19166,7 @@ export class ControlPlaneDb {
       }
       const affected = new Set(snapshot.affectedDecisions);
       const revoked = this.authorityBoundWorkflowDecisionsForController(root.id)
-        .filter((stale) => (!agentSessionId && boundary !== null) || narrowed || affected.has(stale.occurrenceId));
+        .filter((stale) => (!agentSessionId && boundary !== null) || narrowed || agentWithholds || affected.has(stale.occurrenceId));
       for (const stale of revoked) {
         this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
         this.retireWorkflowDecisionResume(stale.occurrenceId, now);
