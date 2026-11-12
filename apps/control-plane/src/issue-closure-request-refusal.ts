@@ -41,6 +41,17 @@ export function boundedDecisionString(value: unknown, max: number): value is str
     !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
 }
 
+/** Why `value` fails {@link boundedDecisionString}, as a predicate for a refusal ("is longer than 256
+ * characters"), or null when it passes. It never quotes the value (#4511). */
+export function boundedDecisionStringProblem(value: unknown, max: number): string | null {
+  if (value === undefined) return "is missing";
+  if (typeof value !== "string") return "must be text";
+  if (value.trim().length === 0) return "is blank";
+  if (value.length > max) return `is longer than ${max} characters`;
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)) return "contains a control character";
+  return null;
+}
+
 /** The request fields that are missing or invalid, in a fixed order; empty for a well-formed request.
  * The limits are the ones the closure route has always enforced. */
 export function issueClosureRequestInvalidFields(request: unknown): string[] {

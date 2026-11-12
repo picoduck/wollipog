@@ -74,7 +74,7 @@ import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, 
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision, outstandingDecisionsBearOnScopeRequest, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
-import { boundedDecisionString, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
+import { boundedDecisionString, boundedDecisionStringProblem, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
 import { needsCampaignIssueScopeSeed } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureCampaignPullRequests, closureCrossRepositoryDelivery, closureCrossRepositoryPullRequests, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
@@ -1277,35 +1277,48 @@ function unrenderableEvidenceArtifact(item: { artifactId?: string; mediaType?: s
   return item.artifactId !== undefined && !RENDERABLE_EVIDENCE_MEDIA_TYPES.includes(item.mediaType as string);
 }
 
+/** The refusal for an evidence artifact the review card cannot show; `index` counts from 0. */
+function unrenderableEvidenceRefusal(index: number): string {
+  return `evidence item ${index + 1}: a Session artifact needs a mediaType the review card can show ` +
+    `(${RENDERABLE_EVIDENCE_MEDIA_TYPES.join(", ")})`;
+}
+
 /** Normalize untrusted JSON into a canonical key order before hashing or persistence. */
 /** A question with 2 to 12 uniquely identified options, one of which may be recommended. `noun`
  * names the decision kind in refusals ("implementation questions"). */
 function normalizeDecisionQuestion(value: Record<string, unknown>, noun: string, maxQuestion: number, minOptions = 2): ServiceResult<{
   question: string; options: WorkflowDecisionOption[]; recommendedOptionId?: string;
 }> {
-  if (!boundedDecisionString(value.question, maxQuestion) || !Array.isArray(value.options) ||
-      value.options.length < minOptions || value.options.length > 12) {
-    return fail(`${noun} require text and ${minOptions} to 12 options`);
+  // Each refusal names the field and its limit, never the submitted text (#4511).
+  const singular = noun.replace(/s$/u, "");
+  const questionProblem = boundedDecisionStringProblem(value.question, maxQuestion);
+  if (questionProblem) return fail(`${singular} text ${questionProblem}`);
+  if (!Array.isArray(value.options) || value.options.length < minOptions || value.options.length > 12) {
+    return fail(`${noun} require a list of ${minOptions} to 12 options` +
+      (Array.isArray(value.options) ? `; ${value.options.length} given` : ""));
   }
-  const options = value.options.flatMap((raw) => {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  const options: WorkflowDecisionOption[] = [];
+  for (const [index, raw] of value.options.entries()) {
+    const at = `${singular} option ${index + 1}`;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail(`${at} must be an object`);
     const option = raw as Record<string, unknown>;
-    return boundedDecisionString(option.optionId, 128) && boundedDecisionString(option.label, 200) &&
-      (option.description === undefined || boundedDecisionString(option.description, 1000))
-      ? [{ optionId: option.optionId, label: option.label,
-          ...(typeof option.description === "string" ? { description: option.description } : {}) }]
-      : [];
-  });
-  if (options.length !== value.options.length || options.some((option) => option.optionId === "__workflow_deny__") ||
-      new Set(options.map((option) => option.optionId)).size !== options.length) {
-    return fail(`${noun.replace(/s$/u, "")} options must have unique valid ids and labels`);
+    for (const [field, max] of [["optionId", 128], ["label", 200], ["description", 1000]] as const) {
+      if (field === "description" && option.description === undefined) continue;
+      const problem = boundedDecisionStringProblem(option[field], max);
+      if (problem) return fail(`${at}: ${field} ${problem}`);
+    }
+    if (option.optionId === "__workflow_deny__") return fail(`${at} uses an optionId Wollipog reserves`);
+    const repeated = options.findIndex((earlier) => earlier.optionId === option.optionId);
+    if (repeated >= 0) return fail(`${at} repeats the optionId of option ${repeated + 1}`);
+    options.push({ optionId: option.optionId as string, label: option.label as string,
+      ...(typeof option.description === "string" ? { description: option.description } : {}) });
   }
   const recommended = value.recommendedOptionId;
   if (recommended !== undefined &&
       (typeof recommended !== "string" || !options.some((option) => option.optionId === recommended))) {
     return fail("recommendedOptionId must identify an offered option");
   }
-  return ok({ question: value.question, options, ...(typeof recommended === "string" ? { recommendedOptionId: recommended } : {}) });
+  return ok({ question: value.question as string, options, ...(typeof recommended === "string" ? { recommendedOptionId: recommended } : {}) });
 }
 
 export function normalizeWorkflowDecisionSnapshot(
@@ -1409,6 +1422,7 @@ export function normalizeWorkflowDecisionSnapshot(
     new RegExp(`^[0-9a-f]{${length}}$`, "u").test(candidate) ? candidate : null;
   const checkedAt = (candidate: unknown) => Number.isSafeInteger(candidate) && (candidate as number) > 0
     ? candidate as number : null;
+  const httpsUrlRule = "an HTTPS URL of at most 4096 characters without a username or password";
   const safeHttpsUrl = (candidate: unknown) => {
     if (!boundedDecisionString(candidate, 4096)) return false;
     try {
@@ -1451,14 +1465,21 @@ export function normalizeWorkflowDecisionSnapshot(
     const checks = value.requiredChecks && typeof value.requiredChecks === "object" && !Array.isArray(value.requiredChecks)
       ? value.requiredChecks as Record<string, unknown> : null;
     const checked = checks && checkedAt(checks.checkedAt);
-    const checkRows = checks && Array.isArray(checks.checks) ? checks.checks.flatMap((raw) => {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    // Each row's refusal names the row and its field, never the submitted value (#4511).
+    const checkRows: { name: string; state: "passed"; url?: string }[] = [];
+    for (const [index, raw] of (checks && Array.isArray(checks.checks) ? checks.checks : []).entries()) {
+      const at = `requiredChecks.checks item ${index + 1}`;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail(`${at} must be an object`);
       const check = raw as Record<string, unknown>;
-      if (!boundedDecisionString(check.name, 256) || check.state !== "passed") return [];
-      if (check.url !== undefined && !safeHttpsUrl(check.url)) return [];
-      return [{ name: check.name, state: "passed" as const,
-        ...(typeof check.url === "string" ? { url: check.url } : {}) }];
-    }) : [];
+      const nameProblem = boundedDecisionStringProblem(check.name, 256);
+      if (nameProblem) return fail(`${at}: name ${nameProblem}`);
+      if (check.state !== "passed") return fail(`${at}: state must be passed`);
+      if (check.url !== undefined && !safeHttpsUrl(check.url)) {
+        return fail(`${at}: url must be ${httpsUrlRule}`);
+      }
+      checkRows.push({ name: check.name as string, state: "passed",
+        ...(typeof check.url === "string" ? { url: check.url } : {}) });
+    }
     // #4119: a GitHub repository without required checks cites every reported check instead; with
     // none at all the merge is the person's, so an empty list is accepted only on that basis.
     if (value.checksBasis !== undefined && (gitlab || value.checksBasis !== "all_reported")) {
@@ -1564,30 +1585,40 @@ export function normalizeWorkflowDecisionSnapshot(
   if (!Array.isArray(value.evidence) || value.evidence.length < 1 || value.evidence.length > 32) {
     return fail("UI evidence decisions require at least one evidence reference");
   }
-  const evidence = value.evidence.flatMap((raw) => {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  // Each refusal names the item, its field and the rule, never the submitted value (#4511).
+  const evidence: { evidenceId: string; uri?: string; sha256: string; artifactId?: string; mediaType?: string }[] = [];
+  for (const [index, raw] of value.evidence.entries()) {
+    const at = `evidence item ${index + 1}`;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail(`${at} must be an object`);
     const item = raw as Record<string, unknown>;
-    if (!boundedDecisionString(item.evidenceId, 256) || !sha(item.sha256, 64)) return [];
-    if (item.uri !== undefined && !safeHttpsUrl(item.uri)) return [];
-    if (item.artifactId !== undefined && !boundedDecisionString(item.artifactId, 256)) return [];
+    const idProblem = boundedDecisionStringProblem(item.evidenceId, 256);
+    if (idProblem) return fail(`${at}: evidenceId ${idProblem}`);
+    if (!sha(item.sha256, 64)) return fail(`${at}: sha256 must be 64 lowercase hexadecimal characters`);
+    if (item.uri !== undefined && !safeHttpsUrl(item.uri)) {
+      return fail(`${at}: uri must be ${httpsUrlRule}`);
+    }
+    const artifactProblem = item.artifactId === undefined ? null : boundedDecisionStringProblem(item.artifactId, 256);
+    if (artifactProblem) return fail(`${at}: artifactId ${artifactProblem}`);
     if (item.mediaType !== undefined &&
-        (typeof item.mediaType !== "string" || !/^[a-z0-9][a-z0-9.+-]{0,62}\/[a-z0-9][a-z0-9.+-]{0,62}$/u.test(item.mediaType))) return [];
+        (typeof item.mediaType !== "string" || !/^[a-z0-9][a-z0-9.+-]{0,62}\/[a-z0-9][a-z0-9.+-]{0,62}$/u.test(item.mediaType))) {
+      return fail(`${at}: mediaType must be a lowercase type/subtype media type, such as image/png`);
+    }
     // Without an external link, the human fallback must have an artifact the browser can display.
     // The Orchestrator still applies its own stricter client and artifact checks before delivery.
-    if (item.uri === undefined && (!item.artifactId ||
-        !RENDERABLE_EVIDENCE_MEDIA_TYPES.includes(item.mediaType as string))) return [];
+    if (item.uri === undefined && item.artifactId === undefined) return fail(`${at} needs a uri or an artifactId`);
+    if (item.uri === undefined && !RENDERABLE_EVIDENCE_MEDIA_TYPES.includes(item.mediaType as string)) {
+      return fail(unrenderableEvidenceRefusal(index));
+    }
+    const repeated = evidence.findIndex((earlier) => earlier.evidenceId === item.evidenceId);
+    if (repeated >= 0) return fail(`${at} repeats the evidenceId of item ${repeated + 1}`);
     // Optional fields are emitted only when present so a pre-v167 snapshot keeps its digest.
-    return [{
-      evidenceId: item.evidenceId,
+    evidence.push({
+      evidenceId: item.evidenceId as string,
       ...(item.uri !== undefined ? { uri: item.uri as string } : {}),
       sha256: item.sha256 as string,
       ...(item.artifactId !== undefined ? { artifactId: item.artifactId as string } : {}),
       ...(item.mediaType !== undefined ? { mediaType: item.mediaType as string } : {}),
-    }];
-  });
-  if (evidence.length !== value.evidence.length ||
-      new Set(evidence.map((item) => item.evidenceId)).size !== evidence.length) {
-    return fail("UI evidence references must be unique HTTPS resources or renderable Session artifacts with SHA-256 integrity");
+    });
   }
   if (value.videoReview === undefined) return ok({ category: "ui_evidence_approval", evidence });
   if (!trustedDerivedVideo || !value.videoReview || typeof value.videoReview !== "object" ||
@@ -14803,10 +14834,9 @@ export class SessionsService {
     // An item naming an artifact is reviewed as that artifact's checked bytes, so the human review
     // card must be able to show it; its `uri` never stands in. Checked only for new requests, so an
     // occurrence approved before this rule can still be consumed with its unchanged snapshot.
-    if (normalized.data.category === "ui_evidence_approval" &&
-        normalized.data.evidence.some(unrenderableEvidenceArtifact)) {
-      return fail("UI evidence references must be unique HTTPS resources or renderable Session artifacts with SHA-256 integrity", 400);
-    }
+    const unrenderable = normalized.data.category === "ui_evidence_approval"
+      ? normalized.data.evidence.findIndex(unrenderableEvidenceArtifact) : -1;
+    if (unrenderable >= 0) return fail(unrenderableEvidenceRefusal(unrenderable), 400);
     const child = this.db.getSession(sessionId);
     if (!child) return fail("session not found", 404);
     if (isTerminal(child.status)) {

@@ -26818,7 +26818,7 @@ test("an evidence artifact the review card cannot show is refused at request tim
     ] as const) {
       const decision = h.request(child.id, requestId, [JSON.parse(JSON.stringify(item))]);
       assert.equal(decision.status, 400, requestId);
-      assert.match(decision.error ?? "", /renderable Session artifacts/u, requestId);
+      assert.match(decision.error ?? "", /^evidence item 1: a Session artifact needs a mediaType the review card can show /u, requestId);
     }
     assert.equal(h.db.pendingWorkflowDecisionsForSession(child.id).length, 0);
     // Evidence without an artifact is still reviewed through its labelled link.
