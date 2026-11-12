@@ -3127,15 +3127,7 @@ function agentField(container: HTMLDivElement): HTMLElement {
 }
 
 test("under Priority Order a session automation names its expected account, why, and that each run rechecks it (#4512)", async () => {
-  const targets: unknown[] = [];
-  const { fixture } = await mountAccountEditor(accountPreview({}), {
-    providerAccountSelection: async (runnerId: string, target: { agentId?: string }) => {
-      targets.push({ runnerId, target });
-      return target.agentId === "other-agent"
-        ? accountPreview({ provider: "codex", mode: "fixed", status: "none", source: "none", accountId: undefined, candidates: [] })
-        : accountPreview({});
-    },
-  });
+  const { fixture, targets } = await mountAccountEditor(accountPreview({}));
   try {
     const text = agentField(fixture.container).textContent ?? "";
     assert.match(text, /Each run is expected to use work@example\.com\./);
@@ -3144,11 +3136,11 @@ test("under Priority Order a session automation names its expected account, why,
     assert.deepEqual(targets.at(-1), { runnerId: "runner-1", target: { agentId: "rich-agent", workspaceId: "runner-1-workspace" } },
       "the preview asks about this exact agent and folder, placed as a run would be");
 
+    const reads = targets.length;
     await choose(fixture.container, "Agent", "Other Agent");
-    assert.deepEqual((targets.at(-1) as { target: unknown }).target, { agentId: "other-agent", workspaceId: "runner-1-workspace" },
-      "another agent is previewed for itself, even with no accounts of its provider");
+    assert.equal(targets.length, reads, "a provider with neither accounts nor a saved policy on this machine isn't read");
     assert.doesNotMatch(agentField(fixture.container).textContent ?? "", /expected to use|Each run/,
-      "and a preview with nothing to bind shows nothing");
+      "and nothing is shown for it");
   } finally {
     await unmountFixture(fixture);
   }
@@ -3262,7 +3254,8 @@ test("with no accounts left, a saved policy's refusal still shows for both roles
   const targets: unknown[] = [];
   const creates: AutomationSpec[] = [];
   const empty = accountPreview({ status: "choice_required", source: "none", accountId: undefined, refusal: "empty_order", candidates: [] });
-  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [{ ...runners[0]!, providerAccounts: [] }], [], {
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [{ ...runners[0]!, providerAccounts: [],
+    providerAccountDefaults: [{ provider: "claude", accountId: null, revision: 2, mode: "priority", priorityAccountIds: [] }] }], [], {
     ...ORCHESTRATOR_SETTINGS,
     providerAccountSelection: async (_runnerId: string, target: unknown) => { targets.push(target); return empty; },
     createAutomation: async (spec: AutomationSpec) => {

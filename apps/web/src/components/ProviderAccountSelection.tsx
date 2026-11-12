@@ -187,7 +187,10 @@ export function AutomationExpectedProviderAccount({ runner, agentId, placement, 
 }) {
   const agent = runner.agents.find((candidate) => candidate.id === agentId);
   const provider = agent ? providerForDriver(agent.driver ?? "acp") : null;
-  const preview = useProviderAccountSelection(runner.runnerId, provider && placement && !namedAccountId ? { agentId, ...placement } : null,
+  // With neither accounts nor a saved policy for this provider there is nothing to bind or refuse.
+  const applies = provider !== null && ((runner.providerAccounts ?? []).some((account) => account.provider === provider) ||
+    (runner.providerAccountDefaults ?? []).some((policy) => policy.provider === provider));
+  const preview = useProviderAccountSelection(runner.runnerId, applies && placement && !namedAccountId ? { agentId, ...placement } : null,
     providerAccountSelectionRefreshKey(runner, runner.status === "online"));
   if (namedAccountId) {
     const named = runner.providerAccounts?.find((candidate) => candidate.id === namedAccountId);
