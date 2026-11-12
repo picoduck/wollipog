@@ -1,6 +1,7 @@
 # Assistant Owner-Capability Parity
 
-Refs #4468 and #4462. This is the first staged parity delivery, not full Assistant acceptance.
+Refs #4468 and #4462. The integrated owner-capability audit has zero gaps. Live workflow
+acceptance remains separate from this automated API/service coverage.
 
 ## Inventory and Gate
 
@@ -25,20 +26,40 @@ Each exact route has one classification:
   classification. A gap is never an allowed exclusion. This deliberately overinclusive audit also
   exposes session-credential-only protocol endpoints; those need explicit owner-counterpart
   classification rather than being silently discarded.
-- `exclusion: session_protocol`: restricted to exactly `POST /api/sessions/:id/waits` and
-  `POST /api/sessions/:id/pull-request-watch`. Actual owner HTTP receives 403: these writes
-  require the matching session's own credential to attest runtime progress/watch ownership.
-  They are not owner capabilities. Each entry records this fence, the registered owner-facing
-  read counterpart `session_watch_get`, and the supported remedy: the genuine session runtime
-  performs these writes. The audit rejects this classification for every other route, requires
-  the read counterpart to be registered, and tests both real owner HTTP and Assistant MCP
-  denial. This narrow contract extension was approved by the controlling Orchestrator in
-  clarification `workflow_37bd52c7276345768122bfe742ceadb6`; it does not exempt ordinary work
-  management or allow an Assistant to impersonate a session from its `sessionId`.
+- `exclusion: session_protocol`: restricted to an explicit per-route allowlist, with production
+  HTTP proof that an otherwise authorized owner receives a credential-specific 403. The original
+  `POST /api/sessions/:id/waits` and `POST /api/sessions/:id/pull-request-watch` attest runtime
+  progress/watch ownership and retain their exact registered read counterpart `session_watch_get`.
+  The 49 campaign/review/residual protocol entries described below claim no owner equivalent.
+  The audit rejects this classification for every other route. The original narrow extension was
+  approved in clarification `workflow_37bd52c7276345768122bfe742ceadb6`; the controlling
+  Orchestrator separately adjudicated the exact 30 and 19 additions. No classification allows
+  an Assistant to impersonate a session from its `sessionId`.
 
 No external technical limitation is claimed by this slice. The inventory supports such an entry
 only with a concrete reason and supported remedy. The parent authorized staged delivery through
 the recorded scope clarification; all remaining gaps block final #4468 acceptance.
+
+Group 7 adds exactly the 30 campaign/review protocol routes enumerated in
+`apps/control-plane/src/campaign-session-protocol.ts` to the `session_protocol` classification.
+The controlling Orchestrator adjudicated these exact routes after the discovery report:
+owner HTTP returns 403 because they require matching self/parent/Orchestrator credentials.
+Unlike wait/watch writes, these entries make no equivalent-owner-tool claim. Historical
+campaign-review-job and repository-addition protocol reads have no asserted owner equivalent;
+their remedy is the genuine credential protocol. New legacy review-job creation stays retired.
+Residual discovery adds exactly 19 further entries in that same file: runtime automation
+proposals, Location-switch requests, issue closures, historical cross-model review jobs,
+reviewer image/video delivery and attestations, and managed-worktree ref cleanup. Each has
+its own credential-specific owner-403 production proof; media refusal tests do not establish
+actual evidence inspection or production video readiness.
+
+The inventory rejects every route outside the two original wait/watch entries and these 49
+explicit entries. A production HTTP test exercises every added route with an authenticated owner
+who can read the target session, requires the credential-specific 403 and no protocol-domain
+effects, and checks every campaign classification against that verified set. There is no prefix
+or category exemption. The two original wait/watch entries retain their exact registered
+`session_watch_get` requirement. The 21 owner capabilities and 16 human-authority boundaries
+are described in [Assistant Campaign and Review Management](assistant-campaign-management.md).
 
 The owner has now selected full parity within this campaign. The #4468 main item owns groups 1–2,
 the shared audit and gate, and later REAL acceptance runs. Separate campaign work items own groups
@@ -117,8 +138,9 @@ node --import tsx apps/control-plane/test-support/owner-parity-snapshot.ts --req
 ```
 
 The strict gate exits nonzero for any gap, absent tool registration, or undocumented exclusion.
-It is intentionally **failing** at this staged delivery. Passing the audit contract tests means
-the inventory detects missing coverage; it does not mean the strict acceptance gate passed.
+After integrating all parity groups it reports `303` exact routes, `202` registered tools and
+`0` gaps. Passing the audit contract alone still does not establish strict acceptance; run the
+actual production-composition command above.
 The fixture starts only a new temporary test control plane/database with a reserved loopback
 port and pricing-network access disabled, then closes it and removes its state. It never imports
 the hosting database or inherits its registered SSH Machines or unrelated sessions.
@@ -130,7 +152,7 @@ owner/session operations. Automation update, enable and pause share the owner up
 The group-6 [automation and Skill Library parity delivery](assistant-skill-parity.md) registers
 the remaining ordinary management paths and documents four exact human-authority routes. Its
 group-specific gate checks actual production registration and refuses remaining group-6 gaps.
-Other groups' unresolved candidates still block the global strict acceptance gate.
+The integrated global strict gate also verifies the other delivered groups.
 
 Discord/work PR #4479 is merged. Production now builds the session/work registry through
 `createAssistantManagement`, preserving its authenticated Discord-origin seam and sharing the
@@ -149,9 +171,9 @@ contains 303 owner-route candidates. PR #4476 also added installation renaming; 
 as an explicit app-management gap. Merged PR #4497 now delivers `install_name` along with
 connection, binding, subscription and delivery diagnostics/recovery operations. All eight exact
 route mappings and its refined credential/standing-authority exclusions are preserved beside
-the status mappings. These shared registrations use the same receipt store. The first slice left
-199 unresolved candidates; the combined status, session-work, connection and group-6 slices
-reduce that count below. Establishing or changing credentials, grants, bindings and subscription
+the status mappings. These shared registrations use the same receipt store. All initially
+unresolved candidates are now mapped or explicitly classified. Establishing or changing
+credentials, grants, bindings and subscription
 configuration retains human authority.
 
 ## Delivered Operations
@@ -219,8 +241,10 @@ Those remain Phase 2b. No rendered application UI changes in this slice.
 
 ## Status, Results and Read Status
 
-The follow-on status slice covers 41 exact route mappings through 35 new status tools and the
-three reminder tools already delivered with session content. The HTTP adapter and Assistant
+The integrated status slice retains its supported owner reads and results, including the
+three reminder tools already delivered with session content. Overlapping campaign/review names
+register once through the campaign service; four supported status aliases use that same service.
+The HTTP adapter and Assistant
 adapter execute the same explicit application handlers, with a current owner principal. They do
 not inject HTTP, fabricate a session credential, or borrow an Orchestrator's ancestry. HTTP auth
 and agent-only mutation routes retain their existing gates. The shared HTTP adapter preserves
@@ -234,7 +258,6 @@ response headers, including `no-store`. MCP applies the same shared reader-speci
 | Review Reads | `review_list`, `review_get`, `review_findings`, `review_jobs`, `review_job`, `review_job_artifacts` |
 | Request Reads | `decision_list`, `decision_get`, `request_list` |
 | Campaign Reads | `campaign_status`, `campaign_decisions`, `campaign_items`, `campaign_item`, `campaign_recommendations`, `campaign_scope`, `campaign_behavior` |
-| Session-Protocol Campaign Reads | `campaign_get`, `campaign_work_items`, `campaign_work_item`, `campaign_review_jobs`, `campaign_review_job`, `campaign_review_report` |
 
 Use `sessionId` plus the exact route coordinate (`reviewSessionId`, `jobId`, `occurrenceId`,
 `itemId` or `continuationId`) where required. `session_lookup` accepts opaque IDs directly; a
@@ -276,25 +299,23 @@ Work-item list query fields use the same allowlist/parser on HTTP and Assistant 
 acknowledgement logs preserve the HTTP request logger and its request id; Assistant logs identify
 the Assistant entry point, operation and command id. Payloads and result content are not logged.
 
-`decision_get` also reads the exact stored status of automation proposals, Location switch requests
-and repository-addition requests. Their existing read adapters select the same session-bound
+`decision_get` also reads the exact stored status of automation proposals and Location switch
+requests. Their existing owner read adapters select the same session-bound
 workflow-decision row; the common service also performs proposal expiry and attaches verified
-merge-review evidence where relevant. No proposal-specific execution path is exposed. The full
-`campaign_get` projection includes installation-wide Machine/model capabilities and requires an
-all-project connection; selected-project connections use the scoped `campaign_status` and detail
-reads. Legacy review-ledger reads report their actual stored/unavailable state. They do not launch
-the retired reviewer bridge or supply a native fallback. Existing session-protocol HTTP read gates
-remain intact; the Assistant calls explicit shared read services as its current granting owner.
+merge-review evidence where relevant. No proposal-specific execution path is exposed. Campaign
+inspection uses the owner-facing `campaign_status` and detail reads. The six initial aliases
+`campaign_get`, `campaign_work_items`, `campaign_work_item`, `campaign_review_jobs`,
+`campaign_review_job` and `campaign_review_report` are absent: their HTTP routes require the
+matching session credential and the approved audit classifies them as session protocol with no
+owner equivalent. Historical review-ledger and repository-addition reads retain that boundary;
+the retired reviewer bridge stays retired. Production tests prove these aliases are unregistered
+and every protocol route refuses an otherwise authorized owner credential.
 
-The audit still contains **89 NOT-YET-SUPPORTED route candidates** on this slice:
-67 session routes, 21 Machine routes and 1 Project
-route. This count is not a count of unique missing tools. The exact remaining
-entries stay in `assistant-owner-capabilities.json`, and none was reclassified as an exclusion.
-They include the broader session work-management, Machine/workspace registration, connection,
-campaign/protocol groups assigned to the other campaign work items. The delivered #4499 session
-work and #4488 automation/Skill Library mappings, including the two exact session-runtime protocol
-classifications, are preserved with their production registry guards. Group 6 has no remaining
-audit gaps. The strict acceptance gate therefore still fails intentionally.
+All seven parity groups and the residual classification are integrated in the audit. Zero gaps
+remain; every route names actual production tools or an explicitly justified exclusion. The
+session-work, automation/Skill Library, connection, Machine/workspace, and campaign registry
+guards remain active. This is not a claim that a live provider, Discord, SSH runner, or evidence
+reviewer completed the workflow; those require separate integration evidence.
 
 The production-composition scenario boots a fresh loopback control plane and synthetic database,
 then compares owner HTTP responses with Assistant reads and exercises actual MCP transport,

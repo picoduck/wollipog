@@ -137,15 +137,15 @@ export async function verifyStatus(app: FastifyInstance, operations: AssistantOp
     // configure preserves an established confirmation preference unless explicitly changed.
     db.assistantConnections.configure(issued.connection.id, {operations: "all", projects: "all", destructiveConfirmation: "none"});
     assert.equal((await call("result_handoff", {sessionId: "status-child", commandId: "handoff-once", payload: {revision: childRevision}})).body.handedOff, true);
-    for (const name of ["campaign_status", "campaign_decisions", "campaign_items", "campaign_recommendations", "campaign_get", "campaign_work_items"]) {
+    for (const name of ["campaign_status", "campaign_decisions", "campaign_items", "campaign_recommendations"]) {
       const read = await call(name, {sessionId: "status-root"});
       assert.equal(read.status, 200, name);
     }
-    const items = await call("campaign_work_items", {sessionId: "status-root"});
-    const injectedItems = await call("campaign_work_items", {sessionId: "status-root", query: {workItemId: "must-not-be-a-selector"}});
+    const items = await call("campaign_items", {sessionId: "status-root"});
+    const injectedItems = await call("campaign_items", {sessionId: "status-root", query: {workItemId: "must-not-be-a-selector"}});
     assert.equal(injectedItems.status, 200);
     assert.deepEqual(injectedItems.body, items.body);
-    assert.equal((await call("campaign_work_items", {sessionId: "status-root", query: {limit: "bad"}})).status, 400);
+    assert.equal((await call("campaign_items", {sessionId: "status-root", query: {limit: "bad"}})).status, 400);
     db.assistantConnections.configure(issued.connection.id, {operations: "all", projects: [granted.id]});
     await assert.rejects(call("session_status", {sessionId: "status-hidden"}), /excluded/);
     const archive = await call("session_archive_list", {query: {archive: "all"}});
@@ -153,11 +153,13 @@ export async function verifyStatus(app: FastifyInstance, operations: AssistantOp
     assert.ok(!JSON.stringify(archive.body).includes("status-hidden"));
     assert.ok(!JSON.stringify(archive.body.facets).includes("Hidden"));
     assert.equal((await call("campaign_status", {sessionId: "status-root"})).status, 200);
-    await assert.rejects(call("campaign_get", {sessionId: "status-root"}), /installation-wide/);
+    for (const name of ["campaign_get", "campaign_work_items", "campaign_work_item", "campaign_review_jobs", "campaign_review_job", "campaign_review_report"]) {
+      await assert.rejects(call(name, {sessionId: "status-root"}), /not registered/);
+    }
     db.setSessionProject("status-child", hidden.id, null);
-    await assert.rejects(call("campaign_status", {sessionId: "status-root"}), /excluded/);
+    await assert.rejects(call("campaign_status", {sessionId: "status-root"}), /excluded|outside/);
     await assert.rejects(call("session_status", {sessionId: "status-root"}), /excluded/);
-    await assert.rejects(call("request_list", {sessionId: "status-root"}), /excluded/);
+    await assert.rejects(call("request_list", {sessionId: "status-root"}), /excluded|outside/);
     // Archive SQL filters root rows, but each root view also embeds campaign children.
     await assert.rejects(call("session_archive_list", {query: {archive: "all"}}), /excluded/);
     db.appendEvent("status-root", {kind: "agent_message", text: "Root fixture result", final: true}, Date.now());

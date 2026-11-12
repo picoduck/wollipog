@@ -320,8 +320,9 @@ export class OrchestratorSettings {
 
   /** `exactRow`: a campaign created before #3247 admits only this exact agent row of its harness, so
    * that harness offers only what this row advertises; every other harness is unaffected. */
-  private capabilities(principal: HumanPrincipal, defaults: OrchestratorDefaults, exactRow?: AgentHarnessIdentity): OrchestratorSettingsCapabilities {
-    const onlineRunners = this.db.listRunnersForPrincipal(principal).filter((runner) => runner.status === "online");
+  private capabilities(principal: HumanPrincipal, defaults: OrchestratorDefaults, exactRow?: AgentHarnessIdentity,
+    runnerVisible?: (runnerId: string) => boolean): OrchestratorSettingsCapabilities {
+    const onlineRunners = this.db.listRunnersForPrincipal(principal).filter((runner) => runner.status === "online" && (!runnerVisible || runnerVisible(runner.runnerId)));
     const installations = onlineRunners.flatMap((runner) =>
       // A saved child harness on the restart-only exec row still renders through the stale entry below.
       runner.agents.filter((agent) => agentAvailableForRunnerDefault(agent, runner.providerAccountDefaults) && agent.capabilities && !isRetiredCodexExec(agent))
@@ -423,9 +424,9 @@ export class OrchestratorSettings {
    * campaign's child behavior instead of the person's defaults (#3580). `exactRow` is the agent row
    * an exact-matching campaign keeps for its harness (CR-2.1). */
   campaignCapabilities(principal: HumanPrincipal, behavior: OrchestratorCampaignBehavior,
-    exactRow?: AgentHarnessIdentity): OrchestratorSettingsCapabilities {
+    exactRow?: AgentHarnessIdentity, runnerVisible?: (runnerId: string) => boolean): OrchestratorSettingsCapabilities {
     return this.capabilities(principal, { ...DEFAULT_ORCHESTRATOR_DEFAULTS,
-      behavior: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.behavior, ...behavior } }, exactRow);
+      behavior: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.behavior, ...behavior } }, exactRow, runnerVisible);
   }
 
   /** Why a running campaign can't take these fixed child values, by the rule saving defaults uses:

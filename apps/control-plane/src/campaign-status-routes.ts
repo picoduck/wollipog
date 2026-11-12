@@ -27,8 +27,8 @@ import { campaignSeedSubjectState } from "./campaign-issue-scope-seed.js";
 import type { ControlPlaneDb } from "./db.js";
 import { decisionOccurrenceView } from "./decision-runtime.js";
 import { selectionProposalView } from "./scope-selection.js";
-import { OwnerManagement, type OwnerManagementInput, type OwnerManagementReply } from "./owner-management.js";
 import type { AuthPrincipal } from "./identity.js";
+import { OwnerManagement, type OwnerManagementInput, type OwnerManagementReply } from "./owner-management.js";
 
 /* ------------------------------ Cost visibility ------------------------------ */
 
@@ -137,17 +137,20 @@ function limitOf(query: Record<string, unknown>): { limit?: number } {
   return limit === undefined ? {} : { limit: /^\d{1,4}$/u.test(limit) ? Number(limit) : Number.NaN };
 }
 
-export function registerCampaignStatusRoutes(
-  app: FastifyInstance,
-  deps: {
-    db: ControlPlaneDb;
-    requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
-    /** Slice 8: read these pull requests now, subject to the rate limit; never rejects. */
-    refreshForge?(campaignId: string, refs: readonly CampaignPullRequestRef[]): Promise<void>;
-  },
-): OwnerManagement<AuthPrincipal> {
+export interface CampaignStatusDependencies {
+  db: ControlPlaneDb;
+  /** Slice 8: read these pull requests now, subject to the rate limit; never rejects. */
+  refreshForge?(campaignId: string, refs: readonly CampaignPullRequestRef[]): Promise<void>;
+}
+
+/** Shared non-HTTP projection and forge-read operations for both adapters. */
+export function createCampaignStatusManagement(deps: CampaignStatusDependencies): OwnerManagement<AuthPrincipal> {
   const { db } = deps;
   const management = new OwnerManagement<AuthPrincipal>();
+  const app = {
+    get: (path: string, handler: Parameters<typeof management.define>[2]) => management.define("GET", path, handler),
+    post: (path: string, handler: Parameters<typeof management.define>[2]) => management.define("POST", path, handler),
+  };
 
   /** Resolve the root campaign for `:id` and authorize the reader, or send the refusal. */
   const reader = (req: OwnerManagementInput<AuthPrincipal>, reply: OwnerManagementReply, id: string): CampaignReader | null => {
@@ -166,11 +169,11 @@ export function registerCampaignStatusRoutes(
         return null;
       }
     } else {
-      if (!db.canAccessSession(principal, id)) {
+      if (!db.canAccessSession(principal, id) || req.access && !req.access.session(id)) {
         void reply.code(404).send({ error: "session not found" });
         return null;
       }
-      if (rootId && !db.canAccessSession(principal, rootId)) {
+      if (rootId && (!db.canAccessSession(principal, rootId) || req.access && !req.access.session(rootId))) {
         void reply.code(403).send({ error: "access to the campaign's Orchestrator session is required" });
         return null;
       }
@@ -184,7 +187,7 @@ export function registerCampaignStatusRoutes(
       const target = sessionId ?? rootId;
       let result = visible.get(target);
       if (result === undefined) {
-        result = db.canAccessSession(principal, target);
+        result = db.canAccessSession(principal, target) && (!req.access || req.access.session(target));
         visible.set(target, result);
       }
       return result;
@@ -196,7 +199,7 @@ export function registerCampaignStatusRoutes(
       if (result === undefined) {
         // The agent branch above already limited an agent to its own campaign's Orchestrator.
         const runner = principal.kind === "agent" ? null : db.campaignForgeObservingRunner(rootId, repository);
-        result = principal.kind === "agent" || (runner !== null && db.canAccessRunner(principal, runner.runnerId));
+        result = principal.kind === "agent" || (runner !== null && db.canAccessRunner(principal, runner.runnerId) && (!req.access || req.access.runner(runner.runnerId)));
         forge.set(key, result);
       }
       return result;
@@ -204,7 +207,7 @@ export function registerCampaignStatusRoutes(
     const forgeFactVisible = (ref: CampaignPullRequestRef): boolean => {
       if (principal.kind === "agent") return true;
       const supplier = db.campaignForgeObservations.supplier(rootId, ref);
-      return supplier ? db.canAccessRunner(principal, supplier) : forgeVisible(ref.repository);
+      return supplier ? db.canAccessRunner(principal, supplier) && (!req.access || req.access.runner(supplier)) : forgeVisible(ref.repository);
     };
     return { principal, rootId, canSee, forgeVisible, forgeFactVisible };
   };
@@ -212,7 +215,7 @@ export function registerCampaignStatusRoutes(
   const everySessionVisible = (read: CampaignReader) =>
     read.canSee(read.rootId) && db.campaignDescendantIds(read.rootId).every((id) => read.canSee(id));
 
-  management.define("GET","/api/sessions/:id/campaign/summary", async (req, reply) => {
+  app.get("/api/sessions/:id/campaign/summary", async (req, reply) => {
     const { id } = req.params as { id: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
@@ -233,7 +236,7 @@ export function registerCampaignStatusRoutes(
 
   // Decision calls that served this campaign, with their verdicts, reasons and their own usage.
   // Kept apart from the managed worker cost above, so an unpriced call never reads as campaign spend.
-  management.define("GET","/api/sessions/:id/campaign/decisions", async (req, reply) => {
+  app.get("/api/sessions/:id/campaign/decisions", async (req, reply) => {
     const { id } = req.params as { id: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
@@ -258,7 +261,7 @@ export function registerCampaignStatusRoutes(
     return reply.send(response);
   });
 
-  management.define("GET","/api/sessions/:id/campaign/work-items", async (req, reply) => {
+  app.get("/api/sessions/:id/campaign/work-items", async (req, reply) => {
     const { id } = req.params as { id: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
@@ -282,7 +285,7 @@ export function registerCampaignStatusRoutes(
     });
   });
 
-  management.define("GET","/api/sessions/:id/campaign/work-items/:itemId", async (req, reply) => {
+  app.get("/api/sessions/:id/campaign/work-items/:itemId", async (req, reply) => {
     const { id, itemId } = req.params as { id: string; itemId: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
@@ -302,7 +305,7 @@ export function registerCampaignStatusRoutes(
   /** Slice 8 on-demand read, sent while the details are visible. A reader who may not see forge
    * facts cannot cause a forge read either. The wait is bounded; the read itself runs off the
    * session-update path and later changes reach readers through the revision. */
-  management.define("POST","/api/sessions/:id/campaign/work-items/:itemId/forge-refresh", async (req, reply) => {
+  app.post("/api/sessions/:id/campaign/work-items/:itemId/forge-refresh", async (req, reply) => {
     const { id, itemId } = req.params as { id: string; itemId: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
@@ -314,16 +317,20 @@ export function registerCampaignStatusRoutes(
     if (!before) return reply.code(404).send({ error: "work item not found in this campaign" });
     // A reader who may not see a repository's facts can't cause a read through its Location's login.
     const refs = (before.observed.pullRequests?.map((entry) => entry.ref) ?? []).filter((ref) => read.forgeVisible(ref.repository));
+    await req.recheck?.();
     if (refs.length > 0 && deps.refreshForge) await deps.refreshForge(read.rootId, refs);
-    const item = ledger.detail(read.rootId, itemId, Date.now());
+    await req.recheck?.();
+    const fresh = reader(req, reply, id);
+    if (!fresh) return reply;
+    const item = ledger.detail(fresh.rootId, itemId, Date.now(), fresh.canSee);
     const response: CampaignForgeRefreshResponse = {
       revision: ledger.revision(read.rootId),
-      pullRequests: item ? forgeFactsForPrincipal(item, read.forgeFactVisible).observed.pullRequests ?? [] : [],
+      pullRequests: item ? forgeFactsForPrincipal(item, fresh.forgeFactVisible).observed.pullRequests ?? [] : [],
     };
     return reply.send(response);
   });
 
-  management.define("GET","/api/sessions/:id/campaign/recommendations", async (req, reply) => {
+  app.get("/api/sessions/:id/campaign/recommendations", async (req, reply) => {
     const { id } = req.params as { id: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
@@ -339,6 +346,13 @@ export function registerCampaignStatusRoutes(
     if (!page.ok) return reply.code(page.status).send({ ...page.details, error: page.error });
     return reply.send(page.data);
   });
-  management.registerHttp(app, deps.requestPrincipal, 401);
+  return management;
+}
+
+export function registerCampaignStatusRoutes(app: FastifyInstance, deps: CampaignStatusDependencies & {
+  requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
+}): OwnerManagement<AuthPrincipal> {
+  const management = createCampaignStatusManagement(deps);
+  management.registerHttp(app, deps.requestPrincipal, {status: 401, error: "authentication required"});
   return management;
 }

@@ -25,28 +25,9 @@ export const ASSISTANT_STATUS_ROUTES = [
   ["result_blocked_ack", "POST /api/sessions/:id/background-deliveries/acknowledge-blocked-results"],
   ["result_missing_ack", "POST /api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result"],
   ["result_retry_ack", "POST /api/sessions/:id/background-deliveries/:continuationId/acknowledge-retry-exhaustion"],
-  ["review_list", "GET /api/sessions/:id/review-sessions"],
-  ["review_get", "GET /api/sessions/:id/review-sessions/:reviewSessionId"],
-  ["review_findings", "GET /api/sessions/:id/review-findings"],
   ["review_jobs", "GET /api/sessions/:id/cross-model-reviews"],
   ["review_job", "GET /api/sessions/:id/cross-model-reviews/:jobId"],
   ["review_job_artifacts", "GET /api/sessions/:id/cross-model-reviews/:jobId/artifacts"],
-  ["decision_list", "GET /api/sessions/:id/workflow-decisions"],
-  ["decision_get", "GET /api/sessions/:id/workflow-decisions/:occurrenceId"],
-  ["request_list", "GET /api/sessions/:id/descendant-requests"],
-  ["campaign_behavior", "GET /api/sessions/:id/orchestrator-campaign/behavior"],
-  ["campaign_status", "GET /api/sessions/:id/campaign/summary"],
-  ["campaign_decisions", "GET /api/sessions/:id/campaign/decisions"],
-  ["campaign_items", "GET /api/sessions/:id/campaign/work-items"],
-  ["campaign_item", "GET /api/sessions/:id/campaign/work-items/:itemId"],
-  ["campaign_recommendations", "GET /api/sessions/:id/campaign/recommendations"],
-  ["campaign_scope", "GET /api/sessions/:id/campaign/issue-scope"],
-  ["campaign_get", "GET /api/sessions/:id/orchestrator-campaign"],
-  ["campaign_work_items", "GET /api/sessions/:id/orchestrator-campaign/work-items"],
-  ["campaign_work_item", "GET /api/sessions/:id/orchestrator-campaign/work-items/:itemId"],
-  ["campaign_review_jobs", "GET /api/sessions/:id/orchestrator-campaign/review-jobs"],
-  ["campaign_review_job", "GET /api/sessions/:id/orchestrator-campaign/review-jobs/:jobId"],
-  ["campaign_review_report", "GET /api/sessions/:id/orchestrator-campaign/review-jobs/:jobId/report"],
 ] as const;
 
 const string = {type: "string"};
@@ -118,7 +99,6 @@ export function registerAssistantStatusOperations(operations: AssistantOperation
               attempts.forEach(s => {if (s && db.getSession(s)) related.add(s);});
             }
           }
-          if (name === "request_list") db.listSessions({includeArchived: true}).filter(s => db.isSessionDescendant(id, s.id)).forEach(s => related.add(s.id));
           if (name === "result_handoff") {
             const controller = db.sessionResultOrchestrator(id);
             if (controller) related.add(controller);
@@ -136,9 +116,6 @@ export function registerAssistantStatusOperations(operations: AssistantOperation
           }
         };
         await ctx.recheck();
-        if (name === "campaign_get" && db.assistantConnections.get(ctx.connection.id)!.grant.projects !== "all") {
-          throw new AssistantRefusal("The full campaign projection includes installation-wide Machine capabilities. Use campaign_status and the scoped campaign reads, or an all-project connection.");
-        }
         authorizeRelated();
         const service = [deps.status, deps.campaign, deps.scope, ...(deps.additional ? [deps.additional] : [])].find(s => s.keys().includes(route));
         if (!service && name !== "session_lookup") throw new AssistantRefusal("The shared owner service is unavailable. Upgrade this control plane.");
