@@ -116,6 +116,30 @@ test("fork grant loss after runner creation prevents cache commit and retains cl
   } finally {h.db.close();}
 });
 
+test("a fork carrying its source's approved Location switch is discarded on the runner, never adopted", async () => {
+  const h = harness(); let target = ""; let state: "pending" | "failed" = "pending";
+  h.hub.requestFromRunner = async (_id, requestId, message) => {
+    assert.equal(message.type, "fork_session"); target = message.targetSessionId;
+    // What a runner built before forks cleared the source's switch returns (#4138).
+    return {type: "fork_result", requestId, ok: true, events: [], snapshot: {...h.snapshot(target),
+      locationSwitch: {state, repository: "acme/docs", workspaceId: "other", locationName: "Docs", at: 1,
+        ...(state === "failed" ? {reason: "the target worktree could not be prepared"} : {})}}};
+  };
+  try {
+    // The route answers 502 with the reason; an assistant command reports that as an uncertain outcome.
+    await assert.rejects(h.call("session_fork", {commandId: "inherited-switch", turn: 1}), /Outcome uncertain/);
+    assert.equal(h.db.getSession(target), null, "the fork is not adopted");
+    assert.equal(h.db.isTombstoned(target), true);
+    assert.ok(h.sent.some((message) => JSON.stringify(message) === JSON.stringify({type: "delete_session", sessionId: target})),
+      "and the runner is told to delete it, so it never carries the switch out");
+    // A failed switch is only shown, never carried out: such a fork is adopted.
+    state = "failed";
+    const fork = await h.call("session_fork", {commandId: "failed-switch", turn: 1});
+    assert.equal(fork.receipt.status, "succeeded");
+    assert.equal(h.db.getSession(fork.result.id)!.workspaceId, "w");
+  } finally {h.db.close();}
+});
+
 test("session deletion confirms then reconciles content-free receipts after the resource is gone", async () => {
   const h = harness();
   try {

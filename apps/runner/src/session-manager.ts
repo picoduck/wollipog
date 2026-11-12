@@ -17867,6 +17867,12 @@ export class SessionManager {
         locationHistory: undefined,
         keptWorktreePaths: undefined,
         keptWorktreesTracked: true,
+        // A Location switch is approved for the session its person approved it for (#4138). The fork
+        // starts where the source is and never carries out, resumes or shows the source's switch: a
+        // move of its own needs its own approval.
+        pendingLocationSwitch: undefined,
+        pendingLocationContinuation: undefined,
+        locationSwitchFailure: undefined,
         agentSessionId: forkedThreadId,
         status: "idle",
         tokensIn: 0,
