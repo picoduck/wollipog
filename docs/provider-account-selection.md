@@ -81,8 +81,11 @@ Explicit choices win. A session or child that names an account uses it, whatever
 would skip. A run or workflow names one per member (`providerAccountIds` by agent id,
 `providerAccountBindings` by role, `orchestratorProviderAccountId`), and a member it doesn't name
 follows the policy. All of them resolve through one function (`launchProviderAccount`), and multi-agent
-runs and workflows bind the same account a session would, including a fixed default. Automations can't
-name one: they resolve at each launch. WSL agents keep their context-local account, because a POSIX path
+runs and workflows bind the same account a session would, including a fixed default. Of automations,
+only an Orchestrator session automation can name one; every other run resolves when it starts. The
+automation editor and an agent's Create Automation approval show that resolution from the preview below
+as an expectation, rechecked when each run starts, and a session automation with no eligible account still
+saves (#4512). WSL agents keep their context-local account, because a POSIX path
 doesn't identify its owning distribution, so a machine policy doesn't apply to them.
 
 Resolution happens at dispatch and again at launch. The runner rechecks a Priority Order choice

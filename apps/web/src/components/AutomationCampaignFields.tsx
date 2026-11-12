@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ComponentProps } from "react";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
@@ -11,14 +11,18 @@ import { evaluateOrchestratorPolicy, policyDraftFromDefaults, policySummaryFacts
 import { OrchestratorPolicyDialog } from "./OrchestratorPolicyDialog.js";
 import { maskedAccountTitles } from "../personal-identifiers.js";
 import { Notice } from "./Notice.js";
+import { AutomationExpectedProviderAccount } from "./ProviderAccountSelection.js";
 import { Select } from "./ui/ChoiceControls.js";
 
 /** The same policy dialog as New Session. The stored schedule holds the applied settings rather
  * than silently following changes to the owner's account defaults on a later day. */
-export function AutomationCampaignFields({ form, runner, onChange }: {
+export function AutomationCampaignFields({ form, runner, accountPlacement, onChange }: {
   form: FormState; runner: RunnerView | undefined; onChange: (form: FormState) => void;
+  /** Where a run would start, for the Default account's preview; null when it can't be derived. */
+  accountPlacement: ComponentProps<typeof AutomationExpectedProviderAccount>["placement"];
 }) {
   const api = useApi();
+  const expectationId = `${useId()}-expected-account`;
   const [view, setView] = useState<OrchestratorSettingsView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
@@ -76,7 +80,11 @@ export function AutomationCampaignFields({ form, runner, onChange }: {
       {accounts.length > 0 && <div className="field"><span className="field-label">Orchestrator Provider Account</span>
         <Select label="Orchestrator Provider Account" value={form.providerAccountId ?? ""}
           options={[{ value: "", label: "Default" }, ...accounts.map((account, index) => ({ value: account.id, label: accountTitles[index]! }))]}
+          describedBy={!form.providerAccountId ? expectationId : undefined}
           onChange={value => onChange({ ...form, providerAccountId: value || undefined })} />
+        {/* What Default resolves to (#4512); a named account needs no prediction. */}
+        {!form.providerAccountId && runner && <AutomationExpectedProviderAccount runner={runner} agentId={form.agentId}
+          placement={accountPlacement} choosable id={expectationId} />}
       </div>}
       {(tiers.length > 0 || form.serviceTier) && <div className="field"><span className="field-label">Service Tier</span>
         <Select label="Service Tier" value={form.serviceTier ?? ""} onChange={value => onChange({ ...form, serviceTier: value || undefined })}
