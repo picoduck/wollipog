@@ -944,7 +944,12 @@ export async function createRequestedWorktree(
     listed = await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]);
     matching = parseWorktreePorcelain(listed).find((entry) => sameWorktreePath(context, entry.path, path));
     if (matching) {
-      // Returned as it stands, it would read as an existing worktree whose directory is not there.
+      // Returned as it stands, it would read as an existing worktree whose directory is not there. Said for
+      // why the drop left it: the directory came back meanwhile, or it is locked, or ambiguous.
+      if (await removalPathIdentity(context, path).catch(() => undefined) !== null) {
+        throw new Error(`the requested worktree for ${branch} at ${path} came back while the runner was dropping its stale ` +
+          "registration, so nothing was dropped or made. Ask again, and it continues there");
+      }
       throw new Error(`the requested worktree for ${branch} is registered at ${path}, but its directory is not there, and its ` +
         `registration was left as it is: ${matching.locked ? `it is locked, so unlock it (git worktree unlock ${path})`
           : "Git's records for it could not be told apart from another worktree's, so remove that one registration by hand"}, ` +
