@@ -3799,6 +3799,9 @@ export class SessionManager {
         baseRef: created.baseRef,
         baseCommit: created.baseCommit,
         source: "created",
+        // Made again on this session's own branch after its directory went (#4209): removing this
+        // worktree keeps the branch, which may hold the session's commits.
+        ...(created.branchPreexisted ? { branchPreexisted: true } : {}),
         ...(defaultBranch ? { defaultBranch } : {}),
       };
       try {
@@ -3837,7 +3840,7 @@ export class SessionManager {
             );
             cleanup.auxiliaryWorktreeRollback = true;
             if (requestProof) cleanup.rollbackProof = requestProof;
-            cleanup.rollbackBranchBase = created.baseCommit;
+            if (!created.branchPreexisted) cleanup.rollbackBranchBase = created.baseCommit;
             await this.recordRollbackSnapshot(cleanup);
             await this.reapCreationRollback(cleanup, cleanupMeta);
             // Only a worktree that really went takes its row with it. One kept or still stuck stays
@@ -8128,6 +8131,8 @@ export class SessionManager {
     let worktree: WorktreeHandle | null = null;
     let worktreeIdentity: SessionWorktreeView | undefined;
     let worktreeOwnedByLaunch = false;
+    // A worktree this launch made and has given back, which no selection may name afterwards.
+    let launchRolledBack: string | undefined;
     const launchWorktreeCleanup = (): WorktreeCleanupRecord => {
       if (!worktree) throw new Error("worktree cleanup requested before materialization");
       const latest = this.store.readMeta(spec.sessionId) ?? meta;
@@ -8247,6 +8252,7 @@ export class SessionManager {
               const cleanup = launchWorktreeCleanup();
               cleanup.checkpointGenerationDisposable = true;
               this.cleanupJournal.add(cleanup);
+              launchRolledBack = worktree.path;
               await this.reapWorktree(cleanup, true);
             }
             worktree = null;
@@ -8368,7 +8374,18 @@ export class SessionManager {
           message: `worktree isolation failed: ${errText(err)}`,
         });
         meta.worktreePending = false;
-        this.store.patchMeta(spec.sessionId, { worktreePending: false });
+        // The launch's row starts with no selection and only finalization writes one. A failure before
+        // that leaves the session selecting the worktree it had (#4209), or the next launch, finding none,
+        // would run in the Location's own checkout. Not one this launch made and gave back: that has gone.
+        const keepSelection = !!selected && !(launchRolledBack && sameWorktreePath(context, launchRolledBack, selected));
+        const current = keepSelection ? this.store.readMeta(spec.sessionId) : undefined;
+        const restore = !!current && !current.worktreePath && current.worktreeBranch === prior!.worktreeBranch;
+        const restored = this.store.patchMeta(spec.sessionId, { worktreePending: false, ...(restore ? { worktreePath: selected } : {}) });
+        if (restore && restored) {
+          meta.worktreePath = selected;
+          // The session holds this worktree again, so no earlier launch's rollback may take it.
+          this.endLaunchRollbacksAt(spec.sessionId, context, selected!);
+        }
         if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
         this.releaseAdmissionIfInactive(spec.sessionId);
         this.emitStatus(spec.sessionId, "failed", "Worktree isolation could not be established");

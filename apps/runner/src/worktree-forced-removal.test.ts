@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createWorktree, releaseRecoveredWorktree, removeWorktree } from "./worktree.js";
+import { createRequestedWorktree, createWorktree, discardWorktreeIfSafe, releaseRecoveredWorktree, removeWorktree } from "./worktree.js";
 
 // The forced removal paths left after #4395 (#4209 follow-ups): a removal never takes what it cannot
 // prove holds nothing of a person's, and never drops another worktree's registration.
@@ -183,6 +183,50 @@ test("removing a worktree that is there leaves another one that is only away reg
     await removeWorktree(repo, { path, branch: "mine" });
     assert.equal(registered(repo).includes(path), false);
     assert.deepEqual(bytes(away.admin), awayAdmin, "Git's prune after the removal would have dropped it");
+    away.back();
+    assert.equal(git(away.path, "status", "--porcelain"), "A  notes.txt");
+  });
+});
+
+test("a safe discard leaves another worktree that is only away registered", async () => {
+  if (process.platform === "win32") return;
+  await withRepository("safe-discard", async (root, repo) => {
+    const origin = join(root, "origin.git");
+    git(root, "init", "--quiet", "--bare", origin);
+    git(repo, "remote", "add", "origin", origin);
+    git(repo, "push", "--quiet", "origin", "main");
+    git(repo, "remote", "set-head", "origin", "main");
+    const dataDir = join(root, "data");
+    const mine = await createRequestedWorktree(repo, "s_safe_discard", { baseRef: "HEAD", branch: "fix/contained" }, { dataDir });
+    const away = worktreeAway(root, repo);
+    const awayAdmin = bytes(away.admin);
+
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe_discard", { ...mine, source: "created" }, { dataDir }), { removed: true });
+    assert.equal(registered(repo).includes(mine.path), false);
+    assert.deepEqual(bytes(away.admin), awayAdmin, "Git's prune after the discard would have dropped it");
+    away.back();
+    assert.equal(git(away.path, "status", "--porcelain"), "A  notes.txt");
+  });
+});
+
+test("a removal Git cannot finish leaves another worktree that is only away registered", async () => {
+  if (process.platform === "win32" || process.getuid?.() === 0) return;
+  await withRepository("failed-removal", async (root, repo) => {
+    const path = join(root, "worktree");
+    git(repo, "worktree", "add", "--quiet", "-b", "mine", path);
+    // A directory nobody may write into, so Git's own removal fails partway.
+    const stuck = join(path, "stuck");
+    mkdirSync(stuck);
+    writeFileSync(join(stuck, "file.txt"), "cannot be removed\n");
+    chmodSync(stuck, 0o500);
+    const away = worktreeAway(root, repo);
+    const awayAdmin = bytes(away.admin);
+    try {
+      await assert.rejects(removeWorktree(repo, { path, branch: "mine" }), /worktree cleanup incomplete/u);
+    } finally {
+      chmodSync(stuck, 0o700);
+    }
+    assert.deepEqual(bytes(away.admin), awayAdmin, "Git's prune after the failed removal would have dropped it");
     away.back();
     assert.equal(git(away.path, "status", "--porcelain"), "A  notes.txt");
   });
