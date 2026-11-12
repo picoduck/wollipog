@@ -32,7 +32,7 @@ import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
 import { inspectCampaignWorkspace, inspectProjectLocation } from "./project-location-inspection.js";
 import { CampaignRepositoryAdditions } from "./campaign-repository-additions.js";
 import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
-import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryEpics, campaignBoundaryRepositories, validCampaignControl, type CampaignControl,
+import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LAUNCH_INSPECTION_ERRORS, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryEpics, campaignBoundaryRepositories, validCampaignControl, type CampaignControl,
   type CampaignAuthorityBoundary, type CampaignRepositoryAdditionRequest } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
@@ -10501,5 +10501,87 @@ test("a malformed exclusion list keeps its well-formed refusals, and a malformed
     const elsewhere = await ask(f, child, publicationIn("elsewhere/repo"), "beside-malformed-elsewhere");
     assert.equal(elsewhere.ok, false);
     assert.match(elsewhere.error!, /no read has named the repository it holds/u);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a Location whose folder changes in place loses its own requester's exemption and counts as unread until a read names it again (#4319 follow-on B, Orchestrator's read of 43a2a41)", async () => {
+  for (const added of ["owner", "someone else"] as const) {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  answerBelow(f);
+  registerBelow(f);
+  try {
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: added === "owner" ? f.human.userId : OTHER_PERSON.userId });
+    // Someone else's is read, and so refused by name, through the owner's Include in Campaign.
+    if (added === "owner") await c.locations.locationAdded(below.id, f.human);
+    else await c.locations.include(c.rootId, below.id, f.human);
+    assert.equal(c.policy().excludedLocations!.find((item) => item.locationId === below.id)?.repository, "below/repo", `${added}: named`);
+    const inBelow = childAt(f, c.rootId, "below", "z", "child-in-below");
+    const exempt = await ask(f, inBelow, publicationIn("below/repo"), "exempt-before-move");
+    assert.equal(exempt.ok, true, "the Location's own requester acts in its own repository");
+    // The runner registers again with workspace z pointing at another folder: same Location, no revival.
+    f.db.registerRunner({ runnerId: "below", hostname: "below", os: "linux", version: "test", agents: [], runtime: { ...runtime, campaignLaunchInspection: { version: 4 } },
+      workspaces: [{ id: "z", name: "below z", path: "/fixture/below-elsewhere" }] }, Date.now(), CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL - 1);
+    assert.equal(f.db.getProjectLocation(below.id)!.path, "/fixture/below-elsewhere");
+    const stale = await ask(f, inBelow, publicationIn("below/repo"), "exempt-after-move");
+    assert.equal(stale.ok, false, "nothing shows the folder still holds below/repo");
+    assert.match(stale.error!, NAMED_REFUSAL, "refused by the name the record kept");
+    assert.equal(c.policy().excludedLocations!.find((item) => item.locationId === below.id)?.repository, undefined, "the exclusion no longer names it");
+    const child = childAt(f, c.rootId, "r", "w");
+    await stillRefused(f, c.rootId, child, `${added}: the refusal by name stays`);
+    await stillUnread(f, c.rootId, child, `${added}: its new folder may hold any repository`);
+  } finally { await c.server.close(); f.db.close(); }
+  }
+});
+
+test("an exclusion list that isn't a list fails closed: each Location of the Project on a runner below the floor counts as unread (#4319 follow-on C, Orchestrator's read of 43a2a41)", async () => {
+  for (const corrupt of [{ not: "a list" }, "a string"] as const) {
+    const f = fixture();
+    const c = await launchedMultiRepositoryCampaign(f);
+    registerBelow(f);
+    try {
+      const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+      const { refusedRepositories: _none, ...policy } = c.policy();
+      f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({ ...policy, excludedLocations: corrupt }), c.rootId);
+      const child = childAt(f, c.rootId, "r", "w");
+      assert.deepEqual(f.db.unnamedBelowGatesLocations(f.db.getSession(c.rootId)!).map((item) => item.locationId), [below.id], `${typeof corrupt}: counted`);
+      await stillUnread(f, c.rootId, child, `${typeof corrupt}: refused`);
+      // Startup writes it into the durable record, so a runner's update before a read doesn't lift it.
+      f.db.recordEarlierUnreadLocations(Date.now());
+      assert.ok(c.policy().unreadLocations?.some((item) => item.locationId === below.id), `${typeof corrupt}: recorded`);
+      registerBelow(f, CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL);
+      await stillUnread(f, c.rootId, child, `${typeof corrupt}: an update before a read doesn't lift it`);
+    } finally { await c.server.close(); f.db.close(); }
+  }
+});
+
+test("an exclusion read on an old runner records its repository lower-cased, so the Location's own requester stays exempt (#4319, Orchestrator's read of 43a2a41)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  registerBelow(f);
+  const inspect = f.state.inspect;
+  f.state.inspect = (message) => message.workspacePath === "/fixture/below"
+    ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: true, repository: "Below/Repo",
+      issueNumbers: message.issueNumbers, digest: "d".repeat(64) }
+    : inspect(message);
+  try {
+    const below = f.db.addProjectLocation(c.p.project.id, { runnerId: "below", workspaceId: "z", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(below.id, f.human);
+    assert.equal(c.policy().excludedLocations!.find((item) => item.locationId === below.id)?.repository, "below/repo");
+    const inBelow = childAt(f, c.rootId, "below", "z", "child-in-below");
+    const own = await ask(f, inBelow, publicationIn("below/repo"), "own-mixed-case");
+    assert.equal(own.ok, true, own.error ?? "");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("an exclusion list past its cap keeps the latest items, and each one dropped that names a Location counts as unread (#4319 follow-on C, Orchestrator's read of 43a2a41)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const items = Array.from({ length: CAMPAIGN_BOUNDARY_LOCATIONS_MAX + 1 }, (_value, index) => belowExclusion(`pl_over_${index}`, `over ${index}`));
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({ ...c.policy(), excludedLocations: items }), c.rootId);
+    assert.equal(c.policy().excludedLocations!.length, CAMPAIGN_BOUNDARY_LOCATIONS_MAX);
+    assert.equal(c.policy().excludedLocations![0]!.locationId, "pl_over_1", "the latest are kept");
+    assert.deepEqual(c.policy().unreadLocations?.map((item) => item.locationId), ["pl_over_0"], "the one dropped counts as unread");
   } finally { await c.server.close(); f.db.close(); }
 });

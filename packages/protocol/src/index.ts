@@ -2267,6 +2267,10 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
    * consent, so the owner can always end a refusal resting on a runner or Location they don't control.
    * A separate list, so a control plane that doesn't know it keeps every unread record. */
   unreadByConsent?: string[];
+  /** Set when a stored `excludedLocations` wasn't a list at all (#4319), so nothing showed what it
+   * refused: each Location of the campaign's Project on a runner below the gates' floor counts as
+   * unread, and startup writes those into `unreadLocations` and clears this. It only ever refuses. */
+  exclusionsLost?: true;
   /** What the Full Control launch or enable that set `control` disclosed about capabilities and
    * evidence (#2940). Server-owned and informational: it grants nothing, a revoke to Custom drops
    * it, and a campaign authorized before it existed has none. */
