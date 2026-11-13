@@ -5515,7 +5515,7 @@ body.shell-dock-dragging * {
 .owner-resource-return {
   display: grid;
   gap: var(--space-3);
-  margin-block: var(--space-4);
+  margin: var(--space-4) 0;
   padding: var(--space-4);
   border: 1px solid var(--border);
   border-radius: var(--radius);
