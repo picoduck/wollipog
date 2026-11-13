@@ -72,8 +72,8 @@ Deploying this version retires proven recorded orphan providers at the next runn
 A version that has never recorded ownership cannot supply retrospective proof: existing unrecorded providers are left
 untouched. Other platforms retain the existing behavior until an equivalent kernel primitive is
 implemented. Unrecorded descendants and ambiguous survivors continue to block HOME recovery.
-Only the recorded root is signalled: unrecorded tool children in another process group can
-survive its retirement and intentionally keep the owner relaunch blocked. This does not delete
+Only the recorded root is signalled: unrecorded tool children in the same or another process
+group can survive its retirement and intentionally keep the owner relaunch blocked. This does not delete
 lease evidence, exclude processes from the production scan or weaken its
 complete-tree standard. No agent management route invokes startup retirement.
 

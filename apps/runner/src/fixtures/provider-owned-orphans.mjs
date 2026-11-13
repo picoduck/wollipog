@@ -21,15 +21,15 @@ const descendantFile = join(dirname(directory), "descendant.json");
 const inert = "setInterval(()=>{},1000);setTimeout(()=>process.exit(0),30000)";
 const children = [rootSession, "child", ...(complete ? [] : ["unknown"])].map(sessionId => {
   const ledger = new ProviderProcessLedger({ processOwnership: sessionId === "unknown" ? undefined : registry.owner(sessionId) });
-  const script = complete === "tree" && sessionId === rootSession ? `
-const c = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(inert)}], { detached: true, stdio: 'ignore' });
+  const script = complete?.startsWith("tree") && sessionId === rootSession ? `
+const c = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(inert)}], { detached: ${complete === "tree"}, stdio: 'ignore' });
 require('node:fs').writeFileSync(${JSON.stringify(descendantFile)}, JSON.stringify({ sessionId: 'grandchild', pid: c.pid }), { mode: 0o600 });
 ${inert}` : inert;
   const child = ledger.launch(spawnAgent, { command: process.execPath, args: ["-e", script],
     cwd: process.cwd(), context: { kind: "native" } });
   return { sessionId, pid: child.pid, startTime: start(child.pid) };
 });
-if (complete === "tree") {
+if (complete?.startsWith("tree")) {
   const deadline = Date.now() + 5000;
   while (!existsSync(descendantFile)) {
     if (Date.now() >= deadline) throw new Error("fixture descendant did not start");

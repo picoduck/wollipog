@@ -14,7 +14,7 @@ import { spawnAgent } from "./spawn.js";
 const linux = process.platform === "linux";
 type Manifest = { bootId: string; uid: number; runnerPid: number; runnerStartTime: string; marker: string;
   children: Array<{ sessionId: string; pid: number; startTime: string }> };
-function fixture(mode?: "tree") {
+function fixture(mode?: "tree" | "tree-same-group") {
   const root = mkdtempSync(join(tmpdir(), "provider-ownership-test-"));
   const directory = join(root, "records");
   const fixture = fileURLToPath(new URL("./fixtures/provider-owned-orphans.mjs", import.meta.url));
@@ -54,18 +54,20 @@ test("startup independently retires two recorded prior-runner sessions and keeps
   } finally { f.close(); }
 });
 
-test("an unrecorded marked descendant survives root retirement and still blocks the production HOME proof", { skip: !linux }, async () => {
-  const f = fixture("tree");
-  try {
-    const descendant = f.manifest.children.find(child => child.sessionId === "grandchild")!;
-    assert.equal((await new ProviderProcessOwnership(f.directory, "runner-test").recover()).retired, 2);
-    assert.equal(f.alive(descendant), true, "ancestry or an inherited marker alone grants no session-bound signal authority");
-    const proof = proveLeaseAbandoned({ bootId: f.manifest.bootId, startTime: f.manifest.runnerStartTime,
-      marker: f.manifest.marker }, f.manifest.runnerPid, linuxLeaseProcessProbe());
-    assert.equal(proof.proven, false);
-    if (!proof.proven) assert.equal(proof.reason, "marked_process");
-  } finally { f.close(); }
-});
+for (const mode of ["tree", "tree-same-group"] as const) {
+  test(`an unrecorded marked descendant (${mode}) survives root retirement and still blocks the production HOME proof`, { skip: !linux }, async () => {
+    const f = fixture(mode);
+    try {
+      const descendant = f.manifest.children.find(child => child.sessionId === "grandchild")!;
+      assert.equal((await new ProviderProcessOwnership(f.directory, "runner-test").recover()).retired, 2);
+      assert.equal(f.alive(descendant), true, "ancestry or an inherited marker alone grants no session-bound signal authority");
+      const proof = proveLeaseAbandoned({ bootId: f.manifest.bootId, startTime: f.manifest.runnerStartTime,
+        marker: f.manifest.marker }, f.manifest.runnerPid, linuxLeaseProcessProbe());
+      assert.equal(proof.proven, false);
+      if (!proof.proven) assert.equal(proof.reason, "marked_process");
+    } finally { f.close(); }
+  });
+}
 
 test("PID reuse identity mismatch retains the unrelated process and handles the other session", { skip: !linux }, async () => {
   const f = fixture();
