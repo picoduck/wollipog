@@ -159,7 +159,7 @@ test.describe("workflow decision reading mode (#2874)", () => {
       await expectReadingMode(page);
       await page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.addRequest("budget"));
       await expect(page.locator(".request-dock-more")).toContainText("+1 More Request");
-      await expect(card(page).getByRole("heading")).toHaveText("Campaign Issue Scope Approval Required");
+      await expect(card(page).getByRole("heading", { level: 3 })).toHaveText("Campaign Issue Scope Approval Required");
       await expectReadingMode(page);
       // The full rationale is reached within the card; its actions stay still.
       await card(page).locator(".request-card-body").evaluate((element) => { element.scrollTop = element.scrollHeight; });
