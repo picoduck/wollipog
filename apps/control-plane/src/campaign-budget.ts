@@ -141,6 +141,9 @@ export class CampaignBudgetLedger {
     CREATE TABLE IF NOT EXISTS campaign_budget_follow_up_admissions (
       work_item_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, occurrence_id TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS campaign_budget_included_follow_up_admissions (
+      occurrence_id TEXT PRIMARY KEY, root_id TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS campaign_budget_checkpoints (
       session_id TEXT PRIMARY KEY, checkpoint TEXT NOT NULL
     );
@@ -416,10 +419,13 @@ export class CampaignBudgetLedger {
   }
 
   /** Records the Human approval that admitted a follow-up work item past the limit (#2940), or that
-   * approved a later change to it. Its title and issue stay bound to that approval. */
-  noteFollowUpAdmission(rootId: string, workItemId: string, occurrenceId: string): void {
+   * approved a later change to it. Its title and issue stay bound to that approval. An identity
+   * approval consumed within a raised limit adds no issue slot: that boundary already funds it.
+   * Keep that fact by occurrence even when a later identity approval replaces the item's binding. */
+  noteFollowUpAdmission(rootId: string, workItemId: string, occurrenceId: string, includedInLimit = false): void {
     this.sql.prepare(`INSERT INTO campaign_budget_follow_up_admissions(work_item_id,root_id,occurrence_id) VALUES (?,?,?)
       ON CONFLICT(work_item_id) DO UPDATE SET occurrence_id=excluded.occurrence_id`).run(workItemId, rootId, occurrenceId);
+    if (includedInLimit) this.sql.prepare("INSERT INTO campaign_budget_included_follow_up_admissions VALUES (?,?)").run(occurrenceId, rootId);
   }
 
   /** The approval a follow-up work item admitted past the limit is bound to, if it was. */
