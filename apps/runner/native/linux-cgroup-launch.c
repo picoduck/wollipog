@@ -3,14 +3,87 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/statfs.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/xattr.h>
 #include <unistd.h>
+
+/* Private startup journal IPC. Acquire the kernel handle before checking identity: even an
+ * exit/PID reuse between inspection and signalling can then affect only the old handle. */
+static int process_identity(long pid, unsigned long long *started, uid_t *uid) {
+  char path[64], bytes[4096];
+  if (snprintf(path, sizeof(path), "/proc/%ld/stat", pid) >= (int)sizeof(path)) return -1;
+  int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) return errno == ENOENT || errno == ESRCH ? 0 : -1;
+  struct stat stat;
+  ssize_t length = read(fd, bytes, sizeof(bytes) - 1);
+  int okay = !fstat(fd, &stat);
+  close(fd);
+  if (!okay || length <= 0) return -1;
+  bytes[length] = 0;
+  char *tail = strrchr(bytes, ')');
+  if (!tail || tail[1] != ' ') return -1;
+  char *save = NULL, *part = strtok_r(tail + 2, " ", &save);
+  for (unsigned field = 3; field < 22 && part; field++) part = strtok_r(NULL, " ", &save);
+  if (!part) return -1;
+  char *end = NULL;
+  errno = 0;
+  *started = strtoull(part, &end, 10);
+  if (errno || !*started || !end || (*end && *end != '\n')) return -1;
+  if (snprintf(path, sizeof(path), "/proc/%ld/status", pid) >= (int)sizeof(path)) return -1;
+  FILE *status = fopen(path, "re");
+  if (!status) return errno == ENOENT || errno == ESRCH ? 0 : -1;
+  unsigned long real, effective;
+  int found = 0;
+  while (fgets(bytes, sizeof(bytes), status)) {
+    if (sscanf(bytes, "Uid: %lu %lu", &real, &effective) != 2) continue;
+    if (real == effective && (unsigned long)(uid_t)real == real) { *uid = (uid_t)real; found = 1; }
+    break;
+  }
+  fclose(status);
+  if (!found) return -1;
+  return 1;
+}
+
+static int retire_process(void) {
+  char boot[38], current[38], extra;
+  long pid, runner;
+  unsigned long uid;
+  unsigned long long started, runner_started, observed;
+  if (scanf("%37s %ld %llu %lu %ld %llu %c", boot, &pid, &started, &uid, &runner, &runner_started, &extra) != 6 ||
+      pid <= 1 || pid > INT_MAX || runner <= 1 || runner > INT_MAX || pid == getpid() || pid == getppid() ||
+      uid != getuid() || getuid() != geteuid() || !started || !runner_started) return 3;
+  int handle = (int)syscall(SYS_pidfd_open, (pid_t)pid, 0);
+  if (handle < 0) return errno == ESRCH ? 4 : 3;
+  FILE *file = fopen("/proc/sys/kernel/random/boot_id", "re");
+  int valid_boot = file && fgets(current, sizeof(current), file);
+  if (file) fclose(file);
+  if (!valid_boot) { close(handle); return 3; }
+  current[strcspn(current, "\n")] = 0;
+  if (strcmp(boot, current)) { close(handle); return 4; }
+  uid_t owner;
+  int state = process_identity(runner, &observed, &owner);
+  if (state < 0 || (state == 1 && observed == runner_started)) { close(handle); return 3; }
+  state = process_identity(pid, &observed, &owner);
+  if (state == 0 || (state == 1 && observed != started)) { close(handle); return 4; }
+  if (state < 0 || owner != (uid_t)uid) { close(handle); return 3; }
+  if (syscall(SYS_pidfd_send_signal, handle, SIGTERM, NULL, 0) && errno != ESRCH) { close(handle); return 3; }
+  (void)syscall(SYS_pidfd_send_signal, handle, SIGCONT, NULL, 0);
+  struct pollfd exited = { .fd = handle, .events = POLLIN };
+  int done = poll(&exited, 1, 500);
+  if (done == 0) {
+    if (syscall(SYS_pidfd_send_signal, handle, SIGKILL, NULL, 0) && errno != ESRCH) { close(handle); return 3; }
+    done = poll(&exited, 1, 2000);
+  }
+  close(handle);
+  return done > 0 && (exited.revents & POLLIN) ? 0 : 3;
+}
 
 /* PID reuse between the cgroup listing and pidfd_open cannot authorize an unrelated signal:
  * membership is checked AFTER opening the pidfd. A PID recycled after that check leaves a dead
@@ -75,6 +148,7 @@ static int term_members(int directory, const char *boundary, unsigned depth, uns
 /* fd 3 is an already-open cgroup directory. Normal launch uses private admission fd 4 and an
  * exec-error fd 5 closed by the kernel on successful exec. Infrastructure modes never exec. */
 int main(int argc, char **argv) {
+  if (argc == 2 && !strcmp(argv[1], "--retire-process")) return retire_process();
   if (argc < 2) return 125;
   struct statfs fs;
   if (fstatfs(3, &fs) || fs.f_type != 0x63677270) goto refused;

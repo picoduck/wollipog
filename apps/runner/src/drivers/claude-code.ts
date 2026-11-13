@@ -715,7 +715,7 @@ export class ClaudeCodeDriver implements Driver {
     private readonly cb: DriverCallbacks,
     deps: Partial<ClaudeDriverDeps> = {},
   ) {
-    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
+    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup, processOwnership: opts.processOwnership });
     this.usageAccounting = new ClaudeUsageAccounting(claudeRestoresUsage(opts.agentVersion), opts.claudeUsageCheckpoint,
       opts.claudeLiveUsage, opts.claudeRepublicationInterrupted === true);
     this.cwd = opts.cwd;

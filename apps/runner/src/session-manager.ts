@@ -2433,6 +2433,12 @@ export class SessionManager {
     reviewerInstallationPaths: [], reviewerSymlinkPaths: [],
   });
   private reviewWriters = new ReviewWriterRegistry();
+  private providerProcesses?: import("./provider-process-ownership.js").ProviderProcessOwnership;
+
+  setProviderProcessOwnership(registry: import("./provider-process-ownership.js").ProviderProcessOwnership): void {
+    if (this.providerProcesses) throw new Error("provider ownership registry is already installed");
+    this.providerProcesses = registry;
+  }
   private readonly driverReviewWriterTokens = new Map<Driver, string>();
 
   setCodexHomes(read: () => readonly string[]): void {
@@ -10426,6 +10432,7 @@ export class SessionManager {
         meta.driver,
         {
           reviewWriterCgroup: this.reviewWriters.group(reviewWriter),
+          processOwnership: meta.context.kind === "native" ? this.providerProcesses?.owner(sessionId) : undefined,
           command: meta.command,
           prepareClaudeHooks: launchPreparation?.prepareClaudeHooks,
           args: preparedProjectMemoryArgs ?? launchPreparation?.codexLaunchArgs ?? meta.args,
@@ -17876,6 +17883,7 @@ export class SessionManager {
           source.driver,
           {
             reviewWriterCgroup: this.reviewWriters.group(reviewWriter),
+            processOwnership: source.context.kind === "native" ? this.providerProcesses?.owner(source.sessionId) : undefined,
             command: source.command,
             args: launchPreparation?.codexLaunchArgs ?? source.args,
             cwd: source.worktreePath,
@@ -18017,6 +18025,7 @@ export class SessionManager {
           source.driver,
           {
             reviewWriterCgroup: this.reviewWriters.group(reviewWriter),
+            processOwnership: forkMeta.context.kind === "native" ? this.providerProcesses?.owner(forkMeta.sessionId) : undefined,
             command: source.command,
             args: source.args,
             cwd: worktree.path,

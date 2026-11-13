@@ -181,7 +181,7 @@ export class PiRpcDriver implements Driver {
     private readonly spawn: typeof spawnAgent = spawnAgent,
     private readonly kill: typeof killTree = killTree,
   ) {
-    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
+    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup, processOwnership: opts.processOwnership });
     this.config = opts.config;
     this.cwd = opts.cwd;
   }

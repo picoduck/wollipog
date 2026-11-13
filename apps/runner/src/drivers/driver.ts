@@ -220,6 +220,7 @@ export interface DriverCallbacks {
 }
 
 export interface DriverOptions {
+  processOwnership?: import("../provider-process-ownership.js").ProviderProcessOwner;
   /** Durable parent for every process owned by one unprotected writer. */
   reviewWriterCgroup?: import("../linux-cgroup.js").LinuxCgroupGroup;
   command: string;

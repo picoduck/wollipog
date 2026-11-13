@@ -31,7 +31,7 @@ export class AcpDriver implements Driver {
     cb: DriverCallbacks,
     deps: { spawn?: typeof spawnAgent; kill?: typeof killTree } = {},
   ) {
-    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
+    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup, processOwnership: opts.processOwnership });
     this.orchestrator = opts.config.permissionMode === "orchestrator";
     // The coupled preset above is only one way to hold the Orchestrator role; runner-owned role
     // metadata is another, and it survives a session that does not carry the preset literal. The

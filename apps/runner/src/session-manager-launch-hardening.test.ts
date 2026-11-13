@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import type { SessionLaunchSpec } from "@wollipog/protocol";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { PROTOCOL_VERSION, type SessionLaunchSpec } from "@wollipog/protocol";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -9,6 +9,12 @@ import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
 import { requestedSlot, requestedWorktreeBoundary, type WorktreeCleanupRecord } from "./worktree.js";
 import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
+import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { providerHomeRunnerMarker } from "./provider-home-lease-evidence.js";
+import { ProviderProcessOwnership } from "./provider-process-ownership.js";
+import { provisionAgentControl, removeAgentControlFiles, isCurrentAgentControlCredential } from "./agent-control.js";
+import { ManagedWorktreeGuardSockets } from "./managed-worktree-guard-socket.js";
+import { requestManagedWorktreeGuardVerdict } from "./managed-worktree-guard.js";
 
 // #4209 follow-ups to #4413, #4418 and #4419: a worktree launch, and what it leaves when it fails.
 
@@ -172,6 +178,75 @@ test("a survivor lease refusal retains the owner recovery action and starts no r
     assert.equal(h.providers.length, priorProviders);
     assert.equal(h.store.readMeta(h.sessionId)!.status, "input_required");
     assert.equal(h.store.readMeta(h.sessionId)!.pendingApproval!.requestId, requestId);
+  });
+});
+
+test("recorded startup retirement clears the survivor lease, then owner relaunch refreshes guard and credential and receives pending work",
+  { timeout: 30_000, skip: process.platform !== "linux" ? "Linux pidfd fixture" :
+    ![0, process.getuid?.()].includes(statSync("/").uid) ? "lease bootstrap rejects a root owned by a remapped foreign UID" : false }, async () => {
+  await withSession("retired-survivor", async h => {
+    h.spec.orchestrator = { strictProjectIsolation: false, integrationIsolation: false };
+    h.store.patchMeta(h.sessionId, { orchestrator: h.spec.orchestrator, status: "running" });
+    const controls = join(h.root, "controls");
+    const host = { configDir: controls, platform: "linux" as const, isSea: false,
+      execPath: process.execPath, execArgv: [], scriptPath: join(h.root, "inert-entry.mjs") };
+    const hashes: string[] = [];
+    const provision = (meta: Parameters<typeof provisionAgentControl>[0]) => provisionAgentControl(meta, {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "provider", providerRelayEndpoint: "@inert-test-relay",
+      registerCredential: (_id, hash) => { hashes.push(hash); },
+    }, () => {}, host);
+    await provision(h.spec);
+    const oldGuard = new ManagedWorktreeGuardSockets(join(h.root, "old-guard"), () => []);
+    const nextGuard = new ManagedWorktreeGuardSockets(join(h.root, "new-guard"), () => []);
+    const payload = JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", cwd: h.app,
+      tool_input: { command: "git status" } });
+    const directory = join(h.root, "ownership");
+    let leases: ProviderHomeLeaseRegistry | undefined;
+    let newAddress = "";
+    try {
+      const oldAddress = await oldGuard.ensure(h.sessionId, "abstract");
+      await requestManagedWorktreeGuardVerdict(oldAddress, payload);
+      const orphanFixture = new URL("./fixtures/provider-owned-orphans.mjs", import.meta.url).pathname;
+      assert.equal(execFileSync(process.execPath, ["--import", "tsx", orphanFixture,
+        directory, "runner", "complete", h.sessionId], { encoding: "utf8", timeout: 10_000 }).trim(), "ready");
+      const manifest = JSON.parse(readFileSync(join(h.root, "fixture-state.json"), "utf8")) as { home: string };
+      leases = new ProviderHomeLeaseRegistry("a".repeat(64), { runnerMarker: providerHomeRunnerMarker() });
+      const homeLease = leases;
+      await oldGuard.closeAll();
+      removeAgentControlFiles(h.sessionId, controls); // The replaced runner's memory is gone.
+      await assert.rejects(requestManagedWorktreeGuardVerdict(oldAddress, payload));
+      assert.throws(() => homeLease.acquireHome(manifest.home, "fixture"), /still used by a process/);
+      const retired = await new ProviderProcessOwnership(directory, "runner").recover();
+      assert.equal(retired.retired, 2);
+      assert.equal(retired.retained, 0);
+      assert.doesNotThrow(() => homeLease.acquireHome(manifest.home, "fixture"));
+      h.restart();
+      h.manager.reconcileRunnerRestartRecovery([h.sessionId]);
+      assert.equal(h.store.readMeta(h.sessionId)!.pendingApproval!.kind, "runner_recovery");
+      assert.equal(h.manager.prompt(h.sessionId, "automatic self-relaunch"), false);
+      Object.defineProperty(h.manager, "prepareLaunch", { value: async (meta: Parameters<typeof provision>[0]) => {
+        homeLease.acquireHome(manifest.home, "fixture");
+        await provision(meta);
+        newAddress = await nextGuard.ensure(h.sessionId, "abstract");
+      } });
+      const starting = h.start(); // Same admitted start dispatched by the owner-only service route.
+      assert.equal(h.manager.prompt(h.sessionId, "reconcile pending requests"), true);
+      assert.equal(await starting, true, JSON.stringify(h.logs));
+      await waitFor(() => h.providers.at(-1)!.prompts.includes("reconcile pending requests"), "pending work was not delivered");
+      assert.equal(hashes.length, 2);
+      assert.notEqual(hashes[0], hashes[1]);
+      assert.equal(isCurrentAgentControlCredential(controls, h.sessionId, hashes[0]!), false);
+      assert.equal(isCurrentAgentControlCredential(controls, h.sessionId, hashes[1]!), true);
+      assert.notEqual(newAddress, oldAddress);
+      await assert.rejects(requestManagedWorktreeGuardVerdict(oldAddress, payload));
+      await assert.doesNotReject(requestManagedWorktreeGuardVerdict(newAddress, payload));
+    } finally {
+      await oldGuard.closeAll(); await nextGuard.closeAll();
+      removeAgentControlFiles(h.sessionId, controls);
+      if (existsSync(directory)) await new ProviderProcessOwnership(directory, "runner").recover();
+      leases?.releaseAll();
+    }
   });
 });
 

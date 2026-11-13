@@ -133,6 +133,7 @@ export type AgentProcess = ChildProcessByStdio<Writable, Readable, Readable> & {
 };
 
 export interface SpawnAgentOptions {
+  processOwnership?: import("./provider-process-ownership.js").ProviderProcessOwner;
   command: string;
   args: string[];
   cwd: string;
@@ -931,6 +932,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   }
   let child: AgentProcess;
   let containment: LinuxCgroupBoundary | undefined;
+  const ownership = ownsNativePosixDescendants ? opts.processOwnership?.prepare() : undefined;
   try {
     if (opts.isolation?.backend === "container") {
       opts.isolation.verifyDefaults?.();
@@ -958,6 +960,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
       child = spawn(file, args, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }) as AgentProcess;
     }
   } catch (error) {
+    ownership?.aborted();
     disposeBridge?.();
     throw error;
   }
@@ -974,6 +977,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     });
     child.once("close", dispose);
   }
+  ownership?.spawned(child);
   child.once("close", () => {
     child.closeObserved = true;
     if (child.posixBoundary) {
@@ -1114,14 +1118,16 @@ export class ProviderProcessLedger {
   private readonly observations = new Set<Promise<boolean>>();
   private readonly namespaceFor: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined;
 
-  constructor(private readonly options: { namespaceFor?: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined; cgroup?: LinuxCgroupGroup } = {}) {
+  constructor(private readonly options: { namespaceFor?: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined; cgroup?: LinuxCgroupGroup;
+    processOwnership?: import("./provider-process-ownership.js").ProviderProcessOwner } = {}) {
     this.namespaceFor = options.namespaceFor ?? claudeNamespaceFor;
   }
 
   /** Enter the writer's durable parent before spawning, never after a child can execute. */
   launch(spawn: typeof spawnAgent, options: SpawnAgentOptions): AgentProcess {
     this.assertOpen();
-    const work = () => this.record(spawn(options));
+    const work = () => this.record(spawn(this.options.processOwnership
+      ? { ...options, processOwnership: this.options.processOwnership } : options));
     return this.options.cgroup ? this.options.cgroup.run(work) : work();
   }
 

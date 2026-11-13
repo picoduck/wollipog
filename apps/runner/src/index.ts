@@ -5,6 +5,7 @@ import { configuredSessionWritableGrants } from "./review-trust.js";
 import { configuredCodexHomes } from "./review-trust.js";
 import { reviewerInstallations } from "./reviewer-installations.js";
 import { ReviewWriterRegistry } from "./review-writers.js";
+import { ProviderProcessOwnership } from "./provider-process-ownership.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
 import { ReviewerSecurity } from "./reviewer-security.js";
 import { defaultReviewSessionDependencies, reviewLaunchArgs, reviewSessionDiscoveryReason, ReviewSessionLauncher } from "./review-sessions.js";
@@ -401,7 +402,9 @@ async function startRunner(config: RunnerConfig, allowInsecureTransport: boolean
 const log = (msg: string) => console.log(`[runner ${config.runnerId}] ${msg}`);
 // Before attestation succeeds no provider HOME or mutable store is owned. Arm transport
 // cancellation now, so an unavailable control plane cannot strand a supervised SSH launch.
-// Startup after attestation is synchronous through the assignment to graceful shutdown below.
+// Before new provider work exists, retirement may await a bounded fixed worker. The acquired
+// data-directory lease has an exit release; construction after that barrier remains synchronous
+// through the assignment to graceful shutdown below.
 let onSshTransportClosed: () => void = () => process.exit(0);
 if (process.env.WOLLIPOG_SSH_SUPERVISED === "1") {
   watchSshLifetime(process.stdin, () => {
@@ -468,6 +471,11 @@ config.dataDir = dataDirLease.dataDir;
 // Runtime containment is selected before provider-HOME acquisitions; staging can use the owned
 // runner data directory when the temporary filesystem is noexec. This never moves the runner.
 process.once("exit", dataDirLease.release);
+// The data-directory lease binds these private records to the attested runner/control plane.
+// No new provider or HOME work exists yet, and no socket can admit an agent recovery request.
+const providerProcesses = new ProviderProcessOwnership(join(config.dataDir, "provider-processes-v1"), config.runnerId);
+const providerRetirement = await providerProcesses.recover();
+log(JSON.stringify({ event: "provider_startup_retirement", ...providerRetirement }));
 const containment = providerContainmentIdentity(config.dataDir);
 if (process.env.WOLLIPOG_SSH_REQUIRE_CGROUP === "1" && !containment) {
   console.error("[runner] ssh_launch_failed reason=containment-unavailable; verify delegated cgroup v2 support before reconnecting; preserve existing ownership evidence");
@@ -1389,6 +1397,7 @@ const unguardedAgentTuis = new UnguardedAgentTuiRegistry();
 const reviewWriters = new ReviewWriterRegistry(process.platform === "linux"
   ? join(config.dataDir, "unprotected-agent-writers") : undefined);
 sessions.setReviewWriterRegistry(reviewWriters);
+sessions.setProviderProcessOwnership(providerProcesses);
 const shells = new ShellManager({
   onOutput: (shellId, sessionId, stream, data, seq) => {
     if (ws && ws.readyState === WebSocket.OPEN && registered) {
@@ -1399,7 +1408,7 @@ const shells = new ShellManager({
     unguardedAgentTuis.exited(shellId);
     sendUp({ type: "shell_exit", sessionId, shellId, code, outputSeq });
   },
-}, undefined, reviewWriters);
+}, undefined, reviewWriters, providerProcesses);
 sessions.setWorktreeShellRetirement((sessionId, context, path) =>
   shells.closeForWorktree(sessionId, context, path));
 // Keep the Claude managed-worktree guard's protection set live: a worktree created, activated,
