@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync, chmodSync, statSync, symlinkSync, unlinkSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +13,7 @@ import { ProviderProcessOwnership } from "./provider-process-ownership.js";
 import { linuxCgroupHelper } from "./linux-cgroup-helper.js";
 import { linuxLeaseProcessProbe, proveLeaseAbandoned } from "./provider-home-lease-evidence.js";
 import { spawnAgent } from "./spawn.js";
+import type { LinuxCgroupBoundary } from "./linux-cgroup.js";
 
 const linux = process.platform === "linux";
 type Manifest = { bootId: string; uid: number; runnerPid: number; runnerStartTime: string; marker: string;
@@ -58,6 +62,14 @@ for (const mode of ["tree", "tree-same-group"] as const) {
   test(`an unrecorded marked descendant (${mode}) survives root retirement and still blocks the production HOME proof`, { skip: !linux }, async () => {
     const f = fixture(mode);
     try {
+      // Rehearse legacy records explicitly even on a delegated host. They grant no
+      // authority over descendants and must retain the marker-based HOME refusal.
+      for (const path of f.records) {
+        const record = JSON.parse(readFileSync(path, "utf8"));
+        delete record.containment;
+        record.version = 1;
+        writeFileSync(path, JSON.stringify(record));
+      }
       const descendant = f.manifest.children.find(child => child.sessionId === "grandchild")!;
       assert.equal((await new ProviderProcessOwnership(f.directory, "runner-test").recover()).retired, 2);
       assert.equal(f.alive(descendant), true, "ancestry or an inherited marker alone grants no session-bound signal authority");
@@ -66,6 +78,75 @@ for (const mode of ["tree", "tree-same-group"] as const) {
       assert.equal(proof.proven, false);
       if (!proof.proven) assert.equal(proof.reason, "marked_process");
     } finally { f.close(); }
+  });
+}
+
+test("a contained journal survives root close and is removed only by whole-boundary release", { skip: !linux }, () => {
+  const directory = mkdtempSync(join(tmpdir(), "owned-boundary-lifetime-"));
+  try {
+    const registry = new ProviderProcessOwnership(directory, "runner");
+    let release!: () => void;
+    const containment = { identity: { kind: "linux-cgroup-v2", bootId: linuxLeaseProcessProbe()!.bootId(),
+      mountRoot: "/", cgroupPath: "fixture/provider", inode: "42" },
+      onReleased: (callback: () => void) => { release = callback; } } as unknown as LinuxCgroupBoundary;
+    const child = Object.assign(new EventEmitter(), { pid: process.pid });
+    registry.owner("s_lifetime")!.prepare().spawned(child, containment);
+    const name = readdirSync(directory)[0]!;
+    const record = JSON.parse(readFileSync(join(directory, name), "utf8"));
+    assert.equal(record.version, 2);
+    assert.deepEqual(record.containment, containment.identity);
+    child.emit("close");
+    assert.deepEqual(readdirSync(directory), [name], "a surviving descendant retains durable ownership");
+    release();
+    assert.deepEqual(readdirSync(directory), []);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+for (const kind of ["partial", "changed", "replaced"] as const) {
+  test(`a failed completion write with ${kind} bytes ${kind === "partial" ? "releases its own partial publication" : "retains unknown evidence"}`, { skip: !linux }, () => {
+    const directory = mkdtempSync(join(tmpdir(), "owned-publication-fault-"));
+    const original = fs.writeFileSync;
+    try {
+      const registry = new ProviderProcessOwnership(directory, "runner");
+      const admission = registry.owner("s_failed_publication")!.prepare();
+      let release!: () => boolean;
+      const containment = { identity: { kind: "linux-cgroup-v2", bootId: linuxLeaseProcessProbe()!.bootId(),
+        mountRoot: "/", cgroupPath: "fixture/provider", inode: "42" },
+        onReleased: (callback: () => boolean) => { release = callback; } } as unknown as LinuxCgroupBoundary;
+      let injected = false;
+      fs.writeFileSync = ((file, data, options) => {
+        if (!injected && typeof file === "number") {
+          injected = true;
+          original(file, kind === "partial" ? String(data).slice(0, 12) : "unexpected", options);
+          if (kind === "replaced") {
+            const pending = join(directory, readdirSync(directory).find(name => name.endsWith(".pending"))!);
+            renameSync(pending, `${pending}.original`);
+            original(pending, String(data).slice(0, 12), { mode: 0o600 });
+          }
+          throw Object.assign(new Error("injected incomplete publication"), { code: "ENOSPC" });
+        }
+        return original(file, data, options);
+      }) as typeof fs.writeFileSync;
+      syncBuiltinESMExports();
+      admission.spawned(Object.assign(new EventEmitter(), { pid: process.pid }), containment);
+      fs.writeFileSync = original;
+      syncBuiltinESMExports();
+      assert.equal(injected, true);
+      assert.equal(release(), kind === "partial");
+      if (kind === "partial") assert.deepEqual(readdirSync(directory), []);
+      else {
+        const names = readdirSync(directory);
+        assert.equal(names.length, kind === "replaced" ? 2 : 1);
+        const pending = names.find(name => name.endsWith(".pending"))!;
+        assert.ok(pending);
+        assert.equal(readFileSync(join(directory, pending), "utf8"), kind === "replaced" ? '{"version":2' : "unexpected");
+        assert.equal(release(), false, "retry never deletes changed evidence");
+      }
+    } finally {
+      fs.writeFileSync = original;
+      syncBuiltinESMExports();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 }
 
@@ -85,7 +166,7 @@ test("PID reuse identity mismatch retains the unrelated process and handles the 
   } finally { f.close(); }
 });
 
-for (const kind of ["runner", "user", "legacy", "permissions", "symlink"] as const) {
+for (const kind of ["runner", "user", "legacy", "permissions", "symlink", "missing-boundary"] as const) {
   test(`unproven ${kind} ownership is kept without signalling`, { skip: !linux }, async () => {
     const f = fixture();
     try {
@@ -93,7 +174,12 @@ for (const kind of ["runner", "user", "legacy", "permissions", "symlink"] as con
         const record = JSON.parse(readFileSync(path, "utf8"));
         if (kind === "runner") record.runnerId = "other-runner";
         if (kind === "user") record.uid++;
-        if (kind === "legacy") delete record.startTime;
+        if (kind === "legacy") { delete record.startTime; delete record.containment; record.version = 1; }
+        if (kind === "missing-boundary") {
+          record.version = 2;
+          record.containment = { kind: "linux-cgroup-v2", bootId: record.bootId, mountRoot: "/",
+            cgroupPath: `missing-${randomUUID()}`, inode: "42" };
+        }
         writeFileSync(path, JSON.stringify(record));
         if (kind === "permissions") chmodSync(path, 0o644);
         if (kind === "symlink") {

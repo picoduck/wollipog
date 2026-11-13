@@ -35,7 +35,7 @@ function controlledBoundary() {
   const pipe = new PassThrough();
   const child = Object.assign(new EventEmitter(), { stdio: [null, null, null, null, pipe], pid: 100 }) as unknown as ChildProcess;
   boundary.bind(child);
-  return { boundary, state, pipe };
+  return { boundary, state, pipe, child };
 }
 
 test("cgroup mount resolution uses the current delegation and decodes mount paths", () => {
@@ -88,6 +88,11 @@ test("an empty cgroup before admission is never an early-release proof", async (
 
 test("early release and shutdown use the same kernel proof without a process scan", async () => {
   const { boundary: kernel, state, pipe } = controlledBoundary();
+  let released = 0;
+  kernel.onReleased(() => {
+    assert.equal(state.removed, 0, "journal release precedes removal of its kernel proof");
+    released++;
+  });
   pipe.end("1");
   const owner = {};
   const boundary = new PosixProcessBoundary(100, owner, "marker", {
@@ -96,11 +101,44 @@ test("early release and shutdown use the same kernel proof without a process sca
   assert.equal(boundary.proofStandard, "linux-cgroup-v2");
   assert.strictEqual(boundary.containmentIdentity, identity);
   assert.equal(await boundary.releaseIfEmpty(), false);
+  assert.equal(released, 0, "a populated boundary retains its ownership journal");
   assert.deepEqual(await Promise.all(terminatePosixProcessBoundaries(owner)), [true]);
   assert.equal(state.kills, 1);
   assert.equal(state.closed, 1);
   assert.equal(await boundary.terminate(), true);
+  assert.equal(released, 1, "whole-boundary proof releases ownership exactly once");
   assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
+});
+
+test("a failed journal unlink retains the empty kernel boundary until retry succeeds", async () => {
+  const { boundary, state, pipe } = controlledBoundary();
+  state.populated = false;
+  pipe.end("1");
+  let writable = false;
+  boundary.onReleased(() => writable);
+  assert.equal(await boundary.releaseIfEmpty(), false);
+  assert.equal(state.removed, 0);
+  assert.equal(state.closed, 0);
+  writable = true;
+  assert.equal(await boundary.releaseIfEmpty(), true);
+  assert.equal(state.removed, 1);
+});
+
+test("failed admission releases ownership only after launcher close and recursive emptiness", async () => {
+  const { boundary, state, pipe, child } = controlledBoundary();
+  let released = false;
+  boundary.onReleased(() => { released = true; });
+  pipe.end();
+  state.populated = false;
+  assert.equal(await boundary.releaseIfEmpty(), false, "an unjoined live launcher could still enter");
+  assert.equal(released, false);
+  state.populated = true;
+  child.emit("close");
+  assert.equal(await boundary.releaseIfEmpty(), false, "a closed launcher does not excuse survivors");
+  assert.equal(released, false);
+  state.populated = false;
+  assert.equal(await boundary.releaseIfEmpty(), true);
+  assert.equal(released, true);
 });
 
 for (const failure of ["unreadable", "killFails", "stuck"] as const) {
@@ -211,6 +249,14 @@ test("native launcher refuses a non-cgroup descriptor before executing provider 
   assert.equal(result.status, 125);
   assert.equal(result.stdout, "");
   assert.match(result.stderr, /provider was not executed/u);
+});
+
+test("startup tree retirement refuses a non-cgroup descriptor without signal authority", { skip: process.platform !== "linux" }, () => {
+  const result = spawnSync(linuxCgroupHelper(), ["--retire-boundary"], {
+    encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(result.status, 125);
+  assert.equal(result.stdout, "");
 });
 
 test("a removed temporary helper is safely restaged; an unexecutable root can fall back to data", { skip: process.platform !== "linux" }, (t) => {

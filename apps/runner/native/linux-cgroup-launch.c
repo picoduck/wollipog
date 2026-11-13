@@ -107,6 +107,122 @@ static int belongs_to_boundary(long pid, const char *boundary) {
   return belongs;
 }
 
+/* Startup has a stronger contract than live shutdown: no cgroup.kill, and no signal to a
+ * member until its pidfd, boot, UID, start time and recorded containment are all proven.
+ * cgroup v2 forbids renaming, so the pinned inode remains the recorded lifecycle boundary.
+ * Deliberate same-user migration is outside that boundary's lifecycle contract. */
+static int prior_owner_dead(const char *boot, long runner, unsigned long long runner_started) {
+  char current[38];
+  FILE *file = fopen("/proc/sys/kernel/random/boot_id", "re");
+  int valid = file && fgets(current, sizeof(current), file);
+  if (file) fclose(file);
+  if (!valid) return 0;
+  current[strcspn(current, "\n")] = 0;
+  if (strcmp(boot, current)) return 0;
+  unsigned long long observed;
+  uid_t owner;
+  int state = process_identity(runner, &observed, &owner);
+  return state == 0 || (state == 1 && observed != runner_started);
+}
+
+static int retire_members(int directory, const char *boundary, const char *boot,
+    long runner, unsigned long long runner_started, unsigned depth, unsigned *budget) {
+  if (depth > 32 || !*budget) return -1;
+  --*budget;
+  int procs = openat(directory, "cgroup.procs", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (procs < 0) return -1;
+  FILE *file = fdopen(procs, "r");
+  if (!file) { close(procs); return -1; }
+  long pid;
+  unsigned count = 0;
+  int result = 0;
+  while (fscanf(file, "%ld", &pid) == 1) {
+    if (++count > 32768 || pid <= 1 || pid > INT_MAX || pid == getpid() || pid == getppid()) { result = -1; break; }
+    int handle = (int)syscall(SYS_pidfd_open, (pid_t)pid, 0);
+    if (handle < 0) { if (errno != ESRCH) result = -1; continue; }
+    unsigned long long before, after;
+    uid_t owner, after_owner;
+    int state = process_identity(pid, &before, &owner);
+    if (state == 1 && owner == getuid() && belongs_to_boundary(pid, boundary) &&
+        prior_owner_dead(boot, runner, runner_started) &&
+        process_identity(pid, &after, &after_owner) == 1 && before == after && owner == after_owner) {
+      if (syscall(SYS_pidfd_send_signal, handle, SIGKILL, NULL, 0) && errno != ESRCH) result = -1;
+    } else if (state != 0) result = -1;
+    close(handle);
+  }
+  if (ferror(file)) result = -1;
+  fclose(file);
+  int copy = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (copy < 0) return -1;
+  DIR *children = fdopendir(copy);
+  if (!children) { close(copy); return -1; }
+  struct dirent *entry;
+  while ((entry = readdir(children))) {
+    if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+    struct stat stat;
+    if (fstatat(directory, entry->d_name, &stat, AT_SYMLINK_NOFOLLOW)) { result = -1; continue; }
+    if (!S_ISDIR(stat.st_mode)) continue;
+    int child = openat(directory, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (child < 0) { result = -1; continue; }
+    if (retire_members(child, boundary, boot, runner, runner_started, depth + 1, budget)) result = -1;
+    close(child);
+  }
+  closedir(children);
+  return result;
+}
+
+static int retire_boundary(void) {
+  char boot[38], boundary[4096], extra;
+  long pid, runner;
+  unsigned long uid;
+  unsigned long long started, runner_started, inode;
+  if (scanf("%37s %ld %llu %lu %ld %llu %llu\n", boot, &pid, &started, &uid, &runner, &runner_started, &inode) != 7 ||
+      !fgets(boundary, sizeof(boundary), stdin) || scanf(" %c", &extra) == 1 ||
+      uid != getuid() || getuid() != geteuid() || runner <= 1 || runner > INT_MAX ||
+      runner == getpid() || runner == getppid() || pid <= 1 || pid > INT_MAX ||
+      pid == getpid() || pid == getppid() || !started || !runner_started) return 3;
+  boundary[strcspn(boundary, "\n")] = 0;
+  if (boundary[0] != '/' || strstr(boundary, "/../") || belongs_to_boundary(getppid(), boundary)) return 3;
+  struct stat stat;
+  if (fstat(3, &stat) || (unsigned long long)stat.st_ino != inode || !stat.st_nlink ||
+      stat.st_uid != (uid_t)uid || !prior_owner_dead(boot, runner, runner_started)) return 3;
+  // Stop the recorded launcher as well: a crash can precede its join-before-exec ack.
+  // An empty leaf cannot prove that this still-unjoined launcher will never enter it.
+  int root = (int)syscall(SYS_pidfd_open, (pid_t)pid, 0);
+  if (root < 0 && errno != ESRCH) return 3;
+  if (root >= 0) {
+    unsigned long long observed;
+    uid_t owner;
+    int state = process_identity(pid, &observed, &owner);
+    if (state < 0 || (state == 1 && observed == started && owner != (uid_t)uid)) { close(root); return 3; }
+    if (state == 1 && observed == started) {
+      if (!prior_owner_dead(boot, runner, runner_started) ||
+          (syscall(SYS_pidfd_send_signal, root, SIGKILL, NULL, 0) && errno != ESRCH)) { close(root); return 3; }
+      struct pollfd exited = { .fd = root, .events = POLLIN };
+      if (poll(&exited, 1, 2000) <= 0 || !(exited.revents & POLLIN)) { close(root); return 3; }
+    }
+    close(root);
+  }
+  // A bounded traversal is repeated to catch forks made before their proven parents exit.
+  // Completion requires recursive kernel emptiness; no empty listing is sufficient.
+  for (unsigned round = 0; round < 200; round++) {
+    unsigned budget = 512;
+    if (retire_members(3, boundary, boot, runner, runner_started, 0, &budget)) return 3;
+    int events = openat(3, "cgroup.events", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (events < 0) return 3;
+    char bytes[4096];
+    ssize_t length = read(events, bytes, sizeof(bytes) - 1);
+    close(events);
+    if (length <= 0) return 3;
+    bytes[length] = 0;
+    if ((!strncmp(bytes, "populated 0\n", 12) || strstr(bytes, "\npopulated 0\n")) &&
+        !fstat(3, &stat) && stat.st_nlink && (unsigned long long)stat.st_ino == inode &&
+        prior_owner_dead(boot, runner, runner_started)) return 0;
+    usleep(20000);
+  }
+  return 3;
+}
+
 static int term_members(int directory, const char *boundary, unsigned depth, unsigned *budget) {
   if (depth > 32 || !*budget) return -1;
   --*budget;
@@ -152,6 +268,7 @@ int main(int argc, char **argv) {
   if (argc < 2) return 125;
   struct statfs fs;
   if (fstatfs(3, &fs) || fs.f_type != 0x63677270) goto refused;
+  if (argc == 2 && !strcmp(argv[1], "--retire-boundary")) return retire_boundary();
   if (argc == 2 && !strcmp(argv[1], "--delegation-probe")) {
     char marker[2];
     return fgetxattr(3, "user.delegate", marker, sizeof(marker)) == 1 && marker[0] == '1' ? 0 : 3;

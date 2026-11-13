@@ -683,6 +683,24 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
       }
       assert.ok(sawOffline, `control plane never observed the old runner go offline after restart\n${runnerOutput}`);
 
+      if (survivorExpected) {
+        // This story tests unproven descendants, not the new recorded-tree retirement.
+        // Model a predecessor that only journaled root identities. The independent HOME
+        // journal and its kernel-boundary refusal remain byte-for-byte unchanged.
+        const ownership = join(runnerDataDir, "provider-processes-v1");
+        let legacyRoots = 0;
+        for (const name of readdirSync(ownership)) {
+          const path = join(ownership, name);
+          const record = JSON.parse(readFileSync(path, "utf8"));
+          if (record.version !== 2) continue;
+          delete record.containment;
+          record.version = 1;
+          writeFileSync(path, JSON.stringify(record));
+          legacyRoots++;
+        }
+        if (process.env.WOLLIPOG_TEST_REQUIRE_CGROUP === "1") assert.ok(legacyRoots > 0, "the refusal fixture explicitly removes descendant authority");
+      }
+
       runner = spawnRunner();
 
       // HTTP acceptance alone is not success: a failed launch also acknowledges a prompt.
