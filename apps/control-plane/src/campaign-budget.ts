@@ -450,18 +450,21 @@ export class CampaignBudgetLedger {
       this.sql.prepare("SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=?").get(sessionId));
   }
 
-  /** A worker's default reservation divides the unreserved allowance among the free slots. A
-   * reviewer takes no slot, so at one free slot or none that division would hand it the whole
-   * remainder and refuse every concurrent review until it settled (#3618). It is instead one more
-   * claimant beside the free slots, counting at least two claimants: it leaves each free slot a share
-   * as large as its own, and at least half of what it found for whoever comes next. A reviewer's own
-   * ceiling only lowers that share. `admit` still checks the result against the unreserved allowance
-   * inside the insertion transaction, so reservations never exceed the allowance. */
+  /** Default workers leave one review claimant per worker slot. Reviews share that pool with
+   * reviews not yet running, including when every worker slot is occupied (#4545). Explicit
+   * worker allocations are unchanged. These are sizing defaults, never authority: admit checks
+   * every reservation again inside the insertion transaction. */
   prepare(rootId: string, sessionId: string, requested: { costUsd?: number; toolCalls?: number },
     reviewer = this.reviewer(sessionId)): CampaignBudgetAllocation {
     const view = this.view(rootId); if (!view || view.state !== "active") throw new Error(view?.reason ?? "campaign allowance unavailable");
     const free = Math.max(0, (view.authority.concurrency ?? 1) - view.occupied);
-    const slots = reviewer ? Math.max(2, free + 1) : Math.max(1, free);
+    const activeReviews = (this.sql.prepare(`SELECT COUNT(*) AS n FROM campaign_budget_members m
+      WHERE m.root_id=? AND m.active=1 AND (
+        EXISTS (SELECT 1 FROM review_sessions r WHERE r.review_session_id=m.session_id) OR
+        EXISTS (SELECT 1 FROM delegated_image_reviews r WHERE r.reviewer_session_id=m.session_id))`)
+      .get(rootId) as { n: number }).n;
+    const reviews = Math.max(1, (view.authority.concurrency ?? 1) - activeReviews);
+    const slots = Math.max(1, free + reviews);
     const prior = this.allocation(sessionId);
     const cost = (view.remaining.costUsd ?? 0) / slots, tools = Math.floor((view.remaining.toolCalls ?? 0) / slots);
     const bounded = (own: number | undefined, share: number) => reviewer && own !== undefined ? Math.min(own, share) : own;

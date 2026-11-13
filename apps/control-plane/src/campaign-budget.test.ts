@@ -506,6 +506,26 @@ test("competing reservations cannot both spend the same remaining allowance", ()
   } finally { h.db.close(); }
 });
 
+test("a stopped worker with an oversized old allocation gets actionable restart guidance (#4545)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 120 })).ok);
+    h.make("old", "root", { costBudgetUsd: 60, maxToolCalls: 60 });
+    h.db.updateSessionStatus("old", "stopped", 7, RUNNER_REPORTED_STOP);
+    h.db.campaignBudgets.recordCheckpoint("old", { generation: h.db.campaignBudgets.dispatch("old")!.generation,
+      historyEpoch: 0, throughSeq: 0, costUsd: 0 });
+    assert.ok(h.db.campaignBudgets.settleCheckpoint("old", { historyEpoch: 0, hydratedSeq: 0 }));
+    h.make("other", "root", { costBudgetUsd: 60, maxToolCalls: 60 });
+    const result = h.svc.restart("old");
+    assert.equal(result.ok, false);
+    assert.match(result.error!, /lower this stopped worker's allocation with allocate_campaign_budget before restarting/);
+    assert.equal(h.db.campaignBudgets.active("old"), false);
+    assert.ok(h.svc.allocateCampaignBudget("root", { sessionId: "old", costUsd: 20, toolCalls: 20 }).ok);
+    const restarted = h.svc.restart("old");
+    assert.ok(restarted.ok, restarted.error ?? "restart refused after lowering allocation");
+  } finally { h.db.close(); }
+});
+
 test("a restart refused by occupied campaign slots preserves its stop fence",()=>{
   const h=harness();
   try {

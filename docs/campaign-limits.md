@@ -198,15 +198,23 @@ parent total is not billed twice; independently reported managed sessions count 
 
 Campaign members use `request_review_session` (`wollipog review session run`) for their own
 pushed PR. Admission reserves campaign allowance and actual managed Session usage settles against
-it, including unsuccessful attempts. A review takes no worker slot, so its default reservation
-counts it as one more claimant beside the free slots, and never fewer than two (#3618): with no free
-slot, the first review reserves half of the unreserved allowance and the next concurrent review
-half of what remains. Each free slot keeps a share at least as large as the review's. The
+it, including unsuccessful attempts. Default reservations divide the unreserved allowance among
+free worker slots plus one review claimant per authorized worker slot, less reviews whose
+reservations are still active (#4545). Default workers therefore leave review capacity even when
+all worker slots are filled. Each admitted review reduces the remaining review claimants, so
+concurrent reviews share that capacity rather than repeatedly halving it. Explicit worker caps
+are unchanged and can still exhaust the allowance; no default can admit work when the remainder
+cannot fund it (including an integer tool call). Each free slot keeps a share equal to a review's. The
 requester's own human cost ceiling only lowers that share. Admission still checks every reservation
 against the unreserved allowance in the insertion transaction, and a review that reaches its
 reservation stops like any member. The reviewer's exact harness/model/effort, read-only snapshot
 and round/attempt limits remain enforced. Review approval grants no human approval, merge authority
 or passing checks. Optional review-session citations at merge gates are verified by the server.
+
+A stopped worker retains its previous allocation. If other reservations make that allocation too
+large to restart, lower it with `allocate_campaign_budget` within the remaining allowance and above
+its spent usage, then retry. A restart never increases the campaign allowance or reclaims capacity
+from a live worker.
 
 Protocol 254 retires the older bridge and campaign review job tools, CLI commands and native
 executors. Follow the [upgrade order](./agent-control.md#retired-review-jobs): drain with the prior
