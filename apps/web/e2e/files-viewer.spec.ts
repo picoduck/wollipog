@@ -91,12 +91,23 @@ async function symbolRoom(page: Page, sample: string): Promise<{ room: number; p
     const context = document.createElement("canvas").getContext("2d")!;
     context.font = style.font;
     return {
-      room: input.clientWidth - parseFloat(style.paddingInlineStart) - parseFloat(style.paddingInlineEnd),
+      // Chromium 158 excludes padding from input.clientWidth; earlier versions include it.
+      // Start at the border box so the text area excludes padding exactly once in either.
+      room: input.getBoundingClientRect().width - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth)
+        - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
       placeholder: context.measureText(input.placeholder).width,
       sample: context.measureText(text).width,
     };
   }, sample);
 }
+
+test("symbol room measures the content box of a padded, bordered input", async ({ page }) => {
+  // A browser-level guard for the measurement itself, independent of app layout and fonts.
+  await page.setContent('<input aria-label="Go to Symbol" style="box-sizing: border-box; width: 200px; border: 2px solid; padding: 0 17px 0 23px" placeholder="Symbol">');
+  expect((await symbolRoom(page, "Sessi")).room).toBe(156);
+  await symbolField(page).evaluate((input) => { input.style.boxSizing = "content-box"; });
+  expect((await symbolRoom(page, "Sessi")).room).toBe(200);
+});
 
 // #2913: beside Markdown's Preview and Source, Go to Symbol stays readable in a narrow panel. The
 // control shows its icons and the placeholder shortens; their names do not change.

@@ -49,7 +49,9 @@ function toolbarGeometry(page: Page) {
     context.font = style.font;
     return {
       // The content box: the placeholder cannot draw into the input's own padding.
-      inputWidth: input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+      // input.clientWidth excludes padding in Chromium 158 but includes it in older browsers.
+      inputWidth: input.getBoundingClientRect().width - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth)
+        - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
       placeholderWidth: context.measureText(input.placeholder).width,
       searchOwnRow: search.bottom <= tabs.top || search.top >= tabs.bottom,
       // Every part of the bar is inside it. A touch target's hit area (`::after`) may reach into
@@ -123,7 +125,8 @@ test.describe("with a touch pointer", () => {
       const row = header.querySelector(".page-header-row")!;
       const rowBox = row.getBoundingClientRect();
       return {
-        inputWidth: input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+        inputWidth: input.getBoundingClientRect().width - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth)
+          - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
         placeholderWidth: context.measureText(input.placeholder).width,
         contained: [...row.children].every((child) => {
           const box = child.getBoundingClientRect();

@@ -494,7 +494,9 @@ test.describe("Composer Response placeholders at 390px", () => {
         const style = getComputedStyle(element);
         const context = document.createElement("canvas").getContext("2d")!;
         context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-        const room = element.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
+        // Input clientWidth excludes padding in Chromium 158; measure the border box consistently.
+        const room = element.getBoundingClientRect().width - Number.parseFloat(style.borderLeftWidth) - Number.parseFloat(style.borderRightWidth)
+          - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
         return { text: element.placeholder, width: context.measureText(element.placeholder).width, room };
       });
       expect(fit.width, `"${fit.text}" fits in ${fit.room}px in ${face}`).toBeLessThanOrEqual(fit.room);
