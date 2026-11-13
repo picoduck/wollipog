@@ -56,6 +56,8 @@ export const ASSISTANT_CAMPAIGN_MANAGEMENT = [
 
 /** Exact group-7 human boundaries; these are audit entries, never tool registrations. */
 export const ASSISTANT_CAMPAIGN_HUMAN_ROUTES = [
+  "POST /api/sessions/:id/orchestrator-campaign/cleanup/worktree/inspect",
+  "POST /api/sessions/:id/orchestrator-campaign/cleanup/worktree/confirm",
   "POST /api/sessions/:id/campaign/decisions/:occurrenceId/classify",
   "POST /api/sessions/:id/campaign/issue-scope/proposals",
   "POST /api/sessions/:id/orchestrator-campaign/behavior",

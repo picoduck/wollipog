@@ -24,21 +24,20 @@ test("a refused worktree gets a next step in words, never a command to run insid
     assert.ok(action.text.length > 0, `${reason}: says what settles it`);
     assert.doesNotMatch(action.text, /`|\bgit\b|\bgh\b|\bcd\b|\bpnpm\b|\bnpm\b|\bmake\b|-C\b|\$\(|\|/u,
       `${reason}: names no tool to run in the worktree`);
-    assert.doesNotMatch(action.text, /--force|reset --hard|\bclean\b|\bprune\b|\bdiscard\b|worktree remove/u,
+    assert.doesNotMatch(action.text, /--force|reset --hard|git clean|\bprune\b|\bdiscard\b|worktree remove/u,
       `${reason}: never removes, resets, cleans or discards anything`);
   }
   // Each reason keeps its own guidance.
-  assert.equal(worktreeRefusalAction(REFUSALS[4]!).text,
-    "Review the child's work from its session in Wollipog. Ask its session or the Orchestrator to commit and push the " +
-    "changes you want to keep, or confirm they are not needed. Then ask the Orchestrator to retire the worktree through Wollipog.");
+  assert.match(worktreeRefusalAction(REFUSALS[4]!).text, /Retirement refuses uncommitted changes/u);
   assert.match(worktreeRefusalAction("the branch has unpushed commits").text, /push the commits you want to keep/u);
   assert.match(worktreeRefusalAction("the branch has no upstream").text, /push the branch if its commits are needed/u);
   assert.match(worktreeRefusalAction("attached operator-owned worktrees are not retired").text, /Wollipog leaves it in place/u);
   assert.match(worktreeRefusalAction("the linked pull request is not verified as merged").text,
     /Wollipog retires the worktree once the forge reports the merge/u);
-  assert.match(worktreeRefusalAction("a reason this version does not know").text, /Decide what to keep\. Then ask the Orchestrator/u);
+  assert.match(worktreeRefusalAction("a reason this version does not know").text, /Decide what to keep\. Choose Inspect Worktree/u);
   for (const reason of ["the worktree has uncommitted changes", "the branch has unpushed commits", "the branch has no upstream", "runner ownership could not be proven"]) {
-    assert.match(worktreeRefusalAction(reason).text, /retire the worktree through Wollipog\.$/u, reason);
+    assert.match(worktreeRefusalAction(reason).text, /confirm retirement yourself\. Local branch refs are kept\.$/u, reason);
+    assert.doesNotMatch(worktreeRefusalAction(reason).text, /ask the Orchestrator to retire/iu);
   }
 });
 

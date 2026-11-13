@@ -148,11 +148,11 @@ export function mergedBranchDeletionCommand(repository: string, branch: string |
  */
 export function worktreeRefusalAction(reason: string): { kind: "person"; text: string } {
   const review = "Review the child's work from its session in Wollipog.";
-  const retire = "Then ask the Orchestrator to retire the worktree through Wollipog.";
+  const retire = "Choose Inspect Worktree in Campaign Status to review a clean checkout and confirm retirement yourself. Local branch refs are kept.";
   const has = (text: string) => reason.toLowerCase().startsWith(text);
   const person = (text: string) => ({ kind: "person" as const, text });
   if (has("the worktree has uncommitted changes")) {
-    return person(`${review} Ask its session or the Orchestrator to commit and push the changes you want to keep, or confirm they are not needed. ${retire}`);
+    return person(`${review} Ask its session to save the changes you want to keep. Retirement refuses uncommitted changes. ${retire}`);
   }
   if (has("the branch has unpushed commits")) {
     return person(`${review} Ask its session or the Orchestrator to push the commits you want to keep, or confirm they are not needed. ${retire}`);

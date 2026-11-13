@@ -319,6 +319,7 @@ import {
   createWorktreeFromTree,
   captureTurnDiff,
   discardWorktreeIfSafe,
+  inspectWorktreeRetirement,
   worktreeIsAbsent,
   isLegacyWslSessionWorktreePath,
   registeredSessionWorktree,
@@ -5099,7 +5100,7 @@ export class SessionManager {
     // A keep can land on a deletion's record while its processes are ending (#4209). It is read again
     // here, as the last thing before Git removes anything.
     const keptMeanwhile = (): boolean => !!record.keepWorktree;
-    if (record.preserveBranch || this.isAuxiliaryRollback(record)) {
+    if ((record.preserveBranch && !record.ownerConfirmation) || this.isAuxiliaryRollback(record)) {
       try {
         await beforeRemove();
         if (keptMeanwhile()) return { removed: true };
@@ -5136,6 +5137,7 @@ export class SessionManager {
           ...(record.verifiedMergedHead ? { verifiedMergedHead: record.verifiedMergedHead } : {}),
           ...(record.containingMergedHead ? { containingMergedHead: record.containingMergedHead } : {}),
           ...(record.patchDelivery ? { patchDelivery: record.patchDelivery } : {}),
+          ...(record.ownerConfirmation ? { ownerConfirmedState: record.ownerConfirmation.state } : {}),
           requireDelivered: record.trigger === "archive_retirement",
           retainRefs,
           beforeRemove,
@@ -5403,7 +5405,8 @@ export class SessionManager {
     sessionId: string,
     path: string,
     options: { refreshMergedHead?: boolean; trigger?: "explicit_discard" | "archive_retirement" | "pull_request_reconciliation";
-      campaignDeliveredPullRequests?: CampaignDeliveredPullRequest[] } = {},
+      campaignDeliveredPullRequests?: CampaignDeliveredPullRequest[];
+      ownerConfirmation?: NonNullable<WorktreeCleanupRecord["ownerConfirmation"]> } = {},
   ): Promise<{
     removed: boolean;
     reason?: string;
@@ -5418,11 +5421,15 @@ export class SessionManager {
     let worktree = this.attributedWorktrees(initialMeta)
       .find((item) => sameWorktreePath(initialMeta.context, item.path, path));
     if (!worktree) return { removed: false, reason: "worktree is not linked to this session" };
+    if (options.ownerConfirmation && options.ownerConfirmation.state.worktreeId !== worktree.id) {
+      return { removed: false, reason: "the worktree generation changed; inspect again" };
+    }
     if (worktree.source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
     }
     const initiallySelectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (initiallySelectedIsLaunching) {
+      if (options.ownerConfirmation) return { removed: false, reason: "the provider is launching; inspect again after it stops" };
       return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard", options.campaignDeliveredPullRequests);
     }
     let unlinkedForgeUnavailable = false;
@@ -5548,11 +5555,13 @@ export class SessionManager {
     }
     const selectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (selectedIsLaunching) {
+      if (options.ownerConfirmation) return { removed: false, reason: "the provider is launching; inspect again after it stops" };
       return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard", options.campaignDeliveredPullRequests);
     }
     if (this.liveWorktreeUsesPath(sessionId, worktree.path) ||
         this.transitioningProviderUsesPath(sessionId, meta.context, worktree.path) ||
         this.providerTurnUsesPath(sessionId, meta.context, worktree.path)) {
+      if (options.ownerConfirmation) return { removed: false, reason: "the provider is active; inspect again after it stops" };
       return this.deferWorktreeRetirement(meta, worktree, "provider_active", options.trigger ?? "explicit_discard", options.campaignDeliveredPullRequests);
     }
     // Last: the path an in-flight launch captured before the selection moved on. The row above no
@@ -5560,6 +5569,7 @@ export class SessionManager {
     // remaining proof that a launch still owns it. Checking it after the fences above keeps every
     // reason those fences already report unchanged.
     if (this.launchingSelectionUsesPath(sessionId, meta, worktree.path)) {
+      if (options.ownerConfirmation) return { removed: false, reason: "the provider is launching; inspect again after it stops" };
       return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard", options.campaignDeliveredPullRequests);
     }
     let teardownIdentityError: string | undefined;
@@ -5604,6 +5614,7 @@ export class SessionManager {
         "safe",
       );
       this.strengthenArchiveRetirement(cleanup, options.trigger);
+      if (options.ownerConfirmation) cleanup.ownerConfirmation = options.ownerConfirmation;
       // Safe removal still compares this exact head with the tree's current head.
       if (deliveredHead && !cleanup.verifiedMergedHead) cleanup.verifiedMergedHead = deliveredHead;
       // A later merged pull request from the same branch delivered this exact tip (#3981).
@@ -5781,6 +5792,40 @@ export class SessionManager {
       setImmediate(() => this.scheduleDrain(record.sessionId));
     }
     return snapshot;
+  }
+
+  /** Only the control plane's human-only Campaign Status routes send these operations. Ordinary
+   * discard has no confirmation parameter. Replays retain the exact directory/tip bound below. */
+  async campaignWorktreeRetirement(sessionId: string, request:
+    | { operation: "inspect"; path: string }
+    | { operation: "confirm"; state: import("@wollipog/protocol").CampaignWorktreeRetirementState;
+        userId: string; at: number },
+  ): Promise<{ snapshot: SessionSnapshot; retirementState?: import("@wollipog/protocol").CampaignWorktreeRetirementState;
+    retirement?: SessionWorktreeRetirementResult }> {
+    return this.runWorktreeOperation(sessionId, async () => {
+      const meta = this.store.readMeta(sessionId);
+      if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
+      const path = request.operation === "inspect" ? request.path : request.state.path;
+      const worktree = this.attributedWorktrees(meta).find(item => sameWorktreePath(meta.context, item.path, path));
+      if (!worktree || worktree.source === "attached") throw new Error("the worktree is not runner-created and linked to this session");
+      if (this.pendingSafeWorktreeCleanup(sessionId, meta.context, worktree)) throw new Error("cleanup is already pending; wait for it to finish");
+      if (this.launchingSelectionUsesPath(sessionId, meta, path) || this.liveWorktreeUsesPath(sessionId, path) ||
+          this.transitioningProviderUsesPath(sessionId, meta.context, path) || this.providerTurnUsesPath(sessionId, meta.context, path)) {
+        throw new Error("the worktree is still active; inspect again after the provider stops");
+      }
+      const state = await inspectWorktreeRetirement(meta.repoPath, sessionId, {
+        id: worktree.id, path: worktree.path, branch: worktree.branch, source: worktree.source,
+      }, { context: meta.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash });
+      if (request.operation === "inspect") return { snapshot: this.snapshot(meta), retirementState: state };
+      if (!isDeepStrictEqual(request.state, state) || !request.userId || request.userId.length > 256 ||
+          !Number.isFinite(request.at) || Math.abs(Date.now() - request.at) > 60_000) {
+        throw new Error("the inspected state changed or confirmation expired; inspect again");
+      }
+      const result = await this.discardWorktreeLocked(sessionId, path, { refreshMergedHead: false,
+        ownerConfirmation: { state, userId: request.userId, at: request.at } });
+      if (!result.removed || !result.snapshot || !result.retirement) throw new Error(`worktree retained: ${result.reason ?? "cleanup did not complete"}`);
+      return { snapshot: result.snapshot, retirement: result.retirement };
+    });
   }
 
   /** Destructive session-scoped operation. Safety checks are identical to automatic PR cleanup;
@@ -20070,7 +20115,7 @@ export class SessionManager {
       let successorState: Awaited<ReturnType<SessionManager["refreshDeferredSuccessorHead"]>> = "not_needed";
       let containmentState: Awaited<ReturnType<SessionManager["refreshDeferredContainment"]>> = "not_needed";
       let patchDeliveryUnavailable = false;
-      if (!record.worktreeRemovedAt) {
+      if (!record.worktreeRemovedAt && !record.ownerConfirmation) {
         forgeState = await this.refreshDeferredMergedHead(record);
         if (worktreeFenced()) return logFenced();
         if (forgeState === "merged") {

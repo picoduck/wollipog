@@ -3155,6 +3155,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         worktree?: SessionWorktreeView;
         isolation?: import("@wollipog/protocol").SessionWorktreeIsolationNotice;
         retirement?: import("@wollipog/protocol").SessionWorktreeRetirementResult;
+        retirementState?: import("@wollipog/protocol").CampaignWorktreeRetirementState;
         refDeletion?: import("@wollipog/protocol").SessionWorktreeRefDeletionResult;
         path?: ".wollipog.json";
         detected?: string[];
@@ -3174,6 +3175,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               ? sessions.retryWorktreeSetup(msg.sessionId, msg.path)
               : msg.operation === "generate_setup"
                 ? sessions.generateWorktreeSetupConfig(msg.sessionId)
+                : msg.operation === "inspect_retirement"
+                  ? sessions.campaignWorktreeRetirement(msg.sessionId, { operation: "inspect", path: msg.path })
+                : msg.operation === "confirm_retirement"
+                  ? sessions.campaignWorktreeRetirement(msg.sessionId, { operation: "confirm", state: msg.state,
+                    userId: msg.confirmedBy.userId, at: msg.confirmedBy.at })
                 : msg.operation === "delete_refs"
                   ? sessions.deleteWorktreeRefs(msg.sessionId, msg.path, msg.refs)
                   : sessions.discardWorktree(msg.sessionId, msg.path, {
@@ -3195,6 +3201,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           ...(result.worktree ? { worktree: result.worktree } : {}),
           ...(result.isolation ? { isolation: result.isolation } : {}),
           ...(result.retirement ? { retirement: result.retirement } : {}),
+          ...(result.retirementState ? { retirementState: result.retirementState } : {}),
           ...(result.refDeletion ? { refDeletion: result.refDeletion } : {}),
           ...(result.path && result.detected ? { generatedSetup: { path: result.path, detected: result.detected } } : {}),
         });
