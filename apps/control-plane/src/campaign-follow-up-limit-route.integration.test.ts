@@ -15,6 +15,7 @@ import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOC
   type CampaignControl, type RunnerMetadata, type SessionView, type WorkflowDecisionView } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { campaignBoundaryCurrent } from "./campaign-authority.js";
+import { CampaignRecoveryService } from "./campaign-recovery.js";
 import { ControlPlaneDb } from "./db.js";
 import { normalizeWorkflowDecisionSnapshot } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
@@ -190,6 +191,17 @@ test("past the threshold a follow-up is a Human decision the Orchestrator cannot
     const root = read(cp.database, (db) => db.getSession(ROOT)!);
     assert.ok(pendingRequests(root.pendingApproval).some((request) => request.occurrenceId === first), "it is a Pending Decision card on the root");
     assert.deepEqual(root.orchestratorCampaign?.budget?.followUpApprovals, { pending: [{ occurrenceId: first, title: "Follow-up follow-up-2" }], approved: 0 });
+    const recovery = read(cp.database, (db) => {
+      new CampaignRecoveryService(db, () => {}, { info() {} }).synchronize(db.getSession(ROOT)!, Date.now());
+      return db.campaignRecovery.projection(ROOT);
+    });
+    const waiting = recovery.records.find((record) => record.reason === "follow_up_limit");
+    assert.ok(waiting, "a real admission card produces limit-specific recovery");
+    assert.equal(waiting.state, "waiting_human");
+    assert.equal(waiting.requiredInput, "answer_existing_request");
+    assert.match(waiting.explanation, /follow-up limit you set/);
+    assert.ok(recovery.records.every((record) => !record.explanation.includes("Human Required rule")),
+      "an empty Human Required list never invents that rule");
 
     const again = await planFollowUp(cp, "follow-up-2");
     assert.equal(again.status, 409);
@@ -434,6 +446,55 @@ test("a decrease revokes approved and pending follow-up admissions (#4537)",
     assert.equal(decision(cp.database, approved).status, "revoked");
     assert.equal(decision(cp.database, pending).status, "revoked");
     assert.equal((await planFollowUp(cp, "approved")).status, 409);
+  });
+
+test("linking only the issue from a consumed forge-verified publication retains the admitted follow-up identity (#4537)",
+  { timeout: 90_000 }, async (t) => {
+    const cp = await startControlPlane(t);
+    assert.equal((await planFollowUp(cp, "first")).status, 200);
+    const recommendation = read(cp.database, (db) => db.recordCampaignFollowUp({ campaignSessionId: ROOT, originSessionId: ROOT,
+      repository: REPOSITORY, title: "Retry Publication", followUpsMode: "execute_approved", now: Date.now() }));
+    const adjudicate = (number?: number) => cp.orchestrator(`/api/sessions/${ROOT}/orchestrator-campaign/recommendations/${recommendation.id}/adjudicate`,
+      { disposition: "accepted", reason: "Verified publication", publicationRequired: true,
+        ...(number === undefined ? {} : { resultingIssue: { repository: REPOSITORY, number } }) });
+    const admitted = occurrence(String((await adjudicate()).json.error));
+    assert.equal((await cp.human(`/api/sessions/${ROOT}/approve`, { requestId: admitted, optionId: "approve" })).status, 200);
+    assert.equal((await adjudicate()).status, 200);
+    const publicationId = `workflow_${"7".repeat(32)}`;
+    const action = { kind: "issue_publication" as const, attempts: 1, outcome: "published" as const, publishedIssue: 77,
+      performedByRunnerId: RUNNER_ID, updatedAt: Date.now() };
+    // Trusted publication-executor boundary is separately exercised by campaign-issue-authority.
+    read(cp.database, (db) => {
+      assert.ok(db.createWorkflowDecision({ requestId: "verified-publication", occurrenceId: publicationId, sessionId: ROOT,
+        controllingSessionId: ROOT, category: "follow_up_issue_publication", resourceKey: publicationId, policyRevision: 2,
+        resourceDigest: "e".repeat(64), authority: "human", createdAt: Date.now(),
+        resourceSnapshot: { category: "follow_up_issue_publication", repository: REPOSITORY, recommendationId: recommendation.id,
+          sanitizedTitle: "Retry Publication", sanitizedBody: "Exact approved body", labels: [] } }));
+      assert.ok(db.resolveWorkflowDecision(publicationId, "human", "approved", Date.now()));
+      assert.ok(db.consumeWorkflowDecision(publicationId, Date.now()));
+      db.recordWorkflowDecisionForgeAction(publicationId, action);
+    });
+    const unproven = await adjudicate(77);
+    assert.equal(unproven.status, 409, "an old success without exact readback grants no exemption");
+    const obsolete = occurrence(String(unproven.json.error));
+    read(cp.database, (db) => db.recordWorkflowDecisionForgeAction(publicationId, { ...action, publicationVerified: true }));
+    const searched = await adjudicate(77);
+    assert.equal(searched.status, 409, "even matching readback cannot prove that this publication created the issue");
+    assert.equal(occurrence(String(searched.json.error)), obsolete, "no duplicate card for the same unproven identity");
+    assert.equal((await adjudicate(78)).status, 409, "another issue still needs an admission");
+    // Restore the original exact pending linkage request before the proof supersedes it.
+    const pending = occurrence(String((await adjudicate(77)).json.error));
+    assert.notEqual(pending, obsolete);
+    read(cp.database, (db) => db.recordWorkflowDecisionForgeAction(publicationId, { ...action, publicationVerified: true, publicationCreatedIssue: 77 }));
+    const linked = await adjudicate(77);
+    assert.equal(linked.status, 200, linked.text);
+    assert.equal(decision(cp.database, pending).status, "revoked", "exact obsolete linkage card is retired");
+    assert.equal(decision(cp.database, admitted).status, "consumed");
+    assert.equal((await adjudicate(77)).status, 200, "the persisted link survives a fresh DB read and is idempotent");
+    const item = (linked.json.workItem as { key: string });
+    assert.equal((await planFollowUp(cp, item.key, "Another Title", { repository: REPOSITORY, number: 77 })).status, 409);
+    assert.equal((await planFollowUp(cp, item.key, "Retry Publication", { repository: REPOSITORY, number: 99 })).status, 409);
+    assert.equal((await planFollowUp(cp, item.key, "Retry Publication", null)).status, 409, "unlinking also changes the now-bound identity");
   });
 
 test("a follow-up admitted past the threshold stays bound to the title and issue the person approved; changing either is a new decision",

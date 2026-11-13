@@ -7,7 +7,7 @@ export type CampaignRecoveryAction = "answer_request" | "review_evidence" | "rec
   "continue_without_request";
 export type CampaignRecoveryReason = "authorized_action" | "transient_failure" | "failed_checks" | "reviewer_objection" |
   "uncertain_outcome" | "missing_human_information" | "missing_access" | "boundary_enlargement" |
-  "human_required_rule" | "unsupported_capability" | "hard_denial" | "attempts_exhausted" | "authority_changed" |
+  "human_required_rule" | "follow_up_limit" | "owner_approval_required" | "unsupported_capability" | "hard_denial" | "attempts_exhausted" | "authority_changed" |
   "request_declined" |
   /** #4065: a person-owned follow-up publication the server could not admit; `admissionFailure` names why. */
   "publication_not_admitted" |
@@ -86,6 +86,8 @@ export const CAMPAIGN_RECOVERY_EXPLANATIONS: Record<CampaignRecoveryReason, stri
   missing_access: "The existing operation requires human authentication or access. Recovery cannot grant access or expose credentials.",
   boundary_enlargement: "The exact operation falls outside current human-authorized scope. Recovery cannot enlarge that boundary.",
   human_required_rule: "This operation is governed by a Human Required rule. A generic answer or tool approval cannot override it.",
+  follow_up_limit: "This follow-up needs your approval because it is past the follow-up limit you set, or changes a follow-up you admitted past that limit. Approve the exact follow-up or change the limit in Campaign Status.",
+  owner_approval_required: "This operation requires the owner's exact approval under the current campaign controls. A generic answer or tool approval cannot authorize it.",
   unsupported_capability: "The current provider path cannot safely perform this operation. Use a supported capability without changing campaign preferences automatically.",
   hard_denial: "The operation was denied. It remains blocked and recovery will not request repeated overrides.",
   attempts_exhausted: "The recovery ceiling was exhausted. It remains blocked and recovery will not reset the ceiling or request repeated overrides.",

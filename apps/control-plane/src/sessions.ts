@@ -10293,7 +10293,7 @@ export class SessionsService {
   ): ServiceResult<T> {
     const before = this.db.campaignWorkLedger.revision(scope.root.id);
     const attemptsBefore = this.db.campaignWorkLedger.openAttemptsBySession(scope.root.id);
-    const approvedBefore = this.db.campaignFollowUpApprovedOccurrences(scope.root.id);
+    const approvedBefore = this.db.campaignFollowUpUnconsumedOccurrences(scope.root.id);
     const result = write();
     if (!result.ok) {
       return result.details?.code === "follow_up_approval_required"
@@ -10303,6 +10303,12 @@ export class SessionsService {
     const now = Date.now();
     for (const occurrenceId of approvedBefore) {
       const consumed = this.db.workflowDecisionByOccurrence(occurrenceId);
+      if (consumed?.status === "revoked") {
+        this.settleWorkflowDecisionPause(consumed.sessionId, occurrenceId, now);
+        this.recordWorkflowDecisionRevocation(consumed,
+          { reason: "follow_up_publication_linked", triggeredBy: { kind: "system", id: "publication-readback" } }, now);
+        continue;
+      }
       if (consumed?.status !== "consumed") continue;
       this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: scope.caller.id }, now);
       this.log.info(JSON.stringify({ event: "campaign_follow_up_admitted", sessionId: scope.root.id, occurrenceId }));
@@ -13121,26 +13127,35 @@ export class SessionsService {
   }
 
   /** The campaign entry a publication must be created through (#4119), or null when its requester
-   * creates it as before: a repository the requester itself works in, a single-repository campaign,
-   * or a repository the campaign holds no Location of, which only a person can have approved. */
+   * creates it as before. `includeOwn` also offers managed execution in its own repository so the
+   * server can prove the created issue and verify the exact payload before exempting a ledger link. */
   private publicationRoute(requester: SessionView, controller: SessionView,
-    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>):
-    { root: SessionView; entry: CampaignBoundaryRepository } | null {
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>, includeOwn = false):
+    { root: SessionView; entry: CampaignBoundaryRepository; requester?: SessionView } | null {
     const rootId = this.db.campaignRootForMember(requester.id);
     const root = (rootId ? this.db.getSession(rootId) : null) ?? controller;
     const entries = campaignScopeRepositories(root);
     const repository = snapshot.repository.toLowerCase();
     const entry = entries.find((candidate) => candidate.repository === repository);
-    if (!entry || entries.length < 2) return null;
+    if (!entry || !includeOwn && entries.length < 2) return null;
     const own = requester.id === root.id ? campaignLaunchRepository(root) : this.db.campaignParticipantRepository(root, requester);
-    return own === repository ? null : { root, entry };
+    return !includeOwn && own === repository ? null : { root, entry, ...(includeOwn && own === repository ? { requester } : {}) };
   }
 
   /** Where a routed publication runs: the first place of its repository whose runner is online and
    * can do it. The launch repository's own checkout is the root's, then its listed Locations. No
    * other runner's login ever stands in, so with none there is nothing to perform it. */
-  private publicationPlace(route: { root: SessionView; entry: CampaignBoundaryRepository }): CampaignRepositoryPlace | null {
+  private publicationPlace(route: { root: SessionView; entry: CampaignBoundaryRepository; requester?: SessionView }): CampaignRepositoryPlace | null {
     const { root, entry } = route;
+    // Optional execution in the requester's own repository retains its own runner's forge login.
+    // Another Location's more privileged login never stands in when that runner is unavailable.
+    if (route.requester) {
+      const requester = route.requester;
+      const workspacePath = requester.workspaceId ? this.db.getWorkspacePath(requester.runnerId, requester.workspaceId) : null;
+      return requester.workspaceId && workspacePath && this.hub.isRunnerOnline(requester.runnerId) &&
+        runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "locationIssuePublication")
+        ? { runnerId: requester.runnerId, workspaceId: requester.workspaceId, workspacePath, repository: entry.repository } : null;
+    }
     const rootPath = root.workspaceId ? this.db.getWorkspacePath(root.runnerId, root.workspaceId) : null;
     const places: CampaignRepositoryPlace[] = [
       ...(entry.repository === campaignLaunchRepository(root) && root.workspaceId && rootPath
@@ -13212,6 +13227,11 @@ export class SessionsService {
         !grant.resourceSnapshot.issueAdmission && !humanApproved || this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return "read_failed";
     const publication = grant.resourceSnapshot;
     const root = this.db.getSession(sessionId)!;
+    return this.readPublishedIssuePayload(root, publication, issue);
+  }
+
+  private async readPublishedIssuePayload(root: SessionView,
+    publication: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>, issue: number): Promise<PublishedIssueFailure | null> {
     // An issue published in another boundary repository is read through one of its Locations (#4119).
     if (publication.repository !== campaignLaunchRepository(root)) {
       const entry = campaignScopeRepositories(root).find((candidate) => candidate.repository === publication.repository);
@@ -13221,8 +13241,8 @@ export class SessionsService {
     const requestId = `publication_verify_${randomUUID()}`;
     try {
       const inspected = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "inspect", requestId,
-        sessionId, issues: [issue], publication: { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels } }, 60_000);
-      if (inspected.type !== "campaign_issue_scope_result" || inspected.sessionId !== sessionId) return "read_failed";
+        sessionId: root.id, issues: [issue], publication: { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels } }, 60_000);
+      if (inspected.type !== "campaign_issue_scope_result" || inspected.sessionId !== root.id) return "read_failed";
       if (!inspected.ok) return publishedIssueFailure(inspected.publicationFailure);
       if (inspected.publicationFailure !== undefined || inspected.repository?.toLowerCase() !== publication.repository) return "read_failed";
       const candidate = inspected.candidates?.find((c) => c.issue.number === issue && c.issue.repository.toLowerCase() === publication.repository);
@@ -16321,6 +16341,17 @@ export class SessionsService {
     // A child can echo the original video request or the exact server-derived snapshot from get;
     // neither can nominate new frames. The stored snapshot remains the action's authority.
     const normalized = { data: decision.resourceSnapshot };
+    // Never hand a possibly completed managed creation to a second writer, including after a
+    // failed readback or restart. An idle refusal proving no effect, with no creation receipt,
+    // may still hand off to the manual route; cross-repository routing remains enforced below.
+    const managedPublication = () => {
+      if (decision.category !== "follow_up_issue_publication") return false;
+      if (this.forgeActionsInFlight.has(occurrenceId)) return true;
+      const attempt = this.db.workflowDecisionByOccurrence(occurrenceId)?.forgeAction;
+      return attempt !== undefined && (attempt.outcome !== "refused" || attempt.publicationCreatedIssue !== undefined);
+    };
+    const managedPublicationRefusal = "This publication has a managed execution attempt. Nothing was consumed: use execute_workflow_decision to reconcile it; do not create the issue yourself.";
+    if (managedPublication()) return fail(managedPublicationRefusal, 409);
     if (video) {
       let sourceBytes: Buffer | null;
       try { sourceBytes = this.db.readWorkflowArtifactBytes(video.sourceArtifactId); } catch { sourceBytes = null; }
@@ -16567,6 +16598,9 @@ export class SessionsService {
     // Even a read that returns at once yields, so an exclusion can be recorded since the check above.
     const excludedWhileConsuming = this.excludedRepositoryRefusal(child, parent, normalized.data);
     if (excludedWhileConsuming) return fail(excludedWhileConsuming, 409);
+    // The publication freshness read yielded; execute may have claimed the occurrence meanwhile.
+    // No await separates this fence from consuming it, or managed dispatch from its own claim.
+    if (managedPublication()) return fail(managedPublicationRefusal, 409);
     const originalVideoApproval = decision.authority === "orchestrator" &&
       decision.resourceSnapshot.category === "ui_evidence_approval" && !decision.resourceSnapshot.videoReview &&
       decision.resourceSnapshot.evidence.some((item) => item.mediaType?.startsWith("video/"));
@@ -16620,7 +16654,7 @@ export class SessionsService {
     if (!decision || decision.sessionId !== sessionId || !canAccess(sessionId)) return fail("workflow decision not found", 404);
     const snapshot = decision.resourceSnapshot;
     if (snapshot.category !== "merged_branch_deletion" && snapshot.category !== "pr_merge" && snapshot.category !== "follow_up_issue_publication") {
-      return fail("Wollipog performs only an approved merged_branch_deletion, an armed pr_merge, or a follow_up_issue_publication in another of a campaign's repositories", 403);
+      return fail("Wollipog performs only an approved merged_branch_deletion, an armed pr_merge, or a follow_up_issue_publication in a campaign repository", 403);
     }
     if (typeof request?.resourceDigest !== "string" || request.resourceDigest !== decision.resourceDigest) {
       return fail("the resource digest does not match this decision; read get_workflow_decision and pass its resourceDigest", 409);
@@ -16668,12 +16702,13 @@ export class SessionsService {
     let action: ForgeDecisionAction;
     // A publication whose earlier attempt may have run only looks for its issue from then on. A
     // dispatch still `in_progress` here is one the begin below will read as stale, so uncertain too.
+    let createdIssue = decision.forgeAction?.publicationCreatedIssue;
     const lookOnly = snapshot.category === "follow_up_issue_publication" &&
-      (decision.forgeAction?.outcome === "uncertain" || decision.forgeAction?.outcome === "in_progress");
+      (createdIssue !== undefined || decision.forgeAction?.outcome === "uncertain" || decision.forgeAction?.outcome === "in_progress");
     let publicationPlace: ReturnType<SessionsService["publicationPlace"]> = null;
     if (snapshot.category === "follow_up_issue_publication") {
-      const route = this.publicationRoute(child, parent, snapshot);
-      if (!route) return fail("This publication is in the requester's own repository, or outside the campaign's repositories, so its requester consumes it and creates the issue; nothing was performed", 403);
+      const route = this.publicationRoute(child, parent, snapshot, true);
+      if (!route) return fail("This publication is outside the campaign's verified repositories; nothing was performed", 403);
       if (campaignRepositoryLocation(snapshot.repository)?.forge === "gitlab") {
         return fail("Wollipog creates issues on GitHub only; nothing was published", 409);
       }
@@ -16682,7 +16717,8 @@ export class SessionsService {
         return fail(`No Location of ${snapshot.repository} is online on a runner that can create its issues, and no other login stands in; nothing was published. The approval still stands: retry once one is.`, 409);
       }
       action = lookOnly
-        ? { kind: "issue_publication_observe", repository: snapshot.repository, title: snapshot.sanitizedTitle, body: snapshot.sanitizedBody }
+        ? { kind: "issue_publication_observe", repository: snapshot.repository, title: snapshot.sanitizedTitle, body: snapshot.sanitizedBody,
+            ...(createdIssue === undefined ? {} : { issue: createdIssue }) }
         : { kind: "issue_publication", repository: snapshot.repository, title: snapshot.sanitizedTitle, body: snapshot.sanitizedBody, labels: snapshot.labels };
     } else if (snapshot.category === "merged_branch_deletion") {
       if (campaignRepositoryLocation(snapshot.repository)?.forge === "gitlab") {
@@ -16728,7 +16764,8 @@ export class SessionsService {
         // A look that found nothing proves nothing, so the issue may still exist and is never created.
         const held = lookOnly && outcome === "refused";
         this.db.recordWorkflowDecisionForgeAction(occurrenceId, { ...begun, outcome: held ? "uncertain" : outcome, ...(refusal && !held ? { refusal } : {}),
-          ...(publishedIssue === undefined ? {} : { publishedIssue, performedByRunnerId: publicationPlace!.runnerId }), updatedAt: Date.now() });
+          ...(createdIssue === undefined ? {} : { publicationCreatedIssue: createdIssue }),
+          ...(publishedIssue === undefined ? {} : { publishedIssue, publicationVerified: true, performedByRunnerId: publicationPlace!.runnerId }), updatedAt: Date.now() });
       };
       if (snapshot.category === "follow_up_issue_publication" && !lookOnly) {
         const stale = await this.publicationFreshnessRefusal(decision, parent, parent.parentControlPolicy!, snapshot);
@@ -16777,7 +16814,7 @@ export class SessionsService {
       // The inspection above was awaited: the Location must still be the one chosen, with nothing
       // awaited between this check and the dispatch.
       if (publicationPlace) {
-        const route = this.publicationRoute(this.db.getSession(sessionId)!, this.db.getSession(parent.id)!, snapshot as Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>);
+        const route = this.publicationRoute(this.db.getSession(sessionId)!, this.db.getSession(parent.id)!, snapshot as Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>, true);
         const current = route && this.publicationPlace(route);
         if (!current || current.runnerId !== publicationPlace.runnerId || current.workspacePath !== publicationPlace.workspacePath) {
           finish("refused", { reason: "runner_unavailable", summary: "The repository's Location changed while the publication was being prepared; nothing was published." });
@@ -16832,7 +16869,27 @@ export class SessionsService {
         finish("uncertain");
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
       }
+      if (snapshot.category === "follow_up_issue_publication" && publishedIssue !== undefined) {
+        if (outcome === "published" && !lookOnly) {
+          createdIssue = publishedIssue;
+          // Persist creation proof before an asynchronous readback can disconnect or crash.
+          this.db.recordWorkflowDecisionForgeAction(occurrenceId,
+            { ...begun, publicationCreatedIssue: createdIssue, updatedAt: Date.now() });
+        }
+        const rootId = this.db.campaignRootForMember(child.id);
+        const publicationRoot = (rootId ? this.db.getSession(rootId) : null) ?? parent;
+        if (createdIssue !== undefined && publishedIssue !== createdIssue ||
+            await this.readPublishedIssuePayload(publicationRoot, snapshot, publishedIssue) !== null) {
+          // Creation may have succeeded. Retain the fence and only observe on a later attempt;
+          // an unreadable or mismatching payload never proves a ledger-link exemption.
+          finish("uncertain");
+          return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+        }
+      }
       finish(outcome, undefined, publishedIssue);
+      // Authority was checked immediately before dispatch. A revision changing during readback
+      // cannot make a confirmed external effect uncertain; record it and consume an approval that
+      // still stands. An explicitly revoked approval is never resurrected by this observation.
       const now = Date.now();
       const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
       if (latest?.status === "approved") {

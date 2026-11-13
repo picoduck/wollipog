@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import fc from "fast-check";
 import type { CampaignLaunchProposal } from "@wollipog/protocol";
-import { campaignLaunchDigest, derivedLaunchLimits, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageLaunch, firstMessageObjective, issueReferencesInMessage,
+import { campaignLaunchDigest, derivedLaunchLimits, derivedFollowUpLimit, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageLaunch, firstMessageObjective, issueReferencesInMessage,
   parseCampaignLaunchProposal, parseFullControlLaunchRequest } from "./campaign-launch-admission.js";
 
 const proposal: CampaignLaunchProposal = { repository: "Owner/Repo", issueNumbers: [12], objective: "Deliver #12",
@@ -90,6 +90,10 @@ test("a launch naming no task, issues or objective waits for its first message",
   assert.equal(firstMessageLaunch({ issueNumbers: [] }), true);
   assert.equal(firstMessageLaunch({ overrides: { objective: "Ship it" } }), false);
   assert.equal(parseFullControlLaunchRequest({ runnerId: "r" }, false), null);
+});
+
+test("scope-derived follow-up room keeps the existing floor and ceiling (#4537)", () => {
+  for (const [count, expected] of [[0, 1], [1, 1], [5, 5], [10, 10], [100, 10]]) assert.equal(derivedFollowUpLimit(count!), expected);
 });
 
 test("the first message's boundary keeps every authority and only grows follow-up and issue limits to fit its issues", () => {

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { campaignAuthorityPreflight, isTerminal, pendingRequests, runnerSupportsProtocol, FULL_CONTROL_DECLINED_CLASSES, type FullControlRequestClass,
-  type CampaignAuthorityEvaluation, type CampaignRecoveryReason, type SessionView } from "@wollipog/protocol";
+  type CampaignAuthorityEvaluation, type CampaignRecoveryReason, type SessionView, type WorkflowDecisionCategory } from "@wollipog/protocol";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
 import type { ControlPlaneDb, SessionStopProvenance } from "./db.js";
@@ -12,13 +12,15 @@ export function recoveryCoordinate(value: string): string {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 /** Why a pending request needs its owner: the four irrecoverable classes of #2938 stay distinct. */
-export function requestReason(evaluation: CampaignAuthorityEvaluation): CampaignRecoveryReason {
+export function requestReason(evaluation: CampaignAuthorityEvaluation, category?: WorkflowDecisionCategory): CampaignRecoveryReason {
   if (evaluation.owner === "orchestrator") return "authorized_action";
   switch (evaluation.reason) {
     case "outside_boundary": case "outside_issue_scope": case "review_extension_cap_reached": return "boundary_enlargement";
     case "unsupported_provider": case "unverified_intent": case "evidence_review_unavailable":
     case "provider_delivery_unavailable": case "unverified_closures": return "unsupported_capability";
-    case "protected_request": case "human_required_rule": case "custom_owner": case "no_checks": return "human_required_rule";
+    case "human_required_rule": return "human_required_rule";
+    case "protected_request": return category === "campaign_follow_up_admission" ? "follow_up_limit" : "owner_approval_required";
+    case "custom_owner": case "no_checks": return "owner_approval_required";
     default: return "missing_human_information";
   }
 }
@@ -97,7 +99,7 @@ export class CampaignRecoveryService {
             evaluated.reason === "unverified_intent" ? "missing_human_information"
           : decision?.humanFallback ? "unsupported_capability"
           : admissionFailure ? "publication_not_admitted"
-          : requestReason({ ...evaluated, owner });
+          : requestReason({ ...evaluated, owner }, decision?.category);
         observations.push({ action: decision?.category === "ui_evidence_approval" ? "review_evidence" : "answer_request",
           resource: { kind: "request", sessionId: session.id, occurrenceId: recoveryCoordinate(request.occurrenceId) },
           reason, owner, signal: `${revision}:${owner}:${reason}${admissionFailure ? `:${admissionFailure}` : ""}`,

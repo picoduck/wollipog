@@ -5776,6 +5776,7 @@ export const WORKFLOW_DECISION_REVOCATION_REASONS = [
   "parent_control_policy_changed",
   "campaign_control_changed",
   "campaign_follow_up_limit_changed",
+  "follow_up_publication_linked",
   "campaign_boundary_restored",
   "session_ended",
   "session_restarted",
