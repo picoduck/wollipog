@@ -360,6 +360,7 @@ function initialModel(): FixtureModel {
     root.role = "orchestrator";
     root.status = "input_required";
     root.fullControlCampaignStatus = "waiting_human";
+    root.createdAt = root.updatedAt = root.lastEventAt = Date.now() - 60_000;
     root.pendingApproval = { requestId: "runner-recovery:fixture", kind: "runner_recovery",
       title: "Relaunch Orchestrator After Runner Restart",
       options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }] };
