@@ -1,4 +1,55 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page, type Locator } from "@playwright/test";
+
+async function wheelToCard(page: Page, card: Locator) {
+  const geometry = () => card.evaluate((element) => {
+    let scroller = element.parentElement;
+    while (scroller && !(scroller.scrollHeight > scroller.clientHeight && /auto|scroll/.test(getComputedStyle(scroller).overflowY))) scroller = scroller.parentElement;
+    const area = scroller!.getBoundingClientRect();
+    const x = element.getBoundingClientRect().left + 2;
+    const covers = (candidate: Element | null) => {
+      for (let at = candidate; at && at !== scroller; at = at.parentElement) if (/sticky|fixed/.test(getComputedStyle(at).position)) return true;
+      return !candidate || !scroller!.contains(candidate);
+    };
+    let visibleTop = Math.max(area.top, 0);
+    while (visibleTop < area.bottom && covers(document.elementFromPoint(x, visibleTop))) visibleTop++;
+    return { gap: element.getBoundingClientRect().top - visibleTop - 12,
+      x: area.left + area.width / 2, y: Math.min(area.bottom - 20, innerHeight - 100) };
+  });
+  for (let step = 0; step < 8; step++) {
+    const { gap, x, y } = await geometry();
+    if (Math.abs(gap) < 3) break;
+    await page.mouse.move(x, y);
+    await page.mouse.wheel(0, gap);
+    await page.waitForTimeout(100);
+  }
+  await page.evaluate(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); });
+  await expect.poll(() => page.locator("aside.rpanel").evaluate((el) => el.scrollTop)).toBe(0);
+}
+
+for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["phone", { width: 390, height: 844 }]] as const) {
+  test(`a typed model ask waits for owner classification (${device})`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&screen=ask");
+    if (device === "phone") await expect(page.getByRole("navigation", { name: "Primary Navigation" })).toBeInViewport();
+    const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
+    await expect(waiting).toContainText("#4542 Migrate Provider Account Configuration");
+    await expect(waiting).toContainText("Held for the owner's classification by the model credential screen.");
+    await wheelToCard(page, waiting);
+    await page.screenshot({ path: testInfo.outputPath(`typed-ask-work-item-${device}.png`) });
+    const section = page.getByRole("region", { name: "Decision Model Checks" });
+    await expect(section).toContainText("Waiting for you to classify it.");
+    await expect(section).toContainText("The configuration migration design could involve provider sign-in");
+    await expect(section).toContainText("The model screen returned “ask”; no deterministic credential rule matched.");
+    await expect(section.getByRole("button")).toHaveText(["Decline", "Let the Orchestrator Answer", "Open Session"]);
+    await wheelToCard(page, section);
+    await page.screenshot({ path: testInfo.outputPath(`typed-ask-${device}.png`) });
+    await section.getByRole("button", { name: "Decline", exact: true }).click();
+    await expect(section).toContainText("You declined it.");
+    await expect(section.getByRole("button")).toHaveText(["Open Session"]);
+    await section.getByRole("button", { name: "Open Session", exact: true }).click();
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.openedSession())).toBe("s_child");
+  });
+}
 
 /** Campaign Status's Decision Model Checks (#4104): each Decision Model verdict beside the request it
  * affected, and the owner's classification of one the model could not screen. */

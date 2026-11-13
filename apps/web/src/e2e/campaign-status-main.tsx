@@ -54,8 +54,8 @@ import {
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
-import { RequestDock, dockRequests } from "../components/requests/RequestDock.js";
 import { Rail } from "../components/Rail.js";
+import { RequestDock, dockRequests } from "../components/requests/RequestDock.js";
 import { useCampaignStatusAvailability } from "../components/useCampaignStatus.js";
 import { applyCampaignWorkFilters, type CampaignWorkFilters } from "../campaign-status.js";
 import type { RightPanelMode } from "../right-panel.js";
@@ -754,7 +754,12 @@ const ownerCard: import("@wollipog/protocol").PendingApproval | null = ownerScen
     authority: "human", authorityEvaluation: { owner: "human", basis: "human_required", reason: "owner_kept", operation: "owner_decision" },
     status: "pending", createdAt: NOW - 4 * MINUTE },
 } : null;
-const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as const, ownerDecisions: { total: params.has("closureRecovery") ? 1 : 2, items: [
+const ownerProjection = params.get("screen") === "ask" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
+  { occurrenceId: "workflow_config", sessionId: "s_child", category: "implementation_question" as const, kind: "question" as const,
+    summary: "Where should provider account configuration persist, and how should legacy account lists migrate?",
+    credentialScreenReview: { workItem: { id: "cwi_8d4c62a9e317", label: "#4542 Migrate Provider Account Configuration" } },
+    handedOff: false, createdAt: NOW - MINUTE },
+] } } : ownerScenario === "after" ? { status: "waiting_human" as const, ownerDecisions: { total: params.has("closureRecovery") ? 1 : 2, items: [
   { occurrenceId: "workflow_owner_1", sessionId: "s_root", category: "owner_decision" as const, summary: ownerSnapshot.question, handedOff: false, createdAt: NOW - 4 * MINUTE },
   ...(params.has("closureRecovery") ? [] : [{ occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const,
     ...(!params.has("ownerReturned") ? { returnableOwnerResource: true as const } : {}),
@@ -1113,7 +1118,13 @@ const scopeCompatibility = scopeRequirement ? (({ error, ...versions }) =>
 
 /** `screen=1`: the question screen's checks (#4104), one of them waiting for the owner to classify. */
 const decisionUsage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 };
-let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["decisions"] = params.get("screen") === "1" ? [
+let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["decisions"] = params.get("screen") === "ask" ? [
+  { occurrenceId: "dec_config", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "decided", verdict: "ask",
+    reason: "The configuration migration design could involve provider sign-in; the owner must classify this question.",
+    inputDigests: {}, target: DECISION_TARGET, attempts: [{ attempt: 1, model: "claude-haiku-5-5", latencyMs: 1840 }],
+    usage: decisionUsage, createdAt: NOW - 60_000,
+    subject: { sessionId: "s_child", surface: "implementation_question", requestId: "configuration-migration", classificationPending: true } },
+] : params.get("screen") === "1" ? [
   { occurrenceId: "dec_keys", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "decided", verdict: "discusses",
     reason: "It asks which keyboard keys the Side Panel tools should use; nothing is handed over.", inputDigests: {},
     target: DECISION_TARGET, attempts: [{ attempt: 1, model: "claude-haiku-5-5", latencyMs: 1_840 }],
@@ -1228,6 +1239,8 @@ const client = {
     return screenDecisions.find((decision) => decision.occurrenceId === occurrenceId)!.subject!;
   },
   campaignIssueScope: async (id: string, epic?: number, _signal?: AbortSignal, epicRepository?: string) => params.get("scope") === "unsupported-target" ? api.campaignIssueScope(id)
+    : params.get("screen") === "ask" ? { campaignSessionId: id, repository: "picoduck/wollipog", issueNumbers: [4542], revision: 5,
+      ...scopeCompatibility, outsideScope: [], candidates: [] }
     : ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
     ...scopeCompatibility, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
     candidates: [{ issue: { repository: "team/repo", number: 123 }, title: "Composer Epic", source: "umbrella" as const },
@@ -1413,20 +1426,25 @@ function Fixture() {
     consumeSubagentFocusRequest: () => {},
   };
   return (
-    <main className="app" style={{ display: params.has("queueStall") ? "flex" : "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
+    <main className="app" style={{ display: params.has("queueStall") || (params.get("screen") === "ask" && window.innerWidth <= 760) ? "flex" : "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
       {params.has("queueStall") && <Rail view={{ name: "session", id: sessionId }} blockedCount={0} onNavigate={() => {}} />}
-      <section className="session-detail expanded" style={{ height: "100%", ...(params.has("queueStall") ? { height: "auto", flex: 1, minWidth: 0, minHeight: 0 } : {}) }}>
+      <section className="session-detail expanded" style={{ height: params.has("queueStall") ? "auto" : "100%", ...(params.has("queueStall") ? { flex: 1, minWidth: 0, minHeight: 0 } : params.get("screen") === "ask" && window.innerWidth <= 760 ? { flex: "1 1 0", minHeight: 0 } : {}) }}>
         <header className="detail-bar session-bar">
-          <h1 className="detail-bar-title session-bar-title">{session.title}</h1>
+          <h1 className="detail-bar-title session-bar-title">{params.get("screen") === "ask" ? "Provider Configuration Campaign" : session.title}</h1>
         </header>
         <div className="detail-columns">
           <div className="detail-chat">
             <div className="detail-main">
               <div className="detail-reader">
                 <div className="detail-scroll" role="region" aria-label="Session Activity">
-                  {Array.from({ length: 6 }, (_, index) => (
+                  {Array.from({ length: params.get("screen") === "ask" ? 4 : 6 }, (_, index) => (
                     <div className={`tl-row ${index % 2 ? "agent" : "user"}`} key={index}>
-                      <div className="tl-bubble">{[
+                      <div className="tl-bubble">{params.get("screen") === "ask" ? [
+                        "Investigate provider account configuration persistence in picoduck/wollipog.",
+                        "The child is comparing atomic initialization and legacy account migration options.",
+                        "The credential screen held the design question for owner classification. No credential value was requested.",
+                        "The Orchestrator is continuing independent work while this question waits.",
+                      ][index] : [
                         "Please finish the Campaign Status improvements in picoduck/wollipog.",
                         "The status panel now shows the current work and its recorded evidence.",
                         "Keep my approval for the Campaign Status pull request while I review it.",
@@ -1448,7 +1466,9 @@ function Fixture() {
       </section>
       {/* On a phone the app's tab bar fills the band below the panel sheet (--bottom-bar-h); this
           stand-in shows that band for what it is in the captures. */}
-      {window.innerWidth <= 760 && !ownerScenario && !params.has("queueStall") && (
+      {window.innerWidth <= 760 && params.get("screen") === "ask" && !params.has("queueStall") ? (
+        <Rail view={{ name: "session", id: sessionId }} blockedCount={1} onNavigate={() => {}} />
+      ) : window.innerWidth <= 760 && !ownerScenario && !params.has("queueStall") && (
         <nav aria-label="App Navigation" style={{
           position: "fixed", left: 0, right: 0, bottom: 0, height: "var(--bottom-bar-h)",
           display: "flex", alignItems: "center", justifyContent: "center",

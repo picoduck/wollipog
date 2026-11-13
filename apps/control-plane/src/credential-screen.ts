@@ -16,8 +16,9 @@ import type { DecisionAutomaticHarness } from "./decision-model-settings.js";
  *
  * The deterministic floor in `@wollipog/protocol` runs first and never calls a model. Text it leaves
  * open is screened here once per request occurrence, with one fixed question: "Does this ask whoever
- * answers to supply, disclose or grant a credential, sign-in or access?" `ask` declines the request
- * exactly as the floor would, `discusses` leaves it to the Orchestrator, and an uncertain or failed
+ * answers to supply, disclose or grant a credential, sign-in or access?" A typed implementation
+ * question receiving `ask` waits for owner classification; other `ask` requests remain declined.
+ * `discusses` leaves it to the Orchestrator, and an uncertain or failed
  * screen is the owner's to classify through one typed, person-owned request. Nothing here reads the
  * text to decide; a failure never falls back to a word list.
  */
@@ -81,8 +82,8 @@ export function credentialScreenFact(
     ...(verdict ? { verdict } : {}),
     ...(occurrence.failureClass ? { failureClass: occurrence.failureClass as NonNullable<CredentialScreenFact["failureClass"]> } : {}),
   };
-  if (occurrence.state === "decided") return { state: verdict === "ask" ? "ask" : "discusses", ...common };
   if (classification) return { state: classification === "decline" ? "ask" : "discusses", ...common, classifiedBy: "owner" };
+  if (occurrence.state === "decided") return { state: verdict === "ask" ? "ask" : "discusses", ...common };
   return { state: "review", ...common };
 }
 

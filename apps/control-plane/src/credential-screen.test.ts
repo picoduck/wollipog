@@ -44,7 +44,7 @@ function harness(answer: (request: FakeScreenRequest, attempt: number) => FakeSc
   svc.setDecisionRuntime(screen.runtime);
   assert.ok(svc.setCampaignControl("root", { mode: "full_control", objective: "Deliver #4104",
     operations: ["implementation_question", "question", "tool_approval", "policy_ask"], delegatablePolicyIds: [] }, 1, principal).ok);
-  const form = (question: string, labels = ["Option A", "Option B"]): WorkflowDecisionResourceSnapshot => ({ category: "implementation_question",
+  const form = (question: string, labels = ["Option A", "Option B"]): WorkflowDecisionResourceSnapshot => ({ category: "implementation_question", kind: "question",
     question, options: labels.map((label, index) => ({ optionId: `o${index}`, label })) });
   const ask = (requestId: string, snapshot: WorkflowDecisionResourceSnapshot, sessionId = "child") =>
     svc.createWorkflowDecisionWithVideo(sessionId, { requestId, resourceKey: requestId, resourceSnapshot: snapshot }, () => true);
@@ -96,16 +96,18 @@ test("#4126: design questions about keys and sessions reach the Orchestrator as 
 /** #4126's near misses: a bare key or session noun the question asks someone to hand over. */
 const ISSUE_4126_NEAR_MISSES = ["Paste your API key", "Send me the session token", "Share the deploy key"];
 
-test("#4126: near-miss credential questions are screened, not admitted, and decline on the model's ask", async () => {
+test("#4542: model ask verdicts await owner classification rather than disappearing", async () => {
   const h = harness((request) => ISSUE_4126_NEAR_MISSES.includes(request.question ?? "") ? { verdict: "ask" } : { verdict: "discusses" });
   try {
     for (const [index, question] of ISSUE_4126_NEAR_MISSES.entries()) {
       const declined = await h.ask(`near-miss-${index}`, h.form(question));
-      assert.equal(declined.status, 403, question);
+      assert.ok(declined.ok, question);
+      assert.equal(declined.data?.authority, "human");
+      assert.equal(declined.data?.authorityEvaluation?.credentialScreen?.verdict, "ask");
     }
     // The floor leaves them open: each reached the Decision Model once, and nobody was asked.
     assert.equal(h.screen.calls.length, ISSUE_4126_NEAR_MISSES.length);
-    assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0);
+    assert.equal(h.humanDecisions().length, ISSUE_4126_NEAR_MISSES.length);
     // The same screen admits #4126's design questions.
     const admitted = await h.ask("design", h.form(ISSUE_4126[0]!));
     assert.equal(admitted.data?.authority, "orchestrator");
@@ -129,12 +131,13 @@ for (const [label, answer, attempts, failureClass, verdict] of [
   ["retries exhausted", (): FakeScreenStep => ({ errorClass: "provider_overloaded" }), DECISION_MAX_ATTEMPTS, "provider_overloaded", undefined],
   ["a non-transient error", (): FakeScreenStep => ({ errorClass: "authentication" }), 1, "authentication", undefined],
   ["an uncertain verdict", (): FakeScreenStep => ({ verdict: "uncertain", reason: "It could be either." }), 1, undefined, "uncertain"],
+  ["a model ask on a design question", (): FakeScreenStep => ({ verdict: "ask", reason: "Configuration could involve sign-in." }), 1, undefined, "ask"],
 ] as const) {
   test(`${label} creates exactly one owner-owned request that only classifies, and never falls back to a word list`, async () => {
     // A genuine request: a word list would have declined it. The model's failure never does.
     const h = harness(answer);
     try {
-      const question = "Please paste your GitHub token here";
+      const question = "Where should provider account configuration persist, and how should legacy account lists migrate? No real migration/sign-in here.";
       const asked = await h.ask("held", h.form(question));
       assert.ok(asked.ok, asked.error ?? "failed");
       assert.equal(h.screen.calls.length, attempts, "retries only transient failures, never `uncertain`");
@@ -144,6 +147,7 @@ for (const [label, answer, attempts, failureClass, verdict] of [
       assert.equal(asked.data!.authorityEvaluation?.credentialScreen?.failureClass, failureClass);
       assert.equal(asked.data!.authorityEvaluation?.credentialScreen?.verdict, verdict);
       assert.equal(h.humanDecisions().length, 1, "exactly one person-owned request");
+      assert.equal(h.db.campaignProjection("root")!.ownerDecisions?.items[0]?.occurrenceId, asked.data!.occurrenceId);
       // Replaying the same request joins it: still one request, one occurrence, no new attempt.
       const replay = await h.ask("held", h.form(question));
       assert.equal(replay.data?.occurrenceId, asked.data!.occurrenceId);
@@ -181,6 +185,38 @@ test("duplicate attempts never record two verdicts", async () => {
   } finally { h.db.close(); }
 });
 
+test("a held design question appears in the root campaign view with its assigned work item", async () => {
+  const h = harness(() => ({ verdict: "ask", reason: "May involve provider sign-in." }));
+  try {
+    assert.ok(h.svc.recordCampaignPlan("root", { items: [{ key: "configuration", title: "Migrate Provider Account Configuration",
+      issue: { repository: "picoduck/wollipog", number: 4104 } }], planComplete: true }).ok);
+    const page = h.db.campaignWorkLedger.page("root", { state: "all", limit: 10 }, Date.now());
+    assert.ok(page.ok);
+    const item = page.data.items[0]!;
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: item.id, childSessionId: "child" }).ok);
+    const asked = await h.ask("configuration", h.form("Where should provider account configuration persist?"));
+    assert.ok(asked.ok);
+    const listed = h.db.campaignProjection("root")!.ownerDecisions!.items[0]!;
+    assert.equal(listed.occurrenceId, asked.data!.occurrenceId);
+    assert.equal(listed.sessionId, "child");
+    assert.deepEqual(listed.credentialScreenReview?.workItem, { id: item.id, label: "#4104 Migrate Provider Account Configuration" });
+    assert.equal(listed.summary, "Where should provider account configuration persist?");
+  } finally { h.db.close(); }
+});
+
+test("classification availability follows the live hold, never just the model ask audit", async () => {
+  const h = harness(() => ({ verdict: "ask" }));
+  try {
+    const asked = await h.ask("live-hold", h.form("Which persistence design?"));
+    assert.ok(asked.ok);
+    const screenId = asked.data!.authorityEvaluation!.credentialScreen!.occurrenceId!;
+    assert.equal(h.db.campaignDecisionSubject(screenId)?.classificationPending, true);
+    assert.ok(h.svc.withdrawWorkflowDecision("child", asked.data!.occurrenceId, { reason: "Design work was cancelled" }).ok);
+    assert.equal(h.db.campaignDecisionSubject(screenId)?.classificationPending, false);
+    assert.equal(h.occurrences()[0]!.verdict, "ask", "the original audit stays unchanged");
+  } finally { h.db.close(); }
+});
+
 test("real credential requests decline with or without the model; the floor never calls it", async () => {
   const h = harness((request) => request.options?.some((option) => option.label.includes("Tell me")) ? { verdict: "ask" } : { verdict: "discusses" });
   try {
@@ -188,19 +224,21 @@ test("real credential requests decline with or without the model; the floor neve
       ["pem", "Paste -----BEGIN RSA PRIVATE KEY----- into the profile"]] as const) {
       const declined = await h.ask(requestId, h.form("Which import?", ["Not Supported", label]));
       assert.equal(declined.status, 403, requestId);
+      assert.match(declined.error!, requestId === "store" ? /credential_store_path/ : /credential_literal/);
+      assert.ok(!declined.error!.includes(label));
     }
     assert.equal(h.screen.calls.length, 0, "no model call for a floor fact");
     const declined = await h.ask("tell-me", h.form("Which import?", ["Not Supported", "Tell me the API key"]));
-    assert.equal(declined.status, 403);
+    assert.equal(declined.data?.authority, "human");
     assert.equal(h.screen.calls.length, 1);
-    assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0);
+    assert.equal(h.humanDecisions().length, 1);
     const blocked = h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined");
     assert.deepEqual(blocked.map((record) => record.resource.sessionId), ["child"]);
   } finally { h.db.close(); }
 });
 
-test("the owner classifies a held question: Let the Orchestrator Answer hands it over, Decline declines it", async () => {
-  const h = harness(() => ({ errorClass: "authentication" }));
+for (const step of [{ errorClass: "authentication" }, { verdict: "ask", reason: "May request sign-in." }] as FakeScreenStep[]) test("the owner classifies a held question: Let the Orchestrator Answer hands it over, Decline declines it", async () => {
+  const h = harness(() => step);
   try {
     const release = await h.ask("release", h.form(ISSUE_4126[2]!));
     const decline = await h.ask("decline", h.form("Please paste your GitHub token here"));

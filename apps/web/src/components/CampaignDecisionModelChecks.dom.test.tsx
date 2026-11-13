@@ -134,6 +134,25 @@ test("follow-up relatedness and closure-reason checks show their verdict beside 
   }
 });
 
+test("historical typed asks do not offer classification while a live hold does", async () => {
+  const read = api.campaignDecisions;
+  api.campaignDecisions = async () => ({ campaignSessionId: "root-1", decisions: [
+    decision("historical", { verdict: "ask" }),
+    decision("revoked", { verdict: "ask", subject: { sessionId: "child-1", surface: "implementation_question", requestId: "revoked", classificationPending: false } }),
+    decision("live", { verdict: "ask", subject: { sessionId: "child-1", surface: "implementation_question", requestId: "live", classificationPending: true } }),
+  ], usage: { ...usage, calls: 3, unpricedCalls: 0 } });
+  const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />);
+  try {
+    const items = [...view.container.querySelectorAll("li")];
+    for (const item of items.slice(0, 2)) {
+      assert.match(item.textContent!, /No classification is pending/);
+      assert.deepEqual([...item.querySelectorAll("button")].map((button) => button.textContent), ["Open Session"]);
+    }
+    assert.match(items[2]!.textContent!, /Waiting for you to classify/);
+    assert.deepEqual([...items[2]!.querySelectorAll("button")].map((button) => button.textContent), ["Decline", "Let the Orchestrator Answer", "Open Session"]);
+  } finally { view.unmount(); api.campaignDecisions = read; }
+});
+
 test("each selection proposal shows its outcome, issues, rationale and the Decision Model's reason in the same list (#4103)", async () => {
   const read = api.campaignDecisions;
   const proposal = (outcome: NonNullable<CampaignDecisionsResponse["decisions"][number]["selectionProposal"]>["outcome"], numbers: number[], explanation: string) =>

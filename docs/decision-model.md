@@ -192,7 +192,8 @@ one excludes a request that only names its subject as part of a design or the co
 **No Credential Handed Over** (`hands_over_credential`), **No Sign-In Performed**
 (`performs_sign_in`) and **No Access Granted** (`grants_access`). The server derives:
 
-- `ask` from a confident yes to any of them, which declines the request;
+- `ask` from a confident yes to any of them: typed implementation questions wait for owner
+  classification (#4542), while other request surfaces retain their refusal;
 - `discusses` from a confident no to all three, which leaves it to the Orchestrator;
 - `uncertain` from anything else, including a yes below the threshold, which holds the request for
   the owner to classify.

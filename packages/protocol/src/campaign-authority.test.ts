@@ -205,11 +205,16 @@ test("#4126's design questions and the #3844, #3913 and #3968 cases reach the Or
   }
 });
 
-test("a request the floor leaves open declines only on the Decision Model's ask verdict, on every route (#4104)", () => {
+test("model ask declines generic requests and holds typed questions for owner classification (#4542)", () => {
   for (const text of genuine) {
     const routes = onEveryRoute(text, undefined);
     assert.ok(routes.child.reason === "credential_screen_pending" && routes.child.disposition === undefined, `no word list declines: ${text}`);
-    declinedEverywhere(text, asks);
+    declined(evaluate(question(text, { credentialScreen: asks })), "secrets_and_sign_in");
+    for (const root of [true, false]) {
+      const held = typed(form(text), { root, credentialScreen: asks });
+      assert.deepEqual([held.owner, held.reason, held.disposition], ["human", "credential_screen_review", undefined]);
+      assert.equal(held.credentialScreen?.verdict, "ask");
+    }
     assert.deepEqual(evaluate(question(text, { credentialScreen: asks })).credentialScreen, asks);
   }
   // A child's tool text that is not verified repository code is screened too; a root's is declined unscreened.
