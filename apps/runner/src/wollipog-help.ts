@@ -241,6 +241,10 @@ export function pullRequestHelp(): string {
   return [
     "Usage: wollipog pr wait <number|owner/name#number|url> [--repo <owner/name>] [--head <sha>]",
     "                        [--timeout <ms>] [--interval <ms>] [--any-failure] [--json]",
+    "       wollipog pr park <owner/repo#number or URL> --head <SHA> [--repo <owner/repo>]",
+    "Register a durable branch-CI or merge-queue wait, then end your turn. Requires a current session",
+    "and compatible control plane. The outcome wakes you once; no merge authority is granted.",
+    "Alias: pr wait <ref> --head <SHA> --park. Without --park, pr wait stays local and blocking.",
     "       wollipog pr closures <number|owner/name#number|url> [--repo <owner/name|gitlab-project>] [--intended <issue>]... [--json]",
     "       wollipog pr closures --file <description.md> [--repo <owner/name|gitlab-project>] [--intended <issue>]... [--json]",
     "Block until the pull request's required checks pass or fail, GitHub marks its merge-queue entry",

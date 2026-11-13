@@ -5,6 +5,7 @@
 
 import {
   PULL_REQUEST_WATCH_REASON_LIMIT,
+  PULL_REQUEST_WATCH_STALL_MS,
   PULL_REQUEST_WATCH_SUMMARY_LIMIT_BYTES,
   type PullRequestWatchOutcome,
   type PullRequestWatchStartCommand,
@@ -96,6 +97,19 @@ export class PullRequestWatcher {
 
   private async watch(command: PullRequestWatchStartCommand, signal: AbortSignal): Promise<void> {
     let failures = 0;
+    const now = this.deps.now ?? Date.now;
+    let group: string | null | undefined = command.progress?.groupSha;
+    let groupSince = command.progress?.groupSince ?? command.watchedSince ?? now();
+    const progress = (summary: PullRequestWaitSummary) => {
+      const next = summary.mergeQueue?.checks?.sha ?? null;
+      if (group !== undefined && next !== group) groupSince = now();
+      group = next;
+      const queue = summary.mergeQueue;
+      this.deps.send({ type: "pull_request_watch_update", watchId: command.watchId, state: "progress",
+        progress: { groupSha: next, groupSince, stalled: !!queue &&
+          (!!queue.checks?.failedJobs.length || now() - groupSince >= PULL_REQUEST_WATCH_STALL_MS),
+          summary: serializedWatchSummary(summary) } });
+    };
     while (!signal.aborted) {
       const result = await (this.deps.wait ?? waitForPullRequest)({
         repository: command.repository,
@@ -105,13 +119,14 @@ export class PullRequestWatcher {
       }, {
         gh: this.deps.gh,
         signal,
+        onSnapshot: progress,
         ...(this.deps.now ? { now: this.deps.now } : {}),
         ...(this.deps.sleep ? { sleep: this.deps.sleep } : {}),
       });
       if (signal.aborted) return;
       if (result.ok) {
         failures = 0;
-        if (result.summary.outcome === "timeout") continue;
+        if (result.summary.outcome === "timeout") { progress(result.summary); continue; }
         this.report({
           type: "pull_request_watch_update",
           watchId: command.watchId,

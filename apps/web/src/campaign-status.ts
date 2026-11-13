@@ -626,7 +626,7 @@ function planNoticeFor(work: CampaignWorkSummary): CampaignSummaryView["planNoti
 
 export function campaignSummaryView(
   work: CampaignWorkSummary,
-  campaign: Pick<OrchestratorCampaignProjection, "status" | "limits"> | null,
+  campaign: Pick<OrchestratorCampaignProjection, "status" | "limits" | "parkedChildren"> | null,
   now: number,
 ): CampaignSummaryView {
   const cost = campaignCostView(work.cost?.total);
@@ -641,7 +641,8 @@ export function campaignSummaryView(
   ] : [];
   const limits = campaign?.limits;
   return {
-    stateLabel: campaign ? campaignLifecycleLabel(campaign.status) : UNAVAILABLE,
+    stateLabel: campaign?.parkedChildren?.some(({ watch }) => watch.state === "watching" && watch.progress?.stalled)
+      ? "Pull Request Wait Stalled" : campaign ? campaignLifecycleLabel(campaign.status) : UNAVAILABLE,
     planNotice: planNoticeFor(work),
     progressText: `${work.counts.delivered} of ${work.counts.committed} Delivered`,
     scope: { original: work.counts.original, followUp: work.counts.followUp },

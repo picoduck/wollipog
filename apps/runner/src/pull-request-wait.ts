@@ -131,6 +131,8 @@ export interface PullRequestWaitDeps {
   readGraceMs?: number;
   /** Called after each complete, successful observation: the wait's progress signal (#1280). */
   onObservation?: () => void;
+  /** Complete forge snapshot for durable watches; does not change wait outcomes. */
+  onSnapshot?: (summary: PullRequestWaitSummary) => void;
 }
 
 export type PullRequestWaitResult =
@@ -1000,6 +1002,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     deps.onObservation?.();
 
     seen.removal = headRemoval(seen);
+    deps.onSnapshot?.(summarize("timeout", seen));
     if (seen.queue) {
       sawQueue = true;
       vanishedAt = null;

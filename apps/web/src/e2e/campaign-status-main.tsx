@@ -55,6 +55,7 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
 import { RequestDock, dockRequests } from "../components/requests/RequestDock.js";
+import { Rail } from "../components/Rail.js";
 import { useCampaignStatusAvailability } from "../components/useCampaignStatus.js";
 import { applyCampaignWorkFilters, type CampaignWorkFilters } from "../campaign-status.js";
 import type { RightPanelMode } from "../right-panel.js";
@@ -569,6 +570,12 @@ const projectionFor = (rev: number) => campaignProjection(
       : handoffScenario || activityScenario ? handoffWork(rev) : recordedWork(rev),
   {
     limits: { maximumConcurrentChildren: 4, occupied: 3, remaining: 1, costBudgetUsd: 40, maxToolCalls: null },
+    ...(params.get("queueStall") === "1" ? { status: "active" as const, parkedChildren: [{ sessionId: "s_child", watch: {
+      watchId: "prw_queue", repository: "picoduck/wollipog", number: 4141, headSha: "a".repeat(40),
+      state: "watching" as const, since: NOW - 65 * MINUTE, continuation: "none" as const, observedAt: NOW,
+      progress: { groupSha: "b".repeat(40), groupSince: NOW - 65 * MINUTE, stalled: true,
+        summary: JSON.stringify({ mergeQueue: { state: "AWAITING_CHECKS", position: 1 } }) },
+    } }] } : {}),
     ...(pauseFixture ? { status: pauseFixture.resumedAt === undefined ? "paused" as const : "active" as const, pause: pauseFixture } : {}),
     // `repositories=1`: a multi-repository boundary with an exclusion, a removed Location and a
     // Location someone else added (#4117). Static rendering data only.
@@ -1225,6 +1232,8 @@ const client = {
     ...scopeCompatibility, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
     candidates: [{ issue: { repository: "team/repo", number: 123 }, title: "Composer Epic", source: "umbrella" as const },
       { issue: { repository: "team/repo", number: 124 }, title: "Member Work", source: "member_checklist" as const }],
+    ...(params.get("queueStall") === "1" ? { repository: "picoduck/wollipog", issueNumbers: [4543], revision: 5,
+      outsideScope: [], candidates: [] } : {}),
     // A Full Control first message's derived scope and its context-only references (#3920).
     ...(params.get("scope") === "first-message" ? {
       issueNumbers: [123, 124, 125], revision: 2, outsideScope: [], candidates: [], contextIssueNumbers: [126, 127],
@@ -1404,8 +1413,9 @@ function Fixture() {
     consumeSubagentFocusRequest: () => {},
   };
   return (
-    <main className="app" style={{ display: "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
-      <section className="session-detail expanded" style={{ height: "100%" }}>
+    <main className="app" style={{ display: params.has("queueStall") ? "flex" : "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
+      {params.has("queueStall") && <Rail view={{ name: "session", id: sessionId }} blockedCount={0} onNavigate={() => {}} />}
+      <section className="session-detail expanded" style={{ height: "100%", ...(params.has("queueStall") ? { height: "auto", flex: 1, minWidth: 0, minHeight: 0 } : {}) }}>
         <header className="detail-bar session-bar">
           <h1 className="detail-bar-title session-bar-title">{session.title}</h1>
         </header>
@@ -1438,7 +1448,7 @@ function Fixture() {
       </section>
       {/* On a phone the app's tab bar fills the band below the panel sheet (--bottom-bar-h); this
           stand-in shows that band for what it is in the captures. */}
-      {window.innerWidth <= 760 && !ownerScenario && (
+      {window.innerWidth <= 760 && !ownerScenario && !params.has("queueStall") && (
         <nav aria-label="App Navigation" style={{
           position: "fixed", left: 0, right: 0, bottom: 0, height: "var(--bottom-bar-h)",
           display: "flex", alignItems: "center", justifyContent: "center",

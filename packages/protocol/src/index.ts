@@ -287,6 +287,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v272 runner watches a parked session's merge-queue entry and the control plane wakes it (#4071).
    * Checked against the runner by the control plane and against the control plane by the runner. */
   pullRequestWatch: 272,
+  pullRequestWatchProgress: 376,
   /** v276 runner launches a delegated image evidence reviewer with only its two review tools and
    * serves those tools to it (#4074). Checked against the root Orchestrator's runner, which hosts
    * the reviewer; the runner checks the control plane's version before offering the path. */

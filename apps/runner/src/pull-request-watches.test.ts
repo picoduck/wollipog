@@ -8,6 +8,28 @@ const HEAD = "c".repeat(40);
 const START = { type: "pull_request_watch_start" as const, watchId: "prw_1", sessionId: "s1",
   repository: "picoduck/wollipog", number: 4071, headSha: HEAD };
 
+test("queue progress signals failed jobs and the duration bound, clearing on rebuild (#4543)", async () => {
+  let clock = 1_000;
+  const updates: PullRequestWatchUpdate[] = [];
+  const group = (sha: string, failed = false) => summary("timeout", { mergeQueue: { state: "AWAITING_CHECKS", position: 1,
+    enqueuedAt: null, checks: { sha, required: [{ name: "aggregator", state: "pending", reported: false }],
+      other: { passed: 0, failed: failed ? 1 : 0, pending: 0 },
+      failedJobs: failed ? [{ name: "unit tests", required: false, conclusion: "FAILURE" }] : [] } } });
+  const watcher = new PullRequestWatcher({ gh: async () => { throw Error("unused"); }, now: () => clock,
+    send: u => updates.push(u), wait: async (_, deps) => {
+      deps.onSnapshot!(group(HEAD, true));
+      deps.onSnapshot!(group("d".repeat(40)));
+      clock += 60 * 60_000;
+      deps.onSnapshot!(group("d".repeat(40)));
+      deps.onSnapshot!(group("e".repeat(40)));
+      return { ok: true, summary: summary("merged") };
+    } });
+  watcher.start(START);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(updates.filter(u => u.state === "progress").map(u => u.progress!.stalled), [true, false, true, false]);
+  assert.deepEqual(updates.filter(u => u.state !== "progress").map(u => u.outcome), ["merged"]);
+});
+
 function summary(outcome: PullRequestWaitSummary["outcome"], extra: Partial<PullRequestWaitSummary> = {}): PullRequestWaitSummary {
   return {
     outcome, repository: "picoduck/wollipog", number: 4071, url: "https://github.com/picoduck/wollipog/pull/4071",
@@ -28,7 +50,7 @@ function scripted(results: PullRequestWaitResult[]) {
   const settled = new Promise<void>((resolve) => { settle = resolve; });
   const watcher = new PullRequestWatcher({
     gh: async () => { throw new Error("the scripted wait never reads GitHub"); },
-    send: (update) => { updates.push(update); settle(); },
+    send: (update) => { updates.push(update); if (update.state !== "progress") settle(); },
     sleep: async (milliseconds) => { sleeps.push(milliseconds); },
     wait: async (input, deps) => {
       inputs.push(input);
@@ -53,8 +75,10 @@ test("a watch keeps waiting through timeouts and reports its first outcome once,
   await h.settled;
   assert.equal(h.inputs.length, 3, "a duplicate start does not watch twice; timeouts only re-arm the wait");
   assert.deepEqual(h.inputs.map((input) => input.headSha), [HEAD, HEAD, HEAD], "every wait pins the parked head");
-  assert.equal(h.updates.length, 1);
-  const [update] = h.updates;
+  assert.equal(h.updates.filter(u => u.state === "progress").length, 2);
+  const terminal = h.updates.filter(u => u.state !== "progress");
+  assert.equal(terminal.length, 1);
+  const [update] = terminal;
   assert.equal(update!.state, "fired");
   assert.equal(update!.outcome, "merged");
   assert.equal(JSON.parse(update!.summary!).mergeCommitSha, "d".repeat(40));
@@ -64,7 +88,7 @@ test("a watch keeps waiting through timeouts and reports its first outcome once,
   // without another read.
   h.watcher.start(START);
   assert.equal(h.inputs.length, 3);
-  assert.deepEqual(h.updates.slice(1), [update]);
+  assert.deepEqual(h.updates.slice(3), [update]);
 });
 
 test("every outcome but a timeout ends the watch, including a pull request that is not queued", async () => {
@@ -95,7 +119,7 @@ test("a success between failures resets the retry budget", async () => {
     { ok: true, summary: summary("queue_ejected") }]);
   h.watcher.start(START);
   await h.settled;
-  assert.deepEqual(h.updates.map((update) => update.state), ["fired"]);
+  assert.deepEqual(h.updates.filter(u => u.state !== "progress").map((update) => update.state), ["fired"]);
 });
 
 test("a cancelled watch stops polling and reports nothing", async () => {

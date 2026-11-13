@@ -3,8 +3,8 @@
  * The runner polls GitHub through its read-only `gh` login, so no model request happens while the
  * session is parked. The wake is an ordinary prompt: it grants no authority. */
 
-/** What ends a watch. Anything `wait_pull_request` returns except `timeout`: a pull request that is
- * not in the queue at all reports its own checks at once, so a session never stays parked on it. */
+/** What ends a watch. Anything `wait_pull_request` returns except `timeout`: outside the queue,
+ * the watch waits for the required branch checks. Queue stalls are separate progress reports. */
 export type PullRequestWatchOutcome =
   | "merged"
   | "closed"
@@ -41,11 +41,16 @@ export interface PullRequestWatchView {
   /** A fixed, path-free reason for a lost or cancelled watch. */
   reason?: string;
   continuation: PullRequestWatchContinuationState;
+  /** Last successful forge observation; optional for older peers. */
+  observedAt?: number;
+  progress?: PullRequestWatchProgress;
 }
 
 /** Control plane to runner: start (or, after a reconnect, resume) watching. Idempotent per id. */
 export interface PullRequestWatchStartCommand {
   type: "pull_request_watch_start";
+  watchedSince?: number;
+  progress?: PullRequestWatchProgress;
   watchId: string;
   sessionId: string;
   repository: string;
@@ -58,12 +63,13 @@ export interface PullRequestWatchCancelCommand {
   watchId: string;
 }
 
-/** Runner to control plane: the watch's end. Accepted only from the watch's runner, only while it
- * is still watching; the first report wins, so a runner re-reporting after a reconnect is harmless. */
+/** Runner to control plane: progress or the watch's end. Accepted only from the watch's runner,
+ * only while watching. The first terminal report wins; progress cannot wake the child. */
 export interface PullRequestWatchUpdate {
   type: "pull_request_watch_update";
   watchId: string;
-  state: "fired" | "lost";
+  state: "fired" | "lost" | "progress";
+  progress?: PullRequestWatchProgress;
   outcome?: PullRequestWatchOutcome;
   /** `wait_pull_request`'s bounded summary, serialized; at most PULL_REQUEST_WATCH_SUMMARY_LIMIT_BYTES. */
   summary?: string;
@@ -80,3 +86,15 @@ export interface CampaignParkedChild {
   sessionId: string;
   watch: PullRequestWatchView;
 }
+
+/** A nonterminal observation never wakes the parked child or authorizes a forge write. */
+export interface PullRequestWatchProgress {
+  groupSha: string | null;
+  groupSince: number;
+  stalled: boolean;
+  /** Bounded JSON wait summary, including queue position/state and failed/pending jobs. */
+  summary: string;
+}
+export const PULL_REQUEST_WATCH_LEASE_MS = 10 * 60_000;
+/** Twice the expected 30-minute merge-group duration. */
+export const PULL_REQUEST_WATCH_STALL_MS = 60 * 60_000;

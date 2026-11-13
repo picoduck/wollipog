@@ -338,7 +338,14 @@ function invocationArgs(argv: string[]): string[] {
 }
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {
-  const words = positional(args);
+  const words = positional(args, ["--repo", "--head"]);
+  if (words[0] === "pr" && (words[1] === "park" || (words[1] === "wait" && flag(args, "--park")))) {
+    const headSha = option(args, "--head");
+    const pullRequest = words[2];
+    if (words.length !== 3 || !pullRequest || !headSha) return { error: "use pr park <owner/repo#number or URL> --head <SHA> [--repo <owner/repo>]" };
+    return { tool: "park_on_pull_request", input: { pullRequest, headSha,
+      ...(option(args, "--repo") ? { repository: option(args, "--repo") } : {}) } };
+  }
   if (words[0] === "automation") {
     if (optionPresent(args, "--session")) return { error: "automation commands act only on the injected session" };
     const groupIndex = args.indexOf("automation");
@@ -1037,7 +1044,7 @@ export async function runWollipogCli(
   }
   // Waiting on a pull request is local and read-only too: it reads GitHub through this machine's
   // `gh` login and never needs a session credential or the control plane.
-  if (positional(args)[0] === "pr") return runPullRequestCli(args, json, io);
+  if (positional(args)[0] === "pr" && positional(args)[1] !== "park" && !flag(args, "--park")) return runPullRequestCli(args, json, io);
   const parsed = command(args);
   if ("error" in parsed) {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: parsed.error })}\n` : `${parsed.error}\n`);

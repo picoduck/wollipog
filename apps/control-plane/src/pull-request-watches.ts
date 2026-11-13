@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
   PULL_REQUEST_WATCH_OUTCOMES,
+  PULL_REQUEST_WATCH_LEASE_MS,
   PULL_REQUEST_WATCH_REASON_LIMIT,
   PULL_REQUEST_WATCH_SUMMARY_LIMIT_BYTES,
   type CampaignParkedChild,
@@ -28,6 +29,8 @@ interface Row {
   summary: string | null;
   reason: string | null;
   created_at: number;
+  observed_at: number | null;
+  progress: string | null;
   ended_at: number | null;
   continuation_state: PullRequestWatchContinuationState | null;
   continuation_command_id: string | null;
@@ -40,7 +43,7 @@ export const PREREQUISITE_MERGE_WATCH_RUNNER = "wollipog:prerequisite-merge";
 
 /** A watch whose wake is still owed: the session is parked on it, so its turn end owes the
  * Orchestrator nothing yet. */
-const PARKED = "(state='watching' OR continuation_state IN ('held','delivering'))";
+const PARKED = "(state='watching' OR (state='fired' AND continuation_state IN ('held','delivering')))";
 /** What a session view and a campaign show: parked, or ended without a delivered wake. */
 const VISIBLE = "(state='watching' OR continuation_state IN ('held','delivering','uncertain','failed'))";
 const OUTCOMES = new Set<string>(PULL_REQUEST_WATCH_OUTCOMES);
@@ -97,6 +100,7 @@ export class PullRequestWatches {
       continuation_state TEXT CHECK (continuation_state IS NULL OR
         continuation_state IN ('held','delivering','delivered','uncertain','failed','abandoned')),
       continuation_command_id TEXT, continuation_updated_at INTEGER,
+      observed_at INTEGER, progress TEXT,
       parked_turn_seq INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS pull_request_watches_session ON pull_request_watches(session_id);
@@ -107,6 +111,14 @@ export class PullRequestWatches {
       WHERE continuation_state='held';
     CREATE INDEX IF NOT EXISTS pull_request_watches_continuation_command ON pull_request_watches(continuation_command_id)
       WHERE continuation_state='delivering';`);
+  }
+
+  /** Upgrade existing durable watches without changing their identity or wake receipts. */
+  static upgrade(sql: DatabaseSync): void {
+    const columns = new Set((sql.prepare("PRAGMA table_info(pull_request_watches)").all() as Array<{name: string}>).map(c => c.name));
+    for (const [name, type] of [["observed_at", "INTEGER"], ["progress", "TEXT"]]) {
+      if (!columns.has(name!)) sql.exec(`ALTER TABLE pull_request_watches ADD COLUMN ${name} ${type}`);
+    }
   }
 
   /** One transaction, or the caller's when one is already open. */
@@ -129,6 +141,8 @@ export class PullRequestWatches {
 
   private static view(row: Row): PullRequestWatchView {
     return {
+      ...(row.observed_at !== null ? { observedAt: row.observed_at } : {}),
+      ...(row.progress ? { progress: JSON.parse(row.progress) } : {}),
       watchId: row.watch_id,
       repository: row.repository,
       number: row.pr_number,
@@ -204,10 +218,13 @@ export class PullRequestWatches {
   }
 
   /** Watches still polling on a runner, oldest first, as start commands' fields. */
-  watchingOn(runnerId: string): Array<{ watchId: string; sessionId: string; repository: string; number: number; headSha: string }> {
+  watchingOn(runnerId: string): Array<{ watchId: string; sessionId: string; repository: string; number: number; headSha: string;
+    watchedSince?: number; progress?: import("@wollipog/protocol").PullRequestWatchProgress }> {
     return (this.stmt(`SELECT * FROM pull_request_watches WHERE runner_id=? AND state='watching' ORDER BY rowid`)
       .all(runnerId) as unknown as Row[]).map((row) => ({
       watchId: row.watch_id, sessionId: row.session_id, repository: row.repository, number: row.pr_number, headSha: row.head_sha,
+      ...(row.observed_at !== null ? { watchedSince: row.created_at } : {}),
+      ...(row.progress ? { progress: JSON.parse(row.progress) } : {}),
     }));
   }
 
@@ -216,6 +233,15 @@ export class PullRequestWatches {
   accept(runnerId: string, update: PullRequestWatchUpdate, now: number): string | null {
     const row = typeof update?.watchId === "string" ? this.row(update.watchId) : undefined;
     if (!row || row.runner_id !== runnerId || row.state !== "watching") return null;
+    if (update.state === "progress") {
+      const p = update.progress;
+      if (!p || !Number.isSafeInteger(p.groupSince) || p.groupSince < 0 ||
+          typeof p.stalled !== "boolean" || (p.groupSha !== null && !/^[0-9a-f]{40}$/.test(p.groupSha)) ||
+          typeof p.summary !== "string" || Buffer.byteLength(p.summary) > PULL_REQUEST_WATCH_SUMMARY_LIMIT_BYTES) return null;
+      this.write("UPDATE pull_request_watches SET progress=?, observed_at=? WHERE watch_id=? AND state='watching'")
+        .run(JSON.stringify({ groupSha: p.groupSha, groupSince: p.groupSince, stalled: p.stalled, summary: p.summary }), now, row.watch_id);
+      return row.session_id;
+    }
     if (update.state === "fired") {
       if (typeof update.outcome !== "string" || !OUTCOMES.has(update.outcome)) return null;
       const summary = typeof update.summary === "string" && Buffer.byteLength(update.summary) <= PULL_REQUEST_WATCH_SUMMARY_LIMIT_BYTES
@@ -229,6 +255,17 @@ export class PullRequestWatches {
       return this.markLost(row.watch_id, boundedReason(update.reason, "the runner stopped watching"), now) ? row.session_id : null;
     }
     return null;
+  }
+
+  /** Only progress-capable watches acquire a lease. Legacy runners keep their old contract. */
+  expired(now: number): Array<{ watchId: string; sessionId: string; runnerId: string }> {
+    return (this.stmt("SELECT watch_id,session_id,runner_id FROM pull_request_watches WHERE state='watching' AND observed_at IS NOT NULL AND observed_at<=?")
+      .all(now - PULL_REQUEST_WATCH_LEASE_MS) as Array<{watch_id:string;session_id:string;runner_id:string}>).map(r =>
+      ({watchId:r.watch_id,sessionId:r.session_id,runnerId:r.runner_id}));
+  }
+
+  acquireLease(watchId: string, now: number): void {
+    this.write("UPDATE pull_request_watches SET observed_at=? WHERE watch_id=? AND state='watching'").run(now, watchId);
   }
 
   /** End a watch no runner can keep, owing the session a wake that says so. */
