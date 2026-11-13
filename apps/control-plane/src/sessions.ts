@@ -17040,7 +17040,8 @@ export class SessionsService {
    * projection. A withdrawal anyone but the campaign's Orchestrator made still reaches it, as a
    * `request_resolved` that names the withdrawal (#3917); its own wakes nobody, as with #3083. */
   private recordApprovedAuthorityRemovalContinuation(decision: WorkflowDecisionView, callerSessionId: string, now: number): void {
-    const requester = this.db.getSession(decision.sessionId);
+    const requester = decision.sessionId === decision.controllingSessionId && decision.authority === "human"
+      ? this.db.getSession(decision.sessionId) : null;
     if (!requester || (!requester.parentSessionId && sessionRole(requester) !== "orchestrator")) return;
     try {
       const campaign = this.db.campaignAncestryRoot(requester.id);
@@ -18254,6 +18255,7 @@ export class SessionsService {
 
   private workflowDecisionApproval(decision: WorkflowDecisionView): PendingApproval {
     const snapshot = decision.resourceSnapshot;
+    const requester = this.db.getSession(decision.sessionId);
     const categoryTitle: Record<WorkflowDecisionCategory, string> = {
       implementation_question: "Implementation Decision Required",
       pr_merge: "PR Merge Approval Required",
@@ -18299,12 +18301,15 @@ export class SessionsService {
       title: isChildQuestionSnapshot(snapshot) ? "Question" : isOwnerQuestionSnapshot(snapshot) ? "Owner Question" : categoryTitle[decision.category],
       options,
       kind: "workflow_decision",
-      // A root's own decision its owner kept (#4064) waits for that person without parking the root:
-      // the root keeps working, and campaign continuations keep reaching it.
+      // Full Control root decisions with human-owned proof gaps also wait without parking the
+      // root (#4536). Existing owner-kept cards retain their behavior (#4064); other root cards
+      // need a runner supporting owner decisions. This changes delivery, never authority.
       ...(decision.sessionId === decision.controllingSessionId && decision.authority === "human" &&
         (decision.category === "owner_decision" || decision.ownerHandoff || decision.ownerRule ||
           decision.authorityEvaluation?.reason === "owner_kept" ||
-          decision.authorityEvaluation?.reason === "credential_screen_review") ? { async: true } : {}),
+          decision.authorityEvaluation?.reason === "credential_screen_review" ||
+          requester?.orchestratorPolicy?.control?.mode === "full_control" &&
+            runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "ownerDecisions")) ? { async: true } : {}),
       context: {
         toolName: "Typed Workflow Decision",
         input: JSON.stringify(snapshot, null, 2),
@@ -25678,7 +25683,7 @@ function runnerHoldFor(kind: PolicyRuleKind | undefined): RunnerGuardrailKind | 
 }
 
 function hasPolicyApproval(pending: PendingApproval | null | undefined): boolean {
-  return pendingRequests(pending).some((request) => isPolicyApproval(request));
+  return pendingRequests(pending).some((request) => !request.async && isPolicyApproval(request));
 }
 
 function hasBlockingPendingRequest(pending: PendingApproval | null | undefined): boolean {

@@ -243,7 +243,7 @@ export class CampaignRecoveryService {
     const working = (session: SessionView) => ["queued", "starting", "running"].includes(session.status) ||
       session.stopOperation?.status === "stop_pending" || liveJobs.has(session.id) ||
       session.backgroundWorkState === "running" || session.backgroundWorkState === "continuation_pending";
-    const quiet = root.status === "idle" && !root.pendingApproval && !working(root) &&
+    const quiet = root.status === "idle" && !pendingRequests(root.pendingApproval).some(request => !request.async) && !working(root) &&
       sessions.slice(1).every(session => session.archived || !working(session));
     const changed = this.db.campaignRecovery.synchronize(root.id, revision, current, observations, now,
       quiet ? record => this.db.campaignRecoveryWakeSettledAt(root.id, `${record.id}:${record.attempts}`) : undefined);
@@ -258,7 +258,7 @@ export class CampaignRecoveryService {
     // otherwise idle parent from repairing unrelated work. One durable continuation remains the
     // execution lane, with its existing receipt and active-turn uniqueness constraints.
     const mayWake = current && supported && admission.state === "available" &&
-      root.status === "idle" && !root.pendingApproval &&
+      root.status === "idle" && !pendingRequests(root.pendingApproval).some(request => !request.async) &&
       runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "campaignContinuations");
     const committedDispatches: Array<{ recoveryId: string; action: string; reason: string; attempt: number }> = [];
     const dispatched = mayWake ? this.db.campaignRecovery.dispatchDue(root.id, revision, now, (record, eventId) => {

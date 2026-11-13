@@ -5236,3 +5236,23 @@ test("#4333 malformed lineage is refused before canonicalization without creatin
     });
   }
 });
+
+for (const full of [true, false]) test(`a human-owned root closure ${full ? "allows" : "holds"} unrelated continuation work (#4536)`, async () => {
+  const h = harness(full);
+  try {
+    const result = await h.svc.requestGithubIssueClosure("root", { requestId: "closure-wait", issue: 100, reason: "completed",
+      explanation: "Delivery needs the owner's review", evidence: ["Incomplete delivery proof"] });
+    assert.ok(result.ok && result.data?.decision, result.error ?? "closure created");
+    const decision = result.data.decision;
+    assert.equal(decision.authority, "human", "delivery gaps retain human authority");
+    h.svc.onSessionStatus("root", "idle");
+    assert.equal(h.db.getSession("root")!.status, full ? "idle" : "input_required");
+    const at = Date.now();
+    h.db.recordCampaignContinuationEvent({ campaignSessionId: "root", eventId: "unrelated-child", kind: "child_ready",
+      subjectSessionId: "child", subjectStatus: "idle", now: at });
+    h.svc.retryDuePrompts(at + 30_001);
+    assert.equal(h.db.latestCampaignContinuation("root") !== null, full);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "pending");
+    assert.equal(h.state.executes, 0, "a continuation grants no closure authority");
+  } finally { h.db.close(); }
+});
