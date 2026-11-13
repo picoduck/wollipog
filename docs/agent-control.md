@@ -2617,7 +2617,7 @@ backup is the alternative; do not restart the hosting stack from a hosted agent 
 When `verify_campaign_child` names an armed, unmerged `pr_merge`, use
 `retire_workflow_decision` (`wollipog decision retire <occurrence> --reason <reason>`).
 The requester may retire its own approval; its controlling Orchestrator may pass
-`--session <child>` for an occurrence it owns. Protocol 367 is required. The server asks the
+`--session <child>` for an occurrence it owns. Protocol 369 is required. The server asks the
 child's runner for a fresh read through its existing GitHub login. Only an open pull request
 outside the queue at the approved head qualifies. Merged, closed, queued, moved or unreadable
 pull requests refuse without changing the decision. GitLab retirement is not supported yet.

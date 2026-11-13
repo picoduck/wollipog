@@ -357,3 +357,13 @@ test("runner-managed ref deletion is open to a session's own credential in eithe
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees/delete-refs", "orchestrator"), true);
   assert.equal(isAgentControlApiRouteAllowed("GET", "/api/sessions/:id/worktrees/delete-refs"), false);
 });
+
+
+test("retirement admits both genuine session credential roles and denies other methods (#4533)", () => {
+  const route = "/api/sessions/:id/workflow-decisions/:occurrenceId/retire";
+  for (const role of ["normal", "orchestrator"] as const) {
+    assert.equal(isAgentControlApiRouteAllowed("POST", route, role), true);
+    assert.equal(isAgentControlApiRouteAllowed("GET", route, role), false);
+    assert.equal(isAgentControlApiRouteAllowed("DELETE", route, role), false);
+  }
+});

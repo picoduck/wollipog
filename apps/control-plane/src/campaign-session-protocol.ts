@@ -32,6 +32,7 @@ export const CAMPAIGN_SESSION_PROTOCOL_ROUTES = [
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/reconcile",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw",
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/retire",
 ] as const;
 
 /** Residual scope: each exact route independently refuses the owner credential in production. */

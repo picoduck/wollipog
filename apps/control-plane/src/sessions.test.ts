@@ -32543,6 +32543,10 @@ test("armed merge retirement removes authority, preserves evidence and reconcile
       const result = await svc.retireWorkflowDecision(caller.id, armed.occurrenceId, request);
       assert.ok(result.ok, result.error);
       assert.equal(result.data?.status, "retired");
+      const resolutionEvents = db.campaignContinuationEvents(root.id).filter(event =>
+        event.kind === "request_resolved" && event.occurrenceId === campaignRequestToken("typed", child.id, armed.occurrenceId));
+      assert.equal(resolutionEvents.filter(event => event.eventId.startsWith("request-retired:")).length,
+        callerKind === "child" ? 1 : 0, "child retirement wakes its controller; controller retirement does not wake itself");
       assert.equal(result.data?.retirement?.headSha, snapshot.headSha);
       assert.equal(result.data?.retirement?.queued, false);
       assert.equal(result.data?.actionAdmission?.command, command);

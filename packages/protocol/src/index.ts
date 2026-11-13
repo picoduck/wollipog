@@ -457,7 +457,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   workflowDecisionActionReconciliation: 153,
   /** v269 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
   workflowDecisionWithdrawal: 269,
-  workflowDecisionRetirement: 367,
+  workflowDecisionRetirement: 369,
   /** v281 owner decisions (#4064): a Full Control root's typed question for its campaign's owner,
    * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
    * root's runner by the control plane and against the control plane by the runner. */

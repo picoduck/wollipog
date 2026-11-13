@@ -16818,15 +16818,18 @@ export class SessionsService {
         (!byRequester && (!this.workflowDecisionRelationship(callerSessionId, requesterId) ||
           !currentCaller.parentControlPolicy || !this.workflowDecisionAuthorityCurrent(currentCaller,
             currentCaller.parentControlPolicy, current)))) return fail("workflow decision changed during retirement", 409);
+    const controllerBefore = this.db.getSession(decision.controllingSessionId);
     const now = Date.now();
     const retired = this.db.retireWorkflowDecision(decision, { bySessionId: callerSessionId, reason,
       observedAt: now, repository: snapshot.repository, pullRequest: snapshot.pullRequest,
       headSha: snapshot.headSha, state: "OPEN", queued: false });
     if (!retired) return fail("workflow decision changed during retirement", 409);
     this.recordWorkflowDecisionAudit(retired, "revoked", { kind: "agent", id: callerSessionId }, now, reason);
+    this.recordApprovedAuthorityRemovalContinuation(retired, callerSessionId, now);
     this.settleWorkflowDecisionPause(requesterId, occurrenceId, now);
     this.hub.sessionChangedById(requesterId);
     this.hub.sessionChangedById(decision.controllingSessionId);
+    this.publishCampaignAttentionTransition(controllerBefore);
     return ok(this.withMergeReviewEvidence(retired));
   }
 
@@ -16897,7 +16900,7 @@ export class SessionsService {
     // The requester withdrawing its own request is inside its turn, so it only loses the card.
     if (!byRequester && written.unheard) this.settleResolvedWorkflowDecision(withdrawn, now, oweResume ? "held" : null);
     else this.settleWorkflowDecisionPause(requesterId, occurrenceId, now);
-    if (decision.status === "approved") this.recordApprovedWithdrawalContinuation(withdrawn, callerSessionId, now);
+    if (decision.status === "approved") this.recordApprovedAuthorityRemovalContinuation(withdrawn, callerSessionId, now);
     this.hub.sessionChangedById(requesterId);
     if (!byRequester) this.hub.sessionChangedById(callerSessionId);
     this.publishCampaignAttentionTransition(controllerBefore);
@@ -16907,7 +16910,7 @@ export class SessionsService {
   /** An approved grant is not a pending request, so retiring it removes nothing from the campaign's
    * projection. A withdrawal anyone but the campaign's Orchestrator made still reaches it, as a
    * `request_resolved` that names the withdrawal (#3917); its own wakes nobody, as with #3083. */
-  private recordApprovedWithdrawalContinuation(decision: WorkflowDecisionView, callerSessionId: string, now: number): void {
+  private recordApprovedAuthorityRemovalContinuation(decision: WorkflowDecisionView, callerSessionId: string, now: number): void {
     const requester = this.db.getSession(decision.sessionId);
     if (!requester || (!requester.parentSessionId && sessionRole(requester) !== "orchestrator")) return;
     try {
@@ -16915,7 +16918,7 @@ export class SessionsService {
       if (typeof campaign !== "object" || !campaign.hasPolicy || campaign.id === callerSessionId) return;
       const token = campaignRequestToken("typed", requester.id, decision.occurrenceId);
       this.db.recordCampaignContinuationEvents([{
-        eventId: `request-withdrawn:${campaign.id}:${token}`,
+        eventId: `request-${decision.retirement ? "retired" : "withdrawn"}:${campaign.id}:${token}`,
         campaignSessionId: campaign.id,
         kind: "request_resolved",
         occurrenceId: token,

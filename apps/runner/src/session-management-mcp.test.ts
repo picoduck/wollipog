@@ -344,7 +344,7 @@ test("retire_workflow_decision posts to the caller's own path and refuses an old
     deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionRetirement - 1;
     const old = await callTool(deps, "retire_workflow_decision", { occurrenceId: "workflow_1", reason: "Superseded." });
     assert.equal(old.isError, true);
-    assert.match(resultText(old), /"requiredControlPlaneProtocolVersion":367/u);
+    assert.match(resultText(old), /"requiredControlPlaneProtocolVersion":369/u);
     assert.equal(calls.length, count, "nothing reaches an older control plane");
   }
 });

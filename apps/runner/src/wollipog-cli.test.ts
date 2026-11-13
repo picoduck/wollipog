@@ -1666,7 +1666,7 @@ test("CLI withdrawal forwards the exact reason and target, and refuses a pre-v26
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")), "an older control plane is never sent the withdrawal");
 });
 
-test("CLI retirement forwards the exact reason and target, and refuses a pre-v367 control plane (#4533)", async () => {
+test("CLI retirement forwards the exact reason and target, and refuses a pre-v369 control plane (#4533)", async () => {
   const calls: Array<{ url: string; body?: string }> = [];
   let version = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionRetirement;
   const fetch: McpFetch = async (url, init) => {

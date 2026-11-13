@@ -3030,7 +3030,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "retire_workflow_decision",
-    description: "Retire an armed pr_merge after the server proves its approved head is open and outside the merge queue. Removes authority only; preserves admission and forge evidence for later merge reconciliation. Omit sessionId for self; the controlling Orchestrator may retire a decision it owns. Requires protocol v367.",
+    description: "Retire an armed pr_merge after the server proves its approved head is open and outside the merge queue. Removes authority only; preserves admission and forge evidence for later merge reconciliation. Omit sessionId for self; the controlling Orchestrator may retire a decision it owns. Requires protocol v369.",
     inputSchema: {
       type: "object",
       properties: {
