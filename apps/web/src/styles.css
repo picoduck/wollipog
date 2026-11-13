@@ -20452,4 +20452,6 @@ a.tab { text-decoration: none; }
 
 .campaign-status:has(.campaign-section-index) {
   padding-top: 0;
+  /* Explicit list memory owns restoration; late index registration must not move its anchor. */
+  overflow-anchor: none;
 }
