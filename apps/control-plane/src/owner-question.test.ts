@@ -203,8 +203,10 @@ test("new child questions require capable peers, distinct labels and credential 
       assert.equal(uncertain.data.authorityEvaluation?.reason, "credential_screen_review");
       const card = pendingRequests(h.db.getSession("child")!.pendingApproval).find((entry) => entry.occurrenceId === uncertain.data!.occurrenceId)!;
       assert.equal(presentOwnerQuestionRequest(card).kind, "workflow_decision", "classification is not a question answer");
-      assert.equal(h.svc.answerQuestion("child", uncertain.data.occurrenceId, { [OWNER_QUESTION_ANSWER_ID]: "Use a broker." },
-        h.owner, "submit", undefined, uncertain.data.occurrenceId).status, 409);
+      const refusal = h.svc.answerQuestion("child", uncertain.data.occurrenceId, { [OWNER_QUESTION_ANSWER_ID]: "Use a broker." },
+        h.owner, "submit", undefined, uncertain.data.occurrenceId);
+      assert.equal(refusal.status, 409);
+      assert.match(refusal.error!, /campaign owner must classify.*Campaign Status/u);
     } finally { h.db.close(); }
   }
 });
