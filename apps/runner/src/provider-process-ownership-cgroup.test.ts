@@ -18,7 +18,7 @@ test("the bootstrap rehearsal reaches real daemon registration with isolated emp
 });
 
 for (const [shape, proof] of [["same", "valid"], ["group", "valid"], ["session", "valid"],
-  ["session", "inode"], ["session", "user"], ["session", "live-runner"], ["session", "pid-reuse"]]) {
+  ["session", "inode"], ["session", "user"], ["session", "live-runner"], ["session", "pid-reuse"], ["session", "retired-unit"]]) {
   test(`real runner bootstrap checks ${proof} ownership of a ${shape} descendant before registration`, {
     skip: process.platform !== "linux", timeout: 40_000,
   }, async t => {

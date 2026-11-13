@@ -72,27 +72,35 @@ export class LinuxCgroupBoundary {
   private admitted: Promise<boolean>;
   private admit!: (value: boolean) => void;
   private removed = false;
-  private released: Array<() => void> = [];
+  private released: Array<() => boolean | void> = [];
   private root?: ChildProcess;
+  private rootClosed = false;
 
   constructor(readonly identity: Readonly<LinuxCgroupIdentity>, private readonly io: LinuxCgroupBoundaryIo) {
     this.admitted = new Promise((resolve) => { this.admit = resolve; });
   }
 
   /** Private ownership journals follow the whole boundary, never just the root's exit. */
-  onReleased(callback: () => void): void {
+  onReleased(callback: () => boolean | void): void {
     if (this.removed) callback();
     else this.released.push(callback);
   }
 
-  private notifyReleased(): void {
-    for (const callback of this.released.splice(0)) callback();
+  private notifyReleased(): boolean {
+    this.released = this.released.filter(callback => {
+      try { return callback() === false; } catch { return true; }
+    });
+    return this.released.length === 0;
   }
 
   /** The helper's private pipe is closed before exec. Empty-before-join is never an empty-tree
    * proof, even if the caller disposes synchronously immediately after spawn returns. */
   bind(child: ChildProcess): void {
     this.root = child;
+    child.once("close", () => {
+      this.rootClosed = true;
+      void this.releaseIfEmpty();
+    });
     const pipe = child.stdio[4] as Readable | null;
     const settle = (accepted: boolean) => this.admit(accepted);
     if (!pipe) { settle(false); return; }
@@ -124,16 +132,19 @@ export class LinuxCgroupBoundary {
     // tasks have passed user-code execution but may not yet show Z in procfs: cgroup_exit()
     // precedes exit_notify(). See docs/linux-cgroup-exit-proof.md. A failed rmdir (e.g. retained
     // empty child cgroups) keeps the identity available but not the fd.
+    // A durable journal unlink precedes kernel removal. A failed callback keeps the
+    // empty boundary available so startup never loses the identity needed for proof.
+    if (!this.notifyReleased()) return false;
     try { this.io.remove(); } catch { /* empty boundary retained for later recovery */ }
     this.removed = true;
     this.io.close();
-    this.notifyReleased();
     return true;
   }
 
   async releaseIfEmpty(): Promise<boolean> {
     if (this.removed) return true;
-    if (!await this.waitForAdmission()) return false;
+    const admitted = await this.waitForAdmission();
+    if (!admitted && !this.rootClosed) return false;
     if (this.removed) return true;
     try { return this.io.populated() ? false : this.finish(); } catch { return false; }
   }
@@ -175,10 +186,10 @@ export class LinuxCgroupBoundary {
   cancelSpawn(): void {
     if (this.removed) return;
     this.admit(false);
+    if (!this.notifyReleased()) return;
     this.removed = true;
     try { this.io.remove(); } catch { /* preserve unexpected evidence */ }
     this.io.close();
-    this.notifyReleased();
   }
 }
 

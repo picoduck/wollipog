@@ -53,7 +53,10 @@ authorize a signal. The private records are never logged or projected to the pro
 On delegated Linux cgroup v2 launches, the complete version-2 record also binds the launch
 leaf's boot, hierarchy path and kernel inode to that session. Descendants stay in this boundary
 when they change process groups or create sessions. Root exit does not remove this record;
-only the live runner's whole-boundary release proof does. Older readers reject version 2.
+only the live runner's whole-boundary release proof does. Journal unlink is made durable before
+the empty leaf is removed. A failed unlink preserves that kernel proof for retry. Older readers
+reject version 2. The record also carries its enclosing delegated unit when available, using
+the same unit identity as provider-HOME leases.
 
 Before startup registration admits any commands, the new runner examines prior-generation
 records belonging to this same runner and OS user. A still-live recording runner, the current
@@ -72,13 +75,16 @@ members and child cgroups. Every member's pidfd, user, start time, membership, b
 runner liveness are checked before KILL. This path never uses `cgroup.kill`, which would also
 signal an unproven member. Recursive kernel emptiness is required before the journal is removed.
 A changed or missing boundary, foreign user, live prior runner or uninspectable member keeps
-the refusal. As with HOME containment proof, deliberate same-user migration out of the recorded
+the refusal. An obsolete missing leaf can be pruned without signalling only when its recorded
+enclosing unit has also retired and its launcher is gone or irreversibly exited. A missing leaf
+under a still-live exact unit, or without recorded unit evidence, remains unproven. As with HOME containment proof, deliberate same-user migration out of the recorded
 boundary is outside the lifecycle contract; escaped unknown survivors retain their independent
 HOME refusal. The startup event reports only outcome counts and session IDs, never ownership
 records, paths or kernel identities.
 
-Failed launches release their own admission intents on synchronous abort or child close, even
-when spawn supplied no PID. Startup can prune a private, valid intent from a dead prior runner
+Failed launches release their own admission intents on synchronous abort or, for a contained
+launch, once the launcher has closed and recursive kernel emptiness is proven, even if join
+acknowledgement failed. Startup can prune a private, valid intent from a dead prior runner
 without signalling anything, and can recover a complete `.pending` publication interrupted
 before its rename. Obsolete records whose exact process identity is proved gone are pruned too.
 Pruning journal metadata never removes the independent HOME lease evidence or admits a signal.

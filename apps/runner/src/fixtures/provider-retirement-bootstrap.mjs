@@ -7,6 +7,8 @@ import { startFakeControlPlane } from "./fake-control-plane.ts";
 import { transportRunnerEnvironment } from "./transport-runner-environment.ts";
 import { linuxLeaseProcessProbe, proveLeaseAbandoned } from "../provider-home-lease-evidence.ts";
 import { ProviderHomeLeaseRegistry } from "../provider-home-lease.ts";
+import { ProviderProcessOwnership } from "../provider-process-ownership.ts";
+import { randomUUID } from "node:crypto";
 const [root, helper, shape, proof = "valid"] = process.argv.slice(2);
 const refused = ["inode", "user", "live-runner"].includes(proof);
 const timer = setTimeout(() => { throw new Error("bootstrap rehearsal timed out"); }, 25_000);
@@ -14,6 +16,11 @@ const cp = await startFakeControlPlane({ onMessage: (_socket, message) => {
   if (message.type !== "register") return;
   const records = readdirSync(join(root, "runner-data/provider-processes-v1"));
   assert.equal(records.length, refused ? 1 : 0, "unproven ownership must remain recorded");
+  if (proof === "retired-unit") {
+    const admission = new ProviderProcessOwnership(join(root, "runner-data/provider-processes-v1"), "runner").owner("s_after_pruning").prepare();
+    admission.aborted();
+    assert.deepEqual(readdirSync(join(root, "runner-data/provider-processes-v1")), []);
+  }
   if (shape === "empty") {
     clearTimeout(timer);
     process.stdout.write("bootstrap-empty-ready\n");
@@ -51,6 +58,14 @@ const original = readFileSync(recordPath, "utf8");
 writeFileSync(join(root, "original-record.json"), original, { mode: 0o600 });
 if (proof !== "valid") {
   const record = JSON.parse(original);
+  if (proof === "retired-unit") {
+    assert.ok(record.containment.unit, "systemd validation records its enclosing unit");
+    assert.equal((await new ProviderProcessOwnership(journal, "runner").recover()).retired, 1);
+    // Recreate the durable pre-crash records after their leaf was removed, with the
+    // previous incarnation of the enclosing unit. Its current kernel inode differs.
+    record.containment.unit.inode = String(BigInt(record.containment.unit.inode) + 1n);
+    for (let index = 0; index < 1023; index++) writeFileSync(join(journal, `${randomUUID()}.json`), JSON.stringify(record), { mode: 0o600 });
+  }
   if (proof === "inode") record.containment.inode = String(BigInt(record.containment.inode) + 1n);
   if (proof === "user") record.uid++;
   if (proof === "live-runner") {
@@ -61,7 +76,7 @@ if (proof !== "valid") {
     record.pid = process.ppid;
     record.startTime = String(BigInt(readFileSync(`/proc/${process.ppid}/stat`, "utf8").split(")").at(-1).trim().split(/\s+/)[19]) + 1n);
   }
-  writeFileSync(recordPath, JSON.stringify(record));
+  writeFileSync(recordPath, JSON.stringify(record), { mode: 0o600 });
 }
 }
 const config = join(root, "runner.json");
