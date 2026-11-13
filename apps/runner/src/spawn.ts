@@ -977,7 +977,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     });
     child.once("close", dispose);
   }
-  ownership?.spawned(child);
+  ownership?.spawned(child, containment);
   child.once("close", () => {
     child.closeObserved = true;
     if (child.posixBoundary) {

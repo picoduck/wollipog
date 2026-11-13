@@ -47,9 +47,13 @@ owner-only process ownership under the runner's private `provider-processes-v1` 
 The enclosing data-directory lease is acquired for the attested runner/control-plane identity
 before any retirement is considered; foreign data-directory ownership is never adopted here.
 An admission intent is durable before spawn; the runner captures its child's kernel start time
-synchronously before the event loop can reap and recycle it. Every record binds one process to
+synchronously before the event loop can reap and recycle it. Every record binds one provider launch to
 its session, this runner's identity and its random startup generation. Partial records never
-authorize a signal. The records and their fields are never logged or projected to the provider.
+authorize a signal. The private records are never logged or projected to the provider.
+On delegated Linux cgroup v2 launches, the complete version-2 record also binds the launch
+leaf's boot, hierarchy path and kernel inode to that session. Descendants stay in this boundary
+when they change process groups or create sessions. Root exit does not remove this record;
+only the live runner's whole-boundary release proof does. Older readers reject version 2.
 
 Before startup registration admits any commands, the new runner examines prior-generation
 records belonging to this same runner and OS user. A still-live recording runner, the current
@@ -62,6 +66,17 @@ period, followed by KILL through the same handle if necessary; kernel exit must 
 The worker never sends a signal through a numeric PID. Startup work has record and elapsed-time
 bounds; anything beyond them is retained.
 
+For a recorded cgroup tree, startup pins and verifies that exact kernel directory, retires the
+recorded launcher (including a crash before its join acknowledgement), then traverses its
+members and child cgroups. Every member's pidfd, user, start time, membership, boot and prior
+runner liveness are checked before KILL. This path never uses `cgroup.kill`, which would also
+signal an unproven member. Recursive kernel emptiness is required before the journal is removed.
+A changed or missing boundary, foreign user, live prior runner or uninspectable member keeps
+the refusal. As with HOME containment proof, deliberate same-user migration out of the recorded
+boundary is outside the lifecycle contract; escaped unknown survivors retain their independent
+HOME refusal. The startup event reports only outcome counts and session IDs, never ownership
+records, paths or kernel identities.
+
 Failed launches release their own admission intents on synchronous abort or child close, even
 when spawn supplied no PID. Startup can prune a private, valid intent from a dead prior runner
 without signalling anything, and can recover a complete `.pending` publication interrupted
@@ -71,9 +86,9 @@ Pruning journal metadata never removes the independent HOME lease evidence or ad
 Deploying this version retires proven recorded orphan providers at the next runner startup.
 A version that has never recorded ownership cannot supply retrospective proof: existing unrecorded providers are left
 untouched. Other platforms retain the existing behavior until an equivalent kernel primitive is
-implemented. Unrecorded descendants and ambiguous survivors continue to block HOME recovery.
-Only the recorded root is signalled: unrecorded tool children in the same or another process
-group can survive its retirement and intentionally keep the owner relaunch blocked. This does not delete
+implemented. Without a recorded cgroup, only the recorded root is signalled: unrecorded tool
+children in the same or another process group can survive its retirement and intentionally
+keep the owner relaunch blocked. Ambiguous survivors continue to block HOME recovery. This does not delete
 lease evidence, exclude processes from the production scan or weaken its
 complete-tree standard. No agent management route invokes startup retirement.
 

@@ -72,10 +72,21 @@ export class LinuxCgroupBoundary {
   private admitted: Promise<boolean>;
   private admit!: (value: boolean) => void;
   private removed = false;
+  private released: Array<() => void> = [];
   private root?: ChildProcess;
 
   constructor(readonly identity: Readonly<LinuxCgroupIdentity>, private readonly io: LinuxCgroupBoundaryIo) {
     this.admitted = new Promise((resolve) => { this.admit = resolve; });
+  }
+
+  /** Private ownership journals follow the whole boundary, never just the root's exit. */
+  onReleased(callback: () => void): void {
+    if (this.removed) callback();
+    else this.released.push(callback);
+  }
+
+  private notifyReleased(): void {
+    for (const callback of this.released.splice(0)) callback();
   }
 
   /** The helper's private pipe is closed before exec. Empty-before-join is never an empty-tree
@@ -116,6 +127,7 @@ export class LinuxCgroupBoundary {
     try { this.io.remove(); } catch { /* empty boundary retained for later recovery */ }
     this.removed = true;
     this.io.close();
+    this.notifyReleased();
     return true;
   }
 
@@ -166,6 +178,7 @@ export class LinuxCgroupBoundary {
     this.removed = true;
     try { this.io.remove(); } catch { /* preserve unexpected evidence */ }
     this.io.close();
+    this.notifyReleased();
   }
 }
 

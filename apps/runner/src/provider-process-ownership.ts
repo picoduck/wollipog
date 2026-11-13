@@ -1,16 +1,19 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, opendirSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, posix } from "node:path";
 import { linuxCgroupHelper } from "./linux-cgroup-helper.js";
+import { currentCgroupDirectory, type LinuxCgroupBoundary, type LinuxCgroupIdentity } from "./linux-cgroup.js";
+import { isLeaseContainmentEvidence } from "./provider-home-lease-containment.js";
 import { linuxLeaseProcessProbe } from "./provider-home-lease-evidence.js";
 
 type Process = { pid?: number; once(event: "close", callback: () => void): unknown };
-export interface ProviderProcessOwner { prepare(): { spawned(child: Process): void; aborted(): void } }
+export interface ProviderProcessOwner { prepare(): { spawned(child: Process, containment?: LinuxCgroupBoundary): void; aborted(): void } }
 interface Ownership {
-  version: 1; runnerId: string; generation: string; sessionId: string;
+  version: 1 | 2; runnerId: string; generation: string; sessionId: string;
   bootId: string; uid: number; runnerPid: number; runnerStartTime: string;
   pid?: number; startTime?: string;
+  containment?: Readonly<LinuxCgroupIdentity>;
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const START = /^[1-9][0-9]{0,19}$/u;
@@ -72,9 +75,11 @@ export class ProviderProcessOwnership {
 
   private publish(file: string, record: Ownership, initial: boolean): void {
     this.checkDirectory();
+    const bytes = JSON.stringify(record);
+    if (Buffer.byteLength(bytes) > 4096) throw new Error("provider ownership record exceeds its private bound");
     const target = initial ? file : `${file}.pending`;
     const fd = openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    try { writeFileSync(fd, JSON.stringify(record)); fsyncSync(fd); } finally { closeSync(fd); }
+    try { writeFileSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
     if (!initial) renameSync(target, file);
     const parent = openSync(this.directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     try { fsyncSync(parent); } finally { closeSync(parent); }
@@ -105,15 +110,19 @@ export class ProviderProcessOwnership {
         this.discard(file, published);
         this.discard(`${file}.pending`, published);
       };
-      return { spawned: (child) => {
+      return { spawned: (child, containment) => {
         // Even ENOENT (no pid) and a failed completion write get a close notification.
-        child.once("close", cleanup);
+        if (containment) containment.onReleased(cleanup);
+        else child.once("close", cleanup);
         // This synchronous snapshot is taken before the event loop can reap/recycle our child.
         try {
           const startTime = child.pid ? probe.startTime(child.pid) : null;
           // Preserve spawn's asynchronous ENOENT/error contract. The intent remains unproven.
           if (!child.pid || !startTime) return;
-          const complete = { ...record, pid: child.pid, startTime };
+          // Version 2 is rejected by old readers rather than granting root-only retirement
+          // authority over a tree whose evidence must outlive that root.
+          const complete: Ownership = { ...record, pid: child.pid, startTime,
+            ...(containment ? { version: 2, containment: containment.identity } : {}) };
           published.push(JSON.stringify(complete));
           this.publish(file, complete, false);
         } catch { /* Interrupted evidence is retained, never promoted into signal authority. */ }
@@ -168,7 +177,10 @@ export class ProviderProcessOwnership {
   }
 
   private valid(v: Ownership): boolean {
-    return !!v && v.version === 1 && typeof v.runnerId === "string" && typeof v.sessionId === "string" &&
+    return !!v && (v.version === 1 && v.containment === undefined || v.version === 2 &&
+      v.pid !== undefined && v.startTime !== undefined &&
+      isLeaseContainmentEvidence(v.containment) && v.containment.kind === "linux-cgroup-v2" &&
+      !Object.hasOwn(v.containment, "unit") && v.containment.bootId === v.bootId) && typeof v.runnerId === "string" && typeof v.sessionId === "string" &&
       /^[\w.-]{1,200}$/u.test(v.sessionId) && typeof v.generation === "string" && UUID.test(v.generation) &&
       typeof v.bootId === "string" && UUID.test(v.bootId) && Number.isSafeInteger(v.uid) && v.uid >= 0 &&
       Number.isSafeInteger(v.runnerPid) && v.runnerPid > 1 && START.test(v.runnerStartTime) &&
@@ -177,16 +189,42 @@ export class ProviderProcessOwnership {
   }
 
   private async retire(record: Ownership): Promise<"retired" | "gone" | "unproven"> {
+    let directoryFd: number | undefined;
+    let directory: string | undefined;
     try {
+      if (record.bootId !== this.probe!.bootId()) return "gone";
+      if (record.containment) {
+        // Resolve only the recorded hierarchy through this process's real mount table.
+        // The native worker rechecks the inherited fd's filesystem/inode and every member.
+        const mount = currentCgroupDirectory(readFileSync("/proc/self/mountinfo", "utf8"), readFileSync("/proc/self/cgroup", "utf8"));
+        if (!mount || mount.mountRoot !== record.containment.mountRoot) return "unproven";
+        directory = posix.join(mount.mountPoint, record.containment.cgroupPath);
+        directoryFd = openSync(directory,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      }
       const helper = linuxCgroupHelper(dirname(this.directory));
-      return await new Promise<"retired" | "gone" | "unproven">((resolve) => {
-        const child = spawn(helper, ["--retire-process"], { env: {}, stdio: ["pipe", "ignore", "ignore"] });
-        child.stdin.on("error", () => {});
-        child.stdin.end(`${record.bootId}\n${record.pid}\n${record.startTime}\n${record.uid}\n${record.runnerPid}\n${record.runnerStartTime}\n`);
+      const result = await new Promise<"retired" | "gone" | "unproven">((resolve) => {
+        const child = spawn(helper, [record.containment ? "--retire-boundary" : "--retire-process"], {
+          env: {}, stdio: ["pipe", "ignore", "ignore", ...(directoryFd === undefined ? [] : [directoryFd])],
+        });
+        child.stdin!.on("error", () => {});
+        child.stdin!.end(`${record.bootId}\n${record.pid}\n${record.startTime}\n${record.uid}\n${record.runnerPid}\n${record.runnerStartTime}\n` +
+          (record.containment ? `${record.containment.inode}\n${posix.join(record.containment.mountRoot, record.containment.cgroupPath)}\n` : ""));
         const timer = setTimeout(() => { child.kill("SIGKILL"); }, 5000);
         child.once("error", () => { clearTimeout(timer); resolve("unproven"); });
         child.once("close", (code) => { clearTimeout(timer); resolve(code === 0 ? "retired" : code === 4 ? "gone" : "unproven"); });
       });
+      if (result === "retired" && directoryFd !== undefined && directory) {
+        // Best-effort cleanup only after native recursive emptiness proof. A changed or
+        // populated cgroup cannot be removed; empty nested cgroups can be left in place.
+        try {
+          const opened = fstatSync(directoryFd, { bigint: true });
+          const named = lstatSync(directory, { bigint: true });
+          if (named.ino === opened.ino && named.dev === opened.dev && !named.isSymbolicLink()) rmdirSync(directory);
+        } catch { /* retain the empty kernel boundary */ }
+      }
+      return result;
     } catch { return "unproven"; }
+    finally { if (directoryFd !== undefined) closeSync(directoryFd); }
   }
 }

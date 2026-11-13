@@ -88,6 +88,8 @@ test("an empty cgroup before admission is never an early-release proof", async (
 
 test("early release and shutdown use the same kernel proof without a process scan", async () => {
   const { boundary: kernel, state, pipe } = controlledBoundary();
+  let released = 0;
+  kernel.onReleased(() => { released++; });
   pipe.end("1");
   const owner = {};
   const boundary = new PosixProcessBoundary(100, owner, "marker", {
@@ -96,10 +98,12 @@ test("early release and shutdown use the same kernel proof without a process sca
   assert.equal(boundary.proofStandard, "linux-cgroup-v2");
   assert.strictEqual(boundary.containmentIdentity, identity);
   assert.equal(await boundary.releaseIfEmpty(), false);
+  assert.equal(released, 0, "a populated boundary retains its ownership journal");
   assert.deepEqual(await Promise.all(terminatePosixProcessBoundaries(owner)), [true]);
   assert.equal(state.kills, 1);
   assert.equal(state.closed, 1);
   assert.equal(await boundary.terminate(), true);
+  assert.equal(released, 1, "whole-boundary proof releases ownership exactly once");
   assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
 });
 
@@ -211,6 +215,14 @@ test("native launcher refuses a non-cgroup descriptor before executing provider 
   assert.equal(result.status, 125);
   assert.equal(result.stdout, "");
   assert.match(result.stderr, /provider was not executed/u);
+});
+
+test("startup tree retirement refuses a non-cgroup descriptor without signal authority", { skip: process.platform !== "linux" }, () => {
+  const result = spawnSync(linuxCgroupHelper(), ["--retire-boundary"], {
+    encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(result.status, 125);
+  assert.equal(result.stdout, "");
 });
 
 test("a removed temporary helper is safely restaged; an unexecutable root can fall back to data", { skip: process.platform !== "linux" }, (t) => {

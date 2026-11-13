@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync, chmodSync, statSync, symlinkSync, unlinkSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,7 @@ import { ProviderProcessOwnership } from "./provider-process-ownership.js";
 import { linuxCgroupHelper } from "./linux-cgroup-helper.js";
 import { linuxLeaseProcessProbe, proveLeaseAbandoned } from "./provider-home-lease-evidence.js";
 import { spawnAgent } from "./spawn.js";
+import type { LinuxCgroupBoundary } from "./linux-cgroup.js";
 
 const linux = process.platform === "linux";
 type Manifest = { bootId: string; uid: number; runnerPid: number; runnerStartTime: string; marker: string;
@@ -58,6 +60,14 @@ for (const mode of ["tree", "tree-same-group"] as const) {
   test(`an unrecorded marked descendant (${mode}) survives root retirement and still blocks the production HOME proof`, { skip: !linux }, async () => {
     const f = fixture(mode);
     try {
+      // Rehearse legacy records explicitly even on a delegated host. They grant no
+      // authority over descendants and must retain the marker-based HOME refusal.
+      for (const path of f.records) {
+        const record = JSON.parse(readFileSync(path, "utf8"));
+        delete record.containment;
+        record.version = 1;
+        writeFileSync(path, JSON.stringify(record));
+      }
       const descendant = f.manifest.children.find(child => child.sessionId === "grandchild")!;
       assert.equal((await new ProviderProcessOwnership(f.directory, "runner-test").recover()).retired, 2);
       assert.equal(f.alive(descendant), true, "ancestry or an inherited marker alone grants no session-bound signal authority");
@@ -68,6 +78,27 @@ for (const mode of ["tree", "tree-same-group"] as const) {
     } finally { f.close(); }
   });
 }
+
+test("a contained journal survives root close and is removed only by whole-boundary release", { skip: !linux }, () => {
+  const directory = mkdtempSync(join(tmpdir(), "owned-boundary-lifetime-"));
+  try {
+    const registry = new ProviderProcessOwnership(directory, "runner");
+    let release!: () => void;
+    const containment = { identity: { kind: "linux-cgroup-v2", bootId: linuxLeaseProcessProbe()!.bootId(),
+      mountRoot: "/", cgroupPath: "fixture/provider", inode: "42" },
+      onReleased: (callback: () => void) => { release = callback; } } as unknown as LinuxCgroupBoundary;
+    const child = Object.assign(new EventEmitter(), { pid: process.pid });
+    registry.owner("s_lifetime")!.prepare().spawned(child, containment);
+    const name = readdirSync(directory)[0]!;
+    const record = JSON.parse(readFileSync(join(directory, name), "utf8"));
+    assert.equal(record.version, 2);
+    assert.deepEqual(record.containment, containment.identity);
+    child.emit("close");
+    assert.deepEqual(readdirSync(directory), [name], "a surviving descendant retains durable ownership");
+    release();
+    assert.deepEqual(readdirSync(directory), []);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
 
 test("PID reuse identity mismatch retains the unrelated process and handles the other session", { skip: !linux }, async () => {
   const f = fixture();
@@ -85,7 +116,7 @@ test("PID reuse identity mismatch retains the unrelated process and handles the 
   } finally { f.close(); }
 });
 
-for (const kind of ["runner", "user", "legacy", "permissions", "symlink"] as const) {
+for (const kind of ["runner", "user", "legacy", "permissions", "symlink", "missing-boundary"] as const) {
   test(`unproven ${kind} ownership is kept without signalling`, { skip: !linux }, async () => {
     const f = fixture();
     try {
@@ -93,7 +124,12 @@ for (const kind of ["runner", "user", "legacy", "permissions", "symlink"] as con
         const record = JSON.parse(readFileSync(path, "utf8"));
         if (kind === "runner") record.runnerId = "other-runner";
         if (kind === "user") record.uid++;
-        if (kind === "legacy") delete record.startTime;
+        if (kind === "legacy") { delete record.startTime; delete record.containment; record.version = 1; }
+        if (kind === "missing-boundary") {
+          record.version = 2;
+          record.containment = { kind: "linux-cgroup-v2", bootId: record.bootId, mountRoot: "/",
+            cgroupPath: `missing-${randomUUID()}`, inode: "42" };
+        }
         writeFileSync(path, JSON.stringify(record));
         if (kind === "permissions") chmodSync(path, 0o644);
         if (kind === "symlink") {
