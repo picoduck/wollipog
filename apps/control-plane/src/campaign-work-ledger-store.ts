@@ -1291,6 +1291,17 @@ export class CampaignWorkLedgerStore {
     return { changed };
   }
 
+  /** Server-recorded root creation includes scheduled tasks, which record as the root.
+   * Unknown historical attribution and a cleared issue never establish investigation provenance. */
+  issueLessCampaignOrigin(campaignId: string, workItemId: string): boolean {
+    return Boolean(this.stmt(`SELECT 1 FROM campaign_work_items item
+      WHERE item.id=? AND item.campaign_session_id=? AND item.created_by_session_id=?
+        AND item.issue_number IS NULL AND item.origin='original'
+        AND NOT EXISTS (SELECT 1 FROM campaign_work_legacy_items WHERE work_item_id=item.id)
+        AND NOT EXISTS (SELECT 1 FROM campaign_work_item_issue_history WHERE work_item_id=item.id)`)
+      .get(workItemId, campaignId, campaignId));
+  }
+
   /* ------------------------------ record_campaign_plan ------------------------------ */
 
   recordPlan(

@@ -77,7 +77,7 @@ import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compat
   everyOutstandingScopeDecision, outstandingDecisionsBearOnScopeRequest, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
 import { boundedDecisionString, boundedDecisionStringProblem, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
 import { needsCampaignIssueScopeSeed } from "./campaign-issue-scope-seed.js";
-import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureCampaignPullRequests, closureCrossRepositoryDelivery, closureCrossRepositoryPullRequests, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
+import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, heldCampaignIssues, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureCampaignPullRequests, closureCrossRepositoryDelivery, closureCrossRepositoryPullRequests, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, followUpOriginEvidence, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
   CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES, type CampaignPullRequestRef } from "@wollipog/protocol";
 import { forgeRefKey, type ForgeReadResult } from "./campaign-forge-observations.js";
@@ -12670,7 +12670,7 @@ export class SessionsService {
       // approves and the requester consumes what it sent (#3918). Only the server's own
       // issueAdmission makes a publication bounded; a named recommendation never does.
       return this.createWorkflowDecision(sessionId, request, canAccess,
-        "failure" in admitted ? { publicationAdmissionFailure: admitted.failure } : undefined);
+        "failure" in admitted ? { publicationAdmissionFailure: admitted.failure, publicationAdmissionReason: admitted.reason } : undefined);
     }
     if (normalized.ok && normalized.data?.category === "pr_merge") {
       return this.createMergeDecision(sessionId, request, normalized.data, canAccess);
@@ -12982,6 +12982,10 @@ export class SessionsService {
     if (decision.authority !== "orchestrator" || !snapshot.issueAdmission) return null;
     const evidence = publicationEvidence(this.db, parent, snapshot);
     if (!evidence) return "Publication lineage, capacity or disposition changed before consumption";
+    const requester = this.db.getSession(decision.sessionId);
+    if (!requester) return "Publication requester is no longer available";
+    const origins = followUpOriginEvidence(this.db, parent, evidence.recommendation.originWorkItemIds, requester.runnerId);
+    if ("failure" in origins) return origins.reason;
     // The same inspection as admission, through the same repository's runner and Location (#4119).
     const publicationDigest = await this.inspectCampaignPublicationDigest(parent, snapshot);
     if (!publicationDigest) return "Fresh duplicate inspection failed; no publication grant was consumed";
@@ -13169,8 +13173,10 @@ export class SessionsService {
     const boundaryRevision = issueBoundary(root)!.revision;
     if (new Set(snapshot.labels).size !== snapshot.labels.length) return refused("unsafe_payload", boundaryRevision);
     const checked = publicationEvidenceCheck(this.db, root, snapshot);
-    if (!("evidence" in checked)) return refused(checked.failure, boundaryRevision);
+    if (!("evidence" in checked)) return refused(checked.failure, boundaryRevision, "reason" in checked && typeof checked.reason === "string" ? checked.reason : undefined);
     const evidence = checked.evidence;
+    const origins = followUpOriginEvidence(this.db, root, evidence.recommendation.originWorkItemIds, caller.runnerId);
+    if ("failure" in origins) return refused(origins.failure, boundaryRevision, origins.reason);
     // After the structural floor, the Decision Model checks the follow-up belongs to the work the
     // owner asked for (#4104). It can only refuse: unrelated goes back to the requester with the
     // model's reason, and an uncertain or failed check makes the publication the owner's.
@@ -13190,7 +13196,7 @@ export class SessionsService {
     const boundary = issueBoundary(current);
     if (!boundary || issueEvidenceDigest(publicationEvidence(this.db, current, snapshot)) !== issueEvidenceDigest(evidence)) return refused("evidence_changed", boundaryRevision);
     this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "publication_proposal", sessionId, requestId: request.requestId,
-      controllingSessionId: root.id, boundaryRevision: evidence.boundaryRevision, scopeRevision: evidence.scopeRevision, recommendationId: snapshot.recommendationId, outcome: "admitted", relatedness }));
+      controllingSessionId: root.id, boundaryRevision: evidence.boundaryRevision, scopeRevision: evidence.scopeRevision, recommendationId: snapshot.recommendationId, outcome: "admitted", relatedness, ...(evidence.originBasis ? { originBasis: evidence.originBasis } : {}) }));
     return this.createWorkflowDecision(sessionId, { ...request, resourceKey: `publication:${snapshot.recommendationId}`,
       resourceSnapshot: { ...snapshot, issueAdmission: { ...(supportsRelatedness ? { relatedness } : {}), boundaryRevision: evidence.boundaryRevision,
         evidenceDigest: issueEvidenceDigest({ evidence, publicationDigest }),
@@ -13415,11 +13421,11 @@ export class SessionsService {
       let ownerReview: CampaignScopeOwnerReview | undefined;
       if (!human && boundary && boundary.operations.includes("campaign_issue_scope")) {
         // Each refusal names the one condition that failed, in a fixed sentence and code (#2940).
-        const refuse = (code: CampaignScopeAdmissionFailure, details: Record<string, number> = {}): ServiceResult<WorkflowDecisionView> => {
+        const refuse = (code: CampaignScopeAdmissionFailure, details: Record<string, number> = {}, message?: string): ServiceResult<WorkflowDecisionView> => {
           this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
             boundaryRevision: boundary.revision, scopeRevision: snapshot.expectedRevision, lineage: snapshot.lineage?.kind ?? "none", outcome: "refused", reason: code }));
           const refusal = CAMPAIGN_SCOPE_ADMISSION_REFUSALS[code];
-          return { ok: false, status: refusal.status, error: refusal.message, errorDetails: { code, ...details } };
+          return { ok: false, status: refusal.status, error: message ?? refusal.message, errorDetails: { code, ...details } };
         };
         const excludedReservation = snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined;
         const scopeSize = campaignScopeChangeResult(snapshot).length;
@@ -13492,20 +13498,16 @@ export class SessionsService {
             const bound = scopePublicationRecommendation(this.db, sessionId, publication, addedIssue);
             if ("failure" in bound) return refuse(bound.failure);
             const { recommendation } = bound;
-            // Its origins are in the scope this change starts from, in whichever repository (#4119).
-            const heldScope = latest.orchestratorPolicy?.issueScope;
-            if (!recommendation.originWorkItemIds.length || recommendation.originWorkItemIds.some((id) => {
-              const origin = this.db.campaignWorkLedger.detail(sessionId, id, Date.now())?.issue;
-              return !origin || !heldScope || !campaignScopeHolds(heldScope, origin);
-            })) return refuse("origin_outside_scope");
+            const origins = followUpOriginEvidence(this.db, latest, recommendation.originWorkItemIds);
+            if ("failure" in origins) return refuse(origins.failure, {}, origins.reason);
             const publicationFailure = await this.inspectPublishedScopeIssue(sessionId, grant, addedIssue, Boolean(approval) || Boolean(ownerReview));
             if (publicationFailure) return refuse(publicationFailure === "read_failed" ? "payload_read_failed" : `payload_${publicationFailure}_mismatch`);
             snapshot.verifiedPublications = [{ publicationOccurrenceId: grant.occurrenceId, issue: addedIssue }];
-            evidence = { occurrenceId: grant.occurrenceId, payloadDigest: grant.resourceDigest, issue: addedIssue,
+            evidence = { occurrenceId: grant.occurrenceId, payloadDigest: grant.resourceDigest, issue: addedIssue, ...(origins.originBasis ? { originBasis: origins.originBasis } : {}),
               ...(otherGroup ? { repository: otherGroup.repository } : {}), ...(approval ? { approval } : {}) };
             if (!ownerReview) followUpAdmissionLog = { event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
               boundaryRevision: boundary.revision, scopeRevision: snapshot.expectedRevision, lineage: "follow_up", publicationOccurrenceId: grant.occurrenceId,
-              publicationAuthority: approval ? "human_approval" : "bounded_admission", ...(approval ? { approvalBasis: approval.basis, approvalObjective: approval.objective } : {}), outcome: "admitted" };
+              ...(origins.originBasis ? { originBasis: origins.originBasis } : {}), publicationAuthority: approval ? "human_approval" : "bounded_admission", ...(approval ? { approvalBasis: approval.basis, approvalObjective: approval.objective } : {}), outcome: "admitted" };
           }
         }
         // Only consumed slots survive owner approval; a verified publication settles its own slot.
@@ -15039,6 +15041,7 @@ export class SessionsService {
       /** An Orchestrator's repository addition, inspected by CampaignLocations (#4117). */
       trustedRepositoryAddition?: boolean;
       publicationAdmissionFailure?: CampaignPublicationAdmissionFailure;
+      publicationAdmissionReason?: string;
       /** The resourceKey an admitted publication was requested under, before it was stored under its recommendation (#4066). */
       requestedResourceKey?: string;
       /** The server's own request when a follow-up passes the campaign's approval limit (#2940). */
@@ -15240,7 +15243,7 @@ export class SessionsService {
           : normalized.data.recommendationId ? "authority_unavailable" : "recommendation_missing"
         : undefined);
       if (failure) authorityEvaluation.admissionFailure = failure;
-      if (failure && issueBounded) authorityEvaluation.admissionMessage = CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[failure];
+      if (failure && issueBounded) authorityEvaluation.admissionMessage = internal?.publicationAdmissionReason ?? CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[failure];
     }
     if (authority === "orchestrator") {
       const parentUnsupported = this.capabilityFailure(
