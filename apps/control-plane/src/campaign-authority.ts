@@ -4,6 +4,7 @@ import {
   type OrchestratorCampaignPolicy, type ParentControlPolicy, type PendingApproval, type SessionView, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
+import { matchingTemporaryBranchReceipt, type TemporaryBranchReceipt } from "@wollipog/protocol";
 
 /** Construct human provenance from the authenticated principal, never from request JSON. Used
  * by the later launch integration. This is deliberately unavailable to agent-facing routes. */
@@ -247,6 +248,7 @@ export function evaluateCampaignAuthority(
     /** #4119: `campaignBoundaryRepositoryAt` for the requester's runner and workspace, resolved by
      * the server. Needed only away from the controller's own place; absent there means none. */
     boundaryRepository?: string | null;
+    temporaryBranchReceipts?: readonly TemporaryBranchReceipt[];
   },
   protocol: number | null | undefined,
   request: PendingApproval | WorkflowDecisionResourceSnapshot,
@@ -264,6 +266,14 @@ export function evaluateCampaignAuthority(
   const control = controller.orchestratorPolicy?.control;
   const full = control?.mode === "full_control";
   const snapshot = "category" in request ? request : undefined;
+  if (snapshot?.category === "merged_branch_deletion" && snapshot.merged === false) {
+    if (!runnerSupportsProtocol(protocol, "temporaryBranchReceipts") || !runnerSupportsProtocol(controllerProtocol, "temporaryBranchReceipts")) {
+      return { operation: "merged_branch_deletion", owner: "human", basis: "human_required", reason: "temporary_branch_peer_unsupported" };
+    }
+    if (!matchingTemporaryBranchReceipt(requester.temporaryBranchReceipts, controller.id, requester.id, snapshot)) {
+      return { operation: "merged_branch_deletion", owner: "human", basis: "human_required", reason: "outside_boundary" };
+    }
+  }
   const raw = "requestId" in request ? request : undefined;
   // Only a v230 runner attests worktree containment; an older runner's evidence is unresolved (#2940).
   const pending = raw?.context?.operation?.filesystem?.containment && !runnerSupportsProtocol(protocol, "campaignWorktreeContainment")

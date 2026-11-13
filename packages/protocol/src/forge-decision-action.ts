@@ -88,6 +88,14 @@ export const FORGE_DECISION_ACTION_SUCCESSES: ReadonlySet<ForgeDecisionActionOut
 /** Dispatch attempts one approval allows, successful or not. */
 export const FORGE_DECISION_ACTION_MAX_ATTEMPTS = 5;
 
+/** The control plane's creation RPC budget; agent clients allow additional response time. */
+export const TEMPORARY_BRANCH_CREATION_RPC_TIMEOUT_MS = 120_000;
+
+/** A policy keeps the decision, unlike a capability or boundary verification failure. */
+export function temporaryBranchDecisionKeptByPolicy(reason: unknown): boolean {
+  return reason === "custom_owner" || reason === "owner_kept";
+}
+
 /** The decision's record of what Wollipog did with it (`WorkflowDecisionView.forgeAction`). */
 export interface WorkflowDecisionForgeAction {
   kind: ForgeDecisionActionKind;
@@ -114,6 +122,8 @@ export interface ExecuteWorkflowDecisionRequest {
 }
 
 export type ForgeDecisionAction =
+  | { kind: "temporary_branch_create"; repository: string; branch: string; headSha: string }
+  | { kind: "temporary_branch_deletion"; repository: string; branch: string; headSha: string }
   | { kind: "branch_deletion"; repository: string; branch: string; pullRequest: number; headSha: string; mergeCommitSha: string }
   | { kind: "pr_merge_enqueue"; repository: string; pullRequest: number; headSha: string }
   /** Read the pull request only, never enqueue: proof for reconciling an enqueue Wollipog already
@@ -158,6 +168,30 @@ export interface ForgeDecisionActionResultMessage {
   refusal?: { reason: ForgeDecisionActionRefusalReason; summary: string };
   /** With `published` or `already_published`. */
   issue?: number;
+  /** v377: immutable default-head containment read that preceded create-only publication. */
+  temporaryBranchProof?: { defaultBranch: string; defaultHeadSha: string };
+}
+
+/** Created only after the runner's create-only remote mutation succeeds. No client assertion or
+ * historical Git metadata can mint one. The control plane binds its immutable campaign/member. */
+export interface TemporaryBranchReceipt {
+  id: string;
+  campaignId: string;
+  sessionId: string;
+  repository: string;
+  branch: string;
+  headSha: string;
+  createdAt: number;
+  defaultBranch?: string;
+  defaultHeadSha?: string;
+}
+
+export function matchingTemporaryBranchReceipt(receipts: readonly TemporaryBranchReceipt[] | undefined,
+  campaignId: string, sessionId: string, snapshot: { repository: string; branch: string; headSha?: string; temporaryReceiptId?: string }): boolean {
+  return Boolean(snapshot.temporaryReceiptId && receipts?.some((receipt) => receipt.id === snapshot.temporaryReceiptId &&
+    receipt.defaultBranch && receipt.defaultHeadSha &&
+    receipt.campaignId === campaignId && receipt.sessionId === sessionId && receipt.repository === snapshot.repository.toLowerCase() &&
+    receipt.branch === snapshot.branch && receipt.headSha === snapshot.headSha));
 }
 
 /** Longest refusal summary kept on a decision. */

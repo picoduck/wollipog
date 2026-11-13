@@ -17,6 +17,7 @@ export function requestReason(evaluation: CampaignAuthorityEvaluation, category?
   switch (evaluation.reason) {
     case "outside_boundary": case "outside_issue_scope": case "review_extension_cap_reached": return "boundary_enlargement";
     case "unsupported_provider": case "unverified_intent": case "evidence_review_unavailable":
+    case "temporary_branch_peer_unsupported":
     case "provider_delivery_unavailable": case "unverified_closures": return "unsupported_capability";
     case "human_required_rule": return "human_required_rule";
     case "protected_request": return category === "campaign_follow_up_admission" ? "follow_up_limit" : "owner_approval_required";
@@ -83,6 +84,7 @@ export class CampaignRecoveryService {
         const decision = request.kind === "workflow_decision" ? this.db.workflowDecisionByOccurrence(request.occurrenceId) : null;
         const evaluated = evaluateCampaignAuthority(root, { ...session,
           repositoryRoot: this.db.sessionRepositoryRoot(session.id) ?? undefined,
+          temporaryBranchReceipts: this.db.temporaryBranchReceipts(root.id, session.id),
           boundaryRepository: campaignBoundaryRepositoryAt(this.db, root, session) },
         this.db.getRunner(session.runnerId)?.protocolVersion,
         decision?.resourceSnapshot ?? this.db.campaignPolicyRequest(session.id, root.orchestratorPolicy?.control, request),

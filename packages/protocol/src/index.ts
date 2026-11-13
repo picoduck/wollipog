@@ -631,6 +631,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   worktreePatchDelivery: 370,
   campaignWorktreeConfirmation: 372,
   campaignWorktreeRemovalReconciliation: 374,
+  temporaryBranchReceipts: 377,
   progressAwareSessionWorktrees: 113,
   /** v161 carries durable worktree-recovery state and its exact not-delivered receipt. */
   worktreeRecovery: 161,
@@ -5260,6 +5261,7 @@ export type WorkflowDecisionResourceSnapshot =
       repository: string;
       branch: string;
       merged: true;
+      temporaryReceiptId?: never;
       mergeCommitSha: string;
       /** v284 (#4067): the merged pull request and its merged head. Wollipog performs the deletion
        * itself only when both are present; omitted, the snapshot and its digest are unchanged. */
@@ -5269,6 +5271,21 @@ export type WorkflowDecisionResourceSnapshot =
         checkedAt: number;
         open: number[];
       };
+    }
+  | {
+      /** A temporary ref has no merged pull request. Only a server-recorded creation receipt
+       * can delegate this variant; historical and shell-created refs stay person-owned. */
+      category: "merged_branch_deletion";
+      repository: string;
+      branch: string;
+      merged: false;
+      temporaryReceiptId?: string;
+      headSha: string;
+      /** Server-recorded creation facts, overwritten from the receipt at request admission. */
+      creation?: { sessionId: string; sessionTitle: string; defaultBranch: string; defaultHeadSha: string; checkedAt: number };
+      mergeCommitSha?: never;
+      pullRequest?: never;
+      dependentPullRequests: { checkedAt: number; open: number[] };
     }
   | {
       category: "follow_up_issue_publication";

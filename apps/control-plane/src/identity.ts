@@ -252,7 +252,7 @@ export function agentCredentialSessionTargetError(
   // session is proof of who made it. Unlike the worktree routes this fails closed for a credential
   // that carries no session id at all.
   // Ref deletion acts on the caller's own worktrees only (#3316), never a descendant's.
-  if (routePath === "/api/sessions/:id/worktrees/delete-refs") {
+  if (routePath === "/api/sessions/:id/worktrees/delete-refs" || routePath === "/api/sessions/:id/temporary-branches") {
     return principal.credentialSessionId === targetSessionId
       ? null
       : "the session credential may delete only its own session's refs";

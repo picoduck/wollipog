@@ -19,6 +19,7 @@ import { CampaignContinuationNotice } from "../components/SessionDetail.js";
 import { CampaignHeldChildren } from "../components/CampaignHeldChildren.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
 import { Notice } from "../components/Notice.js";
+import { Rail } from "../components/Rail.js";
 import {
   SESSION_NOTICE_RANK,
   SessionNoticeSlot,
@@ -355,6 +356,28 @@ function issueClosureSession(refused = false): SessionView {
     workflowDecision: { ...base.pendingApproval!.workflowDecision!, category: "issue_closure", resourceSnapshot: snapshot,
       controllingSessionId: base.id, authority: "human" },
   } };
+}
+
+function temporaryBranchSession(): SessionView {
+  const base = evidenceSession();
+  const snapshot = { category: "merged_branch_deletion" as const, merged: false as const,
+    repository: "picoduck/wollipog", branch: "temporary/4535-retirement-check", headSha: "b587f97abc0ff007a1620f7c5385388e251b9860",
+    ...(query.get("missing") === "1" ? {} : { temporaryReceiptId: "tbr_6cbed790-43c7-4dea-b4b8-14cecacb46a7",
+      creation: { sessionId: "s_72ceeb54b976", sessionTitle: "Campaign Worktree Retirement", defaultBranch: "main",
+        defaultHeadSha: "ccd213ef702537b220d3073779475498759481c4", checkedAt: Date.parse("2026-11-13T08:00:00Z") } }),
+    dependentPullRequests: { checkedAt: 1, open: [] } };
+  return { ...base, title: "Temporary Branch Cleanup", pendingApproval: { ...base.pendingApproval!,
+    title: query.get("owner") === "1" ? "Owner Decision: Delete Temporary Branch"
+      : query.get("unavailable") === "1" || query.get("boundary") === "1" ? "Delegation Unavailable: Delete Temporary Branch" : "Delete Temporary Branch", context: { input: JSON.stringify(snapshot) },
+    workflowDecision: { ...base.pendingApproval!.workflowDecision!, category: "merged_branch_deletion",
+      resourceSnapshot: snapshot, authority: query.get("missing") === "1" || query.get("owner") === "1" || query.get("unavailable") === "1" || query.get("boundary") === "1" ? "human" : "orchestrator",
+      ...(query.get("owner") === "1" ? { authorityEvaluation: { owner: "human" as const, basis: "custom_policy" as const,
+        reason: "custom_owner" as const, operation: "merged_branch_deletion" as const } }
+        : query.get("unavailable") === "1" ? { authorityEvaluation: { owner: "human" as const, basis: "human_required" as const,
+          reason: "temporary_branch_peer_unsupported" as const, operation: "merged_branch_deletion" as const } }
+        : query.get("boundary") === "1" ? { authorityEvaluation: { owner: "human" as const, basis: "human_required" as const,
+          reason: "outside_boundary" as const, operation: "merged_branch_deletion" as const } } : {}),
+    } } };
 }
 
 function automationCreationSession(): SessionView {
@@ -982,7 +1005,7 @@ function ReadingKeys({ scrollRef }: {
 function Fixture() {
   const [keyboard, updateKeyboard] = useState(keyboardOpen);
   setKeyboard = updateKeyboard;
-  const [session, setSession] = useState(() => scenario === "follow-up-batch" ? followUpBatchSession() : scenario === "automation-creation" ? automationCreationSession() : scenario === "location-switch" ? locationSwitchSession() : scenario === "repository-addition" ? repositoryAdditionSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure-refused" ? issueClosureSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
+  const [session, setSession] = useState(() => scenario === "temporary-branch" ? temporaryBranchSession() : scenario === "follow-up-batch" ? followUpBatchSession() : scenario === "automation-creation" ? automationCreationSession() : scenario === "location-switch" ? locationSwitchSession() : scenario === "repository-addition" ? repositoryAdditionSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure-refused" ? issueClosureSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
     : scenario === "held" || scenario === "both"
     ? heldCampaignSession()
@@ -1145,8 +1168,12 @@ function Fixture() {
     "The merge retry draft is sanitized and ready. Runner contention is a separate recommendation awaiting admission.",
     "Include both exact payloads in one review.",
     "The publication will use its approved title, body and labels. The new recommendation will stay within the follow-up approval gate.",
+  ] : scenario === "temporary-branch" ? [
+    "The retirement checks are complete. Remove the temporary verification branch through its typed deletion approval.",
+    query.get("missing") === "1" ? "The branch has no matching trusted creation receipt, so deletion remains the owner's decision."
+      : "The server recorded this member's branch creation at the default-contained tip. Its receipt is attached to the approval.",
   ] : Array.from({ length: scenario === "artifact-timeline" ? 0 : 24 }, (_, index) => `Transcript message ${index + 1}`);
-  const standaloneTemplate = scenario === "automation-creation" ? automationCreationSession().pendingApproval! : scenario === "issue-scope" ? issueScopeSession().pendingApproval! : scenario === "follow-up-admission" ? followUpAdmissionSession().pendingApproval! : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true).pendingApproval! : scenario === "issue-closure-refused" ? issueClosureSession(true).pendingApproval! : scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
+  const standaloneTemplate = scenario === "temporary-branch" ? temporaryBranchSession().pendingApproval! : scenario === "automation-creation" ? automationCreationSession().pendingApproval! : scenario === "issue-scope" ? issueScopeSession().pendingApproval! : scenario === "follow-up-admission" ? followUpAdmissionSession().pendingApproval! : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true).pendingApproval! : scenario === "issue-closure-refused" ? issueClosureSession(true).pendingApproval! : scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
     ? standaloneApprovalSession().pendingApproval!
     // Only a provider's permission has a transcript row; a policy ask or a pause is the control plane's.
     : DOCK_SCENARIOS[scenario]?.requests().find((request) => request.kind === "permission") ?? null;
@@ -1219,7 +1246,8 @@ function Fixture() {
   return (
     <ApiProvider client={client}>
       <ReadingKeys scrollRef={scrollRef} />
-      <main className="app" style={{ display: "block", height: "100dvh" }}>
+      <main className="app" style={{ display: "block", height: scenario === "temporary-branch" && window.innerWidth <= 760
+        ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
         {/* The app's main column, the `app` size container the compact tier answers to (§2.10). */}
         <div className="main" style={{ height: "100%" }}>
         <section className="session-detail expanded" style={{ height: "100%" }}>
@@ -1351,6 +1379,8 @@ function Fixture() {
         </section>
         </div>
       </main>
+      {scenario === "temporary-branch" && window.innerWidth <= 760 &&
+        <Rail view={{ name: "session", id: session.id }} blockedCount={1} onNavigate={() => {}} />}
     </ApiProvider>
   );
 }

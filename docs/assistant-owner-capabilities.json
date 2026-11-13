@@ -246,6 +246,7 @@
   "POST /api/sessions/:id/steer": {"tools":["session_steer"]},
   "POST /api/sessions/:id/steering/:submissionId/resolve": {"tools":["steering_resolve"]},
   "POST /api/sessions/:id/stop": {"tools":["session_stop"]},
+  "POST /api/sessions/:id/temporary-branches": {"exclusion":"session_protocol","reason":"Requires the matching member session's own agent credential to bind a server-recorded creation receipt to its campaign, repository, branch and created tip. Owner HTTP returns 403; an Assistant connection cannot supply that runtime identity.","remedy":"Use the genuine campaign member session's create_temporary_branch tool or wollipog branch create-temporary command. Branch deletion still requires its exact typed approval and managed execution; historical branches without receipts retain the person's decision."},
   "POST /api/sessions/:id/title": {"tools":["session_title"]},
   "POST /api/sessions/:id/transcript-shares": {"exclusion":"human_authority","reason":"Issues a separate bearer capability authorizing public reads of a frozen private transcript. Credential issuance and new disclosure authority require the authenticated owner.","remedy":"Use this exact authenticated owner transcript-sharing API/UI for capability issuance or revocation. The Assistant can inspect share metadata through transcript_shares and read authorized cached content through session_export without issuing credentials or publishing it."},
   "POST /api/sessions/:id/unarchive-and-restart": {"tools":["session_unarchive_restart"]},

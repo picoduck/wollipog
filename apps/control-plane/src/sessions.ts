@@ -34,6 +34,7 @@ import { parseSessionWaitReport } from "./session-waits.js";
 import { isSessionLaunchFailureCode, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { campaignRepositoryLocation, supportsPacedVideoReviewPeer } from "@wollipog/protocol";
+import { forgeActionBranchName, matchingTemporaryBranchReceipt, temporaryBranchDecisionKeptByPolicy, TEMPORARY_BRANCH_CREATION_RPC_TIMEOUT_MS, type TemporaryBranchReceipt } from "@wollipog/protocol";
 import { normalizeIssueClosureEpicMembers } from "@wollipog/protocol";
 import { providerProfileSessionRefusal } from "./provider-profile-route.js";
 import type { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
@@ -1565,6 +1566,23 @@ export function normalizeWorkflowDecisionSnapshot(
       ? value.dependentPullRequests as Record<string, unknown> : null;
     const checked = dependency && checkedAt(dependency.checkedAt);
     const open = dependency && Array.isArray(dependency.open) ? dependency.open : null;
+    if (value.merged === false) {
+      const creation = value.creation as Record<string, unknown> | undefined;
+      if (creation !== undefined && (!creation || typeof creation !== "object" || Array.isArray(creation) ||
+          !boundedDecisionString(creation.sessionId, 128) || !boundedDecisionString(creation.sessionTitle, 256) ||
+          !forgeActionBranchName(creation.defaultBranch) || !sha(creation.defaultHeadSha) || !checkedAt(creation.checkedAt))) {
+        return fail("invalid temporary branch creation facts");
+      }
+      if (!repo || !forgeActionBranchName(value.branch) || value.temporaryReceiptId !== undefined && !boundedDecisionString(value.temporaryReceiptId, 100) || !sha(value.headSha) ||
+          !checked || !open || open.length || Object.keys(value).some((key) => ![
+            "category", "repository", "branch", "merged", "temporaryReceiptId", "headSha", "dependentPullRequests", "creation",
+          ].includes(key))) return fail("temporary deletion requires its creation receipt, exact tip, and no open head or base pull requests");
+      return ok({ category, repository: repo, branch: value.branch, merged: false,
+        ...(value.temporaryReceiptId === undefined ? {} : { temporaryReceiptId: value.temporaryReceiptId as string }),
+        headSha: value.headSha as string, dependentPullRequests: { checkedAt: checked, open: [] },
+        ...(creation ? { creation: { sessionId: creation.sessionId as string, sessionTitle: creation.sessionTitle as string,
+          defaultBranch: creation.defaultBranch as string, defaultHeadSha: creation.defaultHeadSha as string, checkedAt: creation.checkedAt as number } } : {}) });
+    }
     if (!repo || !boundedDecisionString(value.branch, 256) || value.merged !== true ||
         !sha(value.mergeCommitSha) || !checked || !open ||
         open.some((item) => !Number.isSafeInteger(item) || (item as number) <= 0)) {
@@ -2496,6 +2514,7 @@ export class SessionsService {
   private readonly forgeMergeSettlements = new Set<string>();
   /** Occurrences whose Wollipog-performed forge action is being dispatched (#4067). */
   private readonly forgeActionsInFlight = new Set<string>();
+  private readonly temporaryCreationsInFlight = new Set<string>();
   /** Campaigns whose automatic repair of idle leftovers is running in this process (#4146). */
   private readonly campaignRepairsInFlight = new Map<string, Promise<void>>();
   /** When each campaign was last checked for leftovers to repair, so a tick never derives them all. */
@@ -11077,9 +11096,10 @@ export class SessionsService {
 
   /** The requester with the boundary repository whose Location it runs in (#4119), for campaign
    * authority. Resolved from its own runner and workspace, never from anything it sent. */
-  private campaignPlaced<T extends { runnerId?: string; workspaceId?: string | null }>(controller: SessionView, requester: T):
-    T & { boundaryRepository: string | null } {
-    return { ...requester, boundaryRepository: campaignBoundaryRepositoryAt(this.db, controller, requester) };
+  private campaignPlaced<T extends { id?: string; runnerId?: string; workspaceId?: string | null }>(controller: SessionView, requester: T):
+    T & { boundaryRepository: string | null; temporaryBranchReceipts: import("@wollipog/protocol").TemporaryBranchReceipt[] } {
+    return { ...requester, boundaryRepository: campaignBoundaryRepositoryAt(this.db, controller, requester),
+      temporaryBranchReceipts: requester.id ? this.db.temporaryBranchReceipts(controller.id, requester.id) : [] };
   }
 
   /** Synchronous provider requests park the root model. Settle only eligible exact occurrences
@@ -15095,6 +15115,63 @@ export class SessionsService {
     }
   }
 
+  /** Publish a new remote temporary ref using only the member's server-resolved repository. The
+   * before-dispatch record survives a crash; unproven attempts never become creation receipts. */
+  async createTemporaryBranch(sessionId: string, request: unknown,
+    canAccess: (id: string) => boolean = () => true): Promise<ServiceResult<TemporaryBranchReceipt>> {
+    if (!request || typeof request !== "object" || Array.isArray(request)) return fail("invalid temporary branch request", 400);
+    const body = request as Record<string, unknown>;
+    if (!boundedDecisionString(body.requestId, 128) || !forgeActionBranchName(body.branch) ||
+        typeof body.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(body.headSha) ||
+        Object.keys(body).some((key) => !["requestId", "branch", "headSha"].includes(key))) {
+      return fail("requestId, branch and full headSha are required; no receipt or repository may be supplied", 400);
+    }
+    const child = this.db.getSession(sessionId);
+    const root = child && this.orchestratorCampaignController(child);
+    if (!child || !root || root === "refused" || !canAccess(child.id) || !canAccess(root.id)) return fail("campaign member not found", 404);
+    const repository = campaignBoundaryRepositoryAt(this.db, root, child);
+    if (isTerminal(child.status) || isTerminal(root.status) || !campaignBoundaryCurrent(root) || !repository ||
+        campaignRepositoryOutsideLimit(root.orchestratorPolicy, repository) || campaignRepositoryLocation(repository)?.forge !== "github") {
+      return fail("temporary branch publication requires a live member in its current campaign repository", 409);
+    }
+    const unsupported = this.capabilityFailure(child.runnerId, "temporaryBranchReceipts", "temporary branch receipts");
+    if (unsupported) return unsupported;
+    const prior = this.db.temporaryBranchCreation(child.id, body.requestId);
+    if (prior) {
+      if (prior.receipt.campaignId !== root.id || prior.receipt.repository !== repository.toLowerCase() ||
+          prior.receipt.branch !== body.branch || prior.receipt.headSha !== body.headSha) return fail("requestId was used for different creation coordinates", 409);
+      if (prior.state === "pending" && this.temporaryCreationsInFlight.has(prior.receipt.id)) {
+        return fail("Creation is still in progress. Retry with the same requestId and coordinates to read its result; do not create another ref.", 409);
+      }
+      return prior.state === "created" ? ok(prior.receipt)
+        : fail("This creation has no proven response and will not be replayed. Historical ownership cannot be established; any ref it left remains person-owned.", 409);
+    }
+    if (!this.hub.isRunnerOnline(child.runnerId)) return fail("the member's runner is offline", 409);
+    const receipt: TemporaryBranchReceipt = { id: `tbr_${randomUUID()}`, campaignId: root.id, sessionId: child.id,
+      repository: repository.toLowerCase(), branch: body.branch, headSha: body.headSha, createdAt: Date.now() };
+    if (!this.db.beginTemporaryBranchCreation(receipt, body.requestId)) return fail("temporary branch creation limit reached or request already started", 409);
+    const requestId = `temporary_branch_${randomUUID()}`;
+    let created = false;
+    let proof: { defaultBranch: string; defaultHeadSha: string } | undefined;
+    this.temporaryCreationsInFlight.add(receipt.id);
+    try {
+      const answer = await this.hub.requestFromRunner(child.runnerId, requestId, { type: "forge_decision_action",
+        requestId, sessionId, occurrenceId: receipt.id,
+        action: { kind: "temporary_branch_create", repository: receipt.repository, branch: receipt.branch, headSha: receipt.headSha },
+      }, TEMPORARY_BRANCH_CREATION_RPC_TIMEOUT_MS) as unknown as Partial<ForgeDecisionActionResultMessage>;
+      created = answer.type === "forge_decision_action_result" && answer.requestId === requestId &&
+        answer.sessionId === sessionId && answer.occurrenceId === receipt.id && answer.outcome === "published" &&
+        forgeActionBranchName(answer.temporaryBranchProof?.defaultBranch) &&
+        typeof answer.temporaryBranchProof?.defaultHeadSha === "string" && /^[0-9a-f]{40}$/u.test(answer.temporaryBranchProof.defaultHeadSha);
+      if (created) proof = answer.temporaryBranchProof;
+    } catch { /* never recover provenance by inspecting a matching ref */ }
+    finally { this.temporaryCreationsInFlight.delete(receipt.id); }
+    this.db.finishTemporaryBranchCreation(receipt.id, created, proof);
+    this.log.info(JSON.stringify({ event: "temporary_branch_creation", sessionId, campaignId: root.id,
+      receiptId: receipt.id, outcome: created ? "created" : "unproven" }));
+    return created ? ok({ ...receipt, ...proof }) : fail("Creation was refused or could not be proven. No receipt was issued; an existing or uncertain ref remains person-owned.", 409);
+  }
+
   createWorkflowDecision(
     sessionId: string,
     request: CreateWorkflowDecisionRequest,
@@ -15215,6 +15292,21 @@ export class SessionsService {
       }
     }
     const category = normalized.data.category;
+    if (normalized.data.category === "merged_branch_deletion" && normalized.data.merged === false) {
+      // Snapshot JSON may name a receipt, but cannot assert what it proves. Replace every display
+      // fact from the server's immutable receipt, or remove it for unknown/borrowed provenance.
+      delete normalized.data.creation;
+      const snapshot = normalized.data;
+      const receipts = this.db.temporaryBranchReceipts(controller.session.id, child.id);
+      const receipt = receipts.find((item) => item.id === snapshot.temporaryReceiptId);
+      if (receipt?.defaultBranch && receipt.defaultHeadSha && matchingTemporaryBranchReceipt(receipts, controller.session.id, child.id, snapshot)) {
+        const admitted = this.db.workflowDecisionByRequestId(child.id, request.requestId)?.resourceSnapshot;
+        const admittedTitle = admitted?.category === "merged_branch_deletion" && admitted.merged === false &&
+          matchingTemporaryBranchReceipt([receipt], controller.session.id, child.id, admitted) ? admitted.creation?.sessionTitle : undefined;
+        snapshot.creation = { sessionId: child.id, sessionTitle: admittedTitle ?? (child.title || child.id).slice(0, 256),
+          defaultBranch: receipt.defaultBranch, defaultHeadSha: receipt.defaultHeadSha, checkedAt: receipt.createdAt };
+      }
+    }
     if (category === "follow_up_issue_publication" && normalized.data.category === category && normalized.data.issueAdmission && !internal?.trustedPublication) return fail("Use the inspected publication request route; admission cannot be supplied by an agent", 403);
     let evaluated = this.evaluateWorkflowDecisionAuthority(
       controller.session, controller.policy, sessionId, normalized.data,
@@ -16400,6 +16492,9 @@ export class SessionsService {
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
+    if (decision.resourceSnapshot.category === "merged_branch_deletion" && decision.resourceSnapshot.merged === false) {
+      return fail("use execute_workflow_decision for temporary deletion: it proves the forge action and retires the creation receipt atomically with its result; nothing was consumed", 403);
+    }
     if (isChildQuestionSnapshot(decision.resourceSnapshot)) return fail("a question answer grants no authority and cannot be consumed as an approval", 403);
     if (decision.category === "campaign_issue_scope") return fail("Scope resolution applies and consumes the exact authorized proposal atomically", 403);
     if (decision.category === "automation_creation") return fail("use execute_automation_creation to consume and create the approved automation atomically", 403);
@@ -16813,12 +16908,21 @@ export class SessionsService {
       if (campaignRepositoryLocation(snapshot.repository)?.forge === "gitlab") {
         return fail("Wollipog performs branch deletions on GitHub only; nothing was deleted", 409);
       }
-      if (snapshot.pullRequest === undefined || snapshot.headSha === undefined) {
-        return fail("this deletion decision does not name its merged pullRequest and headSha, which Wollipog's compare-and-delete " +
-          "is pinned to; withdraw it and request a new merged_branch_deletion that includes both", 409);
+      if (snapshot.merged === false) {
+        const unsupported = this.capabilityFailure(child.runnerId, "temporaryBranchReceipts", "temporary branch receipts");
+        if (unsupported) return unsupported;
+        if (!matchingTemporaryBranchReceipt(this.db.temporaryBranchReceipts(parent.id, child.id), parent.id, child.id, snapshot)) {
+          return fail("No matching server-recorded creation receipt belongs to this campaign member; nothing was deleted", 409);
+        }
+        action = { kind: "temporary_branch_deletion", repository: snapshot.repository, branch: snapshot.branch, headSha: snapshot.headSha };
+      } else {
+        if (snapshot.pullRequest === undefined || snapshot.headSha === undefined) {
+          return fail("this deletion decision does not name its merged pullRequest and headSha, which Wollipog's compare-and-delete " +
+            "is pinned to; withdraw it and request a new merged_branch_deletion that includes both", 409);
+        }
+        action = { kind: "branch_deletion", repository: snapshot.repository, branch: snapshot.branch, pullRequest: snapshot.pullRequest,
+          headSha: snapshot.headSha, mergeCommitSha: snapshot.mergeCommitSha };
       }
-      action = { kind: "branch_deletion", repository: snapshot.repository, branch: snapshot.branch, pullRequest: snapshot.pullRequest,
-        headSha: snapshot.headSha, mergeCommitSha: snapshot.mergeCommitSha };
     } else {
       const command = canonicalPrMergeEnqueueCommand(snapshot);
       const admission = decision.actionAdmission;
@@ -18449,7 +18553,13 @@ export class SessionsService {
       occurrenceId: decision.occurrenceId,
       // Clients present an Owner Question as a question card (`presentOwnerQuestionRequest`); an
       // older client still shows this card with its options.
-      title: isChildQuestionSnapshot(snapshot) ? "Question" : isOwnerQuestionSnapshot(snapshot) ? "Owner Question" : categoryTitle[decision.category],
+      title: isChildQuestionSnapshot(snapshot) ? "Question" : isOwnerQuestionSnapshot(snapshot) ? "Owner Question"
+        : snapshot.category === "merged_branch_deletion" && snapshot.merged === false
+          ? snapshot.creation && decision.authority === "human"
+            ? temporaryBranchDecisionKeptByPolicy(decision.authorityEvaluation?.reason)
+              ? "Owner Decision: Delete Temporary Branch" : "Delegation Unavailable: Delete Temporary Branch"
+            : "Delete Temporary Branch"
+          : categoryTitle[decision.category],
       options,
       kind: "workflow_decision",
       // Full Control root decisions with human-owned proof gaps also wait without parking the

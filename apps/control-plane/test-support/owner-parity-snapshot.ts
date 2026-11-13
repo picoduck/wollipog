@@ -57,7 +57,7 @@ if (process.argv.includes("--verify-runtime-identity") || process.argv.includes(
       // Snapshot only these isolated fixture's protocol-domain tables, never credential tables
       // or hosting state. Auth refusal audits are expected; application protocol effects are not.
       const tables = (fixture.raw().prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as {name: string}[])
-        .map(row => row.name).filter(name => /^(?:workflow_decisions$|review_|campaign_|delegated_|video_|automation_|location_switch_|github_issue_closure_|session_worktree|assistant_command_receipts$)/u.test(name));
+        .map(row => row.name).filter(name => /^(?:workflow_decisions$|review_|campaign_|delegated_|video_|automation_|location_switch_|github_issue_closure_|session_worktree|temporary_branch_|assistant_command_receipts$)/u.test(name));
       const domainState = () => Object.fromEntries(tables.map(name => [name,
         createHash("sha256").update(JSON.stringify(fixture.raw().prepare(`SELECT * FROM "${name.replaceAll('"', '""')}"`).all()
           .map(row => JSON.stringify(row)).sort())).digest("hex")]));

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { PullRequestClosingReferenceCheck, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
+import type { CampaignAuthorityEvaluation, PullRequestClosingReferenceCheck, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { OwnerRuleSummary, WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
 
 Object.defineProperty(globalThis, "React", { configurable: true, writable: true, value: React });
@@ -12,9 +12,35 @@ const MERGE = {
   reviewResult: "merge", requiredChecks: { headSha: "d".repeat(40), status: "passed", checkedAt: 1, checks: [] },
 } as const satisfies WorkflowDecisionResourceSnapshot;
 
-const text = (snapshot: WorkflowDecisionResourceSnapshot, check?: PullRequestClosingReferenceCheck) =>
-  renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} {...(check ? { closingReferenceCheck: check } : {})} />)
+const text = (snapshot: WorkflowDecisionResourceSnapshot, check?: PullRequestClosingReferenceCheck, authority: "human" | "orchestrator" = "orchestrator", reason: CampaignAuthorityEvaluation["reason"] = "custom_owner") =>
+  renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} authority={authority} authorityReason={reason} {...(check ? { closingReferenceCheck: check } : {})} />)
     .replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ").trim();
+
+test("temporary deletion shows its exact tip and receipt without claiming a merged pull request (#4535)", () => {
+  const snapshot = { category: "merged_branch_deletion" as const, merged: false as const, repository: "picoduck/wollipog",
+    branch: "temporary/check", headSha: "a".repeat(40), temporaryReceiptId: "tbr_receipt", dependentPullRequests: { checkedAt: 1, open: [] },
+    creation: { sessionId: "s_retirement", sessionTitle: "Worktree Retirement", defaultBranch: "main", defaultHeadSha: "c".repeat(40), checkedAt: 1 } };
+  const rendered = text(snapshot);
+  assert.ok(rendered.includes(snapshot.headSha));
+  assert.ok(rendered.includes(snapshot.creation.sessionTitle));
+  assert.match(rendered, /Contained in main at/u);
+  assert.match(rendered, /no open head or base pull requests/u);
+  assert.match(rendered, /Orchestrator may delete/u);
+  const ownerKept = text(snapshot, undefined, "human");
+  assert.match(ownerKept, /This campaign keeps branch deletion with you/u);
+  assert.match(ownerKept, /Orchestrator cannot approve deletion/u);
+  assert.doesNotMatch(ownerKept, /Orchestrator may delete/u);
+  const unavailable = text(snapshot, undefined, "human", "outside_boundary");
+  assert.match(unavailable, /outside the campaign&#x27;s current approved boundary/u);
+  assert.doesNotMatch(unavailable, /This campaign keeps branch deletion with you/u);
+  assert.match(text(snapshot, undefined, "human", "temporary_branch_peer_unsupported"), /campaign runner is too old/u);
+  assert.match(text(snapshot, undefined, "human", "unsupported_provider"), /provider does not support delegated approval/u);
+  assert.doesNotMatch(rendered, /Merge Commit/u);
+  const unknown = text({ ...snapshot, temporaryReceiptId: undefined, creation: undefined });
+  assert.match(unknown, /No matching creation receipt exists/u);
+  assert.match(unknown, /Orchestrator cannot delete/u);
+  assert.doesNotMatch(unknown, /Created Tip/u);
+});
 
 test("a GitHub merge shows the issues it would close, as the runner read them (#3713)", () => {
   assert.match(text(MERGE, { checkedAt: 1, closures: [] }), /Closes on Merge None/u);

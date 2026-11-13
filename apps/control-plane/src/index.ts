@@ -5314,6 +5314,15 @@ app.post("/api/sessions/:id/worktrees/select", async (req, reply) => {
   return runSessionWorktreeRequest(id, { operation: "select", path }, requestPrincipal(req), reply);
 });
 
+app.post("/api/sessions/:id/temporary-branches", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching member session credential is required" });
+  }
+  return respond(reply, await svc.createTemporaryBranch(id, req.body, (target) => db.canAccessSession(principal, target)));
+});
+
 app.post("/api/sessions/:id/worktrees/discard", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const path = (req.body as { path?: unknown })?.path;

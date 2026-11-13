@@ -356,6 +356,12 @@ test("a session's own review session routes are open to general sessions, not Or
   assert.equal(isAgentControlApiRouteAllowed("DELETE", "/api/sessions/:id/review-sessions/:reviewSessionId"), false);
 });
 
+test("temporary branch creation admits session credentials with POST only (#4535)", () => {
+  assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/temporary-branches"), true);
+  assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/temporary-branches", "orchestrator"), true);
+  assert.equal(isAgentControlApiRouteAllowed("GET", "/api/sessions/:id/temporary-branches"), false);
+});
+
 test("runner-managed ref deletion is open to a session's own credential in either role (#3316)", () => {
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees/delete-refs"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees/delete-refs", "orchestrator"), true);

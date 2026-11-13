@@ -14,7 +14,7 @@ import { executeGithubIssueClosure, inspectGithubIssueClosure, reconcileGithubIs
 import type { GithubIssueClosureLocation, GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, GitLabMergeClosuresMessage, GitLabMergeClosuresResultMessage, ForgeDecisionAction, ForgeDecisionActionMessage, ForgeDecisionActionOutcome, ForgeDecisionActionRefusalReason, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
-import { executeBranchDeletion, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
+import { executeBranchDeletion, executeTemporaryBranch, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
 import { githubSlug } from "./git-ops.js";
 import { proveWorktreePatchDelivery, type CampaignDeliveredPullRequest, type WorktreePatchDeliveryResult } from "./worktree-patch-delivery.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
@@ -22178,7 +22178,9 @@ export class SessionManager {
       const agentEnv = options.agentEnv?.(meta) ?? {};
       const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
       const gh = options.gh ?? contextGhRunner(meta.context, neutral, agentEnv);
-      const result = message.action?.kind === "branch_deletion"
+      const result = message.action?.kind === "temporary_branch_create" || message.action?.kind === "temporary_branch_deletion"
+        ? await executeTemporaryBranch(message.action, gh)
+        : message.action?.kind === "branch_deletion"
         ? await executeBranchDeletion(message.action, gh)
         : message.action?.kind === "pr_merge_enqueue"
           ? await executePullRequestEnqueue(message.action, gh)

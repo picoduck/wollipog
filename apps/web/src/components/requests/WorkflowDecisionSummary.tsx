@@ -1,12 +1,18 @@
 import React from "react";
 import { CampaignIssueScopeSummary } from "../CampaignIssueScopePanel.js";
-import type { PendingApproval, PullRequestClosingReferenceCheck, WorkflowDecisionOwnerRule, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
+import { temporaryBranchDecisionKeptByPolicy, type CampaignAuthorityEvaluation, type PendingApproval, type PullRequestClosingReferenceCheck, type WorkflowDecisionOwnerRule, type WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { IssueClosureSummary } from "../IssueClosureSummary.js";
 import { AutomationCreationSummary } from "../AutomationCreationSummary.js";
 import { LocationSwitchSummary } from "./LocationSwitchSummary.js";
 import { followUpLimitText } from "../../follow-up-limit.js";
 import { issueRefLabel } from "../../campaign-status.js";
 import { StructuredQuestionText } from "../StructuredQuestionText.js";
+
+const TEMPORARY_DELEGATION_FAILURE_COPY: Partial<Record<CampaignAuthorityEvaluation["reason"], string>> = {
+  temporary_branch_peer_unsupported: "A campaign runner is too old to evaluate temporary-branch delegation. Wollipog cannot confirm whether the Orchestrator may delete this branch; the decision stays with you.",
+  outside_boundary: "This deletion is outside the campaign's current approved boundary, so it cannot be delegated. The decision stays with you even with a creation receipt.",
+  unsupported_provider: "This session's provider does not support delegated approval. The decision stays with you even with a creation receipt.",
+};
 
 /** The issues a merge would close (#3713; GitLab since #3762). The control plane creates the
  * decision only when they are exactly the snapshot's declared ones, so with a check this is what the
@@ -41,13 +47,17 @@ export function OwnerRuleSummary({ rule }: { rule: WorkflowDecisionOwnerRule }) 
 
 /** What a workflow decision decides, as facts (§5.4): the Request Card's body for the kinds without
  * a review of their own, and the read-only summary of a decision the Orchestrator owns. */
-export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scopeMaxIssuesIncrease }: {
+export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scopeMaxIssuesIncrease, authority, authorityReason }: {
   snapshot: WorkflowDecisionResourceSnapshot;
+  authority?: "human" | "orchestrator";
+  authorityReason?: CampaignAuthorityEvaluation["reason"];
   /** The card's server-derived Maximum Issues increase, for a scope request (#4334). */
   scopeMaxIssuesIncrease?: PendingApproval["scopeMaxIssuesIncrease"];
   /** The server-recorded closing-reference read of a GitHub merge, when there was one. */
   closingReferenceCheck?: PullRequestClosingReferenceCheck;
 }) {
+  const delegationFailure = (authorityReason && TEMPORARY_DELEGATION_FAILURE_COPY[authorityReason]) ??
+    "Your approval is required for this deletion; a creation receipt does not delegate the decision.";
   switch (snapshot.category) {
     case "automation_creation":
       return <AutomationCreationSummary snapshot={snapshot} />;
@@ -137,7 +147,21 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
       return <dl className="facts">
         <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
         <div><dt>Branch</dt><dd><code>{snapshot.branch}</code></dd></div>
-        <div><dt>Merge Commit</dt><dd><code>{snapshot.mergeCommitSha.slice(0, 12)}</code></dd></div>
+        {snapshot.merged === false ? <>
+          <div><dt>{snapshot.creation ? "Created Tip" : "Requested Tip"}</dt><dd><code>{snapshot.headSha}</code></dd></div>
+          {snapshot.creation && <>
+            <div><dt>Created By</dt><dd>{snapshot.creation.sessionTitle} · <code>{snapshot.creation.sessionId}</code></dd></div>
+            <div><dt>Creation Proof</dt><dd>Contained in {snapshot.creation.defaultBranch} at <code>{snapshot.creation.defaultHeadSha}</code>.
+              {" "}Verified when the receipt was issued; checked again before deletion.</dd></div>
+          </>}
+          <div><dt>Deletion Check</dt><dd>{snapshot.creation
+            ? authority === "orchestrator"
+              ? "After approval, the Orchestrator may delete this branch at the exact created tip, with no open head or base pull requests."
+              : temporaryBranchDecisionKeptByPolicy(authorityReason)
+                ? "This campaign keeps branch deletion with you. The Orchestrator cannot approve deletion, even with a creation receipt."
+                : delegationFailure
+            : "No matching creation receipt exists. The Orchestrator cannot delete this branch; it stays the owner's decision."}</dd></div>
+        </> : <div><dt>Merge Commit</dt><dd><code>{snapshot.mergeCommitSha.slice(0, 12)}</code></dd></div>}
       </dl>;
     case "follow_up_issue_publication":
       return <dl className="facts">

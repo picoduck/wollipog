@@ -21,6 +21,16 @@ import {
   type HumanPrincipal,
 } from "./identity.js";
 
+test("temporary branch publication credentials are confined to their exact member, including Orchestrators (#4535)", () => {
+  for (const orchestrator of [false, true]) {
+    const principal: AgentPrincipal = { kind: "agent", actorId: "member", credentialSessionId: "member", orchestrator,
+      organizationId: "org_1", delegatedScope: { organizationId: "org_1", owner: { kind: "user", userId: "usr_1" } } };
+    assert.equal(agentCredentialSessionTargetError("/api/sessions/:id/temporary-branches", principal, "member"), null);
+    assert.notEqual(agentCredentialSessionTargetError("/api/sessions/:id/temporary-branches", principal, "sibling", true), null);
+    assert.notEqual(agentCredentialSessionTargetError("/api/sessions/:id/temporary-branches", { ...principal, credentialSessionId: undefined }, "member"), null);
+  }
+});
+
 test("Assistant administration belongs to the authenticated organization with exact route boundaries", () => {
   for (const route of ["/api/assistant-connections", "/api/assistant-connections/:id/configure", "/api/assistant-connections/:id/rotate", "/api/assistant-connections/:id/revoke", "/api/assistant-connections/:id/activity"]) {
     assert.equal(isOrganizationAdministrationRoute(route), true);

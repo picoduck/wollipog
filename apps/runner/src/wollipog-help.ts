@@ -24,6 +24,7 @@ export function rootHelp(): string {
     "Command Groups:",
     "  session             Manage agent sessions",
     "  worktree            Create, attach, select, and discard session worktrees",
+    "  branch create-temporary --request-id <id> --branch <name> --head <sha> [--json]",
     "  artifact            Attach an image file to a session without passing its bytes through the model",
     "  automation          Propose, inspect, and create an automation with human approval",
     "  location-switch     Ask your person to continue a task in its repository's Project Location",

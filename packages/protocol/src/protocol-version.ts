@@ -1481,6 +1481,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 376: Durable branch-CI watches and nonterminal merge-queue stall observations (#4543).
   376,
   // v377 slot
+  // 377: Trusted temporary branch creation receipts and receipt-bound compare-and-delete.
+  377,
   // v378 slot
   // v379 slot
   // v380 slot
