@@ -18,6 +18,8 @@ export function FollowUpOwnerApproval({ session, requests, onSessionUpdate }: {
   const api = useApi();
   const button = useRef<HTMLButtonElement>(null);
   const flight = useRef(false);
+  const liveRequests = useRef(requests);
+  liveRequests.current = requests;
   const [review, setReview] = useState<PendingApproval[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -37,6 +39,12 @@ export function FollowUpOwnerApproval({ session, requests, onSessionUpdate }: {
     try {
       // Confirm each result before dispatching the next exact approval.
       for (const request of review) {
+        const live = liveRequests.current.find((candidate) => candidate.requestId === request.requestId);
+        // Workflow card requestIds already are unique occurrenceIds on the server. Also compare
+        // the live payload so a stale frozen review never acts on a changed or removed card.
+        if (!live || live.workflowDecision?.status !== "pending" ||
+            live.workflowDecision.occurrenceId !== request.workflowDecision!.occurrenceId ||
+            live.workflowDecision.resourceDigest !== request.workflowDecision!.resourceDigest) throw new Error("review changed");
         const updated = await api.approve(session.id, { requestId: request.requestId, optionId: "approve" });
         approved++;
         onSessionUpdate?.(updated);

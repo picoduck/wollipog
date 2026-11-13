@@ -1462,9 +1462,9 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // v370 slot
   // v371 slot
   // v372 slot
-  // 372: Exact publication readback for follow-up ledger links and limit-specific recovery (#4537).
-  372,
   // v373 slot
+  // 373: Exact publication readback for follow-up ledger links and limit-specific recovery (#4537).
+  373,
   // v374 slot
   // v375 slot
   // v376 slot

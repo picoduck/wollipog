@@ -77,3 +77,26 @@ test("Orchestrator-owned and non-follow-up gates are not included in the owner r
   const view = await mount([admission(), orchestrator, { requestId: "permission", kind: "permission", title: "Run Command", options: [] }]);
   try { assert.equal(button(/^Review/), undefined); } finally { view.close(); }
 });
+
+test("a frozen review stops if a live card is removed or its occurrence or digest changes", async () => {
+  const saved = api.approve;
+  const calls: string[] = [];
+  api.approve = async (_id, request) => { calls.push(request.requestId); return session; };
+  try {
+    for (const change of ["removed", "occurrence", "digest"] as const) {
+      calls.length = 0;
+      const original = publication("one");
+      const view = await mount([original, publication("two")]);
+      try {
+        await act(async () => button(/^Review 2/).click());
+        const replacement = publication("one");
+        if (change === "occurrence") replacement.workflowDecision!.occurrenceId = "replacement";
+        if (change === "digest") replacement.workflowDecision!.resourceDigest = "replacement";
+        await view.render(change === "removed" ? [publication("two")] : [replacement, publication("two")]);
+        await act(async () => button(/^Approve All 2/).click());
+        assert.deepEqual(calls, [], change);
+        assert.equal(button(/^Approve All 2/).disabled, true);
+      } finally { view.close(); }
+    }
+  } finally { api.approve = saved; }
+});

@@ -16337,6 +16337,12 @@ export class SessionsService {
     // A child can echo the original video request or the exact server-derived snapshot from get;
     // neither can nominate new frames. The stored snapshot remains the action's authority.
     const normalized = { data: decision.resourceSnapshot };
+    // Once managed execution owns a publication, manual consumption must never hand the same
+    // creation to a second writer, including after a failed readback or a control-plane restart.
+    const managedPublication = () => decision.category === "follow_up_issue_publication" &&
+      (this.forgeActionsInFlight.has(occurrenceId) || this.db.workflowDecisionByOccurrence(occurrenceId)?.forgeAction !== undefined);
+    const managedPublicationRefusal = "This publication has a managed execution attempt. Nothing was consumed: use execute_workflow_decision to reconcile it; do not create the issue yourself.";
+    if (managedPublication()) return fail(managedPublicationRefusal, 409);
     if (video) {
       let sourceBytes: Buffer | null;
       try { sourceBytes = this.db.readWorkflowArtifactBytes(video.sourceArtifactId); } catch { sourceBytes = null; }
@@ -16583,6 +16589,9 @@ export class SessionsService {
     // Even a read that returns at once yields, so an exclusion can be recorded since the check above.
     const excludedWhileConsuming = this.excludedRepositoryRefusal(child, parent, normalized.data);
     if (excludedWhileConsuming) return fail(excludedWhileConsuming, 409);
+    // The publication freshness read yielded; execute may have claimed the occurrence meanwhile.
+    // No await separates this fence from consuming it, or managed dispatch from its own claim.
+    if (managedPublication()) return fail(managedPublicationRefusal, 409);
     const originalVideoApproval = decision.authority === "orchestrator" &&
       decision.resourceSnapshot.category === "ui_evidence_approval" && !decision.resourceSnapshot.videoReview &&
       decision.resourceSnapshot.evidence.some((item) => item.mediaType?.startsWith("video/"));
@@ -16861,7 +16870,7 @@ export class SessionsService {
         const rootId = this.db.campaignRootForMember(child.id);
         const publicationRoot = (rootId ? this.db.getSession(rootId) : null) ?? parent;
         if (createdIssue !== undefined && publishedIssue !== createdIssue ||
-            await this.readPublishedIssuePayload(publicationRoot, snapshot, publishedIssue) !== null || !authorityCurrent()) {
+            await this.readPublishedIssuePayload(publicationRoot, snapshot, publishedIssue) !== null) {
           // Creation may have succeeded. Retain the fence and only observe on a later attempt;
           // an unreadable or mismatching payload never proves a ledger-link exemption.
           finish("uncertain");
@@ -16869,6 +16878,9 @@ export class SessionsService {
         }
       }
       finish(outcome, undefined, publishedIssue);
+      // Authority was checked immediately before dispatch. A revision changing during readback
+      // cannot make a confirmed external effect uncertain; record it and consume an approval that
+      // still stands. An explicitly revoked approval is never resurrected by this observation.
       const now = Date.now();
       const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
       if (latest?.status === "approved") {

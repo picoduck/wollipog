@@ -15,7 +15,9 @@ export function scopeDerivedFollowUpLimit(policy: Pick<OrchestratorCampaignPolic
   if (policy?.behavior?.followUps !== "execute_approved" || first?.state !== "established" ||
       first.derivedLimits?.acceptedFollowUps !== true || !boundary.budgetAuthority) return undefined;
   const selection = first.grant?.status === "granted" ? first.grant.selection?.count ?? 0 : 0;
-  return derivedFollowUpLimit(Math.max(scopeSize, selection));
+  // Admitting more scope can size the derived allowance up. Scope removal is not an instruction
+  // to lower a budget already allocated; only the owner's explicit limit editor does that.
+  return Math.max(boundary.budgetAuthority.acceptedFollowUps ?? 0, derivedFollowUpLimit(Math.max(scopeSize, selection)));
 }
 
 /** Every repository in the campaign's boundary, the launch repository first (#4118). */

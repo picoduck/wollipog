@@ -1539,6 +1539,14 @@ test("an unnumbered launch derives follow-up room from current admitted scope, w
         assert.equal(boundaryOf(f, c.id).budgetAuthority!.acceptedFollowUps, 5);
         assert.equal(f.db.campaignBudgets.view(c.id)!.authority.acceptedFollowUps, 5);
         assert.equal(boundaryOf(f, c.id).issueAuthority!.maxIssues, 10, "derived issue room includes the new bounded follow-ups");
+        const removal = await f.sessions.proposeCampaignIssueScope(c.id, { requestId: "remove-admitted-issues", expectedRevision: c.revision(),
+          additions: [], removals: [33, 34, 35].map((number) => ({ repository: "owner/repo", number })), explanation: "Narrow the issue scope" });
+        assert.ok(removal.ok, removal.error ?? "scope removal");
+        const removed = f.sessions.resolveWorkflowDecision(c.id, c.id, removal.data!.occurrenceId, { outcome: "approve" },
+          removal.data!.authority, removal.data!.authority === "human" ? { kind: "human", id: f.human.userId } : { kind: "agent", id: c.id }, () => true);
+        assert.ok(removed.ok, removed.error ?? "scope removal approval");
+        assert.equal(boundaryOf(f, c.id).budgetAuthority!.acceptedFollowUps, 5, "scope removal does not lower an allocated budget");
+        assert.equal(f.db.campaignBudgets.view(c.id)!.authority.acceptedFollowUps, 5);
       }
     }
     const investigation = await proposalCampaign(f, server, "Investigate this repository.");

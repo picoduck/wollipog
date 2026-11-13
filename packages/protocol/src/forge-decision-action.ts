@@ -16,7 +16,7 @@
  *   campaign's repositories. The control plane sends it to the runner of a Location of that
  *   repository, which creates the issue with its own forge login, with no session of its own. That
  *   is the only route for such a publication: its requester's own login is never used.
- *   Since v372 the requester may also choose this route for its own campaign repository. A
+ *   Since v373 the requester may also choose this route for its own campaign repository. A
  *   successful exact-payload forge readback is recorded for the follow-up's ledger-link exemption.
  *
  * The provider classifier is not switched off or worked around: the agent's own commands stay
@@ -98,10 +98,10 @@ export interface WorkflowDecisionForgeAction {
   /** A publication's result (v327): the issue created in the snapshot's repository, and the runner
    * whose forge login created it. */
   publishedIssue?: number;
-  /** v372: the exact issue returned by this occurrence's successful create response, retained
+  /** v373: the exact issue returned by this occurrence's successful create response, retained
    * across failed readback and observation. A title/body search alone cannot establish creation. */
   publicationCreatedIssue?: number;
-  /** v372: the server read this created issue back from its forge and verified the exact approved
+  /** v373: the server read this created issue back from its forge and verified the exact approved
    * title, body and labels. Older success records alone grant no ledger-link exemption. */
   publicationVerified?: boolean;
   performedByRunnerId?: string;
@@ -128,7 +128,7 @@ export type ForgeDecisionAction =
    * for the same reason as `pr_merge_observe`. `already_published` means an issue with exactly this
    * title and body exists; anything else stays `uncertain`. */
   | { kind: "issue_publication_observe"; repository: string; title: string; body: string;
-      /** v372: observe this known creation receipt instead of searching for a matching copy. */
+      /** v373: observe this known creation receipt instead of searching for a matching copy. */
       issue?: number };
 
 /** The Location whose runner performs a publication (v327). Resolved by the control plane. */
