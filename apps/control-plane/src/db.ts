@@ -1,5 +1,5 @@
 import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, issueClosureDeliveryGap, knownProviderCommandHomeWriteSeparation } from "@wollipog/protocol";
-import { validCampaignLaunchDisclosure, campaignPublicationTitle } from "@wollipog/protocol";
+import { validCampaignLaunchDisclosure, ownerResourceLabel, campaignPublicationTitle } from "@wollipog/protocol";
 import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
@@ -951,6 +951,18 @@ CREATE TABLE IF NOT EXISTS sessions (
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
   FOREIGN KEY (project_location_id) REFERENCES project_locations(id) ON DELETE SET NULL
 );
+
+CREATE TABLE IF NOT EXISTS campaign_owner_returns (
+  occurrence_id TEXT PRIMARY KEY,
+  controller_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  targets TEXT NOT NULL,
+  keeps TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  by_user_id TEXT NOT NULL,
+  returned_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS campaign_owner_returns_controller ON campaign_owner_returns(controller_id);
 
 CREATE TABLE IF NOT EXISTS workflow_decisions (
   request_id            TEXT NOT NULL,
@@ -23555,6 +23567,23 @@ export class ControlPlaneDb {
     }
   }
 
+  /** Keyset batches include children of stopped/archived roots. The service rechecks verification,
+   * ancestry, policy, generation and runner compatibility before sending any reconciliation. */
+  archivedChildrenWithRefusedWorktrees(after: string, runnerId?: string): string[] {
+    const rows = this.stmt(
+      `SELECT DISTINCT s.id FROM sessions s
+       JOIN orchestrator_campaign_worktree_cleanup c ON c.child_session_id=s.id
+       WHERE s.archived=1 AND c.status='refused' AND s.id>?
+         AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(s.worktrees)
+           THEN CASE WHEN json_type(s.worktrees)='array' THEN s.worktrees END END) w
+           WHERE json_extract(CASE WHEN w.type='object' THEN w.value END,'$.path')=c.path
+             AND json_extract(CASE WHEN w.type='object' THEN w.value END,'$.id')=c.worktree_id)
+         ${runnerId ? "AND s.runner_id=?" : ""}
+       ORDER BY s.id LIMIT 64`,
+    ).all(after, ...(runnerId ? [runnerId] : [])) as Array<{ id: string }>;
+    return rows.map(row => row.id);
+  }
+
   campaignWorktreeCleanup(sessionId: string): NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]> {
     // A SessionView embeds its campaign projection, so read the raw row here to avoid
     // projecting the campaign recursively while its children are being counted.
@@ -24500,7 +24529,8 @@ export class ControlPlaneDb {
       pendingDecisions: { human: pendingHuman.length, orchestrator: pendingOrchestrator.length },
       ...(() => {
         const ownerDecisions = resolvedCampaignId === campaignSessionId ? this.campaignOwnerDecisions(resolvedCampaignId) : null;
-        return ownerDecisions ? { ownerDecisions } : {};
+        const ownerReturns = resolvedCampaignId === campaignSessionId ? this.campaignOwnerReturns(resolvedCampaignId) : [];
+        return { ...(ownerDecisions ? { ownerDecisions } : {}), ...(ownerReturns.length ? { ownerReturns } : {}) };
       })(),
       ...(resolvedCampaignId === campaignSessionId ? { pendingRequests: {
         human: pendingHuman.length + pendingGenericHuman,
@@ -25162,6 +25192,12 @@ export class ControlPlaneDb {
       ORDER BY created_at ASC, occurrence_id ASC LIMIT ${CAMPAIGN_OWNER_DECISIONS_LIMIT}`).all(...params) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null)
       .map((decision) => ({ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category: decision.category,
+        resourceLabel: ownerResourceLabel(decision.resourceSnapshot),
+        ...(decision.category !== "owner_decision" && (decision.ownerRule || decision.ownerHandoff) &&
+          !this.ownerOccurrenceWasReturned(decision.occurrenceId) &&
+          this.stmt("SELECT 1 FROM sessions WHERE id=? AND json_extract(orchestrator_policy, '$.control.mode')='full_control'")
+            .get(decision.controllingSessionId)
+          ? { returnableOwnerResource: true as const } : {}),
         ...(isWorkflowQuestionSnapshot(decision.resourceSnapshot) ? { kind: "question" as const } : {}),
         summary: decision.resourceSnapshot.category === "campaign_issue_scope"
           ? campaignScopeChangeSummary(decision.resourceSnapshot, this.scopeApprovalIncrease(controllingSessionId, decision.resourceSnapshot))
@@ -25196,6 +25232,40 @@ export class ControlPlaneDb {
     ).all(controllingSessionId) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
     );
+  }
+
+  ownerOccurrenceWasReturned(occurrenceId: string): boolean {
+    return !!this.stmt(`SELECT 1 FROM campaign_owner_returns r WHERE r.occurrence_id=? OR EXISTS
+      (SELECT 1 FROM json_each(r.keeps) k WHERE json_extract(k.value, '$.occurrenceId')=?) LIMIT 1`)
+      .get(occurrenceId, occurrenceId);
+  }
+
+  ownerKeepWasReturned(controllerId: string, occurrenceId: string, targets: string[]): boolean {
+    return !!this.stmt(`SELECT 1 FROM campaign_owner_returns r JOIN workflow_decisions d
+      ON d.occurrence_id=? AND EXISTS (SELECT 1 FROM json_each(r.keeps) k
+        WHERE json_extract(k.value, '$.occurrenceId')=d.occurrence_id
+          AND json_extract(k.value, '$.handoff') IS d.owner_handoff)
+      WHERE r.controller_id=? AND EXISTS (SELECT 1 FROM json_each(r.targets) t
+        WHERE t.value IN (SELECT value FROM json_each(?))) LIMIT 1`)
+      .get(occurrenceId, controllerId, JSON.stringify(targets));
+  }
+
+  returnOwnerResource(decision: WorkflowDecisionView, targets: string[], keeps: WorkflowDecisionView[], byUserId: string, now: number): boolean {
+    return Number(this.stmt(`INSERT OR IGNORE INTO campaign_owner_returns
+      (occurrence_id, controller_id, session_id, targets, keeps, summary, by_user_id, returned_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(decision.occurrenceId, decision.controllingSessionId, decision.sessionId, JSON.stringify(targets),
+        JSON.stringify(keeps.map((keep) => ({ occurrenceId: keep.occurrenceId,
+          handoff: keep.ownerHandoff ? JSON.stringify(keep.ownerHandoff) : null }))),
+        ownerResourceLabel(decision.resourceSnapshot), byUserId, now).changes) === 1;
+  }
+
+  campaignOwnerReturns(controllerId: string): NonNullable<OrchestratorCampaignProjection["ownerReturns"]> {
+    return this.stmt(`SELECT r.occurrence_id AS occurrenceId, r.session_id AS sessionId, r.summary,
+      r.by_user_id AS byUserId, COALESCE(u.display_name, 'Campaign owner') AS byName, r.returned_at AS at
+      FROM campaign_owner_returns r LEFT JOIN identity_users u ON u.user_id=r.by_user_id
+      WHERE r.controller_id=? ORDER BY r.returned_at DESC, r.rowid DESC LIMIT 20`).all(controllerId) as
+      NonNullable<OrchestratorCampaignProjection["ownerReturns"]>;
   }
 
   personalRuleDelegations(rootId: string): WorkflowDecisionView[] {

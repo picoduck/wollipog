@@ -229,6 +229,18 @@ test("a runner's real registration below the gates' floor records why, and its r
   assert.equal(exclusion(), undefined);
 });
 
+test("returning an owner-kept resource refuses live root and child agent credentials with 403 (#4539)", { timeout: 90_000 }, async (t) => {
+  const cp = await startControlPlane(t);
+  const path = `/api/sessions/${ROOT}/workflow-decisions/missing-return/return-to-orchestrator`;
+  for (const [session, token] of [[ROOT, ROOT_TOKEN], [CHILD, CHILD_TOKEN]] as const) {
+    const headers = { authorization: `Bearer ${token}`, [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: session };
+    assert.equal((await cp.get(`/api/sessions/${session}`, headers)).status, 200);
+    assert.equal((await cp.post(path, {}, headers)).status, 403);
+  }
+  // The signed-in owner's request reaches lookup; a missing occurrence grants nothing.
+  assert.equal((await cp.post(path, {}, { authorization: `Bearer ${DEVICE_TOKEN}` })).status, 404);
+});
+
 test("a session credential is refused by every route that adds a Location, and no row is written (#4117)", { timeout: 90_000 }, async (t) => {
   const cp = await startControlPlane(t);
   const before = cp.rows();

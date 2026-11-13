@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, pendingRequests,
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, pendingRequests, ownerResourceLabel, ownerResourceKeepReason,
   type ControlPlaneToRunner, type RunnerMetadata, type SessionSnapshot, type WorkflowDecisionView } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -138,6 +138,96 @@ test("an owner decision does not park the root or hold other campaign work (#406
     assert.ok(withdrawn.ok, withdrawn.error ?? "withdrawn");
     assert.equal(withdrawn.data!.status, "revoked");
     assert.equal(pendingRequests(h.db.getSession("root")!.pendingApproval).length, 0);
+  } finally { h.db.close(); }
+});
+
+test("an owner return releases future requests, preserves pending authority, and permits re-keep (#4539)", async () => {
+  const h = harness();
+  try {
+    const first = h.merge("return-first").data!;
+    const other = h.svc.createWorkflowDecision("child", { requestId: "other-pr", resourceKey: "other-pr",
+      resourceSnapshot: { ...first.resourceSnapshot, category: "pr_merge", repository: "team/repo", pullRequest: 8 } as
+        Extract<WorkflowDecisionView["resourceSnapshot"], { category: "pr_merge" }> }).data!;
+    assert.ok(h.svc.handWorkflowDecisionToOwner("root", other.occurrenceId, { reason: "Other merge", sessionId: "child" }).ok);
+    assert.ok(h.svc.handWorkflowDecisionToOwner("root", first.occurrenceId, { reason: "Owner kept merge", sessionId: "child" }).ok);
+    const inherited = h.merge("return-inherited", "inherited-key").data!;
+    assert.equal(inherited.authority, "human");
+    assert.equal(inherited.ownerHandoff, undefined);
+    assert.equal(inherited.ownerRule, undefined);
+    assert.equal(h.svc.returnOwnerResource("child", first.occurrenceId, { kind: "agent", id: "root" }).status, 403);
+    assert.equal(h.svc.returnOwnerResource("child", first.occurrenceId, { kind: "human", id: "stranger" }).status, 403);
+    assert.ok(h.svc.returnOwnerResource("child", first.occurrenceId, h.owner).ok);
+    assert.equal(h.db.campaignProjection("root")!.ownerDecisions!.items.find((d) => d.occurrenceId === first.occurrenceId)!.returnableOwnerResource, undefined);
+    assert.equal(pendingRequests(h.db.getSession("child")!.pendingApproval).find((r) => r.occurrenceId === first.occurrenceId)!.workflowDecision!.returnableOwnerResource, undefined);
+    assert.ok(h.svc.approve("child", inherited.occurrenceId, "approve", h.owner).ok, "inherited pending request remains answerable by the owner");
+    const record = h.db.campaignProjection("root")!.ownerReturns![0]!;
+    assert.equal(record.byUserId, h.owner.id);
+    assert.equal(record.summary, "PR #7 in team/repo");
+    const row = h.db.campaignProjection("root")!.ownerDecisions!.items.find((item) => item.occurrenceId === first.occurrenceId)!;
+    const inbox = pendingRequests(h.db.getSession("child")!.pendingApproval).find((request) => request.occurrenceId === first.occurrenceId)!.workflowDecision!;
+    assert.equal(row.resourceLabel, record.summary);
+    assert.equal(ownerResourceLabel(inbox.resourceSnapshot), record.summary);
+    assert.equal(ownerResourceKeepReason(inbox), ownerResourceKeepReason(row));
+    assert.equal(ownerResourceKeepReason(inbox), "The Orchestrator handed this resource to you.");
+    assert.ok(record.at > 0);
+    assert.equal(h.db.workflowDecisionByOccurrence(first.occurrenceId)!.authority, "human");
+    assert.equal(h.rootResolve("child", h.db.workflowDecisionByOccurrence(first.occurrenceId)!).ok, false);
+    assert.equal(h.db.workflowDecisionByOccurrence(other.occurrenceId)!.authority, "human");
+    assert.equal(h.svc.returnOwnerResource("unrelated-session", first.occurrenceId, h.owner).status, 404);
+    const next = h.merge("return-next", "new-key").data!;
+    assert.equal(next.authority, "orchestrator");
+    assert.ok(h.svc.handWorkflowDecisionToOwner("root", next.occurrenceId, { reason: "Keep again", sessionId: "child" }).ok);
+    assert.equal(h.merge("return-rekept", "third-key").data!.authority, "human");
+    // An old return retried after a later keep cannot release that keep.
+    assert.equal(h.svc.returnOwnerResource("child", first.occurrenceId, h.owner).status, 409);
+    assert.equal(h.merge("return-retry", "fourth-key").data!.authority, "human");
+    assert.ok(h.svc.returnOwnerResource("child", next.occurrenceId, h.owner).ok);
+    const ruled = h.svc.createWorkflowDecision("child", { requestId: "rule-rekeep", resourceKey: "rule-rekeep",
+      ownerRule: { source: "AGENTS.md", quote: "Keep this merge approval" }, resourceSnapshot: first.resourceSnapshot });
+    assert.equal(ruled.data!.authority, "human", "a new ownerRule keeps the resource again");
+    assert.equal(h.merge("after-rule-rekeep", "fifth-key").data!.authority, "human");
+    assert.equal(h.db.campaignOwnerReturns("root").length, 2);
+    const own = (await h.ask()).data!;
+    assert.equal(h.svc.returnOwnerResource("root", own.occurrenceId, h.owner).status, 409);
+  } finally { h.db.close(); }
+});
+
+test("a keep released through another occurrence cannot return a later keep (#4539 review)", () => {
+  const h = harness();
+  try {
+    const first = h.merge("stale-first").data!;
+    assert.ok(h.svc.handWorkflowDecisionToOwner("root", first.occurrenceId,
+      { reason: "Keep first", sessionId: "child" }).ok);
+    const inherited = h.merge("stale-inherited", "inherited-key").data!;
+    assert.ok(h.svc.returnOwnerResource("child", inherited.occurrenceId, h.owner).ok);
+    const next = h.merge("stale-next", "next-key").data!;
+    assert.equal(next.authority, "orchestrator");
+    assert.ok(h.svc.handWorkflowDecisionToOwner("root", next.occurrenceId,
+      { reason: "Keep next", sessionId: "child" }).ok);
+    assert.equal(h.svc.returnOwnerResource("child", first.occurrenceId, h.owner).status, 409);
+    assert.equal(h.merge("after-stale-return", "after-key").data!.authority, "human");
+  } finally { h.db.close(); }
+});
+
+test("owner returns never delegate an undelegated category (#4539)", async () => {
+  const h = harness({ full: false });
+  try {
+    // Keep under Full Control first, then remove pr_merge from its current boundary.
+    assert.ok(h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #100",
+      operations: ["implementation_question", "question", "tool_approval", "policy_ask"], delegatablePolicyIds: [] }, 1, h.principal).ok);
+    const headSha = "b".repeat(40);
+    const create = (id: string, keep: boolean) => h.svc.createWorkflowDecision("child", {
+      requestId: id, resourceKey: id,
+      ...(keep ? { ownerRule: { source: "AGENTS.md", quote: "Keep merge approval" } } : {}),
+      resourceSnapshot: { category: "pr_merge", repository: "team/repo", pullRequest: 7, headSha,
+        reviewResult: "merge", requiredChecks: { headSha, status: "passed", checkedAt: 10,
+          checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] } } });
+    const result = create("undelegated-keep", true);
+    assert.ok(result.ok && result.data, result.error ?? "owner-kept request created");
+    const kept = result.data;
+    assert.equal(kept.authority, "human");
+    assert.ok(h.svc.returnOwnerResource("child", kept.occurrenceId, h.owner).ok);
+    assert.equal(create("undelegated-return", false).data!.authority, "human");
   } finally { h.db.close(); }
 });
 

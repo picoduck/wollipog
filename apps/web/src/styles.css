@@ -5512,6 +5512,34 @@ body.shell-dock-dragging * {
   color: var(--text-dim);
   font: var(--type-small);
 }
+.owner-resource-return {
+  display: grid;
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+}
+:is(.owner-resource-return, .owner-resource-return-inline) > :is(h4, p) { margin: 0; }
+.owner-resource-return-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.campaign-owner-decision {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.owner-resource-return-inline {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
 /* One observed pull request (#2417 slice 8): a rule above heads its group, and its facts sit
    indented under it so two pull requests never read as one list. */
 .campaign-forge-pr > dt,

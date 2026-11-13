@@ -1104,6 +1104,12 @@ function ownerKeptTargets(category: WorkflowDecisionCategory, resourceKey: strin
   return targets;
 }
 
+/** Prefer the resource's identity over a requester's reusable key for an owner return. */
+function ownerReturnTargets(category: WorkflowDecisionCategory, resourceKey: string, snapshot: WorkflowDecisionResourceSnapshot): string[] {
+  const targets = ownerKeptTargets(category, resourceKey, snapshot);
+  return targets.length > 2 ? targets.slice(2) : targets;
+}
+
 /** Why an issue closure cannot execute yet, naming the next step (#2940). A pending closure the
  * root owns under its standing authorization is approved by that root itself, never by a person:
  * a bare "pending" refusal once left a Full Control root asking a person who could not answer. */
@@ -2495,6 +2501,8 @@ export class SessionsService {
   /** When each campaign was last checked for leftovers to repair, so a tick never derives them all. */
   private readonly campaignRepairCheckedAt = new Map<string, number>();
   private readonly archiveWorktreeRetirements = new Set<string>();
+  private readonly refusedWorktreeRecheckedAt = new Map<string, number>();
+  private readonly refusedWorktreeSweep = new Map<string, { at: number; after: string }>();
   /** Full Control campaigns whose first message is being established (#2940). */
   private readonly firstMessagesInFlight = new Set<string>();
   /** The one session whose established first message is being admitted right now. */
@@ -7417,6 +7425,7 @@ export class SessionsService {
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
     this.expireAutomationCreationDecisions(now);
+    this.maintainArchivedWorktreeRemoval(now, runnerId);
     for (const campaignId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
       void this.reconcileUncertainIssueClosures(campaignId).catch(() => this.log.warn(`Issue closure recovery is pending for ${campaignId}`));
     }
@@ -9979,6 +9988,9 @@ export class SessionsService {
       return fail("campaign state is available only for the Orchestrator role", 409);
     }
     const projection = this.db.campaignProjection(sessionId);
+    // A refusal is never a fresh deletion intent. Re-reading Campaign Status only asks the runner
+    // to reconcile external removal, using the archived child's exact inventory generation.
+    this.reconcileRefusedCampaignWorktrees(projection);
     return projection ? ok(projection) : fail("campaign state is unavailable", 409);
   }
 
@@ -15756,6 +15768,48 @@ export class SessionsService {
     return ok(this.withMergeReviewEvidence(handed));
   }
 
+  /** Human-only, future-request release. Existing occurrences retain authority and history. */
+  returnOwnerResource(viewedSessionId: string, occurrenceId: string, actor: GovernanceActor,
+    canAccess: (sessionId: string) => boolean = () => true): ServiceResult<WorkflowDecisionView> {
+    if (actor.kind !== "human" || !actor.id) return fail("only the campaign owner can return a resource", 403);
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (!decision || (viewedSessionId !== decision.sessionId && viewedSessionId !== decision.controllingSessionId) ||
+        !canAccess(decision.sessionId) || !canAccess(decision.controllingSessionId)) return fail("decision not found", 404);
+    if (!this.db.campaignOwnerUser(decision.controllingSessionId, actor.id)) {
+      return fail("only the campaign owner can return a resource", 403);
+    }
+    const root = this.db.getSession(decision.controllingSessionId);
+    if (root?.orchestratorPolicy?.control?.mode !== "full_control" || decision.category === "owner_decision" ||
+        (!decision.ownerHandoff && !decision.ownerRule &&
+          !this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot))) {
+      return fail("this resource cannot be returned", 409);
+    }
+    if (this.db.ownerOccurrenceWasReturned(occurrenceId)) {
+      return fail("This occurrence was already returned. A later keep must be returned from its own request.", 409);
+    }
+    const now = Date.now();
+    const recorded = this.db.returnOwnerResource(decision,
+      ownerReturnTargets(decision.category, decision.resourceKey, decision.resourceSnapshot),
+      this.ownerKeptBy(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot), actor.id, now);
+    if (!recorded) return fail("This occurrence was already returned. A later keep must be returned from its own request.", 409);
+    this.log.info(JSON.stringify({ event: "campaign_owner_resource_returned", campaignId: root.id,
+      occurrenceId, category: decision.category, byUserId: actor.id, at: now }));
+    for (const sessionId of new Set(this.db.pendingWorkflowDecisionsForController(root.id).map((d) => d.sessionId))) {
+      const session = this.db.getSession(sessionId);
+      if (!session) continue;
+      let approval = session.pendingApproval;
+      for (const request of pendingRequests(approval)) {
+        const current = request.workflowDecision && this.db.workflowDecisionByOccurrence(request.workflowDecision.occurrenceId);
+        if (current) approval = appendPendingApproval(removePendingRequest(approval, current.occurrenceId), this.workflowDecisionApproval(current));
+      }
+      this.db.setPendingApproval(sessionId, approval);
+      this.hub.sessionChangedById(sessionId);
+    }
+    this.hub.sessionChangedById(decision.sessionId);
+    this.hub.sessionChangedById(root.id);
+    return ok(decision);
+  }
+
   /** Whether the campaign's owner kept this resource (#4064): its root handed an occurrence for it
    * to the owner, or an owner rule kept one for a person (#4137). See ownerKeptTargets for what
    * counts as the same resource. */
@@ -15795,7 +15849,8 @@ export class SessionsService {
     snapshot: WorkflowDecisionResourceSnapshot): WorkflowDecisionView[] {
     const targets = new Set(ownerKeptTargets(category, resourceKey, snapshot));
     const kept = this.db.ownerKeptWorkflowDecisions(controllerId).filter((decision) =>
-      ownerKeptTargets(decision.category, decision.resourceKey, decision.resourceSnapshot).some((target) => targets.has(target)));
+      ownerKeptTargets(decision.category, decision.resourceKey, decision.resourceSnapshot).some((target) => targets.has(target)) &&
+      !this.db.ownerKeepWasReturned(controllerId, decision.occurrenceId, ownerReturnTargets(category, resourceKey, snapshot)));
     if (!kept.length) return [];
     const approved = this.personalRuleLookup(controllerId, category);
     return kept.filter((d) => d.ownerHandoff || !d.ownerRule || !approved(d.ownerRule));
@@ -16045,7 +16100,7 @@ export class SessionsService {
     }
     // A decision the campaign's owner kept (#4064) is theirs alone: never an agent's, and not any
     // other person's who can open the session.
-    if ((decision.category === "owner_decision" || decision.ownerHandoff || decision.ownerRule ||
+    if ((decision.category === "owner_decision" || decision.ownerHandoff || decision.ownerRule || decision.authorityEvaluation?.reason === "owner_kept" ||
         this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot)) &&
         (authority !== "human" || actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(decision.controllingSessionId, actor.id))) {
       return fail("Only the campaign's owner can decide a decision the owner kept", 403);
@@ -17746,6 +17801,7 @@ export class SessionsService {
     // An Orchestrator-owned occurrence for a resource the owner kept (one requested before the
     // handoff) is never current: nobody acting for the campaign can approve or consume it.
     const ownerKept = decision.category === "owner_decision" || decision.ownerRule !== undefined || decision.ownerHandoff !== undefined ||
+      decision.authorityEvaluation?.reason === "owner_kept" ||
       this.ownerKeptBy(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot).some((kept) =>
         !recordingSupersededMerge || kept.ownerHandoff || !sameWorkflowDecisionOwnerRule(kept.ownerRule, superseded.rule));
     if (ownerKept && decision.authority !== "human") return false;
@@ -18378,7 +18434,13 @@ export class SessionsService {
         toolName: "Typed Workflow Decision",
         input: JSON.stringify(snapshot, null, 2),
       },
-      workflowDecision: decision,
+      workflowDecision: { ...decision,
+        ...(decision.category !== "owner_decision" &&
+          (decision.ownerRule || decision.ownerHandoff || decision.authorityEvaluation?.reason === "owner_kept") &&
+          !this.db.ownerOccurrenceWasReturned(decision.occurrenceId) &&
+          this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot) &&
+          this.db.getSession(decision.controllingSessionId)?.orchestratorPolicy?.control?.mode === "full_control"
+          ? { returnableOwnerResource: true as const } : {}) },
     };
   }
 
@@ -20643,20 +20705,39 @@ export class SessionsService {
     }
   }
 
+  private maintainArchivedWorktreeRemoval(now: number, runnerId?: string): void {
+    const key = runnerId ?? "*";
+    const previous = this.refusedWorktreeSweep.get(key);
+    if (previous && now - previous.at < 30_000) return;
+    const children = this.db.archivedChildrenWithRefusedWorktrees(previous?.after ?? "", runnerId);
+    this.refusedWorktreeSweep.set(key, { at: now, after: children.length === 64 ? children.at(-1)! : "" });
+    for (const childId of children) this.queueCampaignWorktreeRetirement(childId, false, now);
+  }
+
+  private reconcileRefusedCampaignWorktrees(projection: OrchestratorCampaignProjection | null): void {
+    for (const childId of new Set(projection?.cleanupWorktrees?.filter(item => item.status === "refused")
+      .map(item => item.sessionId))) this.queueCampaignWorktreeRetirement(childId);
+  }
+
   /** A verified child and its archived flag are the durable intent. Reconnect replays this
    * request if the control plane exited before sending it; the runner owns deferred replay after
-   * it accepts a request. Safety refusals are recorded once and never retried automatically. */
-  private queueCampaignWorktreeRetirement(sessionId: string, retryDeferred = false): void {
+   * it accepts a request. Refusals only receive metadata reconciliation, never a deletion retry. */
+  private queueCampaignWorktreeRetirement(sessionId: string, retryDeferred = false, recheckAt = Date.now()): void {
     const child = this.db.getSession(sessionId);
     const campaignId = this.db.campaignForVerifiedChild(sessionId);
     const campaign = campaignId ? this.db.getSession(campaignId) : null;
-    if (!child?.archived || !campaign?.orchestratorPolicy ||
+    if (!child?.archived || child.archiveStatus || !campaign?.orchestratorPolicy ||
         campaign.orchestratorPolicy.behavior.completion !== "stop_and_archive" ||
         !runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "archiveWorktreeRetirement") ||
         !this.hub.isRunnerOnline(child.runnerId) || this.archiveWorktreeRetirements.has(sessionId)) return;
+    const reconcileRefused = runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion,
+      "campaignWorktreeRemovalReconciliation") &&
+      (retryDeferred || recheckAt - (this.refusedWorktreeRecheckedAt.get(sessionId) ?? 0) >= 30_000);
     const pending = this.db.campaignWorktreeCleanup(sessionId).filter((item) =>
-      item.status === "pending" || (retryDeferred && item.status === "deferred"));
+      item.status === "pending" || (retryDeferred && item.status === "deferred") ||
+      (reconcileRefused && item.status === "refused"));
     if (!pending.length) return;
+    if (pending.some(item => item.status === "refused")) this.refusedWorktreeRecheckedAt.set(sessionId, recheckAt);
     this.archiveWorktreeRetirements.add(sessionId);
     void (async () => {
       let retry = false;
@@ -20669,6 +20750,28 @@ export class SessionsService {
           const worktreeId = worktree?.id ?? "";
           if (item.status !== this.db.campaignWorktreeCleanup(sessionId)
             .find((candidate) => candidate.path === item.path)?.status) continue;
+          if (item.status === "refused") {
+            if (!worktree || worktree.source !== "created") continue;
+            const requestId = `reconcile_worktree_${randomUUID().slice(0, 8)}`;
+            try {
+              const result = await this.hub.requestFromRunner(child.runnerId, requestId, {
+                type: "session_worktree", requestId, sessionId, operation: "reconcile_removal",
+                path: item.path, worktreeId,
+              }, 150_000);
+              if (result.type === "session_worktree_result" && result.sessionId === sessionId &&
+                  result.operation === "reconcile_removal" && result.ok && result.snapshot &&
+                  result.snapshot.worktreePath !== item.path &&
+                  !result.snapshot.worktrees?.some(tree => tree.path === item.path)) {
+                this.db.updateSessionFromSnapshot(sessionId, result.snapshot, Date.now());
+                this.hub.sessionChangedById(sessionId);
+                this.campaignViewsChanged(campaignId!, sessionId);
+              }
+            } catch {
+              this.log.warn(JSON.stringify({ event: "campaign_worktree_external_reconciliation_unavailable",
+                sessionId, requestId, refusalRetained: true }));
+            }
+            continue;
+          }
           const requestId = `archive_worktree_${randomUUID().slice(0, 8)}`;
           const campaignDeliveredPullRequests = runnerSupportsProtocol(
             this.db.getRunner(child.runnerId)?.protocolVersion, "worktreePatchDelivery")

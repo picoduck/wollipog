@@ -3121,6 +3121,36 @@ export async function discardWorktreeIfSafe(
   }
 }
 
+/** An external operation has removed either the directory or its Git registration. This is
+ * inventory evidence only: callers must preserve all files, refs and administrative records.
+ * Symlinks, inaccessible parents/repositories and non-native contexts fail closed. */
+export async function worktreeExternalRemovalState(
+  repoPath: string, path: string, options: WorktreeOptions = {},
+): Promise<"missing" | "unregistered" | null> {
+  const context = options.context ?? nativeContext;
+  if (context.kind !== "native") return null;
+  try {
+    const directoryState = (): "missing" | "directory" | null => {
+      if (!statSync(dirname(path)).isDirectory()) return null;
+      try {
+        return lstatSync(path).isDirectory() ? "directory" : null;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : null;
+      }
+    };
+    const before = directoryState();
+    if (!before) return null;
+    const listed = parseWorktreePorcelain(
+      await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
+    );
+    if (directoryState() !== before) return null;
+    if (before === "missing") return "missing";
+    return listed.some(entry => sameWorktreePath(context, entry.path, path)) ? null : "unregistered";
+  } catch {
+    return null;
+  }
+}
+
 /** Read-only inventory proof. Missing registration alone does not prove files are absent.
  * Dangling symlinks, unavailable parents/repositories and remote contexts retain the record. */
 export async function worktreeIsAbsent(

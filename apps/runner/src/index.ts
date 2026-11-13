@@ -3175,6 +3175,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               ? sessions.retryWorktreeSetup(msg.sessionId, msg.path)
               : msg.operation === "generate_setup"
                 ? sessions.generateWorktreeSetupConfig(msg.sessionId)
+                : msg.operation === "reconcile_removal"
+                  ? sessions.reconcileCampaignWorktreeRemoval(msg.sessionId, msg.path, msg.worktreeId, msg.requestId)
                 : msg.operation === "inspect_retirement"
                   ? sessions.campaignWorktreeRetirement(msg.sessionId, { operation: "inspect", path: msg.path })
                 : msg.operation === "confirm_retirement"
@@ -4047,7 +4049,7 @@ async function sessionFilesTarget(
   }
   if (failure) {
     return { invalid: `the session's worktree could not be verified: ${failure}` +
-      ` — restore ${latest.worktreePath} or select another worktree for this session` };
+      ` — restore ${latest.worktreePath ?? latest.worktreeRecovery?.selectedPath} or select another worktree for this session` };
   }
   return { root: latest.worktreePath ?? latest.repoPath, context: latest.context, meta: latest };
 }

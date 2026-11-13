@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -8,7 +8,162 @@ import type { RunnerToControlPlane } from "@wollipog/protocol";
 import { SessionStore } from "./session-store.js";
 import { SessionManager } from "./session-manager.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
-import { worktreeIsAbsent, WorktreeCleanupJournal } from "./worktree.js";
+import { createRequestedWorktree, worktreeExternalRemovalState, worktreeIsAbsent, WorktreeCleanupJournal } from "./worktree.js";
+
+for (const external of ["removed", "missing_registered", "unregistered_directory"] as const) {
+  test(`archived removal reconciliation preserves data and resume recovery: ${external}`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-archived-removal-"));
+    const repo = join(root, "repo"), dataDir = join(root, "data");
+    const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args],
+      { encoding: "utf8", stdio: "pipe" }).trim();
+    let manager: SessionManager | undefined;
+    try {
+      mkdirSync(repo); git(repo, "init", "-b", "main"); isolateFromAmbientIgnores(repo);
+      git(repo, "config", "user.email", "test@example.com"); git(repo, "config", "user.name", "Test");
+      git(repo, "commit", "--allow-empty", "-m", "base");
+      const created = await createRequestedWorktree(repo, "s_archived", { branch: "fix/local-only", baseRef: "HEAD" }, { dataDir });
+      const worktree = { ...created, id: "original", source: "created" as const };
+      writeFileSync(join(worktree.path, "unique.txt"), "unlanded committed work\n");
+      git(worktree.path, "add", "."); git(worktree.path, "commit", "-m", "unique");
+      const tip = git(worktree.path, "rev-parse", "HEAD");
+      const admin = git(worktree.path, "rev-parse", "--absolute-git-dir");
+      git(worktree.path, "update-ref", "refs/worktree/private", tip);
+      const privateRef = readFileSync(join(admin, "refs/worktree/private"), "utf8");
+      const store = new SessionStore(join(dataDir, "sessions"));
+      store.create({ sessionId: "s_archived", agentId: "claude", workspaceId: "repo", repoPath: repo,
+        worktreePath: worktree.path, worktreeBranch: worktree.branch, worktrees: [worktree],
+        driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" },
+        agentSessionId: null, status: "stopped", title: "Archived Worktree", config: {}, tokensIn: 0,
+        tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1 });
+      let providerConstructions = 0;
+      manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, () => {
+        providerConstructions++;
+        throw new Error("No provider may be constructed by a blocked restart");
+      }, dataDir);
+      await assert.rejects(manager.discardWorktree("s_archived", worktree.path, { requireDelivered: true }), /no upstream/);
+      await manager.reconcileCampaignWorktreeRemoval("s_archived", worktree.path, worktree.id);
+      assert.equal(store.readMeta("s_archived")?.worktrees?.length, 1, "refused registered work is never retried for deletion");
+      if (external === "missing_registered") {
+        git(worktree.path, "checkout", "--detach");
+        rmSync(worktree.path, { recursive: true }); // Fixture only: retain Git's private administrative state.
+      } else {
+        git(repo, "worktree", "remove", worktree.path);
+        if (external === "unregistered_directory") {
+          mkdirSync(worktree.path); writeFileSync(join(worktree.path, "private.txt"), "surviving private files\n");
+        }
+      }
+      await manager.reconcileCampaignWorktreeRemoval("s_archived", worktree.path, "stale-generation");
+      assert.equal(store.readMeta("s_archived")?.worktrees?.length, 1);
+      const expected = external === "unregistered_directory" ? "unregistered" : "missing";
+      assert.equal(await worktreeExternalRemovalState(repo, worktree.path), expected);
+      assert.equal(await worktreeExternalRemovalState(join(root, "unavailable"), worktree.path), null);
+      assert.equal(await worktreeExternalRemovalState(repo, worktree.path, { context: { kind: "wsl", distro: "absent" } }), null);
+      assert.equal(store.acquireWorktreeLease("s_archived", "another-runner"), true);
+      await manager.reconcileCampaignWorktreeRemoval("s_archived", worktree.path, worktree.id);
+      assert.equal(store.readMeta("s_archived")?.worktrees?.length, 1, "another runner's lease fences reconciliation");
+      store.releaseWorktreeLease("s_archived", "another-runner");
+      if (external === "removed") {
+        store.create({ ...store.readMeta("s_archived")!, sessionId: "s_shared",
+          worktrees: [{ ...worktree, source: "attached" }] });
+        await manager.reconcileCampaignWorktreeRemoval("s_archived", worktree.path, worktree.id);
+        assert.equal(store.readMeta("s_archived")?.worktrees?.length, 1, "another session's selection keeps shared inventory intact");
+        store.remove("s_shared");
+        store.patchMeta("s_archived", { worktrees: [{ ...worktree, source: "attached" }] });
+        await manager.reconcileCampaignWorktreeRemoval("s_archived", worktree.path, worktree.id);
+        assert.equal(store.readMeta("s_archived")?.worktrees?.length, 1, "operator-owned inventory is retained");
+        store.patchMeta("s_archived", { worktrees: [worktree] });
+        const journal = (manager as unknown as { cleanupJournal: WorktreeCleanupJournal }).cleanupJournal;
+        journal.add({ sessionId: "s_archived", worktreeId: worktree.id, cleanupId: "pending",
+          repoPath: repo, worktreePath: worktree.path, context: { kind: "native" },
+          branch: worktree.branch, removalMode: "safe", trigger: "archive_retirement" });
+        const pending = journal.list();
+        await manager.reconcileCampaignWorktreeRemoval("s_archived", worktree.path, worktree.id);
+        assert.deepEqual(journal.list(), pending, "pending cleanup remains owned by its replay generation");
+        assert.equal(store.readMeta("s_archived")?.worktrees?.length, 1);
+        journal.remove("s_archived", worktree.id);
+        const internals = manager as unknown as { retireWorktreeProcesses(...args: unknown[]): Promise<void> };
+        const retire = internals.retireWorktreeProcesses;
+        internals.retireWorktreeProcesses = async () => {
+          store.patchMeta("s_archived", { worktrees: [{ ...worktree, id: "replacement-generation" }] });
+        };
+        await manager.reconcileCampaignWorktreeRemoval("s_archived", worktree.path, worktree.id);
+        assert.equal(store.readMeta("s_archived")?.worktrees?.[0]?.id, "replacement-generation",
+          "metadata replacement during process retirement is not forgotten");
+        internals.retireWorktreeProcesses = retire;
+        store.patchMeta("s_archived", { worktrees: [worktree] });
+      }
+      // Ordinary periodic reconciliation deliberately preserves a terminal selection for recovery.
+      await manager.reconcileWorktreePullRequests({ replayDeferredRetirements: false });
+      assert.equal(store.readMeta("s_archived")?.worktrees?.length, 1);
+      const result = await manager.reconcileCampaignWorktreeRemoval("s_archived", worktree.path, worktree.id);
+      assert.deepEqual(result.snapshot.worktrees, []);
+      assert.equal(result.snapshot.worktreePath, null);
+      assert.equal(result.snapshot.worktreeRecovery?.selectedPath, worktree.path);
+      assert.equal(result.snapshot.worktreeRecovery?.expectedBranch, worktree.branch);
+      store.flush("s_archived");
+      assert.deepEqual(new SessionStore(join(dataDir, "sessions")).readMeta("s_archived")?.worktreeRecovery,
+        store.readMeta("s_archived")?.worktreeRecovery, "the recovery fence survives a fresh store/process read");
+      assert.equal(git(repo, "rev-parse", "refs/heads/fix/local-only"), tip);
+      if (external === "missing_registered") {
+        assert.equal(readFileSync(join(admin, "refs/worktree/private"), "utf8"), privateRef);
+        assert.equal(readFileSync(join(admin, "HEAD"), "utf8").trim(), tip, "detached HEAD survives; no prune runs");
+        assert.match(git(repo, "worktree", "list", "--porcelain"), /detached/);
+      }
+      if (external === "unregistered_directory") {
+        assert.equal(readFileSync(join(worktree.path, "private.txt"), "utf8"), "surviving private files\n");
+      }
+      assert.match(await manager.sessionWorktreeRootFailure(store.readMeta("s_archived")!) ?? "", /Select a worktree/);
+      store.patchMeta("s_archived", { agentSessionId: "stored-provider-thread" });
+      const resumeFailure = await new Promise<{ error: string; code?: string }>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("resume did not settle")), 5_000);
+        manager!.prompt("s_archived", "Resume after removal", [], undefined, undefined, {
+          commandId: "resume-reconciled", queued() {}, started() { reject(new Error("a blocked prompt started")); },
+          completed() { reject(new Error("a blocked prompt completed")); }, uncertain() { reject(new Error("delivery is unknown")); },
+          failed(error, code) { clearTimeout(timeout); resolve({ error, code }); },
+        });
+      });
+      assert.equal(resumeFailure.code, "WORKTREE_RECOVERY_REQUIRED", "prompt resume crosses the launch guard without start()");
+      assert.match(resumeFailure.error, /Select a worktree/);
+      assert.equal(store.readMeta("s_archived")?.status, "input_required");
+      assert.equal(providerConstructions, 0, "resume never constructs a provider in the primary checkout");
+      const spec = { sessionId: "s_archived", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+        command: "claude", args: [], env: {}, driver: "claude-code" as const, context: { kind: "native" as const } };
+      for (const useWorktree of [false, true]) {
+        assert.equal(await manager.start({ ...spec, useWorktree }), false, "restart cannot silently choose primary or recreate a checkout");
+        assert.deepEqual(store.readMeta("s_archived")?.worktrees, []);
+        assert.equal(store.readMeta("s_archived")?.worktreeRecovery?.selectedPath, worktree.path);
+      }
+      assert.equal(providerConstructions, 0);
+      const recoveryId = store.readMeta("s_archived")?.worktreeRecovery?.recoveryId;
+      await manager.reconcileCampaignWorktreeRemoval("s_archived", worktree.path, worktree.id);
+      assert.equal(store.readMeta("s_archived")?.worktreeRecovery?.recoveryId, recoveryId, "repeated reconciliation is idempotent");
+      const replacement = await manager.requestWorktree("s_archived", { branch: "fix/replacement", baseRef: "HEAD" });
+      assert.equal(store.readMeta("s_archived")?.worktreeRecovery, undefined, "explicit worktree selection clears the fence");
+      assert.equal(store.readMeta("s_archived")?.worktreePath, replacement.worktree.path);
+      assert.equal(await manager.sessionWorktreeRootFailure(store.readMeta("s_archived")!), null);
+      if (external === "removed") {
+        const selected = store.readMeta("s_archived")!;
+        store.patchMeta("s_archived", { status: "idle" });
+        renameSync(replacement.worktree.path, `${replacement.worktree.path}.temporarily-missing`);
+        const recovery = manager as unknown as {
+          recordWorktreeRecovery(meta: typeof selected, path: string, detail: string, phase: string): boolean;
+        };
+        assert.equal(recovery.recordWorktreeRecovery(store.readMeta("s_archived")!, replacement.worktree.path,
+          "the directory is missing", "fixture verification"), true);
+        renameSync(`${replacement.worktree.path}.temporarily-missing`, replacement.worktree.path);
+        assert.ok(store.readMeta("s_archived")?.worktreeRecovery, "an ordinary incident was recorded");
+        git(repo, "branch", "--set-upstream-to", "main", replacement.worktree.branch);
+        await manager.discardWorktree("s_archived", replacement.worktree.path);
+        assert.equal(store.readMeta("s_archived")?.worktreePath, null);
+        assert.equal(store.readMeta("s_archived")?.worktreeRecovery, undefined,
+          "intentional discard clears the incident for its removed selection");
+        assert.equal(await manager.sessionWorktreeRootFailure(store.readMeta("s_archived")!), null);
+      }
+    } finally {
+      manager?.shutdownAll(); rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("periodic reconciliation clears external removal after refusal without deleting surviving work", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-missing-reconciliation-"));
@@ -49,6 +204,7 @@ test("periodic reconciliation clears external removal after refusal without dele
     assert.equal(await worktreeIsAbsent(repo, worktree.path), true);
     symlinkSync(join(root, "nonexistent"), worktree.path);
     assert.equal(await worktreeIsAbsent(repo, worktree.path), false, "dangling symlinks are not absence");
+    assert.equal(await worktreeExternalRemovalState(repo, worktree.path), null, "symlinks are never external-removal proof");
     rmSync(worktree.path);
     mkdirSync(worktree.path);
     writeFileSync(join(worktree.path, "private.txt"), "preserve me");

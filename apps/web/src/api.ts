@@ -1192,6 +1192,10 @@ export function createApiClient(transport: ApiTransport) {
       { method: "POST", body: JSON.stringify(request) }),
   /** Authenticated Human-only change to a Full Control campaign's follow-up approval limit (#2940);
    * `null` clears it. Compare-and-set on the campaign's policy revision. */
+  returnOwnerResource: (id: string, occurrenceId: string) =>
+    req<import("@wollipog/protocol").WorkflowDecisionView>(
+      `/api/sessions/${encodeURIComponent(id)}/workflow-decisions/${encodeURIComponent(occurrenceId)}/return-to-orchestrator`,
+      { method: "POST", body: "{}" }),
   setCampaignFollowUpLimit: (id: string, acceptedFollowUps: number | null, expectedRevision: number) =>
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/follow-up-limit`, {
       method: "POST",

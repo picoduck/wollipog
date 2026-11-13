@@ -1472,6 +1472,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 373: Exact publication readback for follow-up ledger links and limit-specific recovery (#4537).
   373,
   // v374 slot
+  // 374: Reconcile externally removed archived campaign worktrees without deleting files or refs (#4535).
+  374,
   // v375 slot
   // 375: Expose typed question classification holds and their work items in Campaign Status (#4542).
   375,
