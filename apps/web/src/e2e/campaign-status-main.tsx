@@ -745,7 +745,11 @@ const ownerCard: import("@wollipog/protocol").PendingApproval | null = ownerScen
     authority: "human", authorityEvaluation: { owner: "human", basis: "human_required", reason: "owner_kept", operation: "owner_decision" },
     status: "pending", createdAt: NOW - 4 * MINUTE },
 } : null;
-const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as const, ownerDecisions: { total: params.has("closureRecovery") ? 1 : 2, items: [
+const ownerProjection = params.get("screen") === "ask" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
+  { occurrenceId: "workflow_config", sessionId: "s_child", category: "implementation_question" as const, kind: "question" as const,
+    summary: "Migrate Provider Account Configuration (cwi_configuration): Where should provider account configuration persist, and how should legacy account lists migrate?",
+    handedOff: false, createdAt: NOW - MINUTE },
+] } } : ownerScenario === "after" ? { status: "waiting_human" as const, ownerDecisions: { total: params.has("closureRecovery") ? 1 : 2, items: [
   { occurrenceId: "workflow_owner_1", sessionId: "s_root", category: "owner_decision" as const, summary: ownerSnapshot.question, handedOff: false, createdAt: NOW - 4 * MINUTE },
   ...(params.has("closureRecovery") ? [] : [{ occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: true, createdAt: NOW - 8 * MINUTE }]),
 ] } } : ownerScenario === "rule" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
@@ -1102,7 +1106,13 @@ const scopeCompatibility = scopeRequirement ? (({ error, ...versions }) =>
 
 /** `screen=1`: the question screen's checks (#4104), one of them waiting for the owner to classify. */
 const decisionUsage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 };
-let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["decisions"] = params.get("screen") === "1" ? [
+let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["decisions"] = params.get("screen") === "ask" ? [
+  { occurrenceId: "dec_config", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "decided", verdict: "ask",
+    reason: "The configuration migration design could involve provider sign-in; the owner must classify this question.",
+    inputDigests: {}, target: DECISION_TARGET, attempts: [{ attempt: 1, model: "claude-haiku-5-5", latencyMs: 1840 }],
+    usage: decisionUsage, createdAt: NOW - 60_000,
+    subject: { sessionId: "s_child", surface: "implementation_question", requestId: "configuration-migration" } },
+] : params.get("screen") === "1" ? [
   { occurrenceId: "dec_keys", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "decided", verdict: "discusses",
     reason: "It asks which keyboard keys the Side Panel tools should use; nothing is handed over.", inputDigests: {},
     target: DECISION_TARGET, attempts: [{ attempt: 1, model: "claude-haiku-5-5", latencyMs: 1_840 }],

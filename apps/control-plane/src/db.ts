@@ -13322,8 +13322,6 @@ export class ControlPlaneDb {
     return row ? this.decisionOccurrenceFromRow(row) : null;
   }
 
-  /** The owner's one classification of an uncertain or failed screen, by compare-and-set: only an
-   * occurrence that routed to a person and has no classification yet accepts one. */
   /** Record the owner's Continue Without an Epic on an epic seed's reading (#4104), once. The seed's
    * own `owner` state, not the occurrence's, is what lets the owner release it. */
   releaseCampaignIssueScopeSeedSubject(occurrenceId: string, userId: string, now: number): boolean {
@@ -13333,12 +13331,15 @@ export class ControlPlaneDb {
     ).run(userId, now, occurrenceId).changes) > 0;
   }
 
+  /** One owner classification of a failed/uncertain screen or a typed model ask. The service
+   * also requires the matching pending human-owned hold; generic asks remain final. */
   classifyCampaignDecision(occurrenceId: string, classification: "decline" | "orchestrator", userId: string, now: number): boolean {
     return Number(this.stmt(
       `UPDATE campaign_decision_subjects SET classification=?, classified_by=?, classified_at=?
        WHERE occurrence_id=? AND classification IS NULL
          AND EXISTS (SELECT 1 FROM decision_occurrences d WHERE d.occurrence_id=campaign_decision_subjects.occurrence_id
-           AND d.state IN ('uncertain','failed'))`,
+           AND (d.state IN ('uncertain','failed') OR (d.kind='credential_screen' AND d.state='decided' AND d.verdict='ask'
+             AND campaign_decision_subjects.surface='implementation_question')))`,
     ).run(classification, userId, now, occurrenceId).changes) > 0;
   }
 
@@ -25146,7 +25147,8 @@ export class ControlPlaneDb {
     }
     // Narrowed to the campaign's controllers first, so the controller index still serves the read.
     const where = `controlling_session_id IN (SELECT value FROM json_each(?)) AND status='pending' AND authority='human'
-      AND ((category='owner_decision' OR owner_handoff IS NOT NULL OR owner_rule IS NOT NULL)
+      AND ((category='owner_decision' OR owner_handoff IS NOT NULL OR owner_rule IS NOT NULL
+          OR category='implementation_question' AND json_extract(authority_evaluation, '$.reason')='credential_screen_review')
           AND EXISTS (SELECT 1 FROM json_each(?) pair WHERE json_extract(pair.value, '$[0]')=controlling_session_id
             AND json_extract(pair.value, '$[1]')=session_id)
         OR controlling_session_id=? AND (category='campaign_repository_addition'
@@ -25163,7 +25165,13 @@ export class ControlPlaneDb {
         ...(isWorkflowQuestionSnapshot(decision.resourceSnapshot) ? { kind: "question" as const } : {}),
         summary: decision.resourceSnapshot.category === "campaign_issue_scope"
           ? campaignScopeChangeSummary(decision.resourceSnapshot, this.scopeApprovalIncrease(controllingSessionId, decision.resourceSnapshot))
-          : ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined,
+          : (() => {
+            const summary = ownerDecisionSummary(decision.resourceSnapshot);
+            if (decision.authorityEvaluation?.reason !== "credential_screen_review") return summary;
+            const assignment = this.campaignWorkLedger.currentAssignment(decision.sessionId);
+            const item = assignment && this.campaignWorkLedger.detail(controllingSessionId, assignment.workItemId, Date.now());
+            return item ? `${item.title ?? item.key} (${item.id}): ${summary}` : summary;
+          })(), handedOff: decision.ownerHandoff !== undefined,
         ...(decision.ownerRule ? { ownerRule: decision.ownerRule } : {}), createdAt: decision.createdAt }));
     return { total: total + recoveries.length, items: [...items, ...recoveries]
       .sort((a, b) => a.createdAt - b.createdAt || a.occurrenceId.localeCompare(b.occurrenceId))

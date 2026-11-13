@@ -415,7 +415,7 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
     <section className="campaign-status-handoffs" aria-labelledby={headingId}>
       <h3 id={headingId} className="section-title">Waiting for You</h3>
       <p className="section-note">
-        {runtimeRecovery || ownerDecisions.items.some((item) => scopeApproval(item) || repositoryAddition(item))
+        {runtimeRecovery || ownerDecisions.items.some((item) => scopeApproval(item) || repositoryAddition(item) || item.category === "implementation_question")
           ? `Only you can make ${one ? "this decision" : "these decisions"}.`
           : `You kept ${one ? "this decision" : "these decisions"}, so only you can make ${one ? "it" : "them"}.`}{" "}
         {runtimeRecovery ? "Relaunch the Orchestrator to restore its tools and continue its pending work." : "The Orchestrator keeps working on everything else meanwhile."}

@@ -1,5 +1,31 @@
 import { expect, test } from "@playwright/test";
 
+for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["phone", { width: 390, height: 844 }]] as const) {
+  test(`a typed model ask waits for owner classification (${device})`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&screen=ask");
+    const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
+    await expect(waiting).toContainText("Migrate Provider Account Configuration (cwi_configuration)");
+    await waiting.scrollIntoViewIfNeeded();
+    await page.mouse.move(30, 150);
+    await page.mouse.wheel(0, -10000);
+    await expect.poll(() => page.locator("aside.rpanel").evaluate((el) => el.scrollTop)).toBe(0);
+    await waiting.screenshot({ path: testInfo.outputPath(`typed-ask-work-item-${device}.png`) });
+    const section = page.getByRole("region", { name: "Decision Model Checks" });
+    await expect(section).toContainText("Waiting for you to classify it.");
+    await expect(section).toContainText("The configuration migration design could involve provider sign-in");
+    await expect(section.getByRole("button")).toHaveText(["Decline", "Let the Orchestrator Answer", "Open Session"]);
+    await section.scrollIntoViewIfNeeded();
+    await page.mouse.move(30, 150);
+    await page.mouse.wheel(0, -10000);
+    await expect.poll(() => page.locator("aside.rpanel").evaluate((el) => el.scrollTop)).toBe(0);
+    await section.screenshot({ path: testInfo.outputPath(`typed-ask-${device}.png`) });
+    await section.getByRole("button", { name: "Decline", exact: true }).click();
+    await expect(section).toContainText("You declined it.");
+    await expect(section.getByRole("button")).toHaveText(["Open Session"]);
+  });
+}
+
 /** Campaign Status's Decision Model Checks (#4104): each Decision Model verdict beside the request it
  * affected, and the owner's classification of one the model could not screen. */
 

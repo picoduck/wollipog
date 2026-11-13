@@ -81,8 +81,8 @@ export function credentialScreenFact(
     ...(verdict ? { verdict } : {}),
     ...(occurrence.failureClass ? { failureClass: occurrence.failureClass as NonNullable<CredentialScreenFact["failureClass"]> } : {}),
   };
-  if (occurrence.state === "decided") return { state: verdict === "ask" ? "ask" : "discusses", ...common };
   if (classification) return { state: classification === "decline" ? "ask" : "discusses", ...common, classifiedBy: "owner" };
+  if (occurrence.state === "decided") return { state: verdict === "ask" ? "ask" : "discusses", ...common };
   return { state: "review", ...common };
 }
 

@@ -421,7 +421,14 @@ function protectedRequestClass(request: PendingApproval, verifiedCodeOperation: 
 /** The floor for a typed question form (an implementation question or an owner decision, #4064):
  * the answer selects one offered option id, so only its text can carry a credential. */
 export function credentialFormFloor(form: { question: string; options: Array<{ label: string; description?: string }>; material?: string }): boolean {
-  return textFloor([form.question, ...form.options.flatMap((option) => [option.label, option.description ?? ""]), form.material ?? ""].join("\n"));
+  return credentialFormFloorRule(form) !== null;
+}
+
+/** Content-safe name of the existing floor; never includes request text. */
+export function credentialFormFloorRule(form: { question: string; options: Array<{ label: string; description?: string }>; material?: string }): "credential_literal" | "credential_store_path" | null {
+  const text = [form.question, ...form.options.flatMap((option) => [option.label, option.description ?? ""]), form.material ?? ""].join("\n");
+  if (credentialLiteral.test(text) || credentialLiteral.test(withoutQuoting(text))) return "credential_literal";
+  return namesCredentialPath(text) ? "credential_store_path" : null;
 }
 
 /** Which unproven-effect class a tool approval belongs to. Informational only: each class is
@@ -515,7 +522,7 @@ export function resolveCampaignAuthority(input: {
       // occurrence passes no screen: its admission already settled it, and an occurrence admitted
       // for the owner's classification stays theirs (see `credential_screen_review`).
       const screen = input.credentialScreen;
-      if (screen?.state === "ask") return declined("secrets_and_sign_in", screen);
+      // A model verdict is classification evidence, never a deterministic floor (#4542).
       if (screen && screen.state !== "discusses") {
         return result("human", "human_required", "credential_screen_review", { credentialScreen: { ...screen, state: "review" } });
       }
