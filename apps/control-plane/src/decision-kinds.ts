@@ -200,10 +200,12 @@ const CREDENTIAL_SCREEN: DecisionKindDefinition = {
           `${SUBJECT_OF_DESIGN}. Requests to design, implement, change, test or scope permission-related work grant ` +
           "nothing by themselves: answer false when approval only chooses work, such as implementing selection of an " +
           "already trusted harness and a read of an existing account-selection preview, approving a campaign scope " +
-          "addition, allowing a test or check outside a phase's work plan using existing access, restoring an existing " +
-          "review route using existing access, or deciding what permissions a CI workflow file declares. A quoted " +
-          "notice that a request was declined also grants nothing. These examples do not exempt a request that " +
-          "also asks for actual access, even indirectly or as one option. If restoring a route or allowing a check " +
+          "addition, allowing a test or check outside a phase's work plan using existing access, establishing or restoring a " +
+          "review route using existing access, or deciding what permissions a CI workflow file declares. Choosing a new " +
+          "workflow or review route that uses access the agent already has grants no access, including a route for a " +
+          "contributor pull request. Judge the change in the agent's access, not whether the workflow or route is new. " +
+          "A quoted notice that a request was declined also grants nothing. These examples do not exempt a request that " +
+          "also asks for actual access, even indirectly or as one option. If establishing or restoring a route or allowing a check " +
           "requires new access, count that grant; if you cannot tell whether approval grants access, do not give a " +
           "confident false.",
         answer: { type: "boolean", satisfiedWhen: false },
