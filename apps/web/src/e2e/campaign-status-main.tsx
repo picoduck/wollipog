@@ -852,6 +852,18 @@ function sessionsFor(rev: number): SessionView[] {
     ...(ownerCard ? { pendingApproval: ownerCard } : {}),
     ...(selectionCard ? { pendingApproval: selectionCard } : {}),
     ...(ownerScopeCards.length && rev === 1 ? { pendingApproval: { ...ownerScopeCards[0]!, ...(ownerScopeCards.length > 1 ? { additionalRequests: ownerScopeCards.slice(1) } : {}) } } : {}) });
+  if (params.get("runnerRecovery") === "1") {
+    root.title = "Orchestrator Recovery";
+    root.status = "input_required";
+    root.pendingApproval = { requestId: "runner-recovery:fixture", kind: "runner_recovery",
+      title: "Relaunch Orchestrator After Runner Restart",
+      options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }] };
+    root.orchestratorCampaign = { ...root.orchestratorCampaign!, status: "waiting_human",
+      pendingRequests: { human: 1, orchestrator: 0 }, ownerDecisions: { total: 1, items: [{
+        occurrenceId: "runner-recovery:fixture", sessionId: "s_root", category: "runner_recovery",
+        summary: "Relaunch Orchestrator After Runner Restart", handedOff: false, createdAt: NOW,
+      }] } };
+  }
   const child = baseSession({
     id: "s_child", title: "#2417 Slice 7: Campaign Status Panel", parentSessionId: "s_root",
     ...(scenario === "legacy" ? {} : { campaignMembership: { campaignSessionId: "s_root", currentWorkItemId: "cwi_2", currentAttemptId: "catt_2" } }),
@@ -888,7 +900,12 @@ const ownerRequests = (owners: "before" | "after" | "rule"): DescendantRequestVi
 };
 
 /** The request the blocked item's recorded blocker names, pending on its child. */
-const descendantRequests: DescendantRequestView[] = epicTracking || ownerScopeCards.length ? [] : ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
+const descendantRequests: DescendantRequestView[] = params.get("runnerRecovery") === "1" ? [{
+  sessionId: "s_root", sessionTitle: "Orchestrator Recovery", runnerId: "runner-1", runnerOnline: true,
+  eventEpoch: 1, createdAt: NOW, responseOwner: "human", occurrenceId: "runner-recovery:fixture",
+  request: { requestId: "runner-recovery:fixture", kind: "runner_recovery", title: "Relaunch Orchestrator After Runner Restart",
+    options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }] },
+}] : epicTracking || ownerScopeCards.length ? [] : ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
   sessionId: "s_child_3",
   sessionTitle: "#2417 Slice 5: Read API",
   runnerId: "runner-1",

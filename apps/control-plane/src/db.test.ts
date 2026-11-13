@@ -4056,6 +4056,42 @@ test("agent-control credentials are hash-only, exact-session, runner-bound, repl
   assert.equal(db.agentControlCredentialValid("agent-session", "runner-1", second), false);
 });
 
+test("runner registration identifies only its own root Orchestrators, including provisionally stopped roots", () => {
+  const db = withRunner();
+  try {
+    db.createSession(newSession({ id: "root", role: "orchestrator" }));
+    db.createSession(newSession({ id: "nested", role: "orchestrator", parentSessionId: "root" }));
+    db.createSession(newSession({ id: "ordinary" }));
+    db.updateSessionStatus("root", "stopped", 2, { cause: "runner_disconnect" });
+    assert.deepEqual(db.runnerRootOrchestratorIds("runner-1"), ["root"]);
+    assert.deepEqual(db.runnerRootOrchestratorIds("other-runner"), []);
+  } finally { db.close(); }
+});
+
+test("root credential refusals name owner recovery rather than referring the root to itself", () => {
+  const db = withRunner();
+  try {
+    db.createSession(newSession({ id: "root", role: "orchestrator", permissionMode: "orchestrator" }));
+    db.setAgentControlCredential("root", "runner-1", hashToken("known-secret"), 1);
+    const headers = { authorization: "Bearer known-secret", [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: "root" };
+    for (const state of ["running", "idle", "stopped"] as const) {
+      db.updateSessionStatus("root", state, 2);
+      const refusal = sessionCredentialRefusal(headers, db)!;
+      assert.equal(refusal.reason, state === "stopped" ? "session_stopped" : state === "running" ? "session_unavailable" : "root_unavailable");
+      if (state === "running") {
+        assert.match(refusal.error!, /unavailable to the session credential.*owner-only actions/);
+        assert.doesNotMatch(refusal.error!, /restart/u);
+      } else assert.match(refusal.error!, /session owner restart.*credential and guard/);
+      assert.doesNotMatch(refusal.error!, /ask the Orchestrator|with the Orchestrator/);
+    }
+    db.updateSessionStatus("root", "running", 3);
+    db.updateSessionStatus("root", "stopped", 4, { cause: "runner_disconnect" });
+    assert.equal(sessionCredentialRefusal(headers, db)!.reason, "runner_reconnecting");
+    assert.match(sessionCredentialRefusal(headers, db)!.error!, /retry after the runner reconnects/);
+    assert.deepEqual(sessionCredentialRefusal({ ...headers, authorization: "Bearer wrong" }, db), { reason: "unknown_credential" });
+  } finally { db.close(); }
+});
+
 test("refused session credentials disclose stop provenance only to the matching bearer", async () => {
   const db = withRunner();
   db.createSession(newSession({ id: "agent-session" }));

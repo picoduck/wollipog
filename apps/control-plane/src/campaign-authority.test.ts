@@ -218,6 +218,23 @@ test("root requests use standing authorization and child requests delegate; exac
   } finally { h.db.close(); }
 });
 
+test("a root runner recovery action stays in the Inbox and Campaign Status under Full Control", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    h.db.setPendingApproval("root", { requestId: "runner-recovery:test", kind: "runner_recovery",
+      title: "Relaunch Orchestrator After Runner Restart", options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }] });
+    h.db.updateSessionStatus("root", "input_required", Date.now());
+    const root = h.db.getSession("root")!;
+    assert.equal(root.attention!.humanActions.length, 1);
+    const campaign = h.db.campaignProjection("root")!;
+    assert.equal(campaign.pendingRequests!.human, 1);
+    assert.equal(campaign.status, "waiting_human");
+    assert.equal(campaign.ownerDecisions!.total, 1);
+    assert.equal(campaign.ownerDecisions!.items[0]!.category, "runner_recovery");
+  } finally { h.db.close(); }
+});
+
 test("provider, parent and list projections share sensitive request ownership", async () => {
   const h = harness();
   try {

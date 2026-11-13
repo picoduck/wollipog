@@ -315,6 +315,9 @@ export interface SessionMeta {
   acknowledgedCostUsd?: number;
   preview: string | null;
   pendingApproval: PendingApproval | null;
+  /** Owner-only discriminator retained while a restart recovery card waits for peer negotiation.
+   * A successful fresh launch replaces the metadata and retires it. Not projected to peers. */
+  runnerRestartRecoveryRequestId?: string;
   /** One-time upgrade scan repaired any question that an older startup path stranded in history. */
   questionRecoveryReconciled?: true;
   /** Runner-only structural identity for the provider installation + credential home/source. */

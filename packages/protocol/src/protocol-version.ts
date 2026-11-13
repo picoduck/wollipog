@@ -1450,6 +1450,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 365: Scope proposals can request all matching issues, bounded by owner words and hard ceilings (#4532).
   365,
   // v366 slot
+  // 366: Owner-only native Orchestrator relaunch cards after runner process loss (#4546).
+  366,
   // v367 slot
   // v368 slot
   // v369 slot

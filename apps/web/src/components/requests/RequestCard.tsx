@@ -488,6 +488,7 @@ export function RequestCard({
         {evidence && !readOnly ? evidence.title : request.title}
       </h3>
       {readOnly && <Notice tone="neutral" compact>{readOnlyNotice}</Notice>}
+      {request.kind === "runner_recovery" && <p className="request-card-policy">The runner restarted, so this Orchestrator needs a fresh connection for its tools. Relaunching refreshes its credential and guard and continues its pending work.</p>}
       {policyLine && <p className="request-card-policy">{policyLine}</p>}
       {body.length > 0 && <div className="request-card-body" id={bodyId} ref={bodyRef}>{body}</div>}
       {error && !readOnly && (

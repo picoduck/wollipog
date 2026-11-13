@@ -614,6 +614,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   governanceTripReporting: 129,
   /** v107 runners durably resume non-secret structured-question answers after process loss. */
   resumableQuestionAnswers: 107,
+  runnerRestartRecovery: 366,
   sessionWorktrees: 101,
   sessionWorktreeDiscard: 102,
   /** v159 reports durable deferred retirement instead of silently treating it as removal. */
@@ -2432,7 +2433,7 @@ export interface CampaignOwnerDecision {
   kind?: "question";
   /** The session whose request it is: the root for an owner decision, else the requester. */
   sessionId: string;
-  category: WorkflowDecisionCategory;
+  category: WorkflowDecisionCategory | "runner_recovery";
   /** The owner decision's question, or what a handed-off occurrence decides ("Merge team/repo#7"). A
    * scope request names its exact change and any Maximum Issues increase, and is never shortened (#4334). */
   summary: string;
@@ -4586,6 +4587,8 @@ export function summarizeQuestionAnswers(
 }
 
 export type ApprovalKind =
+  /** Runner-owned, owner-resolved relaunch after loss of a native Orchestrator's runtime. */
+  | "runner_recovery"
   | "permission"
   | "authentication"
   | "cost_budget"
@@ -10801,6 +10804,8 @@ export interface RegisteredMessage {
   heartbeatIntervalMs: number;
   /** The control-plane protocol version. Absent means a pre-negotiation control plane. */
   protocolVersion?: number;
+  /** v366: control-plane-known root Orchestrators on this runner, never provider-asserted roles. */
+  rootOrchestratorSessionIds?: string[];
   /** Present once an administrator has made the control plane authoritative for this Machine. */
   runnerCapacity?: RunnerCapacityConfiguration;
   /** Present once the Machine has a persisted automatic account-switch preference. */

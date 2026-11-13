@@ -1,5 +1,5 @@
 import { extractBearer, hashToken } from "./auth.js";
-import { WOLLIPOG_AGENT_ACTOR_SESSION_HEADER } from "@wollipog/protocol";
+import { WOLLIPOG_AGENT_ACTOR_SESSION_HEADER, sessionRole } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 
 /** Diagnostic only, after authentication has refused. Never grants access or trusts an actor
@@ -15,12 +15,19 @@ export function sessionCredentialRefusal(
   if (!session || !bearer || !db.agentControlCredentialValid(session.id, session.runnerId, hashToken(bearer))) {
     return { reason: "unknown_credential" };
   }
+  const root = sessionRole(session) === "orchestrator" && !session.parentSessionId;
   const stop = db.sessionStopProvenance(session.id);
   if (session.status === "stopped" && stop?.cause === "runner_disconnect" && !stop.confirmation) {
+    if (root) return { reason: "runner_reconnecting", error: "session agent credential refused: runner reconnecting; retry after the runner reconnects; if it does not recover, use this Orchestrator's relaunch recovery action or have its owner check the runner connection" };
     return { reason: "runner_reconnecting", error: "session agent credential refused: runner reconnecting; retry after the runner reconnects; if it does not recover, ask the Orchestrator to check the runner connection" };
   }
   if (session.status === "stopped") {
+    if (root) return { reason: "session_stopped", error: "session agent credential refused: this Orchestrator is stopped; have its session owner restart it from the session controls to refresh its credential and guard" };
     return { reason: "session_stopped", error: "session agent credential refused: session stopped; ask the Orchestrator to restart the session" };
   }
+  if (root && ["starting", "running", "input_required"].includes(session.status)) {
+    return { reason: "session_unavailable", error: "session agent credential refused: this request is unavailable to the session credential; check the requested operation and use the session owner's controls for owner-only actions" };
+  }
+  if (root) return { reason: "root_unavailable", error: "session agent credential refused: this Orchestrator is unavailable; have the session owner restart it from the session controls to refresh its credential and guard" };
   return { reason: "session_unavailable", error: "session agent credential refused: this request is unavailable to the session credential; check the requested operation, session state and delegated access with the Orchestrator" };
 }

@@ -7094,6 +7094,9 @@ export class SessionsService {
     // (#2940); nothing an agent or automation sends may reach it first.
     const firstMessageRefusal = this.firstMessageFence(sessionId, session);
     if (firstMessageRefusal) return fail(firstMessageRefusal, 409);
+    if (pendingRequests(session.pendingApproval).some((request) => request.kind === "runner_recovery")) {
+      return fail("relaunch this Orchestrator from its recovery action before sending messages", 409);
+    }
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     if (this.db.delegatedImageReviews.isReviewer(sessionId)) return fail(DELEGATED_IMAGE_REVIEWER_ERROR, 409);
     // An older runner would still resume a persisted exec session for this turn (#3259).
@@ -19347,6 +19350,9 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (pendingRequests(session.pendingApproval).some((request) => request.kind === "runner_recovery")) {
+      return fail("relaunch this Orchestrator from its recovery action before answering provider questions", 409);
+    }
     // An Owner Question (#4270) is presented as a question but is the owner's workflow decision: the
     // control plane resolves it, and no runner is asked.
     const ownerQuestionCard = pendingRequests(session.pendingApproval)
@@ -19586,6 +19592,20 @@ export class SessionsService {
     if (!pending) return fail("no pending approval for this session", 409);
     if (pending.requestId !== requestId) return fail("approval request id does not match the pending one", 409);
     if (pending.expiresAt != null && pending.expiresAt <= now) return fail("approval request has expired", 409);
+    // This is a runner recovery action, never a provider tool permission. The old root's
+    // credential and delegated Parent Control cannot authorize its own relaunch.
+    if (pending.kind === "runner_recovery") {
+      if (actor.kind !== "human" || resolvedByParentSessionId || !canAccess(sessionId)) {
+        return fail("only the session owner can relaunch this Orchestrator", 403);
+      }
+      if (optionId !== "relaunch") return fail("choose Relaunch Orchestrator to recover this session", 409);
+      const restarted = this.restart(sessionId);
+      if (restarted.ok) {
+        this.recordGovernanceAudit(session, pending, "resolution", "allowed", actor, now, { optionId });
+        this.prompt(sessionId, "[Wollipog Runner Recovery] The owner relaunched this Orchestrator after its runner restarted. The new launch refreshes its credential and guard. Read the campaign and descendant requests, reconcile any uncertain outcomes before retrying, and continue the pending work within its existing authority.");
+      }
+      return restarted;
+    }
     if (pending.kind !== "workflow_decision" && actor.kind === "human" &&
         !pending.options.some((option) => option.optionId === optionId && option.kind?.startsWith("reject"))) {
       const hold = this.credentialScreenHold(session, pending);

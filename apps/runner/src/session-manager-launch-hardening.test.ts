@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
 import { requestedSlot, requestedWorktreeBoundary, type WorktreeCleanupRecord } from "./worktree.js";
+import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 
 // #4209 follow-ups to #4413, #4418 and #4419: a worktree launch, and what it leaves when it fails.
 
@@ -135,6 +136,44 @@ interface Internals {
   cleanupJournal: { add(record: WorktreeCleanupRecord): void; list(): WorktreeCleanupRecord[] };
 }
 const internalsOf = (h: Harness) => h.manager as unknown as Internals;
+
+test("an owner-admitted relaunch queues its recovery continuation before startup clears the card", async () => {
+  await withSession("runner-recovery", async (h) => {
+    h.spec.orchestrator = { strictProjectIsolation: false, integrationIsolation: false };
+    h.store.patchMeta(h.sessionId, { orchestrator: h.spec.orchestrator, status: "running" });
+    h.restart();
+    h.manager.reconcileRunnerRestartRecovery([h.sessionId]);
+    assert.equal(h.store.readMeta(h.sessionId)!.pendingApproval!.kind, "runner_recovery");
+    assert.equal(h.manager.prompt(h.sessionId, "unadmitted continuation"), false);
+    const receipt: string[] = [];
+    const lifecycle = { commandId: "owner-recovery-continuation", queued: () => { receipt.push("queued"); },
+      started: () => { receipt.push("started"); }, completed: () => { receipt.push("completed"); },
+      failed: (error: string) => { receipt.push(`failed:${error}`); }, uncertain: (error: string) => { receipt.push(`uncertain:${error}`); } };
+    const starting = h.start();
+    assert.equal(h.manager.prompt(h.sessionId, "owner recovery continuation", [], undefined, undefined, lifecycle), true);
+    assert.equal(await starting, true, JSON.stringify({ logs: h.logs, errors: errorText(h) }));
+    await waitFor(() => h.providers.at(-1)!.prompts.includes("owner recovery continuation"), "recovery continuation was lost");
+    await waitFor(() => receipt.includes("completed"), "durable recovery continuation never completed");
+    assert.ok(receipt.includes("queued") && receipt.includes("started"));
+    assert.ok(!receipt.some((item) => item.startsWith("failed:") || item.startsWith("uncertain:")), receipt.join(", "));
+  });
+});
+
+test("a survivor lease refusal retains the owner recovery action and starts no replacement provider", async () => {
+  await withSession("runner-survivor", async (h) => {
+    h.spec.orchestrator = { strictProjectIsolation: false, integrationIsolation: false };
+    h.store.patchMeta(h.sessionId, { orchestrator: h.spec.orchestrator, status: "running" });
+    h.restart();
+    h.manager.reconcileRunnerRestartRecovery([h.sessionId]);
+    const requestId = h.store.readMeta(h.sessionId)!.pendingApproval!.requestId;
+    const priorProviders = h.providers.length;
+    Object.defineProperty(h.manager, "prepareLaunch", { value: async () => { throw new ProviderHomeLeaseError("process_survivor"); } });
+    assert.equal(await h.start(), false);
+    assert.equal(h.providers.length, priorProviders);
+    assert.equal(h.store.readMeta(h.sessionId)!.status, "input_required");
+    assert.equal(h.store.readMeta(h.sessionId)!.pendingApproval!.requestId, requestId);
+  });
+});
 
 const registered = (repo: string) => git(repo, "worktree", "list", "--porcelain").split("\n")
   .filter((line) => line.startsWith("worktree ")).map((line) => line.slice("worktree ".length));
