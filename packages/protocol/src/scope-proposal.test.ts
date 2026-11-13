@@ -7,6 +7,15 @@ import {
 } from "./index.js";
 
 const additions = [{ repository: "Owner/Repo", number: 12 }, { repository: "owner/repo", number: 13 }];
+
+test("all is a distinct count that always needs the count check (#4532)", () => {
+  const normalized = normalizeScopeProposalInput(input({ requestedCount: "all" }), additions);
+  assert.notEqual(typeof normalized, "string");
+  if (typeof normalized === "string") throw new Error(normalized);
+  assert.equal(normalized.requestedCount, "all");
+  assert.ok(scopeProposalChecks(normalized, []).includes("requested_count"));
+  assert.equal(typeof normalizeScopeProposalInput(input({ requestedCount: "every" }), additions), "string");
+});
 const input = (overrides: Record<string, unknown> = {}) => ({
   issues: [{ repository: "owner/repo", number: 12, origin: "owner_named", rationale: " The owner\nnames #12. " },
     { repository: "OWNER/repo", number: 13, origin: "owner_named", rationale: "Named too." }],

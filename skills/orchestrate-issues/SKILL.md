@@ -279,7 +279,7 @@ its scope; the server reads nothing from it. The campaign starts with an empty s
 nothing until your initial proposal is admitted, so proposing it is your first campaign action, after
 `get_campaign` and the preflight report. Send the issues as `additions` with `proposal`: for each
 issue its `origin`, `owner_named` when its number is in the owner's message or `orchestrator_chosen`,
-and a one-line `rationale`; `requestedCount`, the number the owner asked for or `null`;
+and a one-line `rationale`; `requestedCount`, the number the owner asked for, `"all"` when they asked for all/every matching issue, or `null`;
 `constraints`, each checkable limit you read ("open", "UI only", "skip anything labeled security");
 and `withheldOperations`, operations the message rules out ("fix but don't merge" withholds
 `pr_merge`). A proposal may add issues in any of the campaign's repositories. A bare `#12` means the
@@ -311,8 +311,11 @@ the question and issue: revise and propose again, since the same issues with ano
 the same answer. When it is uncertain or fails, the proposal becomes the owner's one approval, asked
 as an Owner Question with your proposal and rationale; proposing the same issues again returns that
 same request, and an answer in the owner's own words declines it and reaches you as a prompt. A
-stated count must be one the message writes, your chosen issues stay within it (3 when none is
-stated), and later additions take the same route within the admitted count.
+stated count must be one the message writes. `"all"` requires all/every in that exact message and
+the check confirming it means every matching issue; it uses the explicit Maximum Issues, otherwise
+the derived ceiling of at most 100. More matches than that ceiling need the owner's approval.
+Your chosen issues stay within the count (3 when none is stated), and later additions take the
+same route within the numeric ceiling recorded on admission.
 
 A Custom campaign's first message gets the same propose-then-check treatment, with the authority it
 always had and no new person step. When the first message writes an issue number, `create_session`

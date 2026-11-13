@@ -6,6 +6,20 @@ import {
 } from "./campaign-issue-scope.js";
 import type { CampaignIssueScope } from "./index.js";
 
+test("only an owner-routed all proposal may retain its exact ceiling increase (#4532)", () => {
+  const proposal = { initial: true, messageDigest: "a".repeat(64), requestedCount: "all", constraints: [], withheldOperations: [],
+    issues: [{ number: 12, origin: "orchestrator_chosen", rationale: "Matches", title: "Issue" }],
+    checks: ["requested_count", "chosen_issues"], route: "owner", ownerCause: "issue_ceiling_exceeded", ownerMessage: "Fix all issues.",
+    constraintCheck: { occurrenceId: "checked", verdict: "admit" } };
+  const input = { category: "campaign_issue_scope", repository: "owner/repo", expectedRevision: 1, before: [], additions: [12], removals: [],
+    explanation: "All matches", affectedAssignments: [], affectedDecisions: [], activeChildren: [], scopeProposal: proposal,
+    ownerReview: { cause: "lineage_missing", maxIssuesIncrease: { from: 1, increase: 1 } } };
+  assert.ok(normalizeCampaignIssueScopeSnapshot(input));
+  assert.equal(normalizeCampaignIssueScopeSnapshot({ ...input, scopeProposal: { ...proposal, requestedCount: 2 } }), null);
+  assert.equal(normalizeCampaignIssueScopeSnapshot({ ...input, scopeProposal: { ...proposal, route: "admitted", ownerCause: undefined, ownerMessage: undefined } }), null);
+  assert.equal(normalizeCampaignIssueScopeSnapshot({ ...input, ownerReview: { cause: "lineage_missing" } }), null);
+});
+
 test("a proposal's issues are exactly each repository's additions, with a launch issue left bare (#4118, #4282)", () => {
   const issue = (number: number, repository?: string) => ({ ...(repository ? { repository } : {}), number, origin: "owner_named", rationale: "Named", title: "" });
   const snapshot = (issues: ReturnType<typeof issue>[], other: Record<string, unknown> = { repository: "owner/api", before: [], additions: [40], removals: [] }, additions = [12]) =>

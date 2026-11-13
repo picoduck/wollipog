@@ -62,8 +62,8 @@ export interface CampaignScopeProposalIssueInput {
  * are exactly the request's additions. */
 export interface CampaignScopeProposalInput {
   issues: CampaignScopeProposalIssueInput[];
-  /** The number of issues the owner asked for, or null when the message states none. */
-  requestedCount: number | null;
+  /** The count the owner asked for, "all" for every matching issue, or null when unstated. */
+  requestedCount: number | "all" | null;
   /** Each checkable constraint the Orchestrator read from the message ("open", "UI only", "skip
    * anything labeled security"). Ranking criteria are not constraints and do not belong here. */
   constraints: string[];
@@ -100,7 +100,7 @@ export type ScopeProposalCheck = "requested_count" | "chosen_issues" | "unrefere
  * its proposal can be checked; `repository_name_unresolved`: the repository the owner's message names
  * matches no boundary repository or several (#4118). */
 export type ScopeProposalOwnerCause = "constraint_check_uncertain" | "constraint_check_failed" | "constraint_check_unavailable" |
-  "proposal_unstructured" | "repository_name_unresolved";
+  "proposal_unstructured" | "repository_name_unresolved" | "issue_ceiling_exceeded";
 
 /** The Decision Model's constraint check of a recorded proposal: its audited occurrence and what the
  * server derived from the answers. A refused check records no proposal: the Orchestrator revises. */
@@ -134,7 +134,7 @@ export interface CampaignScopeProposal {
   repositoryLimitVerified?: true;
   /** The one name a record from before the list held (#4118). Read as a one-entry list. */
   repositoryConstraint?: ScopeProposalRepositoryConstraint;
-  requestedCount: number | null;
+  requestedCount: number | "all" | null;
   constraints: string[];
   withheldOperations: CampaignAuthorityOperation[];
   /** What it needs checked beyond the floors; empty on the fast path. */
@@ -212,7 +212,7 @@ const OPERATIONS: readonly CampaignAuthorityOperation[] = ["implementation_quest
 const CHECKS: readonly ScopeProposalCheck[] = ["requested_count", "chosen_issues", "unreferenced_named_issues", "unproposed_references",
   "later_named_issues", "constraints", "withheld_operations", "proposal_unstructured", "repository_name_unresolved", "repository_limit", "repository_mentioned"];
 const OWNER_CAUSES: readonly ScopeProposalOwnerCause[] = ["constraint_check_uncertain", "constraint_check_failed", "constraint_check_unavailable",
-  "proposal_unstructured", "repository_name_unresolved"];
+  "proposal_unstructured", "repository_name_unresolved", "issue_ceiling_exceeded"];
 
 const plainText = (value: unknown, max: number): value is string => typeof value === "string" && value.length <= max &&
   !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
@@ -251,14 +251,14 @@ export function normalizeScopeProposalInput(value: unknown, additions: ReadonlyA
     return "proposal.issues must list exactly the additions, each once";
   }
   const count = v.requestedCount;
-  if (count !== null && (!Number.isSafeInteger(count) || (count as number) < 1 || (count as number) > 100)) return "proposal.requestedCount must be null or 1 to 100";
+  if (count !== null && count !== "all" && (!Number.isSafeInteger(count) || (count as number) < 1 || (count as number) > 100)) return 'proposal.requestedCount must be null, "all", or 1 to 100';
   if (!Array.isArray(v.constraints) || v.constraints.length > SCOPE_PROPOSAL_LIMITS.constraints ||
       v.constraints.some((c) => !plainText(c, SCOPE_PROPOSAL_LIMITS.constraintChars) || !oneLine(c as string))) {
     return "proposal.constraints must list at most 10 non-empty constraints of at most 200 characters";
   }
   if (!Array.isArray(v.withheldOperations) || v.withheldOperations.some((o) => !OPERATIONS.includes(o as CampaignAuthorityOperation)) ||
       new Set(v.withheldOperations).size !== v.withheldOperations.length) return "proposal.withheldOperations must list distinct known operations";
-  return { issues, requestedCount: count as number | null, constraints: (v.constraints as string[]).map(oneLine),
+  return { issues, requestedCount: count as number | "all" | null, constraints: (v.constraints as string[]).map(oneLine),
     withheldOperations: [...v.withheldOperations as CampaignAuthorityOperation[]].sort(),
     ...(names === undefined ? {} : { repositoryNames: [...new Set((names as string[]).map(oneLine))] }) };
 }
@@ -320,7 +320,7 @@ export function validScopeProposal(value: unknown): boolean {
   if (v.repositoryLimitVerified !== undefined && (v.repositoryLimitVerified !== true || !v.initial || unresolved || list.length !== 1 ||
       v.issues.some((raw) => (raw as { origin: string }).origin !== "owner_named"))) return false;
   if ((list.length > 0 && !unresolved && !v.repositoryLimitVerified) !== (Array.isArray(v.checks) && v.checks.includes("repository_limit"))) return false;
-  if (v.requestedCount !== null && (!Number.isSafeInteger(v.requestedCount) || (v.requestedCount as number) < 1 || (v.requestedCount as number) > 100)) return false;
+  if (v.requestedCount !== null && v.requestedCount !== "all" && (!Number.isSafeInteger(v.requestedCount) || (v.requestedCount as number) < 1 || (v.requestedCount as number) > 100)) return false;
   if (!Array.isArray(v.constraints) || v.constraints.length > SCOPE_PROPOSAL_LIMITS.constraints ||
       v.constraints.some((c) => !plainText(c, SCOPE_PROPOSAL_LIMITS.constraintChars))) return false;
   if (!Array.isArray(v.withheldOperations) || v.withheldOperations.some((o) => !OPERATIONS.includes(o as CampaignAuthorityOperation))) return false;
@@ -341,6 +341,7 @@ export function validScopeProposal(value: unknown): boolean {
   // A check names its outcome exactly when the owner route is that check's.
   if (v.ownerCause === "constraint_check_uncertain") return check?.verdict === "uncertain";
   if (v.ownerCause === "constraint_check_failed") return check?.verdict === "failed";
+  if (v.ownerCause === "issue_ceiling_exceeded") return check?.verdict === "admit";
   return check === undefined;
 }
 
@@ -406,6 +407,8 @@ export function scopeProposalMaterial(snapshot: ScopeProposalSnapshot, maxIssues
   const reason = proposal.constraintCheck?.reason ? ` (${escapeMarkdown(proposal.constraintCheck.reason.replace(/\.$/u, ""))})` : "";
   const why = proposal.ownerCause === "proposal_unstructured"
     ? "the Orchestrator's machine can't send a structured proposal, so nothing could check it"
+    : proposal.ownerCause === "issue_ceiling_exceeded"
+      ? "the matching issues exceed the campaign's Maximum Issues"
     : proposal.ownerCause === "repository_name_unresolved"
       ? "a repository your message names matches no repository in this campaign, or more than one, so no repository limit applies"
     : proposal.ownerCause === "constraint_check_uncertain"
