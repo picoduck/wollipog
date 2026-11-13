@@ -9,7 +9,7 @@ import { CAMPAIGN_FORGE_OBSERVATION, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, DE
   type CampaignWorkItemDetail, type IssueClosureDeliveryGap, type IssueClosureEpicMembers, ISSUE_CLOSURE_DELIVERY_FAILURE_MAX, issueClosureDeliveryFailure,
   issueClosureDeliveryGap, normalizeIssueClosureDeliveryGaps, normalizeIssueClosureEpicMembers } from "@wollipog/protocol";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
-import { Hub } from "./hub.js";
+import { Hub, RunnerRequestNotSentError } from "./hub.js";
 import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
@@ -4946,6 +4946,30 @@ test("a managed own-repository publication cannot hand creation to manual consum
       assert.deepEqual(c.actions.map((action) => action.kind), ["issue_publication", "issue_publication_observe"]);
     } finally { release?.(); c.h.db.close(); }
   }
+});
+
+test("a managed publication proven not sent can use manual consumption even after the attempt cap (#4537)", async () => {
+  const c = multiRepositoryCampaign();
+  try {
+    const decision = await c.approved("not-sent-fallback", recordPublication(c.h, "team/repo", "Publish After a Proven Refusal", c.origin("team/repo")));
+    const inner = c.h.hub.requestFromRunner;
+    let writes = 0;
+    c.h.hub.requestFromRunner = async (runner, id, message, timeout) => {
+      if (message.type === "forge_decision_action") { writes++; throw new RunnerRequestNotSentError(); }
+      return inner(runner, id, message, timeout);
+    };
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const refused = await c.perform(decision);
+      assert.equal(refused.data!.forgeAction?.outcome, "refused");
+      assert.equal(refused.data!.forgeAction?.publicationCreatedIssue, undefined);
+      assert.equal(refused.data!.status, "approved");
+    }
+    assert.equal((await c.perform(decision)).status, 409, "the bounded managed attempt cap still applies");
+    const manual = await c.h.svc.consumeWorkflowDecision("child", decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot });
+    assert.equal(manual.data?.status, "consumed", manual.error ?? "manual consumption after a proven no-op");
+    assert.equal(writes, 5);
+    assert.equal((await c.perform(decision)).status, 409, "consumption cannot be reused for managed creation");
+  } finally { c.h.db.close(); }
 });
 
 test("confirmed publication is consumed when policy changes during its readback, while new dispatch stays gated (#4537)", async () => {

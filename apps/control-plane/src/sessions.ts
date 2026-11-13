@@ -16337,10 +16337,15 @@ export class SessionsService {
     // A child can echo the original video request or the exact server-derived snapshot from get;
     // neither can nominate new frames. The stored snapshot remains the action's authority.
     const normalized = { data: decision.resourceSnapshot };
-    // Once managed execution owns a publication, manual consumption must never hand the same
-    // creation to a second writer, including after a failed readback or a control-plane restart.
-    const managedPublication = () => decision.category === "follow_up_issue_publication" &&
-      (this.forgeActionsInFlight.has(occurrenceId) || this.db.workflowDecisionByOccurrence(occurrenceId)?.forgeAction !== undefined);
+    // Never hand a possibly completed managed creation to a second writer, including after a
+    // failed readback or restart. An idle refusal proving no effect, with no creation receipt,
+    // may still hand off to the manual route; cross-repository routing remains enforced below.
+    const managedPublication = () => {
+      if (decision.category !== "follow_up_issue_publication") return false;
+      if (this.forgeActionsInFlight.has(occurrenceId)) return true;
+      const attempt = this.db.workflowDecisionByOccurrence(occurrenceId)?.forgeAction;
+      return attempt !== undefined && (attempt.outcome !== "refused" || attempt.publicationCreatedIssue !== undefined);
+    };
     const managedPublicationRefusal = "This publication has a managed execution attempt. Nothing was consumed: use execute_workflow_decision to reconcile it; do not create the issue yourself.";
     if (managedPublication()) return fail(managedPublicationRefusal, 409);
     if (video) {
