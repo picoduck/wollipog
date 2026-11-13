@@ -457,7 +457,7 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
                     {item.summary}
                     <span className="campaign-status-meta">
                       {item.category === "runner_recovery" ? "Runner restarted" : item.ownerRule ? "Requested under a rule" : item.handedOff ? "Handed over by the Orchestrator"
-                        : scopeApproval(item) ? "Proposed by the Orchestrator" : "Asked by the Orchestrator"}{" "}
+                        : scopeApproval(item) ? "Proposed by the Orchestrator" : item.credentialScreenReview ? "Held by the model screen" : "Asked by the Orchestrator"}{" "}
                       <RecordedTime at={item.createdAt} now={now} />
                     </span>
                   </dd>

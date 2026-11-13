@@ -1117,7 +1117,7 @@ let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["dec
     reason: "The configuration migration design could involve provider sign-in; the owner must classify this question.",
     inputDigests: {}, target: DECISION_TARGET, attempts: [{ attempt: 1, model: "claude-haiku-5-5", latencyMs: 1840 }],
     usage: decisionUsage, createdAt: NOW - 60_000,
-    subject: { sessionId: "s_child", surface: "implementation_question", requestId: "configuration-migration" } },
+    subject: { sessionId: "s_child", surface: "implementation_question", requestId: "configuration-migration", classificationPending: true } },
 ] : params.get("screen") === "1" ? [
   { occurrenceId: "dec_keys", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "decided", verdict: "discusses",
     reason: "It asks which keyboard keys the Side Panel tools should use; nothing is handed over.", inputDigests: {},

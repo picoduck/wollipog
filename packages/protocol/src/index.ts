@@ -7145,13 +7145,15 @@ export interface DecisionModelTestResult {
 /** Campaign Status: its Decision calls and their separate usage. Never managed worker accounting. */
 /** What a campaign decision affected (#4104), so Campaign Status shows its verdict beside it. */
 export interface CampaignDecisionSubject {
+  /** v375: live typed classification hold; false for historical, refused or revoked requests. */
+  classificationPending?: boolean;
   /** The session whose request was screened. */
   sessionId: string;
   surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision" | "follow_up_publication" | "issue_closure" |
     "issue_scope_seed";
   /** The affected request: a workflow decision request id, or a provider request occurrence id. */
   requestId: string;
-  /** The owner's classification of an uncertain or failed screen. For an epic seed, `orchestrator`
+  /** The owner's classification of an uncertain, failed or held typed ask screen. For an epic seed, `orchestrator`
    * is the owner's Continue Without an Epic. */
   classification?: "decline" | "orchestrator";
   /** An `issue_scope_seed` subject's seed state, when this occurrence is the campaign's current

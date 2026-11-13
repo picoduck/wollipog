@@ -124,7 +124,8 @@ function outcomeText(decision: CampaignDecision): string {
   if (classification === "orchestrator") return ownerDecision ? "You chose to answer it yourself." : "You let the Orchestrator answer it.";
   if (decision.state === "pending") return "Nobody can answer it until the check finishes.";
   if (decision.state === "decided") {
-    if (decision.verdict === "ask" && decision.subject?.surface === "implementation_question") return "Waiting for you to classify it.";
+    if (decision.verdict === "ask" && decision.subject?.surface === "implementation_question") return decision.subject.classificationPending
+      ? "Waiting for you to classify it." : "No classification is pending for this request.";
     if (decision.verdict === "ask") return ownerDecision ? "Refused; nobody was asked." : "Declined and recorded as blocked work.";
     return ownerDecision ? "It went to you as an owner decision." : "The Orchestrator decides it.";
   }
@@ -201,10 +202,10 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
       <ul className="campaign-screen-list">
         {(decisions ?? []).map((decision) => {
           const subject = decision.subject;
-          // Only a question the screen could not decide is classified here; a follow-up or closure
+          // A failed/uncertain screen or a live typed ask hold is classified here; a follow-up or closure
           // the model could not check is decided on its own request.
           const awaiting = decision.kind === "credential_screen" && (decision.state === "uncertain" || decision.state === "failed" ||
-            (decision.state === "decided" && decision.verdict === "ask" && subject?.surface === "implementation_question")) &&
+            (decision.state === "decided" && decision.verdict === "ask" && subject?.surface === "implementation_question" && subject.classificationPending)) &&
             !subject?.classification;
           // An epic seed the model could not settle waits for the owner, who may continue without one.
           const seedAwaiting = isEpicSeed(decision) && subject?.seed === "owner" && !subject.classification;

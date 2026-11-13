@@ -204,6 +204,19 @@ test("a held design question appears in the root campaign view with its assigned
   } finally { h.db.close(); }
 });
 
+test("classification availability follows the live hold, never just the model ask audit", async () => {
+  const h = harness(() => ({ verdict: "ask" }));
+  try {
+    const asked = await h.ask("live-hold", h.form("Which persistence design?"));
+    assert.ok(asked.ok);
+    const screenId = asked.data!.authorityEvaluation!.credentialScreen!.occurrenceId!;
+    assert.equal(h.db.campaignDecisionSubject(screenId)?.classificationPending, true);
+    assert.ok(h.svc.withdrawWorkflowDecision("child", asked.data!.occurrenceId, { reason: "Design work was cancelled" }).ok);
+    assert.equal(h.db.campaignDecisionSubject(screenId)?.classificationPending, false);
+    assert.equal(h.occurrences()[0]!.verdict, "ask", "the original audit stays unchanged");
+  } finally { h.db.close(); }
+});
+
 test("real credential requests decline with or without the model; the floor never calls it", async () => {
   const h = harness((request) => request.options?.some((option) => option.label.includes("Tell me")) ? { verdict: "ask" } : { verdict: "discusses" });
   try {

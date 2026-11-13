@@ -13316,8 +13316,13 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT * FROM campaign_decision_subjects WHERE occurrence_id=?").get(occurrenceId) as
       { campaign_session_id: string; session_id: string; surface: CampaignDecisionSubject["surface"]; request_id: string;
         classification: "decline" | "orchestrator" | null } | undefined;
-    return row ? { campaignSessionId: row.campaign_session_id, sessionId: row.session_id, surface: row.surface,
-      requestId: row.request_id, ...(row.classification ? { classification: row.classification } : {}) } : null;
+    if (!row) return null;
+    const decision = row.surface === "implementation_question" ? this.workflowDecisionByRequestId(row.session_id, row.request_id) : null;
+    return { campaignSessionId: row.campaign_session_id, sessionId: row.session_id, surface: row.surface,
+      requestId: row.request_id, ...(row.classification ? { classification: row.classification } : {}),
+      ...(row.surface === "implementation_question" ? { classificationPending: !row.classification && decision?.status === "pending" &&
+        decision.authority === "human" && decision.authorityEvaluation?.reason === "credential_screen_review" &&
+        decision.authorityEvaluation.credentialScreen?.occurrenceId === occurrenceId } : {}) };
   }
 
   /** The latest check of one subject that did not confirm it (#4104): a refusing verdict, an
@@ -25205,9 +25210,10 @@ export class ControlPlaneDb {
         ...(() => {
             if (decision.authorityEvaluation?.reason !== "credential_screen_review") return {};
             const assignment = this.campaignWorkLedger.currentAssignment(decision.sessionId);
-            const item = assignment && this.campaignWorkLedger.detail(controllingSessionId, assignment.workItemId, Date.now());
+            const item = assignment && this.stmt("SELECT id, title, item_key, issue_number FROM campaign_work_items WHERE id=? AND campaign_session_id=?")
+              .get(assignment.workItemId, controllingSessionId) as { id: string; title: string | null; item_key: string; issue_number: number | null } | null;
             return { credentialScreenReview: { ...(item ? { workItem: { id: item.id,
-              label: `${item.issue ? `#${item.issue.number} ` : ""}${item.title ?? item.key}` } } : {}) } };
+              label: `${item.issue_number !== null ? `#${item.issue_number} ` : ""}${item.title ?? item.item_key}` } } : {}) } };
           })(), handedOff: decision.ownerHandoff !== undefined,
         ...(decision.ownerRule ? { ownerRule: decision.ownerRule } : {}), createdAt: decision.createdAt }));
     return { total: total + recoveries.length, items: [...items, ...recoveries]
