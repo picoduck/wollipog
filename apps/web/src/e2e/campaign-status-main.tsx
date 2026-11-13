@@ -747,7 +747,8 @@ const ownerCard: import("@wollipog/protocol").PendingApproval | null = ownerScen
 } : null;
 const ownerProjection = params.get("screen") === "ask" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
   { occurrenceId: "workflow_config", sessionId: "s_child", category: "implementation_question" as const, kind: "question" as const,
-    summary: "Migrate Provider Account Configuration (cwi_configuration): Where should provider account configuration persist, and how should legacy account lists migrate?",
+    summary: "Where should provider account configuration persist, and how should legacy account lists migrate?",
+    credentialScreenReview: { workItem: { id: "cwi_8d4c62a9e317", label: "#4542 Migrate Provider Account Configuration" } },
     handedOff: false, createdAt: NOW - MINUTE },
 ] } } : ownerScenario === "after" ? { status: "waiting_human" as const, ownerDecisions: { total: params.has("closureRecovery") ? 1 : 2, items: [
   { occurrenceId: "workflow_owner_1", sessionId: "s_root", category: "owner_decision" as const, summary: ownerSnapshot.question, handedOff: false, createdAt: NOW - 4 * MINUTE },
@@ -1223,6 +1224,8 @@ const client = {
     return screenDecisions.find((decision) => decision.occurrenceId === occurrenceId)!.subject!;
   },
   campaignIssueScope: async (id: string, epic?: number, _signal?: AbortSignal, epicRepository?: string) => params.get("scope") === "unsupported-target" ? api.campaignIssueScope(id)
+    : params.get("screen") === "ask" ? { campaignSessionId: id, repository: "picoduck/wollipog", issueNumbers: [4542], revision: 5,
+      ...scopeCompatibility, outsideScope: [], candidates: [] }
     : ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
     ...scopeCompatibility, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
     candidates: [{ issue: { repository: "team/repo", number: 123 }, title: "Composer Epic", source: "umbrella" as const },
@@ -1409,16 +1412,21 @@ function Fixture() {
     <main className="app" style={{ display: "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
       <section className="session-detail expanded" style={{ height: "100%" }}>
         <header className="detail-bar session-bar">
-          <h1 className="detail-bar-title session-bar-title">{session.title}</h1>
+          <h1 className="detail-bar-title session-bar-title">{params.get("screen") === "ask" ? "Provider Configuration Campaign" : session.title}</h1>
         </header>
         <div className="detail-columns">
           <div className="detail-chat">
             <div className="detail-main">
               <div className="detail-reader">
                 <div className="detail-scroll" role="region" aria-label="Session Activity">
-                  {Array.from({ length: 12 }, (_, index) => (
+                  {Array.from({ length: params.get("screen") === "ask" ? 4 : 12 }, (_, index) => (
                     <div className={`tl-row ${index % 2 ? "agent" : "user"}`} key={index}>
-                      <div className="tl-bubble">Transcript message {index + 1}</div>
+                      <div className="tl-bubble">{params.get("screen") === "ask" ? [
+                        "Investigate provider account configuration persistence in picoduck/wollipog.",
+                        "The child is comparing atomic initialization and legacy account migration options.",
+                        "The credential screen held the design question for owner classification. No credential value was requested.",
+                        "The Orchestrator is continuing independent work while this question waits.",
+                      ][index] : `Transcript message ${index + 1}`}</div>
                     </div>
                   ))}
                 </div>
@@ -1440,7 +1448,7 @@ function Fixture() {
           borderTop: "1px solid var(--border)", background: "var(--bg-elev)", color: "var(--text-dim)",
           font: "var(--type-small)",
         }}>
-          App Tab Bar
+          {params.get("screen") === "ask" ? "Sessions · Inbox · Settings" : "App Tab Bar"}
         </nav>
       )}
     </main>

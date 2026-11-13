@@ -199,8 +199,8 @@ test("a held design question appears in the root campaign view with its assigned
     const listed = h.db.campaignProjection("root")!.ownerDecisions!.items[0]!;
     assert.equal(listed.occurrenceId, asked.data!.occurrenceId);
     assert.equal(listed.sessionId, "child");
-    assert.ok(listed.summary.includes(item.id));
-    assert.ok(listed.summary.includes("Migrate Provider Account Configuration"));
+    assert.deepEqual(listed.credentialScreenReview?.workItem, { id: item.id, label: "#4104 Migrate Provider Account Configuration" });
+    assert.equal(listed.summary, "Where should provider account configuration persist?");
   } finally { h.db.close(); }
 });
 

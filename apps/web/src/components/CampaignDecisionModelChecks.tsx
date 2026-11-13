@@ -223,7 +223,11 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
               <dl className="facts">
                 <div>
                   <dt>{label}</dt>
-                  <dd>{outcomeText(decision)}</dd>
+                  <dd>{outcomeText(decision)}
+                    {awaiting && subject?.surface === "implementation_question" && decision.verdict === "ask" && (
+                      <p>The model screen returned “ask”; no deterministic credential rule matched.</p>
+                    )}
+                  </dd>
                 </div>
                 {proposal && (
                   <div>

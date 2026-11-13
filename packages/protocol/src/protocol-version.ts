@@ -1473,6 +1473,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   373,
   // v374 slot
   // v375 slot
+  // 375: Expose typed question classification holds and their work items in Campaign Status (#4542).
+  375,
   // v376 slot
   // v377 slot
   // v378 slot

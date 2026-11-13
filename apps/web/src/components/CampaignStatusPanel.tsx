@@ -433,6 +433,14 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
           return (
             <li key={item.occurrenceId}>
               <dl className="facts">
+                {item.credentialScreenReview && <div>
+                  <dt>Model Screen Review</dt>
+                  <dd>Held for the owner's classification by the model credential screen.</dd>
+                </div>}
+                {item.credentialScreenReview?.workItem && <div>
+                  <dt>Work Item</dt>
+                  <dd>{item.credentialScreenReview.workItem.label}</dd>
+                </div>}
                 <div>
                   <dt>{item.category === "runner_recovery" ? "Runner Recovery" : item.kind === "question" ? "Question" : item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval"
                     : repositoryAddition(item) ? "Add Repository" : "Owner Decision"}</dt>

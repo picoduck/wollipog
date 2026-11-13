@@ -2437,6 +2437,8 @@ export const CAMPAIGN_HANDOFFS_LIMIT = 50;
 
 /** One pending decision the campaign's owner kept (#4064), as Campaign Status lists it. */
 export interface CampaignOwnerDecision {
+  /** v375: a typed question held for human classification, never an ordinary answer request. */
+  credentialScreenReview?: { workItem?: { id: string; label: string } };
   occurrenceId: string;
   /** v332: a question is presented as input, never as an action approval. */
   kind?: "question";

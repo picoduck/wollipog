@@ -25165,12 +25165,13 @@ export class ControlPlaneDb {
         ...(isWorkflowQuestionSnapshot(decision.resourceSnapshot) ? { kind: "question" as const } : {}),
         summary: decision.resourceSnapshot.category === "campaign_issue_scope"
           ? campaignScopeChangeSummary(decision.resourceSnapshot, this.scopeApprovalIncrease(controllingSessionId, decision.resourceSnapshot))
-          : (() => {
-            const summary = ownerDecisionSummary(decision.resourceSnapshot);
-            if (decision.authorityEvaluation?.reason !== "credential_screen_review") return summary;
+          : ownerDecisionSummary(decision.resourceSnapshot),
+        ...(() => {
+            if (decision.authorityEvaluation?.reason !== "credential_screen_review") return {};
             const assignment = this.campaignWorkLedger.currentAssignment(decision.sessionId);
             const item = assignment && this.campaignWorkLedger.detail(controllingSessionId, assignment.workItemId, Date.now());
-            return item ? `${item.title ?? item.key} (${item.id}): ${summary}` : summary;
+            return { credentialScreenReview: { ...(item ? { workItem: { id: item.id,
+              label: `${item.issue ? `#${item.issue.number} ` : ""}${item.title ?? item.key}` } } : {}) } };
           })(), handedOff: decision.ownerHandoff !== undefined,
         ...(decision.ownerRule ? { ownerRule: decision.ownerRule } : {}), createdAt: decision.createdAt }));
     return { total: total + recoveries.length, items: [...items, ...recoveries]
