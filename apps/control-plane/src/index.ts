@@ -1133,6 +1133,7 @@ const campaignStatusManagement = registerCampaignStatusRoutes(app, {
   db,
   requestPrincipal,
   refreshForge: refreshCampaignForge,
+  closureReportAcknowledged: sessionId => hub.sessionChangedById(sessionId),
 });
 hub.observeSessions({
   changed: (sessionId) => campaignWorkObservations.sessionChanged(sessionId),

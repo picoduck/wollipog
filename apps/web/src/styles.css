@@ -11175,6 +11175,11 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .inbox-list-head:empty,
 .inbox-list-notices:empty { display: none; }
+.campaign-closure-report-material {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
 .inbox-list-notices > .list-notice-slot { margin: 0; }
 .inbox-list-head > .inbox-list-status { padding: 0; }
 /* Late library recommendations take space from the bottom, preserving the phone's top rows.

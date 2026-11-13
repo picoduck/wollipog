@@ -334,6 +334,11 @@ function initialModel(): FixtureModel {
       session("session-no-project", "No Project Session", null, "loose-workspace"),
     ],
   };
+  if (SCENARIO === "closure-reports") {
+    initial.sessions = [session("session-alpha", "Review Campaign Delivery", "alpha", "alpha-workspace")];
+    const now = Date.now();
+    Object.assign(initial.sessions[0]!, { role: "orchestrator", status: "failed", createdAt: now - 600_000, updatedAt: now - 60_000, lastEventAt: now - 60_000 });
+  }
   if (SCENARIO === "question-classification") {
     const child = initial.sessions[0]!;
     child.title = "Provider Configuration";

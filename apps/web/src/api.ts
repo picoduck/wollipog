@@ -308,6 +308,12 @@ async function uploadPromptImage(
 export function createApiClient(transport: ApiTransport) {
   const req = <T>(path: string, init?: RequestInit) => requestJson<T>(transport, path, init);
   const client = {
+  campaignClosureReports: () => req<{ reports: Array<{ occurrenceId: string; kind: string; campaignId: string;
+    campaignTitle: string | null; repository: string | null; pullRequest: number | null; issues: string[];
+    question: string; material: string; createdAt: number; acknowledgedAt: number | null }> }>("/api/campaign-closure-reports"),
+  acknowledgeCampaignClosureReport: (occurrenceId: string, kind: string) => req<{ ok: true }>(
+    `/api/campaign-closure-reports/${encodeURIComponent(occurrenceId)}/${encodeURIComponent(kind)}/acknowledge`, { method: "POST" }),
+
   usage: (input: {
     days: number;
     granularity?: UsageAggregationGranularity;

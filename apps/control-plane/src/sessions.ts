@@ -14935,7 +14935,20 @@ export class SessionsService {
   mergeClosureWatcherDeps(): Omit<MergeClosureWatcherDeps, "requestFromRunner" | "newRequestId" | "warn"> {
     return {
       targets: () => this.db.mergeClosureWatchTargets().filter((decision): decision is WatchedMerge =>
-        decision.resourceSnapshot.category === "pr_merge"),
+        decision.resourceSnapshot.category === "pr_merge").map(decision => {
+          const watch = decision.closureWatch;
+          const question = watch?.report?.occurrenceId ? this.db.workflowDecisionByOccurrence(watch.report.occurrenceId) : null;
+          const root = question ? this.db.getSession(question.sessionId) : null;
+          if (watch && !watch.reportPending && question &&
+              (question.status === "pending" || question.status === "revoked") &&
+              root && (root.archived || isTerminal(root.status))) {
+            const kind = question.requestId.startsWith(`${MERGE_CLOSURE_REPORT_REQUEST_PREFIX}landed_`) ? "landed"
+              : question.requestId.startsWith(`${MERGE_CLOSURE_REPORT_REQUEST_PREFIX}not_dequeued_`) ? "not_dequeued" : "unverified";
+            const next = { ...watch, reportPending: kind as MergeClosureReportKind };
+            if (this.db.saveMergeClosureWatch(decision.occurrenceId, watch, next)) decision.closureWatch = next;
+          }
+          return decision;
+        }),
       childRunner: (sessionId) => {
         const session = this.db.getSession(sessionId);
         const runner = session ? this.db.getRunner(session.runnerId) : null;
@@ -14968,8 +14981,7 @@ export class SessionsService {
   /** Tell the campaign's owner about a merge whose closures nobody approved, or that could not be
    * checked (#4323): an Owner Question on the campaign's root, which only that person answers and
    * which grants nothing. Without a root that can carry one, the root Orchestrator is told instead
-   * and the report records why. While the root has ended nobody can be told: the report stays owed
-   * and the watcher retries it, so it reaches the owner if the root runs again. */
+   * and the report records why. Ended roots use a durable human-only Inbox receipt instead. */
   private reportMergeClosureToOwner(decision: WatchedMerge, watch: MergeClosureWatch, kind: MergeClosureReportKind):
     { report: NonNullable<MergeClosureWatch["report"]>; delivered: boolean } {
     const reportedAt = Date.now();
@@ -14977,6 +14989,20 @@ export class SessionsService {
     const rootId = this.db.campaignRootForMember(decision.sessionId) ?? this.db.campaignRootForMember(decision.controllingSessionId) ??
       (this.db.getSession(decision.controllingSessionId)?.orchestratorPolicy ? decision.controllingSessionId : null);
     const root = rootId ? this.db.getSession(rootId) : null;
+    const receipt = this.db.closureReport(decision.occurrenceId, kind);
+    if (receipt || root && (root.archived || isTerminal(root.status))) {
+      if (!receipt) {
+        this.db.ensureClosureReport(decision.occurrenceId, kind, root!.id, text.question, text.material);
+        this.log.info(JSON.stringify({ event: "merge_closure_inbox_report_created", entryPoint: "closure_watch",
+          occurrenceId: decision.occurrenceId, campaignId: root!.id, kind }));
+      }
+      const question = watch.report?.occurrenceId ? this.db.workflowDecisionByOccurrence(watch.report.occurrenceId) : null;
+      if (question?.status === "pending") this.revokeWorkflowDecision(question,
+        { reason: "session_ended", triggeredBy: { kind: "system", id: "merge_closure_watch" } });
+      return { report: { reportedAt: receipt?.acknowledgedAt ?? reportedAt,
+        ...(receipt?.acknowledgedAt ? {} : { unreported: "The owner has an Inbox report to acknowledge." }) },
+        delivered: receipt?.acknowledgedAt != null };
+    }
     const resourceKey = `${MERGE_CLOSURE_REPORT_RESOURCE_PREFIX}${decision.resourceSnapshot.repository.toLowerCase()}#${decision.resourceSnapshot.pullRequest}`;
     // Asked already (a retry after its answer was lost): a question still waiting for the owner, or
     // one the owner answered or a newer report replaced, is the report. One revoked unanswered (the

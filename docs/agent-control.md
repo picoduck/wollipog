@@ -1825,7 +1825,20 @@ in any other state. The decision records the result as `closureWatch`:
   nothing, and the decision no longer proves delivery. A merge with exactly the approved closures is
   `verified`. A report is stored as owed (`reportPending`) in the same write as the state that owes
   it, and retried every read interval until delivered, also after a restart or while the campaign's
-  root has ended; a retry finds the question it already asked.
+  root has ended; a retry finds the question it already asked. For an ended or archived root,
+  a durable Campaign Reports entry in the human Inbox replaces the question (#4551). This also
+  transfers a question still waiting when its root ends. The existing sanitized report material
+  names the pull request and issues. Acknowledging the entry records who was told and clears
+  `reportPending` atomically, without acting on the forge or restarting the root. Only humans
+  with campaign access may read or acknowledge it; agent sessions cannot create or settle it.
+  The receipt is unique per merge decision and report kind, persists across control-plane
+  restarts, and prevents another question if the root later runs. Running roots keep today's
+  Owner Question, including for older web clients. Delivery and acknowledgement emit
+  `merge_closure_inbox_report_created` and `merge_closure_inbox_report_acknowledged` with the
+  occurrence and campaign ids; report text is not logged.
+  Inbox entries name the campaign, pull request and issues from the original receipt. All
+  unacknowledged entries remain visible; acknowledged entries stay in the Inbox for seven days,
+  while their durable acknowledgement record is retained.
 - An unreadable forge or an offline runner never counts as unchanged: after 30 minutes the owner is
   told the merge cannot be checked, and after a day the watch ends `unverified`. Failing dequeues are
   retried up to ten times, then reported to the owner.
