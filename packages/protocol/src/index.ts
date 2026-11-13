@@ -284,6 +284,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * dashboards; older ones receive `complete_with_handoffs` (or `waiting_human`) and `blocked`. */
   campaignActivityStatus: 297,
   campaignPause: 368,
+  scopeSettledDecisionDetails: 380,
   /** v272 runner watches a parked session's merge-queue entry and the control plane wakes it (#4071).
    * Checked against the runner by the control plane and against the control plane by the runner. */
   pullRequestWatch: 272,
