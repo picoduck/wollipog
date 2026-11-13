@@ -40,7 +40,7 @@ export class ProviderProcessOwnership {
     }
   }
 
-  private read(file: string): string {
+  private readBytes(file: string): Buffer {
     this.checkDirectory();
     const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
@@ -55,9 +55,11 @@ export class ProviderProcessOwnership {
           after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs || after.nlink !== 1) {
         throw new Error("provider ownership record changed during read");
       }
-      return bytes.subarray(0, used).toString("utf8");
+      return bytes.subarray(0, used);
     } finally { closeSync(fd); }
   }
+
+  private read(file: string): string { return this.readBytes(file).toString("utf8"); }
 
   private files(): string[] {
     this.checkDirectory();
@@ -79,7 +81,25 @@ export class ProviderProcessOwnership {
     if (Buffer.byteLength(bytes) > 4096) throw new Error("provider ownership record exceeds its private bound");
     const target = initial ? file : `${file}.pending`;
     const fd = openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    try { writeFileSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
+    try { writeFileSync(fd, bytes); fsyncSync(fd); }
+    catch (error) {
+      // Only this O_EXCL publication's pinned, unchanged partial write is ours to
+      // remove. Unknown bytes or replaced files remain evidence and still fail closed.
+      try {
+        const before = fstatSync(fd, { bigint: true });
+        const partial = this.readBytes(target);
+        const after = fstatSync(fd, { bigint: true });
+        const named = lstatSync(target, { bigint: true });
+        const expected = Buffer.from(bytes, "utf8");
+        if (partial.length < expected.length && expected.subarray(0, partial.length).equals(partial) &&
+            before.ino === named.ino && before.dev === named.dev && after.nlink === 1n &&
+            before.size === after.size && before.mtimeNs === after.mtimeNs && before.ctimeNs === after.ctimeNs) {
+          unlinkSync(target);
+          this.syncDirectory();
+        }
+      } catch { /* Preserve uncertain publication evidence. */ }
+      throw error;
+    } finally { closeSync(fd); }
     if (!initial) renameSync(target, file);
     this.syncDirectory();
   }

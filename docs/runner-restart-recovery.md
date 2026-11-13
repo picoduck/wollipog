@@ -88,6 +88,10 @@ acknowledgement failed. Startup can prune a private, valid intent from a dead pr
 without signalling anything, and can recover a complete `.pending` publication interrupted
 before its rename. Obsolete records whose exact process identity is proved gone are pruned too.
 Pruning journal metadata never removes the independent HOME lease evidence or admits a signal.
+If publication itself fails partway through a write, the live runner removes only its own
+still-pinned, unchanged partial file whose exact bytes match the intended prefix. Full pending
+publications remain recoverable. Changed, replaced or unreadable evidence is retained and can
+still prevent live boundary release; the runner never erases unknown state to restore availability.
 
 Deploying this version retires proven recorded orphan providers at the next runner startup.
 A version that has never recorded ownership cannot supply retrospective proof: existing unrecorded providers are left
