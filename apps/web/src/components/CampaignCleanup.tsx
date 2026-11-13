@@ -1,34 +1,30 @@
 import React, { useId, useState, type ReactNode } from "react";
-import type { CampaignCleanupItem, CampaignStuckItem, OrchestratorCampaignProjection } from "@wollipog/protocol";
+import { worktreeRefusalAction, worktreeRefusalAllowsInspection, type CampaignCleanupItem, type CampaignStuckItem, type OrchestratorCampaignProjection } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { issueRefLabel } from "../campaign-status.js";
 import { CopyButton } from "./common.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import { WorktreeRetirement } from "./WorktreeRetirement.js";
 
 /**
  * Campaign Status's Cleanup and Campaign Stuck sections (#4146). Cleanup lists the housekeeping a
  * delivered campaign still owes, each item with its reason and the exact action that settles it:
  * **Delete Merged Branches** where Wollipog holds an approved deletion it can perform, otherwise the
  * exact command, or what Wollipog is already doing about it. A refused worktree shows its path, the
- * refusal reason and the child's session, and its next step in words. Handed-off work items keep their own
+ * refusal reason and the child's session, with a person-only inspection and confirmation action. Handed-off work items keep their own
  * Handed Off section; Cleanup only counts them. Campaign Stuck names the undelivered work behind the
  * status and why nothing is moving.
  */
 
-/** A refused worktree's next step when the projection still carries a command (an older control
- * plane): the step after it, never the command itself. */
-const WORKTREE_FALLBACK_STEP = "Review the child's work from its session in Wollipog and decide what to keep. " +
-  "Then ask the Orchestrator to retire the worktree through Wollipog.";
-
 /** What settles one cleanup item, in words or as a command a person can copy. A worktree item never
  * shows a command: the worktree is agent-managed, so its next step is reviewed through Wollipog. */
-function CleanupAction({ action, subject, worktree }: { action: CampaignCleanupItem["action"]; subject: string; worktree: boolean }) {
+function CleanupAction({ action, subject, worktree, reason }: { action: CampaignCleanupItem["action"]; subject: string; worktree: boolean; reason: string }) {
   switch (action.kind) {
     case "delete_merged_branches":
       return <>Wollipog can delete it with its approved deletion: choose <strong>Delete Merged Branches</strong>.</>;
     case "command":
-      if (worktree) return <>{action.then ?? WORKTREE_FALLBACK_STEP}</>;
+      if (worktree) return <>{worktreeRefusalAction(reason).text}</>;
       return <>
         <code>{action.command}</code>
         <span className="campaign-status-meta">
@@ -39,7 +35,7 @@ function CleanupAction({ action, subject, worktree }: { action: CampaignCleanupI
     case "automatic":
       return <>{action.text}<span className="campaign-status-meta">Nothing is needed from you.</span></>;
     case "person":
-      return <>{action.text}</>;
+      return <>{worktree ? worktreeRefusalAction(reason).text : action.text}</>;
   }
 }
 
@@ -49,7 +45,8 @@ function cleanupSubject(item: CleanupItem): string {
   return item.kind === "merged_branch" ? item.branch ?? `the branch of ${item.repository}#${item.pullRequest}` : item.path;
 }
 
-function CleanupList({ items, onOpenSession }: { items: readonly CleanupItem[]; onOpenSession: (sessionId: string) => ReactNode }) {
+function CleanupList({ items, onOpenSession, campaignId, canAct }: { items: readonly CleanupItem[];
+  onOpenSession: (sessionId: string) => ReactNode; campaignId: string; canAct: boolean }) {
   return (
     <ul className="campaign-detail-list">
       {items.map((item) => (
@@ -76,8 +73,10 @@ function CleanupList({ items, onOpenSession }: { items: readonly CleanupItem[]; 
               </div>
             )}
             <div><dt>Reason</dt><dd>{item.reason}</dd></div>
-            <div><dt>Action</dt><dd><CleanupAction action={item.action} subject={cleanupSubject(item)} worktree={item.kind === "worktree"} /></dd></div>
+            <div><dt>Action</dt><dd><CleanupAction action={item.action} subject={cleanupSubject(item)} worktree={item.kind === "worktree"} reason={item.reason} /></dd></div>
           </dl>
+          {item.kind === "worktree" && item.status === "refused" && canAct && worktreeRefusalAllowsInspection(item.reason) &&
+            <WorktreeRetirement campaignId={campaignId} sessionId={item.sessionId} path={item.path} />}
         </li>
       ))}
     </ul>
@@ -123,7 +122,7 @@ export function CampaignCleanup({ campaignId, cleanup, canAct, onOpenSession }: 
         The campaign's work is delivered. {cleanup.total === 1 ? "This item is" : "These items are"} left; each says why and
         what settles it.
       </p>
-      {branches.length > 0 && <CleanupList items={branches} onOpenSession={onOpenSession} />}
+      {branches.length > 0 && <CleanupList items={branches} onOpenSession={onOpenSession} campaignId={campaignId} canAct={canAct} />}
       {outcome && <Notice tone={outcome.tone} role={outcome.tone === "danger" ? "alert" : "status"}
         title={outcome.tone === "success" ? "Merged Branches Deleted" : "Some Branches Remain"}>{outcome.text}</Notice>}
       {performable && canAct && <div>
@@ -131,7 +130,7 @@ export function CampaignCleanup({ campaignId, cleanup, canAct, onOpenSession }: 
           Delete Merged Branches
         </BusyButton>
       </div>}
-      {worktrees.length > 0 && <CleanupList items={worktrees} onOpenSession={onOpenSession} />}
+      {worktrees.length > 0 && <CleanupList items={worktrees} onOpenSession={onOpenSession} campaignId={campaignId} canAct={canAct} />}
       {handoffs > 0 && <p className="section-note">
         {handoffs} handed-off item{handoffs === 1 ? " is" : "s are"} listed under Handed Off.
       </p>}

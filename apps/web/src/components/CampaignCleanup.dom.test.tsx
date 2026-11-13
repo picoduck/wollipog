@@ -63,10 +63,10 @@ test("Cleanup lists each item with its reason and exact action, and Delete Merge
     assert.match(worktreeRow.textContent ?? "", /The worktree has uncommitted changes \(2 paths\): "report\.md", "notes\.txt"\./u,
       "the refusal reason with the dirty paths the runner reported");
     assert.equal(worktreeRow.querySelector("a[href='/sessions/child-3']")?.textContent, "child-3", "the child's session opens from the row");
-    assert.match(worktreeRow.textContent ?? "", /Review the child's work from its session in Wollipog\. Ask its session or the Orchestrator to commit and push the changes you want to keep, or confirm they are not needed\. Then ask the Orchestrator to retire the worktree through Wollipog\./u);
+    assert.match(worktreeRow.textContent ?? "", /Retirement refuses uncommitted changes\. Choose Inspect Worktree/u);
     assert.deepEqual([...worktreeRow.querySelectorAll("code")].map((node) => node.textContent), ["/worktrees/child-3"],
       "the path is the only code in the worktree row");
-    assertNoDomNode(worktreeRow.querySelector("button"), "nothing to copy or run for a worktree");
+    assert.equal(worktreeRow.querySelector("button")?.textContent?.trim(), "Inspect Worktree");
     assert.doesNotMatch(container.textContent ?? "", /worktree remove|--force|reset --hard|git clean|git -C/u);
     assert.ok(container.querySelector("button[aria-label='Copy Command for agent/child-1']"), "each command can be copied, named");
     assert.match(container.textContent ?? "", /1 handed-off item is listed under Handed Off\./u);
@@ -96,9 +96,57 @@ test("a worktree item that still carries a command shows only its next step, nev
     const { container } = view;
     assert.deepEqual([...container.querySelectorAll("code")].map((node) => node.textContent), ["/worktrees/child-4", "/worktrees/child-5"]);
     assert.doesNotMatch(container.textContent ?? "", /git -C|@\{upstream\}/u);
-    assertNoDomNode(container.querySelector("button"), "no Copy Command for a worktree");
-    assert.match(container.textContent ?? "", /Push the commits you want to keep, or confirm they are not needed\./u);
-    assert.match(container.textContent ?? "", /Review the child's work from its session in Wollipog and decide what to keep\./u);
+    assert.ok([...container.querySelectorAll("button")].every(node => node.textContent?.trim() === "Inspect Worktree"));
+    assert.doesNotMatch(container.textContent ?? "", /Then ask the Orchestrator/u);
+    assert.match(container.textContent ?? "", /Review the child's work from its session in Wollipog\./u);
+  } finally { view.unmount(); }
+});
+
+test("person retirement requires inspection and explicit confirmation, sends exact state and resets after refusal", async () => {
+  const originalInspect = api.inspectCampaignWorktreeRetirement, originalConfirm = api.confirmCampaignWorktreeRetirement;
+  const state = { worktreeId: "tree", path: "/worktrees/child-3", registeredBranch: "fix/work", branch: "fix/work",
+    headSha: "a".repeat(40), clean: true as const, pathIdentity: "1:2" };
+  const calls: unknown[][] = [];
+  let refuse = true;
+  api.inspectCampaignWorktreeRetirement = async (...args) => { calls.push(args); return { state }; };
+  api.confirmCampaignWorktreeRetirement = async (...args) => {
+    calls.push(args);
+    if (refuse) throw new Error("The tip changed; inspect again.");
+    return { retirement: { status: "removed" } };
+  };
+  const view = await render(<CampaignCleanup campaignId="root-1" cleanup={{ total: 1, items: [cleanup.items[2]!] }} canAct onOpenSession={() => null} />);
+  try {
+    assert.equal(button(document.body, "Retire Worktree"), undefined);
+    await act(async () => button(document.body, "Inspect Worktree")!.click());
+    assert.deepEqual(calls[0], ["root-1", "child-3", state.path]);
+    assert.equal(button(document.body, "Retire Worktree")?.disabled, true);
+    assert.ok(document.body.textContent?.includes(state.headSha));
+    await act(async () => document.body.querySelector<HTMLInputElement>("input[type=checkbox]")!.click());
+    assert.equal(button(document.body, "Retire Worktree")?.disabled, false);
+    await act(async () => button(document.body, "Retire Worktree")!.click());
+    assert.deepEqual(calls[1], ["root-1", "child-3", state]);
+    assert.match(document.body.textContent ?? "", /The tip changed; inspect again/u);
+    assert.equal(button(document.body, "Retire Worktree"), undefined);
+    refuse = false;
+    await act(async () => button(document.body, "Inspect Worktree")!.click());
+    assert.equal(button(document.body, "Retire Worktree")?.disabled, true, "old confirmation never survives reinspection");
+    await act(async () => document.body.querySelector<HTMLInputElement>("input[type=checkbox]")!.click());
+    await act(async () => button(document.body, "Retire Worktree")!.click());
+    assert.match(document.body.textContent ?? "", /Local branch refs were kept/u);
+  } finally {
+    view.unmount(); api.inspectCampaignWorktreeRetirement = originalInspect; api.confirmCampaignWorktreeRetirement = originalConfirm;
+  }
+});
+
+test("unproven runner ownership has a truthful next step and no unsupported inspection action", async () => {
+  const view = await render(<CampaignCleanup campaignId="root-1" cleanup={{ total: 1, items: [
+    { kind: "worktree", sessionId: "child-3", path: "/worktrees/child-3", status: "refused",
+      reason: "Runner ownership could not be proven.", action: worktreeRefusalAction("runner ownership could not be proven") },
+  ] }} canAct onOpenSession={() => <a href="/sessions/child-3">Review Child</a>} />);
+  try {
+    assertNoDomNode(view.container.querySelector("button"), "ownership cannot be waived by inspecting or confirming");
+    assert.match(view.container.textContent ?? "", /retirement is unavailable and its contents are kept/u);
+    assert.equal(view.container.querySelector("a")?.getAttribute("href"), "/sessions/child-3");
   } finally { view.unmount(); }
 });
 

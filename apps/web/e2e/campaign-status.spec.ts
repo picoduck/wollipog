@@ -500,11 +500,9 @@ for (const theme of ["dark", "light"] as const) {
       await expect(row.locator("code")).toHaveText(["/home/dev/worktrees/wollipog/s_079714ea231c"]);
       await expect(row).toContainText('The worktree has uncommitted changes (2 paths): "report.md", "notes.txt".');
       await expect(row.getByRole("link")).toHaveCount(1);
-      await expect(row).toContainText("Review the child's work from its session in Wollipog. Ask its session or the Orchestrator " +
-        "to commit and push the changes you want to keep, or confirm they are not needed. Then ask the Orchestrator to retire " +
-        "the worktree through Wollipog.");
+      await expect(row).toContainText("Retirement refuses uncommitted changes. Choose Inspect Worktree");
       await expect(row).not.toContainText(/git -C|\bgit (status|log)\b/u);
-      await expect(row.getByRole("button")).toHaveCount(0);
+      await expect(row.getByRole("button", { name: "Inspect Worktree", exact: true })).toBeVisible();
       // The merged branch's deletion command is unchanged: it does not run inside a worktree.
       await expect(cleanup.getByRole("button", { name: "Copy Command for agent/s_9d2f41c07a11" })).toBeVisible();
       await assertNoHorizontalOverflow(page, ".campaign-status");

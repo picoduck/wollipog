@@ -260,5 +260,7 @@ test("a solid danger button is only ever the confirm of a destructive confirmati
     // Remove Workspace's confirm: a refusal stays in the dialog, so it is not the shared one (#4123).
     'RemoveWorkspaceDialog.tsx: "btn danger"',
     'SkillMachineImportDialog.tsx: "btn danger"',
+    // Person-only retirement names the exact clean checkout and requires the consent checkbox (#4535).
+    'WorktreeRetirement.tsx: "btn danger"',
   ]);
 });

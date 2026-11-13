@@ -207,6 +207,7 @@ import {
   settleCreatedProviderProfileGrantStart,
 } from "./provider-profile-route.js";
 import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
+import { registerCampaignWorktreeRetirementRoutes } from "./campaign-worktree-retirement.js";
 import { CampaignWorkObservations } from "./campaign-work-observation.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import { MergeClosureWatcher } from "./merge-closure-watch.js";
@@ -1121,6 +1122,7 @@ const refreshCampaignForge = (campaignId: string, refs: readonly CampaignPullReq
 });
 svc.campaignForgeRefresh = refreshCampaignForge;
 svc.campaignForgeReadNow = (campaignId, refs) => campaignForgeObserver.readNow(campaignId, refs);
+registerCampaignWorktreeRetirementRoutes(app, { db, hub, requestPrincipal });
 const campaignStatusManagement = registerCampaignStatusRoutes(app, {
   db,
   requestPrincipal,
