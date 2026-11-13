@@ -363,11 +363,12 @@ test("under Full Control the report is the owner's, in their Waiting for You req
 });
 
 test("an ended root gets one durable Inbox receipt and is never asked again (#4551)", async () => {
-  for (const ended of ["failed", "completed", "archived"] as const) {
+  for (const ended of ["failed", "completed", "archived", "stopped"] as const) {
     const f = fixture();
     const { occurrenceId, forge } = f.consumedMerge(f.github(52));
     await f.pass();
     if (ended === "archived") f.db.raw().prepare("UPDATE sessions SET archived=1 WHERE id='root'").run();
+    else if (ended === "stopped") f.db.updateSessionStatus("root", "stopped", 3, { cause: "requested" });
     else f.db.updateSessionStatus("root", ended, 3);
     forge.state = "merged";
     forge.closures = [closure("owner/app#3", "Closes #3\n<script>")];
@@ -402,7 +403,7 @@ test("a root that ends with a waiting question transfers it to the Inbox (#4551)
   forge.state = "merged"; forge.closures = [closure("owner/app#3", "Closes #3")];
   await f.pass();
   assert.equal(f.ownerQuestions().length, 1);
-  f.db.updateSessionStatus("root", "completed", 3);
+  f.db.updateSessionStatus("root", "stopped", 3, { cause: "requested" });
   await f.pass();
   assert.equal(f.db.closureReports().length, 1);
   assert.equal(f.ownerQuestions().length, 0);

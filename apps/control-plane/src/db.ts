@@ -25031,7 +25031,7 @@ export class ControlPlaneDb {
          AND json_extract(closure_watch, '$.report.occurrenceId') IS NOT NULL
          AND EXISTS (SELECT 1 FROM workflow_decisions question JOIN sessions root ON root.id=question.session_id
            WHERE question.occurrence_id=json_extract(workflow_decisions.closure_watch, '$.report.occurrenceId')
-             AND question.status IN ('pending','revoked') AND (root.archived=1 OR root.status IN ('completed','failed'))))
+             AND question.status IN ('pending','revoked') AND (root.archived=1 OR root.status IN ('completed','failed','stopped'))))
        ORDER BY closure_watch IS NOT NULL, COALESCE(json_extract(closure_watch, '$.updatedAt'), 0) ASC, created_at ASC, occurrence_id ASC
        LIMIT ?`,
     ).all(limit) as unknown[]).map(workflowDecisionFromRow).filter(
