@@ -675,7 +675,10 @@ function authedApiPrincipal(
   if (agentControl && mediaPurpose && !svc.mediaSessionPurposes.credentialCurrent(agentControl.id)) return null;
   // A delegated image reviewer's credential reaches only its own review routes (#4074).
   const imageReviewer = agentControl ? db.delegatedImageReviews.isReviewer(agentControl.id) : false;
-  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, sessionRole(agentControl), mediaPurpose, imageReviewer)) {
+  // Authenticate this one human-only route solely so a valid agent receives 403 rather than 401.
+  // authorizeApiRequest rejects it before any handler or resource lookup.
+  const ownerReturnAttempt = req.method === "POST" && routePath === "/api/sessions/:id/workflow-decisions/:occurrenceId/return-to-orchestrator";
+  if (agentControl && (ownerReturnAttempt || isAgentControlApiRouteAllowed(req.method, routePath, sessionRole(agentControl), mediaPurpose, imageReviewer))) {
     const delegatedScope = db.sessionScope(agentControl.id);
     if (!delegatedScope) return null;
     return {
@@ -758,6 +761,9 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   if (principal) requestPrincipals.set(req, principal);
   const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
   if (req.method === "POST" && routePath === "/api/public/push-receipt") return null;
+  if (principal?.kind === "agent" && routePath === "/api/sessions/:id/workflow-decisions/:occurrenceId/return-to-orchestrator") {
+    return { statusCode: 403, error: "only the campaign owner can return a resource" };
+  }
   const mutationError = mutationAuthorizationError(req.method, routePath, principal);
   if (mutationError) return mutationError;
   if (!principal) return null;
@@ -4337,6 +4343,16 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner", asy
   return respond(reply, svc.handWorkflowDecisionToOwner(id, occurrenceId,
     { reason: body?.reason as string, ...(body?.sessionId !== undefined ? { sessionId: body.sessionId } : {}) },
     (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+// #4539: intentionally absent from agent route allowlists, MCP and CLI.
+app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/return-to-orchestrator", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "only the campaign owner can return a resource" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  return respond(reply, svc.returnOwnerResource(id, occurrenceId,
+    { kind: "human", id: humanActorId(req) }, (sessionId) => db.canAccessSession(human, sessionId)));
 });
 
 // #4104: the campaign owner classifies a question the Decision Model could not screen. People only.

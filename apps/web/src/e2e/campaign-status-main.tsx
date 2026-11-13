@@ -685,6 +685,8 @@ const projectionFor = (rev: number) => campaignProjection(
     ...(automationHold ? { recovery: { unattendedReady: false, automation: automationHold, automatic: 0, waitingHuman: 0, blocked: 0,
       records: [], truncated: false } } : {}),
     ...ownerProjection,
+    ...(params.has("ownerReturned") ? { ownerReturns: [{ occurrenceId: "occ_1", sessionId: "s_child_3",
+      summary: "Merge picoduck/wollipog#4141", byUserId: "usr_sam_owner", at: NOW - MINUTE }] } : {}),
     ...ownerScopeProjection(rev),
     // `ownerAddition=1` (#4117): the Orchestrator's request to add a repository waits for the owner.
     ...(params.get("ownerAddition") === "1" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
@@ -744,7 +746,7 @@ const ownerCard: import("@wollipog/protocol").PendingApproval | null = ownerScen
 } : null;
 const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as const, ownerDecisions: { total: params.has("closureRecovery") ? 1 : 2, items: [
   { occurrenceId: "workflow_owner_1", sessionId: "s_root", category: "owner_decision" as const, summary: ownerSnapshot.question, handedOff: false, createdAt: NOW - 4 * MINUTE },
-  ...(params.has("closureRecovery") ? [] : [{ occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: true, createdAt: NOW - 8 * MINUTE }]),
+  ...(params.has("closureRecovery") ? [] : [{ occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, returnableOwnerResource: true as const, summary: "Merge picoduck/wollipog#4141", handedOff: true, createdAt: NOW - 8 * MINUTE }]),
 ] } } : ownerScenario === "rule" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
   { occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: false,
     ownerRule, createdAt: NOW - 8 * MINUTE },
@@ -901,7 +903,7 @@ const ownerRequests = (owners: "before" | "after" | "rule"): DescendantRequestVi
       workflowDecision: { requestId: "merge-4141", occurrenceId: "occ_1", sessionId: "s_child_3", controllingSessionId: "s_root", category: "pr_merge",
         resourceKey: "picoduck/wollipog#4141", resourceSnapshot: mergeSnapshot, resourceDigest: "a".repeat(64), policyRevision: 1,
         authority: evaluation.owner, authorityEvaluation: evaluation, status: "pending", createdAt: NOW - 8 * MINUTE,
-        ...(handed ? { ownerHandoff: { bySessionId: "s_root", at: NOW - 5 * MINUTE, reason: "The owner kept risk consent for this merge." } } : {}),
+        ...(handed ? { returnableOwnerResource: true as const, ownerHandoff: { bySessionId: "s_root", at: NOW - 5 * MINUTE, reason: "The owner kept risk consent for this merge." } } : {}),
         ...(owners === "rule" ? { ownerRule } : {}) } },
   };
   return ownerCard ? [{ sessionId: "s_root", sessionTitle: "Full Control Campaign", runnerId: "runner-1", runnerOnline: true, eventEpoch: 1,
@@ -1193,6 +1195,10 @@ if (params.get("typed") === "1") {
 
 const client = {
   ...api,
+  returnOwnerResource: async (_id: string, occurrenceId: string) => {
+    (window as unknown as { __RETURNED__: unknown }).__RETURNED__ = occurrenceId;
+    return descendantRequests.find((r) => r.occurrenceId === occurrenceId)!.request.workflowDecision!;
+  },
   // `decisions=1` adds three Decision Model calls for the Decision Model section (#4101); the
   // credential checks stay with the Question Screen section (#4104).
   campaignDecisions: async (id: string) => params.get("decisions") === "1"
@@ -1405,7 +1411,14 @@ function Fixture() {
                 <div className="detail-scroll" role="region" aria-label="Session Activity">
                   {Array.from({ length: 12 }, (_, index) => (
                     <div className={`tl-row ${index % 2 ? "agent" : "user"}`} key={index}>
-                      <div className="tl-bubble">Transcript message {index + 1}</div>
+                      <div className="tl-bubble">{[
+                        "Please finish the Campaign Status improvements in picoduck/wollipog.",
+                        "The status panel now shows the current work and its recorded evidence.",
+                        "Keep my approval for the Campaign Status pull request while I review it.",
+                        "The merge request is waiting for you. Other campaign work can continue.",
+                        "The layout looks good on my phone. Leave the pending request with me.",
+                        "You can return future requests for this pull request within the current campaign boundary.",
+                      ][index % 6]}</div>
                     </div>
                   ))}
                 </div>

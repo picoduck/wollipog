@@ -12,6 +12,43 @@ async function assertNoHorizontalOverflow(page: Page, selector: string) {
 
 const SCOPE_EVIDENCE_DIR = process.env.CAMPAIGN_SCOPE_EVIDENCE_DIR;
 
+for (const width of [1440, 390]) test(`owner can return a kept resource from both surfaces at ${width}px (#4539)`, async ({ page }) => {
+  await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=after&fullControl=ready");
+  const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
+  const action = waiting.getByRole("button", { name: "Return to the Orchestrator", exact: true });
+  await expect(action).toBeVisible();
+  await action.click();
+  await expect(waiting).toContainText("Pending requests remain yours.");
+  await page.mouse.move(width - 100, 220);
+  await page.mouse.wheel(0, -10000);
+  if (process.env.OWNER_RETURN_EVIDENCE_DIR) {
+    await page.screenshot({ path: `${process.env.OWNER_RETURN_EVIDENCE_DIR}/status-overview-${width}.png` });
+    await action.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${process.env.OWNER_RETURN_EVIDENCE_DIR}/status-action-${width}.png` });
+  }
+  await action.click();
+  await expect(waiting.getByRole("status")).toContainText("Returned to the Orchestrator");
+  expect(await page.evaluate(() => (window as unknown as { __RETURNED__: string }).__RETURNED__)).toBe("occ_1");
+  await waiting.getByRole("button", { name: "Open Request: Merge picoduck/wollipog#4141" }).click();
+  const detail = page.locator(".request-panel-detail");
+  const inboxAction = detail.getByRole("button", { name: "Return to the Orchestrator", exact: true });
+  await expect(inboxAction).toBeVisible();
+  await inboxAction.click();
+  await page.mouse.move(width - 100, 220);
+  await page.mouse.wheel(0, -10000);
+  if (process.env.OWNER_RETURN_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.OWNER_RETURN_EVIDENCE_DIR}/inbox-action-${width}.png` });
+  await inboxAction.click();
+  await expect(detail.getByRole("status").filter({ hasText: "Pending requests remain yours." })).toBeVisible();
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=after&fullControl=ready&ownerReturned=1");
+  const returned = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Returned to the Orchestrator" }) });
+  await expect(returned).toContainText("usr_sam_owner");
+  await expect(returned).toContainText("Merge picoduck/wollipog#4141");
+  await returned.scrollIntoViewIfNeeded();
+  await assertNoHorizontalOverflow(page, ".campaign-status");
+  if (process.env.OWNER_RETURN_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.OWNER_RETURN_EVIDENCE_DIR}/status-record-${width}.png` });
+});
+
 const campaignRow = (page: Page) => page.locator('.session-tools [data-tool="campaign"]');
 const workRows = (page: Page) => page.locator(".campaign-work-row");
 const queries = (page: Page) => page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.queries());

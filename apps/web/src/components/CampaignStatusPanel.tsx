@@ -74,6 +74,7 @@ import { useStoreSelector } from "../store.js";
 import { CampaignDecisions } from "./CampaignDecisions.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
 import { OwnerRuleFactRows } from "./requests/WorkflowDecisionSummary.js";
+import { ReturnOwnerResource } from "./ReturnOwnerResource.js";
 import { CampaignRepositories } from "./CampaignRepositories.js";
 import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { Notice } from "./Notice.js";
@@ -284,8 +285,16 @@ function AvailableCampaignStatus({
                   findRequest={findRequest}
                   onOpenRequest={onOpenRequest}
                   onOpenSessionRequest={onOpenSessionRequest}
+                  onChanged={data.retry}
                 />
               )}
+              {!!data.summary.campaign?.ownerReturns?.length && <section className="campaign-status-handoffs">
+                <h3 className="section-title">Returned to the Orchestrator</h3>
+                <ul className="campaign-detail-list">{data.summary.campaign.ownerReturns.map((item) => <li key={item.occurrenceId}>
+                  <p>{item.summary}</p>
+                  <p>Returned by {item.byUserId} <RecordedTime at={item.at} now={now} />. Future requests follow the current boundary; pending requests remain yours.</p>
+                </li>)}</ul>
+              </section>}
               <CampaignDecisionModelChecks
                 sessionId={session.id}
                 canClassify={availability.role === "campaign"}
@@ -394,13 +403,14 @@ function CampaignRecoveryAutomation({ campaign }: { campaign: CampaignStatusData
 
 /** Decisions the campaign's owner kept (#4064), which wait for that person while the campaign keeps
  * working: the Orchestrator's questions for them and the decisions it handed to them. */
-function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, onOpenRequest, onOpenSessionRequest }: {
+function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, onOpenRequest, onOpenSessionRequest, onChanged }: {
   sessionId: string;
   ownerDecisions: NonNullable<NonNullable<CampaignStatusData["summary"]["campaign"]>["ownerDecisions"]>;
   now: number;
   findRequest: (target: CampaignRequestTarget) => string | null;
   onOpenRequest: (requestKey: string) => void;
   onOpenSessionRequest?: (sessionId: string, requestId: string) => void;
+  onChanged: () => void;
 }) {
   const headingId = useId();
   const hidden = ownerDecisions.total - ownerDecisions.items.length;
@@ -449,6 +459,8 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
               </dl>
               {open && <button type="button" className="btn sm" aria-label={`Open Request: ${item.summary}`}
                 onClick={open}>Open Request</button>}
+              {item.returnableOwnerResource &&
+                <ReturnOwnerResource sessionId={item.sessionId} occurrenceId={item.occurrenceId} onChanged={onChanged} />}
             </li>
           );
         })}

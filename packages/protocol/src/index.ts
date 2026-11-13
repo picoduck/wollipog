@@ -2434,6 +2434,8 @@ export const CAMPAIGN_HANDOFFS_LIMIT = 50;
 
 /** One pending decision the campaign's owner kept (#4064), as Campaign Status lists it. */
 export interface CampaignOwnerDecision {
+  /** The current campaign supports a human-only return of future requests. */
+  returnableOwnerResource?: true;
   occurrenceId: string;
   /** v332: a question is presented as input, never as an action approval. */
   kind?: "question";
@@ -2570,6 +2572,8 @@ export interface OrchestratorCampaignProjection {
    * decisions and the occurrences it handed to the owner. Root view only; omitted when there are
    * none. Bounded by CAMPAIGN_OWNER_DECISIONS_LIMIT; `total` is the full count. */
   ownerDecisions?: { total: number; items: CampaignOwnerDecision[] };
+  /** Owner-authenticated returns affect future requests only. */
+  ownerReturns?: { occurrenceId: string; sessionId: string; summary: string; byUserId: string; at: number }[];
   uiEvidenceReview: {
     status: "available" | "unavailable";
     effectiveOwner: WorkflowDecisionAuthority;
@@ -5409,6 +5413,8 @@ export interface WorkflowDecisionView {
    * owner. One way: it stays the person's, and so does every later request for the same resource
    * in the campaign. Only a person resolves it. */
   ownerHandoff?: { bySessionId: string; at: number; reason: string };
+  /** Presentation only; the return route independently verifies the human campaign owner. */
+  returnableOwnerResource?: true;
   /** v296 (#4137): the installed or user-authored rule that keeps this occurrence for a person,
    * named by its requester or carried over from an earlier occurrence for the same resource. The
    * occurrence was created human-owned (`owner_kept`); only a person resolves it. */

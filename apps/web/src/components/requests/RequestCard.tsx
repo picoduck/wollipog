@@ -41,6 +41,7 @@ import {
 import { CHOOSE_ACCOUNT_COPY, ChooseAccountDialog, type ChooseAccountResult } from "./ChooseAccountDialog.js";
 import { EvidenceReviewBody, useEvidenceReview } from "./EvidenceReview.js";
 import { OwnerRuleSummary, WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
+import { ReturnOwnerResource } from "../ReturnOwnerResource.js";
 import { LocationSwitchSummary, locationSwitchCardActions, locationSwitchChoices, locationSwitchOptions } from "./LocationSwitchSummary.js";
 import { claimDecision, decisionKey, useDecisionFailure, useDecisionInFlight } from "./request-reveal.js";
 import {
@@ -412,6 +413,8 @@ export function RequestCard({
       {...(request.scopeMaxIssuesIncrease ? { scopeMaxIssuesIncrease: request.scopeMaxIssuesIncrease } : {})}
       {...(workflowDecision.closingReferenceCheck ? { closingReferenceCheck: workflowDecision.closingReferenceCheck } : {})} /> : null,
     workflowDecision?.ownerRule ? <OwnerRuleSummary key="owner-rule" rule={workflowDecision.ownerRule} /> : null,
+    workflowDecision?.returnableOwnerResource
+      ? <ReturnOwnerResource key="owner-return" sessionId={workflowDecision.sessionId} occurrenceId={workflowDecision.occurrenceId} /> : null,
     decisionDetails ? (
       <details key="details" className="disclosure">
         <summary><ChevronRightIcon className="disclosure-chevron" />{REQUEST_CARD_COPY.requestDetails}</summary>

@@ -1104,6 +1104,12 @@ function ownerKeptTargets(category: WorkflowDecisionCategory, resourceKey: strin
   return targets;
 }
 
+/** Prefer the resource's identity over a requester's reusable key for an owner return. */
+function ownerReturnTargets(category: WorkflowDecisionCategory, resourceKey: string, snapshot: WorkflowDecisionResourceSnapshot): string[] {
+  const targets = ownerKeptTargets(category, resourceKey, snapshot);
+  return targets.length > 2 ? targets.slice(2) : targets;
+}
+
 /** Why an issue closure cannot execute yet, naming the next step (#2940). A pending closure the
  * root owns under its standing authorization is approved by that root itself, never by a person:
  * a bare "pending" refusal once left a Full Control root asking a person who could not answer. */
@@ -15733,6 +15739,33 @@ export class SessionsService {
     return ok(this.withMergeReviewEvidence(handed));
   }
 
+  /** Human-only, future-request release. Existing occurrences retain authority and history. */
+  returnOwnerResource(viewedSessionId: string, occurrenceId: string, actor: GovernanceActor,
+    canAccess: (sessionId: string) => boolean = () => true): ServiceResult<WorkflowDecisionView> {
+    if (actor.kind !== "human" || !actor.id) return fail("only the campaign owner can return a resource", 403);
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (!decision || (viewedSessionId !== decision.sessionId && viewedSessionId !== decision.controllingSessionId) ||
+        !canAccess(decision.sessionId) || !canAccess(decision.controllingSessionId)) return fail("decision not found", 404);
+    if (!this.db.campaignOwnerUser(decision.controllingSessionId, actor.id)) {
+      return fail("only the campaign owner can return a resource", 403);
+    }
+    const root = this.db.getSession(decision.controllingSessionId);
+    if (root?.orchestratorPolicy?.control?.mode !== "full_control" || decision.category === "owner_decision" ||
+        (!decision.ownerHandoff && !decision.ownerRule &&
+          !this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot))) {
+      return fail("this resource cannot be returned", 409);
+    }
+    const now = Date.now();
+    const recorded = this.db.returnOwnerResource(decision,
+      ownerReturnTargets(decision.category, decision.resourceKey, decision.resourceSnapshot),
+      this.ownerKeptBy(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot), actor.id, now);
+    if (recorded) this.log.info(JSON.stringify({ event: "campaign_owner_resource_returned", campaignId: root.id,
+      occurrenceId, category: decision.category, byUserId: actor.id, at: now }));
+    this.hub.sessionChangedById(decision.sessionId);
+    this.hub.sessionChangedById(root.id);
+    return ok(decision);
+  }
+
   /** Whether the campaign's owner kept this resource (#4064): its root handed an occurrence for it
    * to the owner, or an owner rule kept one for a person (#4137). See ownerKeptTargets for what
    * counts as the same resource. */
@@ -15772,7 +15805,8 @@ export class SessionsService {
     snapshot: WorkflowDecisionResourceSnapshot): WorkflowDecisionView[] {
     const targets = new Set(ownerKeptTargets(category, resourceKey, snapshot));
     const kept = this.db.ownerKeptWorkflowDecisions(controllerId).filter((decision) =>
-      ownerKeptTargets(decision.category, decision.resourceKey, decision.resourceSnapshot).some((target) => targets.has(target)));
+      ownerKeptTargets(decision.category, decision.resourceKey, decision.resourceSnapshot).some((target) => targets.has(target)) &&
+      !this.db.ownerKeepWasReturned(controllerId, decision.occurrenceId, ownerReturnTargets(category, resourceKey, snapshot)));
     if (!kept.length) return [];
     const approved = this.personalRuleLookup(controllerId, category);
     return kept.filter((d) => d.ownerHandoff || !d.ownerRule || !approved(d.ownerRule));
@@ -18318,7 +18352,11 @@ export class SessionsService {
         toolName: "Typed Workflow Decision",
         input: JSON.stringify(snapshot, null, 2),
       },
-      workflowDecision: decision,
+      workflowDecision: { ...decision,
+        ...(decision.category !== "owner_decision" &&
+          (decision.ownerRule || decision.ownerHandoff || decision.authorityEvaluation?.reason === "owner_kept") &&
+          this.db.getSession(decision.controllingSessionId)?.orchestratorPolicy?.control?.mode === "full_control"
+          ? { returnableOwnerResource: true as const } : {}) },
     };
   }
 
