@@ -16,7 +16,7 @@ export function projectScopeDecisionDetailsForUi<T>(payload: T, protocol: number
     if (details.length !== record.scopeDecisionDetails.length) result = { ...record, scopeDecisionDetails: details };
   }
   // Only delivery envelopes and request containers; never walk decision snapshots or user text.
-  for (const key of ["session", "sessions", "items", "pendingApproval", "requests", "request"]) {
+  for (const key of ["session", "sessions", "items", "pendingApproval", "additionalRequests", "requests", "request"]) {
     if (!(key in record)) continue;
     const child = projectScopeDecisionDetailsForUi(record[key], protocol, depth + 1);
     if (child !== record[key]) (result ??= { ...record })[key] = child;
