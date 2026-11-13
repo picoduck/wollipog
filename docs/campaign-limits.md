@@ -202,9 +202,11 @@ it, including unsuccessful attempts. Default reservations divide the unreserved 
 free worker slots plus one review claimant per authorized worker slot, less reviews whose
 reservations are still active (#4545). Default workers therefore leave review capacity even when
 all worker slots are filled. Each admitted review reduces the remaining review claimants, so
-concurrent reviews share that capacity rather than repeatedly halving it. Explicit worker caps
+concurrent reviews share that capacity. Reviews always count at least two claimants so additional
+PR or image reviews can still run after one review per worker. Explicit worker caps
 are unchanged and can still exhaust the allowance; no default can admit work when the remainder
-cannot fund it (including an integer tool call). Each free slot keeps a share equal to a review's. The
+cannot fund it. Integer shares round down, with a minimum of one tool call when a whole call is
+available; a last indivisible call cannot also be held back for another review. The
 requester's own human cost ceiling only lowers that share. Admission still checks every reservation
 against the unreserved allowance in the insertion transaction, and a review that reaches its
 reservation stops like any member. The reviewer's exact harness/model/effort, read-only snapshot
@@ -212,8 +214,8 @@ and round/attempt limits remain enforced. Review approval grants no human approv
 or passing checks. Optional review-session citations at merge gates are verified by the server.
 
 A stopped worker retains its previous allocation. If other reservations make that allocation too
-large to restart, lower it with `allocate_campaign_budget` within the remaining allowance and above
-its spent usage, then retry. A restart never increases the campaign allowance or reclaims capacity
+large to restart, lower it with `allocate_campaign_budget`; if exhausted, increase it instead.
+Keep it within the remaining allowance and above its spent usage, then retry. A restart never increases the campaign allowance or reclaims capacity
 from a live worker.
 
 Protocol 254 retires the older bridge and campaign review job tools, CLI commands and native

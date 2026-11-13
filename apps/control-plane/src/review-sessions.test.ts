@@ -1729,6 +1729,19 @@ test("review admission and spending remain available with every campaign worker 
   } finally { h.db.close(); }
 });
 
+test("one occupied worker can review two different PRs concurrently (#4545)", () => {
+  const h = harness({ campaign: true });
+  try {
+    h.db.deleteSession("s2");
+    h.enableCampaign({ concurrency: 1 });
+    requested(h);
+    const second = h.svc.requestReviewSession("s1", request({ pullRequest: { repository: "picoduck/wollipog", number: 4545 } }));
+    assert.ok(second.ok, second.error ?? "second PR review refused");
+    assert.equal(h.starts().length, 2);
+    assertConserved(h);
+  } finally { h.db.close(); }
+});
+
 test("default workers leave capacity for one review each at full concurrency (#4545)", () => {
   for (const concurrency of [1, 2, 3, 4]) for (const total of [100, 2 * concurrency + 1]) for (const resource of ["cost", "tools", "both"] as const) {
     const h = harness({ campaign: true, driver: "codex-app-server" });
@@ -1781,7 +1794,7 @@ test("concurrent reviews share the remaining allowance at full worker concurrenc
     const between = assertConserved(h);
     const second = requested(h, "s2").reviewSessionId;
     const secondAllocation = h.db.campaignBudgets.allocation(second)!;
-    assert.equal(secondAllocation.costUsd, between.remaining.costUsd!);
+    assert.equal(secondAllocation.costUsd, between.remaining.costUsd! / 2);
     assert.ok(secondAllocation.costUsd! > 0 && secondAllocation.toolCalls! > 0);
     assert.equal(h.starts().length, 2, "both reviews launch while the first still runs");
     assert.equal(h.db.reviewSessions.view(first)!.terminal, false);

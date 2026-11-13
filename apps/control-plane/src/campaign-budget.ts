@@ -464,9 +464,14 @@ export class CampaignBudgetLedger {
         EXISTS (SELECT 1 FROM delegated_image_reviews r WHERE r.reviewer_session_id=m.session_id))`)
       .get(rootId) as { n: number }).n;
     const reviews = Math.max(1, (view.authority.concurrency ?? 1) - activeReviews);
-    const slots = Math.max(1, free + reviews);
+    // Even after one review per slot, preserve capacity for additional PR/image reviews (#3618).
+    const slots = Math.max(reviewer ? 2 : 1, free + reviews);
     const prior = this.allocation(sessionId);
-    const cost = (view.remaining.costUsd ?? 0) / slots, tools = Math.floor((view.remaining.toolCalls ?? 0) / slots);
+    const cost = (view.remaining.costUsd ?? 0) / slots;
+    const remainingTools = view.remaining.toolCalls ?? 0;
+    // An integer call cannot be shared. Admit one when it fits rather than rounding a usable
+    // allowance to zero; admit still refuses when no whole call is available.
+    const tools = remainingTools >= 1 ? Math.max(1, Math.floor(remainingTools / slots)) : 0;
     const bounded = (own: number | undefined, share: number) => reviewer && own !== undefined ? Math.min(own, share) : own;
     return { sessionId,
       ...(view.authority.costUsd === undefined ? requested.costUsd === undefined ? {} : { costUsd: requested.costUsd } :

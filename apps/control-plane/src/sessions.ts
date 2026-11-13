@@ -9552,7 +9552,7 @@ export class SessionsService {
       catch (error) {
         const message = (error as Error).message;
         return fail(message === "allocation exceeds unreserved campaign allowance"
-          ? `${message}; lower this stopped worker's allocation with allocate_campaign_budget before restarting, within the remaining allowance and above its spent usage`
+          ? `${message}; adjust this stopped worker's allocation with allocate_campaign_budget before restarting: reduce an oversized allocation or increase an exhausted allocation, within the remaining allowance and above its spent usage`
           : message, 409);
       }
       spec.campaignBudgetDispatch = this.db.campaignBudgets.replaceDispatch(sessionId);
