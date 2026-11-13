@@ -95,8 +95,14 @@ test("runner restart leaves an unadoptable native root needing one durable owner
     assert.equal(recovery[0]!.options[0]!.name, "Relaunch Orchestrator");
     assert.equal(sm.prompt("s_perm", "continue automatically"), false);
     sm.reconcileStore();
-    sm.reconcileRunnerRestartRecovery(["s_perm"]);
-    assert.equal(store.readMeta("s_perm")!.pendingApproval!.requestId, recovery[0]!.requestId);
+    sm.reconcileStore(); // A second crash before registration must not forget the persisted identity.
+    const reopened = new SessionStore(store.rootPath());
+    const restarted = new SessionManager(() => {}, () => {}, reopened, "test-runner");
+    try {
+      restarted.reconcileStore();
+      restarted.reconcileRunnerRestartRecovery(["s_perm"]);
+      assert.equal(reopened.readMeta("s_perm")!.pendingApproval!.requestId, recovery[0]!.requestId);
+    } finally { restarted.shutdownAll(); }
   } finally { sm.shutdownAll(); cleanup(); }
 });
 

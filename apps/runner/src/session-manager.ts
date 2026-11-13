@@ -6922,7 +6922,7 @@ export class SessionManager {
     return { requests: [...requests.values()], verified: true };
   }
 
-  private readonly runnerRestartCandidates = new Map<string, PendingApproval | undefined>();
+  private readonly runnerRestartCandidates = new Map<string, string | undefined>();
 
   /** Registration supplies authoritative root identity and negotiated support before any card is
    * published. A transport reconnect cannot mark a provider this manager already owns. */
@@ -6934,12 +6934,13 @@ export class SessionManager {
       const current = this.store.readMeta(sessionId);
       if (!roots.has(sessionId) || !current || this.active.has(sessionId) ||
           ["completed", "failed", "stopped"].includes(current.status)) continue;
-      const request = existing ?? {
-        requestId: `runner-recovery:${randomUUID()}`, kind: "runner_recovery" as const,
+      const request = {
+        requestId: existing ?? `runner-recovery:${randomUUID()}`, kind: "runner_recovery" as const,
         title: "Relaunch Orchestrator After Runner Restart",
         options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }],
       };
-      this.store.patchMeta(sessionId, { status: "input_required", pendingApproval: addPendingRequest(current.pendingApproval, request) });
+      this.store.patchMeta(sessionId, { status: "input_required", runnerRestartRecoveryRequestId: request.requestId,
+        pendingApproval: addPendingRequest(current.pendingApproval, request) });
       if (!existing) this.log(JSON.stringify({ event: "runner_restart_recovery_required",
         entryPoint: "startup_reconciliation", sessionId, requestId: request.requestId }));
     }
@@ -6964,6 +6965,14 @@ export class SessionManager {
           this.log(`startup deletion reconciliation failed for ${m.sessionId}: ${errText(error)}`);
         });
         continue;
+      }
+      // Preserve the discriminator before startup clears the peer-facing pending card. This also
+      // migrates cards written before the discriminator existed, without a crash window between
+      // removing the card and saving its identity.
+      const restartRecoveryRequestId = pendingRequests(m.pendingApproval)
+        .find((request) => request.kind === "runner_recovery")?.requestId ?? m.runnerRestartRecoveryRequestId;
+      if (restartRecoveryRequestId && m.runnerRestartRecoveryRequestId !== restartRecoveryRequestId) {
+        this.store.patchMeta(m.sessionId, { runnerRestartRecoveryRequestId: restartRecoveryRequestId });
       }
       // The durable row's repository/context binding owns its checkpoint refs even while a live
       // session is between worktrees (for example, after interrupted or failed materialization).
@@ -7193,8 +7202,7 @@ export class SessionManager {
       // live root whose tools all refuse. Children retain recovery through their Orchestrator.
       if (isOrchestratorLaunch(m) && m.context.kind === "native" && !m.review &&
           !terminal && m.command && !m.providerAuthBlock && !m.providerHistoryBlock && !m.worktreeRecovery) {
-        const existing = pendingRequests(m.pendingApproval).find((request) => request.kind === "runner_recovery");
-        this.runnerRestartCandidates.set(m.sessionId, existing);
+        this.runnerRestartCandidates.set(m.sessionId, restartRecoveryRequestId);
       }
       // A crash mid-worktree-setup leaves the pending flag stranded; nothing will resolve it
       // until a restart re-runs start(), so clear it rather than blocking Files/shells forever.
@@ -7651,6 +7659,7 @@ export class SessionManager {
           !this.store.isDeleted(spec.sessionId) && current.status !== "stopped" &&
           !current.worktreeRecovery && !current.providerAuthBlock && !current.providerHistoryBlock) {
         const updated = this.store.patchMeta(spec.sessionId, { status: "input_required",
+          runnerRestartRecoveryRequestId: recovery.requestId,
           pendingApproval: addPendingRequest(current.pendingApproval, recovery) });
         if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
