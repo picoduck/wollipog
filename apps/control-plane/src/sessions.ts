@@ -2496,6 +2496,7 @@ export class SessionsService {
   private readonly campaignRepairCheckedAt = new Map<string, number>();
   private readonly archiveWorktreeRetirements = new Set<string>();
   private readonly refusedWorktreeRecheckedAt = new Map<string, number>();
+  private readonly refusedWorktreeSweep = new Map<string, { at: number; after: string }>();
   /** Full Control campaigns whose first message is being established (#2940). */
   private readonly firstMessagesInFlight = new Set<string>();
   /** The one session whose established first message is being admitted right now. */
@@ -7418,6 +7419,7 @@ export class SessionsService {
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
     this.expireAutomationCreationDecisions(now);
+    this.maintainArchivedWorktreeRemoval(now, runnerId);
     for (const campaignId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
       void this.reconcileUncertainIssueClosures(campaignId).catch(() => this.log.warn(`Issue closure recovery is pending for ${campaignId}`));
     }
@@ -7691,9 +7693,6 @@ export class SessionsService {
     if (this.campaignRepairCheckedAt.size > 4_096) {
       for (const [id, at] of this.campaignRepairCheckedAt) if (now - at > CAMPAIGN_REPAIR_CHECK_INTERVAL_MS) this.campaignRepairCheckedAt.delete(id);
     }
-    // Dashboard projections come from the DB directly. Reconcile on the existing maintenance
-    // tick as well as get_campaign/reconnect, so a person need not run an agent to clear cleanup.
-    this.reconcileRefusedCampaignWorktrees(this.db.campaignProjection(campaignId));
     // Starting the repair only claims it; nothing about it may hold up the rest of this tick.
     void this.repairCampaign(campaignId, now);
   }
@@ -20590,6 +20589,15 @@ export class SessionsService {
     }
   }
 
+  private maintainArchivedWorktreeRemoval(now: number, runnerId?: string): void {
+    const key = runnerId ?? "*";
+    const previous = this.refusedWorktreeSweep.get(key);
+    if (previous && now - previous.at < 30_000) return;
+    const children = this.db.archivedChildrenWithRefusedWorktrees(previous?.after ?? "", runnerId);
+    this.refusedWorktreeSweep.set(key, { at: now, after: children.length === 64 ? children.at(-1)! : "" });
+    for (const childId of children) this.queueCampaignWorktreeRetirement(childId, false, now);
+  }
+
   private reconcileRefusedCampaignWorktrees(projection: OrchestratorCampaignProjection | null): void {
     for (const childId of new Set(projection?.cleanupWorktrees?.filter(item => item.status === "refused")
       .map(item => item.sessionId))) this.queueCampaignWorktreeRetirement(childId);
@@ -20598,7 +20606,7 @@ export class SessionsService {
   /** A verified child and its archived flag are the durable intent. Reconnect replays this
    * request if the control plane exited before sending it; the runner owns deferred replay after
    * it accepts a request. Refusals only receive metadata reconciliation, never a deletion retry. */
-  private queueCampaignWorktreeRetirement(sessionId: string, retryDeferred = false): void {
+  private queueCampaignWorktreeRetirement(sessionId: string, retryDeferred = false, recheckAt = Date.now()): void {
     const child = this.db.getSession(sessionId);
     const campaignId = this.db.campaignForVerifiedChild(sessionId);
     const campaign = campaignId ? this.db.getSession(campaignId) : null;
@@ -20608,12 +20616,12 @@ export class SessionsService {
         !this.hub.isRunnerOnline(child.runnerId) || this.archiveWorktreeRetirements.has(sessionId)) return;
     const reconcileRefused = runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion,
       "campaignWorktreeRemovalReconciliation") &&
-      (retryDeferred || Date.now() - (this.refusedWorktreeRecheckedAt.get(sessionId) ?? 0) >= 30_000);
+      (retryDeferred || recheckAt - (this.refusedWorktreeRecheckedAt.get(sessionId) ?? 0) >= 30_000);
     const pending = this.db.campaignWorktreeCleanup(sessionId).filter((item) =>
       item.status === "pending" || (retryDeferred && item.status === "deferred") ||
       (reconcileRefused && item.status === "refused"));
     if (!pending.length) return;
-    if (pending.some(item => item.status === "refused")) this.refusedWorktreeRecheckedAt.set(sessionId, Date.now());
+    if (pending.some(item => item.status === "refused")) this.refusedWorktreeRecheckedAt.set(sessionId, recheckAt);
     this.archiveWorktreeRetirements.add(sessionId);
     void (async () => {
       let retry = false;

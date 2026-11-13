@@ -1989,7 +1989,7 @@ test("Stop and Archive leaves old runners pending and retries an undelivered arc
   }
 });
 
-for (const trigger of ["campaign_read", "maintenance"] as const) test(`Campaign Status reconciles refused external removal without retrying deletion: ${trigger}`, async () => {
+for (const trigger of ["campaign_read", "maintenance", "stopped_root", "archived_root"] as const) test(`Campaign Status reconciles refused external removal without retrying deletion: ${trigger}`, async () => {
   const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {
     const child = spawn(parent.id, "Deliver work with refused cleanup");
@@ -2009,9 +2009,16 @@ for (const trigger of ["campaign_read", "maintenance"] as const) test(`Campaign 
     await new Promise<void>(resolve => setImmediate(resolve));
     db.updateSessionStatus(parent.id, "idle", Date.now());
     assert.equal(db.campaignProjection(parent.id)?.cleanupWorktrees?.[0]?.status, "refused");
+    for (const unreadable of ["not json", '["invalid",null,7]', '{"invalid":{}}']) {
+      db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(unreadable, child);
+      assert.deepEqual(db.archivedChildrenWithRefusedWorktrees(""), [], "unproven inventory never becomes a sweep candidate");
+    }
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify(worktrees), child);
+    if (trigger === "stopped_root") db.updateSessionStatus(parent.id, "stopped", Date.now());
+    if (trigger === "archived_root") db.setSessionArchived(parent.id, true, Date.now());
     hub.sentToRunner.length = 0;
     db.registerRunner(runnerMeta(), Date.now(), 373);
-    if (trigger === "maintenance") svc.retryDuePrompts(Date.now(), RUNNER_ID);
+    if (trigger !== "campaign_read") svc.retryDuePrompts(Date.now(), RUNNER_ID);
     else svc.campaignProjection(parent.id);
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(hub.sentOfType("session_worktree").length, 0, "old runners never receive the new operation or a deletion retry");
@@ -2031,7 +2038,7 @@ for (const trigger of ["campaign_read", "maintenance"] as const) test(`Campaign 
             expectedBranch: "fix/local-only", detectedAt: Date.now(), detail: "Select a worktree before resuming." } } : {}),
         }) };
     };
-    if (trigger === "maintenance") svc.retryDuePrompts(Date.now() + 30_000, RUNNER_ID);
+    if (trigger !== "campaign_read") svc.retryDuePrompts(Date.now() + 30_000, RUNNER_ID);
     else svc.campaignProjection(parent.id);
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(hub.sentOfType("session_worktree").length, 1);
@@ -2050,16 +2057,20 @@ for (const trigger of ["campaign_read", "maintenance"] as const) test(`Campaign 
         sessionId: parent.id, state: "completed", revision: 2,
       }), true);
     }
-    db.updateSessionStatus(parent.id, "idle", Date.now());
+    if (trigger === "maintenance" || trigger === "campaign_read") db.updateSessionStatus(parent.id, "idle", Date.now());
     assert.equal(db.campaignProjection(parent.id)?.status, "complete_needs_cleanup", "a surviving checkout keeps its refusal");
     svc.campaignProjection(parent.id);
     assert.equal(hub.sentOfType("session_worktree").length, 1, "repeated reads are throttled");
     externallyRemoved = true;
-    svc.reconcileArchivedCampaignWorktrees(RUNNER_ID);
+    if (trigger === "campaign_read") svc.reconcileArchivedCampaignWorktrees(RUNNER_ID);
+    else svc.retryDuePrompts(Date.now() + 60_000, RUNNER_ID);
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.deepEqual(db.campaignWorktreeCleanup(child), []);
+    assert.deepEqual(db.archivedChildrenWithRefusedWorktrees(""), [], "retired generations no longer occupy sweep batches");
     assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
     assert.equal(db.getSession(child)?.worktreeRecovery?.selectedPath, path, "future resume still has recovery coordinates");
+    if (trigger === "stopped_root") assert.equal(db.getSession(parent.id)?.status, "stopped");
+    if (trigger === "archived_root") assert.equal(db.getSession(parent.id)?.archived, true);
   } finally {
     db.close();
   }

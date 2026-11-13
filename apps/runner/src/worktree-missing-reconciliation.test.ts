@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -113,6 +113,19 @@ for (const external of ["removed", "missing_registered", "unregistered_directory
         assert.equal(readFileSync(join(worktree.path, "private.txt"), "utf8"), "surviving private files\n");
       }
       assert.match(await manager.sessionWorktreeRootFailure(store.readMeta("s_archived")!) ?? "", /Select a worktree/);
+      store.patchMeta("s_archived", { agentSessionId: "stored-provider-thread" });
+      const resumeFailure = await new Promise<{ error: string; code?: string }>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("resume did not settle")), 5_000);
+        manager!.prompt("s_archived", "Resume after removal", [], undefined, undefined, {
+          commandId: "resume-reconciled", queued() {}, started() { reject(new Error("a blocked prompt started")); },
+          completed() { reject(new Error("a blocked prompt completed")); }, uncertain() { reject(new Error("delivery is unknown")); },
+          failed(error, code) { clearTimeout(timeout); resolve({ error, code }); },
+        });
+      });
+      assert.equal(resumeFailure.code, "WORKTREE_RECOVERY_REQUIRED", "prompt resume crosses the launch guard without start()");
+      assert.match(resumeFailure.error, /Select a worktree/);
+      assert.equal(store.readMeta("s_archived")?.status, "input_required");
+      assert.equal(providerConstructions, 0, "resume never constructs a provider in the primary checkout");
       const spec = { sessionId: "s_archived", workspaceId: "repo", workspacePath: repo, agentId: "claude",
         command: "claude", args: [], env: {}, driver: "claude-code" as const, context: { kind: "native" as const } };
       for (const useWorktree of [false, true]) {
@@ -128,6 +141,24 @@ for (const external of ["removed", "missing_registered", "unregistered_directory
       assert.equal(store.readMeta("s_archived")?.worktreeRecovery, undefined, "explicit worktree selection clears the fence");
       assert.equal(store.readMeta("s_archived")?.worktreePath, replacement.worktree.path);
       assert.equal(await manager.sessionWorktreeRootFailure(store.readMeta("s_archived")!), null);
+      if (external === "removed") {
+        const selected = store.readMeta("s_archived")!;
+        store.patchMeta("s_archived", { status: "idle" });
+        renameSync(replacement.worktree.path, `${replacement.worktree.path}.temporarily-missing`);
+        const recovery = manager as unknown as {
+          recordWorktreeRecovery(meta: typeof selected, path: string, detail: string, phase: string): boolean;
+        };
+        assert.equal(recovery.recordWorktreeRecovery(store.readMeta("s_archived")!, replacement.worktree.path,
+          "the directory is missing", "fixture verification"), true);
+        renameSync(`${replacement.worktree.path}.temporarily-missing`, replacement.worktree.path);
+        assert.ok(store.readMeta("s_archived")?.worktreeRecovery, "an ordinary incident was recorded");
+        git(repo, "branch", "--set-upstream-to", "main", replacement.worktree.branch);
+        await manager.discardWorktree("s_archived", replacement.worktree.path);
+        assert.equal(store.readMeta("s_archived")?.worktreePath, null);
+        assert.equal(store.readMeta("s_archived")?.worktreeRecovery, undefined,
+          "intentional discard clears the incident for its removed selection");
+        assert.equal(await manager.sessionWorktreeRootFailure(store.readMeta("s_archived")!), null);
+      }
     } finally {
       manager?.shutdownAll(); rmSync(root, { recursive: true, force: true });
     }

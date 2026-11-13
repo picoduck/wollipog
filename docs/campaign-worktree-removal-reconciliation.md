@@ -13,6 +13,11 @@ runner reply does not refresh the child's activity timestamp or broadcast a new 
 reply updates the ordinary session snapshot, so the existing cleanup projection stops counting
 the retired inventory generation and can reach `verified_complete`.
 
+Maintenance scans at most 64 archived children with current refused generations per 30-second
+keyset batch, including children whose campaign root is stopped or archived. Each candidate
+still passes the ordinary live ancestry, verification, policy and runner checks. Settled
+inventory generations leave the sweep query. This work does not start or resume the root.
+
 ## Evidence and Preservation
 
 On native execution contexts, Git must be readable and the parent directory accessible. The
@@ -41,6 +46,8 @@ They never fall back to the primary checkout or silently recreate a checkout. Se
 creating a verified replacement worktree clears the hold through the ordinary selection flow.
 This hold concerns a future resume; it does not make an archived, verified child's absent
 worktree count as pending campaign cleanup.
+Ordinary successful discard or retirement clears any recovery incident for the selection it
+intentionally removes; it does not inherit this external-removal fence.
 
 Runner diagnostics emit `campaign_worktree_external_removal_reconciled` with the request ID,
 bounded session ID, removal state and preservation/recovery flags. Control-plane transport

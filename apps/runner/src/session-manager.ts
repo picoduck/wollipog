@@ -5782,11 +5782,11 @@ export class SessionManager {
       keptWorktreePaths: keptWorktreePaths?.length ? keptWorktreePaths : undefined,
       ...(removedActiveSelection
         ? { worktreePath: null, worktreeBranch: undefined, lastTurnBaseTree: undefined,
-            ...(externalSelectionRecovery ? { worktreeRecovery: {
+            worktreeRecovery: externalSelectionRecovery ? {
               recoveryId: `worktree-recovery:${randomUUID()}`, detectedAt: Date.now(),
               selectedPath: record.worktreePath, expectedBranch: record.branch ?? "",
               detail: externalSelectionRecovery,
-            } } : {}) }
+            } : undefined }
         : {}),
     });
     if (!updated) return undefined;
