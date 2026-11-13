@@ -140,11 +140,11 @@ function answers(kind: MigratedKind, chosen: Record<string, FakeTypedAnswer>): F
   return { answers: chosen };
 }
 
-test("each migrated kind is typed: fixed questions, a recorded threshold, a v2 prompt, and no verdict in its schema", () => {
+test("each migrated kind is typed: fixed questions, a recorded threshold, a versioned prompt, and no verdict in its schema", () => {
   for (const kind of MIGRATED) {
     const definition = DECISION_KINDS[kind];
     assert.ok(definition.typed, kind);
-    assert.equal(definition.promptVersion, `${kind}.v2`);
+    assert.equal(definition.promptVersion, kind === "credential_screen" ? "credential_screen.v3" : `${kind}.v2`);
     assert.equal(definition.typed.confidenceThreshold, KINDS[kind].threshold);
     assert.deepEqual(definition.typed.verdicts, { admit: KINDS[kind].confirm, refuse: KINDS[kind].refuse });
     // The verdicts callers read are unchanged, so every caller and recorded outcome keeps its meaning.
@@ -177,6 +177,27 @@ test("the credential screen asks each kind of ask as its own question, each excl
   }
 });
 
+test("credential_screen.v3 renders the access-grant question with work-only examples and real-grant controls", () => {
+  const prepared = prepareDecision(DECISION_KINDS.credential_screen, KINDS.credential_screen.inputs("Plan permission work"));
+  const renderedQuestion = prepared.rendered.match(/<question id="grants_access"[^>]*>\n([\s\S]*?)\n<\/question>/u)?.[1];
+  assert.equal(renderedQuestion,
+    "Would answering or approving this request itself give the agent new provider, repository or sandbox " +
+    "access, or any lasting or standing permission? Answer true for an actual grant, such as allowing network " +
+    "access, adding a provider account for the agent to use, or approving a persistent tool grant. " +
+    "Answer false when the request only talks about this as a subject of the design or the code, and answering it " +
+    "would hand over, reveal or grant nothing. Requests to design, implement, change, test or scope permission-related work grant " +
+    "nothing by themselves: answer false when approval only chooses work, such as implementing selection of an " +
+    "already trusted harness and a read of an existing account-selection preview, approving a campaign scope " +
+    "addition, allowing a test or check outside a phase's work plan using existing access, establishing or restoring a " +
+    "review route using existing access, or deciding what permissions a CI workflow file declares. Choosing a new " +
+    "workflow or review route that uses access the agent already has grants no access, including a route for a " +
+    "contributor pull request. Judge the change in the agent's access, not whether the workflow or route is new. " +
+    "A quoted notice that a request was declined also grants nothing. These examples do not exempt a request that " +
+    "also asks for actual access, even indirectly or as one option. If establishing or restoring a route or allowing a check " +
+    "requires new access, count that grant; if you cannot tell whether approval grants access, do not give a " +
+    "confident false.");
+});
+
 /** Every answer type of each kind, with the verdict the server derives and what the caller does. */
 const CASES: Record<MigratedKind, Array<[string, Record<string, FakeTypedAnswer>, string, Result]>> = {
   credential_screen: [
@@ -187,6 +208,10 @@ const CASES: Record<MigratedKind, Array<[string, Record<string, FakeTypedAnswer>
     ["a confident yes beside an unsure no", { grants_access: { value: true }, hands_over_credential: { value: false, confidence: 0.3 } }, "ask", "refused"],
     ["an unsure yes", { performs_sign_in: { value: true, confidence: 0.79 } }, "uncertain", "owner"],
     ["an unsure no", { hands_over_credential: { value: false, confidence: 0.5 } }, "uncertain", "owner"],
+    ["no access granted at threshold", { grants_access: { value: false, confidence: 0.8 } }, "discusses", "confirmed"],
+    ["access granted at threshold", { grants_access: { value: true, confidence: 0.8 } }, "ask", "refused"],
+    ["unclear access grant", { grants_access: { value: true, confidence: 0.79 } }, "uncertain", "owner"],
+    ["unsure no access", { grants_access: { value: false, confidence: 0.79 } }, "uncertain", "owner"],
   ],
   follow_up_relatedness: [
     ["completes the requested work", { relation: { value: "completes_requested_work" } }, "related", "confirmed"],
@@ -220,7 +245,7 @@ for (const kind of MIGRATED) {
         assert.equal(typed.confidenceThreshold, KINDS[kind].threshold, "the audit records the threshold");
         assert.deepEqual(typed.questions.map((question) => question.questionId), KINDS[kind].questions);
         assert.deepEqual(typed.answers.map((answer) => answer.questionId), KINDS[kind].questions);
-        assert.equal(outcome.occurrence.promptVersion, `${kind}.v2`);
+        assert.equal(outcome.occurrence.promptVersion, kind === "credential_screen" ? "credential_screen.v3" : `${kind}.v2`);
       } finally { h.db.close(); }
     }
   });
