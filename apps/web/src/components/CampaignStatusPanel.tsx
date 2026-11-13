@@ -99,6 +99,8 @@ interface CampaignListMemory {
   focusItemId: string | null;
   /** Rows the list had loaded, so a remounted panel reloads as deep before restoring position. */
   shownCount: number;
+  /** An implicit entry destination, not a command to navigate again when membership refreshes. */
+  initialAssignmentId: string | null;
   reachedSectionTarget?: string;
   reachedRequestId?: string;
   reachedWorkItemId?: string;
@@ -198,6 +200,7 @@ function AvailableCampaignStatus({
     // A member starts on its own assignment.
     focusItemId: availability.currentWorkItemId,
     shownCount: 0,
+    initialAssignmentId: availability.currentWorkItemId,
   });
   const setMemory = useCallback((patch: Partial<CampaignListMemory>) => {
     setMemoryState((current) => {
@@ -218,10 +221,10 @@ function AvailableCampaignStatus({
     if (shownCount !== null && shownCount !== memory.shownCount) setMemory({ shownCount });
   }, [memory.shownCount, setMemory, shownCount]);
   const sectionTargetTitle = target?.workItemId ? undefined : target?.section
-    ?? (attentionRequestId ? "Waiting for You" : availability.currentWorkItemId ? "Work Items" : undefined);
+    ?? (attentionRequestId ? "Waiting for You" : memory.initialAssignmentId ? "Work Items" : undefined);
   const sectionTargetKey = target?.workItemId ? undefined : target?.section ? `section:${target.section}`
     : attentionRequestId ? `request:${attentionRequestId}`
-      : availability.currentWorkItemId ? `assignment:${availability.currentWorkItemId}` : undefined;
+      : memory.initialAssignmentId ? `assignment:${memory.initialAssignmentId}` : undefined;
   const needsSectionTarget = Boolean(sectionTargetKey && memory.reachedSectionTarget !== sectionTargetKey
     && (!attentionRequestId || memory.reachedRequestId !== attentionRequestId));
   useEffect(() => {

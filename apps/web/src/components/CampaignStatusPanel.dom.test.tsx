@@ -675,6 +675,31 @@ test("a member sees its campaign and its current assignment highlighted", async 
   }
 });
 
+test("a new member assignment updates the list without interrupting open details", async () => {
+  const earlier = item("cwi_2", { title: "Earlier Assignment" });
+  const next = item("cwi_7", { title: "Next Assignment" });
+  const { client } = fakeClient(() => ({ revision: 1, items: [earlier, next], nextCursor: null }), {
+    cwi_2: detailOf(earlier),
+  });
+  const panel = await mount({ initial: childSession, sessions: [rootSession, childSession], client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    await click(panel.container.querySelector(".campaign-work-row")!);
+    const heading = panel.container.querySelector(".campaign-detail-title");
+    assert.equal(heading?.textContent, "Earlier Assignment");
+    await panel.setSession({ ...childSession, campaignMembership: {
+      ...childSession.campaignMembership!, currentWorkItemId: "cwi_7", currentAttemptId: "catt_7",
+    } });
+    assert.ok(panel.container.querySelector(".campaign-detail-title") === heading, "membership refresh retains the opened detail");
+    assert.ok(document.activeElement === heading, "membership refresh retains detail focus");
+    await click([...panel.container.querySelectorAll("button")].find(button => button.textContent === "Back to Work Items")!);
+    assert.match(panel.container.querySelector(".campaign-work-row.is-assignment")?.textContent ?? "", /Next Assignment/);
+  } finally {
+    await panel.dispose();
+  }
+});
+
 test("a member hydrates a summary root and refreshes retained campaign detail after paged reconnect", async () => {
   let currentRoot = rootSession;
   let rootReads = 0;
