@@ -1,6 +1,6 @@
 ---
 name: codebase-maintenance
-description: Run one scheduled codebase-maintenance job (dead code, useless tests, stale flags, duplicate abstractions, coverage gaps, docs freshness, flaky tests, dependency bumps, tracker reconciliation) as an unattended read-only sweep that ends in a sanitized issue draft awaiting approval. Use when an automation or user asks to run a named maintenance job for this repository.
+description: Run one named, read-only maintenance job for Wollipog and draft evidence-backed findings for approval. Covers architectural simplification, dead code, test value and coverage, stale flags, duplication, docs, flakes, dependencies, and tracker reconciliation. Use when an automation or user asks for a maintenance sweep.
 ---
 
 # Codebase Maintenance
@@ -12,6 +12,12 @@ that make the result trustworthy.
 Read `jobs/<job-id>.md` for the job you were asked to run. That file defines the scope, the tools
 that produce ground truth, and the gate a finding must pass. This file defines everything the jobs
 share.
+
+For working code that is unnecessarily hard to change, use
+[architectural-simplification](jobs/architectural-simplification.md). It examines one subsystem's
+caller burden and design history; literal duplication remains the separate
+`duplicate-abstraction-unification` job. A schedule or campaign may invoke either job by its exact
+ID. Changing this skill does not add a job to an existing saved automation.
 
 ## Phase 1: Report Only
 
@@ -150,9 +156,11 @@ missing package and the install error. A stale installed package version or miss
 is handled the same way. One flaky-test sweep ran the unit suite three times against shell-quote
 1.9.0 after the checkout required 1.11.0; content comparison catches that mismatch before testing.
 
-A finding that rests only on reading code is a guess. Each job file names the tool that proves its
-category — static analysis, coverage data, test runs, `git log`, `gh`. Run it, and cite what it
-returned.
+Each job file names the tools that establish its category — static analysis, coverage data, test
+runs, `git log`, `gh`. Run them and cite what they returned; code-reading impressions alone do not
+qualify. For architectural simplification, tools establish caller relationships and historical
+maintenance burden, not an objectively best design. Separate those verified observations from
+the proposed design and its unproven benefits; apply that job's evidence gate before drafting.
 
 For every finding, record:
 
