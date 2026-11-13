@@ -167,6 +167,8 @@ export interface WorktreeCleanupRecord {
   auxiliaryWorktreeRollback?: boolean;
   /** Exact initiating lifecycle. Startup replay preserves rather than replaces this value. */
   trigger?: "explicit_discard" | "archive_retirement" | "pull_request_reconciliation" | "external_removal" | "session_delete" | "creation_rollback";
+  /** Preserve attribution when an archive request strengthens a pending explicit intent. */
+  initiatingTrigger?: WorktreeCleanupRecord["trigger"] | "legacy_unknown";
   /** Explicit discard/reconciliation retains Git safety checks; deletion/rollback keeps legacy force cleanup. */
   removalMode?: "safe" | "force";
   /** Exact approved teardown material. Runner-private and never projected to the control plane. */

@@ -176,11 +176,33 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
       return proveDetailed(cwd, branch, candidates, forgeAvailable ? options : unavailableOptions);
     };
     await assert.rejects(manager.discardWorktree("s_patch", worktree.path, { requireDelivered: true }), /no upstream/);
+    const leaseOwner = "fixture-provider";
+    const active = { sessionId: "s_patch", context: { kind: "native" }, cwd: worktree.path, worktree,
+      worktreeLeaseOwner: leaseOwner, queue: [], client: { dispose: () => {} } };
+    assert.equal(store.acquireWorktreeLease("s_patch", leaseOwner), true);
+    internals.active.set("s_patch", active);
+    assert.equal((await manager.discardWorktree("s_patch", worktree.path, {
+      campaignDeliveredPullRequests: [candidate],
+    })).retirement.status, "deferred");
+    const explicitIntent = new WorktreeCleanupJournal(dataDir).list()[0]!;
+    assert.equal(explicitIntent.trigger, "explicit_discard");
+    assert.equal(internals.deleteActiveSession("s_patch", active), true);
+    for (let attempt = 0; attempt < 500 &&
+        new WorktreeCleanupJournal(dataDir).list()[0]?.patchUnavailableAttempts !== 1; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(new WorktreeCleanupJournal(dataDir).list()[0]?.patchUnavailableAttempts, 1);
+    const replayedExplicitIntent = new WorktreeCleanupJournal(dataDir).list()[0]!;
     assert.equal((await manager.discardWorktree("s_patch", worktree.path, {
       requireDelivered: true, campaignDeliveredPullRequests: [candidate],
-    })).retirement.status, "deferred", "initial unknown outage creates bounded durable retry intent");
-    assert.equal(new WorktreeCleanupJournal(dataDir).list()[0]?.patchUnavailableAttempts, 1);
-    await manager.reconcileWorktreePullRequests();
+    })).retirement.status, "deferred", "archive promotion of a pending explicit intent stays retryable");
+    const archiveIntent = new WorktreeCleanupJournal(dataDir).list()[0]!;
+    assert.equal(archiveIntent.cleanupId, replayedExplicitIntent.cleanupId);
+    assert.equal(archiveIntent.trigger, "archive_retirement");
+    assert.equal(archiveIntent.initiatingTrigger, "explicit_discard");
+    assert.ok(logs.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line)).some((event) =>
+      event.cleanupId === archiveIntent.cleanupId && event.entryPoint === "explicit_discard" && event.requireDelivered === true),
+    "promotion preserves the original entry point while reporting the stronger delivery requirement");
     assert.equal(new WorktreeCleanupJournal(dataDir).list()[0]?.patchUnavailableAttempts, 2);
     assert.equal(messages.some((message) => message.type === "session_worktree_retirement_refused"), false);
     await manager.reconcileWorktreePullRequests();
@@ -198,10 +220,8 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
     }), /three attempts/, "repeated CP requests preserve the existing intent's attempt budget too");
     assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 0);
     forgeAvailable = true;
-    const leaseOwner = "fixture-provider";
     assert.equal(store.acquireWorktreeLease("s_patch", leaseOwner), true);
-    const active = { sessionId: "s_patch", context: { kind: "native" }, cwd: worktree.path, worktree,
-      worktreeLeaseOwner: leaseOwner, queue: [], client: { dispose: () => {} } };
+    active.worktreeLeaseOwner = leaseOwner;
     internals.active.set("s_patch", active);
     assert.equal((await manager.discardWorktree("s_patch", worktree.path, {
       requireDelivered: true, campaignDeliveredPullRequests: [candidate],
@@ -214,7 +234,9 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
         !new WorktreeCleanupJournal(dataDir).history().some((record) => record.patchDelivery?.tipOid === tip)); attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.deepEqual(store.readMeta("s_patch")?.worktrees, [], "deferred replay proves patches and retires the worktree");
+    assert.deepEqual(store.readMeta("s_patch")?.worktrees, [], JSON.stringify({
+      journal: new WorktreeCleanupJournal(dataDir).list(), logs: logs.slice(-8),
+    }));
     assert.ok(new WorktreeCleanupJournal(dataDir).history().some((record) => record.patchDelivery?.tipOid === tip));
     const diagnostic = logs.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
       .find((event) => event.event === "worktree_patch_delivery" && event.outcome === "matched");

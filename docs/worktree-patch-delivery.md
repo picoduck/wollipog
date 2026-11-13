@@ -35,6 +35,16 @@ cleanup intent with at most three unavailable proof attempts, including across r
 Exhaustion emits a terminal refusal and retains the worktree; a later explicit retry is a new
 intent. These limits never authorize deleting unproved work.
 
+An archive request strengthens a pending explicit-discard intent to require delivered-work proof,
+preserving its cleanup ID, retry budget and original initiating lifecycle. It never weakens an
+archive intent back to explicit-discard semantics. The original lifecycle remains `entryPoint` in
+diagnostics, with `requireDelivered` identifying the stronger requirement.
+
+The usual five-minute reconcile cadence gives roughly ten minutes between the first attempt and
+third failure. Provider-boundary replays and explicit requests can exhaust that attempt budget
+sooner. This is an attempt limit, not a promised outage grace period; work is always retained and
+a later explicit retry starts a new intent.
+
 For diagnosis, ask:
 
 - Why was this checkout accepted? Its private cleanup history has `patchDelivery`, including the

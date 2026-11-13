@@ -4496,7 +4496,8 @@ export class SessionManager {
     record.patchDelivery = result.state === "matched" ? result.proof : undefined;
     record.patchUnavailableAttempts = result.state === "unavailable" ? (record.patchUnavailableAttempts ?? 0) + 1 : 0;
     this.log(JSON.stringify({ event: "worktree_patch_delivery", sessionId: boundedSessionIdForLog(meta.sessionId),
-      worktreeId: worktree.id, cleanupId: record.cleanupId, entryPoint: record.trigger,
+      worktreeId: worktree.id, cleanupId: record.cleanupId, entryPoint: record.initiatingTrigger ?? record.trigger,
+      requireDelivered: record.trigger === "archive_retirement",
       outcome: result.state, durationMs: Date.now() - startedAt,
       ...("reason" in result ? { reason: result.reason } : {}),
       unavailableAttempts: record.patchUnavailableAttempts,
@@ -5330,6 +5331,12 @@ export class SessionManager {
       record.worktreeId === worktree.id && sameWorktreePath(context, record.worktreePath, worktree.path));
   }
 
+  private strengthenArchiveRetirement(record: WorktreeCleanupRecord, trigger: WorktreeCleanupRecord["trigger"]): void {
+    if (trigger !== "archive_retirement" || record.trigger === "archive_retirement") return;
+    record.initiatingTrigger ??= record.trigger ?? "legacy_unknown";
+    record.trigger = "archive_retirement";
+  }
+
   private async deferWorktreeRetirement(
     meta: SessionMeta,
     worktree: SessionWorktreeView,
@@ -5354,6 +5361,8 @@ export class SessionManager {
       deferredRecord.campaignDeliveredPullRequests = campaignDeliveredPullRequests;
       this.cleanupJournal.add(deferredRecord);
     } else {
+      this.strengthenArchiveRetirement(existing, trigger);
+      this.cleanupJournal.add(existing);
       if (campaignDeliveredPullRequests) {
         existing.campaignDeliveredPullRequests = campaignDeliveredPullRequests;
         this.cleanupJournal.add(existing);
@@ -5518,6 +5527,7 @@ export class SessionManager {
         options.campaignDeliveredPullRequests?.length) {
       const pendingPatchCheck = this.pendingSafeWorktreeCleanup(sessionId, meta.context, worktree);
       patchCheck = pendingPatchCheck ?? this.cleanupRecordForWorktree(meta, worktree, options.trigger ?? "explicit_discard", "safe");
+      this.strengthenArchiveRetirement(patchCheck, options.trigger);
       patchCheck.campaignDeliveredPullRequests = options.campaignDeliveredPullRequests;
       patchDeliveryUnavailable = await this.proveCleanupPatchDelivery(patchCheck, meta, worktree) === "unavailable";
       const latest = this.store.readMeta(sessionId);
@@ -5587,6 +5597,7 @@ export class SessionManager {
         options.trigger ?? "explicit_discard",
         "safe",
       );
+      this.strengthenArchiveRetirement(cleanup, options.trigger);
       // Safe removal still compares this exact head with the tree's current head.
       if (deliveredHead && !cleanup.verifiedMergedHead) cleanup.verifiedMergedHead = deliveredHead;
       // A later merged pull request from the same branch delivered this exact tip (#3981).
