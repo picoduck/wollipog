@@ -148,10 +148,13 @@ function proposalMatchesAdditions(proposal: CampaignScopeProposal, launch: strin
 export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknown>): CampaignIssueScopeSnapshot | null {
   if (!validIssueAdmission(input.issueAdmission) || !validIssueLineage(input.lineage) || !validScopeGrantReview(input.grantReview) ||
       !validSelectionReview(input.selectionReview) || !validScopeOwnerReview(input.ownerReview) || !validScopeProposal(input.scopeProposal)) return null;
-  // A proposal is never also a grant review, a selection review or an owner review, and only an
-  // admitted one carries an admission (#4282).
+  // Only an owner-routed all proposal may also carry the exact ceiling increase it asks the
+  // owner to authorize. Other proposals never mix review kinds; only admitted ones carry admission.
   const proposal = input.scopeProposal as CampaignScopeProposal | undefined;
-  if (proposal && (input.grantReview !== undefined || input.selectionReview !== undefined || input.ownerReview !== undefined ||
+  const ceilingReview = proposal?.route === "owner" && proposal.requestedCount === "all" &&
+    (input.ownerReview as CampaignIssueScopeSnapshot["ownerReview"])?.cause === "lineage_missing" &&
+    (input.ownerReview as CampaignIssueScopeSnapshot["ownerReview"])?.maxIssuesIncrease !== undefined;
+  if (proposal && (input.grantReview !== undefined || input.selectionReview !== undefined || (input.ownerReview !== undefined && !ceilingReview) ||
       input.lineage !== undefined || (proposal.route === "admitted") !== (input.issueAdmission !== undefined))) return null;
   // An owner review never carries admission or grant review. Its cause constrains retained lineage (#4333).
   if (input.ownerReview !== undefined && (input.issueAdmission !== undefined || input.grantReview !== undefined ||

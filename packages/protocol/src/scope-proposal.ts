@@ -341,6 +341,7 @@ export function validScopeProposal(value: unknown): boolean {
   // A check names its outcome exactly when the owner route is that check's.
   if (v.ownerCause === "constraint_check_uncertain") return check?.verdict === "uncertain";
   if (v.ownerCause === "constraint_check_failed") return check?.verdict === "failed";
+  if (v.ownerCause === "issue_ceiling_exceeded") return check?.verdict === "admit";
   return check === undefined;
 }
 
@@ -406,6 +407,8 @@ export function scopeProposalMaterial(snapshot: ScopeProposalSnapshot, maxIssues
   const reason = proposal.constraintCheck?.reason ? ` (${escapeMarkdown(proposal.constraintCheck.reason.replace(/\.$/u, ""))})` : "";
   const why = proposal.ownerCause === "proposal_unstructured"
     ? "the Orchestrator's machine can't send a structured proposal, so nothing could check it"
+    : proposal.ownerCause === "issue_ceiling_exceeded"
+      ? "the matching issues exceed the campaign's Maximum Issues"
     : proposal.ownerCause === "repository_name_unresolved"
       ? "a repository your message names matches no repository in this campaign, or more than one, so no repository limit applies"
     : proposal.ownerCause === "constraint_check_uncertain"

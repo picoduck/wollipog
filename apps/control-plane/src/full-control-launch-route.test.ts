@@ -1439,10 +1439,16 @@ test("every above explicit Maximum Issues goes to the owner (#4532)", async () =
   const { server } = await app(f);
   try {
     const c = await proposalCampaign(f, server, "Fix every open issue.", { issues: { maxIssues: 3 } });
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
     const result = await c.propose([31, 32, 33, 34].map((n) => chosen(n)), { requestedCount: "all", constraints: ["open"] });
     assert.equal(result.ok, true, result.error ?? "");
     assert.equal(result.data!.authority, "human");
     assert.equal((result.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.ownerCause, "issue_ceiling_exceeded");
+    const approved = c.answer({ scope_proposal_answer: "Approve Scope" });
+    assert.equal(approved.ok, true, approved.error ?? "");
+    assert.equal(boundaryOf(f, c.id).issueAuthority!.maxIssues, 4);
+    assert.equal(establishedOf(f, c.id).initialScope!.requestedCount, 4);
+    assert.equal((await c.propose([chosen(35)])).errorDetails?.code, "capacity_exhausted");
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -1453,6 +1459,8 @@ test("an unrelated all cannot pass the semantic count check, and uncertain all k
     const c = await proposalCampaign(f, server, "Run all tests while fixing the highest-priority issues.");
     f.decision.state.check = (message) => scopeCheckAnswer(message, (id) => id === "count_consistent" ? { value: "inconsistent" } : undefined);
     assert.equal((await c.propose([chosen(31)], { requestedCount: "all" })).errorDetails?.code, "constraint_check_refused");
+    const capped = await proposalCampaign(f, server, "Run all tests while fixing the highest-priority issues.", { issues: { maxIssues: 3 } });
+    assert.equal((await capped.propose([41, 42, 43, 44].map((n) => chosen(n)), { requestedCount: "all" })).errorDetails?.code, "constraint_check_refused");
     const uncertain = await proposalCampaign(f, server, "Fix all open issues.");
     f.decision.state.check = uncertainCheck;
     const result = await uncertain.propose([31, 32, 33, 34].map((n) => chosen(n)), { requestedCount: "all" });

@@ -169,7 +169,7 @@ function canonicalLineage(lineage: NonNullable<CampaignIssueScopeRequest["lineag
  * `proposal`: an Orchestrator's recorded proposal (#4282) with its admission when the floors
  * admitted it. It is part of the snapshot's validation, since only an initial proposal may add nothing. */
 export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository: string, request: CampaignIssueScopeRequest,
-  proposal: Pick<CampaignIssueScopeSnapshot, "scopeProposal" | "issueAdmission"> = {}): CampaignIssueScopeSnapshot | null {
+  proposal: Pick<CampaignIssueScopeSnapshot, "scopeProposal" | "issueAdmission" | "ownerReview"> = {}): CampaignIssueScopeSnapshot | null {
   const launch = repository.toLowerCase();
   const allowed = new Set([launch, ...campaignScopeRepositories(root).map((entry) => entry.repository)]);
   // Validate the untrusted shape before canonicalization can rebuild keys or read repository text.
@@ -218,6 +218,7 @@ export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository:
     explanation: request.explanation, affectedAssignments, affectedDecisions, activeChildren,
     ...(request.lineage === undefined ? {} : { lineage: canonicalLineage(request.lineage, launch) }),
     ...(proposal.scopeProposal ? { scopeProposal: proposal.scopeProposal } : {}),
+    ...(proposal.ownerReview ? { ownerReview: proposal.ownerReview } : {}),
     ...(proposal.issueAdmission ? { issueAdmission: proposal.issueAdmission } : {}) });
 }
 

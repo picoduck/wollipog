@@ -13758,7 +13758,6 @@ export class SessionsService {
       log("owner_review", { checks, cause: "owner_pending", ownerRequest: awaitingOwner.occurrenceId });
       return ok(awaitingOwner);
     }
-    if (allOverCeiling) return ownerApproval(ownerRecord("issue_ceiling_exceeded"));
     // Nothing checkable: admitted by the floors alone, with no model call.
     if (!checks.length) return admit(record, { kind: "scope_proposal_floors" });
     // An older runner's unstructured proposal can't be checked, and a repository name that means
@@ -13803,6 +13802,7 @@ export class SessionsService {
       const existing = this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => d.sessionId === sessionId &&
         d.resourceSnapshot.category === "campaign_issue_scope" && d.resourceSnapshot.scopeProposal?.constraintCheck?.occurrenceId === occurrence.occurrenceId);
       if (existing) return ok(existing);
+      if (allOverCeiling) return ownerApproval(ownerRecord("issue_ceiling_exceeded", constraintCheck("admit")));
       return admit({ ...base, constraintCheck: constraintCheck("admit") }, { kind: "scope_proposal_check", occurrenceId: occurrence.occurrenceId });
     }
     // Uncertain, or failed after the runtime's retries: exactly one owner approval. Nothing is parsed.
@@ -16013,7 +16013,8 @@ export class SessionsService {
         ...(snapshot.lineage === undefined ? {} : { lineage: snapshot.lineage }) };
       const scopeSize = campaignScopeChangeResult(snapshot).length;
       const latest = scopeSnapshot(this.db, currentChild, snapshot.repository, request, snapshot.scopeProposal
-        ? { scopeProposal: snapshot.scopeProposal, ...(snapshot.issueAdmission ? { issueAdmission: snapshot.issueAdmission } : {}) } : {});
+        ? { scopeProposal: snapshot.scopeProposal, ...(snapshot.issueAdmission ? { issueAdmission: snapshot.issueAdmission } : {}),
+          ...(snapshot.ownerReview ? { ownerReview: snapshot.ownerReview } : {}) } : {});
       if (latest && snapshot.issueAdmission) latest.issueAdmission = snapshot.issueAdmission;
       if (latest && snapshot.verifiedPublications) latest.verifiedPublications = snapshot.verifiedPublications;
       if (latest && snapshot.grantReview) latest.grantReview = snapshot.grantReview;
