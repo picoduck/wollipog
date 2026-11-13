@@ -6596,6 +6596,12 @@ export class ControlPlaneDb {
             this.campaignBudgets.noteFollowUpAdmission(campaignId, workItemId, approved);
             return true;
           });
+          // A limit increase may make this acceptance automatic. Still consume and bind an
+          // exact approval the person already gave, so a later identity change cannot reuse it.
+          const approved = this.approvedFollowUpAdmission(campaignId, subject, identity);
+          if (approved && this.consumeWorkflowDecision(approved, Date.now()) !== null) {
+            this.campaignBudgets.noteFollowUpAdmission(campaignId, workItemId, approved);
+          }
           return null;
         } catch (error) {
           if (!(error instanceof FollowUpApprovalRequired)) return { error: (error as Error).message };
@@ -18508,8 +18514,8 @@ export class ControlPlaneDb {
    * allowance, as a Human scope approval re-mints it, so the campaign never runs under a boundary
    * that does not name its limit. Raising the limit raises Maximum Issues by as much, and clearing
    * it lifts Maximum Issues to its ceiling, so the follow-ups it admits can hold issues; lowering
-   * changes neither and revokes nothing already accepted. Like any boundary change, it revokes every
-   * unconsumed decision, which it returns. */
+   * changes neither and revokes nothing already accepted. A raise preserves exact approved
+   * admissions that fit; all other unconsumed decisions are revoked and returned. */
   setCampaignFollowUpLimit(rootId: string, limit: number | null, userId: string, expectedRevision: number, now: number):
     { ok: true; revoked: WorkflowDecisionView[] } | { ok: false; status: number; error: string } {
     this.db.exec("BEGIN IMMEDIATE");
@@ -18553,7 +18559,21 @@ export class ControlPlaneDb {
           WHERE id=? AND parent_control_policy_revision=?`).run(rootId, expectedRevision).changes) !== 1) {
         return refuse(409, "Campaign authority changed; refresh and try again.");
       }
-      const revoked = this.authorityBoundWorkflowDecisionsForController(rootId);
+      const raised = previous !== undefined && (limit === null || limit > previous);
+      const revoked = this.authorityBoundWorkflowDecisionsForController(rootId).filter((decision) => {
+        const snapshot = decision.resourceSnapshot;
+        // Only the threshold and derived issue room changed in this transaction. Preserve an
+        // exact approved admission at the old current revision whose next slot fits the raise.
+        // Pending requests and all other actions retain the existing revocation behavior.
+        if (raised && decision.status === "approved" && decision.policyRevision === expectedRevision &&
+            decision.sessionId === rootId && snapshot.category === "campaign_follow_up_admission" &&
+            (limit === null || snapshot.acceptedFollowUps < limit)) {
+          this.stmt("UPDATE workflow_decisions SET policy_revision=? WHERE occurrence_id=? AND status='approved'")
+            .run(expectedRevision + 1, decision.occurrenceId);
+          return false;
+        }
+        return true;
+      });
       for (const stale of revoked) {
         this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
         this.retireWorkflowDecisionResume(stale.occurrenceId, now);

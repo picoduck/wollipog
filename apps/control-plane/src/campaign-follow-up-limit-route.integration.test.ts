@@ -328,6 +328,65 @@ test("accepting a recommendation past the threshold asks the person about that r
       "the admitted follow-up's issue is not refused by a Maximum Issues derived from the follow-ups it exceeded");
   });
 
+test("raising the limit preserves exact approved admissions, retires pending cards, and consumes the original approval on acceptance (#4537)",
+  { timeout: 90_000 }, async (t) => {
+    const cp = await startControlPlane(t);
+    assert.equal((await planFollowUp(cp, "first")).status, 200);
+    const approved = occurrence(String((await planFollowUp(cp, "approved", "Approved Identity")).json.error));
+    const pending = occurrence(String((await planFollowUp(cp, "pending")).json.error));
+    assert.equal((await cp.human(`/api/sessions/${ROOT}/approve`, { requestId: approved, optionId: "approve" })).status, 200);
+    const before = decision(cp.database, approved);
+    const raised = await cp.human(`/api/sessions/${ROOT}/orchestrator-campaign/follow-up-limit`, { acceptedFollowUps: 3, expectedRevision: 2 });
+    assert.equal(raised.status, 200, raised.text);
+    const after = decision(cp.database, approved);
+    assert.equal(after.status, "approved");
+    assert.equal(after.policyRevision, 3);
+    assert.equal(after.resourceDigest, before.resourceDigest);
+    assert.deepEqual(after.resourceSnapshot, before.resourceSnapshot);
+    assert.equal(after.resolvedAt, before.resolvedAt);
+    assert.equal(decision(cp.database, pending).status, "revoked");
+    // A second increase, including No Limit, carries the same approval forward again.
+    assert.equal((await cp.human(`/api/sessions/${ROOT}/orchestrator-campaign/follow-up-limit`, { acceptedFollowUps: null, expectedRevision: 3 })).status, 200);
+    assert.equal(decision(cp.database, approved).status, "approved");
+    assert.equal(decision(cp.database, approved).policyRevision, 4);
+    assert.equal((await planFollowUp(cp, "approved", "Approved Identity")).status, 200);
+    assert.equal(decision(cp.database, approved).status, "consumed");
+    assert.equal(read(cp.database, (db) => db.campaignBudgets.view(ROOT)!.acceptedFollowUps), 2);
+    assert.equal((await planFollowUp(cp, "approved", "Changed Identity")).status, 409,
+      "an automatic acceptance still binds the exact approval; a retitle needs its own approval");
+    assert.equal(decision(cp.database, approved).status, "consumed", "identity change cannot consume it twice");
+  });
+
+test("an approved admission beyond the new threshold still revokes on a raise (#4537)",
+  { timeout: 90_000 }, async (t) => {
+    const cp = await startControlPlane(t);
+    assert.equal((await planFollowUp(cp, "first")).status, 200);
+    for (const key of ["second", "third"]) {
+      const admission = occurrence(String((await planFollowUp(cp, key)).json.error));
+      assert.equal((await cp.human(`/api/sessions/${ROOT}/approve`, { requestId: admission, optionId: "approve" })).status, 200);
+      assert.equal((await planFollowUp(cp, key)).status, 200);
+    }
+    const approved = occurrence(String((await planFollowUp(cp, "fourth")).json.error));
+    assert.equal((await cp.human(`/api/sessions/${ROOT}/approve`, { requestId: approved, optionId: "approve" })).status, 200);
+    assert.equal((await cp.human(`/api/sessions/${ROOT}/orchestrator-campaign/follow-up-limit`, { acceptedFollowUps: 2, expectedRevision: 2 })).status, 200);
+    assert.equal(decision(cp.database, approved).status, "revoked");
+    assert.equal((await planFollowUp(cp, "fourth")).status, 409);
+  });
+
+test("a decrease revokes approved and pending follow-up admissions (#4537)",
+  { timeout: 90_000 }, async (t) => {
+    const cp = await startControlPlane(t);
+    assert.equal((await planFollowUp(cp, "first")).status, 200);
+    const approved = occurrence(String((await planFollowUp(cp, "approved")).json.error));
+    const pending = occurrence(String((await planFollowUp(cp, "pending")).json.error));
+    assert.equal((await cp.human(`/api/sessions/${ROOT}/approve`, { requestId: approved, optionId: "approve" })).status, 200);
+    const lowered = await cp.human(`/api/sessions/${ROOT}/orchestrator-campaign/follow-up-limit`, { acceptedFollowUps: 0, expectedRevision: 2 });
+    assert.equal(lowered.status, 200, lowered.text);
+    assert.equal(decision(cp.database, approved).status, "revoked");
+    assert.equal(decision(cp.database, pending).status, "revoked");
+    assert.equal((await planFollowUp(cp, "approved")).status, 409);
+  });
+
 test("a follow-up admitted past the threshold stays bound to the title and issue the person approved; changing either is a new decision",
   { timeout: 90_000 }, async (t) => {
     const cp = await startControlPlane(t);
