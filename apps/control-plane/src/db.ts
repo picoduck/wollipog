@@ -19906,15 +19906,18 @@ export class ControlPlaneDb {
       ? acceptedHandoff.budgetUsd
       : existing?.cost_budget_usd ?? undefined;
     let keepPolicyPause = false;
+    let keepPolicyCards = false;
     try {
       const cur = existing?.pending_approval ? (JSON.parse(existing.pending_approval) as PendingApproval) : null;
-      keepPolicyPause = pendingRequests(cur).some((request) => isPolicyApproval(request)) && !isTerminal(snap.status);
+      keepPolicyCards = pendingRequests(cur).some((request) => isPolicyApproval(request)) && !isTerminal(snap.status);
+      // Async owner cards are CP-owned and survive runner snapshots, but do not own a turn barrier.
+      keepPolicyPause = keepPolicyCards && pendingRequests(cur).some((request) => isPolicyApproval(request) && !request.async);
     } catch {
       /* malformed cached approval — fall through to the snapshot */
     }
     const status = keepPolicyPause ? "input_required" : snap.status;
     const currentPending = parseJson<PendingApproval>(existing?.pending_approval ?? null);
-    const pending = this.withoutSubmittedAsyncQuestions(id, keepPolicyPause
+    const pending = this.withoutSubmittedAsyncQuestions(id, keepPolicyCards
       ? currentPending
       : snap.pendingApproval ? pendingApprovalWithOccurrenceIds(snap.pendingApproval, currentPending) : null);
     const pendingJson = pending ? JSON.stringify(pending) : null;

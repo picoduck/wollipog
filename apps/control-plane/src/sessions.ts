@@ -18254,6 +18254,8 @@ export class SessionsService {
 
   private workflowDecisionApproval(decision: WorkflowDecisionView): PendingApproval {
     const snapshot = decision.resourceSnapshot;
+    const requester = decision.sessionId === decision.controllingSessionId && decision.authority === "human"
+      ? this.db.getSession(decision.sessionId) : null;
     const categoryTitle: Record<WorkflowDecisionCategory, string> = {
       implementation_question: "Implementation Decision Required",
       pr_merge: "PR Merge Approval Required",
@@ -18299,12 +18301,15 @@ export class SessionsService {
       title: isChildQuestionSnapshot(snapshot) ? "Question" : isOwnerQuestionSnapshot(snapshot) ? "Owner Question" : categoryTitle[decision.category],
       options,
       kind: "workflow_decision",
-      // A root's own decision its owner kept (#4064) waits for that person without parking the root:
-      // the root keeps working, and campaign continuations keep reaching it.
+      // Full Control root decisions with human-owned proof gaps also wait without parking the
+      // root (#4536). Existing owner-kept cards retain their behavior (#4064); other root cards
+      // need a runner supporting owner decisions. This changes delivery, never authority.
       ...(decision.sessionId === decision.controllingSessionId && decision.authority === "human" &&
         (decision.category === "owner_decision" || decision.ownerHandoff || decision.ownerRule ||
           decision.authorityEvaluation?.reason === "owner_kept" ||
-          decision.authorityEvaluation?.reason === "credential_screen_review") ? { async: true } : {}),
+          decision.authorityEvaluation?.reason === "credential_screen_review" ||
+          requester?.orchestratorPolicy?.control?.mode === "full_control" &&
+            runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "ownerDecisions")) ? { async: true } : {}),
       context: {
         toolName: "Typed Workflow Decision",
         input: JSON.stringify(snapshot, null, 2),
@@ -18535,7 +18540,9 @@ export class SessionsService {
       else {
         if (!parked) this.gateOnPolicy(sessionId, now);
         this.clearSettledPolicyResumeStatus(sessionId);
-        resume?.(false);
+        // Async owner cards never parked the root, so its idle status is already authoritative.
+        // Its answer notification is queued until the runner starts it, just like a restored idle.
+        resume?.(!parked && !recovering && current.status === "idle");
       }
     }
   }
@@ -25678,7 +25685,7 @@ function runnerHoldFor(kind: PolicyRuleKind | undefined): RunnerGuardrailKind | 
 }
 
 function hasPolicyApproval(pending: PendingApproval | null | undefined): boolean {
-  return pendingRequests(pending).some((request) => isPolicyApproval(request));
+  return pendingRequests(pending).some((request) => !request.async && isPolicyApproval(request));
 }
 
 function hasBlockingPendingRequest(pending: PendingApproval | null | undefined): boolean {
