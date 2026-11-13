@@ -5,6 +5,9 @@ import {
   type SourceLocation,
 } from "@wollipog/protocol";
 
+/** Client-side destinations within Campaign Status; they grant no action authority. */
+export interface CampaignTarget { section?: string; workItemId?: string; requestId?: string }
+
 /** `activationId` is ephemeral and deliberately omitted from viewPath: repeated activation of the
  * same stable deep link must re-focus its exact request without creating duplicate browser history. */
 export type AttentionTarget = { eventEpoch: number; requestId?: string; activationId?: number };
@@ -26,7 +29,7 @@ export type View =
   /** Archive visit intents are memory-only; viewPath deliberately serializes neither field. */
   | { name: "archived"; archiveSearch?: string; browseVisit?: { restore: boolean; activationId: number } }
   | { name: "projects"; id?: string; pane?: ProjectsPane }
-  | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget; artifacts?: ArtifactsTarget; campaign?: true }
+  | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget; artifacts?: ArtifactsTarget; campaign?: true; campaignTarget?: CampaignTarget }
   /** `member`: the comparison member a phone shows (#2975); wider layouts show every member. */
   | { name: "run"; id: string; member?: string }
   | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
@@ -524,6 +527,15 @@ function sourceLocationSearch(location: SourceLocation): string {
   return search ? `?${search}` : "";
 }
 
+function campaignTargetSearch(target: CampaignTarget | undefined): string {
+  const params = new URLSearchParams();
+  for (const key of ["section", "workItemId", "requestId"] as const) {
+    if (target?.[key]) params.set(key, target[key]);
+  }
+  const search = params.toString();
+  return search ? `?${search}` : "";
+}
+
 export function viewPath(view: View): string {
   switch (view.name) {
     case "inbox": return `/${sessionsTabSearch(view.split)}`;
@@ -545,7 +557,7 @@ export function viewPath(view: View): string {
     case "session": return view.location
       ? `/sessions/~${encodeResourceId(view.id)}/files/~${encodeOpaque(view.location.path)}${sourceLocationSearch(view.location)}`
       : view.campaign
-      ? `/sessions/~${encodeResourceId(view.id)}/campaign`
+      ? `/sessions/~${encodeResourceId(view.id)}/campaign${campaignTargetSearch(view.campaignTarget)}`
       : view.artifacts
       ? `/sessions/~${encodeResourceId(view.id)}/artifacts${view.artifacts.artifactId === undefined ? "" : `/~${encodeResourceId(view.artifacts.artifactId)}`}`
       : view.attention
@@ -704,7 +716,17 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   const campaignMatch = /^\/sessions\/~([^/]+)\/campaign$/.exec(path);
   if (campaignMatch) {
     const id = decodeResourceId(campaignMatch[1]!);
-    return id === null || (search !== "" && search !== "?") ? null : { name: "session", id, campaign: true };
+    if (id === null) return null;
+    const params = new URLSearchParams(search);
+    if ([...params.keys()].some(key => !["section", "workItemId", "requestId"].includes(key))) return null;
+    const target: CampaignTarget = {};
+    for (const key of ["section", "workItemId", "requestId"] as const) {
+      if (params.has(key)) {
+        if (!params.get(key) || params.getAll(key).length !== 1) return null;
+        target[key] = params.get(key)!;
+      }
+    }
+    return { name: "session", id, campaign: true, ...(Object.keys(target).length ? { campaignTarget: target } : {}) };
   }
   const artifactsMatch = /^\/sessions\/~([^/]+)\/artifacts(?:\/~([^/]+))?$/.exec(path);
   if (artifactsMatch) {

@@ -675,6 +675,31 @@ test("a member sees its campaign and its current assignment highlighted", async 
   }
 });
 
+test("a new member assignment updates the list without interrupting open details", async () => {
+  const earlier = item("cwi_2", { title: "Earlier Assignment" });
+  const next = item("cwi_7", { title: "Next Assignment" });
+  const { client } = fakeClient(() => ({ revision: 1, items: [earlier, next], nextCursor: null }), {
+    cwi_2: detailOf(earlier),
+  });
+  const panel = await mount({ initial: childSession, sessions: [rootSession, childSession], client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    await click(panel.container.querySelector(".campaign-work-row")!);
+    const heading = panel.container.querySelector(".campaign-detail-title");
+    assert.equal(heading?.textContent, "Earlier Assignment");
+    await panel.setSession({ ...childSession, campaignMembership: {
+      ...childSession.campaignMembership!, currentWorkItemId: "cwi_7", currentAttemptId: "catt_7",
+    } });
+    assert.ok(panel.container.querySelector(".campaign-detail-title") === heading, "membership refresh retains the opened detail");
+    assert.ok(document.activeElement === heading, "membership refresh retains detail focus");
+    await click([...panel.container.querySelectorAll("button")].find(button => button.textContent === "Back to Work Items")!);
+    assert.match(panel.container.querySelector(".campaign-work-row.is-assignment")?.textContent ?? "", /Next Assignment/);
+  } finally {
+    await panel.dispose();
+  }
+});
+
 test("a member hydrates a summary root and refreshes retained campaign detail after paged reconnect", async () => {
   let currentRoot = rootSession;
   let rootReads = 0;
@@ -1589,7 +1614,7 @@ test("Campaign Status labels a child clarification as a Question (#4359)", async
     await act(async () => panel.state.show("campaign"));
     await settle();
     const section = [...panel.container.querySelectorAll("section")]
-      .find((candidate) => candidate.querySelector("h3")?.textContent === "Waiting for You")!;
+      .find((candidate) => candidate.querySelector("h3")?.getAttribute("aria-label") === "Waiting for You")!;
     assert.deepEqual([...section.querySelectorAll("dt")].map((term) => term.textContent), ["Question", "Rule Source", "Rule"]);
     assert.ok(section.querySelector("button[aria-label='Open Request: Which approach should the child use?']"));
   } finally { await panel.dispose(); }
@@ -1613,7 +1638,7 @@ test("a decision an owner rule kept is waiting for you with the rule's source an
     await act(async () => panel.state.show("campaign"));
     await settle();
     const section = [...panel.container.querySelectorAll("section")]
-      .find((candidate) => candidate.querySelector("h3")?.textContent === "Waiting for You")!;
+      .find((candidate) => candidate.querySelector("h3")?.getAttribute("aria-label") === "Waiting for You")!;
     assert.ok(section, "Waiting for You is shown");
     const facts = [...section.querySelectorAll("dt")].map((term) => [term.textContent, term.nextElementSibling?.textContent]);
     assert.deepEqual(facts.map(([term]) => term), ["Kept by Rule", "Rule Source", "Rule"]);
@@ -1649,7 +1674,7 @@ test("a scope approval the server routed to the owner opens exactly its own requ
     await act(async () => panel.state.show("campaign"));
     await settle();
     const section = () => [...panel.container.querySelectorAll("section")]
-      .find((candidate) => candidate.querySelector("h3")?.textContent === "Waiting for You");
+      .find((candidate) => candidate.querySelector("h3")?.getAttribute("aria-label") === "Waiting for You");
     assert.deepEqual([...section()!.querySelectorAll("dt")].map((term) => term.textContent), ["Scope Approval", "Scope Approval", "Scope Approval"]);
     assert.ok([...section()!.querySelectorAll("dd")].every((detail, index) => detail.textContent!.startsWith(`${summaries[index]}Proposed by the Orchestrator`)));
     assertNoDomNode(section()!.querySelector(`button[aria-label='Open Request: ${summaries[2]}']`),
@@ -1685,7 +1710,7 @@ test("a kept decision a nested Orchestrator controls opens at its own request in
     await act(async () => panel.state.show("campaign"));
     await settle();
     const section = [...panel.container.querySelectorAll("section")]
-      .find((candidate) => candidate.querySelector("h3")?.textContent === "Waiting for You")!;
+      .find((candidate) => candidate.querySelector("h3")?.getAttribute("aria-label") === "Waiting for You")!;
     assert.ok(section, "Waiting for You is shown");
     assert.deepEqual([...section.querySelectorAll("dt")].map((term) => term.textContent), ["Kept by Rule", "Rule Source", "Rule", "Handed to You"]);
     await click(section.querySelector("button[aria-label='Open Request: Merge picoduck/wollipog#11']")!);
@@ -1715,7 +1740,7 @@ test("an Orchestrator's request to add a repository waits for the owner, who nev
     await act(async () => panel.state.show("campaign"));
     await settle();
     const section = [...panel.container.querySelectorAll("section")]
-      .find((candidate) => candidate.querySelector("h3")?.textContent === "Waiting for You")!;
+      .find((candidate) => candidate.querySelector("h3")?.getAttribute("aria-label") === "Waiting for You")!;
     assert.ok(section, "Waiting for You is shown");
     assert.match(section.querySelector(".section-note")!.textContent!, /^Only you can make this decision\./u);
     assert.equal(section.querySelector("dt")!.textContent, "Add Repository");
@@ -1848,7 +1873,7 @@ test("an Orchestrator's scope proposal without lineage waits for you as a Scope 
     await act(async () => panel.state.show("campaign"));
     await settle();
     const section = [...panel.container.querySelectorAll("section")]
-      .find((candidate) => candidate.querySelector("h3")?.textContent === "Waiting for You")!;
+      .find((candidate) => candidate.querySelector("h3")?.getAttribute("aria-label") === "Waiting for You")!;
     assert.ok(section, "Waiting for You is shown");
     assert.match(section.textContent ?? "", /Only you can make this decision\. The Orchestrator keeps working/u);
     assert.doesNotMatch(section.textContent ?? "", /You kept/u, "the owner did not keep it");

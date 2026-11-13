@@ -9,6 +9,7 @@ for (const [device, width, height, theme] of [["desktop", 1440, 1200, "dark"], [
     page.on("pageerror", (error) => errors.push(error.message));
     for (const mode of ["complete", "delivery", "legacy"] as const) {
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&epicTracking=${mode}&theme=${theme}`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       const panel = page.locator(".campaign-status");
       const summary = page.locator(".campaign-status-summary");
       await expect(summary).toContainText(mode === "complete" ? "Campaign Complete" : "Campaign Stuck");

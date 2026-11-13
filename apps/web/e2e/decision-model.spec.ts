@@ -88,8 +88,9 @@ for (const viewport of VIEWPORTS) {
 
     test("Campaign Status groups each decision with its outcome, reason, target model, answering model and usage", async ({ page }, testInfo) => {
       await page.goto("/campaign-status-e2e.html?scenario=campaign&decisions=1");
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       await expect(page.locator(".campaign-status-summary")).toBeVisible();
-      const section = page.locator("section.campaign-status-handoffs").filter({ has: page.getByRole("heading", { name: "Decision Model", exact: true }) });
+      const section = page.locator("section.campaign-status-handoffs").filter({ has: page.getByRole("heading", { name: "Decisions", exact: true }) });
       await expect(section.getByText("3 calls, 6,932 tokens, $0.0104. Not counted in the campaign's cost.", { exact: false })).toBeVisible();
       const items = section.locator(".campaign-decision-item");
       await expect(items).toHaveCount(3);

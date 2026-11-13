@@ -21,6 +21,7 @@ for (const width of [1440, 390]) {
   test(`work groups by repository with counts, dependencies and holds, and filters by repository at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/campaign-status-e2e.html?scenario=campaign&workRepositories=1");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
 
     // One group per repository, each headed by its name and its own counts.
     await expect(groups(page)).toHaveCount(2);
@@ -54,7 +55,7 @@ for (const width of [1440, 390]) {
     const filter = page.getByRole("button", { name: /^Repository:/ });
     await expect(filter).toHaveAccessibleName("Repository: All Repositories");
     await filter.click();
-    await expect(page.getByRole("option")).toHaveText(["All Repositories", "picoduck/wollipog", "picoduck/account-api"]);
+    await expect(page.getByRole("listbox", { name: "Repository", exact: true }).getByRole("option")).toHaveText(["All Repositories", "picoduck/wollipog", "picoduck/account-api"]);
     await page.getByRole("option", { name: "picoduck/account-api" }).click();
     await expect(filter).toHaveAccessibleName("Repository: picoduck/account-api");
     await expect(workRows(page)).toHaveCount(1, { timeout: 5_000 });
@@ -81,6 +82,7 @@ for (const width of [1440, 390]) {
   test(`work verified while its own pull request is open waits on its prerequisite, or is blocked when that can never merge, at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/campaign-status-e2e.html?scenario=campaign&workRepositories=1&verifiedHolds=1");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const app = groups(page).nth(0);
     const waiting = app.locator(".campaign-work-row", { hasText: "Show Account Badge" });
     await expect(waiting).toContainText("Waiting");
@@ -101,6 +103,7 @@ for (const width of [1440, 390]) {
 test("a single-repository campaign's list stays ungrouped, with no Repository filter", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/campaign-status-e2e.html?scenario=campaign");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   await expect(workRows(page)).toHaveCount(7);
   await expect(groups(page)).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^Repository:/ })).toHaveCount(0);

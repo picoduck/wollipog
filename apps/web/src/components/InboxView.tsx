@@ -171,6 +171,7 @@ export interface InboxViewProps {
   routeSplit?: SessionsTab;
   expandedSessionId?: string | null;
   sourceLocation?: SourceLocation;
+  campaignTarget?: import("../navigation.js").CampaignTarget;
   attentionTarget?: AttentionTarget;
   /** App-shell control cluster forwarded into the expanded session's unified bar on desktop. */
   topbarControls?: ReactNode;
@@ -202,6 +203,7 @@ export function InboxView({
   routeSplit,
   expandedSessionId = null,
   sourceLocation,
+  campaignTarget,
   attentionTarget,
   topbarControls,
   rightPanel,
@@ -1682,6 +1684,7 @@ export function InboxView({
     sessionId: surfaceSessionId ?? "",
     mode: expanded ? "expanded" : "preview",
     sourceLocation: expanded ? sourceLocation : undefined,
+    campaignTarget: expanded ? campaignTarget : undefined,
     attentionTarget: expanded ? attentionTarget : undefined,
     topbarControls: expanded ? topbarControls : undefined,
     rightPanel,

@@ -1,4 +1,5 @@
-import React, { useId, useState } from "react";
+import { CampaignSection } from "./CampaignSections.js";
+import React, { useState } from "react";
 import type { CampaignBudgetView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { followUpLimitText } from "../follow-up-limit.js";
@@ -27,7 +28,6 @@ export function CampaignFollowUpLimit({ campaignId, budget, policyRevision, canE
   onOpenRequest: (requestKey: string) => void;
 }) {
   const api = useApi();
-  const headingId = useId();
   const limit = budget.authority.acceptedFollowUps;
   const approvals = budget.followUpApprovals ?? { pending: [], approved: 0 };
   const [editing, setEditing] = useState(false);
@@ -61,8 +61,7 @@ export function CampaignFollowUpLimit({ campaignId, budget, policyRevision, canE
     }
   };
 
-  return <section className="campaign-detail-section" aria-labelledby={headingId}>
-    <h3 id={headingId} className="section-title">Follow-Ups</h3>
+  return <CampaignSection title="Follow-Ups" count={approvals.pending.length} className="campaign-detail-section">
     <dl className="facts">
       <div>
         <dt>Follow-Up Limit</dt>
@@ -109,5 +108,5 @@ export function CampaignFollowUpLimit({ campaignId, budget, policyRevision, canE
         <button className="btn ghost sm" type="button" disabled={busy} onClick={() => setEditing(false)}>Cancel</button>
       </div>
     </fieldset> : <div><button className="btn sm" type="button" onClick={startEditing}>Change Limit</button></div>)}
-  </section>;
+  </CampaignSection>;
 }

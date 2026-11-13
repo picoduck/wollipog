@@ -1,3 +1,4 @@
+import { CampaignSection } from "./CampaignSections.js";
 import React, { useId, useState, type ReactNode } from "react";
 import { CAMPAIGN_SLOT_RELEASE_REASON_MAX, type CampaignBudgetView, type CampaignHeldSlot, type CampaignHeldSlotReason,
   type CampaignSlotRelease } from "@wollipog/protocol";
@@ -97,7 +98,6 @@ export function CampaignHeldSlots({ campaignId, budget, canAct, now, onOpenSessi
   now: number;
   onOpenSession: (sessionId: string) => ReactNode;
 }) {
-  const headingId = useId();
   const releasesId = useId();
   const [releasing, setReleasing] = useState<string | null>(null);
   const [released, setReleased] = useState<CampaignSlotRelease | null>(null);
@@ -105,8 +105,7 @@ export function CampaignHeldSlots({ campaignId, budget, canAct, now, onOpenSessi
   const releases = budget.slotReleases ?? [];
   if (held.length === 0 && releases.length === 0 && !released) return null;
   return (
-    <section className="campaign-status-handoffs" aria-labelledby={headingId}>
-      <h3 id={headingId} className="section-title">Held Slots</h3>
+    <CampaignSection title="Held Slots" count={held.length + releases.length} className="campaign-status-handoffs">
       {held.length > 0 && <p className="section-note">
         {held.length === 1 ? "This ended worker still holds" : "These ended workers still hold"} a concurrency slot that no automatic
         proof can free. Only you can release {held.length === 1 ? "it" : "one"}, after checking that its provider is gone.
@@ -142,6 +141,6 @@ export function CampaignHeldSlots({ campaignId, budget, canAct, now, onOpenSessi
           </li>)}
         </ul>
       </section>}
-    </section>
+    </CampaignSection>
   );
 }

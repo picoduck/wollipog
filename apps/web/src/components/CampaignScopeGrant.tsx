@@ -1,4 +1,5 @@
-import React, { useId, useState } from "react";
+import { CampaignSection } from "./CampaignSections.js";
+import React, { useState } from "react";
 import { campaignOperationLabel, type CampaignAuthorityOperation, type CampaignScopeGrantReview, type DecisionErrorClass, type FullControlScopeGrant,
   type ScopeGrantDropReason } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
@@ -53,12 +54,10 @@ export function CampaignScopeGrantSection({ grant, edit, ceilingsShown = false }
    * section leaves those two rows out instead of repeating them. */
   ceilingsShown?: boolean;
 }) {
-  const headingId = useId();
   const repository = grant.ceilings.repositories[0] ?? "";
   const selection = grant.selection;
   const target = grant.target;
-  return <section className="campaign-detail-section" aria-labelledby={headingId}>
-    <h3 id={headingId} className="section-title">Scope Grant</h3>
+  return <CampaignSection title="Scope Grant" count={1} className="campaign-detail-section">
     {grant.status === "uncertain" && <Notice tone="warning" title="Scope Grant Uncertain">
       The Decision Model couldn't tell which issues your first message asks for, so it granted none. The Orchestrator's scope proposal comes to you for approval.
     </Notice>}
@@ -84,7 +83,7 @@ export function CampaignScopeGrantSection({ grant, edit, ceilingsShown = false }
       <div><dt>{grant.status === "failed" ? "Failure" : "Reason"}</dt><dd>{grant.status === "failed" ? scopeGrantFailureSentence(grant.failureClass) : grant.reason ?? "None Given"}</dd></div>
     </dl>
     {edit && selection && grant.status === "granted" && <SelectionCountEditor grant={grant} count={selection.count} edit={edit} />}
-  </section>;
+  </CampaignSection>;
 }
 
 /** What the owner's selection count control needs: the campaign, its policy revision for the

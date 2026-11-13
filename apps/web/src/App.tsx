@@ -879,6 +879,7 @@ export function Shell() {
               routeSplit={view.name === "inbox" || view.name === "board" ? view.split : undefined}
               expandedSessionId={view.name === "session" ? view.id : null}
               sourceLocation={view.name === "session" ? view.location : undefined}
+              campaignTarget={view.name === "session" ? view.campaignTarget : undefined}
               attentionTarget={view.name === "session" ? view.attention : undefined}
               topbarControls={!isMobile ? sessionPanelControls : undefined}
               rightPanel={rightPanel}

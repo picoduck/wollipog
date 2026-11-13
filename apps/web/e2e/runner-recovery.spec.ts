@@ -15,6 +15,7 @@ for (const [name, viewport] of [["Desktop", { width: 1440, height: 1000 }], ["Ph
     });
     test("Campaign Status lists one root recovery under Waiting for You", async ({ page }) => {
       await page.goto("/campaign-status-e2e.html?runnerRecovery=1");
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       const waiting = page.getByRole("region", { name: "Waiting for You", exact: true });
       await expect(waiting.getByRole("button", { name: "Open Request: Relaunch Orchestrator After Runner Restart", exact: true })).toHaveCount(1);
       await expect(waiting).toContainText("restore its tools and continue its pending work");

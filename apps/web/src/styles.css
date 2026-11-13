@@ -3518,7 +3518,9 @@ textarea {
 }
 /* MeasuredVirtualList owns logical-anchor correction. Native anchoring sees its transformed rows
    as ordinary flow and must not become a competing scrollTop owner. */
-.measured-virtual-scroll { overflow-anchor: none; }
+/* Both owners restore their own positions: virtual rows and remembered campaign lists. */
+.measured-virtual-scroll,
+.campaign-status:has(.campaign-section-index) { overflow-anchor: none; }
 
 /* -------------------------------- Cards ---------------------------------
    A Board card (#2222; docs/design-system.md §5.3): an `<article>` whose title button is stretched
@@ -5702,6 +5704,58 @@ body.shell-dock-dragging * {
   gap: var(--space-6);
   min-width: 0;
 }
+/* Campaign sections keep their live bodies mounted while disclosures hide them. */
+.campaign-section-index {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.campaign-section-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+  max-height: 30dvh;
+  overflow-y: auto;
+}
+.campaign-section-links button {
+  white-space: normal;
+  min-width: 0;
+  text-align: left;
+}
+.campaign-section-links [aria-current="location"] {
+  border-color: var(--accent);
+}
+.campaign-section-heading button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  width: 100%;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  background: transparent;
+  border: 0;
+  padding: var(--space-1);
+  overflow-wrap: anywhere;
+}
+.campaign-section-heading button > span { min-width: 0; }
+[data-campaign-section] > div:not([hidden]) {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.campaign-status:has(.campaign-section-index) {
+  padding-top: 0;
+}
+
 /* Campaign Status › Decision Model (#4101): one group per decision with a rule above it, so one
    decision's outcome, model and usage never read as the next one's. */
 .campaign-decision-list {

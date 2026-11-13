@@ -41,6 +41,14 @@ A row that has a problem blocking the launch stays visible.
 
 ## After Launch: Campaign Status
 
+Campaign Status puts sections needing attention first, followed by Summary and Work Items.
+Reference sections start collapsed. Each heading shows its count and any attention marker;
+opening or folding it is remembered for that campaign while the app remains open. A new item
+needing attention reopens its section and marks it New. Use the sticky Go to Section index to
+open a section, scroll to it and focus its heading, or use Collapse All and Expand All. Long
+reference lists offer Show All with the available count. These controls change presentation;
+the actions inside each section keep their existing permission checks.
+
 Because nothing is reviewed before launch, the facts a preflight would have shown appear after it,
 in Campaign Status's **Full Control** section: the objective (truncated behind Show All), the
 operations, issue authority (Maximum Issues, Related Follow-Ups, Closure Reasons), the authorized

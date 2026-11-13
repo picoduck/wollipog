@@ -38,6 +38,7 @@ for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
     await page.clock.setFixedTime(new Date("2026-11-13T06:30:00Z"));
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&recovery=follow_up_limit");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const notice = page.locator(".notice").filter({ hasText: "This follow-up needs your approval because it is past the follow-up limit you set" });
     await expect(notice).toBeVisible();
     await expect(notice).not.toContainText("Human Required rule");
@@ -50,6 +51,7 @@ for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
     await page.clock.setFixedTime(new Date("2026-11-13T06:30:00Z"));
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&budget=1");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const section = page.getByRole("region", { name: "Follow-Ups", exact: true });
     await section.getByRole("button", { name: "Change Limit", exact: true }).click();
     await expect(section).toContainText("Raising the limit keeps exact approved follow-up admissions that still fit.");

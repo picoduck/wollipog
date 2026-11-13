@@ -1,3 +1,4 @@
+import { CampaignSection } from "./CampaignSections.js";
 import { useId, useState } from "react";
 import {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
@@ -29,14 +30,12 @@ const CAPABILITY_STATE: Record<CampaignLaunchCapability["state"], { label: strin
  * Everything here is read from the server's campaign projection; the objective is the owner's own
  * text and renders as plain text. */
 export function CampaignAuthoritySummary({ campaign }: { campaign: CampaignAuthorityView }) {
-  const headingId = useId();
   const control = campaign.control;
   if (control?.mode !== "full_control") return null;
   const boundary = control.boundary;
   const readiness = fullControlReadiness(campaign);
   return (
-    <section className="campaign-detail-section" aria-labelledby={headingId}>
-      <h3 id={headingId} className="section-title">Full Control</h3>
+    <CampaignSection title="Full Control" count={boundary.operations.length} className="campaign-detail-section">
       <p className="section-note">{readiness.line}</p>
       <dl className="facts">
         <div><dt>Objective</dt><dd><ExpandableText text={boundary.objective} label="Objective" /></dd></div>
@@ -58,7 +57,7 @@ export function CampaignAuthoritySummary({ campaign }: { campaign: CampaignAutho
       {readiness.limited.length > 0 && <ReadinessFacts title="Limited Capabilities" facts={readiness.limited} empty="None" />}
       <LaunchCapabilities campaign={campaign} />
       <EvidenceFacts campaign={campaign} />
-    </section>
+    </CampaignSection>
   );
 }
 

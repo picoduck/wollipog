@@ -140,6 +140,7 @@ for (const theme of ["dark", "light"]) {
 
       test("Campaign Status's Couldn't Refresh notice keeps its icon on the title's line", async ({ page }) => {
         await page.goto(`/campaign-status-e2e.html?scenario=campaign&refresh=failing&theme=${theme}`);
+        await page.getByRole("button", { name: "Expand All", exact: true }).click();
         await expect(page.locator(".campaign-work-row")).toHaveCount(7);
         await page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.bumpRevision());
         const notice = page.locator(".campaign-status .notice.compact.t-danger");
