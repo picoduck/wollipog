@@ -5531,6 +5531,9 @@ export interface PendingApproval {
   /** Server-derived, never stored (#4334): the Maximum Issues increase approving this scope request
    * applies, read when the session is read under the rule the approval applies. Informational. */
   scopeMaxIssuesIncrease?: { from: number; increase: number };
+  /** Live server-derived presentation only; never authority supplied by a caller. */
+  scopeDecisionDetails?: Array<{ occurrenceId: string; category: string; resource: string;
+    approval: "human" | "orchestrator" | "pending"; armed: boolean }>;
   /** CP-derived mandatory human rule on this occurrence. Provider input cannot set it. */
   humanRequired?: boolean;
   /** CP-derived Decision Model screen of this request's text (#4104). The control plane overwrites

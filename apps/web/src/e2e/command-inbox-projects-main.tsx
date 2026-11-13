@@ -333,6 +333,24 @@ function initialModel(): FixtureModel {
       session("session-no-project", "No Project Session", null, "loose-workspace"),
     ],
   };
+  if (SCENARIO === "scope-decisions") {
+    const root = session("session-alpha", "Review Campaign Scope", "alpha", "alpha-workspace");
+    const now = Date.now();
+    Object.assign(root, { status: "input_required", role: "orchestrator", createdAt: now - 600_000, updatedAt: now - 60_000, lastEventAt: now - 60_000 });
+    root.pendingApproval = {
+      requestId: "scope-review", occurrenceId: "scope-review", kind: "workflow_decision", title: "Campaign Scope Approval",
+      scopeDecisionDetails: [
+        { occurrenceId: "workflow_merge_4481", category: "pr_merge", resource: "picoduck/wollipog#4481 at ce64f53", approval: "orchestrator", armed: true },
+        { occurrenceId: "workflow_publish_retry", category: "follow_up_issue_publication", resource: "picoduck/wollipog: Preserve Merge Approval History", approval: "pending", armed: false },
+      ],
+      options: [{ optionId: "approve", name: "Approve Scope", kind: "allow_once" }, { optionId: "deny", name: "Deny Scope", kind: "reject_once" }],
+      workflowDecision: { requestId: "scope-review", occurrenceId: "scope-review", sessionId: root.id, controllingSessionId: root.id,
+        category: "campaign_issue_scope", resourceKey: "scope", resourceDigest: "a".repeat(64), policyRevision: 4, authority: "human", status: "pending", createdAt: now - 60_000,
+        resourceSnapshot: { category: "campaign_issue_scope", repository: "picoduck/wollipog", expectedRevision: 3, before: [4540], additions: [4547], removals: [],
+          explanation: "Add the related approval history work.", affectedAssignments: [], activeChildren: [], affectedDecisions: ["workflow_merge_4481", "workflow_publish_retry"] } },
+    };
+    initial.sessions = [root];
+  }
   if (SCENARIO === "human-follow-up") {
     const base = Date.now() - 3000;
     const make = (id: string, title: string, status: SessionView["status"], at: number) => ({

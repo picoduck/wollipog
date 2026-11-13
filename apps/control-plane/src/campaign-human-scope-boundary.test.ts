@@ -15,6 +15,46 @@ import type { HumanPrincipal } from "./identity.js";
 
 const REPOSITORY = "team/repo";
 
+test("a root withdraws only its own pending scope request before the owner acts (#4547)", async () => {
+  const h = harness();
+  try {
+    const proposal = await h.humanProposal("withdraw-scope", 1, [101]);
+    assert.equal(h.svc.withdrawWorkflowDecision("child", proposal.occurrenceId, { sessionId: "root", reason: "Wait" }).ok, false);
+    const result = h.svc.withdrawWorkflowDecision("root", proposal.occurrenceId, { reason: "Wait for queued merges" });
+    assert.ok(result.ok, result.error ?? "withdrawal");
+    assert.deepEqual(result.data?.withdrawal, { bySessionId: "root", reason: "Wait for queued merges" });
+    assert.equal(h.db.workflowDecisionByOccurrence(proposal.occurrenceId)?.status, "revoked");
+    assert.equal(h.approve(proposal).ok, false);
+    const acted = await h.humanProposal("already-approved", 1, [101]);
+    assert.ok(h.approve(acted).ok);
+    assert.equal(h.svc.withdrawWorkflowDecision("root", acted.occurrenceId, { reason: "Too late" }).ok, false);
+  } finally { h.db.close(); }
+});
+
+test("scope additions preserve owner-approved armed merges but revoke delegated and pending decisions (#4547)", async () => {
+  const h = harness();
+  try {
+    const revision = h.db.getSession("root")!.parentControlPolicy!.revision;
+    for (const [id, authority, approved] of [["owner", "human", true], ["delegated", "orchestrator", true], ["pending", "human", false], ["stale-owner", "human", true]] as const) {
+      const snapshot = { category: "pr_merge" as const, repository: REPOSITORY, pullRequest: 4481,
+        headSha: "a".repeat(40), intendedClosures: [], reviewResult: "merge" as const,
+        requiredChecks: { headSha: "a".repeat(40), checkedAt: 10, status: "passed" as const, checks: [] } };
+      assert.ok(h.db.createWorkflowDecision({ requestId: id, occurrenceId: id, sessionId: "child", controllingSessionId: "root",
+        category: "pr_merge", resourceKey: id, resourceSnapshot: snapshot, resourceDigest: id, policyRevision: revision, authority, createdAt: 10 }));
+      if (approved) {
+        assert.ok(h.db.resolveWorkflowDecision(id, authority, "approved", 11));
+        h.db.raw().prepare("UPDATE workflow_decisions SET action_kind='pr_merge_enqueue', action_command='enqueue', action_command_digest='digest', action_armed_at=12 WHERE occurrence_id=?").run(id);
+      }
+    }
+    h.db.raw().prepare("UPDATE workflow_decisions SET policy_revision=? WHERE occurrence_id='stale-owner'").run(revision - 1);
+    const proposal = await h.humanProposal("add-with-merges", 1, [101]);
+    assert.ok(h.approve(proposal).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence("owner")?.status, "approved");
+    assert.equal(h.db.workflowDecisionByOccurrence("owner")?.policyRevision, h.db.getSession("root")!.parentControlPolicy!.revision);
+    for (const id of ["delegated", "pending", "stale-owner"]) assert.equal(h.db.workflowDecisionByOccurrence(id)?.status, "revoked");
+  } finally { h.db.close(); }
+});
+
 /** The live campaign's shape: a Claude Code root with a campaign allowance, whose prompt path
  * refuses a stale boundary as "campaign allowance boundary is stale or revoked". */
 function harness(maxIssues = 4) {
