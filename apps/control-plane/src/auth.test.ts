@@ -17,6 +17,10 @@ import {
 } from "./auth.js";
 
 test("orchestrator credentials expose only session management and governance reads", () => {
+  for (const role of ["normal", "orchestrator"] as const) {
+    assert.equal(isAgentControlApiRouteAllowed("POST",
+      "/api/sessions/:id/workflow-decisions/:occurrenceId/return-to-orchestrator", role), false);
+  }
   for (const [method, route] of [
     ["GET", "/api/sessions"], ["GET", "/api/governance/policies"],
     ["POST", "/api/sessions"], ["POST", "/api/sessions/:id/stop"],

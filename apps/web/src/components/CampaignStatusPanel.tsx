@@ -74,6 +74,8 @@ import { useStoreSelector } from "../store.js";
 import { CampaignDecisions } from "./CampaignDecisions.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
 import { OwnerRuleFactRows } from "./requests/WorkflowDecisionSummary.js";
+import { ReturnOwnerResource } from "./ReturnOwnerResource.js";
+import { ownerResourceKeepReason } from "@wollipog/protocol";
 import { CampaignRepositories } from "./CampaignRepositories.js";
 import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { Notice } from "./Notice.js";
@@ -275,7 +277,6 @@ function AvailableCampaignStatus({
               {data.summary.campaign && <CampaignPause campaignId={availability.campaignSessionId}
                 pause={data.summary.campaign.pause} canEdit={availability.role === "campaign" && session.commandPermissions?.pauseCampaign?.allowed === true}
                 onChanged={data.retry} />}
-              <CampaignSummarySection data={data} now={now} />
               {data.summary.campaign?.ownerDecisions && (
                 <CampaignOwnerDecisions
                   sessionId={session.id}
@@ -284,8 +285,17 @@ function AvailableCampaignStatus({
                   findRequest={findRequest}
                   onOpenRequest={onOpenRequest}
                   onOpenSessionRequest={onOpenSessionRequest}
+                  onChanged={data.retry}
                 />
               )}
+              {!!data.summary.campaign?.ownerReturns?.length && <section className="campaign-status-handoffs">
+                <h3 className="section-title">Returned to the Orchestrator</h3>
+                <ul className="campaign-detail-list">{data.summary.campaign.ownerReturns.map((item) => <li key={item.occurrenceId} className="campaign-detail-section">
+                  <div><strong>{item.summary}</strong></div>
+                  <div>Returned by {item.byName} <RecordedTime at={item.at} now={now} />. Future requests follow the current boundary; pending requests remain yours.</div>
+                </li>)}</ul>
+              </section>}
+              <CampaignSummarySection data={data} now={now} />
               <CampaignDecisionModelChecks
                 sessionId={session.id}
                 canClassify={availability.role === "campaign"}
@@ -394,13 +404,14 @@ function CampaignRecoveryAutomation({ campaign }: { campaign: CampaignStatusData
 
 /** Decisions the campaign's owner kept (#4064), which wait for that person while the campaign keeps
  * working: the Orchestrator's questions for them and the decisions it handed to them. */
-function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, onOpenRequest, onOpenSessionRequest }: {
+function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, onOpenRequest, onOpenSessionRequest, onChanged }: {
   sessionId: string;
   ownerDecisions: NonNullable<NonNullable<CampaignStatusData["summary"]["campaign"]>["ownerDecisions"]>;
   now: number;
   findRequest: (target: CampaignRequestTarget) => string | null;
   onOpenRequest: (requestKey: string) => void;
   onOpenSessionRequest?: (sessionId: string, requestId: string) => void;
+  onChanged: () => void;
 }) {
   const headingId = useId();
   const hidden = ownerDecisions.total - ownerDecisions.items.length;
@@ -415,9 +426,7 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
     <section className="campaign-status-handoffs" aria-labelledby={headingId}>
       <h3 id={headingId} className="section-title">Waiting for You</h3>
       <p className="section-note">
-        {runtimeRecovery || ownerDecisions.items.some((item) => scopeApproval(item) || repositoryAddition(item))
-          ? `Only you can make ${one ? "this decision" : "these decisions"}.`
-          : `You kept ${one ? "this decision" : "these decisions"}, so only you can make ${one ? "it" : "them"}.`}{" "}
+        {`Only you can make ${one ? "this decision" : "these decisions"}.`}{" "}
         {runtimeRecovery ? "Relaunch the Orchestrator to restore its tools and continue its pending work." : "The Orchestrator keeps working on everything else meanwhile."}
       </p>
       <ul className="campaign-detail-list">
@@ -431,7 +440,7 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
             ? () => onOpenSessionRequest(item.sessionId, item.occurrenceId) : null;
           const open = requestKey ? () => onOpenRequest(requestKey) : openElsewhere;
           return (
-            <li key={item.occurrenceId}>
+            <li key={item.occurrenceId} className={item.returnableOwnerResource ? "campaign-owner-decision" : undefined}>
               <dl className="facts">
                 <div>
                   <dt>{item.category === "runner_recovery" ? "Runner Recovery" : item.kind === "question" ? "Question" : item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval"
@@ -449,6 +458,10 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
               </dl>
               {open && <button type="button" className="btn sm" aria-label={`Open Request: ${item.summary}`}
                 onClick={open}>Open Request</button>}
+              {item.returnableOwnerResource &&
+                <ReturnOwnerResource sessionId={item.sessionId} occurrenceId={item.occurrenceId}
+                  resourceLabel={item.resourceLabel ?? item.summary} onChanged={onChanged} inRow
+                  ownershipReason={ownerResourceKeepReason(item)} />}
             </li>
           );
         })}

@@ -10,7 +10,7 @@ import React, {
   type Ref,
 } from "react";
 import type { GovernancePolicy, PendingApproval, PermissionOption, SessionView } from "@wollipog/protocol";
-import { isChildQuestionSnapshot } from "@wollipog/protocol";
+import { isChildQuestionSnapshot, ownerResourceLabel, ownerResourceKeepReason } from "@wollipog/protocol";
 import { useApi } from "../../api-context.js";
 import type { ApiClient } from "../../api.js";
 import { titleCaseLabel } from "../../format.js";
@@ -41,6 +41,7 @@ import {
 import { CHOOSE_ACCOUNT_COPY, ChooseAccountDialog, type ChooseAccountResult } from "./ChooseAccountDialog.js";
 import { EvidenceReviewBody, useEvidenceReview } from "./EvidenceReview.js";
 import { OwnerRuleSummary, WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
+import { ReturnOwnerResource } from "../ReturnOwnerResource.js";
 import { LocationSwitchSummary, locationSwitchCardActions, locationSwitchChoices, locationSwitchOptions } from "./LocationSwitchSummary.js";
 import { claimDecision, decisionKey, useDecisionFailure, useDecisionInFlight } from "./request-reveal.js";
 import {
@@ -450,7 +451,7 @@ export function RequestCard({
   ].filter(Boolean);
 
   return (
-    <section
+    <><section
       ref={cardRef}
       className="request-card"
       data-presentation={presentation}
@@ -631,6 +632,11 @@ export function RequestCard({
         />
       )}
     </section>
+    {!readOnly && workflowDecision?.returnableOwnerResource && <ReturnOwnerResource
+      key={workflowDecision.occurrenceId} sessionId={workflowDecision.sessionId} occurrenceId={workflowDecision.occurrenceId}
+      resourceLabel={ownerResourceLabel(workflowDecision.resourceSnapshot)}
+      ownershipReason={ownerResourceKeepReason(workflowDecision)} />}
+    </>
   );
 }
 
