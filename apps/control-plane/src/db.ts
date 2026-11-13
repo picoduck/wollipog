@@ -24607,6 +24607,26 @@ export class ControlPlaneDb {
     return row && decisions ? { revision: row.revision, decisions } : null;
   }
 
+  /** Candidate identities only: the runner must freshly prove merged state and patch delivery.
+   * A consumed merge belongs to this exact child and its current campaign, never a sibling or
+   * an agent-written delivery claim. Missing/legacy campaign provenance retains ordinary proof. */
+  campaignChildDeliveredPullRequests(sessionId: string): Array<{ repository: string; number: number; headSha: string }> {
+    const root = this.campaignAncestryRoot(sessionId);
+    if (typeof root !== "object" || !root.hasPolicy || root.id === sessionId) return [];
+    const rows = this.stmt(`SELECT * FROM workflow_decisions WHERE session_id=? AND controlling_session_id=?
+      AND category='pr_merge' AND status='consumed' ORDER BY consumed_at DESC LIMIT 100`).all(sessionId, root.id);
+    const candidates = new Map<string, { repository: string; number: number; headSha: string }>();
+    for (const row of rows) {
+      const snapshot = workflowDecisionFromRow(row)?.resourceSnapshot;
+      if (snapshot?.category !== "pr_merge") continue;
+      const candidate = { repository: snapshot.repository, number: snapshot.pullRequest, headSha: snapshot.headSha };
+      const key = `${candidate.repository.toLowerCase()}#${candidate.number}`;
+      if (!candidates.has(key)) candidates.set(key, candidate);
+      if (candidates.size === 5) break;
+    }
+    return [...candidates.values()];
+  }
+
   /** `alsoSupersede` names further unconsumed occurrences of the same session and category that the
    * new one replaces although their resourceKey differs (#4066); any other id is ignored. Every
    * superseded occurrence records the new one as its cause. */

@@ -176,6 +176,28 @@ test("runner capacity preserves revision checks and worktree refuses dirty retir
   } finally {h.db.close();}
 });
 
+test("discard sends only server-derived patch candidates and omits them for old runners", async () => {
+  const h = harness();
+  try {
+    const candidates = [{ repository: "picoduck/wollipog", number: 700, headSha: "a".repeat(40) }];
+    h.db.campaignChildDeliveredPullRequests = (id) => { assert.equal(id, "unrelated"); return candidates; };
+    const frames: unknown[] = [];
+    const timeouts: Array<number | undefined> = [];
+    h.hub.requestFromRunner = async (_runner, requestId, message, timeoutMs) => {
+      frames.push(message);
+      timeouts.push(timeoutMs);
+      return { type: "session_worktree_result", requestId, sessionId: "unrelated", operation: "discard", ok: false,
+        error: "worktree retained: the branch has no upstream" };
+    };
+    await h.call("worktree_discard", { commandId: "modern", sessionId: "unrelated", path: "/fixture/tree" });
+    assert.deepEqual((frames[0] as { campaignDeliveredPullRequests?: unknown }).campaignDeliveredPullRequests, candidates);
+    h.db.raw().prepare("UPDATE runners SET protocol_version=369 WHERE runner_id='runner'").run();
+    await h.call("worktree_discard", { commandId: "legacy", sessionId: "unrelated", path: "/fixture/tree" });
+    assert.equal("campaignDeliveredPullRequests" in (frames[1] as object), false);
+    assert.deepEqual(timeouts, [330_000, 150_000]);
+  } finally { h.db.close(); }
+});
+
 test("project-scoped grants cannot import an excluded workspace or inspect/register arbitrary Machine folders", async () => {
   const h = harness();
   try {

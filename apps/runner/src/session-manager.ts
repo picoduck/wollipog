@@ -16,6 +16,7 @@ import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, Gi
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
 import { executeBranchDeletion, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
 import { githubSlug } from "./git-ops.js";
+import { proveWorktreePatchDelivery, type CampaignDeliveredPullRequest, type WorktreePatchDeliveryResult } from "./worktree-patch-delivery.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
 import { githubMergePreflight } from "./github-merge-preflight.js";
@@ -2017,6 +2018,7 @@ export class SessionManager {
   private discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch = mergedWorktreePullRequestForBranch;
   private discoverAttachedWorktreePullRequest: typeof branchPullRequestForAttachedWorktree = branchPullRequestForAttachedWorktree;
   private probeMergedPullRequestContainment: typeof mergedPullRequestContainingHead = mergedPullRequestContainingHead;
+  private probePatchDelivery: typeof proveWorktreePatchDelivery = proveWorktreePatchDelivery;
   private resolveWorktreePullRequestState: typeof worktreePullRequestState = worktreePullRequestState;
   private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
   /** The runner's ref-deleting Git runs only in its own confined mount view (#3316), because the
@@ -4491,6 +4493,24 @@ export class SessionManager {
     });
   }
 
+  private async proveCleanupPatchDelivery(record: WorktreeCleanupRecord, meta: SessionMeta,
+    worktree: SessionWorktreeView): Promise<WorktreePatchDeliveryResult["state"]> {
+    record.cleanupId ??= randomUUID();
+    const startedAt = Date.now();
+    const result = await this.probePatchDelivery(worktree.path, worktree.branch,
+      record.campaignDeliveredPullRequests ?? [], { context: meta.context });
+    record.patchDelivery = result.state === "matched" ? result.proof : undefined;
+    record.patchUnavailableAttempts = result.state === "unavailable" ? (record.patchUnavailableAttempts ?? 0) + 1 : 0;
+    this.log(JSON.stringify({ event: "worktree_patch_delivery", sessionId: boundedSessionIdForLog(meta.sessionId),
+      worktreeId: worktree.id, cleanupId: record.cleanupId, entryPoint: record.initiatingTrigger ?? record.trigger,
+      requireDelivered: record.trigger === "archive_retirement",
+      outcome: result.state, durationMs: Date.now() - startedAt,
+      ...("reason" in result ? { reason: result.reason } : {}),
+      unavailableAttempts: record.patchUnavailableAttempts,
+      candidateCount: Math.min(record.campaignDeliveredPullRequests?.length ?? 0, 5) }));
+    return result.state;
+  }
+
   /** Probe a rotating, bounded candidate slice outside the session mutation lanes. Only the short
    * proof-persistence step enters a lane, where current linkage and branch identity are rechecked.
    * A negative result is memoized against the full Git identity, so a changed head/upstream bypasses
@@ -5039,6 +5059,7 @@ export class SessionManager {
           reasons: candidate.reasons,
           ...(candidate.verifiedMergedHead ? { verifiedMergedHead: candidate.verifiedMergedHead } : {}),
           ...(candidate.containingMergedHead ? { containingMergedHead: candidate.containingMergedHead } : {}),
+          ...(candidate.patchDelivery ? { patchDelivery: candidate.patchDelivery } : {}),
           state: "pending",
           createdAt: now,
           updatedAt: now,
@@ -5114,6 +5135,7 @@ export class SessionManager {
           ownerHash: this.runnerOwnerHash,
           ...(record.verifiedMergedHead ? { verifiedMergedHead: record.verifiedMergedHead } : {}),
           ...(record.containingMergedHead ? { containingMergedHead: record.containingMergedHead } : {}),
+          ...(record.patchDelivery ? { patchDelivery: record.patchDelivery } : {}),
           requireDelivered: record.trigger === "archive_retirement",
           retainRefs,
           beforeRemove,
@@ -5315,11 +5337,18 @@ export class SessionManager {
       record.worktreeId === worktree.id && sameWorktreePath(context, record.worktreePath, worktree.path));
   }
 
+  private strengthenArchiveRetirement(record: WorktreeCleanupRecord, trigger: WorktreeCleanupRecord["trigger"]): void {
+    if (trigger !== "archive_retirement" || record.trigger === "archive_retirement") return;
+    record.initiatingTrigger ??= record.trigger ?? "legacy_unknown";
+    record.trigger = "archive_retirement";
+  }
+
   private async deferWorktreeRetirement(
     meta: SessionMeta,
     worktree: SessionWorktreeView,
     reason: "provider_active" | "provider_launching" | "cleanup_pending",
     trigger: "explicit_discard" | "archive_retirement" | "pull_request_reconciliation",
+    campaignDeliveredPullRequests?: CampaignDeliveredPullRequest[],
   ): Promise<{ removed: false; snapshot: SessionSnapshot; retirement: SessionWorktreeRetirementResult }> {
     let latest = meta;
     const existing = this.pendingSafeWorktreeCleanup(meta.sessionId, meta.context, worktree);
@@ -5335,8 +5364,15 @@ export class SessionManager {
         item.id === worktree.id && sameWorktreePath(latest.context, item.path, worktree.path));
       if (!current) throw new Error("worktree record changed while retirement was being deferred");
       deferredRecord = this.cleanupRecordForWorktree(latest, current, trigger, "safe");
+      deferredRecord.campaignDeliveredPullRequests = campaignDeliveredPullRequests;
       this.cleanupJournal.add(deferredRecord);
     } else {
+      this.strengthenArchiveRetirement(existing, trigger);
+      this.cleanupJournal.add(existing);
+      if (campaignDeliveredPullRequests) {
+        existing.campaignDeliveredPullRequests = campaignDeliveredPullRequests;
+        this.cleanupJournal.add(existing);
+      }
       const verifiedMergedHead = verifiedMergedHeadOid(worktree.pullRequest);
       if (verifiedMergedHead && existing.verifiedMergedHead !== verifiedMergedHead) {
         existing.verifiedMergedHead = verifiedMergedHead;
@@ -5366,7 +5402,8 @@ export class SessionManager {
   private async discardWorktreeLocked(
     sessionId: string,
     path: string,
-    options: { refreshMergedHead?: boolean; trigger?: "explicit_discard" | "archive_retirement" | "pull_request_reconciliation" } = {},
+    options: { refreshMergedHead?: boolean; trigger?: "explicit_discard" | "archive_retirement" | "pull_request_reconciliation";
+      campaignDeliveredPullRequests?: CampaignDeliveredPullRequest[] } = {},
   ): Promise<{
     removed: boolean;
     reason?: string;
@@ -5386,9 +5423,11 @@ export class SessionManager {
     }
     const initiallySelectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (initiallySelectedIsLaunching) {
-      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
+      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard", options.campaignDeliveredPullRequests);
     }
     let unlinkedForgeUnavailable = false;
+    let patchDeliveryUnavailable = false;
+    let patchCheck: WorktreeCleanupRecord | undefined;
     let deliveredHead: string | undefined;
     if (options.refreshMergedHead !== false && !worktree.pullRequest) {
       ({ forgeUnavailable: unlinkedForgeUnavailable, deliveredHead } = await this.discoverUnlinkedMergedWorktree(
@@ -5490,21 +5529,38 @@ export class SessionManager {
       meta = latest;
       worktree = current;
     }
+    if (!deliveredHead && !successorHead && containment?.state !== "contained" &&
+        options.campaignDeliveredPullRequests?.length) {
+      const pendingPatchCheck = this.pendingSafeWorktreeCleanup(sessionId, meta.context, worktree);
+      patchCheck = pendingPatchCheck ?? this.cleanupRecordForWorktree(meta, worktree, options.trigger ?? "explicit_discard", "safe");
+      this.strengthenArchiveRetirement(patchCheck, options.trigger);
+      patchCheck.campaignDeliveredPullRequests = options.campaignDeliveredPullRequests;
+      patchDeliveryUnavailable = await this.proveCleanupPatchDelivery(patchCheck, meta, worktree) === "unavailable";
+      const latest = this.store.readMeta(sessionId);
+      const current = latest && this.attributedWorktrees(latest)
+        .find((item) => sameWorktreePath(latest.context, item.path, path));
+      if (!latest || !current || current.id !== worktree.id || current.branch !== worktree.branch || current.source === "attached") {
+        return { removed: false, reason: "worktree linkage changed while checking patch delivery" };
+      }
+      meta = latest;
+      worktree = current;
+      if (pendingPatchCheck) this.cleanupJournal.add(patchCheck);
+    }
     const selectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (selectedIsLaunching) {
-      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
+      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard", options.campaignDeliveredPullRequests);
     }
     if (this.liveWorktreeUsesPath(sessionId, worktree.path) ||
         this.transitioningProviderUsesPath(sessionId, meta.context, worktree.path) ||
         this.providerTurnUsesPath(sessionId, meta.context, worktree.path)) {
-      return this.deferWorktreeRetirement(meta, worktree, "provider_active", options.trigger ?? "explicit_discard");
+      return this.deferWorktreeRetirement(meta, worktree, "provider_active", options.trigger ?? "explicit_discard", options.campaignDeliveredPullRequests);
     }
     // Last: the path an in-flight launch captured before the selection moved on. The row above no
     // longer names it and no provider entry, rebinding, or lease exists yet, so this is the only
     // remaining proof that a launch still owns it. Checking it after the fences above keeps every
     // reason those fences already report unchanged.
     if (this.launchingSelectionUsesPath(sessionId, meta, worktree.path)) {
-      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
+      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard", options.campaignDeliveredPullRequests);
     }
     let teardownIdentityError: string | undefined;
     try {
@@ -5541,18 +5597,25 @@ export class SessionManager {
     try {
       // The durable record precedes process retirement/teardown/removal. Safe Git preflight still
       // runs first inside discardWorktreeIfSafe, so a dirty or unpushed tree is untouched.
-      const cleanup = this.cleanupRecordForWorktree(
+      const cleanup = this.pendingSafeWorktreeCleanup(sessionId, meta.context, worktree) ?? this.cleanupRecordForWorktree(
         meta,
         worktree,
         options.trigger ?? "explicit_discard",
         "safe",
       );
+      this.strengthenArchiveRetirement(cleanup, options.trigger);
       // Safe removal still compares this exact head with the tree's current head.
       if (deliveredHead && !cleanup.verifiedMergedHead) cleanup.verifiedMergedHead = deliveredHead;
       // A later merged pull request from the same branch delivered this exact tip (#3981).
       if (successorHead) cleanup.verifiedMergedHead = successorHead;
       // A merged pull request's history contains this tip (#4068); removal re-proves it.
       if (containment?.state === "contained") cleanup.containingMergedHead = containment.headOid;
+      if (patchCheck) {
+        cleanup.cleanupId = patchCheck.cleanupId;
+        cleanup.campaignDeliveredPullRequests = patchCheck.campaignDeliveredPullRequests;
+        cleanup.patchDelivery = patchCheck.patchDelivery;
+        cleanup.patchUnavailableAttempts = patchCheck.patchUnavailableAttempts;
+      }
       if (teardownIdentityError) {
         const now = Date.now();
         cleanup.teardown = {
@@ -5576,6 +5639,29 @@ export class SessionManager {
       this.cleanupJournal.add(cleanup);
       const result = await this.removeRecordedWorktree(cleanup, meta);
       if (!result.removed) {
+        if (cleanup.trigger === "archive_retirement" && patchDeliveryUnavailable &&
+            (result.reason === "no_upstream" || result.reason === "unpushed" || result.reason === "not_delivered")) {
+          if ((cleanup.patchUnavailableAttempts ?? 0) >= 3) {
+            if (!this.removeWorktreeCleanupRecord(cleanup, true)) {
+              return { removed: false, snapshot: this.snapshot(this.store.readMeta(sessionId) ?? meta),
+                retirement: { status: "deferred", reason: "cleanup_pending" } };
+            }
+            this.send({ type: "session_worktree_retirement_refused", sessionId,
+              worktreeId: cleanup.worktreeId ?? "", path: cleanup.worktreePath,
+              reason: "patch delivery proof remained unavailable after three attempts; the worktree was retained" });
+            const reason = {
+              no_upstream: "the branch has no upstream",
+              unpushed: "the branch has unpushed commits",
+              not_delivered: "the worktree head is not on the default branch or a verified merged pull request",
+            }[result.reason];
+            return { removed: false, reason: `${reason}; patch delivery proof remained unavailable after three attempts` };
+          }
+          // The runner owns bounded retry from here, including across restart. A new CP request
+          // must not recreate an unbounded sequence of supposedly temporary archive failures.
+          this.cleanupJournal.add(cleanup);
+          return { removed: false, snapshot: this.snapshot(this.store.readMeta(sessionId) ?? meta),
+            retirement: { status: "deferred", reason: "cleanup_pending" } };
+        }
         // No destructive phase began: discard the intent rather than surprising the user with a
         // later automatic retry after they merely clean the tree. Once process/teardown work began,
         // retain the journal so startup can finish the interrupted explicit operation.
@@ -5702,11 +5788,12 @@ export class SessionManager {
   async discardWorktree(
     sessionId: string,
     path: string,
-    options: { requireDelivered?: boolean } = {},
+    options: { requireDelivered?: boolean; campaignDeliveredPullRequests?: CampaignDeliveredPullRequest[] } = {},
   ): Promise<{ snapshot: SessionSnapshot; retirement: SessionWorktreeRetirementResult }> {
     return this.runWorktreeOperation(sessionId, async () => {
       const result = await this.discardWorktreeLocked(sessionId, path,
-        options.requireDelivered ? { trigger: "archive_retirement" } : {});
+        { ...(options.requireDelivered ? { trigger: "archive_retirement" as const } : {}),
+          campaignDeliveredPullRequests: options.campaignDeliveredPullRequests });
       if ((!result.removed && result.retirement?.status !== "deferred") || !result.snapshot || !result.retirement) {
         throw new Error(`worktree retained: ${result.reason ?? "cleanup did not complete"}`);
       }
@@ -19982,6 +20069,7 @@ export class SessionManager {
       let forgeState: "merged" | "unmerged" | "unavailable" = "unavailable";
       let successorState: Awaited<ReturnType<SessionManager["refreshDeferredSuccessorHead"]>> = "not_needed";
       let containmentState: Awaited<ReturnType<SessionManager["refreshDeferredContainment"]>> = "not_needed";
+      let patchDeliveryUnavailable = false;
       if (!record.worktreeRemovedAt) {
         forgeState = await this.refreshDeferredMergedHead(record);
         if (worktreeFenced()) return logFenced();
@@ -20003,6 +20091,13 @@ export class SessionManager {
         }
         containmentState = await this.refreshDeferredContainment(record);
         if (worktreeFenced()) return logFenced();
+        if (record.campaignDeliveredPullRequests?.length && !record.containingMergedHead) {
+          patchDeliveryUnavailable = await this.proveCleanupPatchDelivery(record, meta, worktree) === "unavailable";
+          if (worktreeFenced()) return logFenced();
+          if (record.patchDelivery || patchDeliveryUnavailable) {
+            this.cleanupJournal.add(record);
+          }
+        }
       }
 
       const cleanupLeaseOwner = `${this.lockOwner}:cleanup-replay:${randomUUID()}`;
@@ -20024,6 +20119,16 @@ export class SessionManager {
             this.store.readMeta(record.sessionId) ?? meta,
           );
           if (!removal.removed) {
+            if (record.trigger === "archive_retirement" && patchDeliveryUnavailable &&
+                (removal.reason === "no_upstream" || removal.reason === "unpushed" || removal.reason === "not_delivered")) {
+              if ((record.patchUnavailableAttempts ?? 0) < 3) return;
+              if (this.removeWorktreeCleanupRecord(record, true)) {
+                this.send({ type: "session_worktree_retirement_refused", sessionId: record.sessionId,
+                  worktreeId: record.worktreeId ?? "", path: record.worktreePath,
+                  reason: "patch delivery proof remained unavailable after three attempts; the worktree was retained" });
+              }
+              return;
+            }
             if (record.trigger === "archive_retirement" && forgeState === "unavailable" &&
                 (removal.reason === "no_upstream" || removal.reason === "not_delivered")) return;
             if (record.trigger === "archive_retirement" && successorState === "unavailable" &&

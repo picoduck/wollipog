@@ -34,6 +34,9 @@ import type {
 } from "@wollipog/protocol";
 import type { WorktreeHookSnapshot } from "./worktree-setup.js";
 import { runContextCommand } from "./context-command.js";
+import { patchDeliveryContains, type WorktreePatchDeliveryProof } from "./worktree-patch-delivery.js";
+import { CONTAINMENT_FETCH_GIT_CONFIG, CONTAINMENT_FETCH_GIT_ENV } from "./worktree-forge-fetch.js";
+export { CONTAINMENT_FETCH_GIT_CONFIG, CONTAINMENT_FETCH_GIT_ENV } from "./worktree-forge-fetch.js";
 import { oversizedTurnDiffSummary } from "./history-event-bound.js";
 import {
   captureWorktreeTree,
@@ -164,6 +167,8 @@ export interface WorktreeCleanupRecord {
   auxiliaryWorktreeRollback?: boolean;
   /** Exact initiating lifecycle. Startup replay preserves rather than replaces this value. */
   trigger?: "explicit_discard" | "archive_retirement" | "pull_request_reconciliation" | "external_removal" | "session_delete" | "creation_rollback";
+  /** Preserve attribution when an archive request strengthens a pending explicit intent. */
+  initiatingTrigger?: WorktreeCleanupRecord["trigger"] | "legacy_unknown";
   /** Explicit discard/reconciliation retains Git safety checks; deletion/rollback keeps legacy force cleanup. */
   removalMode?: "safe" | "force";
   /** Exact approved teardown material. Runner-private and never projected to the control plane. */
@@ -221,6 +226,10 @@ export interface WorktreeCleanupRecord {
   /** Forge-verified head of a merged pull request whose history contains the tip (#4068). Safe
    * cleanup re-proves that containment against the tree's current head before removing anything. */
   containingMergedHead?: string;
+  patchDelivery?: WorktreePatchDeliveryProof;
+  campaignDeliveredPullRequests?: Array<{ repository: string; number: number; headSha: string }>;
+  /** Unknown proof outages retry at most three times for this durable cleanup intent. */
+  patchUnavailableAttempts?: number;
 }
 
 export type RetainedWorktreeRefReason =
@@ -281,6 +290,7 @@ export interface RetainedWorktreeRefRecord {
   verifiedMergedHead?: string;
   /** Merged pull request head whose history contained this ref when cleanup accepted it (#4068). */
   containingMergedHead?: string;
+  patchDelivery?: WorktreePatchDeliveryProof;
   state: "pending" | "completed" | "retained";
   pendingReason?: RetainedWorktreeRefPendingReason;
   terminalReason?: RetainedWorktreeRefTerminalReason;
@@ -302,6 +312,7 @@ export interface RetainedWorktreeRefCandidate {
   reasons: RetainedWorktreeRefReason[];
   verifiedMergedHead?: string;
   containingMergedHead?: string;
+  patchDelivery?: WorktreePatchDeliveryProof;
 }
 
 export interface RetainedWorktreeRefDiagnostic {
@@ -2333,22 +2344,6 @@ export async function branchPullRequestForAttachedWorktree(
 /** Candidate merged pull requests checked per containment proof; each one costs a forge fetch. */
 const CONTAINING_PULL_REQUEST_CANDIDATES = 5;
 
-/** Configuration for the anonymous containment fetch (#4068). Repository configuration may be
- * session-written, so nothing it names runs: hooks and fsmonitor are off, HTTPS is the only
- * transport (no configured SSH command), and no credential helper or askpass program runs. Extra
- * headers configured for any host or for github.com are cleared, and the environment below skips
- * system and global configuration, so no runner credential is sent and a configured proxy or CA has
- * nothing to capture. A head that needs credentials is therefore unavailable proof. */
-export const CONTAINMENT_FETCH_GIT_CONFIG: readonly string[] = [
-  "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-  "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
-  "-c", "http.sslVerify=true", "-c", "http.extraHeader=", "-c", "http.https://github.com/.extraHeader=",
-  "-c", "credential.helper=", "-c", "credential.interactive=false", "-c", "core.askPass=",
-];
-export const CONTAINMENT_FETCH_GIT_ENV: Readonly<Record<string, string>> = {
-  GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
-};
-
 /** Whether every commit reachable from `tip` is reachable from `mergedHead`, read from the commits
  * themselves (#4068). Replacement refs, a graft file and the commit-graph cache can each rewrite
  * parents, so none of them is consulted. Throws when either commit is unavailable. */
@@ -2614,6 +2609,7 @@ async function retainedRefDeliveryProven(
   defaultBranch: string,
 ): Promise<boolean> {
   if (record.verifiedMergedHead === record.expectedOid) return true;
+  if (record.patchDelivery && await patchDeliveryContains(record.repoPath, context, record.patchDelivery, record.expectedOid)) return true;
   if (record.containingMergedHead && /^[a-f0-9]{40,64}$/u.test(record.containingMergedHead)) {
     try {
       if (await historyContains(context, record.repoPath, record.containingMergedHead, record.expectedOid)) return true;
@@ -2783,6 +2779,7 @@ export async function discardWorktreeIfSafe(
     verifiedMergedHead?: string;
     /** A merged pull request head that may contain a tip without an upstream (#4068). */
     containingMergedHead?: string;
+    patchDelivery?: WorktreePatchDeliveryProof;
     requireDelivered?: boolean;
     beforeRemove?: () => Promise<void>;
     /** Fault-injection boundary after Git removes the worktree but before branch cleanup. */
@@ -2855,6 +2852,13 @@ export async function discardWorktreeIfSafe(
     }
     const head = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
     if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
+    const patchDelivered = !branchChanged && !!options.patchDelivery &&
+      await patchDeliveryContains(repoPath, context, options.patchDelivery, head);
+    // An accepted proof pins immutable objects and this exact tip. Failure to repeat it means
+    // unavailable/corrupt Git evidence, not newly unmatched work; keep cleanup retryable.
+    if (!branchChanged && options.patchDelivery?.tipOid === head && !patchDelivered) {
+      return { removed: false, reason: "unavailable" };
+    }
 
     // Git permits another worktree to deliberately share this branch via
     // --ignore-other-worktrees. Removing this worktree must not detach that sibling from its ref,
@@ -2947,6 +2951,7 @@ export async function discardWorktreeIfSafe(
             // An unavailable head object cannot prove containment.
           }
         }
+        if (!safeUntrackedHead && patchDelivered) safeUntrackedHead = true;
         if (!safeUntrackedHead) {
           return { removed: false, reason: validMergedHead ? "unpushed" : "no_upstream" };
         }
@@ -2959,7 +2964,8 @@ export async function discardWorktreeIfSafe(
       }
     }
 
-    if (options.requireDelivered && options.verifiedMergedHead !== head && !checkedOutContainingMergedHead) {
+    if (options.requireDelivered && options.verifiedMergedHead !== head && !checkedOutContainingMergedHead &&
+        !patchDelivered) {
       const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
       let delivered = false;
       if (defaultBranch) {
@@ -2999,6 +3005,7 @@ export async function discardWorktreeIfSafe(
       reasons: preserveCheckedOutRef ? checkedOutRefReasons : ["deletion_intent"],
       ...(checkedOutVerifiedMergedHead ? { verifiedMergedHead: checkedOutVerifiedMergedHead } : {}),
       ...(checkedOutContainingMergedHead ? { containingMergedHead: checkedOutContainingMergedHead } : {}),
+      ...(patchDelivered ? { patchDelivery: options.patchDelivery } : {}),
     };
     retainedRefs.push(checkedOutCandidate);
     if (retainedRefs.length) await options.retainRefs?.(retainedRefs);
@@ -3059,6 +3066,7 @@ export async function discardWorktreeIfSafe(
         ...(checkedOutCandidate.containingMergedHead
           ? { containingMergedHead: checkedOutCandidate.containingMergedHead }
           : {}),
+        ...(checkedOutCandidate.patchDelivery ? { patchDelivery: checkedOutCandidate.patchDelivery } : {}),
         state: "pending",
         armedAt: Date.now(),
         createdAt: Date.now(),

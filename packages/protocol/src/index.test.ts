@@ -612,6 +612,8 @@ test("public runner capability floors retain their recorded version boundaries",
   assert.equal(runnerSupportsProtocol(196, "campaignWorkLedger"), true);
   assert.equal(runnerSupportsProtocol(192, "archiveWorktreeRetirement"), false);
   assert.equal(runnerSupportsProtocol(193, "archiveWorktreeRetirement"), true);
+  assert.equal(runnerSupportsProtocol(369, "worktreePatchDelivery"), false);
+  assert.equal(runnerSupportsProtocol(370, "worktreePatchDelivery"), true);
   assert.equal(runnerSupportsProtocol(191, "backgroundJobEndedBy"), false);
   assert.equal(runnerSupportsProtocol(192, "backgroundJobEndedBy"), true);
   assert.equal(runnerSupportsProtocol(190, "restartKeepsQueuedWork"), false);

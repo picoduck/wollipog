@@ -1989,6 +1989,55 @@ test("Stop and Archive leaves old runners pending and retries an undelivered arc
   }
 });
 
+test("patch retirement candidates require this exact child's consumed campaign merge record", async () => {
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
+  try {
+    const child = spawn(parent.id, "Deliver patch work");
+    const sibling = spawn(parent.id, "Other work");
+    const record = (sessionId: string, occurrenceId: string, number: number, consumed: boolean) => {
+      const headSha = number.toString(16).padStart(40, "0");
+      db.createWorkflowDecision({ sessionId, controllingSessionId: parent.id, requestId: occurrenceId, occurrenceId,
+        category: "pr_merge", resourceKey: occurrenceId, resourceDigest: occurrenceId, policyRevision: 1,
+        authority: "human", createdAt: Date.now(), resourceSnapshot: {
+          category: "pr_merge", repository: "picoduck/wollipog", pullRequest: number, headSha,
+          reviewResult: "merge", requiredChecks: { headSha, status: "passed", checkedAt: Date.now(), checks: [] },
+        } });
+      if (consumed) db.raw().prepare("UPDATE workflow_decisions SET status='consumed', consumed_at=? WHERE occurrence_id=?")
+        .run(Date.now(), occurrenceId);
+      return { repository: "picoduck/wollipog", number, headSha };
+    };
+    const own = record(child, "own_merge", 700, true);
+    record(sibling, "sibling_merge", 701, true);
+    record(child, "pending_merge", 702, false);
+    record(parent.id, "root_merge", 703, true);
+    assert.deepEqual(db.campaignChildDeliveredPullRequests(child), [own]);
+    assert.deepEqual(db.campaignChildDeliveredPullRequests(parent.id), []);
+    assert.deepEqual(db.campaignChildDeliveredPullRequests("nonexistent"), []);
+    db.raw().prepare("UPDATE workflow_decisions SET status='denied' WHERE occurrence_id='pending_merge'").run();
+    const path = `/worktrees/${child}/checkpoint`;
+    db.setWorktreePath(child, path);
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify([
+      { id: "checkpoint", path, branch: "agent/checkpoint", source: "created" },
+    ]), child);
+    let requested = false;
+    hub.requestHandler = (message) => {
+      assert.equal(message.type, "session_worktree");
+      assert.equal(message.operation, "discard");
+      assert.deepEqual(message.campaignDeliveredPullRequests, [own]);
+      requested = true;
+      return { type: "session_worktree_result", requestId: message.requestId,
+        sessionId: child, operation: "discard", ok: false,
+        error: "worktree retained: the branch has no upstream" };
+    };
+    svc.onSessionStatus(child, "idle");
+    const verified = verify(child, report(child, "Delivered work"));
+    assert.ok(verified.ok, verified.error);
+    svc.onSessionStatus(child, "stopped");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(requested, true, "archive retirement receives the same server-derived provenance");
+  } finally { db.close(); }
+});
+
 test("runner inventory reconciliation clears refused cleanup and verifies a completed campaign", async () => {
   const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {

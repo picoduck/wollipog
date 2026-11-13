@@ -3178,6 +3178,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
                   ? sessions.deleteWorktreeRefs(msg.sessionId, msg.path, msg.refs)
                   : sessions.discardWorktree(msg.sessionId, msg.path, {
                   requireDelivered: msg.operation === "discard" && msg.requireDelivered === true,
+                  campaignDeliveredPullRequests: msg.operation === "discard" ? msg.campaignDeliveredPullRequests : undefined,
                 });
       void operation.then((result) => {
         if (result.retirement?.status === "deferred" &&
