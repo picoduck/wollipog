@@ -16,6 +16,7 @@ import { useRemovedFocus } from "../useRemovedFocus.js";
 import { useIsMobileInEitherOrientation } from "../useIsMobile.js";
 import { registerRequestIntent, registerRequestRevealer } from "./request-reveal.js";
 import { RequestCard, type RequestIntentHandler } from "./RequestCard.js";
+import { FollowUpOwnerApproval } from "./FollowUpOwnerApproval.js";
 import { PreviewQuestionCard } from "./PreviewQuestionCard.js";
 import {
   REQUEST_CARD_COPY,
@@ -454,6 +455,7 @@ export function RequestDock({
           />
         )}
       </div>
+      {!collapsed && <FollowUpOwnerApproval session={session} requests={requests} onSessionUpdate={onSessionUpdate} />}
       <span className="sr-only" role="status" aria-live="polite" data-request-dock-announcement="">
         {announcement && <span key={announcement.serial}>{announcement.text}</span>}
       </span>

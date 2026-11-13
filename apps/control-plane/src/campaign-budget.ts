@@ -144,6 +144,10 @@ export class CampaignBudgetLedger {
     CREATE TABLE IF NOT EXISTS campaign_budget_included_follow_up_admissions (
       occurrence_id TEXT PRIMARY KEY, root_id TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS campaign_budget_follow_up_publication_links (
+      work_item_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, admission_id TEXT NOT NULL,
+      publication_id TEXT NOT NULL, identity_digest TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS campaign_budget_checkpoints (
       session_id TEXT PRIMARY KEY, checkpoint TEXT NOT NULL
     );
@@ -433,6 +437,17 @@ export class CampaignBudgetLedger {
     const row = this.sql.prepare("SELECT root_id, occurrence_id FROM campaign_budget_follow_up_admissions WHERE work_item_id=?")
       .get(workItemId) as { root_id: string; occurrence_id: string } | undefined;
     return row ? { rootId: row.root_id, occurrenceId: row.occurrence_id } : null;
+  }
+
+  followUpPublicationIdentity(workItemId: string, admissionId: string): string | null {
+    return (this.sql.prepare("SELECT identity_digest FROM campaign_budget_follow_up_publication_links WHERE work_item_id=? AND admission_id=?")
+      .get(workItemId, admissionId) as { identity_digest: string } | undefined)?.identity_digest ?? null;
+  }
+
+  noteFollowUpPublicationLink(rootId: string, workItemId: string, admissionId: string, publicationId: string, identity: string): void {
+    this.sql.prepare(`INSERT INTO campaign_budget_follow_up_publication_links VALUES (?,?,?,?,?)
+      ON CONFLICT(work_item_id) DO UPDATE SET admission_id=excluded.admission_id, publication_id=excluded.publication_id,
+        identity_digest=excluded.identity_digest`).run(workItemId, rootId, admissionId, publicationId, identity);
   }
 
   stop(rootId: string, state: Exclude<CampaignBudgetView["state"], "active">, reason: string): void {

@@ -1103,6 +1103,15 @@ and labels; include `recommendationId` in the workflow request. Review the exact
 resolving. Duplicate/sanitation and lineage checks repeat before one-shot consumption. Read the
 published issue back and record it on that recommendation before proposing its scope addition.
 Missing issue-boundary authority never turns ledger acceptance or ordinary prose into a grant.
+On control plane v372+, an approved publication in your own campaign repository may also use
+`execute_workflow_decision`. It consumes the exact approval, creates the issue through that
+repository's runner, and reads the approved title, body and labels back from the forge. Wait for
+`decision.forgeAction.publicationVerified: true`, with `publicationCreatedIssue` equal to its
+`publishedIssue`, before recording that issue
+on the accepted recommendation. Linking this verified publication result to the same admitted
+follow-up needs no additional admission. Another issue, a title change or unlinking still does.
+An older or manual publication without this server proof retains the ordinary admission gate;
+never claim the exemption from an agent-written issue number alone.
 A follow-up may target any repository of the campaign's boundary, not only its origin's: under Full
 Control it is reviewed under the same floors, its duplicate search runs in the target repository
 through one of its Locations, and its lineage names both repositories. When that repository isn't the

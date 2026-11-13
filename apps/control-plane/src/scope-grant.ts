@@ -4,6 +4,19 @@ import {
   type OrchestratorCampaignPolicy, type ScopeGrantDropReason, type ScopeGrantSelection,
 } from "@wollipog/protocol";
 import { MAX_MESSAGE_ISSUES } from "./first-message-issue-intent.js";
+import { derivedFollowUpLimit } from "./campaign-launch-admission.js";
+
+/** Only launch-recorded derived limits follow admitted scope. Explicit limits (including No
+ * Limit) and missing provenance never change. An issue-less investigation stays at one: task
+ * prose and agent-authored ledger units do not prove authority for a larger budget. */
+export function scopeDerivedFollowUpLimit(policy: Pick<OrchestratorCampaignPolicy, "firstMessageScope"> & Partial<Pick<OrchestratorCampaignPolicy, "behavior">> | undefined,
+  boundary: CampaignAuthorityBoundary, scopeSize: number): number | undefined {
+  const first = policy?.firstMessageScope;
+  if (policy?.behavior?.followUps !== "execute_approved" || first?.state !== "established" ||
+      first.derivedLimits?.acceptedFollowUps !== true || !boundary.budgetAuthority) return undefined;
+  const selection = first.grant?.status === "granted" ? first.grant.selection?.count ?? 0 : 0;
+  return derivedFollowUpLimit(Math.max(scopeSize, selection));
+}
 
 /** Every repository in the campaign's boundary, the launch repository first (#4118). */
 export function boundaryRepositories(boundary: Pick<CampaignAuthorityBoundary, "repository" | "repositories">): string[] {
@@ -259,7 +272,7 @@ export function scopeGrantCandidates(text: string, fields: ScopeGrantFields, bou
  * Maximum Issues never grows, a selection's proposal fits its grant's ceiling already, and nothing
  * else changes the limit. Undefined when the boundary's own limit applies. */
 export function grantReviewMaxIssues(
-  policy: Pick<OrchestratorCampaignPolicy, "firstMessageScope"> | undefined,
+  policy: Pick<OrchestratorCampaignPolicy, "firstMessageScope"> & Partial<Pick<OrchestratorCampaignPolicy, "behavior">> | undefined,
   snapshot: Pick<CampaignIssueScopeSnapshot, "grantReview">,
   boundary: CampaignAuthorityBoundary,
   scopeSize: number,
@@ -272,7 +285,7 @@ export function grantReviewMaxIssues(
   if (!issues || !snapshot.grantReview || snapshot.grantReview.cause === "selection" || !grant ||
       grant.status === "granted" || grant.ceilings.maxIssuesSource !== "derived" || first?.state !== "established" ||
       first.derivedLimits?.maxIssues !== true) return undefined;
-  const followUps = boundary.budgetAuthority?.acceptedFollowUps;
+  const followUps = scopeDerivedFollowUpLimit(policy, boundary, scopeSize) ?? boundary.budgetAuthority?.acceptedFollowUps;
   return Math.min(MAX_MESSAGE_ISSUES, Math.max(issues.maxIssues, followUps === undefined ? MAX_MESSAGE_ISSUES : scopeSize + followUps));
 }
 
@@ -318,13 +331,13 @@ export function grantSelection(selection: ScopeGrantCandidates["selection"], sco
  * it before, never below the current limit and never past the 100-issue ceiling. The owner's words
  * stand behind every such scope: the floors bound owner-named issues to them, and anything else was
  * the owner's own approval. An explicit Maximum Issues never grows. Undefined when it doesn't apply. */
-export function proposalMaxIssues(policy: Pick<OrchestratorCampaignPolicy, "firstMessageScope"> | undefined,
+export function proposalMaxIssues(policy: Pick<OrchestratorCampaignPolicy, "firstMessageScope"> & Partial<Pick<OrchestratorCampaignPolicy, "behavior">> | undefined,
   snapshot: Pick<CampaignIssueScopeSnapshot, "scopeProposal">, boundary: CampaignAuthorityBoundary, scopeSize: number): number | undefined {
   const first = policy?.firstMessageScope;
   const issues = boundary.issueAuthority;
   if (!snapshot.scopeProposal || !issues || first?.state !== "established" || first.grant?.status !== "proposal" ||
       first.derivedLimits?.maxIssues !== true) return undefined;
-  const followUps = boundary.budgetAuthority?.acceptedFollowUps;
+  const followUps = scopeDerivedFollowUpLimit(policy, boundary, scopeSize) ?? boundary.budgetAuthority?.acceptedFollowUps;
   return Math.min(MAX_MESSAGE_ISSUES, Math.max(issues.maxIssues, followUps === undefined ? MAX_MESSAGE_ISSUES : scopeSize + followUps));
 }
 

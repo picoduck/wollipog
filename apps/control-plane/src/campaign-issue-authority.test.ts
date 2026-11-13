@@ -4760,12 +4760,23 @@ test("a follow-up from work in the same repository, when that isn't the launch o
     assert.ok(h.approve(joined.data!).ok);
     assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueScope!.issues, [{ repository: "team/api", number: 50 }, { repository: "team/api", number: 77 }, { repository: "team/repo", number: 100 }]);
     assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100], "the launch repository's numbers are unchanged");
-    // It was published by the child's own login: Wollipog never performed it, and refuses to.
+    // The requester may also choose managed publication in its own repository (#4537), which
+    // records a forge-verified receipt instead of relying on an agent's claimed issue number.
     const local = recordPublication(h, "team/api", "Second api repair", origin.id);
     const own = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "own-repository", resourceKey: "own-repository", resourceSnapshot: local });
     assert.ok(h.svc.resolveWorkflowDecision("root", "child", own.data!.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true).ok);
+    const beforeManaged = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      if (message.type !== "forge_decision_action") return beforeManaged(runnerId, requestId, message, timeout);
+      assert.equal(runnerId, "r2");
+      assert.equal(message.location?.repository, "team/api");
+      return { type: "forge_decision_action_result", requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
+        outcome: "published", issue: 78 };
+    };
     const notRouted = await h.svc.executeWorkflowDecision("child", own.data!.occurrenceId, { resourceDigest: own.data!.resourceDigest });
-    assert.equal(notRouted.status, 403, notRouted.error ?? "");
+    assert.ok(notRouted.ok, notRouted.error ?? "managed own-repository publication");
+    assert.equal(notRouted.data!.status, "consumed");
+    assert.equal(notRouted.data!.forgeAction?.publicationVerified, true);
   } finally { h.db.close(); }
 });
 
@@ -4807,12 +4818,15 @@ function multiRepositoryCampaign() {
   const inspections: string[] = [];
   const actions: Array<{ runnerId: string; kind: string; location?: unknown; action: unknown }> = [];
   const control = { answer: (kind: string): Record<string, unknown> => kind === "issue_publication" ? { outcome: "published", issue: 77 } : { outcome: "uncertain" },
-    inspectionOk: true };
+    inspectionOk: true, readbackOk: true };
   const inner = h.hub.requestFromRunner;
   h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
     if (message.type === "forge_decision_action") {
       actions.push({ runnerId, kind: message.action.kind, location: message.location, action: message.action });
       return { type: "forge_decision_action_result", requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId, ...control.answer(message.action.kind) } as never;
+    }
+    if (message.type === "campaign_issue_scope" && message.operation === "inspect" && message.publication && !control.readbackOk) {
+      return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: false, publicationFailure: "body" };
     }
     if (message.type === "campaign_issue_scope" && message.operation === "publication_inspect") {
       inspections.push(runnerId);
@@ -4824,6 +4838,7 @@ function multiRepositoryCampaign() {
     const result = { type: "campaign_launch_inspection_result" as const, requestId, workspaceId: message.workspaceId, ok: true, repository: repositories[runnerId]!,
       issueNumbers: message.issueNumbers, digest: "d".repeat(64) };
     if (!control.inspectionOk) return { ...result, ok: false, failure: "publication_refused" as const };
+    if (message.issueNumbers.length && !control.readbackOk) return { ...result, ok: false, publicationFailure: "body" as const };
     return message.issueNumbers.length ? result : { ...result, publicationDigest: issueEvidenceDigest(message.publication), duplicateSearch: "subject" as const };
   };
   const approved = async (requestId: string, snapshot: ReturnType<typeof recordPublication>) => {
@@ -4836,6 +4851,36 @@ function multiRepositoryCampaign() {
   const perform = (decision: WorkflowDecisionView) => h.svc.executeWorkflowDecision("child", decision.occurrenceId, { resourceDigest: decision.resourceDigest });
   return { h, origin, inspections, actions, control, approved, perform, runner };
 }
+
+test("a same-repository managed publication requires exact forge readback and never recreates an uncertain issue (#4537)", async () => {
+  const c = multiRepositoryCampaign();
+  try {
+    const snapshot = recordPublication(c.h, "team/repo", "Read Back the Approved Payload", c.origin("team/repo"));
+    const decision = await c.approved("own-readback", snapshot);
+    c.control.readbackOk = false;
+    const uncertain = await c.perform(decision);
+    assert.ok(uncertain.ok, uncertain.error ?? "managed publication");
+    assert.equal(uncertain.data!.status, "approved");
+    assert.equal(uncertain.data!.forgeAction?.outcome, "uncertain");
+    assert.equal(uncertain.data!.forgeAction?.publicationCreatedIssue, 77, "known creation survives failed readback");
+    assert.notEqual(uncertain.data!.forgeAction?.publicationVerified, true);
+    assert.equal(c.actions[0]!.runnerId, "r");
+    assert.deepEqual(c.actions[0]!.location, { workspaceId: "w", workspacePath: "/repos/test", repository: "team/repo" });
+    c.control.readbackOk = true;
+    c.control.answer = () => ({ outcome: "already_published", issue: 78 });
+    const copied = await c.perform(decision);
+    assert.equal(copied.data!.status, "approved");
+    assert.equal(copied.data!.forgeAction?.outcome, "uncertain", "a copied matching payload is not the known created issue");
+    assert.equal((c.actions.at(-1)!.action as { issue?: number }).issue, 77, "the server pins the observation to its creation receipt");
+    c.control.answer = () => ({ outcome: "already_published", issue: 77 });
+    const reconciled = await c.perform(decision);
+    assert.ok(reconciled.ok, reconciled.error ?? "readback retry");
+    assert.equal(reconciled.data!.status, "consumed");
+    assert.equal(reconciled.data!.forgeAction?.publicationVerified, true);
+    assert.equal(reconciled.data!.forgeAction?.publishedIssue, 77);
+    assert.deepEqual(c.actions.map((action) => action.kind), ["issue_publication", "issue_publication_observe", "issue_publication_observe"]);
+  } finally { c.h.db.close(); }
+});
 
 test("a publication in another repository is created through a Location of it with that runner's login, and the requester's is never used (#4119)", async () => {
   const c = multiRepositoryCampaign();
@@ -4945,7 +4990,7 @@ test("a follow-up from a non-launch repository publishes into the launch reposit
     const web = await c.approved("to-web", toWeb);
     assert.deepEqual(publicationEvidence(h.db, h.db.getSession("root")!, toWeb)?.lineage, { target: "team/web", origins: ["team/api#50"] });
     assert.ok((await c.perform(web)).ok);
-    assert.deepEqual(c.inspections, ["r3", "r3"]);
+    assert.deepEqual(c.inspections, ["r3", "r3", "r3"], "proposal inspection, execution freshness, and created-issue readback");
     assert.deepEqual(c.actions.map((action) => [action.runnerId, action.location]),
       [["r3", { workspaceId: "b", workspacePath: "/repos/web", repository: "team/web" }]]);
 

@@ -1,12 +1,26 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GhOutcome } from "./campaign-forge-status.js";
-import { executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
+import { executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge, observePullRequestRetirement, observeIssuePublication } from "./forge-decision-action.js";
 
 const HEAD = "a".repeat(40);
 const MERGE = "c".repeat(40);
 const ok = (stdout = ""): GhOutcome => ({ stdout, stderr: "", code: null, timedOut: false });
 const failed = (stderr: string, code: number | string = 1, timedOut = false): GhOutcome => ({ stdout: "", stderr, code, timedOut });
+
+test("publication observation pins a known creation receipt and never substitutes a copied issue (#4537)", async () => {
+  const action = { kind: "issue_publication_observe" as const, repository: "picoduck/wollipog", title: "Exact Title", body: "Exact Body", issue: 77 };
+  const calls: string[][] = [];
+  const row = (number: number) => JSON.stringify({ number, html_url: `https://github.com/picoduck/wollipog/issues/${number}`,
+    title: action.title, body: action.body });
+  const observed = await observeIssuePublication(action, async (args) => { calls.push(args); return ok(row(77)); });
+  assert.deepEqual(observed, { outcome: "already_published", issue: 77 });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.at(-1), "repos/picoduck/wollipog/issues/77");
+  assert.deepEqual(await observeIssuePublication(action, async () => ok(row(78))), { outcome: "uncertain" });
+  assert.deepEqual(await observeIssuePublication(action, async () => failed("HTTP 404")), { outcome: "uncertain" });
+  assert.deepEqual(await observeIssuePublication({ ...action, issue: -1 }, async () => { throw new Error("invalid issue must never reach gh"); }), { outcome: "uncertain" });
+});
 
 const deletion = { kind: "branch_deletion" as const, repository: "picoduck/wollipog", branch: "agent/s_child",
   pullRequest: 4067, headSha: HEAD, mergeCommitSha: MERGE };

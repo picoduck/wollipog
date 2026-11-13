@@ -279,6 +279,16 @@ export async function observeIssuePublication(
   gh: GhRunner,
 ): Promise<ForgeDecisionActionResult & { issue?: number }> {
   if (!REPOSITORY.test(action.repository)) return { outcome: "uncertain" };
+  if (action.issue !== undefined) {
+    if (!Number.isSafeInteger(action.issue) || action.issue < 1) return { outcome: "uncertain" };
+    const known = await gh(["api", "--hostname", "github.com", "-X", "GET", `repos/${action.repository}/issues/${action.issue}`]);
+    if (known.code !== null) return { outcome: "uncertain" };
+    const row = record(parseJsonOrNull(known.stdout));
+    const issue = row && !row.pull_request && row.title === action.title &&
+      (typeof row.body === "string" ? row.body : "").trimEnd() === action.body.trimEnd()
+      ? publishedIssueNumber(row, action.repository) : null;
+    return issue === action.issue ? { outcome: "already_published", issue } : { outcome: "uncertain" };
+  }
   const read = await gh(["api", "--hostname", "github.com", "-X", "GET",
     `repos/${action.repository}/issues?state=all&sort=created&direction=desc&per_page=100`]);
   if (read.code !== null) return { outcome: "uncertain" };

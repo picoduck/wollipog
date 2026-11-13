@@ -101,7 +101,8 @@ export function CampaignFollowUpLimit({ campaignId, budget, policyRevision, canE
         helper="The Orchestrator starts every follow-up it accepts without asking."
         onChange={(checked) => setNoLimit(checked)} />
       <p>Past the limit, each follow-up waits for your approval. Lowering it keeps follow-ups already accepted.
-        Saving re-authorizes Full Control. Any request or approval the Orchestrator hasn't used yet is withdrawn, and it asks again.</p>
+        Saving re-authorizes Full Control. Raising the limit keeps exact approved follow-up admissions that still fit.
+        Other unused requests and approvals are withdrawn, and the Orchestrator asks again.</p>
       {error && <Notice tone="danger" role="alert" title="Couldn't Change the Follow-Up Limit">{error}</Notice>}
       <div>
         <BusyButton className="btn sm" busy={busy} progress="Saving limit…" onClick={() => void save()}>Save Limit</BusyButton>{" "}

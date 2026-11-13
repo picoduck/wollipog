@@ -1,5 +1,5 @@
 import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, issueClosureDeliveryGap, knownProviderCommandHomeWriteSeparation } from "@wollipog/protocol";
-import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
+import { validCampaignLaunchDisclosure, campaignPublicationTitle } from "@wollipog/protocol";
 import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
@@ -57,7 +57,7 @@ import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchSco
 import { campaignBoundaryRepositoryAt, campaignLocationRepository, campaignRepositoryPlaces, limitedLaunchLocations } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
-import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues, scopeApprovalMaxIssuesIncrease } from "./scope-grant.js";
+import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues, scopeApprovalMaxIssuesIncrease, scopeDerivedFollowUpLimit } from "./scope-grant.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
@@ -18459,11 +18459,46 @@ export class ControlPlaneDb {
     if (!admission || bound?.category !== "campaign_follow_up_admission" || this.campaignBudgets.governingRoot(rootId) !== rootId) return null;
     const identified = this.campaignFollowUpIdentityContent(rootId, subject, content);
     const identity = campaignFollowUpIdentity(subject, identified);
-    if (bound.identityDigest === identity) return null;
+    const linked = this.campaignBudgets.followUpPublicationIdentity(workItemId, admission.occurrenceId);
+    if ((linked ?? bound.identityDigest) === identity) return null;
     const approved = this.approvedFollowUpAdmission(rootId, subject, identity, admission.occurrenceId);
     if (approved && this.consumeWorkflowDecision(approved, Date.now()) !== null) {
       this.campaignBudgets.noteFollowUpAdmission(rootId, workItemId, approved);
       return null;
+    }
+    // Filling the issue created by this follow-up's consumed, forge-verified publication changes
+    // no admitted work. Titles, recommendation identity and any later issue change remain bound.
+    if (!linked && bound.issue === null && content.issue &&
+        campaignFollowUpIdentity(subject, { ...identified, issue: null }) === bound.identityDigest) {
+      const candidates = subject.kind === "recommendation"
+        ? [this.campaignWorkLedger.recommendation(rootId, subject.recommendationId)].filter((entry) => entry !== null)
+        : this.campaignWorkLedger.recommendations(rootId).filter((entry) => entry.resultingWorkItemId === workItemId);
+      const recommendation = candidates.length === 1 ? candidates[0] : null;
+      if (recommendation?.disposition === "accepted" && !recommendation.duplicateOfId && recommendation.resultingWorkItemId === workItemId) {
+        const rows = this.stmt(`SELECT occurrence_id FROM workflow_decisions WHERE controlling_session_id=?
+          AND category='follow_up_issue_publication' AND status='consumed'
+          AND json_extract(resource_snapshot, '$.recommendationId')=?`).all(rootId, recommendation.id) as Array<{ occurrence_id: string }>;
+        const publication = rows.map((row) => this.workflowDecisionByOccurrence(row.occurrence_id)).find((decision) =>
+          decision?.resourceSnapshot.category === "follow_up_issue_publication" &&
+          decision.resourceSnapshot.repository.toLowerCase() === content.issue!.repository.toLowerCase() &&
+          recommendation.repository.toLowerCase() === content.issue!.repository.toLowerCase() &&
+          campaignPublicationTitle(decision.resourceSnapshot.sanitizedTitle) === campaignPublicationTitle(recommendation.title) &&
+          decision.forgeAction?.kind === "issue_publication" && decision.forgeAction.publicationVerified === true &&
+          decision.forgeAction.publicationCreatedIssue === content.issue!.number &&
+          (decision.forgeAction.outcome === "published" || decision.forgeAction.outcome === "already_published") &&
+          decision.forgeAction.publishedIssue === content.issue!.number);
+        if (publication) {
+          this.campaignBudgets.noteFollowUpPublicationLink(rootId, workItemId, admission.occurrenceId, publication.occurrenceId, identity);
+          const pending = this.campaignFollowUpAdmission(rootId, subject);
+          if (pending?.status === "pending" && pending.resourceSnapshot.category === "campaign_follow_up_admission" &&
+              pending.resourceSnapshot.revises === admission.occurrenceId && pending.resourceSnapshot.identityDigest === identity) {
+            this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=? WHERE occurrence_id=? AND status='pending'")
+              .run(Date.now(), pending.occurrenceId);
+            this.retireWorkflowDecisionResume(pending.occurrenceId, Date.now());
+          }
+          return null;
+        }
+      }
     }
     const view = this.campaignBudgets.view(rootId);
     // Another recommendation accepted into the admitted item replaces what the Human approved it as.
@@ -18483,10 +18518,11 @@ export class ControlPlaneDb {
       ? this.campaignWorkLedger.recommendation(rootId, subject.recommendationId)?.title ?? null : null };
   }
 
-  /** Approved, not yet consumed follow-up admissions (#2940), so a ledger write can tell which it consumed. */
-  campaignFollowUpApprovedOccurrences(rootId: string): string[] {
+  /** Unconsumed follow-up admissions, so a ledger write can settle consumption or an exact
+   * pending linkage request superseded by server-verified publication proof. */
+  campaignFollowUpUnconsumedOccurrences(rootId: string): string[] {
     return (this.stmt(`SELECT occurrence_id FROM workflow_decisions WHERE controlling_session_id=? AND session_id=?
-        AND category='campaign_follow_up_admission' AND status='approved'`).all(rootId, rootId) as Array<{ occurrence_id: string }>)
+        AND category='campaign_follow_up_admission' AND status IN ('pending','approved')`).all(rootId, rootId) as Array<{ occurrence_id: string }>)
       .map((row) => row.occurrence_id);
   }
 
@@ -19094,6 +19130,7 @@ export class ControlPlaneDb {
         snapshot.scopeProposal?.initial && snapshot.scopeProposal.route === "admitted" && snapshot.scopeProposal.constraintCheck?.verdict === "admit");
       // An Orchestrator proposal the floors admitted (#4282) grows a derived Maximum Issues to fit.
       const agentGrown = agentSessionId && boundary ? proposalMaxIssues(policy, snapshot, boundary, after.length) : undefined;
+      const derivedFollowUps = boundary ? scopeDerivedFollowUpLimit(policy, boundary, after.length) : undefined;
       if (agentSessionId && (!boundary?.issueAuthority || !snapshot.issueAdmission || agentSessionId !== root.id ||
           snapshot.issueAdmission.boundaryRevision !== boundary.revision || decision.policyRevision !== boundary.revision ||
           boundary.issueScopeRevision !== snapshot.expectedRevision || userId !== boundary.authorizedByUserId ||
@@ -19187,8 +19224,16 @@ export class ControlPlaneDb {
             if (memberPolicy.control.boundary.evidenceAuthority) memberPolicy.control.boundary.evidenceAuthority.issueScopeRevision = scope.revision;
           }
         }
+        if (derivedFollowUps !== undefined && memberPolicy.control?.mode === "full_control" && memberPolicy.control.boundary.budgetAuthority) {
+          memberPolicy.control.boundary.budgetAuthority.acceptedFollowUps = derivedFollowUps;
+          const issues = memberPolicy.control.boundary.issueAuthority;
+          if (issues && firstScope?.state === "established" && firstScope.derivedLimits?.maxIssues === true) {
+            issues.maxIssues = Math.min(100, Math.max(issues.maxIssues, after.length + derivedFollowUps));
+          }
+        }
         this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
       }
+      if (derivedFollowUps !== undefined && this.campaignBudgets.view(root.id)) this.campaignBudgets.setFollowUpLimit(root.id, derivedFollowUps);
       if (reminted?.mode === "full_control" && Number(this.stmt(`UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1
           WHERE id=? AND parent_control_policy_revision=?`).run(root.id, boundary!.revision).changes) !== 1) {
         throw new Error("Campaign authority changed concurrently");
@@ -26215,6 +26260,8 @@ export class ControlPlaneDb {
         return null;
       }
       const next: NonNullable<WorkflowDecisionView["forgeAction"]> = { kind, attempts: (previous?.attempts ?? 0) + 1,
+        ...(kind === "issue_publication" && previous?.publicationCreatedIssue !== undefined
+          ? { publicationCreatedIssue: previous.publicationCreatedIssue } : {}),
         outcome: "in_progress", updatedAt: now };
       this.stmt("UPDATE workflow_decisions SET forge_action=? WHERE occurrence_id=?").run(JSON.stringify(next), occurrenceId);
       this.db.exec("COMMIT");

@@ -25,9 +25,9 @@ const evaluation = (owner: CampaignAuthorityEvaluation["owner"], reason: Campaig
 test("irrecoverable requests distinguish boundary enlargement, Human Required rules, unsupported capability and missing information (#2938)", () => {
   const cases: Array<[CampaignAuthorityEvaluation["reason"], ReturnType<typeof requestReason>]> = [
     ["outside_boundary", "boundary_enlargement"],
-    ["protected_request", "human_required_rule"],
+    ["protected_request", "owner_approval_required"],
     ["human_required_rule", "human_required_rule"],
-    ["custom_owner", "human_required_rule"],
+    ["custom_owner", "owner_approval_required"],
     ["unsupported_provider", "unsupported_capability"],
     ["unverified_intent", "unsupported_capability"],
     ["evidence_review_unavailable", "unsupported_capability"],
@@ -38,4 +38,11 @@ test("irrecoverable requests distinguish boundary enlargement, Human Required ru
   for (const [reason] of cases) {
     assert.equal(requestReason(evaluation("orchestrator", reason)), "authorized_action", "an Orchestrator-owned request is never escalated");
   }
+});
+
+test("follow-up admissions name the approval limit rather than inventing a Human Required rule (#4537)", () => {
+  assert.equal(requestReason(evaluation("human", "protected_request"), "campaign_follow_up_admission"), "follow_up_limit");
+  assert.equal(requestReason(evaluation("orchestrator", "protected_request"), "campaign_follow_up_admission"), "authorized_action");
+  assert.equal(requestReason(evaluation("human", "human_required_rule"), "campaign_follow_up_admission"), "human_required_rule",
+    "an actual Human Required rule retains its distinct explanation");
 });
