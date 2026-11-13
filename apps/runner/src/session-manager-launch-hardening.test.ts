@@ -10,7 +10,7 @@ import { SessionStore } from "./session-store.js";
 import { requestedSlot, requestedWorktreeBoundary, type WorktreeCleanupRecord } from "./worktree.js";
 import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
-import { linuxLeaseProcessProbe, providerHomeRunnerMarker } from "./provider-home-lease-evidence.js";
+import { providerHomeRunnerMarker } from "./provider-home-lease-evidence.js";
 import { ProviderProcessOwnership } from "./provider-process-ownership.js";
 import { provisionAgentControl, removeAgentControlFiles, isCurrentAgentControlCredential } from "./agent-control.js";
 import { ManagedWorktreeGuardSockets } from "./managed-worktree-guard-socket.js";
@@ -210,16 +210,8 @@ test("recorded startup retirement clears the survivor lease, then owner relaunch
       const orphanFixture = new URL("./fixtures/provider-owned-orphans.mjs", import.meta.url).pathname;
       assert.equal(execFileSync(process.execPath, ["--import", "tsx", orphanFixture,
         directory, "runner", "complete", h.sessionId], { encoding: "utf8", timeout: 10_000 }).trim(), "ready");
-      const manifest = JSON.parse(readFileSync(join(h.root, "fixture-state.json"), "utf8")) as {
-          home: string; children: Array<{ pid: number; startTime: string }> };
-      const probe = linuxLeaseProcessProbe()!;
-      // Closed fixture world: concurrent test jobs are not members of this fake runner.
-      // Identity and irreversible exit are still observed from the actual kernel.
-      leases = new ProviderHomeLeaseRegistry("a".repeat(64), { runnerMarker: providerHomeRunnerMarker(),
-        processProbe: { ...probe, scan: () => ({ uninspectable: [], marked: manifest.children.filter(child => {
-          try { return probe.startTime(child.pid) === child.startTime &&
-            !/\) [ZX] /u.test(readFileSync(`/proc/${child.pid}/stat`, "utf8")); } catch { return false; }
-        }).map(child => child.pid) }) } });
+      const manifest = JSON.parse(readFileSync(join(h.root, "fixture-state.json"), "utf8")) as { home: string };
+      leases = new ProviderHomeLeaseRegistry("a".repeat(64), { runnerMarker: providerHomeRunnerMarker() });
       const homeLease = leases;
       await oldGuard.closeAll();
       removeAgentControlFiles(h.sessionId, controls); // The replaced runner's memory is gone.

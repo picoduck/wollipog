@@ -54,18 +54,27 @@ authorize a signal. The records and their fields are never logged or projected t
 Before startup registration admits any commands, the new runner examines prior-generation
 records belonging to this same runner and OS user. A still-live recording runner, the current
 generation, unknown/legacy evidence, changed private-file permissions or unverifiable identity
-retain their records and processes. The native worker opens a pidfd first, then checks boot,
+never authorize a signal. Unreadable or foreign records are retained. The native worker opens
+a pidfd first, then checks boot,
 start time, user and prior-runner liveness before signalling through that handle. PID reuse can
 therefore never redirect a signal to its replacement. A graceful TERM/CONT gets a short grace
 period, followed by KILL through the same handle if necessary; kernel exit must be observed.
 The worker never sends a signal through a numeric PID. Startup work has record and elapsed-time
 bounds; anything beyond them is retained.
 
-Deploying this version retires proven recorded orphan providers at the next runner startup. A version that has never
-recorded ownership cannot supply retrospective proof: existing unrecorded providers are left
+Failed launches release their own admission intents on synchronous abort or child close, even
+when spawn supplied no PID. Startup can prune a private, valid intent from a dead prior runner
+without signalling anything, and can recover a complete `.pending` publication interrupted
+before its rename. Obsolete records whose exact process identity is proved gone are pruned too.
+Pruning journal metadata never removes the independent HOME lease evidence or admits a signal.
+
+Deploying this version retires proven recorded orphan providers at the next runner startup.
+A version that has never recorded ownership cannot supply retrospective proof: existing unrecorded providers are left
 untouched. Other platforms retain the existing behavior until an equivalent kernel primitive is
-implemented. Unrecorded descendants and ambiguous survivors continue to block HOME recovery;
-this does not delete lease evidence, exclude processes from the production scan or weaken its
+implemented. Unrecorded descendants and ambiguous survivors continue to block HOME recovery.
+Only the recorded root is signalled: unrecorded tool children in another process group can
+survive its retirement and intentionally keep the owner relaunch blocked. This does not delete
+lease evidence, exclude processes from the production scan or weaken its
 complete-tree standard. No agent management route invokes startup retirement.
 
 Retiring a root's provider does not restart it. The owner's action above still admits its fresh
@@ -79,7 +88,7 @@ the existing startup assumption that prior runtime has ended, without adding a b
 action or changing unknown-survivor authority. This decision does not authorize deployment or
 restart of the stack hosting an agent.
 
-Runner logs emit `provider_startup_retirement` with retired/retained counts and retired session
+Runner logs emit `provider_startup_retirement` with retired/retained/pruned counts and retired session
 IDs only. Fixture tests cover independent orphan sessions, unknown survivors, PID identity
 mismatch, foreign ownership, current generation, private-file permissions, and owner recovery.
 The combined HOME/guard/credential rehearsal requires an unremapped host root: the existing

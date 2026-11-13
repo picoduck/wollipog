@@ -60,19 +60,19 @@ static int retire_process(void) {
       pid <= 1 || pid > INT_MAX || runner <= 1 || runner > INT_MAX || pid == getpid() || pid == getppid() ||
       uid != getuid() || getuid() != geteuid() || !started || !runner_started) return 3;
   int handle = (int)syscall(SYS_pidfd_open, (pid_t)pid, 0);
-  if (handle < 0) return errno == ESRCH ? 0 : 3;
+  if (handle < 0) return errno == ESRCH ? 4 : 3;
   FILE *file = fopen("/proc/sys/kernel/random/boot_id", "re");
   int valid_boot = file && fgets(current, sizeof(current), file);
   if (file) fclose(file);
   if (!valid_boot) { close(handle); return 3; }
   current[strcspn(current, "\n")] = 0;
-  if (strcmp(boot, current)) { close(handle); return 0; }
+  if (strcmp(boot, current)) { close(handle); return 4; }
   uid_t owner;
   int state = process_identity(runner, &observed, &owner);
   if (state < 0 || (state == 1 && observed == runner_started)) { close(handle); return 3; }
   state = process_identity(pid, &observed, &owner);
-  if (state == 0) { close(handle); return 0; }
-  if (state < 0 || observed != started || owner != (uid_t)uid) { close(handle); return 3; }
+  if (state == 0 || (state == 1 && observed != started)) { close(handle); return 4; }
+  if (state < 0 || owner != (uid_t)uid) { close(handle); return 3; }
   if (syscall(SYS_pidfd_send_signal, handle, SIGTERM, NULL, 0) && errno != ESRCH) { close(handle); return 3; }
   (void)syscall(SYS_pidfd_send_signal, handle, SIGCONT, NULL, 0);
   struct pollfd exited = { .fd = handle, .events = POLLIN };

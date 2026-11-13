@@ -302,6 +302,7 @@ class ClaudeNamespace implements ClaudeNamespaceLifetime {
       rmSync(this.tempRoot, { recursive: true, force: true });
       throw error;
     }
+    let ownership: ReturnType<NonNullable<SpawnAgentOptions["processOwnership"]>["prepare"]> | undefined;
     try {
       const isolation: BwrapSpawnIsolation = {
         ...opts.isolation,
@@ -310,7 +311,7 @@ class ClaudeNamespace implements ClaudeNamespaceLifetime {
       const args = buildBwrapArgs({
         command: TARGET, args: ["--supervisor", this.token.toString("hex")], cwd: opts.cwd,
       }, isolation);
-      const ownership = opts.processOwnership?.prepare();
+      ownership = opts.processOwnership?.prepare();
       const launch = spawnWithLinuxCgroup(isolation.command, args, {
         cwd: opts.cwd, env, detached: true,
       });
@@ -318,6 +319,7 @@ class ClaudeNamespace implements ClaudeNamespaceLifetime {
       ownership?.spawned(this.outer);
       this.containment = launch.containment;
     } catch (error) {
+      ownership?.aborted();
       rmSync(this.tempRoot, { recursive: true, force: true });
       throw error;
     }

@@ -960,6 +960,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
       child = spawn(file, args, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }) as AgentProcess;
     }
   } catch (error) {
+    ownership?.aborted();
     disposeBridge?.();
     throw error;
   }

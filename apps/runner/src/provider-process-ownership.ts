@@ -6,7 +6,7 @@ import { linuxCgroupHelper } from "./linux-cgroup-helper.js";
 import { linuxLeaseProcessProbe } from "./provider-home-lease-evidence.js";
 
 type Process = { pid?: number; once(event: "close", callback: () => void): unknown };
-export interface ProviderProcessOwner { prepare(): { spawned(child: Process): void } }
+export interface ProviderProcessOwner { prepare(): { spawned(child: Process): void; aborted(): void } }
 interface Ownership {
   version: 1; runnerId: string; generation: string; sessionId: string;
   bootId: string; uid: number; runnerPid: number; runnerStartTime: string;
@@ -80,6 +80,14 @@ export class ProviderProcessOwnership {
     try { fsyncSync(parent); } finally { closeSync(parent); }
   }
 
+  private discard(file: string, expected: readonly string[]): boolean {
+    try {
+      if (!expected.includes(this.read(file))) return false;
+      unlinkSync(file);
+      return true;
+    } catch { return false; } // Changed or unreadable evidence is retained.
+  }
+
   owner(sessionId: string): ProviderProcessOwner | undefined {
     if (!this.probe || this.uid === undefined || !/^[\w.-]{1,200}$/u.test(sessionId)) return undefined;
     const probe = this.probe, uid = this.uid;
@@ -92,37 +100,41 @@ export class ProviderProcessOwnership {
       const file = join(this.directory, `${randomUUID()}.json`);
       // An interrupted admission stays unproven. Never infer absence from an incomplete write.
       this.publish(file, record, true);
+      const published = [JSON.stringify(record)];
+      const cleanup = () => {
+        this.discard(file, published);
+        this.discard(`${file}.pending`, published);
+      };
       return { spawned: (child) => {
+        // Even ENOENT (no pid) and a failed completion write get a close notification.
+        child.once("close", cleanup);
         // This synchronous snapshot is taken before the event loop can reap/recycle our child.
         try {
           const startTime = child.pid ? probe.startTime(child.pid) : null;
           // Preserve spawn's asynchronous ENOENT/error contract. The intent remains unproven.
           if (!child.pid || !startTime) return;
           const complete = { ...record, pid: child.pid, startTime };
+          published.push(JSON.stringify(complete));
           this.publish(file, complete, false);
-          child.once("close", () => {
-            // Only retire this exact root record. Descendant/HOME proof remains independent.
-            try { if (this.read(file) === JSON.stringify(complete)) unlinkSync(file); } catch { /* retain ambiguous evidence */ }
-          });
         } catch { /* Interrupted evidence is retained, never promoted into signal authority. */ }
-      } };
+      }, aborted: cleanup };
     } };
   }
 
   /** Called exactly once during trusted runner startup, before its connection admits commands.
    * No management route exposes this operation, including to a root's own credential. */
-  async recover(): Promise<{ retired: number; retained: number; sessions: string[] }> {
+  async recover(): Promise<{ retired: number; retained: number; pruned: number; sessions: string[] }> {
     if (this.recoveryStarted) throw new Error("provider startup retirement already ran");
     this.recoveryStarted = true;
-    const result = { retired: 0, retained: 0, sessions: [] as string[] };
+    const result = { retired: 0, retained: 0, pruned: 0, sessions: [] as string[] };
     if (!this.probe || this.uid === undefined) return result;
     this.checkDirectory();
     const files = this.files();
-    if (files.length > MAX_RECORDS) return { ...result, retained: files.length };
     const deadline = performance.now() + 30_000;
     for (const [index, name] of files.entries()) {
       if (performance.now() >= deadline) { result.retained += files.length - index; break; }
-      if (!UUID.test(name.replace(/\.json$/u, "")) || !name.endsWith(".json")) { result.retained++; continue; }
+      // A complete private pending write has the same authority as its renamed publication.
+      if (!/\.json(?:\.pending)?$/u.test(name) || !UUID.test(name.replace(/\.json(?:\.pending)?$/u, ""))) { result.retained++; continue; }
       const file = join(this.directory, name);
       let bytes: string, record: Ownership;
       try {
@@ -130,16 +142,24 @@ export class ProviderProcessOwnership {
         record = JSON.parse(bytes) as Ownership;
         if (!this.valid(record) || record.runnerId !== this.runnerId || record.uid !== this.uid ||
             record.generation === this.generation || record.runnerPid === process.pid ||
-            !record.pid || record.pid === process.pid || !record.startTime) { result.retained++; continue; }
+            record.pid === process.pid) { result.retained++; continue; }
         if (record.bootId === this.probe.bootId() && this.probe.startTime(record.runnerPid) === record.runnerStartTime) {
           result.retained++; continue;
         }
       } catch { result.retained++; continue; }
+      if (!record.pid || !record.startTime) {
+        // No signal authority ever existed. Removing obsolete metadata does not remove the
+        // independent HOME evidence: an unrecorded survivor still blocks its lease recovery.
+        if (this.discard(file, [bytes])) { result.pruned++; continue; }
+        result.retained++; continue;
+      }
       // The helper opens a pidfd FIRST, then rechecks boot, UID, root start time and prior
       // runner liveness. It never signals a numeric PID. No record bytes enter argv or logs.
-      if (await this.retire(record)) {
-        try { if (this.read(file) === bytes) { unlinkSync(file); result.retired++; result.sessions.push(record.sessionId); continue; } }
-        catch { /* record changed or cannot be retired */ }
+      const retired = await this.retire(record);
+      if ((retired === "retired" || retired === "gone") && this.discard(file, [bytes])) {
+        if (retired === "gone") result.pruned++;
+        else { result.retired++; result.sessions.push(record.sessionId); }
+        continue;
       }
       result.retained++;
     }
@@ -156,17 +176,17 @@ export class ProviderProcessOwnership {
       (v.startTime === undefined || typeof v.startTime === "string" && START.test(v.startTime));
   }
 
-  private async retire(record: Ownership): Promise<boolean> {
+  private async retire(record: Ownership): Promise<"retired" | "gone" | "unproven"> {
     try {
       const helper = linuxCgroupHelper(dirname(this.directory));
-      return await new Promise<boolean>((resolve) => {
+      return await new Promise<"retired" | "gone" | "unproven">((resolve) => {
         const child = spawn(helper, ["--retire-process"], { env: {}, stdio: ["pipe", "ignore", "ignore"] });
         child.stdin.on("error", () => {});
         child.stdin.end(`${record.bootId}\n${record.pid}\n${record.startTime}\n${record.uid}\n${record.runnerPid}\n${record.runnerStartTime}\n`);
         const timer = setTimeout(() => { child.kill("SIGKILL"); }, 5000);
-        child.once("error", () => { clearTimeout(timer); resolve(false); });
-        child.once("close", (code) => { clearTimeout(timer); resolve(code === 0); });
+        child.once("error", () => { clearTimeout(timer); resolve("unproven"); });
+        child.once("close", (code) => { clearTimeout(timer); resolve(code === 0 ? "retired" : code === 4 ? "gone" : "unproven"); });
       });
-    } catch { return false; }
+    } catch { return "unproven"; }
   }
 }
