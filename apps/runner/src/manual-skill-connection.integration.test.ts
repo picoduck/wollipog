@@ -72,7 +72,7 @@ function fixture(t: TestContext) {
     ws: null, republishWindow: null, registered: true, controlPlanePeerRefused: false, controlPlaneProtocolVersion: PROTOCOL_VERSION,
     automaticAccountSwitchConfigurationSynchronized: true,
     heartbeatPongObserved: false, missedHeartbeatPongs: 3,
-    sessions: { setAutomaticAccountSwitchAuthorityReady() {}, liveSessionIds: () => [] },
+    sessions: { setAutomaticAccountSwitchAuthorityReady() {}, reconcileRunnerRestartRecovery() {}, liveSessionIds: () => [] },
     chunkedSkillsSync: { reset() {} },
     config: { runnerId: "fixture", controlPlaneUrl: "inert", token: "", providerAccounts: [] }, metadata: { agents: [] },
     WebSocket: InertSocket, validateControlPlaneUrl: (url: string) => url, allowInsecureTransport: false,
