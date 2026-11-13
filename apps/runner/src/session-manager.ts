@@ -6922,6 +6922,30 @@ export class SessionManager {
     return { requests: [...requests.values()], verified: true };
   }
 
+  private readonly runnerRestartCandidates = new Map<string, PendingApproval | undefined>();
+
+  /** Registration supplies authoritative root identity and negotiated support before any card is
+   * published. A transport reconnect cannot mark a provider this manager already owns. */
+  reconcileRunnerRestartRecovery(rootSessionIds?: readonly string[]): void {
+    if (!Array.isArray(rootSessionIds) || rootSessionIds.some((id) => typeof id !== "string") ||
+        !runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "runnerRestartRecovery")) return;
+    const roots = new Set(rootSessionIds);
+    for (const [sessionId, existing] of this.runnerRestartCandidates) {
+      const current = this.store.readMeta(sessionId);
+      if (!roots.has(sessionId) || !current || this.active.has(sessionId) ||
+          ["completed", "failed", "stopped"].includes(current.status)) continue;
+      const request = existing ?? {
+        requestId: `runner-recovery:${randomUUID()}`, kind: "runner_recovery" as const,
+        title: "Relaunch Orchestrator After Runner Restart",
+        options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }],
+      };
+      this.store.patchMeta(sessionId, { status: "input_required", pendingApproval: addPendingRequest(current.pendingApproval, request) });
+      if (!existing) this.log(JSON.stringify({ event: "runner_restart_recovery_required",
+        entryPoint: "startup_reconciliation", sessionId, requestId: request.requestId }));
+    }
+    this.runnerRestartCandidates.clear();
+  }
+
   /** On startup, no previous provider is attached to this manager. Demote sessions left mid-flight
    * and explicitly surface native Orchestrators whose loaded runtime bindings need replacement. */
   reconcileStore(): void {
@@ -7169,20 +7193,8 @@ export class SessionManager {
       // live root whose tools all refuse. Children retain recovery through their Orchestrator.
       if (isOrchestratorLaunch(m) && m.context.kind === "native" && !m.review &&
           !terminal && m.command && !m.providerAuthBlock && !m.providerHistoryBlock && !m.worktreeRecovery) {
-        const current = this.store.readMeta(m.sessionId)!;
         const existing = pendingRequests(m.pendingApproval).find((request) => request.kind === "runner_recovery");
-        const request = existing ?? {
-          requestId: `runner-recovery:${randomUUID()}`,
-          kind: "runner_recovery" as const,
-          title: "Relaunch Orchestrator After Runner Restart",
-          options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }],
-        };
-        this.store.patchMeta(m.sessionId, {
-          status: "input_required",
-          pendingApproval: addPendingRequest(current.pendingApproval, request),
-        });
-        if (!existing) this.log(JSON.stringify({ event: "runner_restart_recovery_required",
-          entryPoint: "startup_reconciliation", sessionId: m.sessionId, requestId: request.requestId }));
+        this.runnerRestartCandidates.set(m.sessionId, existing);
       }
       // A crash mid-worktree-setup leaves the pending flag stranded; nothing will resolve it
       // until a restart re-runs start(), so clear it rather than blocking Files/shells forever.
@@ -7624,6 +7636,35 @@ export class SessionManager {
     durable?: DurableCommandLifecycle,
     onMaterialized?: (ready: boolean) => void,
   ): Promise<boolean> {
+    const recovery = pendingRequests(this.store.readMeta(spec.sessionId)?.pendingApproval)
+      .find((request) => request.kind === "runner_recovery");
+    const previousGeneration = this.latestLaunchGenerations.get(spec.sessionId);
+    let recoveryGeneration: number | undefined;
+    let started = false;
+    try {
+      return started = await this.startAttempt(spec, initialPrompt, initialImages, durable, onMaterialized,
+        (generation) => { recoveryGeneration = generation; });
+    } finally {
+      const current = this.store.readMeta(spec.sessionId);
+      if (!started && recovery && current && !this.shuttingDown && !this.active.has(spec.sessionId) &&
+          this.latestLaunchGenerations.get(spec.sessionId) === (recoveryGeneration ?? previousGeneration) &&
+          !this.store.isDeleted(spec.sessionId) && current.status !== "stopped" &&
+          !current.worktreeRecovery && !current.providerAuthBlock && !current.providerHistoryBlock) {
+        const updated = this.store.patchMeta(spec.sessionId, { status: "input_required",
+          pendingApproval: addPendingRequest(current.pendingApproval, recovery) });
+        if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+      }
+    }
+  }
+
+  private async startAttempt(
+    spec: SessionLaunchSpec,
+    initialPrompt?: string,
+    initialImages?: PromptImageInput[],
+    durable?: DurableCommandLifecycle,
+    onMaterialized?: (ready: boolean) => void,
+    onLaunchGeneration?: (generation: number) => void,
+  ): Promise<boolean> {
     let materializationReported = false;
     const reportMaterialized = (ready: boolean) => {
       if (materializationReported) return;
@@ -7718,6 +7759,7 @@ export class SessionManager {
       return false;
     }
     const launchGeneration = this.beginLaunchGeneration(spec.sessionId);
+    onLaunchGeneration?.(launchGeneration);
     this.preLaunchAdmissionGenerations.set(spec.sessionId, launchGeneration);
     if (spec.waitForProviderHome === true) this.providerHomeWaitLaunches.set(spec.sessionId, launchGeneration);
     let started = false;
@@ -11363,7 +11405,9 @@ export class SessionManager {
     launchInitialPrompt = false,
     providerRecovery = false,
   ): boolean {
-    if (pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.kind === "runner_recovery")) {
+    const recoveryLaunch = this.launchGenerations.get(sessionId);
+    const admittedRecoveryLaunch = recoveryLaunch !== undefined && this.preLaunchAdmissionGenerations.get(sessionId) === recoveryLaunch;
+    if (!admittedRecoveryLaunch && pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.kind === "runner_recovery")) {
       durable?.failed("relaunch this Orchestrator from its recovery action before sending messages", "COMMAND_CANCELLED");
       return false;
     }

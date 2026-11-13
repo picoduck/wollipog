@@ -25000,6 +25000,13 @@ export class ControlPlaneDb {
       .slice(0, CAMPAIGN_OWNER_DECISIONS_LIMIT) };
   }
 
+  runnerRootOrchestratorIds(runnerId: string): string[] {
+    return (this.stmt(`SELECT id FROM sessions WHERE runner_id=? AND parent_session_id IS NULL
+      AND archived=0
+      AND (session_role='orchestrator' OR session_role IS NULL AND permission_mode='orchestrator')`)
+      .all(runnerId) as Array<{ id: string }>).map((row) => row.id);
+  }
+
   /** Every occurrence a campaign's root handed to its owner (#4064) or an owner rule kept for a
    * person (#4137), in any state. */
   ownerKeptWorkflowDecisions(controllingSessionId: string): WorkflowDecisionView[] {

@@ -1437,6 +1437,8 @@ app.register(async (instance) => {
           serverTime: Date.now(),
           heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
           protocolVersion: PROTOCOL_VERSION,
+          ...(runnerSupportsProtocol(msg.protocolVersion, "runnerRestartRecovery")
+            ? { rootOrchestratorSessionIds: db.runnerRootOrchestratorIds(runnerId) } : {}),
           ...(runnerSupportsProtocol(msg.protocolVersion, "skillRequestResumption")
             ? { pendingSkillRequests: hub.pendingSkillRequests(runnerId) }
             : {}),

@@ -87,6 +87,7 @@ test("runner restart leaves an unadoptable native root needing one durable owner
   try {
     store.patchMeta("s_perm", { status: "running", config: { permissionMode: "orchestrator" }, agentSessionId: "survivor" });
     sm.reconcileStore();
+    sm.reconcileRunnerRestartRecovery(["s_perm"]);
     const first = store.readMeta("s_perm")!;
     assert.equal(first.status, "input_required");
     const recovery = pendingRequests(first.pendingApproval).filter((request) => request.kind === "runner_recovery");
@@ -94,8 +95,23 @@ test("runner restart leaves an unadoptable native root needing one durable owner
     assert.equal(recovery[0]!.options[0]!.name, "Relaunch Orchestrator");
     assert.equal(sm.prompt("s_perm", "continue automatically"), false);
     sm.reconcileStore();
+    sm.reconcileRunnerRestartRecovery(["s_perm"]);
     assert.equal(store.readMeta("s_perm")!.pendingApproval!.requestId, recovery[0]!.requestId);
   } finally { sm.shutdownAll(); cleanup(); }
+});
+
+test("older control planes and non-root Orchestrators retain legacy recovery", () => {
+  for (const peerVersion of [365, 366]) {
+    const { sm, store, cleanup } = makeHarness("none");
+    try {
+      Object.defineProperty(sm, "controlPlaneProtocolVersion", { value: () => peerVersion });
+      store.patchMeta("s_perm", { status: "running", config: { permissionMode: "orchestrator" } });
+      sm.reconcileStore();
+      sm.reconcileRunnerRestartRecovery(peerVersion === 365 ? ["s_perm"] : []);
+      assert.equal(store.readMeta("s_perm")!.status, "idle");
+      assert.equal(store.readMeta("s_perm")!.pendingApproval, null);
+    } finally { sm.shutdownAll(); cleanup(); }
+  }
 });
 
 test("a native provider survives the in-process runner replacement with its old guard closed and an explicit relaunch action", { skip: process.platform !== "linux" }, async () => {
@@ -116,6 +132,7 @@ test("a native provider survives the in-process runner replacement with its old 
     store.patchMeta("s_perm", { status: "running", config: { permissionMode: "orchestrator" }, agentSessionId: "survivor" });
     await guards.closeAll(); // Replace the runner service, never the hosting runner.
     sm.reconcileStore();
+    sm.reconcileRunnerRestartRecovery(["s_perm"]);
     assert.equal(provider.exitCode, null, "the native provider still lives");
     assert.equal((await ask()).judged, false, "an unserved guard cannot judge or run the call");
     assert.equal(store.readMeta("s_perm")!.status, "input_required");

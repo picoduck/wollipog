@@ -614,6 +614,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   governanceTripReporting: 129,
   /** v107 runners durably resume non-secret structured-question answers after process loss. */
   resumableQuestionAnswers: 107,
+  runnerRestartRecovery: 366,
   sessionWorktrees: 101,
   sessionWorktreeDiscard: 102,
   /** v159 reports durable deferred retirement instead of silently treating it as removal. */
@@ -10803,6 +10804,8 @@ export interface RegisteredMessage {
   heartbeatIntervalMs: number;
   /** The control-plane protocol version. Absent means a pre-negotiation control plane. */
   protocolVersion?: number;
+  /** v366: control-plane-known root Orchestrators on this runner, never provider-asserted roles. */
+  rootOrchestratorSessionIds?: string[];
   /** Present once an administrator has made the control plane authoritative for this Machine. */
   runnerCapacity?: RunnerCapacityConfiguration;
   /** Present once the Machine has a persisted automatic account-switch preference. */

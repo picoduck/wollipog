@@ -2433,6 +2433,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       backoff = INITIAL_BACKOFF_MS;
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
+      sessions.reconcileRunnerRestartRecovery(msg.rootOrchestratorSessionIds);
       skillStateReporter.resumeRequests(runnerSupportsProtocol(controlPlaneProtocolVersion, "skillRequestResumption")
         ? msg.pendingSkillRequests : undefined);
       harnessInstallationChoices = synchronizedHarnessChoices(controlPlaneProtocolVersion, msg.harnessInstallationChoices);
