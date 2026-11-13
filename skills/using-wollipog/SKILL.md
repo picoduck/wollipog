@@ -214,7 +214,7 @@ approval once. A refusal that changed nothing leaves it approved for a retry. A 
 (the tip moved, a dependent pull request opened, or the head or closures changed) revokes it. An
 uncertain enqueue is never replayed: reconcile it once the PR reads MERGED.
 
-For a temporary GitHub branch in a live Full Control campaign, protocol 376 adds
+For a temporary GitHub branch in a live Full Control campaign, protocol 377 adds
 `create_temporary_branch` (the `branch create-temporary` CLI command). It creates only a new remote
 ref at a commit already contained in the default branch and returns a server-recorded receipt
 bound to your campaign, session, repository, branch and created tip. Existing refs are refused.

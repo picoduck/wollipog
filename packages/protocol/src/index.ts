@@ -630,7 +630,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   worktreePatchDelivery: 370,
   campaignWorktreeConfirmation: 372,
   campaignWorktreeRemovalReconciliation: 374,
-  temporaryBranchReceipts: 376,
+  temporaryBranchReceipts: 377,
   progressAwareSessionWorktrees: 113,
   /** v161 carries durable worktree-recovery state and its exact not-delivered receipt. */
   worktreeRecovery: 161,

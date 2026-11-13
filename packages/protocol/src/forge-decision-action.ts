@@ -160,7 +160,7 @@ export interface ForgeDecisionActionResultMessage {
   refusal?: { reason: ForgeDecisionActionRefusalReason; summary: string };
   /** With `published` or `already_published`. */
   issue?: number;
-  /** v376: immutable default-head containment read that preceded create-only publication. */
+  /** v377: immutable default-head containment read that preceded create-only publication. */
   temporaryBranchProof?: { defaultBranch: string; defaultHeadSha: string };
 }
 

@@ -1,6 +1,6 @@
 # Temporary Campaign Branches
 
-Protocol 376 adds `create_temporary_branch`, also available as
+Protocol 377 adds `create_temporary_branch`, also available as
 `wollipog branch create-temporary --request-id <id> --branch <name> --head <sha> --json`.
 Only the authenticated campaign member can publish for itself. The control plane resolves its
 repository from the current campaign Location; a caller cannot supply a repository or a receipt.

@@ -15,7 +15,8 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       else {
         await expect(summary.getByText(/Contained in main at/)).toBeVisible();
         await expect(summary.locator("dd").filter({ hasText: "Campaign Worktree Retirement" })).toBeVisible();
-        await expect(summary.getByText(state === "owner-kept" ? /Owner approval is required/ : /Orchestrator may delete/)).toBeVisible();
+        await expect(summary.getByText(state === "owner-kept" ? /This campaign keeps branch deletion with you/ : /Orchestrator may delete/)).toBeVisible();
+        if (state === "owner-kept") await expect(page.getByRole("heading", { name: "Owner Decision: Delete Temporary Branch", exact: true })).toBeVisible();
       }
       await expect(page.getByText("Request Details", { exact: true })).toBeVisible();
       if (viewport.width === 390) await expect(page.getByRole("navigation", { name: "Primary Navigation" })).toBeVisible();

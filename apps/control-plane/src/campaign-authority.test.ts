@@ -199,6 +199,27 @@ test("temporary deletion delegates only the exact campaign member's server recei
   } finally { h.db.close(); }
 });
 
+test("a valid temporary receipt under Custom keeps an explicit Owner Decision title (#4535)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const receipt = { id: "tbr_owner", campaignId: "root", sessionId: "child", repository: "picoduck/wollipog",
+      branch: "temporary/owner-check", headSha: "a".repeat(40), createdAt: 1 };
+    h.db.beginTemporaryBranchCreation(receipt, "owner-creation");
+    h.db.finishTemporaryBranchCreation(receipt.id, true, { defaultBranch: "main", defaultHeadSha: "c".repeat(40) });
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+    const gate = h.svc.createWorkflowDecision("child", { requestId: "owner-delete", resourceKey: "owner-delete",
+      resourceSnapshot: { category: "merged_branch_deletion", merged: false, repository: receipt.repository, branch: receipt.branch,
+        headSha: receipt.headSha, temporaryReceiptId: receipt.id, dependentPullRequests: { checkedAt: 1, open: [] } } });
+    assert.ok(gate.ok, gate.error ?? "owner gate failed");
+    assert.equal(gate.data!.authority, "human");
+    const view = h.svc.descendantRequests("root", () => true, "human");
+    assert.ok(view.ok);
+    assert.equal(view.data!.requests.find((item) => item.request.workflowDecision?.occurrenceId === gate.data!.occurrenceId)?.request.title,
+      "Owner Decision: Delete Temporary Branch");
+  } finally { h.db.close(); }
+});
+
 test("#4062 a Full Control merge is the Orchestrator's only while every issue it closes is in scope, and is never assumed to close nothing", () => {
   const h = harness();
   try {

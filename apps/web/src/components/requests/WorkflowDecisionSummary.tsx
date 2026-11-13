@@ -148,7 +148,7 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
           <div><dt>Deletion Check</dt><dd>{snapshot.creation
             ? authority === "orchestrator"
               ? "After approval, the Orchestrator may delete this branch at the exact created tip, with no open head or base pull requests."
-              : "Owner approval is required. The campaign can then delete only the exact created tip, with no open head or base pull requests."
+              : "This campaign keeps branch deletion with you. The Orchestrator cannot approve deletion, even with a creation receipt."
             : "No matching creation receipt exists. The Orchestrator cannot delete this branch; it stays the owner's decision."}</dd></div>
         </> : <div><dt>Merge Commit</dt><dd><code>{snapshot.mergeCommitSha.slice(0, 12)}</code></dd></div>}
       </dl>;

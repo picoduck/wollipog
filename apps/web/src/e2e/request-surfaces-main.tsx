@@ -367,7 +367,7 @@ function temporaryBranchSession(): SessionView {
         defaultHeadSha: "ccd213ef702537b220d3073779475498759481c4", checkedAt: Date.parse("2026-11-13T08:00:00Z") } }),
     dependentPullRequests: { checkedAt: 1, open: [] } };
   return { ...base, title: "Temporary Branch Cleanup", pendingApproval: { ...base.pendingApproval!,
-    title: "Delete Temporary Branch", context: { input: JSON.stringify(snapshot) },
+    title: query.get("owner") === "1" ? "Owner Decision: Delete Temporary Branch" : "Delete Temporary Branch", context: { input: JSON.stringify(snapshot) },
     workflowDecision: { ...base.pendingApproval!.workflowDecision!, category: "merged_branch_deletion",
       resourceSnapshot: snapshot, authority: query.get("missing") === "1" || query.get("owner") === "1" ? "human" : "orchestrator" } } };
 }

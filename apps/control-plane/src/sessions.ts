@@ -18510,7 +18510,10 @@ export class SessionsService {
       occurrenceId: decision.occurrenceId,
       // Clients present an Owner Question as a question card (`presentOwnerQuestionRequest`); an
       // older client still shows this card with its options.
-      title: isChildQuestionSnapshot(snapshot) ? "Question" : isOwnerQuestionSnapshot(snapshot) ? "Owner Question" : categoryTitle[decision.category],
+      title: isChildQuestionSnapshot(snapshot) ? "Question" : isOwnerQuestionSnapshot(snapshot) ? "Owner Question"
+        : snapshot.category === "merged_branch_deletion" && snapshot.merged === false
+          ? snapshot.creation && decision.authority === "human" ? "Owner Decision: Delete Temporary Branch" : "Delete Temporary Branch"
+          : categoryTitle[decision.category],
       options,
       kind: "workflow_decision",
       // Full Control root decisions with human-owned proof gaps also wait without parking the

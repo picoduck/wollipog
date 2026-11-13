@@ -27,7 +27,8 @@ test("temporary deletion shows its exact tip and receipt without claiming a merg
   assert.match(rendered, /no open head or base pull requests/u);
   assert.match(rendered, /Orchestrator may delete/u);
   const ownerKept = text(snapshot, undefined, "human");
-  assert.match(ownerKept, /Owner approval is required/u);
+  assert.match(ownerKept, /This campaign keeps branch deletion with you/u);
+  assert.match(ownerKept, /Orchestrator cannot approve deletion/u);
   assert.doesNotMatch(ownerKept, /Orchestrator may delete/u);
   assert.doesNotMatch(rendered, /Merge Commit/u);
   const unknown = text({ ...snapshot, temporaryReceiptId: undefined, creation: undefined });
