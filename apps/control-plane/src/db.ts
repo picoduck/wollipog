@@ -6606,9 +6606,10 @@ export class ControlPlaneDb {
     const increase = this.scopeApprovalIncrease(sessionId, decision.resourceSnapshot);
     const scopeDecisionDetails = decision.resourceSnapshot.affectedDecisions.flatMap((occurrenceId) => {
       const d = this.workflowDecisionByOccurrence(occurrenceId);
-      // A settled or missing occurrence is not a pending approval. The client already has an
-      // unavailable-details fallback prompting a refresh instead of inventing its state.
-      if (!d || d.status !== "pending" && d.status !== "approved") return [];
+      // Keep readable settled occurrences: refreshing cannot make them live again.
+      if (!d) return [];
+      const settledOutcome = d.status !== "pending" && d.status !== "approved"
+        ? d.withdrawal ? "withdrawn" as const : d.status : undefined;
       const s = d?.resourceSnapshot;
       const resource = s?.category === "pr_merge" ? `${s.repository}#${s.pullRequest} at ${s.headSha.slice(0, 7)}`
         : s?.category === "follow_up_issue_publication" ? `${s.repository}: ${s.sanitizedTitle}`
@@ -6616,7 +6617,8 @@ export class ControlPlaneDb {
         : s && s.category !== "campaign_issue_scope" ? ownerDecisionSummary(s) : "Unavailable Resource";
       return [{ occurrenceId, category: d.category, resource,
         approval: d.status === "approved" ? d.authority : "pending" as const,
-        armed: d.actionAdmission?.kind === "pr_merge_enqueue" }];
+        armed: d.actionAdmission?.kind === "pr_merge_enqueue",
+        ...(settledOutcome ? { settledOutcome } : {}) }];
     });
     return { ...stored, ...(increase ? { scopeMaxIssuesIncrease: increase } : {}), scopeDecisionDetails };
   }

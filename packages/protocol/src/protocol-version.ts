@@ -1490,6 +1490,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 379: Expose viewer-specific campaign question classification permission (#4548).
   379,
   // v380 slot
+  // 380: scope-card settled decision details; older dashboards retain unavailable-detail rows.
+  380,
   // v381 slot
   // v382 slot
   // v383 slot

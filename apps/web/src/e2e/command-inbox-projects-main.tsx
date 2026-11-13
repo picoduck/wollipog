@@ -354,7 +354,8 @@ function initialModel(): FixtureModel {
     root.pendingApproval = {
       requestId: "scope-review", occurrenceId: "scope-review", kind: "workflow_decision", title: "Campaign Scope Approval",
       scopeDecisionDetails: [
-        { occurrenceId: "workflow_merge_4481", category: "pr_merge", resource: "picoduck/wollipog#4481 at ce64f53", approval: "orchestrator", armed: true },
+        { occurrenceId: "workflow_merge_4481", category: "pr_merge", resource: "picoduck/wollipog#4481 at ce64f53", approval: "orchestrator", armed: true,
+          ...(FIXTURE_QUERY.has("settled") ? { settledOutcome: "consumed" as const } : {}) },
         { occurrenceId: "workflow_publish_retry", category: "follow_up_issue_publication", resource: "picoduck/wollipog: Preserve Merge Approval History", approval: "pending", armed: false },
       ],
       options: [{ optionId: "approve", name: "Approve Scope", kind: "allow_once" }, { optionId: "deny", name: "Deny Scope", kind: "reject_once" }],

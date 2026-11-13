@@ -53,9 +53,11 @@ for (const remints of [true, false]) test(`scope additions preserve only indepen
     assert.equal(details()?.find((d) => d.occurrenceId === "pending")?.approval, "pending");
     for (const settled of ["denied", "revoked", "consumed"]) {
       h.db.raw().prepare("UPDATE workflow_decisions SET status=? WHERE occurrence_id='pending'").run(settled);
-      assert.equal(details()?.some((d) => d.occurrenceId === "pending"), false, `${settled} is never labeled pending`);
+      assert.equal(details()?.find((d) => d.occurrenceId === "pending")?.settledOutcome, settled);
     }
-    h.db.raw().prepare("UPDATE workflow_decisions SET status='pending' WHERE occurrence_id='pending'").run();
+    h.db.raw().prepare("UPDATE workflow_decisions SET withdrawal=? WHERE occurrence_id='pending'").run(JSON.stringify({ bySessionId: "child", reason: "No longer needed" }));
+    assert.equal(details()?.find((d) => d.occurrenceId === "pending")?.settledOutcome, "withdrawn");
+    h.db.raw().prepare("UPDATE workflow_decisions SET status='pending', withdrawal=NULL WHERE occurrence_id='pending'").run();
     if (remints) assert.ok(h.approve(proposal).ok);
     else {
       // Exercise storage's defense with history no scope approval explains. The service normally

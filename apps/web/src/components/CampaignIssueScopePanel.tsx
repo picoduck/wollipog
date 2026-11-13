@@ -58,8 +58,10 @@ export function CampaignIssueScopeSummary({ snapshot, derivedIncrease, decisionD
           const d = decisionDetails?.find((candidate) => candidate.occurrenceId === id);
           return <li key={id}>{d ? <>
             {d.category === "pr_merge" ? "Merge" : d.category === "follow_up_issue_publication" ? "Publication" : d.category.replaceAll("_", " ")}: {d.resource}
+            {d.settledOutcome ? <> — <strong>Already Settled</strong> ({d.settledOutcome}); approval no longer affects it</> : <>
             {" — "}{d.approval === "pending" ? "Pending approval" : d.approval === "human" ? "Approved by the owner" : "Approved by the Orchestrator"}
             {d.armed ? "; armed for the merge queue" : "; not armed"}
+            </>}
           </> : "Decision details unavailable; refresh before approving."}</li>;
         })}</ul>
         <details><summary>Raw Decision IDs</summary><p>{snapshot.affectedDecisions.join(", ")}</p></details>

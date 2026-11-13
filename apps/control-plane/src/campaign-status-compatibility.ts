@@ -1,4 +1,5 @@
 import { RUNNER_CAPABILITY_MIN_PROTOCOL, type OrchestratorCampaignStatus } from "@wollipog/protocol";
+import { projectScopeDecisionDetailsForUi } from "./scope-decision-details-compatibility.js";
 
 /** What a dashboard older than `campaignHandoffs` reads for `complete_with_handoffs` (#4070). It
  * has no label or status meta for the new value, and it must never read it as active work: the
@@ -43,6 +44,8 @@ function projectionLike(value: Record<string, unknown>): boolean {
  * and agent principals receive the payload unchanged; so does every payload that has no such status.
  */
 export function projectCampaignStatusForUi<T>(payload: T, uiProtocolVersion: number | null | undefined, depth = 0): T {
+  // This delivery boundary is shared by REST responses, snapshots and live session upserts.
+  if (depth === 0) payload = projectScopeDecisionDetailsForUi(payload, uiProtocolVersion);
   if ((uiProtocolVersion ?? 0) >= RUNNER_CAPABILITY_MIN_PROTOCOL.campaignPause || depth > 3 ||
       payload == null || typeof payload !== "object") return payload;
   if (Array.isArray(payload)) {
