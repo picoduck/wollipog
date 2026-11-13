@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, pendingRequests,
-  type ControlPlaneToRunner, type RunnerMetadata, type WorkflowDecisionView } from "@wollipog/protocol";
+  type ControlPlaneToRunner, type RunnerMetadata, type SessionSnapshot, type WorkflowDecisionView } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
@@ -11,7 +11,7 @@ import { fakeScreenRuntime } from "./credential-screen-test-fixture.js";
 
 /** Owner decisions (#4064): a Full Control root hands a decision its owner kept to that owner as a
  * typed request only a person can answer, without parking the root. */
-function harness(options: { full?: boolean; runnerProtocol?: number } = {}) {
+function harness(options: { full?: boolean; runnerProtocol?: number; child?: boolean } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
   const principal: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
@@ -22,7 +22,7 @@ function harness(options: { full?: boolean; runnerProtocol?: number } = {}) {
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
   policy.issueScope = { repository: "team/repo", issueNumbers: [100], revision: 1, authorizedByUserId: principal.userId, authorizedAt: 1 };
   policy.issueNumbers = [100];
-  for (const id of ["root", "child"]) {
+  for (const id of options.child === false ? ["root"] : ["root", "child"]) {
     db.createSession({ id, runnerId: "r", workspaceId: "w", agentId: "claude", title: id, useWorktree: false, driver: "claude-code", now: 1, config: {},
       ...(id === "root" ? { role: "orchestrator", orchestratorPolicy: policy, parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } }
         : { parentSessionId: "root" }) });
@@ -305,6 +305,20 @@ for (const kind of ["approval", "question"] as const) test(`pending root owner $
     assert.ok(asked.ok && asked.data, asked.error ?? "owner request created");
     const at = Date.now();
     h.svc.onSessionStatus("root", "idle");
+    const snapshot = (id: string): SessionSnapshot => ({ id, workspaceId: "w", agentId: "claude", title: id,
+      driver: "claude-code", status: "idle", config: {}, costUsd: 0, tokensIn: 0, tokensOut: 0,
+      useWorktree: false, worktreePath: null, preview: null, pendingApproval: null, seq: 0,
+      historyEpoch: 0, createdAt: 1, updatedAt: Date.now() });
+    for (const update of [
+      () => h.db.updateSessionFromSnapshot("root", snapshot("root"), Date.now()),
+      () => h.svc.applySessionRuntimeUpdate("r", snapshot("root")),
+      () => h.svc.hydrateRunnerSessions("r", [snapshot("root"), snapshot("child")]),
+    ]) {
+      update();
+      assert.equal(h.db.getSession("root")!.status, "idle", "idle snapshots must not park an async owner card");
+      assert.equal(pendingRequests(h.db.getSession("root")!.pendingApproval)[0]!.occurrenceId, asked.data.occurrenceId,
+        "snapshots retain the exact CP-owned card even though the runner does not know it");
+    }
     const child = h.merge("child-merge");
     assert.ok(child.ok && child.data, child.error ?? "child request created");
     h.svc.onSessionStatus("child", "idle");
@@ -317,6 +331,10 @@ for (const kind of ["approval", "question"] as const) test(`pending root owner $
       "the idle report must admit a durable continuation while the owner card waits");
     assert.match(continuation.command.text, /request_actionable/u);
     assert.match(continuation.command.text, /child_ready/u);
+    assert.equal(h.db.campaignContinuationAdmission("root").state, "available");
+    assert.notEqual(h.db.campaignProjection("root")!.continuation?.state, "held");
+    assert.ok(h.db.campaignRecovery.projection("root").records.every(record => !record.dispatchFenced),
+      "a pending owner card never fences recovery dispatch");
     assert.ok(h.db.campaignRecovery.projection("root").records.some(record =>
       record.resource.sessionId === "child" && record.state === "dispatched"), "recovery wakes also pass async cards");
     assert.equal(pendingRequests(h.db.getSession("root")!.pendingApproval)[0]!.occurrenceId, asked.data.occurrenceId);
@@ -328,5 +346,22 @@ for (const kind of ["approval", "question"] as const) test(`pending root owner $
     assert.equal(delivered, 1, "one durable answer notification is owed");
     assert.equal(answer().ok, false, "the answer cannot be delivered twice");
     assert.equal(resumes().length, delivered);
+  } finally { h.db.close(); }
+});
+
+test("an Owner Question filed before any child never fences campaign dispatch (#4536)", async () => {
+  const h = harness({ child: false });
+  try {
+    const asked = await h.svc.createOwnerDecision("root", { requestId: "before-children", resourceKey: "before-children",
+      kind: "question", question: "Which design?", options: [] });
+    assert.ok(asked.ok && asked.data, asked.error ?? "Owner Question created");
+    h.svc.onSessionStatus("root", "idle");
+    h.svc.retryDuePrompts(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1);
+    const records = h.db.campaignRecovery.projection("root").records;
+    assert.ok(records.some(record => record.resource.sessionId === "root"), "the pending question is tracked");
+    assert.ok(records.every(record => !record.dispatchFenced), "waiting for the owner is not revoked authority");
+    assert.equal(h.db.campaignContinuationAdmission("root").state, "available");
+    assert.ok(h.db.campaignMayContinueWhileHumanWaiting("root"), "Waiting for You remains informational for delivery");
+    assert.equal(h.db.workflowDecisionByOccurrence(asked.data.occurrenceId)!.status, "pending");
   } finally { h.db.close(); }
 });

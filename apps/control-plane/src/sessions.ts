@@ -17040,8 +17040,7 @@ export class SessionsService {
    * projection. A withdrawal anyone but the campaign's Orchestrator made still reaches it, as a
    * `request_resolved` that names the withdrawal (#3917); its own wakes nobody, as with #3083. */
   private recordApprovedAuthorityRemovalContinuation(decision: WorkflowDecisionView, callerSessionId: string, now: number): void {
-    const requester = decision.sessionId === decision.controllingSessionId && decision.authority === "human"
-      ? this.db.getSession(decision.sessionId) : null;
+    const requester = this.db.getSession(decision.sessionId);
     if (!requester || (!requester.parentSessionId && sessionRole(requester) !== "orchestrator")) return;
     try {
       const campaign = this.db.campaignAncestryRoot(requester.id);
@@ -18255,7 +18254,8 @@ export class SessionsService {
 
   private workflowDecisionApproval(decision: WorkflowDecisionView): PendingApproval {
     const snapshot = decision.resourceSnapshot;
-    const requester = this.db.getSession(decision.sessionId);
+    const requester = decision.sessionId === decision.controllingSessionId && decision.authority === "human"
+      ? this.db.getSession(decision.sessionId) : null;
     const categoryTitle: Record<WorkflowDecisionCategory, string> = {
       implementation_question: "Implementation Decision Required",
       pr_merge: "PR Merge Approval Required",

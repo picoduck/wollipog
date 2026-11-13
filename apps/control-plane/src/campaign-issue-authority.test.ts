@@ -5252,6 +5252,11 @@ for (const full of [true, false]) test(`a human-owned root closure ${full ? "all
       subjectSessionId: "child", subjectStatus: "idle", now: at });
     h.svc.retryDuePrompts(at + 30_001);
     assert.equal(h.db.latestCampaignContinuation("root") !== null, full);
+    if (full) {
+      assert.equal(h.db.campaignContinuationAdmission("root").state, "available");
+      assert.notEqual(h.db.campaignProjection("root")!.continuation?.state, "held");
+      assert.ok(h.db.campaignRecovery.projection("root").records.every(record => !record.dispatchFenced));
+    }
     assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "pending");
     assert.equal(h.state.executes, 0, "a continuation grants no closure authority");
   } finally { h.db.close(); }
