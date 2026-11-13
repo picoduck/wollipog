@@ -1,7 +1,8 @@
-import { lstatSync, mkdirSync, realpathSync, type Stats } from "node:fs";
+import { lstatSync, realpathSync, type BigIntStats, type Stats } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isProviderProfileId } from "./provider-profile.js";
+import { runManagedProfileCreationHelper, withLeaseIoOptions, type ProfileCreationComponent, type ProfileCreationReason } from "./provider-home-lease-io.js";
 
 /**
  * Managed provider profile HOMEs (#3239). An account created through Add Account for a control
@@ -11,27 +12,27 @@ import { isProviderProfileId } from "./provider-profile.js";
  * Existing account homes keep their paths.
  */
 export function managedProviderProfileRoot(home = homedir()): string {
+  // Keep the configured spelling: persisted accounts and substitution/retirement guards use it.
   return join(home, ".agent-manager", "profiles");
 }
 
-function errorCode(error: unknown): string | undefined {
-  return (error as NodeJS.ErrnoException | undefined)?.code;
-}
-
-export type ManagedProfileDirectoryComponent = "manager_root" | "profiles_root" | "profile_home";
-export type ManagedProfileDirectoryReason = "symlink" | "not_directory" | "wrong_owner" | "group_or_other_write" | "unavailable";
+export type ManagedProfileDirectoryComponent = ProfileCreationComponent;
+export type ManagedProfileDirectoryReason = Exclude<ProfileCreationReason, "created">;
 
 /** Safe metadata for account setup diagnostics. Never retain a filesystem error as its cause:
  * those errors carry paths. Callers may serialize only this fixed vocabulary. */
 export class ManagedProfileDirectoryError extends Error {
   readonly code = "managed_profile_directory";
-  constructor(readonly component: ManagedProfileDirectoryComponent, readonly reason: ManagedProfileDirectoryReason) {
-    super(reason === "unavailable"
-      ? "The managed provider profile directory could not be created."
+  constructor(readonly component: ManagedProfileDirectoryComponent, readonly reason: ManagedProfileDirectoryReason,
+    readonly failureReason?: ProfileCreationReason) {
+    super(reason === "already_exists" ? "A managed provider profile with this identity already exists."
+      : reason === "may_have_changed" ? "Managed profile directories may have been created. Preserve them and request operator guidance; do not retry automatically."
+      : reason.startsWith("unsupported_") ? "Managed provider profile creation could not be verified on this Machine. Preserve the directories and request operator guidance."
+      : reason === "unavailable" ? "The managed provider profile directory could not be created."
       : "The managed provider profile directory is not a private directory.");
   }
-  toJSON(): { code: string; component: ManagedProfileDirectoryComponent; reason: ManagedProfileDirectoryReason } {
-    return { code: this.code, component: this.component, reason: this.reason };
+  toJSON(): { code: string; component: ManagedProfileDirectoryComponent; reason: ManagedProfileDirectoryReason; failureReason?: ProfileCreationReason } {
+    return { code: this.code, component: this.component, reason: this.reason, ...(this.failureReason ? { failureReason: this.failureReason } : {}) };
   }
 }
 
@@ -49,16 +50,6 @@ function privateDirectory(stat: Stats): boolean {
   return privateDirectoryReason(stat) === undefined;
 }
 
-function ensurePrivateDirectory(path: string, component: ManagedProfileDirectoryComponent): void {
-  try { mkdirSync(path, { mode: 0o700 }); } catch (error) {
-    if (errorCode(error) !== "EEXIST") throw new ManagedProfileDirectoryError(component, "unavailable");
-  }
-  let stat: Stats;
-  try { stat = lstatSync(path); } catch { throw new ManagedProfileDirectoryError(component, "unavailable"); }
-  const reason = privateDirectoryReason(stat);
-  if (reason) throw new ManagedProfileDirectoryError(component, reason);
-}
-
 /** The two components Wollipog owns, `.agent-manager` and `profiles`, are private real
  * directories; the SSH account's home above them is the operator's. */
 function verifiedRoot(root: string): boolean {
@@ -72,24 +63,39 @@ function verifiedRoot(root: string): boolean {
 /**
  * Create the HOME of a new managed profile: `.agent-manager` and `profiles` are created 0700 when
  * missing and must be private real directories, and `<profileId>` itself must not exist yet. POSIX
- * only: profile markers cannot be verified on Windows. Returns the HOME path.
+ * only after a capability-checked, descriptor-relative Linux/Darwin helper operation.
+ * `root` is trusted runner context (production constructs it from homedir),
+ * never a wire/CLI path: even in synthetic contexts it must have the exact fixed layout.
+ * Options carry the trusted runner staging directory; `create` is an in-process test seam.
  */
-export function createManagedProviderProfileHome(root: string, profileId: string, platform: NodeJS.Platform = process.platform): string {
-  if (platform === "win32") throw new Error("Managed provider profiles are not supported on this Machine.");
-  if (!isAbsolute(root) || !isProviderProfileId(profileId)) throw new Error("The managed provider profile path is invalid.");
-  ensurePrivateDirectory(dirname(root), "manager_root");
-  ensurePrivateDirectory(root, "profiles_root");
-  const home = join(root, profileId);
-  try { mkdirSync(home, { mode: 0o700 }); } catch (error) {
-    throw new Error(errorCode(error) === "EEXIST"
-      ? "A managed provider profile with this identity already exists."
-      : "The managed provider profile directory could not be created.");
-  }
-  let stat: Stats;
-  try { stat = lstatSync(home); } catch { throw new ManagedProfileDirectoryError("profile_home", "unavailable"); }
-  const reason = privateDirectoryReason(stat);
-  if (reason) throw new ManagedProfileDirectoryError("profile_home", reason);
-  return home;
+export function createManagedProviderProfileHome(root: string, profileId: string, platform: NodeJS.Platform = process.platform,
+  options: { helperDataDir?: string; create?: typeof runManagedProfileCreationHelper } = {}): string {
+  if (platform !== "linux" && platform !== "darwin") throw new ManagedProfileDirectoryError("profile_home", "unsupported_platform");
+  const osHome = dirname(dirname(root));
+  if (!isAbsolute(root) || root !== resolve(root) || root !== managedProviderProfileRoot(osHome) || !isProviderProfileId(profileId))
+    throw new ManagedProfileDirectoryError("profile_home", "unsupported_layout");
+  // Canonicalize ONLY the trusted OS-home context for native no-follow traversal. Never resolve
+  // owned components or rewrite persisted account paths, which would change their classification.
+  let canonicalOsHome: string;
+  let homeIdentity: BigIntStats;
+  try { canonicalOsHome = realpathSync(osHome); homeIdentity = lstatSync(canonicalOsHome, { bigint: true }); }
+  catch { throw new ManagedProfileDirectoryError("os_home", "unavailable"); }
+  if (!homeIdentity.isDirectory() || homeIdentity.isSymbolicLink()) throw new ManagedProfileDirectoryError("os_home", "identity_changed");
+  const result = withLeaseIoOptions({ ...(options.helperDataDir === undefined ? {} : { helperDataDir: options.helperDataDir }),
+    providerHome: join(managedProviderProfileRoot(canonicalOsHome), profileId) },
+  () => (options.create ?? runManagedProfileCreationHelper)(canonicalOsHome, profileId));
+  if (!result.ok) throw new ManagedProfileDirectoryError(result.component, result.reason === "created" ? "may_have_changed" : result.reason, result.failureReason);
+  // A concurrent alias rename cannot claim a clean refusal: the canonical target may now hold
+  // new directories. Keep the primary helper failure above if one was reported.
+  let currentOsHome: string;
+  let currentIdentity: BigIntStats;
+  try { currentOsHome = realpathSync(osHome); currentIdentity = lstatSync(currentOsHome, { bigint: true }); }
+  catch { throw new ManagedProfileDirectoryError("os_home", "may_have_changed", "unavailable"); }
+  if (currentOsHome !== canonicalOsHome || !currentIdentity.isDirectory() || currentIdentity.isSymbolicLink() ||
+      currentIdentity.dev !== homeIdentity.dev || currentIdentity.ino !== homeIdentity.ino ||
+      currentIdentity.uid !== homeIdentity.uid || currentIdentity.mode !== homeIdentity.mode)
+    throw new ManagedProfileDirectoryError("os_home", "may_have_changed", "identity_changed");
+  return join(root, profileId);
 }
 
 /**

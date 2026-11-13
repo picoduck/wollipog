@@ -16,6 +16,7 @@ import { PROVIDER_PROFILE_DIRECTORY, PROVIDER_PROFILE_MARKER, readProviderProfil
  * `.agent-manager` is not a credential change, so the snapshots below exclude it.
  */
 const posixOnly = { skip: process.platform === "win32" };
+const managedCreationOnly = { skip: process.platform === "win32" };
 const INSTANCE = "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
 const GRANT = "2a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
 const PROFILE = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
@@ -65,7 +66,7 @@ function refused(code: string) {
   return (error: unknown) => error instanceof ProviderHomeLeaseError && error.code === code;
 }
 
-test("an API-key sign-in is copied into a fresh profile, and only its key", posixOnly, async (t) => {
+test("an API-key sign-in is copied into a fresh profile, and only its key", managedCreationOnly, async (t) => {
   const m = machine(t);
   const source = codexDirectory(join(m.user, ".codex"), {
     "auth.json": API_KEY_RECORD, "config.toml": "model = \"gpt-5\"\n", "history.jsonl": "{\"session\":\"transcript\"}\n",
@@ -91,7 +92,7 @@ test("an API-key sign-in is copied into a fresh profile, and only its key", posi
   assert.equal(await m.leases.releaseHome(m.user), true);
 });
 
-test("a configured account HOME is its own credential directory", posixOnly, async (t) => {
+test("a configured account HOME is its own credential directory", managedCreationOnly, async (t) => {
   const m = machine(t);
   const account = codexDirectory(join(m.root, "accounts", "work"), { "auth.json": API_KEY_RECORD });
   await m.leases.importCodexCredential(account, "codex_home", m.profiles, PROFILE, GRANT);
@@ -136,7 +137,7 @@ test("an unverifiable or unsupported source is refused and both HOMEs stay uncha
   assert.equal(existsSync(missing), false);
 });
 
-test("a source this runner holds, even by its own reference, is refused rather than borrowed", posixOnly, async (t) => {
+test("a source this runner holds, even by its own reference, is refused rather than borrowed", managedCreationOnly, async (t) => {
   const m = machine(t);
   const home = codexDirectory(join(m.root, "held"), { "auth.json": API_KEY_RECORD });
   const reference = await m.leases.acquireHomeReference(home, "codex");
