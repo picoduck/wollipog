@@ -4289,7 +4289,7 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/retire", async (req
     return reply.code(400).send({ error: "invalid sessionId" });
   }
   if (body?.sessionId !== undefined && body.sessionId !== id && principal.orchestrator !== true) {
-    return reply.code(403).send({ error: "only an Orchestrator can withdraw another session's workflow decision" });
+    return reply.code(403).send({ error: "only an Orchestrator can retire another session's workflow decision" });
   }
   return respond(reply, await svc.retireWorkflowDecision(
     id,
