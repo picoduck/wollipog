@@ -2610,3 +2610,23 @@ rolling back to a control plane below protocol 335 against the same database, le
 settle (or cancel them and wait for terminal states). An older binary cannot recreate its unique
 index while multiple reviews of one requester remain active. Restoring the pre-upgrade database
 backup is the alternative; do not restart the hosting stack from a hosted agent session.
+
+
+### Retiring an Ejected Armed Merge
+
+When `verify_campaign_child` names an armed, unmerged `pr_merge`, use
+`retire_workflow_decision` (`wollipog decision retire <occurrence> --reason <reason>`).
+The requester may retire its own approval; its controlling Orchestrator may pass
+`--session <child>` for an occurrence it owns. Protocol 369 is required. The server asks the
+child's runner for a fresh read through its existing GitHub login. Only an open pull request
+outside the queue at the approved head qualifies. Merged, closed, queued, moved or unreadable
+pull requests refuse without changing the decision. GitLab retirement is not supported yet.
+
+The public status becomes `retired`, with the observer, time, reason and exact forge evidence.
+Storage uses the existing revoked terminal state plus retirement provenance so older SQL readers
+also exclude it from live approvals. The original admission remains historical evidence: no
+consume, execution or provider permission route can use it. A new enqueue needs a fresh approval.
+If that exact head later merges, the requester can reconcile the retired occurrence using the
+original snapshot; the server records the forge-proven merge without replaying any command.
+Ordinary withdrawal retains its refusal of armed actions. This does not change request-time
+supersession (#4192) or reconciliation of a human-run enqueue (#3492).

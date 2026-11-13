@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GhOutcome } from "./campaign-forge-status.js";
-import { executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge } from "./forge-decision-action.js";
+import { executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
 
 const HEAD = "a".repeat(40);
 const MERGE = "c".repeat(40);
@@ -155,4 +155,23 @@ test("a reconciliation read reports the merge and never enqueues (#4067)", async
   for (const { calls } of [merged, otherHead, open, queued]) {
     assert.deepEqual(calls.map((args) => args[0]), ["api"], "one read, and no gh pr merge");
   }
+});
+
+
+test("retirement observes only an open unqueued approved head and never writes (#4533)", async () => {
+  const action = { ...enqueue, kind: "pr_merge_retirement_observe" as const };
+  for (const [pr, accepted] of [
+    [{}, true], [{ state: "MERGED" }, false], [{ state: "CLOSED" }, false],
+    [{ mergeQueueEntry: { state: "QUEUED" } }, false], [{ headRefOid: "f".repeat(40) }, false],
+    [{ mergeQueueEntry: undefined }, false],
+  ] as const) {
+    const calls: string[][] = [];
+    const result = await observePullRequestRetirement(action, async args => {
+      calls.push(args); return ok(pullRequest(pr));
+    });
+    assert.equal(result.outcome === "open_unqueued", accepted, JSON.stringify(pr));
+    assert.deepEqual(calls.map(args => args[0]), ["api"]);
+  }
+  assert.equal((await observePullRequestRetirement(action, async () => failed("not authenticated", 4))).outcome, "refused");
+  assert.equal((await observePullRequestRetirement(action, async () => ok("malformed"))).outcome, "refused");
 });

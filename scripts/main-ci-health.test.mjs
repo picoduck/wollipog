@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import test from "node:test";
 import {
-  ALERT_LABEL, ALERT_TITLE, alertBody, budgetApi, githubApi, reconcile as reconcileActual, REQUEST_MS, targetFromEvent,
+  main, ALERT_LABEL, ALERT_TITLE, alertBody, budgetApi, githubApi, reconcile as reconcileActual, REQUEST_MS, targetFromEvent,
   API_BUDGET, API_MAX_BUDGET, API_WRITE_RESERVE, API_REMAINING_FLOOR, RECOVERY_API_BUDGET,
 } from "./main-ci-health.mjs";
 
@@ -121,7 +121,7 @@ test("the alert names the run, the commit, the failing jobs and what to do, and 
 });
 
 test("opening an alert ensures the label, creates one issue and mentions the head commit's author", async () => {
-  const { api, mutations } = fakeApi();
+  const { api, mutations } = fakeApi({});
   const log = [];
   assert.equal(await reconcile({ repository }, { api, log: (line) => log.push(JSON.parse(line)) }), "opened");
   assert.deepEqual(mutations.map(({ method, path }) => `${method} ${path}`), [
@@ -338,4 +338,30 @@ test("the workflow observes only main completions and scheduled/manual recovery,
   assert.match(text, /workflow_run.event == 'push'/);
   assert.match(text, /workflow_run.head_branch == 'main'/);
   assert.match(text, /node scripts\/main-ci-health.mjs/);
+});
+
+
+test("report falls back to gh auth read-only and never logs its token (#4533)", async () => {
+  for (const configured of [undefined, "explicit-secret"]) {
+    let reads = 0;
+    const output = [];
+    const { api, mutations } = fakeApi({});
+    await main(["report"], { env: { GITHUB_REPOSITORY: repository, GITHUB_REF: "refs/heads/main",
+      ...(configured ? { GITHUB_TOKEN: configured } : {}) }, api,
+      readGhToken: () => { reads++; return "gh-secret"; }, log: line => output.push(line), error: line => output.push(line) });
+    assert.equal(reads, configured ? 0 : 1);
+    assert.deepEqual(mutations, []);
+    assert.ok(output.length > 0);
+    assert.ok(output.every(line => !/gh-secret|explicit-secret/.test(line)));
+  }
+  for (const mode of ["report", "reconcile"]) {
+    const output = [];
+    let reads = 0;
+    const result = await main([mode], { env: { GITHUB_REPOSITORY: repository, GITHUB_REF: "refs/heads/main" },
+      readGhToken: () => { reads++; throw new Error("secret process output"); },
+      error: line => output.push(line), log: line => output.push(line) });
+    assert.equal(reads, mode === "report" ? 1 : 0);
+    assert.equal(result, 1);
+    assert.ok(output.every(line => !line.includes("secret process output")));
+  }
 });

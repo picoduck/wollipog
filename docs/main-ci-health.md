@@ -101,7 +101,10 @@ before an admission or release decision:
 GITHUB_REF=refs/heads/main node scripts/main-ci-health.mjs report
 ```
 
-Supply `GITHUB_REPOSITORY` and `GITHUB_TOKEN` through the environment. `report` mutates no ref,
+Supply `GITHUB_REPOSITORY` through the environment. For read-only `report`, an unset
+`GITHUB_TOKEN` falls back to `gh auth token --hostname github.com` using the existing login.
+The token stays in process memory and is never logged. Reconciliation still requires an explicit
+`GITHUB_TOKEN`. `report` mutates no ref,
 issue, check or run; an unknown result prints JSON and exits 1. Reconciliation also writes the
 JSON to `MAIN_CI_HEALTH_OUTPUT`, retains a workflow artifact for 30 days, and writes a step summary.
 Artifacts are historical observations, never replacements for live forge revalidation. The

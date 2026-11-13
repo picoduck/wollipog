@@ -2582,6 +2582,7 @@ test("the controlling Orchestrator withdraws an approved, unconsumed grant so it
     });
     const blocked = verify();
     assert.equal(blocked.status, 409);
+    assert.match(blocked.error!, /retire_workflow_decision/u);
     assert.ok(blocked.error?.includes(`${stale.occurrenceId} (pr_merge, approved)`), blocked.error);
 
     const unrelated = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
@@ -32526,4 +32527,81 @@ test("GitLab campaign scope and issue closure require a v249 runner and then rea
     assert.equal(snapshot.reason, "not_planned");
     assert.deepEqual(snapshot.openPullRequests.map((mr) => mr.url), [`${web}/-/merge_requests/7`]);
   } finally { db.close(); }
+});
+
+test("armed merge retirement removes authority, preserves evidence and reconciles a later merge (#4533)", async () => {
+  for (const callerKind of ["child", "root"] as const) {
+    const { db, svc, root, child, hub, requestMerge, approve } = withdrawalCampaign();
+    try {
+      const armed = requestMerge(4533);
+      approve(armed.occurrenceId);
+      const snapshot = armed.resourceSnapshot;
+      assert.equal(snapshot.category, "pr_merge");
+      if (snapshot.category !== "pr_merge") throw new Error("snapshot");
+      const command = canonicalPrMergeEnqueueCommand(snapshot);
+      const commandDigest = createHash("sha256").update(JSON.stringify({ kind: "pr_merge_enqueue", command })).digest("hex");
+      db.raw().prepare(`UPDATE workflow_decisions SET action_kind='pr_merge_enqueue', action_command=?,
+        action_command_digest=?, action_armed_at=? WHERE occurrence_id=?`)
+        .run(command, commandDigest, Date.now(), armed.occurrenceId);
+      const caller = callerKind === "child" ? child : root;
+      const request = { reason: "Ejected from queue", ...(callerKind === "root" ? { sessionId: child.id } : {}) };
+      hub.requestHandler = () => { throw new Error("offline"); };
+      assert.equal((await svc.retireWorkflowDecision(caller.id, armed.occurrenceId, request)).status, 409);
+      assert.equal(db.workflowDecisionByOccurrence(armed.occurrenceId)?.status, "approved");
+      hub.requestHandler = (message) => {
+        if (message.type !== "forge_decision_action") throw new Error("unexpected request");
+        assert.equal(message.action.kind, "pr_merge_retirement_observe");
+        return { type: "forge_decision_action_result", requestId: message.requestId,
+          sessionId: child.id, occurrenceId: armed.occurrenceId, outcome: "refused" };
+      };
+      assert.equal((await svc.retireWorkflowDecision(caller.id, armed.occurrenceId, request)).status, 409);
+      assert.equal(db.workflowDecisionByOccurrence(armed.occurrenceId)?.status, "approved");
+      hub.requestHandler = (message) => {
+        if (message.type !== "forge_decision_action") throw new Error("unexpected request");
+        return { type: "forge_decision_action_result", requestId: message.requestId,
+          sessionId: child.id, occurrenceId: armed.occurrenceId, outcome: "open_unqueued" };
+      };
+      assert.equal((await svc.retireWorkflowDecision(caller.id, armed.occurrenceId, request, () => false)).status, 404);
+      const result = await svc.retireWorkflowDecision(caller.id, armed.occurrenceId, request);
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "retired");
+      const resolutionEvents = db.campaignContinuationEvents(root.id).filter(event =>
+        event.kind === "request_resolved" && event.occurrenceId === campaignRequestToken("typed", child.id, armed.occurrenceId));
+      assert.equal(resolutionEvents.filter(event => event.eventId.startsWith("request-retired:")).length,
+        callerKind === "child" ? 1 : 0, "child retirement wakes its controller; controller retirement does not wake itself");
+      assert.equal(result.data?.retirement?.headSha, snapshot.headSha);
+      assert.equal(result.data?.retirement?.queued, false);
+      assert.equal(result.data?.actionAdmission?.command, command);
+      assert.equal(db.unconsumedWorkflowDecisionsForSession(child.id).length, 0);
+      assert.equal((await svc.consumeWorkflowDecision(child.id, armed.occurrenceId,
+        { resourceSnapshot: snapshot, action: { kind: "pr_merge_enqueue", command } })).ok, false);
+      if (callerKind === "root") {
+        const newer = svc.createWorkflowDecision(child.id, { requestId: "retry-4533", resourceKey: armed.resourceKey,
+          resourceSnapshot: snapshot });
+        assert.ok(newer.ok && newer.data, newer.error);
+        approve(newer.data.occurrenceId);
+        db.raw().prepare(`UPDATE workflow_decisions SET action_kind='pr_merge_enqueue', action_command=?,
+          action_command_digest=?, action_armed_at=? WHERE occurrence_id=?`)
+          .run(command, commandDigest, Date.now(), newer.data.occurrenceId);
+        const settled = db.consumeReconciledWorkflowDecisionActionWithReceipt(child.id, newer.data.occurrenceId,
+          commandDigest!, "e".repeat(64), Date.now(), { forgeAttested: true });
+        assert.ok(settled);
+        const historical = db.workflowDecisionByOccurrence(armed.occurrenceId)!;
+        assert.equal(historical.status, "superseded");
+        assert.equal(historical.supersededBy, newer.data.occurrenceId);
+        assert.ok(historical.retirement);
+        continue;
+      }
+      hub.requestHandler = (message) => {
+        if (message.type !== "forge_decision_action") throw new Error("unexpected request");
+        assert.equal(message.action.kind, "pr_merge_observe");
+        return { type: "forge_decision_action_result", requestId: message.requestId,
+          sessionId: child.id, occurrenceId: armed.occurrenceId, outcome: "already_merged" };
+      };
+      const reconciled = await svc.reconcileWorkflowDecision(child.id, armed.occurrenceId, { resourceSnapshot: snapshot });
+      assert.ok(reconciled.ok, reconciled.error);
+      assert.equal(reconciled.data?.status, "consumed");
+      assert.ok(reconciled.data?.retirement, "retirement evidence survives merge settlement");
+    } finally { db.close(); }
+  }
 });

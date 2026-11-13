@@ -4283,6 +4283,29 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/withdraw", async (r
   ));
 });
 
+app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/retire", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  const body = req.body as Partial<WithdrawWorkflowDecisionRequest> | null;
+  if (body?.sessionId !== undefined && !validParentControlCoordinate(body.sessionId)) {
+    return reply.code(400).send({ error: "invalid sessionId" });
+  }
+  if (body?.sessionId !== undefined && body.sessionId !== id && principal.orchestrator !== true) {
+    return reply.code(403).send({ error: "only an Orchestrator can retire another session's workflow decision" });
+  }
+  return respond(reply, await svc.retireWorkflowDecision(
+    id,
+    occurrenceId,
+    { reason: body?.reason as string, ...(body?.sessionId !== undefined ? { sessionId: body.sessionId } : {}) },
+    (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
 // #4064: a Full Control root's question for its campaign's owner. `:id` is the caller's own
 // credential session; the service checks that it is the campaign's root and that only a person
 // can answer.

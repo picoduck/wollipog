@@ -97,10 +97,10 @@ test("production composition inventory is exhaustive; unresolved gaps cannot cou
   }
   const group7Routes = new Set<string>([...ASSISTANT_CAMPAIGN_MANAGEMENT.map(([, route]) => route), ...ASSISTANT_CAMPAIGN_HUMAN_ROUTES, ...CAMPAIGN_SESSION_PROTOCOL_ROUTES]);
   const group7 = Object.entries(manifest).filter(([route]) => group7Routes.has(route));
-  assert.equal(group7.length, 58);
+  assert.equal(group7.length, 59);
   assert.equal(group7.filter(([, entry]) => "tools" in entry).length, 18);
   assert.equal(group7.filter(([, entry]) => "exclusion" in entry && entry.exclusion === "human_authority").length, 10);
-  assert.equal(group7.filter(([, entry]) => "exclusion" in entry && entry.exclusion === "session_protocol").length, 30);
+  assert.equal(group7.filter(([, entry]) => "exclusion" in entry && entry.exclusion === "session_protocol").length, 31);
   const residualRoutes = new Set<string>([...ASSISTANT_RESIDUAL_MANAGEMENT.map(([, route]) => route), ...ASSISTANT_RESIDUAL_HUMAN_ROUTES, ...RESIDUAL_SESSION_PROTOCOL_ROUTES]);
   const residual = Object.entries(manifest).filter(([route]) => residualRoutes.has(route));
   assert.equal(residual.length, 29);
@@ -150,11 +150,11 @@ test("campaign protocol accepts only its exact no-owner-equivalent entries and r
 });
 
 test("every campaign protocol classification is explicitly allowlisted and proved owner-403 in production HTTP", {timeout: 30_000}, () => {
-  assert.equal(CAMPAIGN_SESSION_PROTOCOL_ROUTES.length, 30, "Only the 30 adjudicated group-7 routes are admitted");
-  assert.equal(new Set(CAMPAIGN_SESSION_PROTOCOL_ROUTES).size, 30);
+  assert.equal(CAMPAIGN_SESSION_PROTOCOL_ROUTES.length, 31, "Only the 31 adjudicated group-7 routes are admitted");
+  assert.equal(new Set(CAMPAIGN_SESSION_PROTOCOL_ROUTES).size, 31);
   assert.equal(RESIDUAL_SESSION_PROTOCOL_ROUTES.length, 19);
   const protocolRoutes = [...CAMPAIGN_SESSION_PROTOCOL_ROUTES, ...RESIDUAL_SESSION_PROTOCOL_ROUTES];
-  assert.equal(new Set(protocolRoutes).size, 49);
+  assert.equal(new Set(protocolRoutes).size, 50);
   const child = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../test-support/owner-parity-snapshot.ts", import.meta.url)), "--verify-campaign-protocol"],
     {encoding: "utf8", timeout: 25_000, maxBuffer: 1024 * 1024});
   assert.equal(child.status, 0, "Isolated production protocol authorization test failed; raw logs withheld.");

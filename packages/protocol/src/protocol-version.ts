@@ -1457,6 +1457,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 368: Durable owner-controlled campaign pause and resume (#4534).
   368,
   // v369 slot
+  // 369: Retire ejected armed merge approvals with fresh forge evidence (#4533).
+  369,
   // v370 slot
   // v371 slot
   // v372 slot

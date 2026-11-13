@@ -14,7 +14,7 @@ import { executeGithubIssueClosure, inspectGithubIssueClosure, reconcileGithubIs
 import type { GithubIssueClosureLocation, GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, GitLabMergeClosuresMessage, GitLabMergeClosuresResultMessage, ForgeDecisionAction, ForgeDecisionActionMessage, ForgeDecisionActionOutcome, ForgeDecisionActionRefusalReason, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
-import { executeBranchDeletion, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge } from "./forge-decision-action.js";
+import { executeBranchDeletion, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
 import { githubSlug } from "./git-ops.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
@@ -21878,6 +21878,8 @@ export class SessionManager {
         ? await executeBranchDeletion(message.action, gh)
         : message.action?.kind === "pr_merge_enqueue"
           ? await executePullRequestEnqueue(message.action, gh)
+          : message.action?.kind === "pr_merge_retirement_observe"
+            ? await observePullRequestRetirement(message.action, gh)
           : message.action?.kind === "pr_merge_observe"
             ? await observePullRequestMerge(message.action, gh)
             : { outcome: "refused" as const, refusal: { reason: "pull_request_mismatch" as const, summary: "Unknown forge action." } };
