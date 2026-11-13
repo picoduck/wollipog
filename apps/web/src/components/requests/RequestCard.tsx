@@ -10,7 +10,7 @@ import React, {
   type Ref,
 } from "react";
 import type { GovernancePolicy, PendingApproval, PermissionOption, SessionView } from "@wollipog/protocol";
-import { isChildQuestionSnapshot } from "@wollipog/protocol";
+import { isChildQuestionSnapshot, ownerResourceLabel, ownerResourceKeepReason } from "@wollipog/protocol";
 import { useApi } from "../../api-context.js";
 import type { ApiClient } from "../../api.js";
 import { titleCaseLabel } from "../../format.js";
@@ -634,14 +634,8 @@ export function RequestCard({
     </section>
     {!readOnly && workflowDecision?.returnableOwnerResource && <ReturnOwnerResource
       key={workflowDecision.occurrenceId} sessionId={workflowDecision.sessionId} occurrenceId={workflowDecision.occurrenceId}
-      resourceLabel={workflowDecision.resourceSnapshot.category === "pr_merge"
-        ? `PR #${workflowDecision.resourceSnapshot.pullRequest} in ${workflowDecision.resourceSnapshot.repository}`
-        : workflowDecision.resourceSnapshot.category === "merged_branch_deletion"
-          ? `Branch ${workflowDecision.resourceSnapshot.branch} in ${workflowDecision.resourceSnapshot.repository}`
-          : workflowDecision.resourceSnapshot.category === "implementation_question"
-            ? workflowDecision.resourceSnapshot.question
-            : workflowDecision.resourceSnapshot.category === "follow_up_issue_publication"
-              ? `${workflowDecision.resourceSnapshot.sanitizedTitle} in ${workflowDecision.resourceSnapshot.repository}` : request.title} />}
+      resourceLabel={ownerResourceLabel(workflowDecision.resourceSnapshot, request.title)}
+      ownershipReason={ownerResourceKeepReason(workflowDecision)} />}
     </>
   );
 }

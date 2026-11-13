@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, pendingRequests,
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, pendingRequests, ownerResourceLabel, ownerResourceKeepReason,
   type ControlPlaneToRunner, type RunnerMetadata, type SessionSnapshot, type WorkflowDecisionView } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -162,7 +162,13 @@ test("an owner return releases future requests, preserves pending authority, and
     assert.ok(h.svc.approve("child", inherited.occurrenceId, "approve", h.owner).ok, "inherited pending request remains answerable by the owner");
     const record = h.db.campaignProjection("root")!.ownerReturns![0]!;
     assert.equal(record.byUserId, h.owner.id);
-    assert.equal(record.summary, "Merge team/repo#7");
+    assert.equal(record.summary, "PR #7 in team/repo");
+    const row = h.db.campaignProjection("root")!.ownerDecisions!.items.find((item) => item.occurrenceId === first.occurrenceId)!;
+    const inbox = pendingRequests(h.db.getSession("child")!.pendingApproval).find((request) => request.occurrenceId === first.occurrenceId)!.workflowDecision!;
+    assert.equal(row.resourceLabel, record.summary);
+    assert.equal(ownerResourceLabel(inbox.resourceSnapshot, ""), record.summary);
+    assert.equal(ownerResourceKeepReason(inbox), ownerResourceKeepReason(row));
+    assert.equal(ownerResourceKeepReason(inbox), "The Orchestrator handed this resource to you.");
     assert.ok(record.at > 0);
     assert.equal(h.db.workflowDecisionByOccurrence(first.occurrenceId)!.authority, "human");
     assert.equal(h.rootResolve("child", h.db.workflowDecisionByOccurrence(first.occurrenceId)!).ok, false);

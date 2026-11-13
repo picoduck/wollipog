@@ -1,5 +1,5 @@
 import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, issueClosureDeliveryGap, knownProviderCommandHomeWriteSeparation } from "@wollipog/protocol";
-import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
+import { validCampaignLaunchDisclosure, ownerResourceLabel } from "@wollipog/protocol";
 import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
@@ -25128,10 +25128,9 @@ export class ControlPlaneDb {
       ORDER BY created_at ASC, occurrence_id ASC LIMIT ${CAMPAIGN_OWNER_DECISIONS_LIMIT}`).all(...params) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null)
       .map((decision) => ({ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category: decision.category,
-        ...(decision.resourceSnapshot.category === "pr_merge" ? { resourceLabel:
-          `PR #${decision.resourceSnapshot.pullRequest} in ${decision.resourceSnapshot.repository}` }
-          : decision.resourceSnapshot.category === "merged_branch_deletion" ? { resourceLabel:
-            `Branch ${decision.resourceSnapshot.branch} in ${decision.resourceSnapshot.repository}` } : {}),
+        resourceLabel: ownerResourceLabel(decision.resourceSnapshot, decision.resourceSnapshot.category === "campaign_issue_scope"
+          ? campaignScopeChangeSummary(decision.resourceSnapshot, this.scopeApprovalIncrease(controllingSessionId, decision.resourceSnapshot))
+          : ownerDecisionSummary(decision.resourceSnapshot)),
         ...(decision.category !== "owner_decision" && (decision.ownerRule || decision.ownerHandoff) &&
           !this.ownerOccurrenceWasReturned(decision.occurrenceId) &&
           this.stmt("SELECT 1 FROM sessions WHERE id=? AND json_extract(orchestrator_policy, '$.control.mode')='full_control'")
@@ -25189,9 +25188,9 @@ export class ControlPlaneDb {
       .run(decision.occurrenceId, decision.controllingSessionId, decision.sessionId, JSON.stringify(targets),
         JSON.stringify(keeps.map((keep) => ({ occurrenceId: keep.occurrenceId,
           handoff: keep.ownerHandoff ? JSON.stringify(keep.ownerHandoff) : null }))),
-        decision.resourceSnapshot.category === "campaign_issue_scope"
+        ownerResourceLabel(decision.resourceSnapshot, decision.resourceSnapshot.category === "campaign_issue_scope"
           ? campaignScopeChangeSummary(decision.resourceSnapshot, this.scopeApprovalIncrease(decision.controllingSessionId, decision.resourceSnapshot))
-          : ownerDecisionSummary(decision.resourceSnapshot), byUserId, now).changes) === 1;
+          : ownerDecisionSummary(decision.resourceSnapshot)), byUserId, now).changes) === 1;
   }
 
   campaignOwnerReturns(controllerId: string): NonNullable<OrchestratorCampaignProjection["ownerReturns"]> {

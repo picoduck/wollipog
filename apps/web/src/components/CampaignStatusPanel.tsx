@@ -75,6 +75,7 @@ import { CampaignDecisions } from "./CampaignDecisions.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
 import { OwnerRuleFactRows } from "./requests/WorkflowDecisionSummary.js";
 import { ReturnOwnerResource } from "./ReturnOwnerResource.js";
+import { ownerResourceKeepReason } from "@wollipog/protocol";
 import { CampaignRepositories } from "./CampaignRepositories.js";
 import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { Notice } from "./Notice.js";
@@ -460,7 +461,7 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
               {item.returnableOwnerResource &&
                 <ReturnOwnerResource sessionId={item.sessionId} occurrenceId={item.occurrenceId}
                   resourceLabel={item.resourceLabel ?? item.summary} onChanged={onChanged} inRow
-                  ownershipReason={item.ownerRule ? "A rule keeps this resource with you." : "The Orchestrator handed this resource to you."} />}
+                  ownershipReason={ownerResourceKeepReason(item)} />}
             </li>
           );
         })}

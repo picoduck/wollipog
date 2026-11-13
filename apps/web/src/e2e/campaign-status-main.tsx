@@ -686,7 +686,7 @@ const projectionFor = (rev: number) => campaignProjection(
       records: [], truncated: false } } : {}),
     ...ownerProjection,
     ...(params.has("ownerReturned") ? { ownerReturns: [{ occurrenceId: "occ_1", sessionId: "s_child_3",
-      summary: "Merge picoduck/wollipog#4141", byUserId: "usr_sam_owner", byName: "Sam Rivera", at: NOW - MINUTE }] } : {}),
+      summary: "PR #4141 in picoduck/wollipog", byUserId: "usr_sam_owner", byName: "Sam Rivera", at: NOW - MINUTE }] } : {}),
     ...ownerScopeProjection(rev),
     // `ownerAddition=1` (#4117): the Orchestrator's request to add a repository waits for the owner.
     ...(params.get("ownerAddition") === "1" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
