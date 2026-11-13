@@ -152,6 +152,11 @@ test("a stop during a running turn holds the slot until the runner confirms it, 
   const h = harness(":memory:", { ...concurrencyOnly(1), toolCalls: 120 });
   try {
     const child = spawned(h);
+    // This case tests pending reservation reuse, so explicitly reserve the remainder. Default
+    // workers now leave review capacity (#4545), which a replacement could legitimately use.
+    const allocation = h.db.campaignBudgets.allocation(child)!;
+    const remaining = h.db.campaignBudgets.view("root")!.remaining.toolCalls!;
+    assert.ok(h.svc.allocateCampaignBudget("root", { sessionId: child, toolCalls: allocation.toolCalls! + remaining }).ok);
     h.svc.onSessionStatus(child, "running", undefined, undefined, "r");
     h.db.appendEvent(child, { kind: "tool_call", toolCallId: "read", title: "Read", status: "completed" }, 5);
     // The turn's open live estimate, which settlement replaces rather than adds to (#3196).

@@ -9636,7 +9636,12 @@ export class SessionsService {
       const unsupported = this.campaignBudgetConfigError(session, spec.config, launch.driver);
       if (unsupported) return campaignRefusalFail(unsupported);
       try { this.db.campaignBudgets.admit(budgetRoot, this.db.campaignBudgets.allocation(sessionId)!, {}); }
-      catch (error) { return fail((error as Error).message, 409); }
+      catch (error) {
+        const message = (error as Error).message;
+        return fail(message === "allocation exceeds unreserved campaign allowance"
+          ? `${message}; adjust this stopped worker's allocation with allocate_campaign_budget before restarting: reduce an oversized allocation or increase an exhausted allocation, within the remaining allowance and above its spent usage`
+          : message, 409);
+      }
       spec.campaignBudgetDispatch = this.db.campaignBudgets.replaceDispatch(sessionId);
     }
     if (restartLaunchId) this.db.setSessionStopRestartLaunchId(sessionId, restartLaunchId);
