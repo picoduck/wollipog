@@ -413,8 +413,6 @@ export function RequestCard({
       {...(request.scopeMaxIssuesIncrease ? { scopeMaxIssuesIncrease: request.scopeMaxIssuesIncrease } : {})}
       {...(workflowDecision.closingReferenceCheck ? { closingReferenceCheck: workflowDecision.closingReferenceCheck } : {})} /> : null,
     workflowDecision?.ownerRule ? <OwnerRuleSummary key="owner-rule" rule={workflowDecision.ownerRule} /> : null,
-    workflowDecision?.returnableOwnerResource
-      ? <ReturnOwnerResource key="owner-return" sessionId={workflowDecision.sessionId} occurrenceId={workflowDecision.occurrenceId} /> : null,
     decisionDetails ? (
       <details key="details" className="disclosure">
         <summary><ChevronRightIcon className="disclosure-chevron" />{REQUEST_CARD_COPY.requestDetails}</summary>
@@ -453,7 +451,7 @@ export function RequestCard({
   ].filter(Boolean);
 
   return (
-    <section
+    <><section
       ref={cardRef}
       className="request-card"
       data-presentation={presentation}
@@ -634,6 +632,17 @@ export function RequestCard({
         />
       )}
     </section>
+    {!readOnly && workflowDecision?.returnableOwnerResource && <ReturnOwnerResource
+      key={workflowDecision.occurrenceId} sessionId={workflowDecision.sessionId} occurrenceId={workflowDecision.occurrenceId}
+      resourceLabel={workflowDecision.resourceSnapshot.category === "pr_merge"
+        ? `PR #${workflowDecision.resourceSnapshot.pullRequest} in ${workflowDecision.resourceSnapshot.repository}`
+        : workflowDecision.resourceSnapshot.category === "merged_branch_deletion"
+          ? `Branch ${workflowDecision.resourceSnapshot.branch} in ${workflowDecision.resourceSnapshot.repository}`
+          : workflowDecision.resourceSnapshot.category === "implementation_question"
+            ? workflowDecision.resourceSnapshot.question
+            : workflowDecision.resourceSnapshot.category === "follow_up_issue_publication"
+              ? `${workflowDecision.resourceSnapshot.sanitizedTitle} in ${workflowDecision.resourceSnapshot.repository}` : request.title} />}
+    </>
   );
 }
 

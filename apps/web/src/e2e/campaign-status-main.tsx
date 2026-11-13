@@ -686,7 +686,7 @@ const projectionFor = (rev: number) => campaignProjection(
       records: [], truncated: false } } : {}),
     ...ownerProjection,
     ...(params.has("ownerReturned") ? { ownerReturns: [{ occurrenceId: "occ_1", sessionId: "s_child_3",
-      summary: "Merge picoduck/wollipog#4141", byUserId: "usr_sam_owner", at: NOW - MINUTE }] } : {}),
+      summary: "Merge picoduck/wollipog#4141", byUserId: "usr_sam_owner", byName: "Sam Rivera", at: NOW - MINUTE }] } : {}),
     ...ownerScopeProjection(rev),
     // `ownerAddition=1` (#4117): the Orchestrator's request to add a repository waits for the owner.
     ...(params.get("ownerAddition") === "1" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
@@ -746,7 +746,9 @@ const ownerCard: import("@wollipog/protocol").PendingApproval | null = ownerScen
 } : null;
 const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as const, ownerDecisions: { total: params.has("closureRecovery") ? 1 : 2, items: [
   { occurrenceId: "workflow_owner_1", sessionId: "s_root", category: "owner_decision" as const, summary: ownerSnapshot.question, handedOff: false, createdAt: NOW - 4 * MINUTE },
-  ...(params.has("closureRecovery") ? [] : [{ occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, returnableOwnerResource: true as const, summary: "Merge picoduck/wollipog#4141", handedOff: true, createdAt: NOW - 8 * MINUTE }]),
+  ...(params.has("closureRecovery") ? [] : [{ occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const,
+    ...(!params.has("ownerReturned") ? { returnableOwnerResource: true as const } : {}),
+    summary: "Merge picoduck/wollipog#4141", handedOff: true, createdAt: NOW - 8 * MINUTE }]),
 ] } } : ownerScenario === "rule" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
   { occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: false,
     ownerRule, createdAt: NOW - 8 * MINUTE },
@@ -886,8 +888,8 @@ function sessionsFor(rev: number): SessionView[] {
 
 /** `owners`: the child's merge, the Orchestrator's before #4064 and handed to the owner after it,
  * and after it the root's own owner decision. */
-const mergeSnapshot = { category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest: 4141, headSha: "3f9c2e1".padEnd(40, "0"),
-  reviewResult: "merge_with_acknowledged_risk" as const, requiredChecks: { headSha: "3f9c2e1".padEnd(40, "0"), status: "passed" as const, checkedAt: NOW - 9 * MINUTE,
+const mergeSnapshot = { category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest: 4141, headSha: "3f9c2e174adb8c61d032de5698c7a14b8e250f63",
+  reviewResult: "merge_with_acknowledged_risk" as const, requiredChecks: { headSha: "3f9c2e174adb8c61d032de5698c7a14b8e250f63", status: "passed" as const, checkedAt: NOW - 9 * MINUTE,
     checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] } };
 const ownerRequests = (owners: "before" | "after" | "rule"): DescendantRequestView[] => {
   const handed = owners === "after";
@@ -903,7 +905,7 @@ const ownerRequests = (owners: "before" | "after" | "rule"): DescendantRequestVi
       workflowDecision: { requestId: "merge-4141", occurrenceId: "occ_1", sessionId: "s_child_3", controllingSessionId: "s_root", category: "pr_merge",
         resourceKey: "picoduck/wollipog#4141", resourceSnapshot: mergeSnapshot, resourceDigest: "a".repeat(64), policyRevision: 1,
         authority: evaluation.owner, authorityEvaluation: evaluation, status: "pending", createdAt: NOW - 8 * MINUTE,
-        ...(handed ? { returnableOwnerResource: true as const, ownerHandoff: { bySessionId: "s_root", at: NOW - 5 * MINUTE, reason: "The owner kept risk consent for this merge." } } : {}),
+        ...(handed ? { ...(!params.has("ownerReturned") ? { returnableOwnerResource: true as const } : {}), ownerHandoff: { bySessionId: "s_root", at: NOW - 5 * MINUTE, reason: "The owner kept risk consent for this merge." } } : {}),
         ...(owners === "rule" ? { ownerRule } : {}) } },
   };
   return ownerCard ? [{ sessionId: "s_root", sessionTitle: "Full Control Campaign", runnerId: "runner-1", runnerOnline: true, eventEpoch: 1,
@@ -1409,7 +1411,7 @@ function Fixture() {
             <div className="detail-main">
               <div className="detail-reader">
                 <div className="detail-scroll" role="region" aria-label="Session Activity">
-                  {Array.from({ length: 12 }, (_, index) => (
+                  {Array.from({ length: 6 }, (_, index) => (
                     <div className={`tl-row ${index % 2 ? "agent" : "user"}`} key={index}>
                       <div className="tl-bubble">{[
                         "Please finish the Campaign Status improvements in picoduck/wollipog.",
@@ -1418,7 +1420,7 @@ function Fixture() {
                         "The merge request is waiting for you. Other campaign work can continue.",
                         "The layout looks good on my phone. Leave the pending request with me.",
                         "You can return future requests for this pull request within the current campaign boundary.",
-                      ][index % 6]}</div>
+                      ][index]}</div>
                     </div>
                   ))}
                 </div>
@@ -1433,7 +1435,7 @@ function Fixture() {
       </section>
       {/* On a phone the app's tab bar fills the band below the panel sheet (--bottom-bar-h); this
           stand-in shows that band for what it is in the captures. */}
-      {window.innerWidth <= 760 && (
+      {window.innerWidth <= 760 && !ownerScenario && (
         <nav aria-label="App Navigation" style={{
           position: "fixed", left: 0, right: 0, bottom: 0, height: "var(--bottom-bar-h)",
           display: "flex", alignItems: "center", justifyContent: "center",

@@ -276,7 +276,6 @@ function AvailableCampaignStatus({
               {data.summary.campaign && <CampaignPause campaignId={availability.campaignSessionId}
                 pause={data.summary.campaign.pause} canEdit={availability.role === "campaign" && session.commandPermissions?.pauseCampaign?.allowed === true}
                 onChanged={data.retry} />}
-              <CampaignSummarySection data={data} now={now} />
               {data.summary.campaign?.ownerDecisions && (
                 <CampaignOwnerDecisions
                   sessionId={session.id}
@@ -292,9 +291,10 @@ function AvailableCampaignStatus({
                 <h3 className="section-title">Returned to the Orchestrator</h3>
                 <ul className="campaign-detail-list">{data.summary.campaign.ownerReturns.map((item) => <li key={item.occurrenceId}>
                   <p>{item.summary}</p>
-                  <p>Returned by {item.byUserId} <RecordedTime at={item.at} now={now} />. Future requests follow the current boundary; pending requests remain yours.</p>
+                  <p>Returned by {item.byName} <RecordedTime at={item.at} now={now} />. Future requests follow the current boundary; pending requests remain yours.</p>
                 </li>)}</ul>
               </section>}
+              <CampaignSummarySection data={data} now={now} />
               <CampaignDecisionModelChecks
                 sessionId={session.id}
                 canClassify={availability.role === "campaign"}
@@ -460,7 +460,7 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
               {open && <button type="button" className="btn sm" aria-label={`Open Request: ${item.summary}`}
                 onClick={open}>Open Request</button>}
               {item.returnableOwnerResource &&
-                <ReturnOwnerResource sessionId={item.sessionId} occurrenceId={item.occurrenceId} onChanged={onChanged} />}
+                <ReturnOwnerResource sessionId={item.sessionId} occurrenceId={item.occurrenceId} resourceLabel={item.summary} onChanged={onChanged} />}
             </li>
           );
         })}

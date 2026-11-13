@@ -2573,7 +2573,7 @@ export interface OrchestratorCampaignProjection {
    * none. Bounded by CAMPAIGN_OWNER_DECISIONS_LIMIT; `total` is the full count. */
   ownerDecisions?: { total: number; items: CampaignOwnerDecision[] };
   /** Owner-authenticated returns affect future requests only. */
-  ownerReturns?: { occurrenceId: string; sessionId: string; summary: string; byUserId: string; at: number }[];
+  ownerReturns?: { occurrenceId: string; sessionId: string; summary: string; byUserId: string; byName: string; at: number }[];
   uiEvidenceReview: {
     status: "available" | "unavailable";
     effectiveOwner: WorkflowDecisionAuthority;

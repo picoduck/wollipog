@@ -150,9 +150,16 @@ test("an owner return releases future requests, preserves pending authority, and
         Extract<WorkflowDecisionView["resourceSnapshot"], { category: "pr_merge" }> }).data!;
     assert.ok(h.svc.handWorkflowDecisionToOwner("root", other.occurrenceId, { reason: "Other merge", sessionId: "child" }).ok);
     assert.ok(h.svc.handWorkflowDecisionToOwner("root", first.occurrenceId, { reason: "Owner kept merge", sessionId: "child" }).ok);
+    const inherited = h.merge("return-inherited", "inherited-key").data!;
+    assert.equal(inherited.authority, "human");
+    assert.equal(inherited.ownerHandoff, undefined);
+    assert.equal(inherited.ownerRule, undefined);
     assert.equal(h.svc.returnOwnerResource("child", first.occurrenceId, { kind: "agent", id: "root" }).status, 403);
     assert.equal(h.svc.returnOwnerResource("child", first.occurrenceId, { kind: "human", id: "stranger" }).status, 403);
     assert.ok(h.svc.returnOwnerResource("child", first.occurrenceId, h.owner).ok);
+    assert.equal(h.db.campaignProjection("root")!.ownerDecisions!.items.find((d) => d.occurrenceId === first.occurrenceId)!.returnableOwnerResource, undefined);
+    assert.equal(pendingRequests(h.db.getSession("child")!.pendingApproval).find((r) => r.occurrenceId === first.occurrenceId)!.workflowDecision!.returnableOwnerResource, undefined);
+    assert.ok(h.svc.approve("child", inherited.occurrenceId, "approve", h.owner).ok, "inherited pending request remains answerable by the owner");
     const record = h.db.campaignProjection("root")!.ownerReturns![0]!;
     assert.equal(record.byUserId, h.owner.id);
     assert.equal(record.summary, "Merge team/repo#7");
@@ -166,7 +173,7 @@ test("an owner return releases future requests, preserves pending authority, and
     assert.ok(h.svc.handWorkflowDecisionToOwner("root", next.occurrenceId, { reason: "Keep again", sessionId: "child" }).ok);
     assert.equal(h.merge("return-rekept", "third-key").data!.authority, "human");
     // An old return retried after a later keep cannot release that keep.
-    assert.ok(h.svc.returnOwnerResource("child", first.occurrenceId, h.owner).ok);
+    assert.equal(h.svc.returnOwnerResource("child", first.occurrenceId, h.owner).status, 409);
     assert.equal(h.merge("return-retry", "fourth-key").data!.authority, "human");
     assert.ok(h.svc.returnOwnerResource("child", next.occurrenceId, h.owner).ok);
     const ruled = h.svc.createWorkflowDecision("child", { requestId: "rule-rekeep", resourceKey: "rule-rekeep",

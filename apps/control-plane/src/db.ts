@@ -25129,6 +25129,7 @@ export class ControlPlaneDb {
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null)
       .map((decision) => ({ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category: decision.category,
         ...(decision.category !== "owner_decision" && (decision.ownerRule || decision.ownerHandoff) &&
+          !this.ownerOccurrenceWasReturned(decision.occurrenceId) &&
           this.stmt("SELECT 1 FROM sessions WHERE id=? AND json_extract(orchestrator_policy, '$.control.mode')='full_control'")
             .get(decision.controllingSessionId)
           ? { returnableOwnerResource: true as const } : {}),
@@ -25161,6 +25162,12 @@ export class ControlPlaneDb {
     );
   }
 
+  ownerOccurrenceWasReturned(occurrenceId: string): boolean {
+    return !!this.stmt(`SELECT 1 FROM campaign_owner_returns r WHERE r.occurrence_id=? OR EXISTS
+      (SELECT 1 FROM json_each(r.keeps) k WHERE json_extract(k.value, '$.occurrenceId')=?) LIMIT 1`)
+      .get(occurrenceId, occurrenceId);
+  }
+
   ownerKeepWasReturned(controllerId: string, occurrenceId: string, targets: string[]): boolean {
     return !!this.stmt(`SELECT 1 FROM campaign_owner_returns r JOIN workflow_decisions d
       ON d.occurrence_id=? AND EXISTS (SELECT 1 FROM json_each(r.keeps) k
@@ -25184,9 +25191,10 @@ export class ControlPlaneDb {
   }
 
   campaignOwnerReturns(controllerId: string): NonNullable<OrchestratorCampaignProjection["ownerReturns"]> {
-    return this.stmt(`SELECT occurrence_id AS occurrenceId, session_id AS sessionId, summary,
-      by_user_id AS byUserId, returned_at AS at FROM campaign_owner_returns
-      WHERE controller_id=? ORDER BY returned_at DESC, rowid DESC LIMIT 20`).all(controllerId) as
+    return this.stmt(`SELECT r.occurrence_id AS occurrenceId, r.session_id AS sessionId, r.summary,
+      r.by_user_id AS byUserId, COALESCE(u.display_name, 'Campaign owner') AS byName, r.returned_at AS at
+      FROM campaign_owner_returns r LEFT JOIN identity_users u ON u.user_id=r.by_user_id
+      WHERE r.controller_id=? ORDER BY r.returned_at DESC, r.rowid DESC LIMIT 20`).all(controllerId) as
       NonNullable<OrchestratorCampaignProjection["ownerReturns"]>;
   }
 

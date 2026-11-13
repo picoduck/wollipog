@@ -15759,8 +15759,20 @@ export class SessionsService {
     const recorded = this.db.returnOwnerResource(decision,
       ownerReturnTargets(decision.category, decision.resourceKey, decision.resourceSnapshot),
       this.ownerKeptBy(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot), actor.id, now);
-    if (recorded) this.log.info(JSON.stringify({ event: "campaign_owner_resource_returned", campaignId: root.id,
+    if (!recorded) return fail("This occurrence was already returned. A later keep must be returned from its own request.", 409);
+    this.log.info(JSON.stringify({ event: "campaign_owner_resource_returned", campaignId: root.id,
       occurrenceId, category: decision.category, byUserId: actor.id, at: now }));
+    for (const sessionId of new Set(this.db.pendingWorkflowDecisionsForController(root.id).map((d) => d.sessionId))) {
+      const session = this.db.getSession(sessionId);
+      if (!session) continue;
+      let approval = session.pendingApproval;
+      for (const request of pendingRequests(approval)) {
+        const current = request.workflowDecision && this.db.workflowDecisionByOccurrence(request.workflowDecision.occurrenceId);
+        if (current) approval = appendPendingApproval(removePendingRequest(approval, current.occurrenceId), this.workflowDecisionApproval(current));
+      }
+      this.db.setPendingApproval(sessionId, approval);
+      this.hub.sessionChangedById(sessionId);
+    }
     this.hub.sessionChangedById(decision.sessionId);
     this.hub.sessionChangedById(root.id);
     return ok(decision);
@@ -16056,7 +16068,7 @@ export class SessionsService {
     }
     // A decision the campaign's owner kept (#4064) is theirs alone: never an agent's, and not any
     // other person's who can open the session.
-    if ((decision.category === "owner_decision" || decision.ownerHandoff || decision.ownerRule ||
+    if ((decision.category === "owner_decision" || decision.ownerHandoff || decision.ownerRule || decision.authorityEvaluation?.reason === "owner_kept" ||
         this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot)) &&
         (authority !== "human" || actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(decision.controllingSessionId, actor.id))) {
       return fail("Only the campaign's owner can decide a decision the owner kept", 403);
@@ -17720,6 +17732,7 @@ export class SessionsService {
     // An Orchestrator-owned occurrence for a resource the owner kept (one requested before the
     // handoff) is never current: nobody acting for the campaign can approve or consume it.
     const ownerKept = decision.category === "owner_decision" || decision.ownerRule !== undefined || decision.ownerHandoff !== undefined ||
+      decision.authorityEvaluation?.reason === "owner_kept" ||
       this.ownerKeptBy(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot).some((kept) =>
         !recordingSupersededMerge || kept.ownerHandoff || !sameWorkflowDecisionOwnerRule(kept.ownerRule, superseded.rule));
     if (ownerKept && decision.authority !== "human") return false;
@@ -18355,6 +18368,8 @@ export class SessionsService {
       workflowDecision: { ...decision,
         ...(decision.category !== "owner_decision" &&
           (decision.ownerRule || decision.ownerHandoff || decision.authorityEvaluation?.reason === "owner_kept") &&
+          !this.db.ownerOccurrenceWasReturned(decision.occurrenceId) &&
+          this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot) &&
           this.db.getSession(decision.controllingSessionId)?.orchestratorPolicy?.control?.mode === "full_control"
           ? { returnableOwnerResource: true as const } : {}) },
     };
