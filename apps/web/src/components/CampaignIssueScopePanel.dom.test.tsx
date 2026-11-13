@@ -63,3 +63,21 @@ test("scope approval qualifies every repository's change by its own repository (
   assert.match(markup,/<dt>Removals<\/dt><dd>owner\/app#5<\/dd>/u);
   assert.match(markup,/<dt>Affected Assignments<\/dt><dd>owner\/app#5: app-child, owner\/api#5: api-child<\/dd>/u);
 });
+
+for (const outcome of ["denied", "withdrawn", "consumed", "revoked"] as const) {
+  test(`scope card distinguishes ${outcome} from live and unreadable rows (#4601)`, () => {
+    const markup = renderToStaticMarkup(<CampaignIssueScopeSummary snapshot={{ category: "campaign_issue_scope", repository: "picoduck/wollipog",
+      expectedRevision: 3, before: [4547], additions: [4601], removals: [], explanation: "Include related work.",
+      affectedAssignments: [], activeChildren: [], affectedDecisions: ["pending", "approved", "settled", "unreadable"] }} decisionDetails={[
+        { occurrenceId: "pending", category: "follow_up_issue_publication", resource: "picoduck/wollipog: Preserve Approval History", approval: "pending", armed: false },
+        { occurrenceId: "approved", category: "pr_merge", resource: "picoduck/wollipog#4590 at ce64f53", approval: "human", armed: false },
+        { occurrenceId: "settled", category: "pr_merge", resource: "picoduck/wollipog#4481 at d3f42a1", approval: "orchestrator", armed: true, settledOutcome: outcome },
+      ]} />).replace(/<!-- -->/gu, "");
+    assert.match(markup, /Pending approval; not armed/u);
+    assert.match(markup, /Approved by the owner; not armed/u);
+    assert.ok(markup.includes(`Merge: picoduck/wollipog#4481 at d3f42a1 — <strong>Already Settled</strong> (${outcome}); approval no longer affects it`));
+    assert.equal(markup.includes("armed for the merge queue"), false);
+    assert.equal(markup.split("Decision details unavailable; refresh before approving.").length - 1, 1);
+    assert.ok(markup.includes("<details><summary>Raw Decision IDs</summary><p>pending, approved, settled, unreadable</p></details>"));
+  });
+}

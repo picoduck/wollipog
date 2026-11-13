@@ -5536,7 +5536,9 @@ export interface PendingApproval {
   scopeMaxIssuesIncrease?: { from: number; increase: number };
   /** Live server-derived presentation only; never authority supplied by a caller. */
   scopeDecisionDetails?: Array<{ occurrenceId: string; category: string; resource: string;
-    approval: "human" | "orchestrator" | "pending"; armed: boolean }>;
+    approval: "human" | "orchestrator" | "pending"; armed: boolean;
+    /** Terminal presentation outcome; withdrawals are stored as revoked decisions. */
+    settledOutcome?: Exclude<WorkflowDecisionStatus, "pending" | "approved"> | "withdrawn" }>;
   /** CP-derived mandatory human rule on this occurrence. Provider input cannot set it. */
   humanRequired?: boolean;
   /** CP-derived Decision Model screen of this request's text (#4104). The control plane overwrites
