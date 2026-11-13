@@ -1452,6 +1452,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // v366 slot
   // v367 slot
   // v368 slot
+  // 368: Durable owner-controlled campaign pause and resume (#4534).
+  368,
   // v369 slot
   // v370 slot
   // v371 slot

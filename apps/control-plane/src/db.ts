@@ -671,6 +671,11 @@ export const TRANSCRIPT_SHARE_TERMINAL_RETENTION_PER_SESSION = 100;
 export const RUNNER_CREDENTIAL_REVOKED_HISTORY_LIMIT = 64;
 
 const SCHEMA = /* sql */ `
+CREATE TABLE IF NOT EXISTS campaign_pauses (
+  campaign_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  payload TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS control_plane_metadata (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -6333,6 +6338,7 @@ export class ControlPlaneDb {
   /** Shared live CP preflight for recovery, scheduler, projection and outbox. Read rows rather
    * than SessionView: a view contains the projection which calls this predicate. */
   campaignContinuationAdmission(campaignId: string): NonNullable<import("@wollipog/protocol").CampaignRecoveryProjection["automation"]> {
+    if (this.campaignPaused(campaignId)) return { state: "lifecycle_held", reason: "The campaign is paused." };
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
     const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
     if (!row || !policy || row.archived === 1 || this.sessionStopIntent(campaignId) ||
@@ -13833,7 +13839,7 @@ export class ControlPlaneDb {
   sessionListJsonForPrincipal(principal: AuthPrincipal, includeArchived = false, supportsRetryExhaustion = true,
     campaignStatusProtocol: number | null = PROTOCOL_VERSION): string {
     const cached = this.sessionSummaryRead(principal,includeArchived);
-    const currentStatuses = runnerSupportsProtocol(campaignStatusProtocol, "campaignActivityStatus");
+    const currentStatuses = runnerSupportsProtocol(campaignStatusProtocol, "campaignPause");
     if (supportsRetryExhaustion && currentStatuses) return cached.json;
     if (supportsRetryExhaustion) {
       // Only the campaign status needs a fallback (#4070, #4146), and only a campaign with a newer
@@ -23719,10 +23725,12 @@ export class ControlPlaneDb {
         reason: continuation.continuation.error ? `The campaign's next continuation is held: ${continuation.continuation.error}.`
           : "The campaign's next continuation is held by its current lifecycle." });
     }
-    const status: OrchestratorCampaignStatus = baseStatus === "waiting_human" ? "waiting_human" : live.length > 0 ? "active" : baseStatus;
+    const paused = this.campaignPaused(resolvedCampaignId);
+    if (paused) { stuckItems.length = 0; cleanupItems.length = 0; }
+    const status: OrchestratorCampaignStatus = paused ? "paused" : baseStatus === "waiting_human" ? "waiting_human" : live.length > 0 ? "active" : baseStatus;
     // What the server's one automatic repair is keyed to: the identity of every leftover, never a
     // time or a reason, so the same leftovers are tried once and any change tries again.
-    const leftoverDigest = baseStatus === "stuck" || baseStatus === "complete_needs_cleanup"
+    const leftoverDigest = !paused && (baseStatus === "stuck" || baseStatus === "complete_needs_cleanup")
       ? campaignLeftoverDigest(baseStatus, stuckItems, cleanupItems, recoveryIds) : null;
     const activity: CampaignActivityView = { live, ...(repair ? { repair } : {}) };
     return { childIds, pendingHuman, pendingOrchestrator, pendingGenericHuman, pendingGenericOrchestrator, humanRequestTokens, orchestratorRequestTokens, waitingHuman, active, blocked, fullyVerified, cleanupPending, cleanupWorktrees, heldChildren, total, continuation, stalled, status, baseStatus, activity, cleanupItems, stuckItems, leftoverDigest };
@@ -24193,6 +24201,39 @@ export class ControlPlaneDb {
 
   /** The campaign status alone, for a session summary: identical to `campaignProjection().status`
    * without the projection's owners, evidence, budget, video review or ledger work. */
+  campaignPause(sessionId: string): import("@wollipog/protocol").CampaignPauseView | null {
+    const rootId = this.campaignRootForMember(sessionId);
+    if (!rootId) return null;
+    const row = this.stmt("SELECT payload FROM campaign_pauses WHERE campaign_id=?").get(rootId) as { payload: string } | undefined;
+    return row ? JSON.parse(row.payload) : null;
+  }
+
+  campaignPaused(sessionId: string): boolean {
+    const pause = this.campaignPause(sessionId);
+    return !!pause && pause.resumedAt === undefined;
+  }
+
+  saveCampaignPause(campaignId: string, pause: import("@wollipog/protocol").CampaignPauseView): void {
+    this.stmt("INSERT INTO campaign_pauses(campaign_id,payload) VALUES (?,?) ON CONFLICT(campaign_id) DO UPDATE SET payload=excluded.payload WHERE payload<>excluded.payload")
+      .run(campaignId, JSON.stringify(pause));
+  }
+
+  stopCampaignMemberForPause(campaignId: string, pause: import("@wollipog/protocol").CampaignPauseView,
+    sessionId: string, runnerId: string, now: number): void {
+    this.atomic(() => {
+      this.saveCampaignPause(campaignId, pause);
+      this.addSessionStopIntent(sessionId, runnerId, now, false);
+      this.updateSessionStatus(sessionId, "stopped", now, { cause: "requested" });
+    });
+  }
+
+  pausedCampaignIds(runnerId?: string): string[] {
+    return (this.stmt(`SELECT campaign_id FROM campaign_pauses JOIN sessions ON sessions.id=campaign_id
+      WHERE sessions.archived=0 AND json_extract(payload,'$.resumedAt') IS NULL
+      ${runnerId ? "AND sessions.runner_id=?" : ""}`).all(...(runnerId ? [runnerId] : [])) as Array<{ campaign_id: string }>)
+      .map(row => row.campaign_id);
+  }
+
   campaignStatusOnly(campaignSessionId: string): OrchestratorCampaignProjection["status"] | null {
     const campaign = this.resolvedCampaignSession(campaignSessionId);
     const policy = campaign ? orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy) : null;
@@ -24278,6 +24319,7 @@ export class ControlPlaneDb {
     return {
       status,
       policyRevision: campaign.parent_control_policy_revision,
+      ...(this.campaignPause(resolvedCampaignId) ? { pause: this.campaignPause(resolvedCampaignId)! } : {}),
       ...(this.campaignRootAudienceCanSee(campaignSessionId)(resolvedCampaignId)
         ? { control: structuredClone(policy.control ?? { mode: "custom" as const }) } : {}),
       ...(() => {

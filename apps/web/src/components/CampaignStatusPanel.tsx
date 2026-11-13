@@ -67,6 +67,7 @@ import { ChevronLeftIcon } from "./Icons.js";
 import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
 import { CampaignAuthoritySummary } from "./CampaignAuthoritySummary.js";
 import { CampaignFollowUpLimit } from "./CampaignFollowUpLimit.js";
+import { CampaignPause } from "./CampaignPause.js";
 import { CampaignCleanup, CampaignStuck } from "./CampaignCleanup.js";
 import { CampaignHeldSlots } from "./CampaignHeldSlots.js";
 import { useStoreSelector } from "../store.js";
@@ -271,6 +272,9 @@ function AvailableCampaignStatus({
           {data.offline && <p className="campaign-status-offline" role="status">Reconnecting… Showing the last loaded campaign status.</p>}
           <StaleContent stale={data.offline}>
             <div className="campaign-status-sections">
+              {data.summary.campaign && <CampaignPause campaignId={availability.campaignSessionId}
+                pause={data.summary.campaign.pause} canEdit={availability.role === "campaign"}
+                onChanged={data.retry} />}
               <CampaignSummarySection data={data} now={now} />
               {data.summary.campaign?.ownerDecisions && (
                 <CampaignOwnerDecisions

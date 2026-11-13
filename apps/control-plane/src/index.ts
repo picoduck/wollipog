@@ -4014,6 +4014,13 @@ app.post("/api/sessions/:id/review-sessions/:reviewSessionId/cancel", async (req
 
 // Budget minting shares the foundation's human-only CAS and revocation contract. No agent
 // allowlist entry exists for this endpoint; account defaults never establish an envelope.
+app.post("/api/sessions/:id/orchestrator-campaign/pause", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "human") return reply.code(403).send({ error: "Only the campaign owner can pause or resume it." });
+  return respond(reply, svc.setCampaignPause(id, req.body as Parameters<SessionsService["setCampaignPause"]>[1], principal));
+});
+
 app.post("/api/sessions/:id/orchestrator-campaign/control", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = requestPrincipal(req);

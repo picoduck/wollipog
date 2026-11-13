@@ -1197,6 +1197,10 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ acceptedFollowUps, expectedRevision }),
     }),
+  setCampaignPause: (id: string, input: { action: "pause" | "resume"; resumeAt?: number | null }) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/pause`, {
+      method: "POST", body: JSON.stringify(input),
+    }),
   /** Campaign Status's Delete Merged Branches (#4146): Wollipog performs the campaign's approved
    * merged-branch deletions it still can, through the existing forge action. It approves nothing. */
   deleteCampaignMergedBranches: (id: string) =>

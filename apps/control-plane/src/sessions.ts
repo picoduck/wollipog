@@ -4874,6 +4874,7 @@ export class SessionsService {
     if (parentSessionId) {
       if (this.db.roleConversionBlocksSession(parentSessionId)) return fail("wait for the session role change to finish before creating children", 409);
       const parent = this.db.getSession(parentSessionId);
+      if (this.db.campaignPaused(parentSessionId)) return fail("The campaign is paused; resume it before starting children.", 409);
       if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
         return fail("the creating parent session is no longer active", 409);
       }
@@ -6105,6 +6106,7 @@ export class SessionsService {
     /** Internal: a Full Control first message's own durable identity (#2940). */
     binding?: Parameters<SessionsService["prompt"]>[8],
   ): ServiceResult<PromptAdmissionView> {
+    if (this.db.campaignPaused(sessionId)) return fail("The campaign is paused; resume it before sending messages.", 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
     // Capture the exact fired row before admission. If another client snoozes again while the
@@ -7080,6 +7082,7 @@ export class SessionsService {
     // its refusal or delivery report names only tools it can call (#1863).
     holdReader?: HoldAdviceReader,
   ): ServiceResult<PromptAdmissionView> {
+    if (this.db.campaignPaused(sessionId)) return fail("The campaign is paused; resume it before sending messages.", 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
     const snapshotCommand = delivery?.commandSnapshots?.[0];
@@ -7409,6 +7412,7 @@ export class SessionsService {
     for (const { sessionId } of this.db.firstMessageDeliveries()) {
       if (!this.firstMessagesInFlight.has(sessionId)) this.reconcileFirstMessageDelivery(sessionId, now);
     }
+    this.maintainCampaignPauses(now, runnerId);
     this.maintainCampaignContinuations(now, runnerId);
     // A receipt recorded just before a restart may never have reached its decision's resume.
     for (const commandId of this.db.settledWorkflowDecisionResumeCommands(runnerId)) {
@@ -9195,6 +9199,96 @@ export class SessionsService {
     return Boolean(this.preparedMediaActiveStops?.request(session.id));
   }
 
+  setCampaignPause(sessionId: string, input: { action: "pause" | "resume"; resumeAt?: number | null }, principal: HumanPrincipal): ServiceResult<SessionView> {
+    const root = this.db.getSession(sessionId);
+    if (!root?.orchestratorPolicy || root.archived || this.db.resolvedCampaignSessionId(sessionId) !== sessionId ||
+        !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
+    if (!input || !["pause", "resume"].includes(input.action) ||
+        input.resumeAt != null && (!Number.isSafeInteger(input.resumeAt) || input.resumeAt <= Date.now())) {
+      return fail("Choose Pause or Resume and an optional future resume time.", 400);
+    }
+    const existing = this.db.campaignPause(sessionId);
+    if (input.action === "pause" && isTerminal(root.status) && (!existing || existing.resumedAt !== undefined)) {
+      return fail("Only a live campaign can be paused.", 409);
+    }
+    const now = Date.now();
+    if (input.action === "resume") {
+      if (existing && existing.resumedAt === undefined) {
+        existing.resumeRequestedBy = principal.userId;
+        this.db.saveCampaignPause(sessionId, existing);
+      }
+    } else if (!existing || existing.resumedAt !== undefined) {
+      this.db.saveCampaignPause(sessionId, { pausedAt: now, pausedBy: principal.userId,
+        resumeAt: input.resumeAt ?? null, stoppedSessionIds: [], inFlightSessionIds: [] });
+      this.db.appendEvent(sessionId, { kind: "stderr", text: `Campaign paused by ${principal.userId}. Pending requests and decisions are preserved.` }, now);
+      this.log.info(JSON.stringify({ event: "campaign_paused", campaignId: sessionId, actorId: principal.userId, at: now, resumeAt: input.resumeAt ?? null }));
+    }
+    this.maintainCampaignPauses(now);
+    this.hub.sessionChangedById(sessionId);
+    return ok(this.db.getSession(sessionId)!);
+  }
+
+  private maintainCampaignPauses(now: number, runnerId?: string): void {
+    for (const id of this.db.pausedCampaignIds(runnerId)) {
+      const pause = this.db.campaignPause(id);
+      if (!pause || pause.resumedAt !== undefined) continue;
+      if (pause.resumeRequestedBy || pause.resumeAt !== null && pause.resumeAt <= now) {
+        this.resumeCampaign(id, pause.resumeRequestedBy ?? "scheduled", now);
+        continue;
+      }
+      const inFlight: string[] = [];
+      for (const memberId of [id, ...this.db.campaignDescendantIds(id)]) {
+        const member = this.db.getSession(memberId);
+        if (!member || member.archived || isTerminal(member.status) || pause.stoppedSessionIds.includes(memberId)) continue;
+        // Stop is destructive for provider questions and queued tool work. Never interrupt a
+        // merge admission, parked queue entry, background job, or a provider still executing.
+        // The next idle boundary is safe; a busy member remains visibly in flight until then.
+        if (member.status !== "idle" || member.pendingApproval ||
+            this.db.unconsumedWorkflowDecisionsForSession(memberId).length > 0 ||
+            this.db.pullRequestWatches.isParked(memberId) ||
+            this.db.sessionsWithLiveBackgroundJobs([memberId], now).size > 0) {
+          inFlight.push(memberId); continue;
+        }
+        pause.stoppedSessionIds.push(memberId);
+        this.db.stopCampaignMemberForPause(id, pause, memberId, member.runnerId, now);
+        this.sendStopCommand(member.runnerId, memberId);
+        this.hub.sessionChangedById(memberId);
+      }
+      pause.inFlightSessionIds = inFlight;
+      this.db.saveCampaignPause(id, pause);
+    }
+  }
+
+  private resumeCampaign(id: string, actor: string, now: number): void {
+    const pause = this.db.campaignPause(id);
+    if (!pause || pause.resumedAt !== undefined) return;
+    if (pause.stoppedSessionIds.some(childId => this.db.hasSessionStopIntent(childId))) return;
+    const text = "The campaign has resumed. Continue the preserved work within its existing authority and budget. Main may have moved; fetch it and inspect dependencies before continuing.";
+    // Restart keeps suspension active until every retained child has passed existing admission.
+    // An unsuccessful restart stays in this durable list for the next sweep, without more grants.
+    for (const childId of [...pause.stoppedSessionIds].sort((a, b) => a === id ? 1 : b === id ? -1 : 0)) {
+      const child = this.db.getSession(childId);
+      if (!child || child.archived) continue;
+      if (child.status === "stopped" && !this.restart(childId, { campaignResume: true }).ok) continue;
+      this.promptOutbox.stage(childId, child.runnerId, { type: "prompt_session", sessionId: childId, text }, now,
+        `campaign_resume_${id}_${pause.pausedAt}_${childId}`);
+      pause.stoppedSessionIds = pause.stoppedSessionIds.filter(memberId => memberId !== childId);
+      this.db.saveCampaignPause(id, pause);
+    }
+    if (pause.stoppedSessionIds.length) return;
+    for (const memberId of pause.inFlightSessionIds) {
+      const member = this.db.getSession(memberId);
+      if (!member || member.archived || isTerminal(member.status)) continue;
+      this.promptOutbox.stage(memberId, member.runnerId, { type: "prompt_session", sessionId: memberId, text }, now,
+        `campaign_resume_${id}_${pause.pausedAt}_${memberId}`);
+    }
+    pause.resumedAt = now; pause.resumedBy = actor;
+    this.db.saveCampaignPause(id, pause);
+    this.db.appendEvent(id, { kind: "stderr", text: `Campaign resumed by ${actor} (${actor === "scheduled" ? "owner-selected time" : "owner action"}).` }, now);
+    this.log.info(JSON.stringify({ event: "campaign_resumed", campaignId: id, actorId: actor, at: now }));
+    this.hub.sessionChangedById(id);
+  }
+
   stop(sessionId: string): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -9395,7 +9489,9 @@ export class SessionsService {
     unarchive?: boolean;
     /** #3240: wait for a busy provider account instead of failing the launch. */
     waitForProviderHome?: boolean;
+    campaignResume?: boolean;
   } = {}): ServiceResult<SessionView> {
+    if (this.db.campaignPaused(sessionId) && !options.campaignResume) return fail("The campaign is paused; only its owner or scheduled resume can restart it.", 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "runs once and cannot be restarted");
     if (reviewRefusal) return fail(reviewRefusal, 409);
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before restarting", 409);
@@ -10030,6 +10126,7 @@ export class SessionsService {
     const root = rootId ? this.db.getSession(rootId) : null;
     if (!root?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
     const completion = root.orchestratorPolicy.behavior.completion;
+    if (this.db.campaignPaused(root.id)) return fail("The campaign is paused; paused children cannot be verified.", 409);
     // A requested stop, a guardrail Stop, a runner disconnect, and startup settlement all write
     // `stopped` before the runner confirms anything, so that row is not yet proof the child's last
     // report is final. Only a recorded confirmation is (#1466): it survives the runner going
@@ -18740,6 +18837,7 @@ export class SessionsService {
    * and approved decisions, and any resume still owed for a denied or consumed one is abandoned
    * with them, so only a provisional disconnect stop leaves a resume held (#1759). */
   private revokeUnconsumedWorkflowDecisionsForSession(sessionId: string, actorId: string): void {
+    if (this.db.campaignPaused(sessionId)) return;
     const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
       const settle = child ? this.forgeSettlesArmedMerge(child, decision) : false;
@@ -20263,6 +20361,7 @@ export class SessionsService {
   }
 
   setArchived(sessionId: string, archived: boolean, refreshProject = true): ServiceResult<SessionView> {
+    if (archived && this.db.campaignPaused(sessionId)) return fail("The campaign is paused; preserved children cannot be archived.", 409);
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const now = Date.now();

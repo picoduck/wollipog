@@ -106,6 +106,7 @@ export function orchestratorControlsSummary(session: ControlView & Pick<SessionV
 /** A campaign's lifecycle in the status vocabulary (§11.2). */
 function campaignStatusMeta(status: OrchestratorCampaignProjection["status"]): StatusMeta {
   switch (status) {
+    case "paused": return statusMeta("session", "campaign_paused");
     case "waiting_human": return statusMeta("workflow", "awaiting_decision");
     case "active": return statusMeta("workflow", "running");
     // #4146: finished with cleanup left reads as complete, informational; stuck needs a person.

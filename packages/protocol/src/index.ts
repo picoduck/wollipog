@@ -280,6 +280,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v297 campaign activity status (#4146). Gates `complete_needs_cleanup` and `stuck` for
    * dashboards; older ones receive `complete_with_handoffs` (or `waiting_human`) and `blocked`. */
   campaignActivityStatus: 297,
+  campaignPause: 368,
   /** v272 runner watches a parked session's merge-queue entry and the control plane wakes it (#4071).
    * Checked against the runner by the control plane and against the control plane by the runner. */
   pullRequestWatch: 272,
@@ -2399,6 +2400,7 @@ export interface FullControlScopeGrant {
  * terminal with every unfinished item handed to a person. A v297 control plane sends them only to
  * dashboards older than `campaignActivityStatus`, in place of `stuck` and `complete_needs_cleanup`. */
 export type OrchestratorCampaignStatus =
+  | "paused"
   | "waiting_human"
   | "active"
   | "complete_needs_cleanup"
@@ -2491,9 +2493,22 @@ export interface UiEvidenceReviewDelivery {
   data: string;
 }
 
+/** Durable owner-controlled suspension. In-flight work retains its authority and lifecycle. */
+export interface CampaignPauseView {
+  pausedAt: number;
+  pausedBy: string;
+  resumeAt: number | null;
+  resumeRequestedBy?: string;
+  resumedAt?: number;
+  resumedBy?: string;
+  stoppedSessionIds: string[];
+  inFlightSessionIds: string[];
+}
+
 /** Credential-free, server-derived campaign state. The stored policy remains the source of truth;
  * this projection applies runtime compatibility fallbacks without mutating or broadening it. */
 export interface OrchestratorCampaignProjection {
+  pause?: CampaignPauseView;
   /** Current authorized root control, paired with policyRevision; child snapshots may be stale. */
   control?: CampaignControl;
   /** The repository boundary's Locations, exclusions and joins (#4117). Omitted for a campaign
