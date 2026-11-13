@@ -99,6 +99,9 @@ interface CampaignListMemory {
   focusItemId: string | null;
   /** Rows the list had loaded, so a remounted panel reloads as deep before restoring position. */
   shownCount: number;
+  reachedSectionTarget?: string;
+  reachedRequestId?: string;
+  reachedWorkItemId?: string;
 }
 const listMemory = new Map<string, CampaignListMemory>();
 
@@ -159,7 +162,7 @@ export function CampaignStatusPanel({
       key={session.id}
       session={session}
       target={target}
-      attentionRequestId={attentionRequestId ?? target?.requestId}
+      attentionRequestId={target ? target.requestId : attentionRequestId}
       availability={availability}
       onOpenSession={onOpenSession}
       findRequest={findRequest}
@@ -214,23 +217,26 @@ function AvailableCampaignStatus({
   useEffect(() => {
     if (shownCount !== null && shownCount !== memory.shownCount) setMemory({ shownCount });
   }, [memory.shownCount, setMemory, shownCount]);
+  const sectionTargetTitle = target?.workItemId ? undefined : target?.section
+    ?? (attentionRequestId ? "Waiting for You" : availability.currentWorkItemId ? "Work Items" : undefined);
+  const sectionTargetKey = target?.workItemId ? undefined : target?.section ? `section:${target.section}`
+    : attentionRequestId ? `request:${attentionRequestId}`
+      : availability.currentWorkItemId ? `assignment:${availability.currentWorkItemId}` : undefined;
+  const needsSectionTarget = Boolean(sectionTargetKey && memory.reachedSectionTarget !== sectionTargetKey
+    && (!attentionRequestId || memory.reachedRequestId !== attentionRequestId));
   useEffect(() => {
-    if (target?.section || attentionRequestId) setMemory({ selectedItemId: null });
-  }, [target?.section, attentionRequestId, setMemory]);
-  const reachedWorkItem = useRef<string | undefined>(undefined);
+    if (needsSectionTarget) setMemory({ selectedItemId: null });
+  }, [needsSectionTarget, setMemory]);
   useEffect(() => {
-    if (!target?.workItemId || reachedWorkItem.current === target.workItemId) return;
-    reachedWorkItem.current = target.workItemId;
-    setMemory({ selectedItemId: target.workItemId, focusItemId: target.workItemId });
-  }, [target?.workItemId, setMemory]);
-  const reachedRequest = useRef<string | undefined>(undefined);
+    if (!target?.workItemId || memory.reachedWorkItemId === target.workItemId) return;
+    setMemory({ selectedItemId: target.workItemId, focusItemId: target.workItemId, reachedWorkItemId: target.workItemId });
+  }, [target?.workItemId, memory.reachedWorkItemId, setMemory]);
   useEffect(() => {
-    if (!attentionRequestId || reachedRequest.current === attentionRequestId) return;
+    if (!attentionRequestId || memory.reachedRequestId === attentionRequestId) return;
     const item = data.list.items.find(item => item.blocker?.requestOccurrenceId === attentionRequestId);
     if (!item) return;
-    reachedRequest.current = attentionRequestId;
-    setMemory({ selectedItemId: item.id, focusItemId: item.id });
-  }, [attentionRequestId, data.list.items, setMemory]);
+    setMemory({ selectedItemId: item.id, focusItemId: item.id, reachedRequestId: attentionRequestId });
+  }, [attentionRequestId, memory.reachedRequestId, data.list.items, setMemory]);
   const now = useTimelineClock(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -274,6 +280,9 @@ function AvailableCampaignStatus({
   const heldChildren = data.summary.campaign?.heldChildren ?? [];
   const recovery = useCampaignEntries(data.summary.campaign?.recovery?.records ?? []);
   const returns = useCampaignEntries(data.summary.campaign?.ownerReturns ?? []);
+  const automationNeedsAttention = campaignRecoveryAutomationNotice(data.summary.campaign?.status,
+    data.summary.campaign?.recovery?.automation)?.tone === "warning";
+  const automationSection = <CampaignRecoveryAutomation key="automation" campaign={data.summary.campaign} />;
   // A child named by Cleanup or Campaign Stuck, as a link to its session.
   const sessionLink = (sessionId: string) => <CampaignChildLink sessionId={sessionId} onOpen={onOpenSession} />;
   const recoveryNeedsAttention = data.summary.campaign?.recovery?.records.some(record => record.state === "waiting_human");
@@ -341,7 +350,12 @@ function AvailableCampaignStatus({
           )}
           {data.offline && <p className="campaign-status-offline" role="status">Reconnecting… Showing the last loaded campaign status.</p>}
           <StaleContent stale={data.offline}>
-            <CampaignSections campaignId={availability.campaignSessionId} targetTitle={target?.section ?? (attentionRequestId ? "Waiting for You" : availability.currentWorkItemId ? "Work Items" : undefined)}><div className="campaign-status-sections">
+            <CampaignSections campaignId={availability.campaignSessionId} targetTitle={needsSectionTarget ? sectionTargetTitle : undefined}
+              targetKey={sectionTargetKey}
+              onTargetReached={() => {
+                pendingRestore.current = null;
+                setMemory({ reachedSectionTarget: sectionTargetKey });
+              }}><div className="campaign-status-sections">
               {pauseNeedsAttention && pauseSection}
               {data.summary.campaign?.ownerDecisions && (
                 <CampaignOwnerDecisions
@@ -374,6 +388,7 @@ function AvailableCampaignStatus({
               {recoveryNeedsAttention && recoverySection}
               {repositoriesNeedAttention && repositorySection}
               {handoffsNeedAttention && handoffSection}
+              {automationNeedsAttention && automationSection}
               <CampaignSummarySection data={data} now={now} />
               <CampaignWorkList
                 data={data}
@@ -404,7 +419,7 @@ function AvailableCampaignStatus({
                   onOpenSession={sessionLink}
                 />
               )}
-              <CampaignRecoveryAutomation campaign={data.summary.campaign} />
+              {!automationNeedsAttention && automationSection}
               {!recoveryNeedsAttention && recoverySection}
               {data.summary.campaign?.budget?.followUpApprovals && (
                 <CampaignFollowUpLimit
@@ -441,7 +456,7 @@ function CampaignRecoveryAutomation({ campaign }: { campaign: CampaignStatusData
   const notice = campaignRecoveryAutomationNotice(campaign?.status, campaign?.recovery?.automation);
   if (!notice) return null;
   return (
-    <CampaignSection title="Recovery Automation" count={1}><Notice tone={notice.tone} title={notice.title} role={notice.tone === "neutral" ? "status" : undefined}>
+    <CampaignSection title="Recovery Automation" count={1} attention={notice.tone === "warning" ? `${notice.title}:${notice.body}` : ""}><Notice tone={notice.tone} title={notice.title} role={notice.tone === "neutral" ? "status" : undefined}>
       {notice.body}
     </Notice></CampaignSection>
   );
@@ -718,7 +733,6 @@ function CampaignWorkList({
   now: number;
   onOpen: (item: CampaignWorkItemSummary) => void;
 }) {
-  const headingId = useId();
   const { list } = data;
   // #4120: grouped by repository when the campaign works in more than one; keyboard order follows
   // what is shown.
@@ -785,7 +799,7 @@ function CampaignWorkList({
             {list.error}
           </Notice>
         )}
-        <ul className="campaign-work-list" aria-labelledby={headingId} onKeyDown={onKeyDown}>
+        <ul className="campaign-work-list" aria-label="Work Items" onKeyDown={onKeyDown}>
           {groups ? groups.map((group) => (
             <CampaignWorkGroup key={group.repository ?? ""} group={group}>
               {group.items.map(row)}

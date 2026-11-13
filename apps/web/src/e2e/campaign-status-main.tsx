@@ -104,6 +104,7 @@ declare global {
 
 const params = new URLSearchParams(window.location.search);
 const largeCampaign = params.has("largeCampaign");
+const appChrome = params.has("queueStall") || largeCampaign || params.has("chrome");
 if (largeCampaign) {
   params.set("repositories", "1"); params.set("decisions", "1");
   params.set("recovery", "failed_checks"); params.set("owners", "after");
@@ -1469,9 +1470,9 @@ function Fixture() {
     consumeSubagentFocusRequest: () => {},
   };
   return (
-    <main className="app" style={{ display: params.has("queueStall") || largeCampaign || params.get("screen") === "ask" ? "flex" : "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
-      {(params.has("queueStall") || largeCampaign || params.get("screen") === "ask" && window.innerWidth > 760) && <Rail view={{ name: "session", id: sessionId }} blockedCount={0} onNavigate={() => {}} />}
-      <section className="session-detail expanded" style={{ height: params.has("queueStall") || largeCampaign ? "auto" : "100%", ...(params.has("queueStall") || largeCampaign ? { flex: 1, minWidth: 0, minHeight: 0 } : params.get("screen") === "ask" ? { flex: "1 1 0", minWidth: 0, minHeight: 0 } : {}) }}>
+    <main className="app" style={{ display: appChrome || params.get("screen") === "ask" ? "flex" : "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
+      {(appChrome || params.get("screen") === "ask" && window.innerWidth > 760) && <Rail view={{ name: "session", id: sessionId }} blockedCount={0} onNavigate={() => {}} />}
+      <section className="session-detail expanded" style={{ height: appChrome ? "auto" : "100%", ...(appChrome ? { flex: 1, minWidth: 0, minHeight: 0 } : params.get("screen") === "ask" ? { flex: "1 1 0", minWidth: 0, minHeight: 0 } : {}) }}>
         <header className="detail-bar session-bar">
           <h1 className="detail-bar-title session-bar-title">{params.get("screen") === "ask" ? "Provider Configuration Campaign" : session.title}</h1>
         </header>
@@ -1509,9 +1510,9 @@ function Fixture() {
       </section>
       {/* On a phone the app's tab bar fills the band below the panel sheet (--bottom-bar-h); this
           stand-in shows that band for what it is in the captures. */}
-      {window.innerWidth <= 760 && params.get("screen") === "ask" && !(params.has("queueStall") || largeCampaign) ? (
+      {window.innerWidth <= 760 && params.get("screen") === "ask" && !appChrome ? (
         <Rail view={{ name: "session", id: sessionId }} blockedCount={1} onNavigate={() => {}} />
-      ) : window.innerWidth <= 760 && !ownerScenario && !(params.has("queueStall") || largeCampaign) && (
+      ) : window.innerWidth <= 760 && !ownerScenario && !appChrome && (
         <nav aria-label="App Navigation" style={{
           position: "fixed", left: 0, right: 0, bottom: 0, height: "var(--bottom-bar-h)",
           display: "flex", alignItems: "center", justifyContent: "center",

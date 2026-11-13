@@ -12,7 +12,9 @@ const Context = createContext<{
 } | null>(null);
 
 /** Sections register only when rendered, including those loaded independently from older servers. */
-export function CampaignSections({ campaignId, targetTitle, children }: { campaignId: string; targetTitle?: string; children: ReactNode }) {
+export function CampaignSections({ campaignId, targetTitle, targetKey, onTargetReached, children }: {
+  campaignId: string; targetTitle?: string; targetKey?: string; onTargetReached?: () => void; children: ReactNode;
+}) {
   const [entries, setEntries] = useState<Map<string, Entry>>(new Map());
   const [all, setAll] = useState<{ value: boolean; revision: number } | null>(null);
   const memory = useMemo(() => {
@@ -48,12 +50,14 @@ export function CampaignSections({ campaignId, targetTitle, children }: { campai
   }, []);
   const reached = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (!targetTitle || reached.current === targetTitle) return;
+    const key = targetKey ?? targetTitle;
+    if (!targetTitle || reached.current === key) return;
     const entry = [...entries.values()].find(entry => entry.title === targetTitle);
     if (!entry) return;
-    reached.current = targetTitle;
+    reached.current = key;
+    onTargetReached?.();
     reveal(entry);
-  }, [entries, targetTitle, reveal]);
+  }, [entries, targetTitle, targetKey, reveal, onTargetReached]);
   const ordered = [...entries].sort((a, b) => {
     const position = a[1].heading?.compareDocumentPosition(b[1].heading!);
     return position && position & 4 ? -1 : 1;

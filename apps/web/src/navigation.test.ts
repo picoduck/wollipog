@@ -739,3 +739,15 @@ test("resource codec is canonical exact UTF-16LE base64url and rejects invalid e
     assert.deepEqual(viewFromPath(url.pathname, url.search), view);
   }
 });
+
+test("campaign targets do not depend on URLSearchParams.size", () => {
+  const descriptor = Object.getOwnPropertyDescriptor(URLSearchParams.prototype, "size")!;
+  Object.defineProperty(URLSearchParams.prototype, "size", { configurable: true, get: () => undefined });
+  try {
+    const view: View = { name: "session", id: "campaign", campaign: true, campaignTarget: { workItemId: "work-42" } };
+    const url = new URL(viewPath(view), "https://example.test");
+    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
+  } finally {
+    Object.defineProperty(URLSearchParams.prototype, "size", descriptor);
+  }
+});

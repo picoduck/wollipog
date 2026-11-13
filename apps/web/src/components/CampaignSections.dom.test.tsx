@@ -56,3 +56,27 @@ test("defaults, per-campaign memory, all controls, index focus and new attention
   assert.match(disclosure("Decisions").textContent!, /New/);
   await act(async () => root.unmount()); container.remove();
 });
+
+test("distinct requests can reach the same heading without replaying a handled request", async () => {
+  const container = document.createElement("div"); container.className = "campaign-status"; document.body.append(container);
+  container.scrollTo = () => {};
+  const root = createRoot(container);
+  let reached = 0;
+  const render = async (targetKey: string, count: number) => act(async () => root.render(
+    <CampaignSections campaignId="request-targets" targetTitle="Waiting for You" targetKey={targetKey} onTargetReached={() => { reached++; }}>
+      <button type="button">Elsewhere</button>
+      <CampaignSection title="Waiting for You" count={count}>Requests</CampaignSection>
+    </CampaignSections>));
+  await render("request-one", 1);
+  assert.equal(reached, 1);
+  assert.equal(document.activeElement, container.querySelector("h3"));
+  const elsewhere = [...container.querySelectorAll("button")].find(button => button.textContent === "Elsewhere")!;
+  elsewhere.focus();
+  await render("request-one", 2);
+  assert.equal(reached, 1);
+  assert.equal(document.activeElement, elsewhere);
+  await render("request-two", 2);
+  assert.equal(reached, 2);
+  assert.equal(document.activeElement, container.querySelector("h3"));
+  await act(async () => root.unmount()); container.remove();
+});

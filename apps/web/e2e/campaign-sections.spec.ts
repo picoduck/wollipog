@@ -1,5 +1,38 @@
 import { expect, test } from "@playwright/test";
 
+for (const query of ["scenario=member", "scenario=campaign&section=Decisions&decisions=1"]) test(`Back preserves the row after targeted entry: ${query}`, async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/campaign-status-e2e.html?${query}`);
+  const target = query.includes("member") ? "Work Items" : "Decisions";
+  await expect(page.getByRole("heading", { name: target, exact: true })).toBeFocused();
+  await expect(page.getByRole("list", { name: "Work Items", exact: true })).toBeVisible();
+  const row = page.locator(".campaign-work-row").first();
+  await row.focus();
+  const scroller = page.locator(".campaign-status");
+  await scroller.evaluate(element => { element.scrollTop = 260; });
+  const before = await scroller.evaluate(element => element.scrollTop);
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".campaign-detail-title")).toBeFocused();
+  await page.getByRole("button", { name: "Back to Work Items", exact: true }).click();
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await expect(row).toBeFocused();
+  expect(await scroller.evaluate(element => element.scrollTop)).toBe(before);
+});
+
+for (const width of [1440, 390]) test(`a recovery hold remains actionable before opening reference sections at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&handoffs=before&chrome=1");
+  await expect(page.getByRole("navigation", { name: "Primary Navigation" })).toBeVisible();
+  await expect(page.getByText("Authorized Recovery Unavailable", { exact: true })).toBeVisible();
+  await expect(page.locator('[data-campaign-section="Recovery Automation"] h3 button')).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByRole("navigation", { name: "Campaign Sections" }).getByRole("button", { name: "Recovery Automation · 1 · Attention", exact: true })).toBeVisible();
+  await page.mouse.move(width - 100, 360);
+  await page.mouse.wheel(0, -10000);
+  await expect(page.locator(".campaign-status")).toHaveJSProperty("scrollTop", 0);
+  expect(await page.locator(".campaign-status").evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  if (process.env.CAMPAIGN_SECTIONS_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.CAMPAIGN_SECTIONS_EVIDENCE_DIR}/recovery-attention-${width}.png` });
+});
+
 for (const width of [1440, 390]) test(`large campaign sections at ${width}px (#4549)`, async ({ page }) => {
   await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
   await page.goto("/campaign-status-e2e.html?scenario=campaign&largeCampaign=1");

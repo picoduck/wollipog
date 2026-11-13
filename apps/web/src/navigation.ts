@@ -532,7 +532,8 @@ function campaignTargetSearch(target: CampaignTarget | undefined): string {
   for (const key of ["section", "workItemId", "requestId"] as const) {
     if (target?.[key]) params.set(key, target[key]);
   }
-  return params.size ? `?${params.toString()}` : "";
+  const search = params.toString();
+  return search ? `?${search}` : "";
 }
 
 export function viewPath(view: View): string {
@@ -725,7 +726,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
         target[key] = params.get(key)!;
       }
     }
-    return { name: "session", id, campaign: true, ...(params.size ? { campaignTarget: target } : {}) };
+    return { name: "session", id, campaign: true, ...(Object.keys(target).length ? { campaignTarget: target } : {}) };
   }
   const artifactsMatch = /^\/sessions\/~([^/]+)\/artifacts(?:\/~([^/]+))?$/.exec(path);
   if (artifactsMatch) {
