@@ -59,6 +59,7 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
     const candidate = { repository: "picoduck/wollipog", number: 700, headSha: mergedHead };
     const options = { context: { kind: "native" as const }, forgeFetchRepository: remote,
       runForgeCommand: async () => ({ stdout: JSON.stringify({ data: { repository: {
+        isPrivate: false,
         defaultBranchRef: { name: "main", target: { oid: defaultHead } },
         pullRequest: { state: "MERGED", headRefOid: mergedHead, baseRefName: "main" },
       } } }), stderr: "" }) };
@@ -68,6 +69,26 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
       [{ ...candidate, headSha: "a".repeat(40) }], options), undefined, "moved admitted head refuses");
     const proof = await proveWorktreePatchDelivery(worktree.path, worktree.branch, [candidate], options);
     assert.ok(proof, "individual pre-squash commits match under different IDs");
+    const privateOptions = { ...options, runForgeCommand: async () => {
+      const response = await options.runForgeCommand();
+      const data = JSON.parse(response.stdout);
+      data.data.repository.isPrivate = true;
+      return { stdout: JSON.stringify(data), stderr: "" };
+    } };
+    assert.deepEqual(await proveDetailed(worktree.path, worktree.branch, [candidate], privateOptions),
+      { state: "ineligible", reason: "private_repository" });
+    assert.deepEqual(await proveDetailed(worktree.path, worktree.branch, [candidate], {
+      ...options, runForgeCommand: async () => { throw Object.assign(new Error("missing gh"), { code: "ENOENT" }); },
+    }), { state: "ineligible", reason: "missing_gh" });
+    assert.deepEqual(await proveDetailed(worktree.path, worktree.branch, [candidate], {
+      ...options, runForgeCommand: async () => { throw Object.assign(new Error("auth required"), { code: 4 }); },
+    }), { state: "ineligible", reason: "forge_auth_required" });
+    assert.deepEqual(await proveDetailed(worktree.path, worktree.branch, [candidate], {
+      ...options, runGitCommand: async () => ({ stdout: `${"a".repeat(40)} ${"0".repeat(40)}\n`, stderr: "" }),
+    }), { state: "ineligible", reason: "unsupported_git" }, "a mode-unaware implementation cannot authorize proof");
+    assert.deepEqual(await proveDetailed(worktree.path, worktree.branch, [candidate], {
+      ...options, runGitCommand: async () => { throw Object.assign(new Error("unsupported flag"), { code: 129 }); },
+    }), { state: "ineligible", reason: "unsupported_git" });
     const unavailableOptions = { ...options, runForgeCommand: async () => { throw new Error("temporary fixture outage"); } };
     assert.equal((await proveDetailed(worktree.path, worktree.branch, [candidate], unavailableOptions)).state, "unavailable");
     assert.equal((await proveDetailed(worktree.path, worktree.branch, [candidate], {
@@ -138,13 +159,45 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
     };
     internals.discoverMergedWorktreePullRequest = async () => null;
     internals.probeMergedPullRequestContainment = async () => ({ state: "not_contained" });
+    for (const permanent of [privateOptions,
+      { ...options, runForgeCommand: async () => { throw Object.assign(new Error("missing gh"), { code: "ENOENT" }); } },
+      { ...options, runGitCommand: async () => { throw Object.assign(new Error("unsupported flag"), { code: 129 }); } },
+    ]) {
+      internals.probePatchDelivery = (cwd, branch, candidates) => proveDetailed(cwd, branch, candidates, permanent);
+      await assert.rejects(manager.discardWorktree("s_patch", worktree.path, {
+        requireDelivered: true, campaignDeliveredPullRequests: [candidate],
+      }), /no upstream/, "known permanent proof failure keeps the ordinary terminal archive refusal");
+      assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 0);
+    }
     let forgeAvailable = false;
-    internals.probePatchDelivery = (cwd, branch, candidates) => proveDetailed(cwd, branch, candidates,
-      forgeAvailable ? options : unavailableOptions);
+    internals.probePatchDelivery = (cwd, branch, candidates) => {
+      const held = store.readWorktreeLease("s_patch");
+      assert.ok(!held || held.owner === "fixture-provider", "network proof runs before the cleanup lease");
+      return proveDetailed(cwd, branch, candidates, forgeAvailable ? options : unavailableOptions);
+    };
     await assert.rejects(manager.discardWorktree("s_patch", worktree.path, { requireDelivered: true }), /no upstream/);
-    await assert.rejects(manager.discardWorktree("s_patch", worktree.path, {
+    assert.equal((await manager.discardWorktree("s_patch", worktree.path, {
       requireDelivered: true, campaignDeliveredPullRequests: [candidate],
-    }), /forge state is temporarily unavailable/, "initial archive proof outage is retryable");
+    })).retirement.status, "deferred", "initial unknown outage creates bounded durable retry intent");
+    assert.equal(new WorktreeCleanupJournal(dataDir).list()[0]?.patchUnavailableAttempts, 1);
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(new WorktreeCleanupJournal(dataDir).list()[0]?.patchUnavailableAttempts, 2);
+    assert.equal(messages.some((message) => message.type === "session_worktree_retirement_refused"), false);
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 0, "a permanent unknown outage cannot retry forever");
+    assert.ok(messages.some((message) => message.type === "session_worktree_retirement_refused" &&
+      /three attempts/.test(message.reason)));
+    assert.equal(existsSync(worktree.path), true, "exhaustion never removes unproved work");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      assert.equal((await manager.discardWorktree("s_patch", worktree.path, {
+        requireDelivered: true, campaignDeliveredPullRequests: [candidate],
+      })).retirement.status, "deferred");
+    }
+    await assert.rejects(manager.discardWorktree("s_patch", worktree.path, {
+      campaignDeliveredPullRequests: [candidate],
+    }), /three attempts/, "repeated CP requests preserve the existing intent's attempt budget too");
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 0);
+    forgeAvailable = true;
     const leaseOwner = "fixture-provider";
     assert.equal(store.acquireWorktreeLease("s_patch", leaseOwner), true);
     const active = { sessionId: "s_patch", context: { kind: "native" }, cwd: worktree.path, worktree,
@@ -156,16 +209,6 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
     assert.deepEqual(new WorktreeCleanupJournal(dataDir).list()[0]?.campaignDeliveredPullRequests, [candidate],
       "same-child candidate provenance survives the provider boundary");
     assert.equal(internals.deleteActiveSession("s_patch", active), true);
-    const unavailableEvents = () => logs.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
-      .filter((event) => event.event === "worktree_patch_delivery" && event.outcome === "unavailable");
-    for (let attempt = 0; attempt < 500 && unavailableEvents().length < 2; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.equal(unavailableEvents().length, 2, "deferred replay also attempted proof during the outage");
-    assert.equal(existsSync(worktree.path), true);
-    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 1, "outage preserves durable retry intent");
-    assert.equal(messages.some((message) => message.type === "session_worktree_retirement_refused"), false);
-    forgeAvailable = true;
     await manager.reconcileWorktreePullRequests();
     for (let attempt = 0; attempt < 500 && (store.readMeta("s_patch")?.worktrees?.length ||
         !new WorktreeCleanupJournal(dataDir).history().some((record) => record.patchDelivery?.tipOid === tip)); attempt++) {

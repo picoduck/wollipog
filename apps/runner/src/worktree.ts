@@ -226,6 +226,8 @@ export interface WorktreeCleanupRecord {
   containingMergedHead?: string;
   patchDelivery?: WorktreePatchDeliveryProof;
   campaignDeliveredPullRequests?: Array<{ repository: string; number: number; headSha: string }>;
+  /** Unknown proof outages retry at most three times for this durable cleanup intent. */
+  patchUnavailableAttempts?: number;
 }
 
 export type RetainedWorktreeRefReason =

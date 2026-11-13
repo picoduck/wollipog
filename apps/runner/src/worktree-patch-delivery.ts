@@ -13,13 +13,35 @@ export interface WorktreePatchDeliveryProof {
 export type CampaignDeliveredPullRequest = { repository: string; number: number; headSha: string };
 export type WorktreePatchDeliveryResult =
   | { state: "matched"; proof: WorktreePatchDeliveryProof }
-  | { state: "not_matched" | "unavailable" | "ineligible" };
+  | { state: "not_matched" | "unavailable" }
+  | { state: "ineligible"; reason: "no_candidates" | "live_upstream" | "unsupported_forge" |
+      "private_repository" | "unsupported_git" | "missing_gh" | "forge_auth_required" };
 const OID = /^[a-f0-9]{40,64}$/u;
 const LOCAL_LIMIT = 128;
 const MERGED_LIMIT = 512;
 const SAFE_GIT = ["--no-replace-objects", "-c", "core.commitGraph=false", "-c", "core.fsmonitor=false",
   "-c", "core.hooksPath=/dev/null"];
 const ENV = { GIT_GRAFT_FILE: "/dev/null" };
+
+/** Test behavior, not a version string: distribution backports differ. Run only fixed patch
+ * material through Git, with no repository writes or helper execution. */
+async function supportsModePatchIds(cwd: string, context: AgentContext, signal: AbortSignal,
+  runGit = runContextCommand): Promise<boolean> {
+  const body = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-before\n+after\n";
+  const plain = "diff --git a/f b/f\nindex " + "1".repeat(40) + ".." + "2".repeat(40) + " 100644\n" + body;
+  const mode = "diff --git a/f b/f\nold mode 100644\nnew mode 100755\nindex " +
+    "1".repeat(40) + ".." + "2".repeat(40) + "\n" + body;
+  try {
+    const id = async (stdin: string) => (await runGit(context, "git", [...SAFE_GIT, "patch-id", "--verbatim"],
+      { cwd, stdin, env: ENV, signal, timeoutMs: 15_000, maxBuffer: 1024 })).stdout.trim().split(" ")[0];
+    const before = await id(plain), after = await id(mode);
+    return typeof before === "string" && typeof after === "string" && OID.test(before) && OID.test(after) && before !== after;
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    if (code === "ENOENT" || code === 129) return false;
+    throw error;
+  }
+}
 
 /** Whitespace-preserving Git patch IDs, with bounded real commit walks. Empty/merge commits and
  * undecodable text refuse proof rather than silently omitting work. No diff driver can execute.
@@ -60,6 +82,7 @@ export async function patchDeliveryContains(cwd: string, context: AgentContext, 
   tip: string, signal = AbortSignal.timeout(90_000)): Promise<boolean> {
   if (tip !== proof.tipOid || ![tip, proof.mergedHeadOid, proof.defaultHeadOid].every((oid) => OID.test(oid))) return false;
   try {
+    if (!await supportsModePatchIds(cwd, context, signal)) return false;
     const local = await patchIds(cwd, context, proof.defaultHeadOid, tip, LOCAL_LIMIT, signal);
     const merged = await patchIds(cwd, context, proof.defaultHeadOid, proof.mergedHeadOid, MERGED_LIMIT, signal);
     return !!local && !!merged && [...local].every((id) => merged.has(id));
@@ -71,9 +94,11 @@ export async function patchDeliveryContains(cwd: string, context: AgentContext, 
  * Fetch both histories anonymously using the same transport boundary as ancestry retirement. */
 export async function proveWorktreePatchDelivery(
   cwd: string, branch: string, candidates: readonly CampaignDeliveredPullRequest[],
-  options: { context: AgentContext; runForgeCommand?: typeof runContextCommand; forgeFetchRepository?: string },
+  options: { context: AgentContext; runForgeCommand?: typeof runContextCommand; forgeFetchRepository?: string;
+    /** Test-only subprocess seam for capability behavior; production always invokes real Git. */
+    runGitCommand?: typeof runContextCommand },
 ): Promise<WorktreePatchDeliveryResult> {
-  if (!candidates.length) return { state: "ineligible" };
+  if (!candidates.length) return { state: "ineligible", reason: "no_candidates" };
   const { context } = options;
   const signal = AbortSignal.timeout(90_000);
   const git = (args: string[], env = ENV) => runContextCommand(context, "git", [...SAFE_GIT, ...args],
@@ -81,32 +106,38 @@ export async function proveWorktreePatchDelivery(
   let unavailable = false;
   const localSets = new Map<string, Set<string> | null>();
   try {
+    if (!await supportsModePatchIds(cwd, context, signal, options.runGitCommand)) {
+      return { state: "ineligible", reason: "unsupported_git" };
+    }
     // This proof never relaxes publication checks for a branch with a live upstream.
-    try { await git(["rev-parse", "--verify", `${branch}@{upstream}`]); return { state: "ineligible" }; } catch { /* no live upstream */ }
+    try { await git(["rev-parse", "--verify", `${branch}@{upstream}`]); return { state: "ineligible", reason: "live_upstream" }; } catch { /* no live upstream */ }
     const tipOid = (await git(["rev-parse", "--verify", "HEAD"])).stdout.trim();
     const remote = parseForgeRemote((await git(["config", "--get", "remote.origin.url"])).stdout.trim());
     if (!OID.test(tipOid) || remote?.provider !== "github" || remote.host !== "github.com" ||
-        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(remote.project)) return { state: "ineligible" };
+        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(remote.project)) return { state: "ineligible", reason: "unsupported_forge" };
     const [owner, name] = remote.project.split("/");
     for (const candidate of candidates.slice(0, 5)) {
       if (candidate.repository.toLowerCase() !== remote.project.toLowerCase() ||
           !Number.isSafeInteger(candidate.number) || candidate.number <= 0 || !OID.test(candidate.headSha)) continue;
+      let step: "forge" | "git" = "forge";
       try {
         const query = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){" +
-          "defaultBranchRef{name target{oid}} pullRequest(number:$number){state headRefOid baseRefName}}}";
+          "isPrivate defaultBranchRef{name target{oid}} pullRequest(number:$number){state headRefOid baseRefName}}}";
         const response = await (options.runForgeCommand ?? runContextCommand)(context, "gh", ["api", "graphql", "--hostname", "github.com",
           "-f", `query=${query}`, "-f", `owner=${owner}`, "-f", `name=${name}`, "-F", `number=${candidate.number}`],
         { cwd, signal, timeoutMs: 15_000, maxBuffer: 1024 * 1024 });
+        step = "git";
         const data = JSON.parse(response.stdout);
         const repo = data?.data?.repository;
         const pr = repo?.pullRequest;
         const defaultBranch = repo?.defaultBranchRef?.name;
         const defaultHeadOid = repo?.defaultBranchRef?.target?.oid;
-        if (data.errors || !repo || !pr || !repo.defaultBranchRef ||
+        if (data.errors || !repo || !pr || !repo.defaultBranchRef || typeof repo.isPrivate !== "boolean" ||
             !["MERGED", "OPEN", "CLOSED"].includes(pr.state) ||
             typeof pr.headRefOid !== "string" || !OID.test(pr.headRefOid) ||
             typeof pr.baseRefName !== "string" || typeof defaultBranch !== "string" ||
             typeof defaultHeadOid !== "string" || !OID.test(defaultHeadOid)) { unavailable = true; continue; }
+        if (repo.isPrivate) return { state: "ineligible", reason: "private_repository" };
         if (pr.state !== "MERGED" || pr.headRefOid !== candidate.headSha || pr.baseRefName !== defaultBranch) continue;
         await git(["check-ref-format", `refs/heads/${defaultBranch}`]);
         await git([...CONTAINMENT_FETCH_GIT_CONFIG,
@@ -124,7 +155,12 @@ export async function proveWorktreePatchDelivery(
         const local = localSets.get(defaultHeadOid);
         const merged = await patchIds(cwd, context, defaultHeadOid, candidate.headSha, MERGED_LIMIT, signal);
         if (local && merged && [...local].every((id) => merged.has(id))) return { state: "matched", proof };
-      } catch { unavailable = true; }
+      } catch (error) {
+        const code = (error as { code?: unknown }).code;
+        if (code === "ENOENT") return { state: "ineligible", reason: step === "forge" ? "missing_gh" : "unsupported_git" };
+        if (step === "forge" && code === 4) return { state: "ineligible", reason: "forge_auth_required" };
+        unavailable = true;
+      }
     }
   } catch { unavailable = true; }
   return { state: unavailable ? "unavailable" : "not_matched" };
