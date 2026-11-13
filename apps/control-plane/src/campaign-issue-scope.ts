@@ -222,11 +222,11 @@ export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository:
     ...(proposal.issueAdmission ? { issueAdmission: proposal.issueAdmission } : {}) });
 }
 
-/** Every outstanding decision the root controls, other than scope requests. A person deciding a
- * Full Control scope change re-authorizes the boundary all of them were evaluated under, so that
- * request lists, and its approval revokes, every one (#3915). */
-export function everyOutstandingScopeDecision(db: ControlPlaneDb, rootId: string): string[] {
-  return db.authorityBoundWorkflowDecisionsForController(rootId).filter((d) => d.category !== "campaign_issue_scope").map((d) => d.occurrenceId).sort();
+/** Outstanding decisions a person's Full Control scope approval revokes. Independent human
+ * approvals are excluded only with an exact scope change to test; without one, fail closed. */
+export function everyOutstandingScopeDecision(db: ControlPlaneDb, rootId: string, request?: CampaignIssueScopeSnapshot): string[] {
+  return db.authorityBoundWorkflowDecisionsForController(rootId).filter((d) => d.category !== "campaign_issue_scope" &&
+    (!request || !scopePreservesHumanApproval(db, rootId, request, d))).map((d) => d.occurrenceId).sort();
 }
 
 /** Whether a decision filed or settled since a person's Full Control scope request bears on its
@@ -242,7 +242,7 @@ export function everyOutstandingScopeDecision(db: ControlPlaneDb, rootId: string
  * A listed decision that can no longer be read proves nothing, and bears on it too. */
 export function outstandingDecisionsBearOnScopeRequest(db: ControlPlaneDb, rootId: string, request: CampaignIssueScopeSnapshot): boolean {
   const listed = new Set(request.affectedDecisions);
-  const outstanding = new Set(everyOutstandingScopeDecision(db, rootId));
+  const outstanding = new Set(everyOutstandingScopeDecision(db, rootId, request));
   const groups = campaignScopeChangeGroups(request);
   return [...listed, ...outstanding].filter((id) => listed.has(id) !== outstanding.has(id)).some((id) => {
     const decision = db.workflowDecisionByOccurrence(id);
@@ -273,6 +273,24 @@ function scopeChangeAffectsDecision(db: ControlPlaneDb, rootId: string, reposito
   if (snapshot.category === "follow_up_issue_publication" || snapshot.category === "campaign_follow_up_admission") return true;
   if (!removes && decision.status === "approved" && snapshot.category === "pr_merge" && decision.actionAdmission?.kind === "pr_merge_enqueue") return false;
   return decision.sessionId === rootId || db.initialUserMessageText(decision.sessionId) === null || !unrelated.has(decision.sessionId);
+}
+
+/** Preserve only an existing human approval proven independent of this scope change.
+ * Pending and delegated decisions still lose authority; missing ledger proof fails closed. */
+export function scopePreservesHumanApproval(db: ControlPlaneDb, rootId: string, request: CampaignIssueScopeSnapshot,
+  decision: WorkflowDecisionView, expectedPolicyRevision = db.getSession(rootId)?.parentControlPolicy?.revision): boolean {
+  if (decision.authority !== "human" || decision.status !== "approved") return false;
+  // A scope change must never revive approval already stale for another policy change.
+  if (expectedPolicyRevision === undefined || decision.policyRevision !== expectedPolicyRevision ||
+      decision.authorityEvaluation?.boundaryRevision !== undefined &&
+      decision.authorityEvaluation.boundaryRevision !== expectedPolicyRevision) return false;
+  // Proposal constraints can also narrow operations or repositories, beyond issue membership.
+  if (request.scopeProposal) return false;
+  const groups = campaignScopeChangeGroups(request);
+  const removes = groups.some((g) => g.removals.length > 0);
+  return groups.filter((g) => g.additions.length || g.removals.length).every((g) =>
+    !scopeChangeAffectsDecision(db, rootId, g.repository, [...g.additions, ...g.removals], removes,
+      db.campaignWorkLedger.sessionsUnrelatedToIssues(rootId, g.repository, [...g.additions, ...g.removals]), decision));
 }
 
 export function campaignNeedsEpicScope(root: SessionView): boolean {

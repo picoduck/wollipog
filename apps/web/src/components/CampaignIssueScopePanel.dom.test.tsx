@@ -4,6 +4,19 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CampaignIssueScopeSummary } from "./CampaignIssueScopePanel.js";
 
+test("scope decisions identify an armed merge and pending publication, with IDs in a closed disclosure (#4547)", () => {
+  const markup = renderToStaticMarkup(<CampaignIssueScopeSummary snapshot={{ category: "campaign_issue_scope", repository: "team/repo",
+    expectedRevision: 3, before: [100], additions: [101], removals: [], explanation: "Include the related work.",
+    affectedAssignments: [], activeChildren: [], affectedDecisions: ["merge-id", "publication-id"] }} decisionDetails={[
+      { occurrenceId: "merge-id", category: "pr_merge", resource: "team/repo#4481 at ce64f53", approval: "orchestrator", armed: true },
+      { occurrenceId: "publication-id", category: "follow_up_issue_publication", resource: "team/repo: Preserve Approval History", approval: "pending", armed: false },
+    ]} />).replace(/<!-- -->/gu, "");
+  for (const text of ["Merge: team/repo#4481 at ce64f53", "Approved by the Orchestrator", "armed for the merge queue",
+    "Publication: team/repo: Preserve Approval History", "Pending approval", "<details><summary>Raw Decision IDs</summary><p>merge-id, publication-id</p></details>"]) {
+    assert.ok(markup.includes(text), text);
+  }
+});
+
 test("an all proposal explains its ceiling without claiming missing lineage (#4532)", () => {
   const markup = renderToStaticMarkup(<CampaignIssueScopeSummary snapshot={{
     category: "campaign_issue_scope", repository: "team/repo", expectedRevision: 1, before: [], additions: [12, 13], removals: [],
@@ -23,10 +36,9 @@ test("scope approval displays exact qualified changes, revision and affected aut
   const markup=renderToStaticMarkup(<CampaignIssueScopeSummary snapshot={{category:"campaign_issue_scope",repository:"team/repo",expectedRevision:3,
     before:[123],additions:[124,125],removals:[123],explanation:"Include members <literal>",
     affectedAssignments:[{sessionId:"child",issue:123}],affectedDecisions:["closure-old"],activeChildren:[{sessionId:"untracked-child",title:"Active Untracked Work",assignmentDigest:"a".repeat(64)}]}}/>);
-  for(const expected of ["team/repo#124", "team/repo#125", "team/repo#123", "3 to 4", "child", "closure-old", "&lt;literal&gt;", "Issue closure still requires its own human approval"]) assert.ok(markup.includes(expected),expected);
+  for(const expected of ["team/repo#124", "team/repo#125", "team/repo#123", "3 to 4", "child", "closure-old", "&lt;literal&gt;"]) assert.ok(markup.includes(expected),expected);
   assert.equal(markup.includes("Maximum Issues"), false, "a change without an owner review states no limit");
-  assert.ok(markup.includes("Under Full Control, approving revokes every decision outstanding at that moment, including any filed after this request"),
-    "the list is what the request saw; the approval revokes what is outstanding when it happens (#4332)");
+  assert.ok(markup.includes("pending and Orchestrator-approved decisions are revoked"));
 });
 
 test("an Orchestrator's proposal without lineage says why it waits for the owner and the Maximum Issues increase approving applies (#4267)", () => {

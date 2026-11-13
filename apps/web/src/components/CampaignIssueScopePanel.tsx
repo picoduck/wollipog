@@ -22,10 +22,11 @@ function ScopeOwnerReviewFacts({ review }: { review: NonNullable<CampaignIssueSc
   </p>;
 }
 
-export function CampaignIssueScopeSummary({ snapshot, derivedIncrease }: {
+export function CampaignIssueScopeSummary({ snapshot, derivedIncrease, decisionDetails }: {
   snapshot: CampaignIssueScopeSnapshot;
   /** The server's read of the derived limit approving this request grows, which the snapshot doesn't record (#4334). */
   derivedIncrease?: PendingApproval["scopeMaxIssuesIncrease"];
+  decisionDetails?: PendingApproval["scopeDecisionDetails"];
 }) {
   // Every repository's part of the change, each issue qualified by its own repository (#4118).
   const groups = campaignScopeChangeGroups(snapshot);
@@ -49,9 +50,21 @@ export function CampaignIssueScopeSummary({ snapshot, derivedIncrease }: {
       <div><dt>Removals</dt><dd>{refs((group) => group.removals)}</dd></div>
       <div><dt>Affected Assignments</dt><dd>{snapshot.affectedAssignments.length ? snapshot.affectedAssignments.map((a) => `${a.repository ?? snapshot.repository}#${a.issue}: ${a.sessionId}`).join(", ") : "None"}</dd></div>
       <div><dt>Active Child Work</dt><dd>{snapshot.activeChildren.length ? snapshot.activeChildren.map((child) => `${child.title}: ${child.sessionId}`).join(", ") : "None"}</dd></div>
-      <div><dt>Decisions to Revoke</dt><dd>{snapshot.affectedDecisions.length ? snapshot.affectedDecisions.join(", ") : "None"}</dd></div>
     </dl>
-    <p>Approval changes campaign authority. Active children may hold issue work even when no ledger assignment is recorded. Existing assignments keep their history; work outside the new scope needs a separate scope approval. Outstanding decisions listed above are revoked. Under Full Control, approving revokes every decision outstanding at that moment, including any filed after this request, and the approval's record lists each one. Issue closure still requires its own human approval.</p>
+    <section aria-label="Decisions to Revoke">
+      <h4>Decisions to Revoke</h4>{snapshot.affectedDecisions.length ? <>
+        <ul>{snapshot.affectedDecisions.map((id) => {
+          const d = decisionDetails?.find((candidate) => candidate.occurrenceId === id);
+          return <li key={id}>{d ? <>
+            {d.category === "pr_merge" ? "Merge" : d.category === "follow_up_issue_publication" ? "Publication" : d.category.replaceAll("_", " ")}: {d.resource}
+            {" — "}{d.approval === "pending" ? "Pending approval" : d.approval === "human" ? "Approved by the owner" : "Approved by the Orchestrator"}
+            {d.armed ? "; armed for the merge queue" : "; not armed"}
+          </> : "Decision details unavailable; refresh before approving."}</li>;
+        })}</ul>
+        <details><summary>Raw Decision IDs</summary><p>{snapshot.affectedDecisions.join(", ")}</p></details>
+      </> : <p>None</p>}
+    </section>
+    <p>Under Full Control, pending and Orchestrator-approved decisions are revoked, including ones filed later. Owner approvals survive only when proven independent of the scope change. The approval records each revoked decision.</p>
   </>;
 }
 

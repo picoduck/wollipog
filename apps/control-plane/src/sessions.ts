@@ -13516,8 +13516,8 @@ export class SessionsService {
         const excludedReservation = snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined;
         const scopeSize = campaignScopeChangeResult(snapshot).length;
         const toOwner = !grantReview && additionCount > 0 && !snapshot.lineage;
-        // The owner's approval revokes every outstanding decision (#3915), pending and approved
-        // publications included, so only the slots consumed publications still hold count against
+        // The owner's approval revokes pending and approved publications (#3915), so only the
+        // slots consumed publications still hold count against
         // it, exactly as its resolution counts them; an Orchestrator's own admission counts them all.
         const limit = this.db.campaignIssueLimit(sessionId,
           (grantReview ? grantReviewMaxIssues(latest.orchestratorPolicy, { grantReview }, boundary, scopeSize) : undefined) ?? boundary.issueAuthority!.maxIssues);
@@ -13635,7 +13635,7 @@ export class SessionsService {
       const controller = this.workflowDecisionController(current, "campaign_issue_scope");
       if (current.orchestratorPolicy?.control?.mode === "full_control" && (!controller ||
           this.evaluateWorkflowDecisionAuthority(controller.session, controller.policy, sessionId, snapshot).effectiveOwner === "human")) {
-        snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId);
+        snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId, snapshot);
       }
       const created = this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
         resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
@@ -13961,8 +13961,8 @@ export class SessionsService {
       const snapshot = scopeSnapshot(this.db, latest, repository, scopeRequest, { scopeProposal: owned,
         ...(allOverCeiling ? { ownerReview: { cause: "lineage_missing", maxIssuesIncrease: { from: latestBoundary.issueAuthority!.maxIssues, increase: requested - limit } } } : {}) });
       if (!snapshot) return malformed();
-      // The owner's approval re-authorizes the boundary, so it lists and revokes every outstanding decision (#3915).
-      snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId);
+      // List the decisions revoked by re-authorization, excluding proven independent human approvals.
+      snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId, snapshot);
       log("owner_review", { checks, cause: owned.ownerCause, ...(owned.constraintCheck ? { checkOccurrenceId: owned.constraintCheck.occurrenceId } : {}) });
       return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
         resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
@@ -14164,7 +14164,7 @@ export class SessionsService {
       scopeRevision: request.expectedRevision, lineage: "selection", outcome, ...extra }));
     // The owner's one typed approval: the proposal, its rationale (`explanation`), the grant and why
     // nothing admitted it. It carries no admission, so it is the owner's, and approving it revokes
-    // every outstanding decision as any Full Control scope approval does (#3915).
+    // outstanding decisions other than proven independent human approvals (#4547).
     const ownerRequest = (review: CampaignScopeGrantReview): ServiceResult<WorkflowDecisionView> => {
       const current = this.db.getSession(sessionId);
       if (!current || (current.orchestratorPolicy?.issueScope?.revision ?? 0) !== request.expectedRevision ||
@@ -14177,7 +14177,7 @@ export class SessionsService {
           JSON.stringify(s.additions) === JSON.stringify(snapshot.additions) && !s.removals.length;
       });
       if (pending) return ok(pending);
-      const owned = { ...snapshot, grantReview: review, affectedDecisions: everyOutstandingScopeDecision(this.db, sessionId) };
+      const owned = { ...snapshot, grantReview: review, affectedDecisions: everyOutstandingScopeDecision(this.db, sessionId, snapshot) };
       log("owner_review", { cause: review.cause, ...(review.failureClass ? { failureClass: review.failureClass } : {}) });
       return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
         resourceSnapshot: owned }, canAccess, { trustedIssueScope: true });
@@ -17224,7 +17224,8 @@ export class SessionsService {
    * names the withdrawing session and its reason, and nothing can approve, consume, arm or reconcile
    * it afterwards. The requester may withdraw its own. Its controlling Orchestrator may withdraw one
    * it owns, under the ancestry and current-authority checks resolution applies; a person's request
-   * or approval stays the requester's to retire. Nobody withdraws a category a person settles, and
+   * or approval stays the requester's to retire. Person-settled categories stay protected except
+   * the requesting root's own pending scope proposal before the person acts, and
    * an armed pr_merge is reconciled instead. A child that has not heard the outcome yet is told,
    * with the reason, through the resume its resolution would have used; one already holding an
    * approval is not woken, so a finished child stays verifiable.
@@ -17258,7 +17259,9 @@ export class SessionsService {
       return fail("an armed pr_merge cannot be withdrawn: reconcile it with reconcile_workflow_decision " +
         "once its pull request reads MERGED, or use retire_workflow_decision when open at the approved head and not queued", 409);
     }
-    if (decision.authority === "human" && PERSON_SETTLED_WORKFLOW_DECISION_CATEGORIES.has(decision.category)) {
+    const ownPendingScope = byRequester && decision.category === "campaign_issue_scope" && decision.status === "pending" &&
+      !requester.parentSessionId && sessionRole(requester) === "orchestrator" && decision.controllingSessionId === callerSessionId;
+    if (decision.authority === "human" && PERSON_SETTLED_WORKFLOW_DECISION_CATEGORIES.has(decision.category) && !ownPendingScope) {
       return fail(`a person settles this ${decision.category} decision, so it cannot be withdrawn`, 403);
     }
     if (decision.requestId.startsWith("issue_closure_recovery_")) return fail("Only the owner can acknowledge issue closure recovery; agents cannot withdraw it", 403);
