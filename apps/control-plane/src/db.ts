@@ -673,8 +673,8 @@ export const RUNNER_CREDENTIAL_REVOKED_HISTORY_LIMIT = 64;
 const SCHEMA = /* sql */ `
 CREATE TABLE IF NOT EXISTS temporary_branch_creations (
   id TEXT PRIMARY KEY,
-  campaign_id TEXT NOT NULL,
-  session_id TEXT NOT NULL,
+  campaign_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   request_id TEXT NOT NULL,
   repository TEXT NOT NULL,
   branch TEXT NOT NULL,
@@ -26418,7 +26418,16 @@ export class ControlPlaneDb {
 
   /** Record the dispatch's outcome (#4067). Consumption, when it succeeded, is written separately. */
   recordWorkflowDecisionForgeAction(occurrenceId: string, action: NonNullable<WorkflowDecisionView["forgeAction"]>): void {
-    this.stmt("UPDATE workflow_decisions SET forge_action=? WHERE occurrence_id=?").run(JSON.stringify(action), occurrenceId);
+    this.atomic(() => {
+      this.stmt("UPDATE workflow_decisions SET forge_action=? WHERE occurrence_id=?").run(JSON.stringify(action), occurrenceId);
+      if (action.kind === "branch_deletion" && (action.outcome === "deleted" || action.outcome === "already_deleted")) {
+        const snapshot = this.workflowDecisionByOccurrence(occurrenceId)?.resourceSnapshot;
+        if (snapshot?.category === "merged_branch_deletion" && snapshot.merged === false && snapshot.temporaryReceiptId) {
+          // The known external effect and the end of its receipt lifetime survive a crash together.
+          this.retireTemporaryBranchReceipt(snapshot.temporaryReceiptId);
+        }
+      }
+    });
   }
 
   armWorkflowDecisionAction(

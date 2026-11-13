@@ -41,8 +41,9 @@ export function OwnerRuleSummary({ rule }: { rule: WorkflowDecisionOwnerRule }) 
 
 /** What a workflow decision decides, as facts (§5.4): the Request Card's body for the kinds without
  * a review of their own, and the read-only summary of a decision the Orchestrator owns. */
-export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scopeMaxIssuesIncrease }: {
+export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scopeMaxIssuesIncrease, authority }: {
   snapshot: WorkflowDecisionResourceSnapshot;
+  authority?: "human" | "orchestrator";
   /** The card's server-derived Maximum Issues increase, for a scope request (#4334). */
   scopeMaxIssuesIncrease?: PendingApproval["scopeMaxIssuesIncrease"];
   /** The server-recorded closing-reference read of a GitHub merge, when there was one. */
@@ -145,7 +146,9 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
               {" "}Verified when the receipt was issued; checked again before deletion.</dd></div>
           </>}
           <div><dt>Deletion Check</dt><dd>{snapshot.creation
-            ? "After approval, the Orchestrator may delete this branch at the exact created tip, with no open head or base pull requests."
+            ? authority === "orchestrator"
+              ? "After approval, the Orchestrator may delete this branch at the exact created tip, with no open head or base pull requests."
+              : "Owner approval is required. The campaign can then delete only the exact created tip, with no open head or base pull requests."
             : "No matching creation receipt exists. The Orchestrator cannot delete this branch; it stays the owner's decision."}</dd></div>
         </> : <div><dt>Merge Commit</dt><dd><code>{snapshot.mergeCommitSha.slice(0, 12)}</code></dd></div>}
       </dl>;

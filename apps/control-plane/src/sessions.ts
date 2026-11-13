@@ -1579,9 +1579,9 @@ export function normalizeWorkflowDecisionSnapshot(
           ].includes(key))) return fail("temporary deletion requires its creation receipt, exact tip, and no open head or base pull requests");
       return ok({ category, repository: repo, branch: value.branch, merged: false,
         ...(value.temporaryReceiptId === undefined ? {} : { temporaryReceiptId: value.temporaryReceiptId as string }),
+        headSha: value.headSha as string, dependentPullRequests: { checkedAt: checked, open: [] },
         ...(creation ? { creation: { sessionId: creation.sessionId as string, sessionTitle: creation.sessionTitle as string,
-          defaultBranch: creation.defaultBranch as string, defaultHeadSha: creation.defaultHeadSha as string, checkedAt: creation.checkedAt as number } } : {}),
-        headSha: value.headSha as string, dependentPullRequests: { checkedAt: checked, open: [] } });
+          defaultBranch: creation.defaultBranch as string, defaultHeadSha: creation.defaultHeadSha as string, checkedAt: creation.checkedAt as number } } : {}) });
     }
     if (!repo || !boundedDecisionString(value.branch, 256) || value.merged !== true ||
         !sha(value.mergeCommitSha) || !checked || !open ||
@@ -16449,6 +16449,9 @@ export class SessionsService {
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
+    if (decision.resourceSnapshot.category === "merged_branch_deletion" && decision.resourceSnapshot.merged === false) {
+      return fail("use execute_workflow_decision for temporary deletion: it proves the forge action and retires the creation receipt atomically with its result; nothing was consumed", 403);
+    }
     if (isChildQuestionSnapshot(decision.resourceSnapshot)) return fail("a question answer grants no authority and cannot be consumed as an approval", 403);
     if (decision.category === "campaign_issue_scope") return fail("Scope resolution applies and consumes the exact authorized proposal atomically", 403);
     if (decision.category === "automation_creation") return fail("use execute_automation_creation to consume and create the approved automation atomically", 403);
@@ -17064,11 +17067,6 @@ export class SessionsService {
       }
       if (snapshot.category === "merged_branch_deletion" && snapshot.pullRequest !== undefined) {
         this.refreshMergedBranchObservation(sessionId, snapshot.repository, snapshot.pullRequest);
-      }
-      if (snapshot.category === "merged_branch_deletion" && snapshot.merged === false && snapshot.temporaryReceiptId) {
-        // A known deletion ends the receipt's lifetime. A later recreation, even at the same tip,
-        // cannot reuse this historical provenance for another delegated deletion.
-        this.db.retireTemporaryBranchReceipt(snapshot.temporaryReceiptId);
       }
       return this.forgeActionResult(sessionId, parent.id, occurrenceId);
     } finally {

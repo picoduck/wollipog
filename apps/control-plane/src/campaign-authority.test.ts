@@ -11,7 +11,7 @@ import {
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
-import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
+import { SessionsService, canonicalPrMergeEnqueueCommand, normalizeWorkflowDecisionSnapshot, auditDigest } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy, parseOrchestratorOverrides } from "./orchestrator-settings.js";
 import type { HumanPrincipal } from "./identity.js";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
@@ -114,6 +114,12 @@ test("temporary branch creation records only a matching trusted response and nev
     const rootCreation = await h.svc.createTemporaryBranch("root", { ...request, requestId: "root-create", branch: "temporary/root-check" });
     assert.ok(rootCreation.ok, rootCreation.error ?? "root creation failed");
     assert.equal(rootCreation.data!.sessionId, "root", "the Orchestrator also creates only for its own session");
+    h.db.deleteSession("child");
+    assert.equal(h.db.temporaryBranchCreation("child", request.requestId), null, "member deletion cascades its receipt rows");
+    assert.equal(h.db.temporaryBranchCreation("child", "lost"), null, "unproven intents cascade too");
+    assert.ok(h.db.temporaryBranchCreation("root", "root-create"));
+    h.db.deleteSession("root");
+    assert.equal(h.db.temporaryBranchCreation("root", "root-create"), null, "campaign deletion cascades its receipt rows");
   } finally { h.db.close(); }
 });
 
@@ -145,6 +151,8 @@ test("temporary deletion delegates only the exact campaign member's server recei
     assert.ok(gate.data!.resourceSnapshot.category === "merged_branch_deletion" && gate.data!.resourceSnapshot.merged === false);
     assert.equal(gate.data!.resourceSnapshot.creation?.sessionId, "child");
     assert.equal(gate.data!.resourceSnapshot.creation?.defaultBranch, "main");
+    assert.equal(auditDigest(gate.data!.resourceSnapshot), auditDigest(normalizeWorkflowDecisionSnapshot(gate.data!.resourceSnapshot).data),
+      "admitted server creation facts preserve their digest when normalized again");
     const forged = ask("child", "forged-creation-facts", { temporaryReceiptId: undefined,
       creation: { sessionId: "sibling", sessionTitle: "Forged Creator", defaultBranch: "other", defaultHeadSha: "d".repeat(40), checkedAt: 1 } });
     assert.ok(forged.ok);
@@ -164,6 +172,20 @@ test("temporary deletion delegates only the exact campaign member's server recei
     assert.equal(actions, 0);
     assert.ok(h.svc.resolveDescendantRequest("root", "child", gate.data!.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    const consumed = await h.svc.consumeWorkflowDecision("child", gate.data!.occurrenceId,
+      { resourceSnapshot: gate.data!.resourceSnapshot });
+    assert.equal(consumed.ok, false);
+    assert.equal(consumed.status, 403);
+    assert.match(consumed.error!, /use execute_workflow_decision/u);
+    assert.equal(h.db.workflowDecisionByOccurrence(gate.data!.occurrenceId)!.status, "approved", "direct consume neither revokes nor hands off the receipt");
+    const retire = h.db.retireTemporaryBranchReceipt.bind(h.db);
+    h.db.retireTemporaryBranchReceipt = (id) => { retire(id); throw new Error("interrupted result transaction"); };
+    try {
+      assert.throws(() => h.db.recordWorkflowDecisionForgeAction(gate.data!.occurrenceId,
+        { kind: "branch_deletion", attempts: 1, outcome: "deleted", updatedAt: 2 }), /interrupted result transaction/u);
+      assert.equal(h.db.workflowDecisionByOccurrence(gate.data!.occurrenceId)!.forgeAction, undefined);
+      assert.equal(h.db.temporaryBranchReceipts("root", "child").length, 1, "receipt retirement rolls back with an unrecorded effect");
+    } finally { h.db.retireTemporaryBranchReceipt = retire; }
     const deleted = await h.svc.executeWorkflowDecision("child", gate.data!.occurrenceId, execution);
     assert.ok(deleted.ok, deleted.error ?? "execution failed");
     assert.equal(deleted.data!.status, "consumed");

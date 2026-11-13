@@ -12,8 +12,8 @@ const MERGE = {
   reviewResult: "merge", requiredChecks: { headSha: "d".repeat(40), status: "passed", checkedAt: 1, checks: [] },
 } as const satisfies WorkflowDecisionResourceSnapshot;
 
-const text = (snapshot: WorkflowDecisionResourceSnapshot, check?: PullRequestClosingReferenceCheck) =>
-  renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} {...(check ? { closingReferenceCheck: check } : {})} />)
+const text = (snapshot: WorkflowDecisionResourceSnapshot, check?: PullRequestClosingReferenceCheck, authority: "human" | "orchestrator" = "orchestrator") =>
+  renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} authority={authority} {...(check ? { closingReferenceCheck: check } : {})} />)
     .replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ").trim();
 
 test("temporary deletion shows its exact tip and receipt without claiming a merged pull request (#4535)", () => {
@@ -25,6 +25,10 @@ test("temporary deletion shows its exact tip and receipt without claiming a merg
   assert.ok(rendered.includes(snapshot.creation.sessionTitle));
   assert.match(rendered, /Contained in main at/u);
   assert.match(rendered, /no open head or base pull requests/u);
+  assert.match(rendered, /Orchestrator may delete/u);
+  const ownerKept = text(snapshot, undefined, "human");
+  assert.match(ownerKept, /Owner approval is required/u);
+  assert.doesNotMatch(ownerKept, /Orchestrator may delete/u);
   assert.doesNotMatch(rendered, /Merge Commit/u);
   const unknown = text({ ...snapshot, temporaryReceiptId: undefined, creation: undefined });
   assert.match(unknown, /No matching creation receipt exists/u);

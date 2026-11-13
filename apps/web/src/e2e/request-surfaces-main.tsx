@@ -369,7 +369,7 @@ function temporaryBranchSession(): SessionView {
   return { ...base, title: "Temporary Branch Cleanup", pendingApproval: { ...base.pendingApproval!,
     title: "Delete Temporary Branch", context: { input: JSON.stringify(snapshot) },
     workflowDecision: { ...base.pendingApproval!.workflowDecision!, category: "merged_branch_deletion",
-      resourceSnapshot: snapshot, authority: "human" } } };
+      resourceSnapshot: snapshot, authority: query.get("missing") === "1" || query.get("owner") === "1" ? "human" : "orchestrator" } } };
 }
 
 function automationCreationSession(): SessionView {
