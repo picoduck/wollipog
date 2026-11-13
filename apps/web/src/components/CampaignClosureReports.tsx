@@ -45,6 +45,9 @@ export function CampaignClosureReports() {
     {reports.map(report => <div key={report.occurrenceId + report.kind}>
       <button className="btn sm" onClick={() => setSelected(report.occurrenceId + report.kind)}>{labels[report.kind] ?? "Merge Report"}</button>
       {report.acknowledgedAt ? <span> Acknowledged</span> : <span> Needs Acknowledgement</span>}
+      <p>{report.campaignTitle ?? report.campaignId}</p>
+      <p>{report.repository && report.pullRequest ? `${report.repository} PR #${report.pullRequest}` : "Pull Request Unavailable"}
+        {report.issues.length ? ` · ${report.issues.join(", ")}` : " · No Issues Identified"}</p>
     </div>)}
     {current && <Modal title={labels[current.kind] ?? "Merge Report"} onClose={() => setSelected(null)}
       footer={current.acknowledgedAt ? <p role="status">Acknowledged</p>

@@ -375,6 +375,14 @@ test("an ended root gets one durable Inbox receipt and is never asked again (#45
     assert.equal(f.watch(occurrenceId)!.reportPending, "landed");
     assert.equal(f.db.closureReports().length, 1);
     assert.match(f.db.closureReports()[0]!.material, /Closes #3 'script'/u);
+    assert.equal(f.db.closureReports()[0]!.repository, "owner/app");
+    assert.equal(f.db.closureReports()[0]!.pullRequest, 52);
+    assert.equal(f.db.closureReports()[0]!.campaignTitle, "root");
+    assert.deepEqual(f.db.closureReports()[0]!.issues, ["owner/app#3"]);
+    const reportedWatch = f.watch(occurrenceId)!;
+    f.db.saveMergeClosureWatch(occurrenceId, reportedWatch, { ...reportedWatch,
+      unapprovedClosures: [closure("owner/app#4", "Closes #4")] });
+    assert.deepEqual(f.db.closureReports()[0]!.issues, ["owner/app#3"], "summary is a receipt of the original report");
     await f.pass();
     f.db.updateSessionStatus("root", "running", 4);
     await f.pass();

@@ -6123,6 +6123,7 @@ export class ControlPlaneDb {
       db.exec(`CREATE TABLE IF NOT EXISTS campaign_closure_reports (
         occurrence_id TEXT NOT NULL, kind TEXT NOT NULL, campaign_id TEXT NOT NULL,
         question TEXT NOT NULL, material TEXT NOT NULL, created_at INTEGER NOT NULL,
+        summary_json TEXT NOT NULL DEFAULT '{}',
         acknowledged_at INTEGER, acknowledged_by TEXT,
         PRIMARY KEY (occurrence_id, kind)
       )`);
@@ -25033,16 +25034,32 @@ export class ControlPlaneDb {
     );
   }
 
-  closureReports(): Array<{ occurrenceId: string; kind: string; campaignId: string; question: string; material: string; createdAt: number; acknowledgedAt: number | null }> {
-    return this.stmt(`SELECT occurrence_id AS occurrenceId, kind, campaign_id AS campaignId,
-      question, material, created_at AS createdAt, acknowledged_at AS acknowledgedAt
-      FROM campaign_closure_reports ORDER BY created_at DESC`).all() as ReturnType<ControlPlaneDb["closureReports"]>;
+  closureReports(): Array<{ occurrenceId: string; kind: string; campaignId: string; campaignTitle: string | null;
+    repository: string | null; pullRequest: number | null; issues: string[];
+    question: string; material: string; createdAt: number; acknowledgedAt: number | null }> {
+    const rows = this.stmt(`SELECT r.occurrence_id AS occurrenceId, r.kind, r.campaign_id AS campaignId,
+      json_extract(r.summary_json, '$.campaignTitle') AS campaignTitle,
+      json_extract(r.summary_json, '$.repository') AS repository,
+      json_extract(r.summary_json, '$.pullRequest') AS pullRequest,
+      COALESCE(json_extract(r.summary_json, '$.issues'), '[]') AS issuesJson,
+      r.question, r.material, r.created_at AS createdAt, r.acknowledged_at AS acknowledgedAt
+      FROM campaign_closure_reports r ORDER BY r.created_at DESC`).all() as
+      Array<Omit<ReturnType<ControlPlaneDb["closureReports"]>[number], "issues"> & { issuesJson: string }>;
+    return rows.map(({ issuesJson, ...row }) => ({ ...row, issues: JSON.parse(issuesJson) as string[] }));
   }
 
   ensureClosureReport(occurrenceId: string, kind: string, campaignId: string, question: string, material: string): void {
+    const decision = this.workflowDecisionByOccurrence(occurrenceId);
+    const snapshot = decision?.resourceSnapshot;
+    const closures = kind === "landed" ? decision?.closureWatch?.unapprovedClosures : decision?.closureWatch?.mismatch?.closures;
+    const summary = { campaignTitle: this.getSession(campaignId)?.title ?? null,
+      repository: snapshot?.category === "pr_merge" ? snapshot.repository : null,
+      pullRequest: snapshot?.category === "pr_merge" ? snapshot.pullRequest : null,
+      issues: [...new Set([...(snapshot?.category === "pr_merge" ? snapshot.intendedClosures ?? [] : []),
+        ...(closures?.map(closure => closure.issue) ?? [])])] };
     this.stmt(`INSERT OR IGNORE INTO campaign_closure_reports
-      (occurrence_id, kind, campaign_id, question, material, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(occurrenceId, kind, campaignId, question, material, Date.now());
+      (occurrence_id, kind, campaign_id, question, material, created_at, summary_json) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(occurrenceId, kind, campaignId, question, material, Date.now(), JSON.stringify(summary));
   }
 
   closureReport(occurrenceId: string, kind: string): { acknowledgedAt: number | null } | null {
