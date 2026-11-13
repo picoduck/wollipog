@@ -137,7 +137,7 @@ test("a provider fork gets its own runner restart recovery identity", async () =
     f.store.patchMeta(f.source.sessionId, { runnerRestartRecoveryRequestId: sourceRequestId,
       orchestrator: { strictProjectIsolation: false, integrationIsolation: false } });
     const result = await f.manager.forkConversation(f.source.sessionId, "s_recovery_target", 1, "Fork");
-    assert.equal(result.ok, true, result.error);
+    assert.equal(result.ok, true, result.error ?? "the recovery fork failed");
     f.manager.reconcileStore();
     f.manager.reconcileRunnerRestartRecovery(["s_recovery_target"]);
     const request = f.store.readMeta("s_recovery_target")!.pendingApproval!;
