@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { ChevronDownIcon, ChevronRightIcon } from "./Icons.js";
 
 interface Entry { title: string; count: number; attention: string; heading: HTMLHeadingElement | null; open: () => void }
 const attentionMemory = new Map<string, Map<string, string>>();
@@ -117,7 +118,8 @@ export function CampaignSection({ title, count = 0, attention = "", defaultOpen 
   return <section className={className} aria-labelledby={id} data-campaign-section={title}>
     <h3 aria-label={title} id={id} ref={heading} tabIndex={-1} className="section-title campaign-section-heading">
       <button type="button" aria-expanded={expanded} aria-controls={`${id}-body`} onClick={() => { setOpen(!expanded); setFresh(false); }}>
-        <span aria-hidden="true">{expanded ? "▾" : "▸"} </span>{title} · {count}{attention && <span> · Attention</span>}{fresh && <span> · New</span>}
+        {expanded ? <ChevronDownIcon size={14} /> : <ChevronRightIcon size={14} />}
+        <span>{title} · {count}{attention && <span> · Attention</span>}{fresh && <span> · New</span>}</span>
       </button>
     </h3>
     <div id={`${id}-body`} hidden={!expanded}>{children}</div>

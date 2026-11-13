@@ -67,6 +67,11 @@ for (const width of [1440, 390]) test(`large campaign sections at ${width}px (#4
   await expect(page.locator(".campaign-status")).toHaveJSProperty("scrollTop", 0);
   await page.getByRole("button", { name: "Collapse All", exact: true }).click();
   await expect(page.locator('[data-campaign-section] h3 button[aria-expanded="true"]')).toHaveCount(0);
+  expect(await page.locator('[data-campaign-section] h3 button').evaluateAll(buttons => buttons.every(button => {
+    const style = getComputedStyle(button);
+    return button.getBoundingClientRect().height <= parseFloat(style.lineHeight)
+      + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) + 1;
+  }))).toBe(true);
   await capture("collapsed");
   const index = page.getByRole("navigation", { name: "Campaign Sections" });
   await index.getByRole("button", { name: "Decisions · 30", exact: true }).click();
