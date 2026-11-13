@@ -37,6 +37,8 @@ test("pause is owner-only, holds continuations and admission, and preserves runn
   try {
     assert.equal(svc.setCampaignPause("root", { action: "pause" }, { ...owner, userId: "someone-else" }).ok, false);
     assert.ok(svc.setCampaignPause("root", { action: "pause" }, owner).ok);
+    assert.equal(svc.setCampaignPause("root", { action: "resume" }, { ...owner, userId: "someone-else" }).ok, false);
+    assert.equal(db.campaignPaused("root"), true);
     assert.equal(db.campaignProjection("root")!.status, "paused");
     assert.equal(db.campaignProjection("root")!.stuck?.items.length ?? 0, 0);
     assert.equal(db.campaignContinuationAdmission("root").state, "lifecycle_held");
@@ -54,6 +56,21 @@ test("pause is owner-only, holds continuations and admission, and preserves runn
     assert.equal(db.getSession("child")!.status, "stopped");
     assert.ok(db.campaignPause("root")!.stoppedSessionIds.includes("child"));
     assert.equal(db.campaignStatusOnly("root"), "paused");
+  } finally { db.close(); }
+});
+
+test("pause names the actual merge watch and keeps it active", () => {
+  const { db, svc, owner } = fixture();
+  try {
+    db.updateSessionStatus("child", "idle", Date.now());
+    db.pullRequestWatches.register({ watchId: "queued-merge", sessionId: "child", runnerId: "r",
+      repository: "picoduck/wollipog", number: 4560, headSha: "a".repeat(40), now: Date.now() });
+    assert.ok(svc.setCampaignPause("root", { action: "pause" }, owner).ok);
+    svc.retryDuePrompts();
+    assert.equal(db.pullRequestWatches.view("queued-merge")!.state, "watching");
+    assert.equal(db.getSession("child")!.status, "idle");
+    assert.equal(db.campaignProjection("root")!.pause!.inFlightWork!.find(work => work.sessionId === "child")!.description,
+      "Merge of picoduck/wollipog#4560 is still in flight; its merge watch is active.");
   } finally { db.close(); }
 });
 
@@ -119,6 +136,8 @@ test("pause never revokes or interrupts an armed merge or pending request", () =
     svc.retryDuePrompts();
     assert.equal(db.getSession("child")!.status, "idle");
     assert.deepEqual(db.workflowDecisionByOccurrence("merge-1"), before);
+    assert.ok(db.campaignProjection("root")!.pause!.inFlightWork!.some(work =>
+      work.description === "Merge of picoduck/wollipog#1 has an armed enqueue decision and is still in flight."));
     assert.equal(db.getSession("root")!.pendingApproval!.requestId, "question");
     assert.deepEqual(db.campaignPause("root")!.inFlightSessionIds.sort(), ["child", "root"]);
     const outbox = new SessionPromptOutbox(db, hub, { warn() {} });

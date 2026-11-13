@@ -2503,6 +2503,8 @@ export interface CampaignPauseView {
   resumedBy?: string;
   stoppedSessionIds: string[];
   inFlightSessionIds: string[];
+  /** Read-time descriptions of actual protected work; omitted by older pause-capable peers. */
+  inFlightWork?: Array<{ sessionId: string; description: string }>;
 }
 
 /** Credential-free, server-derived campaign state. The stored policy remains the source of truth;

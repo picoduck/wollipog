@@ -32,10 +32,14 @@ export function CampaignPause({ campaignId, pause, canEdit, onChanged }: {
     <h3 id={heading} className="section-title">Campaign Pause</h3>
     {pause && <dl className="facts">
       <div><dt>Paused</dt><dd>{formatRecordedTimestamp(pause.pausedAt)?.label} by {pause.pausedBy}</dd></div>
-      <div><dt>Resume</dt><dd>{pause.resumeAt === null ? "When the owner resumes" : formatRecordedTimestamp(pause.resumeAt)?.label}</dd></div>
-      {paused && <div><dt>In Flight</dt><dd>{pause.inFlightSessionIds.length > 0
-        ? `${pause.inFlightSessionIds.length} session(s) still have work in flight. Running turns finish at a safe point. Armed and queued merges stay in flight.`
-        : "None. Paused children are preserved for resume."}</dd></div>}
+      {paused && <div><dt>Resumes At</dt><dd>{pause.resumeAt === null ? "When the owner resumes"
+        : new Date(pause.resumeAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</dd></div>}
+      {paused && <div><dt>In Flight</dt><dd>{pause.inFlightSessionIds.length > 0 ? <>
+        <p>{pause.inFlightSessionIds.length === 1 ? "1 session still has work in flight." : `${pause.inFlightSessionIds.length} sessions still have work in flight.`}</p>
+        <ul className="campaign-detail-list">{pause.inFlightSessionIds.map(sessionId => <li key={sessionId}>
+          {pause.inFlightWork?.find(work => work.sessionId === sessionId)?.description ?? `Session ${sessionId} is still in flight.`}
+        </li>)}</ul>
+      </> : "None. Paused children are preserved for resume."}</dd></div>}
       {pause.resumedAt !== undefined && <div><dt>Resumed</dt><dd>{formatRecordedTimestamp(pause.resumedAt)?.label} by {pause.resumedBy}</dd></div>}
     </dl>}
     {paused && <p>Campaign continuations and new children are held. Pending requests and decisions stay unchanged.</p>}

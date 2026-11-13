@@ -24213,6 +24213,27 @@ export class ControlPlaneDb {
     return !!pause && pause.resumedAt === undefined;
   }
 
+  private campaignPauseProjection(sessionId: string): import("@wollipog/protocol").CampaignPauseView | null {
+    const pause = this.campaignPause(sessionId);
+    if (!pause || pause.resumedAt !== undefined) return pause;
+    return { ...pause, inFlightWork: pause.inFlightSessionIds.map(memberId => {
+      const row = this.stmt("SELECT title,status FROM sessions WHERE id=?").get(memberId) as { title: string | null; status: string } | undefined;
+      const title = row?.title || memberId;
+      const watch = this.pullRequestWatches.visibleFor(memberId);
+      if (watch?.state === "watching") return { sessionId: memberId,
+        description: `Merge of ${watch.repository}#${watch.number} is still in flight; its merge watch is active.` };
+      const decisions = this.unconsumedWorkflowDecisionsForSession(memberId);
+      const armed = decisions.find(decision => decision.category === "pr_merge" && decision.actionAdmission);
+      if (armed?.resourceSnapshot.category === "pr_merge") return { sessionId: memberId,
+        description: `Merge of ${armed.resourceSnapshot.repository}#${armed.resourceSnapshot.pullRequest} has an armed enqueue decision and is still in flight.` };
+      const description = this.sessionsWithLiveBackgroundJobs([memberId], Date.now()).size > 0
+        ? `${title} still has background work in flight.`
+        : decisions.length > 0 || row?.status === "input_required" ? `${title} is waiting on a request or decision.`
+        : `${title} is finishing its current turn before it can pause.`;
+      return { sessionId: memberId, description };
+    }) };
+  }
+
   saveCampaignPause(campaignId: string, pause: import("@wollipog/protocol").CampaignPauseView): void {
     this.stmt("INSERT INTO campaign_pauses(campaign_id,payload) VALUES (?,?) ON CONFLICT(campaign_id) DO UPDATE SET payload=excluded.payload WHERE payload<>excluded.payload")
       .run(campaignId, JSON.stringify(pause));
@@ -24319,7 +24340,7 @@ export class ControlPlaneDb {
     return {
       status,
       policyRevision: campaign.parent_control_policy_revision,
-      ...(this.campaignPause(resolvedCampaignId) ? { pause: this.campaignPause(resolvedCampaignId)! } : {}),
+      ...(this.campaignPause(resolvedCampaignId) ? { pause: this.campaignPauseProjection(resolvedCampaignId)! } : {}),
       ...(this.campaignRootAudienceCanSee(campaignSessionId)(resolvedCampaignId)
         ? { control: structuredClone(policy.control ?? { mode: "custom" as const }) } : {}),
       ...(() => {
