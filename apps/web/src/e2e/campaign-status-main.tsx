@@ -1444,9 +1444,9 @@ function Fixture() {
     consumeSubagentFocusRequest: () => {},
   };
   return (
-    <main className="app" style={{ display: params.has("queueStall") || (params.get("screen") === "ask" && window.innerWidth <= 760) ? "flex" : "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
-      {params.has("queueStall") && <Rail view={{ name: "session", id: sessionId }} blockedCount={0} onNavigate={() => {}} />}
-      <section className="session-detail expanded" style={{ height: params.has("queueStall") ? "auto" : "100%", ...(params.has("queueStall") ? { flex: 1, minWidth: 0, minHeight: 0 } : params.get("screen") === "ask" && window.innerWidth <= 760 ? { flex: "1 1 0", minHeight: 0 } : {}) }}>
+    <main className="app" style={{ display: params.has("queueStall") || params.get("screen") === "ask" ? "flex" : "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
+      {(params.has("queueStall") || params.get("screen") === "ask" && window.innerWidth > 760) && <Rail view={{ name: "session", id: sessionId }} blockedCount={0} onNavigate={() => {}} />}
+      <section className="session-detail expanded" style={{ height: params.has("queueStall") ? "auto" : "100%", ...(params.has("queueStall") ? { flex: 1, minWidth: 0, minHeight: 0 } : params.get("screen") === "ask" ? { flex: "1 1 0", minWidth: 0, minHeight: 0 } : {}) }}>
         <header className="detail-bar session-bar">
           <h1 className="detail-bar-title session-bar-title">{params.get("screen") === "ask" ? "Provider Configuration Campaign" : session.title}</h1>
         </header>

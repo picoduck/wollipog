@@ -45,7 +45,7 @@ for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
       await page.screenshot({ path: testInfo.outputPath(`${surface}-${device}-before.png`) });
       await card.getByRole("button", { name: "Let the Orchestrator Answer", exact: true }).click();
       await expect(page.getByText("The Orchestrator is handling this request.", { exact: true }).first()).toBeVisible();
-      await page.mouse.click(20, 100);
+      await page.evaluate(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); });
       await page.screenshot({ path: testInfo.outputPath(`${surface}-${device}-after.png`) });
     });
   }
