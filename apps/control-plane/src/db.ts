@@ -25128,6 +25128,10 @@ export class ControlPlaneDb {
       ORDER BY created_at ASC, occurrence_id ASC LIMIT ${CAMPAIGN_OWNER_DECISIONS_LIMIT}`).all(...params) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null)
       .map((decision) => ({ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category: decision.category,
+        ...(decision.resourceSnapshot.category === "pr_merge" ? { resourceLabel:
+          `PR #${decision.resourceSnapshot.pullRequest} in ${decision.resourceSnapshot.repository}` }
+          : decision.resourceSnapshot.category === "merged_branch_deletion" ? { resourceLabel:
+            `Branch ${decision.resourceSnapshot.branch} in ${decision.resourceSnapshot.repository}` } : {}),
         ...(decision.category !== "owner_decision" && (decision.ownerRule || decision.ownerHandoff) &&
           !this.ownerOccurrenceWasReturned(decision.occurrenceId) &&
           this.stmt("SELECT 1 FROM sessions WHERE id=? AND json_extract(orchestrator_policy, '$.control.mode')='full_control'")

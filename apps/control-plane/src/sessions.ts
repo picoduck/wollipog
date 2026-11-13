@@ -15755,6 +15755,9 @@ export class SessionsService {
           !this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot))) {
       return fail("this resource cannot be returned", 409);
     }
+    if (this.db.ownerOccurrenceWasReturned(occurrenceId)) {
+      return fail("This occurrence was already returned. A later keep must be returned from its own request.", 409);
+    }
     const now = Date.now();
     const recorded = this.db.returnOwnerResource(decision,
       ownerReturnTargets(decision.category, decision.resourceKey, decision.resourceSnapshot),

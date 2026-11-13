@@ -748,7 +748,7 @@ const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as
   { occurrenceId: "workflow_owner_1", sessionId: "s_root", category: "owner_decision" as const, summary: ownerSnapshot.question, handedOff: false, createdAt: NOW - 4 * MINUTE },
   ...(params.has("closureRecovery") ? [] : [{ occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const,
     ...(!params.has("ownerReturned") ? { returnableOwnerResource: true as const } : {}),
-    summary: "Merge picoduck/wollipog#4141", handedOff: true, createdAt: NOW - 8 * MINUTE }]),
+    summary: "Merge picoduck/wollipog#4141", resourceLabel: "PR #4141 in picoduck/wollipog", handedOff: true, createdAt: NOW - 8 * MINUTE }]),
 ] } } : ownerScenario === "rule" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
   { occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: false,
     ownerRule, createdAt: NOW - 8 * MINUTE },

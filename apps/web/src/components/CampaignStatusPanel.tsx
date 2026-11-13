@@ -425,9 +425,7 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
     <section className="campaign-status-handoffs" aria-labelledby={headingId}>
       <h3 id={headingId} className="section-title">Waiting for You</h3>
       <p className="section-note">
-        {runtimeRecovery || ownerDecisions.items.some((item) => scopeApproval(item) || repositoryAddition(item))
-          ? `Only you can make ${one ? "this decision" : "these decisions"}.`
-          : `You kept ${one ? "this decision" : "these decisions"}, so only you can make ${one ? "it" : "them"}.`}{" "}
+        {`Only you can make ${one ? "this decision" : "these decisions"}.`}{" "}
         {runtimeRecovery ? "Relaunch the Orchestrator to restore its tools and continue its pending work." : "The Orchestrator keeps working on everything else meanwhile."}
       </p>
       <ul className="campaign-detail-list">
@@ -441,7 +439,7 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
             ? () => onOpenSessionRequest(item.sessionId, item.occurrenceId) : null;
           const open = requestKey ? () => onOpenRequest(requestKey) : openElsewhere;
           return (
-            <li key={item.occurrenceId}>
+            <li key={item.occurrenceId} className={item.returnableOwnerResource ? "campaign-owner-decision" : undefined}>
               <dl className="facts">
                 <div>
                   <dt>{item.category === "runner_recovery" ? "Runner Recovery" : item.kind === "question" ? "Question" : item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval"
@@ -460,7 +458,9 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
               {open && <button type="button" className="btn sm" aria-label={`Open Request: ${item.summary}`}
                 onClick={open}>Open Request</button>}
               {item.returnableOwnerResource &&
-                <ReturnOwnerResource sessionId={item.sessionId} occurrenceId={item.occurrenceId} resourceLabel={item.summary} onChanged={onChanged} />}
+                <ReturnOwnerResource sessionId={item.sessionId} occurrenceId={item.occurrenceId}
+                  resourceLabel={item.resourceLabel ?? item.summary} onChanged={onChanged} inRow
+                  ownershipReason={item.ownerRule ? "A rule keeps this resource with you." : "The Orchestrator handed this resource to you."} />}
             </li>
           );
         })}

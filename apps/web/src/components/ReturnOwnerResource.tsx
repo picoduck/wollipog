@@ -4,8 +4,9 @@ import { BusyButton } from "./ui/BusyButton.js";
 import { Notice } from "./Notice.js";
 
 /** This calls a human-only route; it does not answer or transfer a pending occurrence. */
-export function ReturnOwnerResource({ sessionId, occurrenceId, resourceLabel, onChanged }: {
+export function ReturnOwnerResource({ sessionId, occurrenceId, resourceLabel, onChanged, inRow, ownershipReason }: {
   sessionId: string; occurrenceId: string; resourceLabel: string; onChanged?: () => void;
+  inRow?: boolean; ownershipReason?: string;
 }) {
   const api = useApi();
   const [confirming, setConfirming] = useState(false);
@@ -22,10 +23,10 @@ export function ReturnOwnerResource({ sessionId, occurrenceId, resourceLabel, on
     finally { setBusy(false); }
   };
   if (returned) return <p role="status">{resourceLabel} returned to the Orchestrator for future requests. Pending requests remain yours.</p>;
-  return <section className="owner-resource-return" aria-label={`Your Resource Ownership: ${resourceLabel}`}>
-    <h4>Your Resource Ownership</h4>
+  return <section className={inRow ? "owner-resource-return-inline" : "owner-resource-return"} aria-label={`Your Resource Ownership: ${resourceLabel}`}>
+    <h4>{inRow ? "Your Action" : "Your Resource Ownership"}</h4>
     <p><strong>{resourceLabel}</strong></p>
-    <p>You kept this resource. You can let the Orchestrator handle future requests within the campaign's current boundary.</p>
+    <p>{ownershipReason ?? "You kept this resource."} You can let the Orchestrator handle future requests within the campaign's current boundary.</p>
     {confirming && <p>Return {resourceLabel} to the Orchestrator for future requests? Pending requests remain yours.</p>}
     {error && <Notice tone="danger">{error}</Notice>}
     <div className="owner-resource-return-actions">

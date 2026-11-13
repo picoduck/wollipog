@@ -17,6 +17,10 @@ for (const width of [1440, 390]) test(`owner can return a kept resource from bot
   await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=after&fullControl=ready");
   const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
   const action = waiting.getByRole("button", { name: "Return to the Orchestrator", exact: true });
+  const resourceRow = waiting.locator("li", { has: page.getByRole("button", { name: "Return to the Orchestrator", exact: true }) });
+  await expect(resourceRow).toContainText("PR #4141 in picoduck/wollipog");
+  await expect(resourceRow).toContainText("The Orchestrator handed this resource to you.");
+  await expect(resourceRow).not.toContainText("Which credential design");
   await expect(action).toBeVisible();
   await action.click();
   await expect(waiting).toContainText("Pending requests remain yours.");

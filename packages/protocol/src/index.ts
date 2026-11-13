@@ -2434,6 +2434,8 @@ export const CAMPAIGN_HANDOFFS_LIMIT = 50;
 
 /** One pending decision the campaign's owner kept (#4064), as Campaign Status lists it. */
 export interface CampaignOwnerDecision {
+  /** Concrete resource label, independent of the requested action's summary. */
+  resourceLabel?: string;
   /** The current campaign supports a human-only return of future requests. */
   returnableOwnerResource?: true;
   occurrenceId: string;

@@ -5521,11 +5521,24 @@ body.shell-dock-dragging * {
   border-radius: var(--radius);
   background: var(--bg-elev);
 }
-.owner-resource-return > :is(h4, p) { margin: 0; }
+:is(.owner-resource-return, .owner-resource-return-inline) > :is(h4, p) { margin: 0; }
 .owner-resource-return-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+}
+.campaign-owner-decision {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.owner-resource-return-inline {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
 }
 /* One observed pull request (#2417 slice 8): a rule above heads its group, and its facts sit
    indented under it so two pull requests never read as one list. */

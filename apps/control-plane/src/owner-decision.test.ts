@@ -186,6 +186,23 @@ test("an owner return releases future requests, preserves pending authority, and
   } finally { h.db.close(); }
 });
 
+test("a keep released through another occurrence cannot return a later keep (#4539 review)", () => {
+  const h = harness();
+  try {
+    const first = h.merge("stale-first").data!;
+    assert.ok(h.svc.handWorkflowDecisionToOwner("root", first.occurrenceId,
+      { reason: "Keep first", sessionId: "child" }).ok);
+    const inherited = h.merge("stale-inherited", "inherited-key").data!;
+    assert.ok(h.svc.returnOwnerResource("child", inherited.occurrenceId, h.owner).ok);
+    const next = h.merge("stale-next", "next-key").data!;
+    assert.equal(next.authority, "orchestrator");
+    assert.ok(h.svc.handWorkflowDecisionToOwner("root", next.occurrenceId,
+      { reason: "Keep next", sessionId: "child" }).ok);
+    assert.equal(h.svc.returnOwnerResource("child", first.occurrenceId, h.owner).status, 409);
+    assert.equal(h.merge("after-stale-return", "after-key").data!.authority, "human");
+  } finally { h.db.close(); }
+});
+
 test("owner returns never delegate an undelegated category (#4539)", async () => {
   const h = harness({ full: false });
   try {
