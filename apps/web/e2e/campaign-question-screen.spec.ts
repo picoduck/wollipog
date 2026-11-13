@@ -44,9 +44,11 @@ for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
     await expect(section.locator("button:not([aria-expanded])")).toHaveText(["Decline", "Let the Orchestrator Answer", "Open Session"]);
     await wheelToCard(page, section);
     await page.screenshot({ path: testInfo.outputPath(`typed-ask-${device}.png`) });
-    await section.getByRole("button", { name: "Decline", exact: true }).click();
-    await expect(section).toContainText("You declined it.");
+    await section.getByRole("button", { name: "Let the Orchestrator Answer", exact: true }).click();
+    await expect(section).toContainText("You let the Orchestrator answer it.");
     await expect(section.locator("button:not([aria-expanded])")).toHaveText(["Open Session"]);
+    await wheelToCard(page, section);
+    await page.screenshot({ path: testInfo.outputPath(`typed-ask-${device}-after.png`) });
     await section.getByRole("button", { name: "Open Session", exact: true }).click();
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.openedSession())).toBe("s_child");
   });

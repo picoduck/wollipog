@@ -52,6 +52,7 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
+import { heldQuestion } from "./question-classification-fixture.js";
 import { ApiProvider } from "../api-context.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
 import { Rail } from "../components/Rail.js";
@@ -944,7 +945,15 @@ const ownerRequests = (owners: "before" | "after" | "rule"): DescendantRequestVi
 };
 
 /** The request the blocked item's recorded blocker names, pending on its child. */
-const descendantRequests: DescendantRequestView[] = params.get("runnerRecovery") === "1" ? [{
+const classificationRequest = heldQuestion();
+classificationRequest.requestId = classificationRequest.occurrenceId = "workflow_config";
+classificationRequest.workflowDecision = { ...classificationRequest.workflowDecision!, sessionId: "s_child", controllingSessionId: "s_root",
+  occurrenceId: "workflow_config", authorityEvaluation: { ...classificationRequest.workflowDecision!.authorityEvaluation!,
+    credentialScreen: { occurrenceId: "dec_config", state: "review" } } };
+const descendantRequests: DescendantRequestView[] = params.get("screen") === "ask" ? [{
+  sessionId: "s_child", sessionTitle: "Provider Configuration", runnerId: "runner-1", runnerOnline: true,
+  eventEpoch: 1, createdAt: NOW - MINUTE, responseOwner: "human", occurrenceId: "workflow_config", request: classificationRequest,
+}] : params.get("runnerRecovery") === "1" ? [{
   sessionId: "s_root", sessionTitle: "Orchestrator Recovery", runnerId: "runner-1", runnerOnline: true,
   eventEpoch: 1, createdAt: NOW, responseOwner: "human", occurrenceId: "runner-recovery:fixture",
   request: { requestId: "runner-recovery:fixture", kind: "runner_recovery", title: "Relaunch Orchestrator After Runner Restart",
@@ -1233,6 +1242,9 @@ if (params.get("typed") === "1") {
 
 const client = {
   ...api,
+  ...(params.get("screen") === "ask" ? { session: async (id: string) => ({
+    session: { ...sessionsFor(revision).find((candidate) => candidate.id === id)!, pendingApproval: classificationRequest },
+  }) } : {}),
   returnOwnerResource: async (_id: string, occurrenceId: string) => {
     (window as unknown as { __RETURNED__: unknown }).__RETURNED__ = occurrenceId;
     return descendantRequests.find((r) => r.occurrenceId === occurrenceId)!.request.workflowDecision!;
@@ -1249,15 +1261,21 @@ const client = {
         }));
           fixture.usage = { calls: 30, inputTokens: 4200, outputTokens: 960, cacheReadInputTokens: 0, cacheCreationInputTokens: 64160, costUsd: 0.104, unpricedCalls: 0 };
         }
-        return { ...fixture, decisions: [...screenDecisions, ...fixture.decisions],
+        return { ...fixture, canClassify: true, decisions: [...screenDecisions, ...fixture.decisions],
           usage: { ...fixture.usage, calls: fixture.usage.calls + screenDecisions.length } };
       })()
-    : ({ campaignSessionId: id, decisions: screenDecisions,
+    : ({ canClassify: true, campaignSessionId: id, decisions: screenDecisions,
         usage: { ...decisionUsage, calls: screenDecisions.length, unpricedCalls: 0 } }),
   classifyCampaignDecision: async (_id: string, occurrenceId: string, classification: "decline" | "orchestrator") => {
     (window as unknown as { __CLASSIFIED__: unknown }).__CLASSIFIED__ = { occurrenceId, classification };
     screenDecisions = screenDecisions.map((decision) => decision.occurrenceId === occurrenceId
       ? { ...decision, subject: { ...decision.subject!, classification } } : decision);
+    if (occurrenceId === "dec_config") {
+      classificationRequest.workflowDecision = { ...classificationRequest.workflowDecision!, authority: "orchestrator",
+        authorityEvaluation: { ...classificationRequest.workflowDecision!.authorityEvaluation!, owner: "orchestrator", reason: "authorized_operation" } };
+      descendantRequests[0]!.responseOwner = "orchestrator";
+      window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.bumpRevision();
+    }
     return screenDecisions.find((decision) => decision.occurrenceId === occurrenceId)!.subject!;
   },
   campaignIssueScope: async (id: string, epic?: number, _signal?: AbortSignal, epicRepository?: string) => largeCampaign ? {
@@ -1451,9 +1469,9 @@ function Fixture() {
     consumeSubagentFocusRequest: () => {},
   };
   return (
-    <main className="app" style={{ display: (params.has("queueStall") || largeCampaign) || (params.get("screen") === "ask" && window.innerWidth <= 760) ? "flex" : "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
-      {(params.has("queueStall") || largeCampaign) && <Rail view={{ name: "session", id: sessionId }} blockedCount={0} onNavigate={() => {}} />}
-      <section className="session-detail expanded" style={{ height: (params.has("queueStall") || largeCampaign) ? "auto" : "100%", ...((params.has("queueStall") || largeCampaign) ? { flex: 1, minWidth: 0, minHeight: 0 } : params.get("screen") === "ask" && window.innerWidth <= 760 ? { flex: "1 1 0", minHeight: 0 } : {}) }}>
+    <main className="app" style={{ display: params.has("queueStall") || largeCampaign || params.get("screen") === "ask" ? "flex" : "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
+      {(params.has("queueStall") || largeCampaign || params.get("screen") === "ask" && window.innerWidth > 760) && <Rail view={{ name: "session", id: sessionId }} blockedCount={0} onNavigate={() => {}} />}
+      <section className="session-detail expanded" style={{ height: params.has("queueStall") || largeCampaign ? "auto" : "100%", ...(params.has("queueStall") || largeCampaign ? { flex: 1, minWidth: 0, minHeight: 0 } : params.get("screen") === "ask" ? { flex: "1 1 0", minWidth: 0, minHeight: 0 } : {}) }}>
         <header className="detail-bar session-bar">
           <h1 className="detail-bar-title session-bar-title">{params.get("screen") === "ask" ? "Provider Configuration Campaign" : session.title}</h1>
         </header>

@@ -50,7 +50,7 @@ test("Campaign Status shows each screen's verdict, reason and failure beside the
     decision("dec_failed", { state: "failed", failureClass: "timed_out" }),
     decision("probe", { kind: "probe", verdict: "confirm" }),
   ];
-  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: decisions.length, unpricedCalls: 0 } });
+  api.campaignDecisions = async (id) => ({ canClassify: true, campaignSessionId: id, decisions, usage: { ...usage, calls: decisions.length, unpricedCalls: 0 } });
   api.classifyCampaignDecision = async (id, occurrenceId, classification) => {
     classified.push([id, occurrenceId, classification]);
     decisions = decisions.map((item) => item.occurrenceId === occurrenceId ? { ...item, subject: { ...item.subject!, classification } } : item);
@@ -89,7 +89,7 @@ test("Campaign Status shows each screen's verdict, reason and failure beside the
 
 test("an owner decision whose screen failed stays the owner's: they decline it or answer it themselves", async () => {
   const read = api.campaignDecisions;
-  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [decision("dec_owner", { state: "uncertain", verdict: "uncertain",
+  api.campaignDecisions = async (id) => ({ canClassify: true, campaignSessionId: id, decisions: [decision("dec_owner", { state: "uncertain", verdict: "uncertain",
     reason: "It may ask the owner to sign in.", subject: { sessionId: "root-1", surface: "owner_decision", requestId: "ask-owner" } })],
     usage: { ...usage, calls: 1, unpricedCalls: 0 } });
   const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />);
@@ -107,7 +107,7 @@ test("follow-up relatedness and closure-reason checks show their verdict beside 
   const read = api.campaignDecisions;
   const followUp = { sessionId: "child-1", surface: "follow_up_publication" as const, requestId: "rec_1" };
   const closure = { sessionId: "root-1", surface: "issue_closure" as const, requestId: "team/repo#7" };
-  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [
+  api.campaignDecisions = async (id) => ({ canClassify: true, campaignSessionId: id, decisions: [
     decision("rel_ok", { kind: "follow_up_relatedness", verdict: "related", reason: "It fixes a defect the work exposed.", subject: followUp }),
     decision("rel_no", { kind: "follow_up_relatedness", verdict: "unrelated", reason: "It starts a different feature.", subject: followUp }),
     decision("rel_failed", { kind: "follow_up_relatedness", state: "failed", failureClass: "timed_out", subject: followUp }),
@@ -136,7 +136,7 @@ test("follow-up relatedness and closure-reason checks show their verdict beside 
 
 test("historical typed asks do not offer classification while a live hold does", async () => {
   const read = api.campaignDecisions;
-  api.campaignDecisions = async () => ({ campaignSessionId: "root-1", decisions: [
+  api.campaignDecisions = async () => ({ canClassify: true, campaignSessionId: "root-1", decisions: [
     decision("historical", { verdict: "ask" }),
     decision("revoked", { verdict: "ask", subject: { sessionId: "child-1", surface: "implementation_question", requestId: "revoked", classificationPending: false } }),
     decision("live", { verdict: "ask", subject: { sessionId: "child-1", surface: "implementation_question", requestId: "live", classificationPending: true } }),
@@ -157,7 +157,7 @@ test("each selection proposal shows its outcome, issues, rationale and the Decis
   const read = api.campaignDecisions;
   const proposal = (outcome: NonNullable<CampaignDecisionsResponse["decisions"][number]["selectionProposal"]>["outcome"], numbers: number[], explanation: string) =>
     ({ outcome, explanation, issues: numbers.map((number) => ({ repository: "team/repo", number, title: `Issue ${number}` })) });
-  api.campaignDecisions = async () => ({ campaignSessionId: "root-1", decisions: [
+  api.campaignDecisions = async () => ({ canClassify: true, campaignSessionId: "root-1", decisions: [
     decision("sel_admit", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, verdict: "admit",
       reason: "Both are labeled priority/high.", selectionProposal: proposal("applied", [30, 31], "The two highest-priority open issues.") }),
     decision("sel_refuse", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, verdict: "refuse",
@@ -202,7 +202,7 @@ test("each selection proposal shows its outcome, issues, rationale and the Decis
 test("a Custom campaign's epic seed shows its reading beside the scope it affects; Full Control's scope grant stays in its own section (#4104)", async () => {
   const read = api.campaignDecisions;
   const seed = { sessionId: "root-1", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:abc" };
-  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [
+  api.campaignDecisions = async (id) => ({ canClassify: true, campaignSessionId: id, decisions: [
     decision("seed_read", { kind: "scope_grant", verdict: "grant", reason: "The person names epic #40 to orchestrate.", subject: { ...seed, seed: "seeded" } }),
     decision("seed_none", { kind: "scope_grant", verdict: "grant", reason: "No issue is named.", subject: { ...seed, seed: "none" } }),
     decision("seed_pending", { kind: "scope_grant", state: "pending", subject: { ...seed, seed: "pending" } }),
@@ -240,7 +240,7 @@ test("a Custom campaign's epic seed on the proposal check reads as the Epic Seed
   const seed = { sessionId: "root-1", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:abc" };
   const check = (occurrenceId: string, extra: Partial<CampaignDecisionsResponse["decisions"][number]>) =>
     decision(occurrenceId, { kind: "scope_check", promptVersion: "scope_check.v1", ...extra });
-  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [
+  api.campaignDecisions = async (id) => ({ canClassify: true, campaignSessionId: id, decisions: [
     check("check_seeded", { verdict: "admit", typedAnswers: TYPED_ADMITTED, subject: { ...seed, seed: "seeded" } }),
     check("check_refused", { verdict: "refuse", reason: "The message only mentions #12 as background.", typedAnswers: TYPED_REFUSED, subject: { ...seed } }),
     check("check_pending", { state: "pending", subject: { ...seed } }),
@@ -302,7 +302,7 @@ test("Campaign Status lists each Decision Model call in exactly one section: che
       subject: { sessionId: "root-1", surface: "issue_scope_seed", requestId: "issue_scope_seed:abc", seed: "seeded" } })],
   ];
   const decisions = listed.map(([, item]) => item);
-  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: decisions.length, unpricedCalls: 0 } });
+  api.campaignDecisions = async (id) => ({ canClassify: true, campaignSessionId: id, decisions, usage: { ...usage, calls: decisions.length, unpricedCalls: 0 } });
   const view = await render(<>
     <CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />
     <CampaignDecisions campaignId="root-1" />
@@ -326,7 +326,7 @@ test("Campaign Status lists each Decision Model call in exactly one section: che
 
 test("a member session sees the checks but never the classification buttons", async () => {
   const read = api.campaignDecisions;
-  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [decision("dec_failed", { state: "uncertain", verdict: "uncertain", reason: "Unclear." })],
+  api.campaignDecisions = async (id) => ({ canClassify: true, campaignSessionId: id, decisions: [decision("dec_failed", { state: "uncertain", verdict: "uncertain", reason: "Unclear." })],
     usage: { ...usage, calls: 1, unpricedCalls: 0 } });
   const view = await render(<CampaignDecisionModelChecks sessionId="child-1" canClassify={false} refreshKey={1} onOpenSession={() => {}} />);
   try {
@@ -352,7 +352,7 @@ test("a typed check shows its answers as a short checklist beside the server's v
       reason: "Every answer is satisfied with at least 80% confidence.", typedAnswers: TYPED_ADMITTED }),
     decision("dec_legacy", { kind: "probe", verdict: "confirm", subject: undefined, reason: "Listed in the boundary." }),
   ];
-  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: decisions.length, unpricedCalls: 0 } });
+  api.campaignDecisions = async (id) => ({ canClassify: true, campaignSessionId: id, decisions, usage: { ...usage, calls: decisions.length, unpricedCalls: 0 } });
   const view = await render(<>
     <CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />
     <CampaignDecisions campaignId="root-1" />
@@ -399,7 +399,7 @@ test("a typed check names a parameterized question by its complete parameter, ne
       ? { ...candidate, label: `${shared.slice(0, 119)}…`, parameter } : candidate),
   };
   const decisions = [decision("dec_long", { kind: "probe", verdict: "confirm", subject: undefined, reason: "Checked.", typedAnswers: typed })];
-  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions, usage: { ...usage, calls: 1, unpricedCalls: 0 } });
+  api.campaignDecisions = async (id) => ({ canClassify: true, campaignSessionId: id, decisions, usage: { ...usage, calls: 1, unpricedCalls: 0 } });
   const view = await render(<CampaignDecisions campaignId="root-1" />);
   try {
     const claims = [...view.container.querySelectorAll("ul[aria-label='Answers'] .decision-answer-claim")].map((claim) => claim.textContent);
