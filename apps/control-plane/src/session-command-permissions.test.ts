@@ -41,6 +41,7 @@ const AGENT_UNARCHIVE = "Session credentials may archive descendants, but cannot
 const AGENT_DELETE = "Session credentials cannot delete sessions.";
 const AGENT_ROUTE = "Session credentials cannot use this command.";
 const ALL_ALLOWED: SessionCommandPermissions = {
+  pauseCampaign: { allowed: true },
   stop: { allowed: true },
   restart: { allowed: true },
   stopBackgroundJob: { allowed: true },
@@ -66,6 +67,7 @@ const ISSUE_COMMANDS = ["fork", "rewind", "manageReviewFindings", "manageWorktre
 const LATER_COMMANDS = ["cancelTurn", "manageQueue", "rename", "configure", "respond"] as const;
 const NON_OWNER: SessionCommandPermissions = {
   ...ALL_ALLOWED,
+  pauseCampaign: { allowed: false, reason: "Only the campaign owner can pause or resume it." },
   stopBackgroundJob: { allowed: false, reason: STOP_JOB_OWNER },
 };
 
@@ -90,6 +92,7 @@ test("a person's command permissions follow the role gate and Stop Job's owner r
   const readOnly = { allowed: false, reason: VIEWER };
   for (const facts of [owns, sees]) {
     assert.deepEqual(sessionCommandPermissions(human("viewer"), child, facts), {
+      pauseCampaign: readOnly,
       stop: readOnly, restart: readOnly, stopBackgroundJob: readOnly,
       archive: readOnly, unarchive: readOnly, prompt: readOnly, delete: readOnly,
       cancelTurn: readOnly, manageQueue: readOnly, rename: readOnly, configure: readOnly, respond: readOnly,
@@ -109,6 +112,7 @@ test("an agent credential's command permissions follow descendant confinement an
   const descendant = { ownsSession: false, isDescendant: true, archivedWorktreeRecoveryError: null };
   assert.deepEqual(sessionCommandPermissions(orchestrator, child, descendant), {
     ...ALL_ALLOWED,
+    pauseCampaign: { allowed: false, reason: AGENT_ROUTE },
     unarchive: { allowed: true },
     delete: { allowed: false, reason: AGENT_DELETE },
     cancelTurn: { allowed: false, reason: AGENT_ROUTE },

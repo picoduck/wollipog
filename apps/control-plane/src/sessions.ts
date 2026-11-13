@@ -4874,6 +4874,7 @@ export class SessionsService {
     if (parentSessionId) {
       if (this.db.roleConversionBlocksSession(parentSessionId)) return fail("wait for the session role change to finish before creating children", 409);
       const parent = this.db.getSession(parentSessionId);
+      if (this.db.campaignPaused(parentSessionId)) return fail("The campaign is paused; resume it before starting children.", 409);
       if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
         return fail("the creating parent session is no longer active", 409);
       }
@@ -6105,6 +6106,7 @@ export class SessionsService {
     /** Internal: a Full Control first message's own durable identity (#2940). */
     binding?: Parameters<SessionsService["prompt"]>[8],
   ): ServiceResult<PromptAdmissionView> {
+    if (this.db.campaignPaused(sessionId)) return fail("The campaign is paused; resume it before sending messages.", 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
     // Capture the exact fired row before admission. If another client snoozes again while the
@@ -6958,6 +6960,7 @@ export class SessionsService {
     /** The authenticated agent sending it; only its server-derived identity is read (#4022). */
     sender?: AgentPrincipal,
   ): Promise<ServiceResult<PromptAdmissionView>> {
+    if (this.db.campaignPaused(sessionId)) return fail("The campaign is paused; resume it before sending messages.", 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
     const steered = await this.steerMidTurnPrompt(sessionId, text, images, slashCommand, config, sender);
@@ -7079,7 +7082,13 @@ export class SessionsService {
     // What the agent credential sending the prompt may do to this session, so the hold advice in
     // its refusal or delivery report names only tools it can call (#1863).
     holdReader?: HoldAdviceReader,
+    /** Trusted server notices may be retained unsent. Never populated from a caller's request. */
+    retainNoticeDuringCampaignPause = false,
   ): ServiceResult<PromptAdmissionView> {
+    const pausedCampaign = this.db.campaignPaused(sessionId);
+    if (pausedCampaign && (delivery || !retainNoticeDuringCampaignPause && !binding)) {
+      return fail("The campaign is paused; resume it before admitting more work.", 409);
+    }
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
     const snapshotCommand = delivery?.commandSnapshots?.[0];
@@ -7122,7 +7131,7 @@ export class SessionsService {
     }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
-    if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
+    if (isTerminal(session.status) && !(pausedCampaign && this.db.campaignPause(sessionId)?.stoppedSessionIds.includes(sessionId))) return fail(`session is ${session.status}`, 409);
     if (session.historyQuarantine) return fail(QUARANTINED_CONVERSATION_ERROR, 409);
     if (session.worktreeRecovery) {
       return fail(
@@ -7151,7 +7160,7 @@ export class SessionsService {
       this.hub.sessionChangedById(sessionId);
       return fail("daily budget reached — new turns pause until the day rolls over or an owner or admin raises it", 409);
     }
-    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    if (!pausedCampaign && !this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
     const admissionQueuedPrompt = !delivery &&
       (session.status === "queued" || session.status === "starting");
     if (admissionQueuedPrompt) {
@@ -7328,7 +7337,7 @@ export class SessionsService {
     // provider may need to relaunch, and verification can then prove that the prompt was not sent.
     // Persisting before that attempt retains attachments/workspace references and gives recovery
     // a stable idempotency identity instead of relying on a browser-local draft.
-    const durablePrompt = admissionQueuedPrompt || (retainAcrossWorktreeRecovery && !delivery &&
+    const durablePrompt = (pausedCampaign && !delivery) || admissionQueuedPrompt || (retainAcrossWorktreeRecovery && !delivery &&
       session.status === "idle" &&
       session.worktreePath != null &&
       runnerSupportsProtocol(
@@ -7349,7 +7358,7 @@ export class SessionsService {
     // A prompt admitted behind authoritative input is runner-queued work, not a new turn. Keep the
     // input card intact; the runner advances status only after the input resolves and this dequeues.
     // Otherwise preserve runner-authoritative admission state while its provider slot is queued.
-    if (!pendingInputBarrier && (!durablePrompt || (session.status !== "queued" && session.status !== "starting"))) {
+    if (!pausedCampaign && !pendingInputBarrier && (!durablePrompt || (session.status !== "queued" && session.status !== "starting"))) {
       // The socket send below can still reject synchronously. Defer campaign-attestation
       // invalidation until its success boundary so an undelivered prompt is a true no-op.
       // A caller that knows the provider is idle and follows the durable receipts admits the
@@ -7402,6 +7411,10 @@ export class SessionsService {
     });
   }
 
+  private promptSystemNotice(sessionId: string, text: string): ServiceResult<PromptAdmissionView> {
+    return this.prompt(sessionId, text, [], undefined, undefined, undefined, "session", false, undefined, undefined, true);
+  }
+
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
     this.expireAutomationCreationDecisions(now);
     for (const campaignId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
@@ -7412,6 +7425,7 @@ export class SessionsService {
     for (const { sessionId } of this.db.firstMessageDeliveries()) {
       if (!this.firstMessagesInFlight.has(sessionId)) this.reconcileFirstMessageDelivery(sessionId, now);
     }
+    this.maintainCampaignPauses(now, runnerId);
     this.maintainCampaignContinuations(now, runnerId);
     // A receipt recorded just before a restart may never have reached its decision's resume.
     for (const commandId of this.db.settledWorkflowDecisionResumeCommands(runnerId)) {
@@ -9053,6 +9067,7 @@ export class SessionsService {
   }
 
   private requestStop(session: SessionView, now: number, archiveAfterStop = false, refreshProject = true): SessionView {
+    this.removeCampaignPauseMember(session.id);
     if (this.mediaSessionPurposes.owns(session.id) && session.status !== "queued" &&
       this.mediaSessionPurposes.lifecycleState(session.id) !== "cancelled") {
       this.requestDedicatedMediaStop(session);
@@ -9142,6 +9157,7 @@ export class SessionsService {
    * touching the socket, or a lost frame leaves nothing to resend and the runner's next live
    * snapshot restores the session the user stopped. */
   private stopAtGuardrail(session: SessionView, now: number): void {
+    this.removeCampaignPauseMember(session.id);
     if (this.mediaSessionPurposes.owns(session.id) || this.pendingMediaLifecycle(session)) {
       // Reuse only the exact same-DB locally unsent cancellation. Unknown delivery is not a
       // generic Stop authorization or terminal proof, even when the root budget is stopped.
@@ -9196,6 +9212,106 @@ export class SessionsService {
   private requestDedicatedMediaStop(session: SessionView): boolean {
     if (!this.mediaSessionPurposes.owns(session.id) || !this.sessionPacedVideoCompatible(session)) return false;
     return Boolean(this.preparedMediaActiveStops?.request(session.id));
+  }
+
+  /** An ordinary Stop or guardrail end supersedes preservation; scheduled resume must not undo it. */
+  private removeCampaignPauseMember(sessionId: string): void {
+    const pause = this.db.campaignPause(sessionId);
+    const rootId = this.db.campaignRootForMember(sessionId);
+    if (!rootId || !pause || pause.resumedAt !== undefined) return;
+    pause.stoppedSessionIds = pause.stoppedSessionIds.filter(id => id !== sessionId);
+    pause.inFlightSessionIds = pause.inFlightSessionIds.filter(id => id !== sessionId);
+    this.db.saveCampaignPause(rootId, pause);
+  }
+
+  setCampaignPause(sessionId: string, input: { action: "pause" | "resume"; resumeAt?: number | null }, principal: HumanPrincipal): ServiceResult<SessionView> {
+    const root = this.db.getSession(sessionId);
+    if (!root?.orchestratorPolicy || root.archived || this.db.resolvedCampaignSessionId(sessionId) !== sessionId ||
+        !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
+    if (!input || !["pause", "resume"].includes(input.action) ||
+        input.resumeAt != null && (!Number.isSafeInteger(input.resumeAt) || input.resumeAt <= Date.now())) {
+      return fail("Choose Pause or Resume and an optional future resume time.", 400);
+    }
+    const existing = this.db.campaignPause(sessionId);
+    if (input.action === "pause" && isTerminal(root.status) && (!existing || existing.resumedAt !== undefined)) {
+      return fail("Only a live campaign can be paused.", 409);
+    }
+    const now = Date.now();
+    if (input.action === "resume") {
+      if (existing && existing.resumedAt === undefined) {
+        existing.resumeRequestedBy = principal.userId;
+        this.db.saveCampaignPause(sessionId, existing);
+      }
+    } else if (!existing || existing.resumedAt !== undefined) {
+      this.db.saveCampaignPause(sessionId, { pausedAt: now, pausedBy: principal.userId,
+        resumeAt: input.resumeAt ?? null, stoppedSessionIds: [], inFlightSessionIds: [] });
+      this.db.appendEvent(sessionId, { kind: "stderr", text: `Campaign paused by ${principal.userId}. Pending requests and decisions are preserved.` }, now);
+      this.log.info(JSON.stringify({ event: "campaign_paused", campaignId: sessionId, actorId: principal.userId, at: now, resumeAt: input.resumeAt ?? null }));
+    }
+    this.maintainCampaignPauses(now);
+    this.hub.sessionChangedById(sessionId);
+    return ok(this.db.getSession(sessionId)!);
+  }
+
+  private maintainCampaignPauses(now: number, runnerId?: string): void {
+    for (const id of this.db.pausedCampaignIds(runnerId)) {
+      const pause = this.db.campaignPause(id);
+      if (!pause || pause.resumedAt !== undefined) continue;
+      if (pause.resumeRequestedBy || pause.resumeAt !== null && pause.resumeAt <= now) {
+        this.resumeCampaign(id, pause.resumeRequestedBy ?? "scheduled", now);
+        continue;
+      }
+      const inFlight: string[] = [];
+      for (const memberId of [id, ...this.db.campaignDescendantIds(id)]) {
+        const member = this.db.getSession(memberId);
+        if (!member || member.archived || isTerminal(member.status) || pause.stoppedSessionIds.includes(memberId)) continue;
+        // Stop is destructive for provider questions and queued tool work. Never interrupt a
+        // merge admission, parked queue entry, background job, or a provider still executing.
+        // The next idle boundary is safe; a busy member remains visibly in flight until then.
+        if (member.status !== "idle" || member.pendingApproval ||
+            this.db.unconsumedWorkflowDecisionsForSession(memberId).length > 0 ||
+            this.db.pullRequestWatches.isParked(memberId) ||
+            this.db.sessionsWithLiveBackgroundJobs([memberId], now).size > 0) {
+          inFlight.push(memberId); continue;
+        }
+        pause.stoppedSessionIds.push(memberId);
+        this.db.stopCampaignMemberForPause(id, pause, memberId, member.runnerId, now);
+        this.sendStopCommand(member.runnerId, memberId);
+        this.hub.sessionChangedById(memberId);
+      }
+      pause.inFlightSessionIds = inFlight;
+      this.db.saveCampaignPause(id, pause);
+    }
+  }
+
+  private resumeCampaign(id: string, actor: string, now: number): void {
+    const pause = this.db.campaignPause(id);
+    if (!pause || pause.resumedAt !== undefined) return;
+    if (pause.stoppedSessionIds.some(childId => this.db.hasSessionStopIntent(childId))) return;
+    const text = "The campaign has resumed. Continue the preserved work within its existing authority and budget. Main may have moved; fetch it and inspect dependencies before continuing.";
+    // Restart keeps suspension active until every retained child has passed existing admission.
+    // An unsuccessful restart stays in this durable list for the next sweep, without more grants.
+    for (const childId of [...pause.stoppedSessionIds].sort((a, b) => a === id ? 1 : b === id ? -1 : 0)) {
+      const child = this.db.getSession(childId);
+      if (!child || child.archived) continue;
+      if (child.status === "stopped" && !this.restart(childId, { campaignResume: true }).ok) continue;
+      this.promptOutbox.stage(childId, child.runnerId, { type: "prompt_session", sessionId: childId, text }, now,
+        `campaign_resume_${id}_${pause.pausedAt}_${childId}`);
+      pause.stoppedSessionIds = pause.stoppedSessionIds.filter(memberId => memberId !== childId);
+      this.db.saveCampaignPause(id, pause);
+    }
+    if (pause.stoppedSessionIds.length) return;
+    for (const memberId of pause.inFlightSessionIds) {
+      const member = this.db.getSession(memberId);
+      if (!member || member.archived || isTerminal(member.status)) continue;
+      this.promptOutbox.stage(memberId, member.runnerId, { type: "prompt_session", sessionId: memberId, text }, now,
+        `campaign_resume_${id}_${pause.pausedAt}_${memberId}`);
+    }
+    pause.resumedAt = now; pause.resumedBy = actor;
+    this.db.saveCampaignPause(id, pause);
+    this.db.appendEvent(id, { kind: "stderr", text: `Campaign resumed by ${actor} (${actor === "scheduled" ? "owner-selected time" : "owner action"}).` }, now);
+    this.log.info(JSON.stringify({ event: "campaign_resumed", campaignId: id, actorId: actor, at: now }));
+    this.hub.sessionChangedById(id);
   }
 
   stop(sessionId: string): ServiceResult<SessionView> {
@@ -9398,7 +9514,9 @@ export class SessionsService {
     unarchive?: boolean;
     /** #3240: wait for a busy provider account instead of failing the launch. */
     waitForProviderHome?: boolean;
+    campaignResume?: boolean;
   } = {}): ServiceResult<SessionView> {
+    if (this.db.campaignPaused(sessionId) && !options.campaignResume) return fail("The campaign is paused; only its owner or scheduled resume can restart it.", 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "runs once and cannot be restarted");
     if (reviewRefusal) return fail(reviewRefusal, 409);
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before restarting", 409);
@@ -10033,6 +10151,7 @@ export class SessionsService {
     const root = rootId ? this.db.getSession(rootId) : null;
     if (!root?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
     const completion = root.orchestratorPolicy.behavior.completion;
+    if (this.db.campaignPaused(root.id)) return fail("The campaign is paused; paused children cannot be verified.", 409);
     // A requested stop, a guardrail Stop, a runner disconnect, and startup settlement all write
     // `stopped` before the runner confirms anything, so that row is not yet proof the child's last
     // report is final. Only a recorded confirmation is (#1466): it survives the runner going
@@ -11061,7 +11180,7 @@ export class SessionsService {
       // the same rule in its campaign policy rather than being woken for its own decline.
       setImmediate(() => {
         try {
-          const delivered = this.prompt(session.id, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE);
+          const delivered = this.promptSystemNotice(session.id, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE);
           if (!delivered.ok) this.log.warn(`unresolved-effect decline guidance not delivered to ${session.id}: ${delivered.error}`);
         } catch (error) {
           this.log.warn(`unresolved-effect decline guidance failed for ${session.id}: ${(error as Error).message}`);
@@ -11082,7 +11201,7 @@ export class SessionsService {
       if (first) setImmediate(() => {
         try {
           // A root whose runner has the owner-decision tools (#4064) is told how to reach its owner.
-          const delivered = this.prompt(session.id, runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion,
+          const delivered = this.promptSystemNotice(session.id, runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion,
             "ownerDecisions") ? FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE : FULL_CONTROL_ROOT_QUESTION_MESSAGE);
           if (!delivered.ok) this.log.warn(`root question guidance not delivered to ${session.id}: ${delivered.error}`);
         } catch (error) {
@@ -14751,7 +14870,7 @@ export class SessionsService {
     // Nobody is left to tell; the decision itself records why.
     if (!child || isTerminal(child.status)) return true;
     if (!this.hub.isRunnerOnline(child.runnerId)) return false;
-    const result = this.prompt(decision.sessionId, mergeClosureChangedPrompt(decision, watch));
+    const result = this.promptSystemNotice(decision.sessionId, mergeClosureChangedPrompt(decision, watch));
     if (!result.ok) this.log.warn(`merge closure notice for ${decision.sessionId} was not sent: ${result.error}`);
     return result.ok;
   }
@@ -14799,7 +14918,7 @@ export class SessionsService {
       this.log.warn(`merge closure owner question for ${decision.occurrenceId} was refused: ${created.error}`);
     }
     // An older root, or a refused question: the root Orchestrator is told, and the record says so.
-    const told = this.prompt(root.id, `${text.question}\n\n${text.material}\n\nReport this to the campaign's owner.`);
+    const told = this.promptSystemNotice(root.id, `${text.question}\n\n${text.material}\n\nReport this to the campaign's owner.`);
     return { report: { reportedAt, unreported: told.ok
       ? "The campaign's root cannot carry an owner question, so its Orchestrator was told instead."
       : `Neither the owner nor the root Orchestrator could be told: ${told.error ?? "the message was refused"}` }, delivered: told.ok };
@@ -18500,6 +18619,10 @@ export class SessionsService {
   ): boolean {
     const child = this.db.getSession(decision.sessionId);
     if (!child) return false;
+    if (this.db.campaignPaused(child.id)) {
+      if (from !== "held") this.db.setWorkflowDecisionResume(decision.occurrenceId, "held", null, now);
+      return false;
+    }
     const text = workflowDecisionResolutionPrompt(decision);
     if (!runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "worktreeRecovery")) {
       const delivered = this.prompt(child.id, text);
@@ -18826,6 +18949,8 @@ export class SessionsService {
    * and approved decisions, and any resume still owed for a denied or consumed one is abandoned
    * with them, so only a provisional disconnect stop leaves a resume held (#1759). */
   private revokeUnconsumedWorkflowDecisionsForSession(sessionId: string, actorId: string): void {
+    const pause = this.db.campaignPause(sessionId);
+    if (pause && pause.resumedAt === undefined && pause.stoppedSessionIds.includes(sessionId)) return;
     const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
       const settle = child ? this.forgeSettlesArmedMerge(child, decision) : false;
@@ -20366,6 +20491,7 @@ export class SessionsService {
   }
 
   setArchived(sessionId: string, archived: boolean, refreshProject = true): ServiceResult<SessionView> {
+    if (archived && this.db.campaignPaused(sessionId)) return fail("The campaign is paused; preserved children cannot be archived.", 409);
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const now = Date.now();

@@ -58,7 +58,7 @@ explicit entries. A production HTTP test exercises every added route with an aut
 who can read the target session, requires the credential-specific 403 and no protocol-domain
 effects, and checks every campaign classification against that verified set. There is no prefix
 or category exemption. The two original wait/watch entries retain their exact registered
-`session_watch_get` requirement. The 21 owner capabilities and 16 human-authority boundaries
+`session_watch_get` requirement. The 21 owner capabilities and 17 human-authority boundaries
 are described in [Assistant Campaign and Review Management](assistant-campaign-management.md).
 
 The owner has now selected full parity within this campaign. The #4468 main item owns groups 1–2,

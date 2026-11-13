@@ -97,9 +97,9 @@ test("production composition inventory is exhaustive; unresolved gaps cannot cou
   }
   const group7Routes = new Set<string>([...ASSISTANT_CAMPAIGN_MANAGEMENT.map(([, route]) => route), ...ASSISTANT_CAMPAIGN_HUMAN_ROUTES, ...CAMPAIGN_SESSION_PROTOCOL_ROUTES]);
   const group7 = Object.entries(manifest).filter(([route]) => group7Routes.has(route));
-  assert.equal(group7.length, 58);
+  assert.equal(group7.length, 59);
   assert.equal(group7.filter(([, entry]) => "tools" in entry).length, 18);
-  assert.equal(group7.filter(([, entry]) => "exclusion" in entry && entry.exclusion === "human_authority").length, 9);
+  assert.equal(group7.filter(([, entry]) => "exclusion" in entry && entry.exclusion === "human_authority").length, 10);
   assert.equal(group7.filter(([, entry]) => "exclusion" in entry && entry.exclusion === "session_protocol").length, 31);
   const residualRoutes = new Set<string>([...ASSISTANT_RESIDUAL_MANAGEMENT.map(([, route]) => route), ...ASSISTANT_RESIDUAL_HUMAN_ROUTES, ...RESIDUAL_SESSION_PROTOCOL_ROUTES]);
   const residual = Object.entries(manifest).filter(([route]) => residualRoutes.has(route));

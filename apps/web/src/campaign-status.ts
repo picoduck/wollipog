@@ -528,6 +528,7 @@ export function forgePullRequestView(
 /** The campaign's status in its own words (#4146). `blocked` and `complete_with_handoffs` come only
  * from control planes older than v297. */
 const CAMPAIGN_LIFECYCLE_LABELS: Record<OrchestratorCampaignProjection["status"], string> = {
+  paused: "Paused",
   waiting_human: "Waiting for Human",
   active: "Campaign Active",
   complete_needs_cleanup: "Complete, Needs Cleanup",

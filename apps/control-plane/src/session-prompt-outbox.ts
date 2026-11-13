@@ -212,7 +212,7 @@ export class SessionPromptOutbox {
     this.beforeFlush(now);
     let sent = 0;
     for (const row of this.db.dueSessionPromptCommands(now, runnerId, 100)) {
-      if (!this.hub.isRunnerOnline(row.runnerId)) continue;
+      if (!this.hub.isRunnerOnline(row.runnerId) || this.db.campaignPaused(row.sessionId)) continue;
       let command: DurableSessionCommand;
       try {
         command = JSON.parse(row.payloadJson) as DurableSessionCommand;
@@ -227,6 +227,13 @@ export class SessionPromptOutbox {
       // A prompt or answer queued for a persisted exec session before the retirement (#3259) never
       // reaches a runner that may still resume that driver. One already sent may have landed.
       const target = this.db.getSession(row.sessionId);
+      // A campaign resume is a wake-up, never an answer or an interruption of protected work.
+      // Its server-owned durable identity keeps the one notification held through reconnects.
+      if (row.commandId.startsWith("campaign_resume_") && (!target || target.status !== "idle" || target.pendingApproval ||
+          this.db.unconsumedWorkflowDecisionsForSession(row.sessionId).some(decision => decision.actionAdmission))) {
+        this.db.deferSessionPromptCommand(row.commandId, now + CAMPAIGN_HOLD_RECHECK_MS, now);
+        continue;
+      }
       // Retained work never runs before a Full Control campaign's first owner message (#2940); it
       // stays queued and runs once that message is established. The message's own durable command,
       // admitted under its delivery id, is that delivery and runs.
