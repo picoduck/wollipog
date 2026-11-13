@@ -83,6 +83,7 @@ export class CampaignRecoveryService {
         const decision = request.kind === "workflow_decision" ? this.db.workflowDecisionByOccurrence(request.occurrenceId) : null;
         const evaluated = evaluateCampaignAuthority(root, { ...session,
           repositoryRoot: this.db.sessionRepositoryRoot(session.id) ?? undefined,
+          temporaryBranchReceipts: this.db.temporaryBranchReceipts(root.id, session.id),
           boundaryRepository: campaignBoundaryRepositoryAt(this.db, root, session) },
         this.db.getRunner(session.runnerId)?.protocolVersion,
         decision?.resourceSnapshot ?? this.db.campaignPolicyRequest(session.id, root.orchestratorPolicy?.control, request),

@@ -21,6 +21,11 @@ replayed or turned into provenance by reading a matching ref. Creation attempts 
 64 per member. Historical provenance cannot be established: raw-shell, pre-existing and unknown
 branches keep person-owned decisions.
 
+While the original server call is still live, a retry reports that creation is in progress and
+asks for the same request ID again; it never publishes another ref or prematurely calls the
+intent unproven. The agent client's timeout exceeds the server's runner RPC budget. After a
+server restart an orphaned pending intent remains unproven and cannot be replayed.
+
 The receipt also retains the verified default branch name and immutable default-head SHA from
 creation. At decision admission the server replaces any caller-supplied `creation` facts with
 these receipt facts and the creating session's label, or removes them when provenance is unknown.
@@ -28,6 +33,8 @@ The card distinguishes the proven created tip from a requested tip, identifies t
 member, and dates the containment claim to creation; execution still checks containment afresh.
 The creation facts normalize to the same digest as the admitted snapshot. Temporary deletion
 cannot be consumed as a shell-command handoff; managed execution is mandatory.
+An idempotent replay retains the first admitted session label, even if the session is renamed.
+Campaign recovery uses the same server-recorded receipts as admission when displaying authority.
 
 Temporary deletion uses the existing typed `merged_branch_deletion` category with `merged:false`,
 `headSha`, optional `temporaryReceiptId`, and `dependentPullRequests` evidence. It does not

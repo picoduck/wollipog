@@ -34,7 +34,7 @@ import { parseSessionWaitReport } from "./session-waits.js";
 import { isSessionLaunchFailureCode, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { campaignRepositoryLocation, supportsPacedVideoReviewPeer } from "@wollipog/protocol";
-import { forgeActionBranchName, matchingTemporaryBranchReceipt, type TemporaryBranchReceipt } from "@wollipog/protocol";
+import { forgeActionBranchName, matchingTemporaryBranchReceipt, TEMPORARY_BRANCH_CREATION_RPC_TIMEOUT_MS, type TemporaryBranchReceipt } from "@wollipog/protocol";
 import { normalizeIssueClosureEpicMembers } from "@wollipog/protocol";
 import { providerProfileSessionRefusal } from "./provider-profile-route.js";
 import type { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
@@ -2514,6 +2514,7 @@ export class SessionsService {
   private readonly forgeMergeSettlements = new Set<string>();
   /** Occurrences whose Wollipog-performed forge action is being dispatched (#4067). */
   private readonly forgeActionsInFlight = new Set<string>();
+  private readonly temporaryCreationsInFlight = new Set<string>();
   /** Campaigns whose automatic repair of idle leftovers is running in this process (#4146). */
   private readonly campaignRepairsInFlight = new Map<string, Promise<void>>();
   /** When each campaign was last checked for leftovers to repair, so a tick never derives them all. */
@@ -15108,6 +15109,9 @@ export class SessionsService {
     if (prior) {
       if (prior.receipt.campaignId !== root.id || prior.receipt.repository !== repository.toLowerCase() ||
           prior.receipt.branch !== body.branch || prior.receipt.headSha !== body.headSha) return fail("requestId was used for different creation coordinates", 409);
+      if (prior.state === "pending" && this.temporaryCreationsInFlight.has(prior.receipt.id)) {
+        return fail("Creation is still in progress. Retry with the same requestId and coordinates to read its result; do not create another ref.", 409);
+      }
       return prior.state === "created" ? ok(prior.receipt)
         : fail("This creation has no proven response and will not be replayed. Historical ownership cannot be established; any ref it left remains person-owned.", 409);
     }
@@ -15118,17 +15122,19 @@ export class SessionsService {
     const requestId = `temporary_branch_${randomUUID()}`;
     let created = false;
     let proof: { defaultBranch: string; defaultHeadSha: string } | undefined;
+    this.temporaryCreationsInFlight.add(receipt.id);
     try {
       const answer = await this.hub.requestFromRunner(child.runnerId, requestId, { type: "forge_decision_action",
         requestId, sessionId, occurrenceId: receipt.id,
         action: { kind: "temporary_branch_create", repository: receipt.repository, branch: receipt.branch, headSha: receipt.headSha },
-      }, FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS) as unknown as Partial<ForgeDecisionActionResultMessage>;
+      }, TEMPORARY_BRANCH_CREATION_RPC_TIMEOUT_MS) as unknown as Partial<ForgeDecisionActionResultMessage>;
       created = answer.type === "forge_decision_action_result" && answer.requestId === requestId &&
         answer.sessionId === sessionId && answer.occurrenceId === receipt.id && answer.outcome === "published" &&
         forgeActionBranchName(answer.temporaryBranchProof?.defaultBranch) &&
         typeof answer.temporaryBranchProof?.defaultHeadSha === "string" && /^[0-9a-f]{40}$/u.test(answer.temporaryBranchProof.defaultHeadSha);
       if (created) proof = answer.temporaryBranchProof;
     } catch { /* never recover provenance by inspecting a matching ref */ }
+    finally { this.temporaryCreationsInFlight.delete(receipt.id); }
     this.db.finishTemporaryBranchCreation(receipt.id, created, proof);
     this.log.info(JSON.stringify({ event: "temporary_branch_creation", sessionId, campaignId: root.id,
       receiptId: receipt.id, outcome: created ? "created" : "unproven" }));
@@ -15263,7 +15269,10 @@ export class SessionsService {
       const receipts = this.db.temporaryBranchReceipts(controller.session.id, child.id);
       const receipt = receipts.find((item) => item.id === snapshot.temporaryReceiptId);
       if (receipt?.defaultBranch && receipt.defaultHeadSha && matchingTemporaryBranchReceipt(receipts, controller.session.id, child.id, snapshot)) {
-        snapshot.creation = { sessionId: child.id, sessionTitle: (child.title || child.id).slice(0, 256),
+        const admitted = this.db.workflowDecisionByRequestId(child.id, request.requestId)?.resourceSnapshot;
+        const admittedTitle = admitted?.category === "merged_branch_deletion" && admitted.merged === false &&
+          matchingTemporaryBranchReceipt([receipt], controller.session.id, child.id, admitted) ? admitted.creation?.sessionTitle : undefined;
+        snapshot.creation = { sessionId: child.id, sessionTitle: admittedTitle ?? (child.title || child.id).slice(0, 256),
           defaultBranch: receipt.defaultBranch, defaultHeadSha: receipt.defaultHeadSha, checkedAt: receipt.createdAt };
       }
     }

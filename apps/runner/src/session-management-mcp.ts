@@ -22,6 +22,7 @@ import {
   MAX_SESSION_WORKTREE_REF_DELETIONS,
   pendingRequests,
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
+  TEMPORARY_BRANCH_CREATION_RPC_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   WORKFLOW_QUESTION_ANSWER_MAX_CHARS,
@@ -4025,7 +4026,7 @@ export const TOOLS: McpTool[] = [
       if (!args || typeof args.requestId !== "string" || typeof args.branch !== "string" || typeof args.headSha !== "string" ||
           Object.keys(args).some((key) => !["requestId", "branch", "headSha"].includes(key))) return errorResult("requestId, branch and headSha are required; creation acts only on your own campaign session");
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/temporary-branches`, args,
-        MERGE_DECISION_TIMEOUT_MS);
+        TEMPORARY_BRANCH_CREATION_RPC_TIMEOUT_MS + 15_000);
       return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },

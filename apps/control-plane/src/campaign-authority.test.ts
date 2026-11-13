@@ -17,6 +17,7 @@ import type { HumanPrincipal } from "./identity.js";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
 import { runnerCredentialRoots, setCampaignCredentialRoots } from "../../runner/src/campaign-operation-evidence.js";
 import { fakeScreenRuntime, settleScreens } from "./credential-screen-test-fixture.js";
+import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 
 /** A v230 runner's attestation that resolved targets are inside the fixture worktree `/repos/test`. */
 const CONTAINED = { version: 1 as const, root: "/repos/test", sessionRoot: "/repos/test" };
@@ -123,6 +124,37 @@ test("temporary branch creation records only a matching trusted response and nev
   } finally { h.db.close(); }
 });
 
+test("temporary creation retry distinguishes a live write from an unproven intent (#4535)", async () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    let finish!: () => void;
+    let writes = 0;
+    h.hub.requestFromRunner = async (_runner, requestId, message) => {
+      if (message.type !== "forge_decision_action") throw new Error("unexpected RPC");
+      writes++;
+      await new Promise<void>((resolve) => { finish = resolve; });
+      return { type: "forge_decision_action_result", requestId, sessionId: message.sessionId,
+        occurrenceId: message.occurrenceId, outcome: "published",
+        temporaryBranchProof: { defaultBranch: "main", defaultHeadSha: "c".repeat(40) } } as never;
+    };
+    const request = { requestId: "slow-create", branch: "temporary/slow-check", headSha: "a".repeat(40) };
+    const first = h.svc.createTemporaryBranch("child", request);
+    const pending = await h.svc.createTemporaryBranch("child", request);
+    finish();
+    const created = await first;
+    assert.equal(created.ok, true);
+    assert.match(pending.error!, /still in progress.*same requestId/u);
+    assert.equal(writes, 1);
+    assert.deepEqual((await h.svc.createTemporaryBranch("child", request)).data, created.data);
+    h.db.beginTemporaryBranchCreation({ id: "tbr_orphan", campaignId: "root", sessionId: "child", repository: "picoduck/wollipog",
+      branch: "temporary/orphan", headSha: request.headSha, createdAt: 1 }, "orphan");
+    const orphan = await h.svc.createTemporaryBranch("child", { ...request, requestId: "orphan", branch: "temporary/orphan" });
+    assert.match(orphan.error!, /no proven response and will not be replayed/u);
+    assert.equal(writes, 1, "an orphaned pending intent never repeats the forge mutation");
+  } finally { h.db.close(); }
+});
+
 test("temporary deletion delegates only the exact campaign member's server receipt and executes behind its typed gate (#4535)", async () => {
   const h = harness();
   try {
@@ -151,6 +183,13 @@ test("temporary deletion delegates only the exact campaign member's server recei
     assert.ok(gate.data!.resourceSnapshot.category === "merged_branch_deletion" && gate.data!.resourceSnapshot.merged === false);
     assert.equal(gate.data!.resourceSnapshot.creation?.sessionId, "child");
     assert.equal(gate.data!.resourceSnapshot.creation?.defaultBranch, "main");
+    h.db.setSessionTitle("child", "Renamed Worktree Session", 3);
+    const replay = ask("child", "exact");
+    new CampaignRecoveryService(h.db, () => {}, { info() {} }).synchronize(h.db.getSession("root")!, Date.now());
+    const recovered = h.db.campaignRecovery.activeObservations("root").find((item) => item.action === "answer_request" &&
+      item.resource.kind === "request" && item.resource.occurrenceId === recoveryCoordinate(gate.data!.occurrenceId));
+    assert.deepEqual({ replayed: replay.ok, recoveryOwner: recovered?.owner }, { replayed: true, recoveryOwner: "orchestrator" });
+    assert.deepEqual(replay.data!.resourceSnapshot, gate.data!.resourceSnapshot, "the first admitted display title is stable across retries");
     assert.equal(auditDigest(gate.data!.resourceSnapshot), auditDigest(normalizeWorkflowDecisionSnapshot(gate.data!.resourceSnapshot).data),
       "admitted server creation facts preserve their digest when normalized again");
     const forged = ask("child", "forged-creation-facts", { temporaryReceiptId: undefined,

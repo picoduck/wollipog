@@ -88,6 +88,9 @@ export const FORGE_DECISION_ACTION_SUCCESSES: ReadonlySet<ForgeDecisionActionOut
 /** Dispatch attempts one approval allows, successful or not. */
 export const FORGE_DECISION_ACTION_MAX_ATTEMPTS = 5;
 
+/** The control plane's creation RPC budget; agent clients allow additional response time. */
+export const TEMPORARY_BRANCH_CREATION_RPC_TIMEOUT_MS = 120_000;
+
 /** The decision's record of what Wollipog did with it (`WorkflowDecisionView.forgeAction`). */
 export interface WorkflowDecisionForgeAction {
   kind: ForgeDecisionActionKind;
