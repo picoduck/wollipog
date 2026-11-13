@@ -6,7 +6,8 @@ import { scopeSnapshot, scopePreservesHumanApproval } from "./campaign-issue-sco
 
 test("human approvals depending on changed issues or follow-up slots never survive scope approval (#4547)", () => {
   const db = { campaignWorkLedger: { sessionsUnrelatedToIssues: () => new Set<string>() } } as unknown as ControlPlaneDb;
-  const request = { repository: "team/repo", before: [100], additions: [101], removals: [], category: "campaign_issue_scope" } as CampaignIssueScopeSnapshot;
+  const request: CampaignIssueScopeSnapshot = { repository: "team/repo", before: [100], additions: [101], removals: [], category: "campaign_issue_scope",
+    expectedRevision: 3, explanation: "Add related work", affectedAssignments: [], affectedDecisions: [], activeChildren: [] };
   for (const resourceSnapshot of [
     { category: "issue_closure", repository: "team/repo", issue: 101 },
     { category: "issue_closure", repository: "other/repo", issue: 101 },
