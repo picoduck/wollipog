@@ -355,6 +355,16 @@ function initialModel(): FixtureModel {
     initial.projects[0]!.unarchivedSessionCount = 4;
     initial.projects[0]!.totalSessionCount = 4;
   }
+  if (SCENARIO === "runner-recovery") {
+    const root = session("session-recovery", "Orchestrator Recovery", "alpha", "alpha-workspace");
+    root.role = "orchestrator";
+    root.status = "input_required";
+    root.fullControlCampaignStatus = "waiting_human";
+    root.pendingApproval = { requestId: "runner-recovery:fixture", kind: "runner_recovery",
+      title: "Relaunch Orchestrator After Runner Restart",
+      options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }] };
+    initial.sessions = [root];
+  }
   if (SCENARIO === "campaign-complete") {
     // Three at-rest Orchestrator roots with the same unacknowledged result (#2940), shaped as the
     // list snapshot sends them: summaries carry no campaign projection, only a Full Control root's

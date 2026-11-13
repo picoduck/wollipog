@@ -230,6 +230,8 @@ test("a root runner recovery action stays in the Inbox and Campaign Status under
     const campaign = h.db.campaignProjection("root")!;
     assert.equal(campaign.pendingRequests!.human, 1);
     assert.equal(campaign.status, "waiting_human");
+    assert.equal(campaign.ownerDecisions!.total, 1);
+    assert.equal(campaign.ownerDecisions!.items[0]!.category, "runner_recovery");
   } finally { h.db.close(); }
 });
 

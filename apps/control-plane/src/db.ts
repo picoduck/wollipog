@@ -24952,6 +24952,12 @@ export class ControlPlaneDb {
    * none, and an admitted or Orchestrator-owned change is neither marked for the owner nor `human`.
    * Listing grants nothing: the owner still decides the exact occurrence. */
   campaignOwnerDecisions(controllingSessionId: string): NonNullable<OrchestratorCampaignProjection["ownerDecisions"]> | null {
+    const root = this.stmt("SELECT pending_approval, created_at FROM sessions WHERE id=?").get(controllingSessionId) as
+      { pending_approval: string | null; created_at: number } | undefined;
+    const recoveries = pendingRequests(parseJson<PendingApproval>(root?.pending_approval ?? null)).filter((request) => request.kind === "runner_recovery")
+      .map((request) => ({ occurrenceId: request.occurrenceId ?? request.requestId, sessionId: controllingSessionId,
+        category: "runner_recovery" as const, summary: request.title, handedOff: false,
+        createdAt: request.requestedAt ?? root!.created_at }));
     const descendants = this.campaignDescendantIds(controllingSessionId);
     // Each [controller, requester] pair the campaign controls: the root over itself and every member,
     // and each nested Orchestrator over its own descendants, never over itself.
@@ -24979,7 +24985,7 @@ export class ControlPlaneDb {
     const params = [JSON.stringify(controllers), JSON.stringify(pairs), controllingSessionId];
     const total = Number((this.stmt(`SELECT COUNT(*) AS count FROM workflow_decisions WHERE ${where}`)
       .get(...params) as { count: number }).count);
-    if (!total) return null;
+    if (!total && !recoveries.length) return null;
     const items = (this.stmt(`SELECT * FROM workflow_decisions WHERE ${where}
       ORDER BY created_at ASC, occurrence_id ASC LIMIT ${CAMPAIGN_OWNER_DECISIONS_LIMIT}`).all(...params) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null)
@@ -24989,7 +24995,9 @@ export class ControlPlaneDb {
           ? campaignScopeChangeSummary(decision.resourceSnapshot, this.scopeApprovalIncrease(controllingSessionId, decision.resourceSnapshot))
           : ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined,
         ...(decision.ownerRule ? { ownerRule: decision.ownerRule } : {}), createdAt: decision.createdAt }));
-    return { total, items };
+    return { total: total + recoveries.length, items: [...items, ...recoveries]
+      .sort((a, b) => a.createdAt - b.createdAt || a.occurrenceId.localeCompare(b.occurrenceId))
+      .slice(0, CAMPAIGN_OWNER_DECISIONS_LIMIT) };
   }
 
   /** Every occurrence a campaign's root handed to its owner (#4064) or an owner rule kept for a
