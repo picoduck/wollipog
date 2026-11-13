@@ -47,6 +47,7 @@ import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import type { CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { campaignScopeChangeBefore, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeForRepository, campaignScopeHolds, campaignScopeIssues, campaignScopeNumbers, campaignScopeWithIssues, canonicalCampaignIssues } from "@wollipog/protocol";
+import { scopePreservesHumanApproval } from "./campaign-issue-scope.js";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import {
   isProviderLoginFailureCode, isSessionLaunchFailureCode, type SessionLaunchFailureCode, PROJECT_CREATION_REQUEST_WINDOW_MS,
@@ -6590,12 +6591,26 @@ export class ControlPlaneDb {
   /** A person-owned scope card as the session view shows it: the increase its approval applies, derived
    * on every read. Whatever a stored card or a runner carried in its place is dropped. */
   private scopeApprovalRequest(sessionId: string, request: PendingApproval): PendingApproval {
-    const { scopeMaxIssuesIncrease: _derivedIncrease, ...stored } = request;
+    const { scopeMaxIssuesIncrease: _derivedIncrease, scopeDecisionDetails: _details, ...stored } = request;
     const decision = stored.workflowDecision;
     if (stored.kind !== "workflow_decision" || decision?.authority !== "human" || decision.sessionId !== sessionId ||
         decision.controllingSessionId !== sessionId || decision.resourceSnapshot.category !== "campaign_issue_scope") return stored;
     const increase = this.scopeApprovalIncrease(sessionId, decision.resourceSnapshot);
-    return increase ? { ...stored, scopeMaxIssuesIncrease: increase } : stored;
+    const scopeDecisionDetails = decision.resourceSnapshot.affectedDecisions.flatMap((occurrenceId) => {
+      const d = this.workflowDecisionByOccurrence(occurrenceId);
+      // A settled or missing occurrence is not a pending approval. The client already has an
+      // unavailable-details fallback prompting a refresh instead of inventing its state.
+      if (!d || d.status !== "pending" && d.status !== "approved") return [];
+      const s = d?.resourceSnapshot;
+      const resource = s?.category === "pr_merge" ? `${s.repository}#${s.pullRequest} at ${s.headSha.slice(0, 7)}`
+        : s?.category === "follow_up_issue_publication" ? `${s.repository}: ${s.sanitizedTitle}`
+        : s?.category === "issue_closure" ? `${s.repository}#${s.issue}`
+        : s && s.category !== "campaign_issue_scope" ? ownerDecisionSummary(s) : "Unavailable Resource";
+      return [{ occurrenceId, category: d.category, resource,
+        approval: d.status === "approved" ? d.authority : "pending" as const,
+        armed: d.actionAdmission?.kind === "pr_merge_enqueue" }];
+    });
+    return { ...stored, ...(increase ? { scopeMaxIssuesIncrease: increase } : {}), scopeDecisionDetails };
   }
 
   campaignRecoveryRequest(sessionId: string, request: PendingApproval): PendingApproval {
@@ -19172,8 +19187,8 @@ export class ControlPlaneDb {
 
   /** Approval, authority update, and consumption share a transaction: a replay cannot widen scope.
    * It revokes the outstanding decisions the exact approved snapshot names as affected (#3915). A
-   * Human's approval under Full Control re-authorizes the boundary every decision was evaluated
-   * under (re-minting it bumps the policy revision they are bound to), so it still revokes them all. */
+   * Human's approval under Full Control re-authorizes the boundary. Only existing independent
+   * human approvals survive that revision; pending and delegated decisions are revoked. */
   approveCampaignIssueScope(occurrenceId: string, userId: string, now: number, agentSessionId?: string):
     { decision: WorkflowDecisionView; revoked: WorkflowDecisionView[] } | { refusal: string } {
     this.db.exec("BEGIN IMMEDIATE");
@@ -19316,8 +19331,19 @@ export class ControlPlaneDb {
         throw new Error("Scope approval was resolved concurrently");
       }
       const affected = new Set(snapshot.affectedDecisions);
-      const revoked = this.authorityBoundWorkflowDecisionsForController(root.id)
-        .filter((stale) => (!agentSessionId && boundary !== null) || narrowed || agentWithholds || affected.has(stale.occurrenceId));
+      const outstanding = this.authorityBoundWorkflowDecisionsForController(root.id);
+      const preserved = new Set(!agentSessionId && reminted?.mode === "full_control" && !narrowed && !withheld.length
+        ? outstanding.filter((d) => scopePreservesHumanApproval(this, root.id, snapshot, d, boundary!.revision)).map((d) => d.occurrenceId) : []);
+      const revoked = outstanding.filter((stale) => !preserved.has(stale.occurrenceId) &&
+        ((!agentSessionId && boundary !== null) || narrowed || agentWithholds || affected.has(stale.occurrenceId)));
+      // Carry proven independent human approvals across this scope-only revision. Resource,
+      // actor and armed command remain unchanged; no delegated decision gains authority.
+      if (reminted?.mode === "full_control") for (const id of preserved) {
+        this.stmt(`UPDATE workflow_decisions SET policy_revision=?, authority_evaluation=
+          CASE WHEN authority_evaluation IS NULL THEN NULL ELSE json_set(authority_evaluation, '$.boundaryRevision', ?) END
+          WHERE occurrence_id=? AND authority='human' AND status='approved'`)
+          .run(reminted.boundary.revision, reminted.boundary.revision, id);
+      }
       for (const stale of revoked) {
         this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
         this.retireWorkflowDecisionResume(stale.occurrenceId, now);
@@ -37162,7 +37188,7 @@ function pendingApprovalWithOccurrenceIds(
     pendingRequests(prior).map((request) => [request.requestId, request]),
   );
   const identify = (request: PendingApproval): PendingApproval => {
-    const { campaignRecovery: _derivedRecovery, scopeMaxIssuesIncrease: _derivedIncrease, ...stored } = request;
+    const { campaignRecovery: _derivedRecovery, scopeMaxIssuesIncrease: _derivedIncrease, scopeDecisionDetails: _details, ...stored } = request;
     return {
       ...stored,
       occurrenceId: request.occurrenceId || priorByRequestId.get(request.requestId)?.occurrenceId ||

@@ -243,9 +243,13 @@ export function validIssueAdmission(value: unknown): boolean {
   const v = value as Record<string, unknown>;
   const p = v.publicationAuthority as Record<string, unknown> | undefined;
   const r = v.relatedness as Record<string, unknown> | undefined;
+  const required = r?.requiredCheck as Record<string, unknown> | undefined;
+  const validRequired = required === undefined || Boolean(required && typeof required === "object" && Object.keys(required).length === 2 &&
+    Number.isSafeInteger(required.checkRunId) && (required.checkRunId as number) > 0 &&
+    typeof required.checkName === "string" && required.checkName.trim().length > 0 && required.checkName.length <= 512);
   const related = r === undefined || Boolean(r && typeof r === "object" &&
     (r.basis === "decision_model" && Object.keys(r).length === 1 ||
-     r.basis === "failed_campaign_run" && Object.keys(r).length === 8 &&
+     r.basis === "failed_campaign_run" && Object.keys(r).length === (required === undefined ? 8 : 9) && validRequired &&
      typeof r.repository === "string" && /^[\w.-]+\/[\w.-]+$/u.test(r.repository) &&
      Number.isSafeInteger(r.pullRequest) && (r.pullRequest as number) > 0 &&
      Number.isSafeInteger(r.runId) && (r.runId as number) > 0 &&

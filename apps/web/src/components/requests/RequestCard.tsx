@@ -345,7 +345,7 @@ export function RequestCard({
   const body: ReactNode[] = readOnly ? [
     // Facts only: what is being decided, never a control that would act on it.
     workflowDecision ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot} authority={workflowDecision.authority}
-      authorityReason={workflowDecision.authorityEvaluation?.reason}
+      authorityReason={workflowDecision.authorityEvaluation?.reason} scopeDecisionDetails={request.scopeDecisionDetails}
       {...(request.scopeMaxIssuesIncrease ? { scopeMaxIssuesIncrease: request.scopeMaxIssuesIncrease } : {})}
       {...(workflowDecision.closingReferenceCheck ? { closingReferenceCheck: workflowDecision.closingReferenceCheck } : {})} /> : null,
     workflowDecision?.ownerRule ? <OwnerRuleSummary key="owner-rule" rule={workflowDecision.ownerRule} /> : null,
@@ -413,7 +413,7 @@ export function RequestCard({
     locationSwitch ? <LocationSwitchSummary key="decision" snapshot={locationSwitch} chosenLocationId={chosenLocationId}
       onChoose={setChosenLocation} /> : null,
     workflowDecision && !evidence && !locationSwitch ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot} authority={workflowDecision.authority}
-      authorityReason={workflowDecision.authorityEvaluation?.reason}
+      authorityReason={workflowDecision.authorityEvaluation?.reason} scopeDecisionDetails={request.scopeDecisionDetails}
       {...(request.scopeMaxIssuesIncrease ? { scopeMaxIssuesIncrease: request.scopeMaxIssuesIncrease } : {})}
       {...(workflowDecision.closingReferenceCheck ? { closingReferenceCheck: workflowDecision.closingReferenceCheck } : {})} /> : null,
     workflowDecision?.ownerRule ? <OwnerRuleSummary key="owner-rule" rule={workflowDecision.ownerRule} /> : null,

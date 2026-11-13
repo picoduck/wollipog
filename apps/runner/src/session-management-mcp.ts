@@ -1428,7 +1428,9 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
             { type: "object", properties: { basis: { const: "decision_model" } }, required: ["basis"], additionalProperties: false },
             { type: "object", properties: { basis: { const: "failed_campaign_run" }, repository: { type: "string" },
               pullRequest: { type: "integer", minimum: 1 }, headSha: { type: "string", pattern: "^[0-9a-f]{40}$" }, runId: { type: "integer", minimum: 1 },
-              jobId: { type: "integer", minimum: 1 }, checkRunId: { type: "integer", minimum: 1 }, checkName: { type: "string", minLength: 1, maxLength: 512 } },
+              jobId: { type: "integer", minimum: 1 }, checkRunId: { type: "integer", minimum: 1 }, checkName: { type: "string", minLength: 1, maxLength: 512 },
+              requiredCheck: { type: "object", properties: { checkRunId: { type: "integer", minimum: 1 },
+                checkName: { type: "string", minLength: 1, maxLength: 512 } }, required: ["checkRunId", "checkName"], additionalProperties: false } },
               required: ["basis", "repository", "pullRequest", "headSha", "runId", "jobId", "checkRunId", "checkName"], additionalProperties: false },
           ] },
           publicationAuthority: { type: "object", properties: { authorizedByUserId: { type: "string" }, objectiveDigest: { type: "string" } }, required: ["authorizedByUserId", "objectiveDigest"], additionalProperties: false } }, required: ["boundaryRevision", "evidenceDigest"], additionalProperties: false, description: "Echo only the server-derived admission from get_workflow_decision when consuming." },
@@ -3013,7 +3015,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "withdraw_workflow_decision",
-    description: "Withdraw one pending or approved workflow decision that is no longer needed and was never consumed or armed, with a reason. It approves and consumes nothing: the occurrence ends revoked with withdrawal provenance naming you and the reason, can never be consumed afterwards, and no longer blocks verify_campaign_child. Omit sessionId to withdraw your own; an Orchestrator may pass its controlled child's sessionId to withdraw a decision it owns. Consumed decisions, an armed pr_merge (reconcile it after merge, or use retire_workflow_decision for an open, unqueued approved head), another session's decisions, a human-owned decision you did not request, and human-owned issue closure, scope, follow-up admission and automation requests are refused. Requires control plane v269.",
+    description: "Withdraw one pending or approved workflow decision that is no longer needed and was never consumed or armed, with a reason. It approves and consumes nothing: the occurrence ends revoked with withdrawal provenance naming you and the reason, can never be consumed afterwards, and no longer blocks verify_campaign_child. Omit sessionId to withdraw your own; an Orchestrator may pass its controlled child's sessionId to withdraw a decision it owns. Consumed decisions, an armed pr_merge (reconcile it after merge, or use retire_workflow_decision for an open, unqueued approved head), another session's decisions, a human-owned decision you did not request, and human-owned issue closure, follow-up admission and automation requests are refused. Only the requesting root may withdraw its own pending campaign_issue_scope before a person acts; older control planes may refuse this exception. Requires control plane v269.",
     inputSchema: {
       type: "object",
       properties: {

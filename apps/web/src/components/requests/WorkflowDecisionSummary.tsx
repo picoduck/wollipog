@@ -47,12 +47,13 @@ export function OwnerRuleSummary({ rule }: { rule: WorkflowDecisionOwnerRule }) 
 
 /** What a workflow decision decides, as facts (§5.4): the Request Card's body for the kinds without
  * a review of their own, and the read-only summary of a decision the Orchestrator owns. */
-export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scopeMaxIssuesIncrease, authority, authorityReason }: {
+export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scopeMaxIssuesIncrease, authority, authorityReason, scopeDecisionDetails }: {
   snapshot: WorkflowDecisionResourceSnapshot;
   authority?: "human" | "orchestrator";
   authorityReason?: CampaignAuthorityEvaluation["reason"];
   /** The card's server-derived Maximum Issues increase, for a scope request (#4334). */
   scopeMaxIssuesIncrease?: PendingApproval["scopeMaxIssuesIncrease"];
+  scopeDecisionDetails?: PendingApproval["scopeDecisionDetails"];
   /** The server-recorded closing-reference read of a GitHub merge, when there was one. */
   closingReferenceCheck?: PullRequestClosingReferenceCheck;
 }) {
@@ -98,7 +99,7 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
           : "You kept this decision, so only you can make it. The Orchestrator keeps working while it waits."}</p>}
       </>;
     case "campaign_issue_scope":
-      return <CampaignIssueScopeSummary snapshot={snapshot} {...(scopeMaxIssuesIncrease ? { derivedIncrease: scopeMaxIssuesIncrease } : {})} />;
+      return <CampaignIssueScopeSummary snapshot={snapshot} decisionDetails={scopeDecisionDetails} {...(scopeMaxIssuesIncrease ? { derivedIncrease: scopeMaxIssuesIncrease } : {})} />;
     case "issue_closure":
       return <IssueClosureSummary snapshot={snapshot} />;
     case "campaign_follow_up_admission":

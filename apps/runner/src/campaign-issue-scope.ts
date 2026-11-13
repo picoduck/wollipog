@@ -8,7 +8,7 @@ type Run = (command: string, args: string[]) => Promise<string>;
 type Candidates = NonNullable<CampaignIssueScopeView["candidates"]>;
 
 /** A URL is only a lookup hint. Failure and PR association must come from the forge. */
-export async function inspectCampaignFailedRun(run: Run, evidence: Omit<import("@wollipog/protocol").CampaignFailedRunEvidence, "checkRunId" | "checkName">): Promise<
+export async function inspectCampaignFailedRun(run: Run, evidence: Omit<import("@wollipog/protocol").CampaignFailedRunEvidence, "checkRunId" | "checkName" | "requiredCheck">): Promise<
   { repository: string; failedRun?: import("@wollipog/protocol").CampaignFailedRunEvidence }> {
   const { repository } = await inspectCampaignIssueScope(run);
   if (repository !== evidence.repository || !/^[0-9a-f]{40}$/u.test(evidence.headSha) ||
@@ -43,11 +43,36 @@ export async function inspectCampaignFailedRun(run: Run, evidence: Omit<import("
     if (!Array.isArray(failure.pull_requests) || !failure.pull_requests.some((pr: any) =>
       pr.number === evidence.pullRequest && pr.head?.sha === evidence.headSha &&
       pr.base?.repo?.full_name?.toLowerCase() === repository)) return { repository };
-    if (typeof check.node_id !== "string" || !check.node_id) return { repository };
-    const query = `query { node(id:${JSON.stringify(check.node_id)}) { ... on CheckRun {
-      databaseId isRequired(pullRequestNumber:${evidence.pullRequest}) } } }`;
-    const response = JSON.parse(await run("gh", ["api", "--hostname", "github.com", "graphql", "-f", `query=${query}`]));
-    if (response.errors || response.data?.node?.databaseId !== checkRunId || response.data.node.isRequired !== true) return { repository };
+    const isRequired = async (candidate: typeof check): Promise<boolean> => {
+      if (typeof candidate.node_id !== "string" || !candidate.node_id) return false;
+      const query = `query { node(id:${JSON.stringify(candidate.node_id)}) { ... on CheckRun {
+        databaseId isRequired(pullRequestNumber:${evidence.pullRequest}) } } }`;
+      const response = JSON.parse(await run("gh", ["api", "--hostname", "github.com", "graphql", "-f", `query=${query}`]));
+      return !response.errors && response.data?.node?.databaseId === candidate.id && response.data.node.isRequired === true;
+    };
+    let required = await isRequired(check) ? check : undefined;
+    if (!required) {
+      // Read this run's jobs, not other workflows at the head. Overflow retains model fallback.
+      const jobs = await read(`actions/runs/${evidence.runId}/jobs?filter=latest&per_page=100`);
+      if (!Number.isSafeInteger(jobs.total_count) || jobs.total_count < 0 || jobs.total_count > 100 || !Array.isArray(jobs.jobs) ||
+          jobs.jobs.length !== jobs.total_count) return { repository };
+      for (const candidateJob of jobs.jobs) {
+        if (candidateJob.run_id !== evidence.runId || candidateJob.status !== "completed" || candidateJob.conclusion !== "failure" ||
+            typeof candidateJob.check_run_url !== "string") continue;
+        const url = /^https:\/\/api\.github\.com\/repos\/([\w.-]+\/[\w.-]+)\/check-runs\/([1-9][0-9]*)$/u.exec(candidateJob.check_run_url);
+        if (!url || url[1]!.toLowerCase() !== repository) continue;
+        const id = Number(url[2]);
+        if (!Number.isSafeInteger(id) || id === checkRunId) continue;
+        const candidate = await read(`check-runs/${id}`);
+        if (candidate.id !== id || candidate.head_sha !== failure.head_sha || candidate.check_suite?.id !== failure.check_suite_id ||
+            candidate.status !== "completed" || candidate.conclusion !== "failure" || typeof candidate.name !== "string" ||
+            !candidate.name.trim() || candidate.name.length > 512) continue;
+        if (await isRequired(candidate)) { required = candidate; break; }
+      }
+    }
+    if (!required) return { repository };
+    return { repository, failedRun: { ...evidence, checkRunId, checkName: check.name,
+      ...(required.id === checkRunId ? {} : { requiredCheck: { checkRunId: required.id, checkName: required.name } }) } };
   } else return { repository };
   return { repository, failedRun: { ...evidence, checkRunId, checkName: check.name } };
 }

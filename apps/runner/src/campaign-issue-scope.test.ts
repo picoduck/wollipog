@@ -9,6 +9,7 @@ for (const scenario of ["merge failure", "required failure", "another PR", "pass
     const run = async (command: string, args: string[]) => {
       if (command === "git") return "https://github.com/team/repo.git";
       const path = args[args.indexOf("github.com") + 1];
+      if (path?.includes("/jobs?")) return JSON.stringify({ total_count: 0, jobs: [] });
       if (path === "graphql") return JSON.stringify({ data: { node: { databaseId: 456, isRequired: scenario !== "optional check" } } });
       if (path?.includes("actions/runs/")) return JSON.stringify({ id: 123, repository: { full_name: "team/repo" },
         status: "completed", conclusion: scenario === "passed" ? "success" : scenario === "cancelled" ? "cancelled" : scenario === "skipped" ? "skipped" : "failure", event: merge ? "merge_group" : "pull_request",
@@ -27,6 +28,43 @@ for (const scenario of ["merge failure", "required failure", "another PR", "pass
     const result = await inspectCampaignFailedRun(run, evidence);
     assert.deepEqual(result.failedRun, scenario === "merge failure" || scenario === "required failure"
       ? { ...evidence, checkRunId: 456, checkName: "Broken Check" } : undefined);
+  });
+}
+
+for (const scenario of ["failed aggregator", "passing aggregator", "pending aggregator", "optional aggregator", "another PR",
+  "another head", "aggregator head mismatch", "another run", "another suite", "overflow", "graphql error"] as const) {
+  test(`branch campaign evidence with aggregator only: ${scenario}`, async () => {
+    const evidence = { repository: "team/repo", pullRequest: 10, headSha: "a".repeat(40), runId: 123, jobId: 321 };
+    const run = async (command: string, args: string[]) => {
+      if (command === "git") return "https://github.com/team/repo.git";
+      const path = args[args.indexOf("github.com") + 1];
+      if (path === "graphql") {
+        const aggregator = args.at(-1)!.includes("node789");
+        return JSON.stringify({ ...(scenario === "graphql error" ? { errors: [{}] } : {}),
+          data: { node: { databaseId: aggregator ? 789 : 456, isRequired: aggregator && scenario !== "optional aggregator" } } });
+      }
+      if (path?.endsWith("actions/runs/123")) return JSON.stringify({ id: 123, repository: { full_name: "team/repo" },
+        status: "completed", conclusion: "failure", event: "pull_request", head_sha: "b".repeat(40), check_suite_id: 999,
+        pull_requests: [{ number: scenario === "another PR" ? 11 : 10, head: { sha: scenario === "another head" ? "c".repeat(40) : evidence.headSha },
+          base: { repo: { full_name: "team/repo" } } }] });
+      const job = { id: 322, run_id: scenario === "another run" ? 124 : 123, status: "completed", conclusion: "failure",
+        check_run_url: "https://api.github.com/repos/team/repo/check-runs/789" };
+      if (path?.includes("/jobs?")) return JSON.stringify({ total_count: scenario === "overflow" ? 101 : 1, jobs: [job] });
+      if (path?.includes("actions/jobs/")) return JSON.stringify({ ...job, id: 321, run_id: 123,
+        check_run_url: "https://api.github.com/repos/team/repo/check-runs/456" });
+      if (path?.includes("check-runs/")) {
+        const aggregator = path.endsWith("789");
+        return JSON.stringify({ id: aggregator ? 789 : 456, node_id: aggregator ? "node789" : "node456",
+          name: aggregator ? "Required Summary" : "Unit Tests (2)",
+          head_sha: aggregator && scenario === "aggregator head mismatch" ? "c".repeat(40) : "b".repeat(40),
+          check_suite: { id: aggregator && scenario === "another suite" ? 998 : 999 },
+          status: aggregator && scenario === "pending aggregator" ? "in_progress" : "completed",
+          conclusion: aggregator && scenario === "passing aggregator" ? "success" : "failure" });
+      }
+      throw new Error(`Unexpected command ${args.join(" ")}`);
+    };
+    assert.deepEqual((await inspectCampaignFailedRun(run, evidence)).failedRun, scenario === "failed aggregator"
+      ? { ...evidence, checkRunId: 456, checkName: "Unit Tests (2)", requiredCheck: { checkRunId: 789, checkName: "Required Summary" } } : undefined);
   });
 }
 
