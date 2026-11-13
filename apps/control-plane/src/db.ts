@@ -1151,7 +1151,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_events (
   campaign_session_id TEXT NOT NULL,
   kind                TEXT NOT NULL CHECK (kind IN
                        ('request_actionable','request_resolved','child_ready','human_blockers_cleared',
-                        'child_blocked','campaign_idle')),
+                        'child_blocked','campaign_idle','pull_request_stalled')),
   subject_session_id  TEXT,
   occurrence_id       TEXT,
   subject_status      TEXT,
@@ -3996,7 +3996,8 @@ export type CampaignContinuationEventKind =
   | "child_blocked"
   /** The server's one repair of an idle campaign's leftovers wakes the root (#4146): `occurrenceId`
    * is the digest of the leftovers, so each distinct set wakes it at most once. */
-  | "campaign_idle";
+  | "campaign_idle"
+  | "pull_request_stalled";
 
 /**
  * How the prompt that resumes a child after its workflow decision resolves is progressing (#1650).
@@ -5841,7 +5842,7 @@ function sameHostBoot(previous: string, current: string): boolean {
 }
 
 /**
- * Admit the newer campaign events: `child_blocked` (#1650) and `campaign_idle` (#4146). SQLite
+ * Admit newer campaign events, including nonterminal pull-request stalls (#4543). SQLite
  * cannot alter a CHECK constraint, so an older table is rebuilt under the new one. Event sequence
  * numbers are campaign cursors (`orchestrator_campaign_cursors.consumed_through_seq`), so every row
  * keeps its `seq` and the AUTOINCREMENT high-water mark is carried over too: a pruned tail must never
@@ -5851,7 +5852,7 @@ function admitCampaignEventKinds(db: DatabaseSync): void {
   const schema = db.prepare(
     "SELECT sql FROM sqlite_master WHERE type='table' AND name='orchestrator_campaign_events'",
   ).get() as { sql?: string } | undefined;
-  if (!schema?.sql || schema.sql.includes("'campaign_idle'")) return;
+  if (!schema?.sql || schema.sql.includes("'pull_request_stalled'")) return;
   db.exec("PRAGMA foreign_keys = OFF;");
   try {
     db.exec("BEGIN;");
@@ -5865,7 +5866,7 @@ function admitCampaignEventKinds(db: DatabaseSync): void {
         campaign_session_id TEXT NOT NULL,
         kind                TEXT NOT NULL CHECK (kind IN
                              ('request_actionable','request_resolved','child_ready','human_blockers_cleared',
-                              'child_blocked','campaign_idle')),
+                              'child_blocked','campaign_idle','pull_request_stalled')),
         subject_session_id  TEXT,
         occurrence_id       TEXT,
         subject_status      TEXT,
@@ -6112,6 +6113,7 @@ export class ControlPlaneDb {
       ReviewSessions.install(db);
       DelegatedImageReviews.install(db);
       PullRequestWatches.install(db);
+      PullRequestWatches.upgrade(db);
       ReviewSettingsStore.install(db);
     }
     this.assistantConnections = new AssistantConnections(db);
@@ -23029,7 +23031,7 @@ export class ControlPlaneDb {
     const row = this.stmt(
       `SELECT MIN(event.created_at) AS at FROM orchestrator_campaign_events event
        WHERE event.campaign_session_id=? AND event.seq>? AND (
-         event.kind IN ('child_blocked','human_blockers_cleared') OR
+         event.kind IN ('child_blocked','human_blockers_cleared','pull_request_stalled') OR
          (event.kind='child_ready' AND COALESCE(event.subject_status,'')!='idle') OR
          (event.kind='request_resolved' AND NOT EXISTS (
            SELECT 1 FROM orchestrator_campaign_request_resolutions resolution
@@ -23056,7 +23058,8 @@ export class ControlPlaneDb {
    * longer than that (campaignChildWaitsExpired). Only an idle child can be waiting: a completed,
    * failed or stopped one has ended. Add any new kind of wait here, so that every reader agrees.
    * A child parked on a merge-queue watch (#4071) waits too, until its wake is handed to the
-   * runner; the watch ends by a runner report or a lost notice, never by a stall bound. */
+   * runner. A queue stall only signals the Orchestrator; a missing polling lease ends the watch
+   * as lost, so an orphaned wait cannot hide a genuinely stuck child (#4543). */
   campaignChildWait(sessionId: string, now: number): CampaignChildWait | null {
     if (this.pullRequestWatches.isParked(sessionId)) return "merge_queue_watch";
     return this.sessionsWithLiveBackgroundJobs([sessionId], now).size > 0 ? "background_job" : null;

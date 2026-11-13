@@ -7897,6 +7897,12 @@ export class SessionsService {
           ...(event.subjectStatus ? { status: event.subjectStatus } : {}),
         } };
       }
+      case "pull_request_stalled": {
+        const watch = event.occurrenceId ? this.db.pullRequestWatches.view(event.occurrenceId) : undefined;
+        return { actionable: watch?.state === "watching" && watch.progress?.stalled === true, summary: {
+          ...base, ...subject(event.subjectSessionId), watchId: event.occurrenceId,
+          pullRequest: event.subjectStatus, instruction: "The queue wait is stalled. The child stays parked. Inspect the forge; this grants no authority and performs no re-enqueue." } };
+      }
       case "child_blocked":
         return { actionable: true, summary: {
           ...base, ...subject(event.subjectSessionId),
@@ -12013,9 +12019,11 @@ export class SessionsService {
     const headSha = body.headSha;
     const replaced = this.db.pullRequestWatches.register({ watchId, sessionId: session.id, runnerId: session.runnerId,
       repository, number, headSha, now });
+    if (runnerSupportsProtocol(runner?.protocolVersion, "pullRequestWatchProgress")) this.db.pullRequestWatches.acquireLease(watchId, now);
     for (const id of replaced) this.hub.sendToRunner(session.runnerId, { type: "pull_request_watch_cancel", watchId: id });
     // An offline runner receives it on registration, like every other watch still `watching`.
-    this.hub.sendToRunner(session.runnerId, { type: "pull_request_watch_start", watchId, sessionId: session.id, repository, number, headSha });
+    this.hub.sendToRunner(session.runnerId, { type: "pull_request_watch_start", watchId, sessionId: session.id, repository, number, headSha,
+      ...(runnerSupportsProtocol(runner?.protocolVersion, "pullRequestWatchProgress") ? { watchedSince: now } : {}) });
     this.hub.sessionChangedById(session.id);
     return ok({ watch: this.db.pullRequestWatches.view(watchId)! });
   }
@@ -12251,6 +12259,15 @@ export class SessionsService {
       }
     }
     this.sessionWaitsChanged([...cleared, ...this.db.sessionWaits.sweep(now)]);
+    for (const watch of this.db.pullRequestWatches.expired(now)) {
+      if (!this.db.pullRequestWatches.markLost(watch.watchId, "no successful forge observation within the ten-minute watch lease", now)) continue;
+      this.hub.sendToRunner(watch.runnerId, { type: "pull_request_watch_cancel", watchId: watch.watchId });
+      this.hub.sessionChangedById(watch.sessionId);
+      this.deliverHeldPullRequestWatchWakes(watch.sessionId, now);
+      if (this.db.sessionStatusOnly(watch.sessionId) === "idle") {
+        this.recordCampaignReadinessAfterWatch(watch.sessionId, watch.watchId, now);
+      }
+    }
   }
 
   /** A session's lifecycle changed: a turn that ended takes every wait inside it along. */
@@ -12274,7 +12291,21 @@ export class SessionsService {
     const sessionId = this.db.pullRequestWatches.accept(runnerId, update, now);
     if (!sessionId) return;
     this.hub.sessionChangedById(sessionId);
+    if (update.state === "progress") {
+      const campaignId = this.db.campaignRootForMember(sessionId);
+      if (campaignId && campaignId !== sessionId && update.progress?.stalled) {
+        const recorded = this.db.recordCampaignContinuationEvent({ eventId: `pr-stalled:${update.watchId}:${update.progress.groupSha ?? "unknown"}`,
+          campaignSessionId: campaignId, kind: "pull_request_stalled", subjectSessionId: sessionId,
+          occurrenceId: update.watchId, subjectStatus: update.progress.summary, now });
+        if (recorded) this.log.info(JSON.stringify({ event: "pull_request_watch_stalled", campaignId, sessionId,
+          watchId: update.watchId, groupSha: update.progress.groupSha }));
+      }
+      return;
+    }
     this.deliverHeldPullRequestWatchWakes(sessionId, now);
+    if (update.state === "lost" && this.db.sessionStatusOnly(sessionId) === "idle") {
+      this.recordCampaignReadinessAfterWatch(sessionId, update.watchId, now);
+    }
   }
 
   /** On registration: resend every watch still `watching` on this runner, so a restarted runner

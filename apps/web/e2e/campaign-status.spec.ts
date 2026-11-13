@@ -12,6 +12,22 @@ async function assertNoHorizontalOverflow(page: Page, selector: string) {
 
 const SCOPE_EVIDENCE_DIR = process.env.CAMPAIGN_SCOPE_EVIDENCE_DIR;
 
+for (const width of [1440, 390]) test(`queue stall is visible with the real tabs at ${width}px (#4543)`, async ({ page }) => {
+  await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&queueStall=1");
+  const summary = page.locator(".campaign-status-summary");
+  await expect(page.getByRole("navigation", { name: "Primary Navigation" })).toBeVisible();
+  await expect(summary.getByText("Pull Request Wait Stalled", { exact: true })).toHaveCount(2);
+  await expect(summary).toContainText("picoduck/wollipog#4141");
+  await expect(summary).toContainText("The child stays parked");
+  await page.mouse.move(width - 100, 220);
+  await page.mouse.wheel(0, -10000);
+  await expect(page.locator(".campaign-status")).toHaveJSProperty("scrollTop", 0);
+  await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+  await assertNoHorizontalOverflow(page, ".campaign-status");
+  if (process.env.QUEUE_STALL_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.QUEUE_STALL_EVIDENCE_DIR}/queue-stall-${width}.png` });
+});
+
 for (const width of [1440, 390]) test(`owner can return a kept resource from both surfaces at ${width}px (#4539)`, async ({ page }) => {
   await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
   await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=after&fullControl=ready");

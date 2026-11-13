@@ -5,6 +5,7 @@
 
 import {
   PULL_REQUEST_WATCH_REASON_LIMIT,
+  PULL_REQUEST_WATCH_STALL_MS,
   PULL_REQUEST_WATCH_SUMMARY_LIMIT_BYTES,
   type PullRequestWatchOutcome,
   type PullRequestWatchStartCommand,
@@ -42,12 +43,22 @@ function clip(value: string, max: number): string {
 }
 
 /** The bounded wait summary, serialized within the protocol's limit. A summary over it (only
- * possible with unusually long names) keeps the outcome, head, queue and merge facts. */
+ * possible with unusually long names) keeps the outcome, head, queue and merge facts, prioritizing
+ * compact group diagnostics over branch details so a stall signal still names the failed and
+ * unstarted required jobs (#4543). Forge summaries already cap these lists at 30 and 20. */
 export function serializedWatchSummary(summary: PullRequestWaitSummary): string {
   const full = JSON.stringify(summary);
   if (Buffer.byteLength(full) <= PULL_REQUEST_WATCH_SUMMARY_LIMIT_BYTES) return full;
   const { checks: _checks, requiredCheckNames: _names, mergeQueue, ...rest } = summary;
-  return JSON.stringify({ ...rest, mergeQueue: mergeQueue ? { ...mergeQueue, checks: null } : null, truncated: true });
+  const group = mergeQueue?.checks;
+  const checks = group ? {
+    sha: group.sha,
+    required: group.required.slice(0, 30).map(check => ({ ...check, name: clip(check.name, 60) })),
+    failedJobs: group.failedJobs.slice(0, 20).map(job => ({ name: clip(job.name, 60), required: job.required,
+      conclusion: clip(job.conclusion, 20) })),
+    truncated: true,
+  } : null;
+  return JSON.stringify({ ...rest, mergeQueue: mergeQueue ? { ...mergeQueue, checks } : null, truncated: true });
 }
 
 export class PullRequestWatcher {
@@ -96,6 +107,19 @@ export class PullRequestWatcher {
 
   private async watch(command: PullRequestWatchStartCommand, signal: AbortSignal): Promise<void> {
     let failures = 0;
+    const now = this.deps.now ?? Date.now;
+    let group: string | null | undefined = command.progress?.groupSha;
+    let groupSince = command.progress?.groupSince ?? command.watchedSince ?? now();
+    const progress = (summary: PullRequestWaitSummary) => {
+      const next = summary.mergeQueue?.checks?.sha ?? null;
+      if (group !== undefined && next !== group) groupSince = now();
+      group = next;
+      const queue = summary.mergeQueue;
+      this.deps.send({ type: "pull_request_watch_update", watchId: command.watchId, state: "progress",
+        progress: { groupSha: next, groupSince, stalled: !!queue &&
+          (!!queue.checks?.failedJobs.length || now() - groupSince >= PULL_REQUEST_WATCH_STALL_MS),
+          summary: serializedWatchSummary(summary) } });
+    };
     while (!signal.aborted) {
       const result = await (this.deps.wait ?? waitForPullRequest)({
         repository: command.repository,
@@ -105,13 +129,14 @@ export class PullRequestWatcher {
       }, {
         gh: this.deps.gh,
         signal,
+        onSnapshot: progress,
         ...(this.deps.now ? { now: this.deps.now } : {}),
         ...(this.deps.sleep ? { sleep: this.deps.sleep } : {}),
       });
       if (signal.aborted) return;
       if (result.ok) {
         failures = 0;
-        if (result.summary.outcome === "timeout") continue;
+        if (result.summary.outcome === "timeout") { progress(result.summary); continue; }
         this.report({
           type: "pull_request_watch_update",
           watchId: command.watchId,

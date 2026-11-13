@@ -1030,6 +1030,26 @@ test("CLI gates deferred worktree retirement on v159 without disabling v101 sele
   ]);
 });
 
+test("pr park and pr wait --park register a durable exact-head wait from a session (#4543)", async () => {
+  for (const args of [["pr", "park"], ["pr", "wait", "--park"]]) {
+    const requests: Array<{url: string; body?: string}> = [];
+    const fetch: McpFetch = async (url, init) => {
+      requests.push({ url, body: init?.body as string | undefined });
+      return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+        ? { protocolVersion: PROTOCOL_VERSION } : { watch: { watchId: "prw_ci" } }) };
+    };
+    let output = "";
+    assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args,
+      "picoduck/wollipog#7", "--head", "a".repeat(40), "--json"],
+      { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device", WOLLIPOG_SESSION_ID: "s_child" },
+      { stdout: text => { output += text; }, stderr: () => {} }, fetch), 0);
+    const registered = requests.find(r => r.url.endsWith("/pull-request-watch"));
+    assert.ok(registered);
+    assert.deepEqual(JSON.parse(registered.body!), { repository: "picoduck/wollipog", number: 7, headSha: "a".repeat(40) });
+    assert.match(output, /End your turn/);
+  }
+});
+
 test("CLI emits JSON for get, events, prompt, wait, and stop core commands", async () => {
   const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
   const cases = [

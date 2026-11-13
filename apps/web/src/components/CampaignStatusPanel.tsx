@@ -556,6 +556,11 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
           {summary.error} Showing the last loaded summary.
         </Notice>
       )}
+      {summary.campaign?.parkedChildren?.filter(({ watch }) => watch.state === "watching" && watch.progress?.stalled).map(({ watch }) => (
+        <Notice key={watch.watchId} tone="warning" title="Pull Request Wait Stalled">
+          {watch.repository}#{watch.number} has a stalled merge-queue wait. The child stays parked while the Orchestrator investigates.
+        </Notice>
+      ))}
       {view.planNotice && (
         <Notice tone="info" title={view.planNotice.title}>
           {view.planNotice.body}

@@ -1069,7 +1069,7 @@ test("park_on_pull_request refuses GitLab, a short head and an older control pla
   assert.equal(short.isError, true);
   const old = await callTool(deps, "park_on_pull_request", { pullRequest: "picoduck/wollipog#7", headSha: head });
   assert.equal(old.isError, true);
-  assert.equal(JSON.parse(old.content[0].text).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.pullRequestWatch);
+  assert.equal(JSON.parse(old.content[0].text).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.pullRequestWatchProgress);
   assert.equal(calls.filter((call) => call.method === "POST").length, 0);
 });
 

@@ -498,7 +498,7 @@ async function pullRequestWatchCompatibilityError(deps: McpDeps): Promise<ToolRe
     if (!compatibility.ok) return errorResult(wollipogSupportUnverified("merge-queue watches", compatibility.message));
     actual = compatibility.data?.protocolVersion;
   }
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.pullRequestWatch;
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.pullRequestWatchProgress;
   return Number.isInteger(actual) && actual! >= required ? null
     : controlPlaneUpdateRequired(needsNewerWollipog("Merge-queue watches need"), required, actual);
 }
@@ -3363,13 +3363,13 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "park_on_pull_request",
-    description: "Park this session on its own enqueued GitHub pull request, then end your turn (#4071). The runner keeps watching the merge-queue entry through its read-only gh login with no model requests, and Wollipog prompts this session once, with the same bounded summary wait_pull_request returns, when the pull request merges, closes, its entry is marked unmergeable or leaves the queue, or its head moves; a pull request that is not in the queue reports its checks at once. The watch survives a runner restart, or the session is told it was lost. A supervising Orchestrator sees the watch and is not woken by this session's turn end, only by what it does after waking. Parking again replaces the previous watch. The wake grants nothing: re-enqueueing, merging and branch deletion keep their gates. A GitLab merge request, an older runner or an older control plane is refused: wait with wait_pull_request instead.",
+    description: "Register a server-kept wait on this session’s own GitHub pull request at an exact head, then end your turn (#4071, #4543). This works for required branch CI from any harness and for enqueued pull requests. The runner keeps watching the merge-queue entry through its read-only gh login with no model requests, and Wollipog prompts this session once, with the same bounded summary wait_pull_request returns, when the pull request merges, closes, its entry is marked unmergeable or leaves the queue, or its head moves; a pull request outside the queue waits for its required checks and wakes with checks_passed or checks_failed. Nonterminal queue stalls notify the supervising Orchestrator once per group, keeping the child parked. A watch without a successful observation for ten minutes is lost and wakes the child. The watch survives a runner restart, or the session is told it was lost. A supervising Orchestrator sees the watch and is not woken by this session's turn end, only by what it does after waking. Parking again replaces the previous watch. The wake grants nothing: re-enqueueing, merging and branch deletion keep their gates. A GitLab merge request, an older runner or an older control plane is refused: wait with wait_pull_request instead.",
     inputSchema: {
       type: "object",
       properties: {
         pullRequest: { type: "string", description: "Pull request number (with repository), owner/name#number, or a github.com pull request URL." },
         repository: { type: "string", description: "GitHub owner/name; required with a bare number." },
-        headSha: { type: "string", pattern: "^[0-9a-f]{40}$", description: "The enqueued head; a different head wakes the session with head_changed." },
+        headSha: { type: "string", pattern: "^[0-9a-f]{40}$", description: "The exact head to watch; a different head wakes the session with head_changed." },
       },
       required: ["pullRequest", "headSha"],
       additionalProperties: false,

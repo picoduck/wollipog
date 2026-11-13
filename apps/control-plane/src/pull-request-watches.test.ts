@@ -11,6 +11,7 @@ import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { SessionsService } from "./sessions.js";
+import { PullRequestWatches } from "./pull-request-watches.js";
 
 const HEAD = "a".repeat(40);
 const WATCH = { repository: "picoduck/wollipog", number: 4071, headSha: HEAD };
@@ -57,6 +58,109 @@ function park(h: ReturnType<typeof harness>, sessionId = "s1", headSha = HEAD) {
   return result.data.watch;
 }
 
+test("control-plane recovery gives stale leases bounded time for a fresh observation (#4543)", () => {
+  const h = harness();
+  try {
+    const watch = park(h);
+    const now = Date.now();
+    h.db.raw().prepare("UPDATE pull_request_watches SET observed_at=? WHERE watch_id=?")
+      .run(now - 11 * 60_000, watch.watchId);
+    // A fresh store on the persisted table models a restarted control-plane process. It gives
+    // the still-polling runner time to reconnect, but does not renew a lease without evidence.
+    const recovered = new PullRequestWatches(h.db.raw());
+    assert.deepEqual(recovered.expired(now + 30_000), []);
+    assert.equal(recovered.expired(now + 11 * 60_000).length, 1, "reconnect grace is bounded");
+    recovered.accept("r", { type: "pull_request_watch_update", watchId: watch.watchId, state: "progress",
+      progress: { groupSha: HEAD, groupSince: watch.since, stalled: false, summary: "{}" } }, now + 9 * 60_000);
+    assert.deepEqual(recovered.expired(now + 11 * 60_000), [], "a real observation renews the lease");
+  } finally { h.db.close(); }
+});
+
+test("online lost-watch outcomes wake the child without an extra Orchestrator readiness event (#4543)", () => {
+  for (const path of ["report", "lease"] as const) {
+    const h = harness();
+    try {
+      const watch = park(h);
+      h.db.appendEvent("s1", { kind: "agent_message", text: "Waiting on CI.", final: true }, Date.now());
+      h.db.updateSessionStatus("s1", "idle", Date.now());
+      if (path === "report") h.svc.onPullRequestWatchUpdate("r", {
+        type: "pull_request_watch_update", watchId: watch.watchId, state: "lost", reason: "GitHub could not be read" });
+      else h.svc.maintainSessionWaits(watch.since + 11 * 60_000);
+      assert.equal(h.wakes().size, 1);
+      assert.equal(h.db.getSession("s1")!.status, "queued");
+      assert.equal(h.db.campaignContinuationEvents("root").filter(e => e.kind === "child_ready").length, 0);
+    } finally { h.db.close(); }
+  }
+});
+
+test("a failed queue group signals once, stays parked, and clears on a rebuilt group (#4543)", () => {
+  const h = harness();
+  try {
+    const watch = park(h);
+    h.db.updateSessionStatus("s1", "idle", Date.now());
+    const summary = JSON.stringify({ repository: WATCH.repository, number: WATCH.number,
+      mergeQueue: { position: 1, state: "AWAITING_CHECKS", checks: {
+        failedJobs: [{ name: "Unit Tests (2)", conclusion: "FAILURE" }],
+        required: [{ name: "Typecheck, Test & Sidecar Bundle", state: "pending", reported: false }] } } });
+    const progress = { groupSha: "b".repeat(40), groupSince: watch.since, stalled: true, summary };
+    for (let i = 0; i < 3; i++) h.svc.onPullRequestWatchUpdate("r", {
+      type: "pull_request_watch_update", watchId: watch.watchId, state: "progress", progress });
+    const events = h.db.campaignContinuationEvents("root").filter(e => e.kind === "pull_request_stalled");
+    assert.equal(events.length, 1);
+    assert.equal(events[0]!.subjectStatus, summary);
+    assert.equal(h.wakes().size, 0);
+    assert.equal(h.db.pullRequestWatches.isParked("s1"), true);
+    assert.equal(h.db.pullRequestWatches.view(watch.watchId)!.state, "watching");
+    h.svc.retryDuePrompts(Date.now() + 20_000);
+    // Transport may re-send an unacknowledged command. Its durable id, not the send count,
+    // identifies the one continuation the runner can deliver.
+    const rootPrompts = () => [...new Map(h.of("durable_session_command")
+      .map(message => message as unknown as { commandId: string; command: { type: string; sessionId: string; text?: string } })
+      .filter(message => message.command.type === "prompt_session" && message.command.sessionId === "root")
+      .map(message => [message.commandId, message])).values()];
+    assert.equal(rootPrompts().length, 1, "one durable Orchestrator continuation carries the stall");
+    const prompt = rootPrompts()[0]!.command.text!;
+    const metadata = JSON.parse(prompt.split("Canonical event metadata: ")[1]!.split("\n")[0]!);
+    const stall = metadata.find((event: { kind: string }) => event.kind === "pull_request_stalled");
+    const observed = JSON.parse(stall.pullRequest);
+    assert.equal(observed.repository, WATCH.repository);
+    assert.equal(observed.number, WATCH.number);
+    assert.equal(observed.mergeQueue.position, 1);
+    assert.equal(observed.mergeQueue.state, "AWAITING_CHECKS");
+    assert.deepEqual(observed.mergeQueue.checks.failedJobs, [{ name: "Unit Tests (2)", conclusion: "FAILURE" }]);
+    assert.deepEqual(observed.mergeQueue.checks.required,
+      [{ name: "Typecheck, Test & Sidecar Bundle", state: "pending", reported: false }]);
+    assert.equal(h.wakes().size, 0, "signaling the Orchestrator never wakes the parked child");
+    h.svc.onPullRequestWatchUpdate("r", { type: "pull_request_watch_update", watchId: watch.watchId,
+      state: "progress", progress: { ...progress, groupSha: "c".repeat(40), stalled: false } });
+    assert.equal(h.db.pullRequestWatches.view(watch.watchId)!.progress!.stalled, false);
+    assert.equal(h.db.campaignContinuationEvents("root").filter(e => e.kind === "pull_request_stalled").length, 1);
+    h.svc.retryDuePrompts(Date.now() + 40_000);
+    assert.equal(rootPrompts().length, 1, "a healthy rebuilt group does not prompt the Orchestrator");
+  } finally { h.db.close(); }
+});
+
+test("Codex branch CI survives turn end, wakes once, and an orphaned watch expires (#4543)", () => {
+  const h = harness();
+  try {
+    h.db.raw().prepare("UPDATE sessions SET driver='codex-app' WHERE id='s1'").run();
+    const watch = park(h);
+    h.db.updateSessionStatus("s1", "idle", Date.now());
+    assert.equal(h.db.campaignChildWait("s1", Date.now()), "merge_queue_watch");
+    assert.equal(h.db.campaignStatusOnly("root"), "active");
+    assert.equal(h.db.campaignContinuationEvents("root").filter(e => e.kind === "campaign_idle").length, 0);
+    for (let i = 0; i < 2; i++) h.svc.onPullRequestWatchUpdate("r", { type: "pull_request_watch_update",
+      watchId: watch.watchId, state: "fired", outcome: "checks_passed", summary: '{"outcome":"checks_passed"}' });
+    assert.equal(h.wakes().size, 1);
+    const orphan = park(h, "s2");
+    h.hub.isRunnerOnline = () => false;
+    h.svc.maintainSessionWaits(orphan.since + 10 * 60_000 + 1);
+    assert.equal(h.db.pullRequestWatches.view(orphan.watchId)!.state, "lost");
+    assert.equal(h.db.pullRequestWatches.isParked("s2"), false, "an offline wake must not keep an orphaned wait live forever");
+    assert.equal(h.db.campaignChildWait("s2", Date.now()), null);
+  } finally { h.db.close(); }
+});
+
 test("parking registers one watch, starts it on the session's runner, and shows it on the session (#4071)", () => {
   const h = harness();
   try {
@@ -64,7 +168,7 @@ test("parking registers one watch, starts it on the session's runner, and shows 
     assert.equal(watch.state, "watching");
     assert.equal(watch.continuation, "none");
     assert.deepEqual(h.of("pull_request_watch_start"), [{ type: "pull_request_watch_start", watchId: watch.watchId,
-      sessionId: "s1", ...WATCH }]);
+      sessionId: "s1", ...WATCH, watchedSince: watch.since }]);
     assert.deepEqual(h.db.getSession("s1")!.pullRequestWatch, watch);
     assert.equal(h.db.getSession("s2")!.pullRequestWatch, undefined);
     // Parking again (a re-enqueued head, say) replaces the old watch and stops its polling.

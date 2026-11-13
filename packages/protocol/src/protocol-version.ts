@@ -1478,6 +1478,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 375: Expose typed question classification holds and their work items in Campaign Status (#4542).
   375,
   // v376 slot
+  // 376: Durable branch-CI watches and nonterminal merge-queue stall observations (#4543).
+  376,
   // v377 slot
   // v378 slot
   // v379 slot
