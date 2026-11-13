@@ -24648,12 +24648,16 @@ export class SessionsService {
       if (seenSnapshotIds.has(id)) duplicateSnapshotIds.add(id);
       seenSnapshotIds.add(id);
     }
+    // Only multi-chunk inventories need an initial scheduling window. Keep a single chunk
+    // eager: ACK-triggered API requests rely on its sessions/credentials already being restored.
+    // For a large inventory, capture optimistic fences first, then allow ACK delivery and
+    // the returning credential frame through the poll phase before the first write-heavy chunk.
+    if (snapshots.length > 32) {
+      yield;
+      yield;
+    }
     // Capture the first before-view once per campaign. Publishing after every retained child
     // rescans the entire campaign and retries the same durable events quadratically (#2125).
-    // Capture optimistic fences before yielding. Let the registration ACK reach the runner
-    // and its credential reply reach the next poll phase before the first write-heavy chunk.
-    yield;
-    yield;
     const campaigns = this.runnerAttentionBeforeViews(runnerId);
     const parents = new Map<string, SessionView | null>();
     const campaignBefore = (session: SessionView | null): SessionView | null => {
