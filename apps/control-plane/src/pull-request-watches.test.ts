@@ -75,10 +75,32 @@ test("a failed queue group signals once, stays parked, and clears on a rebuilt g
     assert.equal(h.wakes().size, 0);
     assert.equal(h.db.pullRequestWatches.isParked("s1"), true);
     assert.equal(h.db.pullRequestWatches.view(watch.watchId)!.state, "watching");
+    h.svc.retryDuePrompts(Date.now() + 20_000);
+    // Transport may re-send an unacknowledged command. Its durable id, not the send count,
+    // identifies the one continuation the runner can deliver.
+    const rootPrompts = () => [...new Map(h.of("durable_session_command")
+      .map(message => message as unknown as { commandId: string; command: { type: string; sessionId: string; text?: string } })
+      .filter(message => message.command.type === "prompt_session" && message.command.sessionId === "root")
+      .map(message => [message.commandId, message])).values()];
+    assert.equal(rootPrompts().length, 1, "one durable Orchestrator continuation carries the stall");
+    const prompt = rootPrompts()[0]!.command.text!;
+    const metadata = JSON.parse(prompt.split("Canonical event metadata: ")[1]!.split("\n")[0]!);
+    const stall = metadata.find((event: { kind: string }) => event.kind === "pull_request_stalled");
+    const observed = JSON.parse(stall.pullRequest);
+    assert.equal(observed.repository, WATCH.repository);
+    assert.equal(observed.number, WATCH.number);
+    assert.equal(observed.mergeQueue.position, 1);
+    assert.equal(observed.mergeQueue.state, "AWAITING_CHECKS");
+    assert.deepEqual(observed.mergeQueue.checks.failedJobs, [{ name: "Unit Tests (2)", conclusion: "FAILURE" }]);
+    assert.deepEqual(observed.mergeQueue.checks.required,
+      [{ name: "Typecheck, Test & Sidecar Bundle", state: "pending", reported: false }]);
+    assert.equal(h.wakes().size, 0, "signaling the Orchestrator never wakes the parked child");
     h.svc.onPullRequestWatchUpdate("r", { type: "pull_request_watch_update", watchId: watch.watchId,
       state: "progress", progress: { ...progress, groupSha: "c".repeat(40), stalled: false } });
     assert.equal(h.db.pullRequestWatches.view(watch.watchId)!.progress!.stalled, false);
     assert.equal(h.db.campaignContinuationEvents("root").filter(e => e.kind === "pull_request_stalled").length, 1);
+    h.svc.retryDuePrompts(Date.now() + 40_000);
+    assert.equal(rootPrompts().length, 1, "a healthy rebuilt group does not prompt the Orchestrator");
   } finally { h.db.close(); }
 });
 
