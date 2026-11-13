@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import type { PendingApproval, SessionView } from "@wollipog/protocol";
 import { api } from "../../api.js";
 import { installDomTestCleanup } from "../../dom-test-cleanup.js";
+import { assertNoDomNode } from "../../dom-test-assertions.js";
 import { FollowUpOwnerApproval } from "./FollowUpOwnerApproval.js";
 
 const dom = new Window({ url: "http://localhost/" });
@@ -54,7 +55,7 @@ test("one Owner Approval shows exact mixed payloads and approves only the frozen
     assert.doesNotMatch(dialog.textContent!, /Track late/);
     await act(async () => button(/^Approve All 4/).click());
     assert.deepEqual(calls, ["admission", "second-admission", "one", "two"]);
-    assert.equal(document.querySelector('[role="dialog"]'), null);
+    assertNoDomNode(document.querySelector('[role="dialog"]'));
   } finally { view.close(); api.approve = saved; }
 });
 
