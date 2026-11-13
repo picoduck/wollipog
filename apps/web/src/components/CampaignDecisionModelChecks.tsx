@@ -152,6 +152,7 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
   const api = useApi();
   const headingId = useId();
   const [decisions, setDecisions] = useState<CampaignDecision[] | null>(null);
+  const [ownerCanClassify, setOwnerCanClassify] = useState(false);
   // A selection proposal is the campaign Orchestrator's own, whichever session shows the list.
   const [campaignSessionId, setCampaignSessionId] = useState(sessionId);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -163,6 +164,7 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
     const controller = new AbortController();
     api.campaignDecisions(sessionId, controller.signal).then((response) => {
       setDecisions(response.decisions.filter(isDecisionModelCheck));
+      setOwnerCanClassify(response.canClassify === true);
       setCampaignSessionId(response.campaignSessionId);
       setLoadError(null);
     }).catch((cause: unknown) => {
@@ -268,12 +270,12 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
               </dl>
               {(subject || (awaiting && canClassify)) && (
                 <div className="campaign-screen-actions" role="group" aria-label={`${label} Actions`}>
-                  {seedAwaiting && canClassify && (
+                  {seedAwaiting && canClassify && ownerCanClassify && (
                     <BusyButton className="btn sm" busy={busy === `${decision.occurrenceId}:orchestrator`}
                       progress="Letting the Orchestrator delegate…" disabled={busy !== null}
                       onClick={() => void classify(decision.occurrenceId, "orchestrator")}>Continue Without an Epic</BusyButton>
                   )}
-                  {awaiting && canClassify && <>
+                  {awaiting && canClassify && ownerCanClassify && <>
                     <BusyButton className="btn sm" busy={busy === `${decision.occurrenceId}:decline`} progress="Declining the question…" disabled={busy !== null}
                       onClick={() => void classify(decision.occurrenceId, "decline")}>Decline</BusyButton>
                     <BusyButton className="btn primary sm" busy={busy === `${decision.occurrenceId}:orchestrator`}

@@ -57,6 +57,7 @@ import {
 } from "../queued-edit-recovery.js";
 import { scopeAudienceContainedForIdentity } from "../access-scopes.js";
 import { api, ApiError, type ApiClient } from "../api.js";
+import { heldQuestion } from "./question-classification-fixture.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider, useFeedback, type ToastOptions } from "../components/FeedbackProvider.js";
 import { CommandLineIcon, InfoIcon, PanelRightIcon } from "../components/Icons.js";
@@ -333,6 +334,14 @@ function initialModel(): FixtureModel {
       session("session-no-project", "No Project Session", null, "loose-workspace"),
     ],
   };
+  if (SCENARIO === "question-classification") {
+    const child = initial.sessions[0]!;
+    child.title = "Provider Configuration";
+    child.status = "input_required";
+    child.createdAt = child.updatedAt = child.lastEventAt = Date.now() - 120_000;
+    child.pendingApproval = heldQuestion();
+    initial.sessions = [child];
+  }
   if (SCENARIO === "human-follow-up") {
     const base = Date.now() - 3000;
     const make = (id: string, title: string, status: SessionView["status"], at: number) => ({
@@ -2490,6 +2499,21 @@ const listNoticeSkills = ["orchestrate-issues", "using-wollipog"].map((name) => 
 }));
 const client = {
   ...api,
+  ...(SCENARIO === "question-classification" ? {
+    campaignDecisions: async () => ({ canClassify: true, campaignSessionId: "session-alpha", decisions: [],
+      usage: { calls: 1, unpricedCalls: 0, inputTokens: 180, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0.001 } }),
+    classifyCampaignDecision: async (_id: string, _screen: string, classification: "decline" | "orchestrator") => {
+      const child = model.sessions[0]!;
+      if (classification === "decline") child.pendingApproval = null;
+      else {
+        const decision = child.pendingApproval!.workflowDecision!;
+        decision.authority = "orchestrator";
+        decision.authorityEvaluation = { ...decision.authorityEvaluation!, owner: "orchestrator", reason: "authorized_operation" };
+      }
+      pushSession(child);
+      return { sessionId: child.id, surface: "implementation_question" as const, requestId: "question-configuration", classification };
+    },
+  } : {}),
   // This synthetic Shell models an older server and must never query a real host.
   // Guided HTTPS setup has its own suite backed by a disposable control plane.
   remoteAccess: async () => { throw new ApiError("Remote access is not supported by this fixture.", 404); },

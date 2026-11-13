@@ -42,6 +42,7 @@ import { CHOOSE_ACCOUNT_COPY, ChooseAccountDialog, type ChooseAccountResult } fr
 import { EvidenceReviewBody, useEvidenceReview } from "./EvidenceReview.js";
 import { OwnerRuleSummary, WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
 import { ReturnOwnerResource } from "../ReturnOwnerResource.js";
+import { QuestionClassification, QUESTION_CLASSIFICATION_REASON } from "./QuestionClassification.js";
 import { LocationSwitchSummary, locationSwitchCardActions, locationSwitchChoices, locationSwitchOptions } from "./LocationSwitchSummary.js";
 import { claimDecision, decisionKey, useDecisionFailure, useDecisionInFlight } from "./request-reveal.js";
 import {
@@ -130,6 +131,7 @@ export function RequestCard({
   const evidence = useEvidenceReview(session.id, request);
   const workflowDecision = request.kind === "workflow_decision" ? request.workflowDecision : undefined;
   const childQuestion = isChildQuestionSnapshot(workflowDecision?.resourceSnapshot);
+  const classificationHeld = workflowDecision?.authorityEvaluation?.reason === "credential_screen_review";
   const readOnlyNotice = suppliedReadOnlyNotice ??
     (childQuestion && workflowDecision?.authority === "orchestrator" ? "The Orchestrator is handling this request." : undefined);
   // A Location switch (#4138) asks the person to choose one Location; every control then acts on it.
@@ -173,7 +175,7 @@ export function RequestCard({
   // Guardrail pauses and workflow decisions are resolved by the control plane; everything else is
   // answered by the runner, which must be connected to take it.
   const decisionNeedsRunner = request.kind !== "policy_hook" && request.kind !== "workflow_decision";
-  const reason = responseRefusal ?? (decisionNeedsRunner && !runnerOnline ? REQUEST_CARD_COPY.runnerOffline : null);
+  const reason = classificationHeld ? QUESTION_CLASSIFICATION_REASON : responseRefusal ?? (decisionNeedsRunner && !runnerOnline ? REQUEST_CARD_COPY.runnerOffline : null);
   const signInBlocked = runner?.canManage === false && request.options.some((option) => option.optionId === "auth:login");
   const optionReason = (option: PermissionOption): string | null =>
     option.optionId === "auth:login" && runner?.canManage === false ? signInReasonId
@@ -507,6 +509,7 @@ export function RequestCard({
           {evidence?.footNote && <p id={evidenceReasonId}>{evidence.footNote}</p>}
         </div>
       )}
+      {classificationHeld && <QuestionClassification sessionId={session.id} request={request} onSessionUpdate={onSessionUpdate} />}
       {!readOnly && <div className="request-card-foot">
         {tertiary && !phoneOverflow && optionButton(tertiary, "tertiary")}
         {footerSecondary.map((option) => optionButton(option, "secondary"))}

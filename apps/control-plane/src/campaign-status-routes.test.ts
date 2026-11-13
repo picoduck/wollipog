@@ -868,6 +868,8 @@ test("Campaign Status shows the campaign's Decision verdicts, reasons and their 
   const other = campaignFixture();
   ownBy(root, "alice");
   ownBy(member, "alice");
+  db.raw().prepare("INSERT INTO identity_users (user_id, display_name, created_at, updated_at) VALUES ('alice', 'Alice', 1, 1)").run();
+  db.raw().prepare("INSERT INTO identity_memberships (organization_id, user_id, role, created_at, updated_at) VALUES (?, 'alice', 'operator', 1, 1)").run(ORG);
   const runtime = new DecisionRuntime({
     db,
     settings: { resolve: () => ({ ok: true, target: {
@@ -894,6 +896,7 @@ test("Campaign Status shows the campaign's Decision verdicts, reasons and their 
     const read = await get<CampaignDecisionsResponse>("alice", `/api/sessions/${member}/campaign/decisions`);
     assert.equal(read.status, 200);
     assert.equal(read.body.campaignSessionId, root);
+    assert.equal(read.body.canClassify, true);
     assert.equal(read.body.decisions.length, 1);
     assert.equal(read.body.decisions[0]!.verdict, "confirm");
     assert.equal(read.body.decisions[0]!.reason, "Listed in the boundary.");
@@ -902,7 +905,9 @@ test("Campaign Status shows the campaign's Decision verdicts, reasons and their 
       calls: 1, inputTokens: 3, outputTokens: 4, cacheReadInputTokens: 0, cacheCreationInputTokens: 0,
       costUsd: null, unpricedCalls: 1,
     });
-    assert.equal((await get("orchestrator", `/api/sessions/${root}/campaign/decisions`)).status, 200);
+    const agentRead = await get<CampaignDecisionsResponse>("orchestrator", `/api/sessions/${root}/campaign/decisions`);
+    assert.equal(agentRead.status, 200);
+    assert.equal(agentRead.body.canClassify, false);
     assert.equal((await get("stranger", `/api/sessions/${root}/campaign/decisions`)).status, 403);
     assert.equal((await get("bob", `/api/sessions/${root}/campaign/decisions`)).status, 404);
     // Decision usage never enters the managed worker cost the summary reports.

@@ -1485,6 +1485,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   377,
   // v378 slot
   // v379 slot
+  // 379: Expose viewer-specific campaign question classification permission (#4548).
+  379,
   // v380 slot
   // v381 slot
   // v382 slot

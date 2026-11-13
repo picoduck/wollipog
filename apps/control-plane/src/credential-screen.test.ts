@@ -155,9 +155,13 @@ for (const [label, answer, attempts, failureClass, verdict] of [
       assert.equal(h.occurrences().length, 1);
       assert.equal(h.screen.calls.length, attempts);
       // Nobody answers it: not the Orchestrator, and not the owner either, until it is classified.
-      assert.equal(h.svc.resolveDescendantRequest("root", "child", asked.data!.occurrenceId,
-        { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "o0" }, () => true).ok, false);
-      assert.equal(h.svc.approve("child", asked.data!.occurrenceId, "o0", h.owner).status, 409);
+      const rootRefusal = h.svc.resolveDescendantRequest("root", "child", asked.data!.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "o0" }, () => true);
+      assert.equal(rootRefusal.status, 403);
+      assert.match(rootRefusal.error!, /campaign owner must classify.*Campaign Status/u);
+      const ownerRefusal = h.svc.approve("child", asked.data!.occurrenceId, "o0", h.owner);
+      assert.equal(ownerRefusal.status, 409);
+      assert.match(ownerRefusal.error!, /campaign owner must classify.*Campaign Status/u);
       const subject = h.db.campaignDecisionSubject(h.occurrences()[0]!.occurrenceId);
       assert.deepEqual([subject?.surface, subject?.sessionId, subject?.requestId], ["implementation_question", "child", "held"]);
     } finally { h.db.close(); }
