@@ -671,9 +671,17 @@ for (const restartPoint of ["before_publication", "before_clear", "after_clear"]
       db.registerRunner({ runnerId: "runner", hostname: "synthetic", os: "linux", version: "test",
         agents: [], workspaces: [] }, Date.now(), PROTOCOL_VERSION);
       const hub = new Hub(db);
-      let sent = 0;
+      const commandIds: string[] = [];
       hub.isRunnerOnline = () => true;
-      hub.sendToRunner = () => { sent++; return true; };
+      hub.sendToRunner = (_runnerId, message) => {
+        assert.equal(message.type, "durable_session_command");
+        if (message.type !== "durable_session_command") return false;
+        assert.equal(message.command.type, "prompt_session");
+        assert.ok(message.command.type === "prompt_session" && message.command.campaignContinuation);
+        assert.ok(message.commandId);
+        commandIds.push(message.commandId);
+        return true;
+      };
       const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
       const replacement = svc.beginRunnerAttentionBatch("runner");
       if (restartPoint !== "after_clear") svc.applySessionRuntimeUpdate("runner", initial.snapshots[0]!, replacement);
@@ -689,10 +697,14 @@ for (const restartPoint of ["before_publication", "before_clear", "after_clear"]
       await svc.flushRunnerAttention("runner", () => true);
       assert.equal(db.raw().prepare("SELECT seq FROM sqlite_sequence WHERE name='orchestrator_campaign_events'").get()?.seq, sequence);
       db.updateSessionStatus("campaign-0", "idle", Date.now());
-      svc.retryDuePrompts(Date.now() + 3_000);
-      assert.equal(sent, 1, "eligible idle parent continues without another user prompt");
-      svc.retryDuePrompts(Date.now() + 3_001);
-      assert.equal(sent, 1, "coalesced continuation is single-flight");
+      const retryNow = Date.now() + 3_000;
+      svc.retryDuePrompts(retryNow);
+      assert.equal(commandIds.length, 1, "eligible idle parent continues without another user prompt");
+      // A scheduler pause past the 250 ms retry deadline may retransmit the durable command.
+      // Count continuation identities, not transport attempts, using explicit retry times.
+      svc.retryDuePrompts(retryNow + 350);
+      assert.equal(commandIds.length, 2, "unacknowledged continuation is retransmitted after 350 ms");
+      assert.equal(new Set(commandIds).size, 1, "coalesced continuation is single-flight");
     } finally { db?.close(); rmSync(root, { recursive: true, force: true }); }
   });
 }
