@@ -63,6 +63,7 @@ export const ASSISTANT_CAMPAIGN_HUMAN_ROUTES = [
   "POST /api/sessions/:id/orchestrator-campaign/control",
   "POST /api/sessions/:id/orchestrator-campaign/follow-up-limit",
   "POST /api/sessions/:id/orchestrator-campaign/locations/:locationId/include",
+  "POST /api/sessions/:id/orchestrator-campaign/pause",
   "POST /api/sessions/:id/orchestrator-campaign/scope-grant/selection-count",
   "POST /api/sessions/:id/orchestrator-campaign/slots/release",
 ] as const;

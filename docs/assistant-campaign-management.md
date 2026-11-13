@@ -59,7 +59,7 @@ status changes to remote-owned findings and retains the remote forge remedy.
 ## Human Authority and Session Protocol
 
 Credential-screen classification, human issue-scope proposals, campaign behavior changes,
-cost allocations, control changes, follow-up limits, Location inclusion, selection counts and
+cost allocations, control changes, follow-up limits, campaign pause/resume, Location inclusion, selection counts and
 manual provider-slot attestation remain explicit human-authority audit entries with supported
 owner/runtime remedies. The human scope-proposal branch supplies privileged provenance even
 though it creates a typed decision before any scope change. An Assistant cannot assert that
