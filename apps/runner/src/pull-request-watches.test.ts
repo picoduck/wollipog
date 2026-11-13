@@ -149,3 +149,25 @@ test("a serialized summary stays within the protocol's bound", () => {
   const small = serializedWatchSummary(summary("merged"));
   assert.deepEqual(JSON.parse(small), summary("merged"));
 });
+
+test("an oversized stall summary preserves group failures and unstarted required jobs (#4543)", () => {
+  const long = "x".repeat(120);
+  const group = { sha: HEAD, required: [{ name: "Typecheck, Test & Sidecar Bundle", state: "pending" as const, reported: false }],
+    other: { passed: 0, failed: 1, pending: 0 },
+    failedJobs: [{ name: "Unit Tests (2)", required: false, conclusion: "FAILURE", url: "https://example.com/job" }] };
+  const oversized = summary("timeout", { requiredCheckNames: Array.from({length: 300}, () => long),
+    mergeQueue: { state: "AWAITING_CHECKS", position: 1, enqueuedAt: null, checks: group } });
+  const encoded = serializedWatchSummary(oversized);
+  assert.ok(Buffer.byteLength(encoded) <= PULL_REQUEST_WATCH_SUMMARY_LIMIT_BYTES);
+  const decoded = JSON.parse(encoded);
+  assert.equal(decoded.mergeQueue.position, 1);
+  assert.equal(decoded.mergeQueue.state, "AWAITING_CHECKS");
+  assert.deepEqual(decoded.mergeQueue.checks.required, group.required);
+  assert.deepEqual(decoded.mergeQueue.checks.failedJobs,
+    [{ name: "Unit Tests (2)", required: false, conclusion: "FAILURE" }]);
+  // Maximum forge list sizes and multibyte names still fit the wire limit after compaction.
+  const worst = { ...group, required: Array.from({length:30}, () => ({ ...group.required[0]!, name: "漢".repeat(120) })),
+    failedJobs: Array.from({length:20}, () => ({ ...group.failedJobs[0]!, name: "漢".repeat(120) })) };
+  const compact = serializedWatchSummary({ ...oversized, mergeQueue: { ...oversized.mergeQueue!, checks: worst } });
+  assert.ok(Buffer.byteLength(compact) <= PULL_REQUEST_WATCH_SUMMARY_LIMIT_BYTES);
+});

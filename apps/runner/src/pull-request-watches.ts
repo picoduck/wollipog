@@ -43,12 +43,22 @@ function clip(value: string, max: number): string {
 }
 
 /** The bounded wait summary, serialized within the protocol's limit. A summary over it (only
- * possible with unusually long names) keeps the outcome, head, queue and merge facts. */
+ * possible with unusually long names) keeps the outcome, head, queue and merge facts, prioritizing
+ * compact group diagnostics over branch details so a stall signal still names the failed and
+ * unstarted required jobs (#4543). Forge summaries already cap these lists at 30 and 20. */
 export function serializedWatchSummary(summary: PullRequestWaitSummary): string {
   const full = JSON.stringify(summary);
   if (Buffer.byteLength(full) <= PULL_REQUEST_WATCH_SUMMARY_LIMIT_BYTES) return full;
   const { checks: _checks, requiredCheckNames: _names, mergeQueue, ...rest } = summary;
-  return JSON.stringify({ ...rest, mergeQueue: mergeQueue ? { ...mergeQueue, checks: null } : null, truncated: true });
+  const group = mergeQueue?.checks;
+  const checks = group ? {
+    sha: group.sha,
+    required: group.required.slice(0, 30).map(check => ({ ...check, name: clip(check.name, 60) })),
+    failedJobs: group.failedJobs.slice(0, 20).map(job => ({ name: clip(job.name, 60), required: job.required,
+      conclusion: clip(job.conclusion, 20) })),
+    truncated: true,
+  } : null;
+  return JSON.stringify({ ...rest, mergeQueue: mergeQueue ? { ...mergeQueue, checks } : null, truncated: true });
 }
 
 export class PullRequestWatcher {
