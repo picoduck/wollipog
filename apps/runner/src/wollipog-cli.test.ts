@@ -1158,6 +1158,30 @@ test("CLI session events pages forward with --after and reads the newest events 
   }
 });
 
+test("CLI temporary branch creation uses the injected member and exact coordinates (#4535)", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "temporary-branch-cli-"));
+  try {
+    const tokenFile = join(directory, "token");
+    writeFileSync(tokenFile, "fixture-token");
+    const calls: Array<{ url: string; body: string | undefined }> = [];
+    const fetch: McpFetch = async (url, init) => {
+      calls.push({ url, body: init?.body });
+      return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+        ? { protocolVersion: PROTOCOL_VERSION } : { id: "tbr_created" }) };
+    };
+    const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_SESSION_ID: "member", WOLLIPOG_SESSION_TOKEN_FILE: tokenFile };
+    const command = ["node", "cli.js", "--wollipog-cli", "branch", "create-temporary", "--request-id", "create-1",
+      "--branch", "temporary/check", "--head", "a".repeat(40), "--json"];
+    assert.equal(await runWollipogCli(command, env, { stdout() {}, stderr() {} }, fetch), 0);
+    const publication = calls.find((call) => call.url.endsWith("/temporary-branches"));
+    assert.equal(publication?.url, "http://cp/api/sessions/member/temporary-branches");
+    assert.deepEqual(JSON.parse(publication!.body!), { requestId: "create-1", branch: "temporary/check", headSha: "a".repeat(40) });
+    const before = calls.length;
+    assert.notEqual(await runWollipogCli([...command, "--session", "sibling"], env, { stdout() {}, stderr() {} }, fetch), 0);
+    assert.equal(calls.length, before);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("CLI recognizes installed POSIX and Windows alias invocation names", async () => {
   for (const executable of ["/opt/bin/wollipog", String.raw`C:\Users\agent\wollipog.exe`]) {
     const requests: string[] = [];

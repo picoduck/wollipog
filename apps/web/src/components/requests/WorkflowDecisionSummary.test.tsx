@@ -16,6 +16,22 @@ const text = (snapshot: WorkflowDecisionResourceSnapshot, check?: PullRequestClo
   renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} {...(check ? { closingReferenceCheck: check } : {})} />)
     .replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ").trim();
 
+test("temporary deletion shows its exact tip and receipt without claiming a merged pull request (#4535)", () => {
+  const snapshot = { category: "merged_branch_deletion" as const, merged: false as const, repository: "picoduck/wollipog",
+    branch: "temporary/check", headSha: "a".repeat(40), temporaryReceiptId: "tbr_receipt", dependentPullRequests: { checkedAt: 1, open: [] },
+    creation: { sessionId: "s_retirement", sessionTitle: "Worktree Retirement", defaultBranch: "main", defaultHeadSha: "c".repeat(40), checkedAt: 1 } };
+  const rendered = text(snapshot);
+  assert.ok(rendered.includes(snapshot.headSha));
+  assert.ok(rendered.includes(snapshot.creation.sessionTitle));
+  assert.match(rendered, /Contained in main at/u);
+  assert.match(rendered, /no open head or base pull requests/u);
+  assert.doesNotMatch(rendered, /Merge Commit/u);
+  const unknown = text({ ...snapshot, temporaryReceiptId: undefined, creation: undefined });
+  assert.match(unknown, /No matching creation receipt exists/u);
+  assert.match(unknown, /Orchestrator cannot delete/u);
+  assert.doesNotMatch(unknown, /Created Tip/u);
+});
+
 test("a GitHub merge shows the issues it would close, as the runner read them (#3713)", () => {
   assert.match(text(MERGE, { checkedAt: 1, closures: [] }), /Closes on Merge None/u);
   assert.match(text({ ...MERGE, intendedClosures: ["picoduck/wollipog#3713", "picoduck/wollipog#9"] }, { checkedAt: 1, closures: [

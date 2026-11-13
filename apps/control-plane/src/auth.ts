@@ -141,6 +141,7 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "POST /api/sessions/:id/worktrees/attach",
   "POST /api/sessions/:id/worktrees/select",
   "POST /api/sessions/:id/worktrees/discard",
+  "POST /api/sessions/:id/temporary-branches",
   "GET /api/runs",
   "POST /api/runs",
   "GET /api/governance/policies",
@@ -180,6 +181,7 @@ const AGENT_CONTROL_API_ROUTES = new Set([
 ]);
 
 const ORCHESTRATOR_API_ROUTES = new Set([
+  "POST /api/sessions/:id/temporary-branches",
   "POST /api/sessions/:id/automation-proposals",
   "GET /api/sessions/:id/automation-proposals/:occurrenceId",
   "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute",

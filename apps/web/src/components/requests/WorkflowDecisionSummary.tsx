@@ -137,7 +137,17 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
       return <dl className="facts">
         <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
         <div><dt>Branch</dt><dd><code>{snapshot.branch}</code></dd></div>
-        <div><dt>Merge Commit</dt><dd><code>{snapshot.mergeCommitSha.slice(0, 12)}</code></dd></div>
+        {snapshot.merged === false ? <>
+          <div><dt>{snapshot.creation ? "Created Tip" : "Requested Tip"}</dt><dd><code>{snapshot.headSha}</code></dd></div>
+          {snapshot.creation && <>
+            <div><dt>Created By</dt><dd>{snapshot.creation.sessionTitle} · <code>{snapshot.creation.sessionId}</code></dd></div>
+            <div><dt>Creation Proof</dt><dd>Contained in {snapshot.creation.defaultBranch} at <code>{snapshot.creation.defaultHeadSha}</code>.
+              {" "}Verified when the receipt was issued; checked again before deletion.</dd></div>
+          </>}
+          <div><dt>Deletion Check</dt><dd>{snapshot.creation
+            ? "After approval, the Orchestrator may delete this branch at the exact created tip, with no open head or base pull requests."
+            : "No matching creation receipt exists. The Orchestrator cannot delete this branch; it stays the owner's decision."}</dd></div>
+        </> : <div><dt>Merge Commit</dt><dd><code>{snapshot.mergeCommitSha.slice(0, 12)}</code></dd></div>}
       </dl>;
     case "follow_up_issue_publication":
       return <dl className="facts">

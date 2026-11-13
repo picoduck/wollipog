@@ -657,6 +657,12 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       },
     };
   }
+  if (words[0] === "branch" && words[1] === "create-temporary") {
+    if (optionPresent(args, "--session")) return { error: "temporary branch creation acts only on the injected member session" };
+    const requestId = option(args, "--request-id"), branch = option(args, "--branch"), headSha = option(args, "--head");
+    if (!requestId || !branch || !headSha) return { error: "branch create-temporary requires --request-id, --branch and --head" };
+    return { tool: "create_temporary_branch", input: { requestId, branch, headSha } };
+  }
   if (words[0] === "worktree" || words[0] === "worktrees") {
     const verb = words[1];
     const sessionId = option(args, "--session");
@@ -1094,6 +1100,8 @@ export async function runWollipogCli(
     : parsed.tool === "list_workflow_decisions" || (parsed.tool === "get_workflow_decision" &&
       typeof parsed.input.sessionId === "string" && parsed.input.sessionId !== sessionId)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.descendantWorkflowDecisionInspection
+    : parsed.tool === "create_temporary_branch"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.temporaryBranchReceipts
     : parsed.tool === "discard_worktree"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement
     : parsed.tool === "delete_worktree_refs"

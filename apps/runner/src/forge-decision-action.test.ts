@@ -1,12 +1,64 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GhOutcome } from "./campaign-forge-status.js";
-import { executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge, observePullRequestRetirement, observeIssuePublication } from "./forge-decision-action.js";
+import { executeTemporaryBranch, executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge, observePullRequestRetirement, observeIssuePublication } from "./forge-decision-action.js";
 
 const HEAD = "a".repeat(40);
 const MERGE = "c".repeat(40);
 const ok = (stdout = ""): GhOutcome => ({ stdout, stderr: "", code: null, timedOut: false });
 const failed = (stderr: string, code: number | string = 1, timedOut = false): GhOutcome => ({ stdout: "", stderr, code, timedOut });
+
+function temporaryForge(overrides: { tip?: string | null; heads?: number; bases?: number; contained?: boolean;
+  mutation?: GhOutcome; freshTip?: string; freshDefault?: string } = {}) {
+  const calls: string[][] = [];
+  let reads = 0;
+  const gh = async (args: string[]) => {
+    calls.push(args);
+    if (args.some((value) => value.includes("updateRefs"))) return overrides.mutation ?? ok(JSON.stringify({ data: { updateRefs: { clientMutationId: null } } }));
+    if (args.some((value) => value.includes("/compare/"))) return ok(JSON.stringify({ status: "ahead", behind_by: 0,
+      merge_base_commit: { sha: overrides.contained === false ? MERGE : HEAD } }));
+    reads++;
+    const tip = reads > 1 && overrides.freshTip !== undefined ? overrides.freshTip : overrides.tip === undefined ? HEAD : overrides.tip;
+    return ok(JSON.stringify({ data: { repository: { id: "R_1", nameWithOwner: "picoduck/wollipog",
+      defaultBranchRef: { name: "main", target: { oid: reads > 1 && overrides.freshDefault ? overrides.freshDefault : MERGE } },
+      ref: tip === null ? null : { target: { oid: tip } }, heads: { totalCount: overrides.heads ?? 0 }, bases: { totalCount: overrides.bases ?? 0 } } } }));
+  };
+  return { gh, calls, writes: () => calls.filter((args) => args.some((value) => value.includes("updateRefs"))) };
+}
+
+const temporary = { kind: "temporary_branch_deletion" as const, repository: "picoduck/wollipog", branch: "temporary/check", headSha: HEAD };
+test("temporary publication is create-only even when an existing ref has the requested tip (#4535)", async () => {
+  const create = { ...temporary, kind: "temporary_branch_create" as const };
+  const existing = temporaryForge();
+  assert.equal((await executeTemporaryBranch(create, existing.gh)).outcome, "refused");
+  assert.equal(existing.writes().length, 0);
+  const fresh = temporaryForge({ tip: null });
+  assert.deepEqual(await executeTemporaryBranch(create, fresh.gh), { outcome: "published",
+    temporaryBranchProof: { defaultBranch: "main", defaultHeadSha: MERGE } });
+  assert.equal(fresh.writes().length, 1);
+  assert.ok(fresh.writes()[0]!.includes(`before=${"0".repeat(40)}`));
+  assert.ok(fresh.writes()[0]!.includes(`after=${HEAD}`));
+  const unknown = temporaryForge({ tip: null, mutation: failed("timeout", 1, true) });
+  assert.deepEqual(await executeTemporaryBranch(create, unknown.gh), { outcome: "uncertain" });
+  assert.equal(unknown.writes().length, 1, "no matching-ref readback can assert creation");
+});
+
+test("temporary deletion requires exact tip, current default containment, and no open head or base PR (#4535)", async () => {
+  for (const override of [{ tip: MERGE }, { heads: 1 }, { bases: 1 }, { contained: false },
+    { freshTip: MERGE }, { freshDefault: "d".repeat(40) }]) {
+    const f = temporaryForge(override);
+    assert.equal((await executeTemporaryBranch(temporary, f.gh)).outcome, "refused", JSON.stringify(override));
+    assert.equal(f.writes().length, 0);
+  }
+  const f = temporaryForge();
+  assert.deepEqual(await executeTemporaryBranch(temporary, f.gh), { outcome: "deleted" });
+  assert.equal(f.writes().length, 1);
+  assert.ok(f.writes()[0]!.includes(`before=${HEAD}`));
+  assert.ok(f.writes()[0]!.includes(`after=${"0".repeat(40)}`));
+  const raced = temporaryForge({ mutation: failed("compare-and-delete refused") });
+  assert.deepEqual(await executeTemporaryBranch(temporary, raced.gh), { outcome: "uncertain" });
+  assert.ok(raced.writes()[0]!.includes(`before=${HEAD}`), "a moved tip during mutation is protected by GitHub's CAS");
+});
 
 test("publication observation pins a known creation receipt and never substitutes a copied issue (#4537)", async () => {
   const action = { kind: "issue_publication_observe" as const, repository: "picoduck/wollipog", title: "Exact Title", body: "Exact Body", issue: 77 };

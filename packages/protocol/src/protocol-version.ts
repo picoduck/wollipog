@@ -1476,6 +1476,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   374,
   // v375 slot
   // v376 slot
+  // 376: Trusted temporary branch creation receipts and receipt-bound compare-and-delete.
+  376,
   // v377 slot
   // v378 slot
   // v379 slot

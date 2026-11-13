@@ -1007,6 +1007,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "create_worktree",
       "attach_worktree",
       "select_worktree",
+      "create_temporary_branch",
       "discard_worktree",
       "delete_worktree_refs",
       "create_session",
@@ -2347,6 +2348,19 @@ test("worktree tools use the canonical routes and default to the calling session
   assert.equal(calls[3]!.url, `${CP_URL}/api/sessions/s_child/worktrees/discard`);
   assert.deepEqual(calls[3]!.body, { path: "/repo/old" });
   assert.deepEqual(resultJson(discarded).retirement, { status: "deferred", reason: "provider_active" });
+});
+
+test("temporary creation sends only the calling member's coordinates and refuses a forged target (#4535)", async () => {
+  const receipt = { id: "tbr_example", campaignId: "root", sessionId: SELF_ID, repository: "example/project",
+    branch: "temporary/check", headSha: "a".repeat(40), createdAt: 1 };
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: receipt }));
+  const input = { requestId: "create-1", branch: receipt.branch, headSha: receipt.headSha };
+  const response = await callTool(deps, "create_temporary_branch", input);
+  assert.deepEqual(resultJson(response), receipt);
+  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/${SELF_ID}/temporary-branches`);
+  assert.deepEqual(calls[0]!.body, input);
+  assert.equal((await callTool(deps, "create_temporary_branch", { ...input, sessionId: "sibling" })).isError, true);
+  assert.equal(calls.length, 1);
 });
 
 test("discard_worktree refuses peers that cannot report deferred retirement", async () => {

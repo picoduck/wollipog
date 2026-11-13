@@ -36,6 +36,7 @@ const ZERO_OID = "0".repeat(40);
 export interface ForgeDecisionActionResult {
   outcome: ForgeDecisionActionOutcome;
   refusal?: { reason: ForgeDecisionActionRefusalReason; summary: string };
+  temporaryBranchProof?: { defaultBranch: string; defaultHeadSha: string };
 }
 
 const refused = (reason: ForgeDecisionActionRefusalReason, summary: string): ForgeDecisionActionResult =>
@@ -82,6 +83,81 @@ const DELETION_QUERY = `query($owner:String!,$name:String!,$number:Int!,$ref:Str
 const DELETION_MUTATION = `mutation($repositoryId:ID!,$ref:GitRefname!,$before:GitObjectID!,$after:GitObjectID!){
   updateRefs(input:{repositoryId:$repositoryId, refUpdates:[{name:$ref, beforeOid:$before, afterOid:$after}]}){ clientMutationId }
 }`;
+
+/** Temporary refs are created only from commits already on the remote default branch. Immutable
+ * compare endpoints avoid worktree Git configuration and bound the answer to one commit page. */
+export async function executeTemporaryBranch(
+  action: Extract<ForgeDecisionAction, { kind: "temporary_branch_create" | "temporary_branch_deletion" }>,
+  gh: GhRunner,
+): Promise<ForgeDecisionActionResult> {
+  if (!REPOSITORY.test(action.repository) || !forgeActionBranchName(action.branch) || !SHA.test(action.headSha)) {
+    return refused("pull_request_mismatch", "Invalid temporary branch coordinates.");
+  }
+  const readState = () => readRepository(gh, `query($owner:String!,$name:String!,$ref:String!,$branch:String!){
+    repository(owner:$owner,name:$name){ id nameWithOwner defaultBranchRef{ name target{ oid } }
+      ref(qualifiedName:$ref){ target{ oid } }
+      heads:pullRequests(states:OPEN,headRefName:$branch,first:1){ totalCount }
+      bases:pullRequests(states:OPEN,baseRefName:$branch,first:1){ totalCount }
+    } }`, action.repository, [["ref", `refs/heads/${action.branch}`], ["branch", action.branch]]);
+  const creating = action.kind === "temporary_branch_create";
+  const read = await readState();
+  if ("refusal" in read) return read.refusal;
+  const state = (data: Record<string, unknown>) => ({
+    tip: data.ref === null ? null : record(record(data.ref)?.target)?.oid,
+    defaultTip: record(record(data.defaultBranchRef)?.target)?.oid,
+    defaultName: record(data.defaultBranchRef)?.name,
+    heads: record(data.heads)?.totalCount, bases: record(data.bases)?.totalCount,
+  });
+  const before = state(read.data);
+  if (typeof read.data.id !== "string" || !read.data.id || typeof before.defaultTip !== "string" ||
+      !SHA.test(before.defaultTip) || typeof before.defaultName !== "string" ||
+      (before.tip !== null && (typeof before.tip !== "string" || !SHA.test(before.tip))) ||
+      !Number.isSafeInteger(before.heads) || !Number.isSafeInteger(before.bases)) {
+    return refused("forge_unavailable", "GitHub returned incomplete temporary branch evidence.");
+  }
+  if (before.defaultName === action.branch) return refused("pull_request_mismatch", "The default branch is never temporary.");
+  if (creating && before.tip !== null) return refused("forge_refused", "The remote ref already exists; no creation receipt was issued.");
+  if (!creating && before.tip !== null && before.tip !== action.headSha) return refused("tip_moved", "The temporary branch tip moved; it was left alone.");
+  if ((before.heads as number) > 0 || (before.bases as number) > 0) {
+    return refused("dependent_pull_request_open", "An open pull request uses this branch as head or base; it was left alone.");
+  }
+  const compare = await gh(["api", "--hostname", "github.com",
+    `repos/${action.repository}/compare/${action.headSha}...${before.defaultTip}?per_page=1`]);
+  let contained = false;
+  if (compare.code === null && !compare.timedOut) {
+    try {
+      const result = record(JSON.parse(compare.stdout));
+      contained = Boolean(result && (result.status === "ahead" || result.status === "identical") &&
+        result.behind_by === 0 && record(result.merge_base_commit)?.sha === action.headSha);
+    } catch { /* unreadable evidence refuses */ }
+  }
+  if (!contained) return refused("forge_unavailable", "The created tip could not be proven contained in the default branch; nothing changed.");
+  // Re-read after the compare: a default ref rewrite or PR opened during that read must stop the
+  // operation. The final mutation independently pins the temporary ref's exact current tip.
+  const fresh = await readState();
+  if ("refusal" in fresh) return fresh.refusal;
+  const after = state(fresh.data);
+  if (fresh.data.id !== read.data.id || after.defaultTip !== before.defaultTip || after.defaultName !== before.defaultName ||
+      after.tip !== before.tip || after.heads !== 0 || after.bases !== 0) {
+    return refused("tip_moved", "The branch or its dependency evidence changed during verification; nothing changed.");
+  }
+  if (!creating && before.tip === null) return { outcome: "already_deleted" };
+  // beforeOid=zero is create-only: even an existing ref at this SAME tip must refuse. No force,
+  // shell Git, credential helper, hook or worktree-controlled origin participates.
+  const updated = await gh(["api", "graphql", "--hostname", "github.com", "-f", `query=${DELETION_MUTATION}`,
+    "-f", `repositoryId=${read.data.id}`, "-f", `ref=refs/heads/${action.branch}`,
+    "-f", `before=${creating ? ZERO_OID : action.headSha}`, "-f", `after=${creating ? action.headSha : ZERO_OID}`]);
+  if (updated.code === null && !updated.timedOut) {
+    try {
+      const result = record(JSON.parse(updated.stdout));
+      if (result && !result.errors && record(record(result.data)?.updateRefs)) return creating
+        ? { outcome: "published", temporaryBranchProof: { defaultBranch: before.defaultName, defaultHeadSha: before.defaultTip } }
+        : { outcome: "deleted" };
+    } catch { /* a lost or malformed creation response never mints provenance */ }
+  }
+  // Never infer creation from a later matching ref: it could have been created by someone else.
+  return { outcome: "uncertain" };
+}
 
 /** What the branch looks like now: gone, at a tip, or unreadable. */
 async function branchTip(gh: GhRunner, action: Extract<ForgeDecisionAction, { kind: "branch_deletion" }>): Promise<string | null | undefined> {

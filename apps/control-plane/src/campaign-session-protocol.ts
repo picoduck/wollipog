@@ -56,4 +56,5 @@ export const RESIDUAL_SESSION_PROTOCOL_ROUTES = [
   "POST /api/sessions/:id/video-evidence-review/provenance",
   "POST /api/sessions/:id/video-evidence-review/verdict",
   "POST /api/sessions/:id/worktrees/delete-refs",
+  "POST /api/sessions/:id/temporary-branches",
 ] as const;

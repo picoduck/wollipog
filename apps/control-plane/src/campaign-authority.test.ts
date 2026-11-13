@@ -74,8 +74,108 @@ function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", dri
     kind: "question_request", requestId, occurrenceId: requestId, requestSource: source,
     questions: [{ id: "approach", question: snapshot.question, options: [{ label: "A" }, { label: "B" }] }],
   });
-  return { db, svc, principal, sent, enable, ask, generic, snapshot, make, asking, screen };
+  return { db, hub, svc, principal, sent, enable, ask, generic, snapshot, make, asking, screen };
 }
+
+test("temporary branch creation records only a matching trusted response and never replays an uncertain intent (#4535)", async () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    let dispatched = 0;
+    let uncertain = false;
+    h.hub.requestFromRunner = async (_runner, requestId, message) => {
+      assert.equal(message.type, "forge_decision_action");
+      if (message.type !== "forge_decision_action") throw new Error("wrong RPC");
+      assert.equal(message.action.kind, "temporary_branch_create");
+      assert.equal(message.action.repository, "picoduck/wollipog");
+      dispatched++;
+      if (uncertain) throw new Error("lost reply");
+      return { type: "forge_decision_action_result", requestId, sessionId: message.sessionId,
+        occurrenceId: message.occurrenceId, outcome: "published",
+        temporaryBranchProof: { defaultBranch: "main", defaultHeadSha: "c".repeat(40) } } as never;
+    };
+    const request = { requestId: "create-1", branch: "temporary/check", headSha: "a".repeat(40) };
+    const created = await h.svc.createTemporaryBranch("child", request);
+    assert.ok(created.ok, created.error ?? "creation failed");
+    assert.equal(created.data!.campaignId, "root");
+    assert.equal(created.data!.sessionId, "child");
+    assert.deepEqual(h.db.temporaryBranchReceipts("root", "child").map((row) => ({ ...row })), [created.data]);
+    assert.deepEqual((await h.svc.createTemporaryBranch("child", request)).data, created.data);
+    assert.equal(dispatched, 1);
+    assert.equal((await h.svc.createTemporaryBranch("child", { ...request, headSha: "b".repeat(40) })).ok, false);
+    assert.equal((await h.svc.createTemporaryBranch("child", { ...request, requestId: "forged", receipt: created.data })).ok, false);
+    uncertain = true;
+    const lost = { ...request, requestId: "lost", branch: "temporary/lost" };
+    assert.equal((await h.svc.createTemporaryBranch("child", lost)).ok, false);
+    assert.equal((await h.svc.createTemporaryBranch("child", lost)).ok, false);
+    assert.equal(dispatched, 2, "no second write after a lost response");
+    assert.equal(h.db.temporaryBranchReceipts("root", "child").length, 1);
+    uncertain = false;
+    const rootCreation = await h.svc.createTemporaryBranch("root", { ...request, requestId: "root-create", branch: "temporary/root-check" });
+    assert.ok(rootCreation.ok, rootCreation.error ?? "root creation failed");
+    assert.equal(rootCreation.data!.sessionId, "root", "the Orchestrator also creates only for its own session");
+  } finally { h.db.close(); }
+});
+
+test("temporary deletion delegates only the exact campaign member's server receipt and executes behind its typed gate (#4535)", async () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const receipt = { id: "tbr_test", campaignId: "root", sessionId: "child", repository: "picoduck/wollipog",
+      branch: "temporary/check", headSha: "a".repeat(40), createdAt: 1 };
+    assert.equal(h.db.beginTemporaryBranchCreation(receipt, "creation"), true);
+    h.db.finishTemporaryBranchCreation(receipt.id, true, { defaultBranch: "main", defaultHeadSha: "c".repeat(40) });
+    h.make("sibling", "root");
+    const snapshot = { category: "merged_branch_deletion" as const, merged: false as const,
+      repository: receipt.repository, branch: receipt.branch, headSha: receipt.headSha,
+      temporaryReceiptId: receipt.id, dependentPullRequests: { checkedAt: 1, open: [] } };
+    const ask = (session: string, suffix: string, extra = {}) => h.svc.createWorkflowDecision(session, {
+      requestId: suffix, resourceKey: suffix, resourceSnapshot: { ...snapshot, ...extra },
+    });
+    for (const [session, key, extra] of [["child", "missing", { temporaryReceiptId: undefined }],
+      ["sibling", "other-member", {}], ["child", "moved", { headSha: "b".repeat(40) }],
+      ["child", "other-repo", { repository: "other/repo" }]] as const) {
+      const result = ask(session, key, extra);
+      assert.ok(result.ok, result.error ?? "request failed");
+      assert.equal(result.data!.authority, "human", key);
+    }
+    const gate = ask("child", "exact");
+    assert.ok(gate.ok, gate.error ?? "request failed");
+    assert.equal(gate.data!.authority, "orchestrator");
+    assert.ok(gate.data!.resourceSnapshot.category === "merged_branch_deletion" && gate.data!.resourceSnapshot.merged === false);
+    assert.equal(gate.data!.resourceSnapshot.creation?.sessionId, "child");
+    assert.equal(gate.data!.resourceSnapshot.creation?.defaultBranch, "main");
+    const forged = ask("child", "forged-creation-facts", { temporaryReceiptId: undefined,
+      creation: { sessionId: "sibling", sessionTitle: "Forged Creator", defaultBranch: "other", defaultHeadSha: "d".repeat(40), checkedAt: 1 } });
+    assert.ok(forged.ok);
+    assert.ok(forged.data!.resourceSnapshot.category === "merged_branch_deletion" && forged.data!.resourceSnapshot.merged === false);
+    assert.equal(forged.data!.resourceSnapshot.creation, undefined, "client assertions cannot establish displayed proof");
+    assert.equal(forged.data!.authority, "human");
+    let actions = 0;
+    h.hub.requestFromRunner = async (_runner, requestId, message) => {
+      assert.equal(message.type, "forge_decision_action");
+      if (message.type !== "forge_decision_action") throw new Error("wrong RPC");
+      assert.deepEqual(message.action, { kind: "temporary_branch_deletion", repository: receipt.repository, branch: receipt.branch, headSha: receipt.headSha });
+      actions++;
+      return { type: "forge_decision_action_result", requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId, outcome: "deleted" } as never;
+    };
+    const execution = { resourceDigest: gate.data!.resourceDigest };
+    assert.equal((await h.svc.executeWorkflowDecision("child", gate.data!.occurrenceId, execution)).ok, false);
+    assert.equal(actions, 0);
+    assert.ok(h.svc.resolveDescendantRequest("root", "child", gate.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    const deleted = await h.svc.executeWorkflowDecision("child", gate.data!.occurrenceId, execution);
+    assert.ok(deleted.ok, deleted.error ?? "execution failed");
+    assert.equal(deleted.data!.status, "consumed");
+    assert.equal(actions, 1);
+    assert.equal((await h.svc.executeWorkflowDecision("child", gate.data!.occurrenceId, execution)).ok, false);
+    assert.equal(actions, 1);
+    assert.equal(h.db.temporaryBranchReceipts("root", "child").length, 0, "known deletion retires the receipt");
+    assert.equal(ask("child", "recreated-after-deletion").data!.authority, "human", "a later ref cannot borrow retired provenance");
+    h.db.finishTemporaryBranchCreation(receipt.id, true);
+    assert.equal(h.db.temporaryBranchReceipts("root", "child").length, 0, "late creation replies cannot resurrect retired receipts");
+  } finally { h.db.close(); }
+});
 
 test("#4062 a Full Control merge is the Orchestrator's only while every issue it closes is in scope, and is never assumed to close nothing", () => {
   const h = harness();

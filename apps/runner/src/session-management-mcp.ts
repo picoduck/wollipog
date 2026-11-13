@@ -1401,6 +1401,23 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
     {
       type: "object",
       properties: {
+        category: { const: "merged_branch_deletion" }, repository: { type: "string" }, branch: { type: "string" },
+        merged: { const: false }, headSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
+        temporaryReceiptId: { type: "string", description: "The server-issued creation receipt. Missing or borrowed receipts retain person-owned decisions." },
+        creation: { type: "object", description: "Server-recorded creation facts returned in the admitted snapshot; preserve them on consume.",
+          properties: { sessionId: { type: "string" }, sessionTitle: { type: "string" }, defaultBranch: { type: "string" },
+            defaultHeadSha: { type: "string", pattern: "^[0-9a-f]{40}$" }, checkedAt: { type: "integer", minimum: 1 } },
+          required: ["sessionId", "sessionTitle", "defaultBranch", "defaultHeadSha", "checkedAt"], additionalProperties: false },
+        dependentPullRequests: { type: "object", properties: {
+          checkedAt: { type: "integer", minimum: 1 }, open: { type: "array", maxItems: 0 },
+        }, required: ["checkedAt", "open"], additionalProperties: false },
+      },
+      required: ["category", "repository", "branch", "merged", "headSha", "dependentPullRequests"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
         category: { const: "follow_up_issue_publication" }, repository: { type: "string" },
         sanitizedTitle: { type: "string" }, sanitizedBody: { type: "string" },
         labels: { type: "array", maxItems: 32, items: { type: "string" } },
@@ -1456,7 +1473,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "g
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
   "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "unarchive_session", "set_guardrails", "create_worktree",
-  "attach_worktree", "select_worktree", "discard_worktree", "delete_worktree_refs"]);
+  "attach_worktree", "select_worktree", "discard_worktree", "delete_worktree_refs", "create_temporary_branch"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
   "request_owner_decision", "hand_workflow_decision_to_owner",
   "request_campaign_repository_addition", "get_campaign_repository_addition", "execute_campaign_repository_addition",
@@ -2929,7 +2946,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "execute_workflow_decision",
-    description: "Have Wollipog itself perform one approved forge action, bound to its exact snapshot, through this session's own forge login: an approved merged_branch_deletion that names pullRequest and headSha (deleted by compare-and-delete only while the remote tip is still the approved merged head and no open pull request targets the branch), or an approved and already armed GitHub pr_merge (the canonical gh pr merge --squash --match-head-commit enqueue, never --delete-branch, after GitHub's closing references are re-read). Use it when your provider refuses the approved command, or instead of running it. An approved follow_up_issue_publication in another of the campaign's repositories than the one you work in must use this instead of being consumed: a Location of that repository creates the issue with that runner's login, never yours, and decision.forgeAction names the issue and runner (v327). Pass occurrenceId and resourceDigest from get_workflow_decision. Read decision.forgeAction: a success consumes the approval once; a refusal that changed nothing leaves it approved for a retry; a stale snapshot (tip moved, dependent pull request opened, head or closures changed) revokes it and needs a new decision; an uncertain enqueue is never replayed (reconcile it once the PR reads MERGED), and after an uncertain publication another call only looks for the issue. Never retry a refused command through another shell, wrapper or permission change. Requires control plane and runner protocol v284.",
+    description: "Have Wollipog itself perform one approved forge action, bound to its exact snapshot, through this session's own forge login: an approved merged_branch_deletion that names pullRequest and headSha (deleted by compare-and-delete only while the remote tip is still the approved merged head and no open pull request targets the branch), a protocol-376 temporary deletion with merged:false and a matching server creation receipt (exact created tip, still default-contained, no open head or base PR), or an approved and already armed GitHub pr_merge (the canonical gh pr merge --squash --match-head-commit enqueue, never --delete-branch, after GitHub's closing references are re-read). Use it when your provider refuses the approved command, or instead of running it. An approved follow_up_issue_publication in another of the campaign's repositories than the one you work in must use this instead of being consumed: a Location of that repository creates the issue with that runner's login, never yours, and decision.forgeAction names the issue and runner (v327). Pass occurrenceId and resourceDigest from get_workflow_decision. Read decision.forgeAction: a success consumes the approval once; a refusal that changed nothing leaves it approved for a retry; a stale snapshot (tip moved, dependent pull request opened, head or closures changed) revokes it and needs a new decision; an uncertain enqueue is never replayed (reconcile it once the PR reads MERGED), and after an uncertain publication another call only looks for the issue. Never retry a refused command through another shell, wrapper or permission change. Requires control plane and runner protocol v284.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3994,6 +4011,22 @@ export const TOOLS: McpTool[] = [
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/worktrees/select`, { path: args.path });
       if (!r.ok) return errorResult(r.message);
       return textResult(mapWorktreeResult(r.data));
+    },
+  },
+  {
+    name: "create_temporary_branch",
+    description: "Create a new temporary remote branch at a commit already contained in the default branch. Uses your campaign repository and refuses an existing ref. Returns a server-recorded creation receipt bound to your campaign and session, required for typed temporary branch deletion. Reuse requestId only with identical coordinates; uncertain creation is never replayed or claimed as owned. Historical or shell-created branches retain person-owned deletion.",
+    inputSchema: {
+      type: "object", properties: { requestId: { type: "string", maxLength: 128 }, branch: { type: "string" },
+        headSha: { type: "string", pattern: "^[0-9a-f]{40}$" } },
+      required: ["requestId", "branch", "headSha"], additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!args || typeof args.requestId !== "string" || typeof args.branch !== "string" || typeof args.headSha !== "string" ||
+          Object.keys(args).some((key) => !["requestId", "branch", "headSha"].includes(key))) return errorResult("requestId, branch and headSha are required; creation acts only on your own campaign session");
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/temporary-branches`, args,
+        MERGE_DECISION_TIMEOUT_MS);
+      return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },
   {

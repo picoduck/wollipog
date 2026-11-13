@@ -671,6 +671,22 @@ export const TRANSCRIPT_SHARE_TERMINAL_RETENTION_PER_SESSION = 100;
 export const RUNNER_CREDENTIAL_REVOKED_HISTORY_LIMIT = 64;
 
 const SCHEMA = /* sql */ `
+CREATE TABLE IF NOT EXISTS temporary_branch_creations (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  repository TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  head_sha TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  default_branch TEXT,
+  default_head_sha TEXT,
+  state TEXT NOT NULL CHECK(state IN ('pending', 'created', 'unproven', 'retired')),
+  UNIQUE(session_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS temporary_branch_creations_member ON temporary_branch_creations(session_id, campaign_id);
+
 CREATE TABLE IF NOT EXISTS campaign_pauses (
   campaign_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
   payload TEXT NOT NULL
@@ -6319,6 +6335,44 @@ export class ControlPlaneDb {
   }
 
   private campaignWorkLedgerStore: CampaignWorkLedgerStore | null = null;
+
+  /** A durable before-dispatch fence. An interrupted creation is never replayed or inferred from
+   * a matching remote ref. Only this request's successful runner response records provenance. */
+  beginTemporaryBranchCreation(receipt: import("@wollipog/protocol").TemporaryBranchReceipt, requestId: string): boolean {
+    return this.atomic(() => {
+      const count = this.stmt("SELECT COUNT(*) AS n FROM temporary_branch_creations WHERE session_id = ?").get(receipt.sessionId) as { n: number };
+      if (count.n >= 64) return false;
+      return this.stmt(`INSERT OR IGNORE INTO temporary_branch_creations
+        (id,campaign_id,session_id,request_id,repository,branch,head_sha,created_at,state) VALUES (?,?,?,?,?,?,?,?,'pending')`)
+        .run(receipt.id, receipt.campaignId, receipt.sessionId, requestId, receipt.repository, receipt.branch, receipt.headSha, receipt.createdAt).changes === 1;
+    });
+  }
+
+  finishTemporaryBranchCreation(id: string, created: boolean, proof?: { defaultBranch: string; defaultHeadSha: string }): void {
+    this.stmt("UPDATE temporary_branch_creations SET state = ?, default_branch = ?, default_head_sha = ? WHERE id = ? AND state = 'pending'")
+      .run(created && proof ? "created" : "unproven", proof?.defaultBranch ?? null, proof?.defaultHeadSha ?? null, id);
+  }
+
+  retireTemporaryBranchReceipt(id: string): void {
+    this.stmt("UPDATE temporary_branch_creations SET state = 'retired' WHERE id = ? AND state = 'created'").run(id);
+  }
+
+  temporaryBranchCreation(sessionId: string, requestId: string): { receipt: import("@wollipog/protocol").TemporaryBranchReceipt; state: string } | null {
+    const row = this.stmt(`SELECT id,campaign_id AS campaignId,session_id AS sessionId,repository,branch,head_sha AS headSha,
+      created_at AS createdAt,default_branch AS defaultBranch,default_head_sha AS defaultHeadSha,state
+      FROM temporary_branch_creations WHERE session_id = ? AND request_id = ?`).get(sessionId, requestId) as
+      (import("@wollipog/protocol").TemporaryBranchReceipt & { state: string }) | undefined;
+    if (!row) return null;
+    const { state, ...receipt } = row;
+    return { receipt, state };
+  }
+
+  temporaryBranchReceipts(campaignId: string, sessionId: string): import("@wollipog/protocol").TemporaryBranchReceipt[] {
+    return this.stmt(`SELECT id,campaign_id AS campaignId,session_id AS sessionId,repository,branch,head_sha AS headSha,
+      created_at AS createdAt,default_branch AS defaultBranch,default_head_sha AS defaultHeadSha
+      FROM temporary_branch_creations WHERE campaign_id = ? AND session_id = ? AND state = 'created' LIMIT 64`)
+      .all(campaignId, sessionId) as unknown as import("@wollipog/protocol").TemporaryBranchReceipt[];
+  }
   private campaignRecoveryStore: CampaignRecoveryStore | null = null;
 
   get campaignRecovery(): CampaignRecoveryStore {
