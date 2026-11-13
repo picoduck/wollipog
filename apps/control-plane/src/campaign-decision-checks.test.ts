@@ -123,7 +123,7 @@ test("follow-up relatedness: an unrelated follow-up is refused back to the Orche
   } finally { h.db.close(); }
 });
 
-for (const scenario of ["owned failure", "missing check name", "workflow only", "another PR", "passed run", "cancelled run", "no evidence", "old runner", "wrong head", "unverified review", "read timeout", "unsafe payload"] as const) {
+for (const scenario of ["owned failure", "aggregator failure", "invalid aggregator", "old aggregator runner", "missing check name", "workflow only", "another PR", "passed run", "cancelled run", "no evidence", "old runner", "wrong head", "unverified review", "read timeout", "unsafe payload"] as const) {
   test(`follow-up relatedness: forge evidence ${scenario}`, async () => {
     const h = harness();
     try {
@@ -146,11 +146,14 @@ for (const scenario of ["owned failure", "missing check name", "workflow only", 
           if (scenario === "read timeout") throw new Error("request timed out");
           return { type: "campaign_issue_scope_result", requestId: id, sessionId: message.sessionId, ok: true, repository: "team/repo",
             ...(scenario === "passed run" || scenario === "cancelled run" ? {} : { failedRun: { ...message.evidence,
-              ...(scenario === "wrong head" ? { headSha: "b".repeat(40) } : {}), checkRunId: 456, checkName: "Broken Check" } }) };
+              ...(scenario === "wrong head" ? { headSha: "b".repeat(40) } : {}), checkRunId: 456, checkName: "Broken Check",
+              ...(["aggregator failure", "invalid aggregator", "old aggregator runner"].includes(scenario)
+                ? { requiredCheck: { checkRunId: scenario === "invalid aggregator" ? 0 : 789, checkName: "Required Summary" } } : {}) } }) };
         }
         return original(runner, id, message, timeout);
       };
       if (scenario === "old runner") h.db.raw().prepare("UPDATE runners SET protocol_version=350 WHERE runner_id='r'").run();
+      if (scenario === "old aggregator runner") h.db.raw().prepare("UPDATE runners SET protocol_version=377 WHERE runner_id='r'").run();
       const recommendation = recommend(h);
       const result = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: scenario, resourceKey: scenario,
         resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo",
@@ -164,11 +167,15 @@ for (const scenario of ["owned failure", "missing check name", "workflow only", 
         assert.equal(inspections, 0);
       } else {
         assert.ok(result.ok, result.error ?? "publication");
-        assert.equal(h.calls("follow_up_relatedness").length, scenario === "owned failure" ? 0 : 1);
+        const verified = scenario === "owned failure" || scenario === "aggregator failure";
+        assert.equal(h.calls("follow_up_relatedness").length, verified ? 0 : 1);
         const snapshot = result.data!.resourceSnapshot;
         assert.ok(snapshot.category === "follow_up_issue_publication");
         assert.equal(snapshot.issueAdmission?.relatedness?.basis, scenario === "old runner" ? undefined
-          : scenario === "owned failure" ? "failed_campaign_run" : "decision_model");
+          : verified ? "failed_campaign_run" : "decision_model");
+        if (scenario === "aggregator failure") assert.deepEqual(snapshot.issueAdmission?.relatedness,
+          { basis: "failed_campaign_run", repository: "team/repo", pullRequest: 10, headSha: "a".repeat(40), runId: 123,
+            jobId: 321, checkRunId: 456, checkName: "Broken Check", requiredCheck: { checkRunId: 789, checkName: "Required Summary" } });
         assert.ok(h.svc.resolveWorkflowDecision("root", "child", result.data!.occurrenceId, { outcome: "approve" },
           "orchestrator", { kind: "agent", id: "root" }, () => true).ok);
         const consumed = await h.svc.consumeWorkflowDecision("child", result.data!.occurrenceId, { resourceSnapshot: snapshot });

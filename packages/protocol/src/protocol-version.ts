@@ -1480,6 +1480,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // v376 slot
   // v377 slot
   // v378 slot
+  // 378: Record same-run failed required check evidence for campaign follow-ups (#4544).
+  378,
   // v379 slot
   // v380 slot
   // v381 slot

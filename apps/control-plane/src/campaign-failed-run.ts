@@ -44,7 +44,10 @@ export async function failedCampaignRun(db: ControlPlaneDb, hub: Hub, root: Sess
             operation: "failed_run_inspect", sessionId: root.id, requestId, evidence }, Math.min(5_000, remaining));
           if (result.type !== "campaign_issue_scope_result" || result.requestId !== requestId || result.sessionId !== root.id ||
               !result.ok || result.repository !== head.repository || !result.failedRun) continue;
-          const { checkRunId, checkName, ...bound } = result.failedRun;
+          const { checkRunId, checkName, requiredCheck, ...bound } = result.failedRun;
+          if (requiredCheck && (!runnerSupportsProtocol(db.getRunner(root.runnerId)?.protocolVersion, "campaignFailedRunRequiredCheck") ||
+              !Number.isSafeInteger(requiredCheck.checkRunId) || requiredCheck.checkRunId < 1 ||
+              typeof requiredCheck.checkName !== "string" || !requiredCheck.checkName.trim() || requiredCheck.checkName.length > 512)) continue;
           if (issueEvidenceDigest(bound) === issueEvidenceDigest(evidence) && Number.isSafeInteger(checkRunId) && checkRunId > 0 &&
               typeof checkName === "string" && checkName.trim() && checkName.length <= 512 && body.includes(checkName)) return result.failedRun;
         } catch { return null; /* A failed read retains the ordinary model check without more waits. */ }
