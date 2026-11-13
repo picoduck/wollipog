@@ -1989,6 +1989,82 @@ test("Stop and Archive leaves old runners pending and retries an undelivered arc
   }
 });
 
+for (const trigger of ["campaign_read", "maintenance"] as const) test(`Campaign Status reconciles refused external removal without retrying deletion: ${trigger}`, async () => {
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
+  try {
+    const child = spawn(parent.id, "Deliver work with refused cleanup");
+    const path = `/worktrees/${child}/original`;
+    const worktrees = [{ id: "original", path, branch: "fix/local-only", source: "created" as const }];
+    db.setWorktreePath(child, path);
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify(worktrees), child);
+    hub.requestHandler = message => {
+      assert.equal(message.type, "session_worktree");
+      assert.equal(message.operation, "discard");
+      return { type: "session_worktree_result", requestId: message.requestId, sessionId: child,
+        operation: "discard", ok: false, error: "worktree retained: the worktree has uncommitted changes" };
+    };
+    svc.onSessionStatus(child, "idle");
+    assert.ok(verify(child, report(child, "Delivered work")).ok);
+    svc.onSessionStatus(child, "stopped");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    db.updateSessionStatus(parent.id, "idle", Date.now());
+    assert.equal(db.campaignProjection(parent.id)?.cleanupWorktrees?.[0]?.status, "refused");
+    hub.sentToRunner.length = 0;
+    db.registerRunner(runnerMeta(), Date.now(), 373);
+    if (trigger === "maintenance") svc.retryDuePrompts(Date.now(), RUNNER_ID);
+    else svc.campaignProjection(parent.id);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(hub.sentOfType("session_worktree").length, 0, "old runners never receive the new operation or a deletion retry");
+
+    db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+    let externallyRemoved = false;
+    hub.requestHandler = message => {
+      assert.equal(message.type, "session_worktree");
+      assert.equal(message.operation, "reconcile_removal");
+      assert.equal(message.worktreeId, "original");
+      assert.equal(message.path, path);
+      assert.equal("requireDelivered" in message, false, "the refusal is not a discard retry");
+      return { type: "session_worktree_result", requestId: message.requestId, sessionId: child,
+        operation: "reconcile_removal", ok: true, snapshot: snapshot({ id: child, status: "stopped",
+          worktreePath: externallyRemoved ? null : path, worktrees: externallyRemoved ? [] : worktrees,
+          ...(externallyRemoved ? { worktreeRecovery: { recoveryId: "external-removal", selectedPath: path,
+            expectedBranch: "fix/local-only", detectedAt: Date.now(), detail: "Select a worktree before resuming." } } : {}),
+        }) };
+    };
+    if (trigger === "maintenance") svc.retryDuePrompts(Date.now() + 30_000, RUNNER_ID);
+    else svc.campaignProjection(parent.id);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(hub.sentOfType("session_worktree").length, 1);
+    // Existing campaign repair may wake the root while a surviving refusal remains. Finish that
+    // independent synthetic turn through its real receipt path before judging cleanup settlement.
+    const continuation = db.activeCampaignContinuation(parent.id);
+    if (continuation) {
+      const delivery = hub.sentOfType("durable_session_command").find(item => item.commandId === continuation.commandId)!;
+      assert.ok(delivery);
+      assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+        type: "durable_session_command_result", requestId: delivery.requestId, commandId: delivery.commandId,
+        sessionId: parent.id, state: "accepted", revision: 1, duplicate: false,
+      }), true);
+      assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+        type: "durable_session_command_update", commandId: delivery.commandId,
+        sessionId: parent.id, state: "completed", revision: 2,
+      }), true);
+    }
+    db.updateSessionStatus(parent.id, "idle", Date.now());
+    assert.equal(db.campaignProjection(parent.id)?.status, "complete_needs_cleanup", "a surviving checkout keeps its refusal");
+    svc.campaignProjection(parent.id);
+    assert.equal(hub.sentOfType("session_worktree").length, 1, "repeated reads are throttled");
+    externallyRemoved = true;
+    svc.reconcileArchivedCampaignWorktrees(RUNNER_ID);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(db.campaignWorktreeCleanup(child), []);
+    assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
+    assert.equal(db.getSession(child)?.worktreeRecovery?.selectedPath, path, "future resume still has recovery coordinates");
+  } finally {
+    db.close();
+  }
+});
+
 test("patch retirement candidates require this exact child's consumed campaign merge record", async () => {
   const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {

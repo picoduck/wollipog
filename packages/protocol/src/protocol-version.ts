@@ -1470,6 +1470,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   372,
   // v373 slot
   // v374 slot
+  // 374: Reconcile externally removed archived campaign worktrees without deleting files or refs (#4535).
+  374,
   // v375 slot
   // v376 slot
   // v377 slot

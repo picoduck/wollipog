@@ -321,6 +321,7 @@ import {
   discardWorktreeIfSafe,
   inspectWorktreeRetirement,
   worktreeIsAbsent,
+  worktreeExternalRemovalState,
   isLegacyWslSessionWorktreePath,
   registeredSessionWorktree,
   sessionWorktreeBranch,
@@ -5746,7 +5747,10 @@ export class SessionManager {
 
   /** Remove a completed cleanup generation from a still-live session without disturbing any
    * replacement identity. Safe cleanup replay and the initiating request share this path. */
-  private async forgetRemovedWorktree(record: WorktreeCleanupRecord): Promise<SessionSnapshot | undefined> {
+  private async forgetRemovedWorktree(
+    record: WorktreeCleanupRecord,
+    externalSelectionRecovery?: string,
+  ): Promise<SessionSnapshot | undefined> {
     const latest = this.store.readMeta(record.sessionId);
     if (!latest) return undefined;
     const removed = this.attributedWorktrees(latest).find((item) =>
@@ -5777,7 +5781,12 @@ export class SessionManager {
       worktreeProcessMarkers: Object.keys(worktreeProcessMarkers).length ? worktreeProcessMarkers : undefined,
       keptWorktreePaths: keptWorktreePaths?.length ? keptWorktreePaths : undefined,
       ...(removedActiveSelection
-        ? { worktreePath: null, worktreeBranch: undefined, lastTurnBaseTree: undefined }
+        ? { worktreePath: null, worktreeBranch: undefined, lastTurnBaseTree: undefined,
+            ...(externalSelectionRecovery ? { worktreeRecovery: {
+              recoveryId: `worktree-recovery:${randomUUID()}`, detectedAt: Date.now(),
+              selectedPath: record.worktreePath, expectedBranch: record.branch ?? "",
+              detail: externalSelectionRecovery,
+            } } : {}) }
         : {}),
     });
     if (!updated) return undefined;
@@ -5795,6 +5804,74 @@ export class SessionManager {
       setImmediate(() => this.scheduleDrain(record.sessionId));
     }
     return snapshot;
+  }
+
+  /** The control plane sends this only for a fully archived, verified child's refused cleanup.
+   * This ends inventory ownership, not a deletion attempt: private Git state and surviving files
+   * are never removed. Every pending cleanup generation remains owned by its existing replay. */
+  async reconcileCampaignWorktreeRemoval(
+    sessionId: string, path: string, worktreeId: string, requestId: string = randomUUID(),
+  ): Promise<{ snapshot: SessionSnapshot }> {
+    return this.runWorktreeOperation(sessionId, async () => {
+      const meta = this.store.readMeta(sessionId);
+      if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
+      const unchanged = () => ({ snapshot: this.snapshot(this.store.readMeta(sessionId) ?? meta) });
+      const worktree = this.attributedWorktrees(meta).find(item => item.id === worktreeId &&
+        sameWorktreePath(meta.context, item.path, path));
+      if (!worktree || worktree.source !== "created" || !["stopped", "completed", "failed"].includes(meta.status)) return unchanged();
+      const fenced = () => this.active.has(sessionId) || this.closing.has(sessionId) ||
+        this.launchingSelectionUsesPath(sessionId, meta, path) || this.liveWorktreeUsesPath(sessionId, path) ||
+        this.transitioningProviderUsesPath(sessionId, meta.context, path) ||
+        this.listedByAnotherSession(sessionId, meta.context, path) ||
+        this.cleanupJournal.list().some(record => record.sessionId === sessionId && record.worktreeId === worktreeId);
+      if (fenced()) return unchanged();
+      const leaseOwner = `${this.lockOwner}:external:${randomUUID()}`;
+      if (!this.store.acquireWorktreeLease(sessionId, leaseOwner)) return unchanged();
+      try {
+        const state = await worktreeExternalRemovalState(meta.repoPath, path, { context: meta.context });
+        if (!state || fenced()) return unchanged();
+        const record = this.cleanupRecordForWorktree(meta, worktree, "external_removal", "safe");
+        await this.retireWorktreeProcesses(sessionId, meta.context, path, record.processMarker);
+        if (fenced() || state !== await worktreeExternalRemovalState(meta.repoPath, path, { context: meta.context })) return unchanged();
+        const latest = this.store.readMeta(sessionId);
+        if (!latest || latest.repoPath !== meta.repoPath || latest.status !== meta.status ||
+            agentContextKey(latest.context) !== agentContextKey(meta.context) || latest.worktreePath !== meta.worktreePath ||
+            latest.worktreeBranch !== meta.worktreeBranch || !latest.worktrees?.some(item =>
+              item.id === worktreeId && item.source === "created" && item.branch === worktree.branch &&
+              sameWorktreePath(latest.context, item.path, path))) return unchanged();
+        if (state === "missing") record.worktreeRemovedAt = Date.now();
+        // Hooks cannot run in an unverified checkout. Preserve their audit rather than falling
+        // back to the primary checkout or executing code in the unregistered directory.
+        this.recordExternalRemovalTeardown(record);
+        const detail = "The selected worktree was removed externally and its cleanup inventory was retired. " +
+          "Files, branch refs and Git administrative records were kept. Select a worktree before resuming this session.";
+        const snapshot = await this.forgetRemovedWorktree(record, detail);
+        if (snapshot) {
+          this.finishWorktreeCleanup(record);
+          this.log(JSON.stringify({ event: "campaign_worktree_external_removal_reconciled", requestId,
+            sessionId: boundedSessionIdForLog(sessionId), state, filesAndRefsRetained: true,
+            selectionRecovery: snapshot.worktreeRecovery !== undefined }));
+        }
+        return snapshot ? { snapshot } : unchanged();
+      } finally {
+        this.store.releaseWorktreeLease(sessionId, leaseOwner);
+      }
+    });
+  }
+
+  private recordExternalRemovalTeardown(record: WorktreeCleanupRecord): void {
+    if (!record.hooks?.teardown.length || record.teardown?.completedAt) return;
+    const now = Date.now();
+    record.teardown = {
+      status: "completed_with_failures", configHash: record.hooks.configHash,
+      attemptId: randomUUID(), startedAt: now, completedAt: now,
+      steps: record.hooks.teardown.map(step => ({
+        name: step.name, optional: step.optional, status: "failed", startedAt: now,
+        durationMs: 0, error: "The worktree was removed externally; teardown cannot run in its unverified directory.",
+        stdout: "", stderr: "",
+      })),
+    };
+    this.log(`external worktree removal for ${boundedSessionIdForLog(record.sessionId)} left teardown hooks unrun; see cleanup history`);
   }
 
   /** Only the control plane's human-only Campaign Status routes send these operations. Ordinary
@@ -6011,19 +6088,7 @@ export class SessionManager {
         record.worktreeRemovedAt = Date.now();
         // The approved hook's cwd no longer exists. Never run repository code in the primary
         // checkout as a fallback; record the unreleased external resources as teardown failures.
-        if (record.hooks?.teardown.length && !record.teardown?.completedAt) {
-          const now = Date.now();
-          record.teardown = {
-            status: "completed_with_failures", configHash: record.hooks.configHash,
-            attemptId: randomUUID(), startedAt: now, completedAt: now,
-            steps: record.hooks.teardown.map((step) => ({
-              name: step.name, optional: step.optional, status: "failed", startedAt: now,
-              durationMs: 0, error: "The worktree was removed externally; teardown cannot run in its missing directory.",
-              stdout: "", stderr: "",
-            })),
-          };
-          this.log(`external worktree removal for ${boundedSessionIdForLog(meta.sessionId)} left teardown hooks unrun; see cleanup history`);
-        }
+        this.recordExternalRemovalTeardown(record);
         if (await this.forgetRemovedWorktree(record)) this.finishWorktreeCleanup(record);
       } finally {
         this.store.releaseWorktreeLease(meta.sessionId, leaseOwner);
@@ -8075,11 +8140,14 @@ export class SessionManager {
       return false;
     }
     let remapBlocked = false;
+    let removedSelectionRecovery: string | undefined;
     if (this.store.has(spec.sessionId)) {
       await this.runWorktreeOperation(spec.sessionId, async () => {
         if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return;
+        const latest = this.store.readMeta(spec.sessionId);
+        removedSelectionRecovery = !latest?.worktreePath ? latest?.worktreeRecovery?.detail : undefined;
         remapBlocked = this.runnerOwnedWorktreeBlocksWorkspaceRemap(
-          this.store.readMeta(spec.sessionId),
+          latest,
           repoPath,
           context,
         );
@@ -8092,6 +8160,11 @@ export class SessionManager {
           : "session launch was canceled before provider startup",
         "COMMAND_CANCELLED",
       );
+      return false;
+    }
+    if (removedSelectionRecovery) {
+      this.emitStatus(spec.sessionId, "input_required", removedSelectionRecovery);
+      durable?.failed(removedSelectionRecovery, "WORKTREE_RECOVERY_REQUIRED");
       return false;
     }
     if (remapBlocked) {
@@ -8353,6 +8426,10 @@ export class SessionManager {
       // restart row is written. Merge that exact identity rather than recreating stale launch state.
       const latest = this.store.readMeta(spec.sessionId);
       if (latest) {
+        if (!latest.worktreePath && latest.worktreeRecovery) {
+          removedSelectionRecovery = latest.worktreeRecovery.detail;
+          return;
+        }
         if (this.runnerOwnedWorktreeBlocksWorkspaceRemap(latest, repoPath, context)) {
           remapBlocked = true;
           return;
@@ -8453,6 +8530,12 @@ export class SessionManager {
       if (!priorResumeId) this.releaseSupersededResumeLock(spec.sessionId, launchGeneration);
       this.refreshCapacityInventorySession(spec.sessionId);
     });
+    if (removedSelectionRecovery) {
+      if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
+      this.emitStatus(spec.sessionId, "input_required", removedSelectionRecovery);
+      durable?.failed(removedSelectionRecovery, "WORKTREE_RECOVERY_REQUIRED");
+      return false;
+    }
     if (managedPiCleanupError) {
       if (this.launchIsCurrent(spec.sessionId, launchGeneration)) {
         this.emitEvent(spec.sessionId, { kind: "error", message: managedPiCleanupError });
@@ -10084,7 +10167,7 @@ export class SessionManager {
    * and that window is far shorter than the gap between proving a root and using it. Failures are
    * never memoized, so a repaired worktree recovers on the next request. */
   async sessionWorktreeRootFailure(meta: SessionMeta): Promise<string | null> {
-    if (!meta.worktreePath) return null;
+    if (!meta.worktreePath) return meta.worktreeRecovery?.detail ?? null;
     const identity = `${meta.worktreePath}\u0000${meta.worktreeBranch ?? ""}`;
     const proven = this.verifiedWorktreeRoots.get(meta.sessionId);
     if (proven?.identity === identity && Date.now() - proven.at < VERIFIED_WORKTREE_ROOT_MS) return null;
@@ -10328,6 +10411,11 @@ export class SessionManager {
       // Every launch path crosses here, so a session persisted on the retired exec driver (#3259)
       // fails before any provider, lease, or worktree work.
       if (isRetiredCodexExec(meta)) throw new Error(CODEX_EXEC_RETIRED_REASON);
+      if (!meta.worktreePath && meta.worktreeRecovery) {
+        this.worktreeVerificationRefusals.set(sessionId, launchGeneration);
+        this.emitStatus(sessionId, "input_required", meta.worktreeRecovery.detail);
+        return false;
+      }
       // Every launch that carries a persisted worktree re-proves it here, immediately before any
       // discovery, isolation binding, lease, or provider process exists. start() validates its own
       // prior selection earlier, and worktree rebind validates the replacement it is about to

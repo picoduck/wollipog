@@ -628,6 +628,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   archiveWorktreeRetirement: 193,
   worktreePatchDelivery: 370,
   campaignWorktreeConfirmation: 372,
+  campaignWorktreeRemovalReconciliation: 374,
   progressAwareSessionWorktrees: 113,
   /** v161 carries durable worktree-recovery state and its exact not-delivered receipt. */
   worktreeRecovery: 161,
@@ -11416,6 +11417,8 @@ export type SessionWorktreeRequestMessage =
       campaignDeliveredPullRequests?: Array<{ repository: string; number: number; headSha: string }> }
   /** Sent only by the authenticated-person Campaign Status routes. No agent operation maps here. */
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "inspect_retirement"; path: string }
+  /** Control-plane-only reconciliation of a fully archived, verified child's refused generation. */
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "reconcile_removal"; path: string; worktreeId: string }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "confirm_retirement";
       state: CampaignWorktreeRetirementState; confirmedBy: { userId: string; at: number } }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "generate_setup" }
@@ -11555,7 +11558,7 @@ export interface SessionWorktreeResultMessage {
   requestId: string;
   /** Protocol v113+: exact request coordinates echoed for cross-operation correlation. */
   sessionId?: string;
-  operation?: "create" | "attach" | "select" | "discard" | "retry_setup" | "generate_setup" | "delete_refs" | "inspect_retirement" | "confirm_retirement";
+  operation?: "create" | "attach" | "select" | "discard" | "retry_setup" | "generate_setup" | "delete_refs" | "inspect_retirement" | "confirm_retirement" | "reconcile_removal";
   retirementState?: CampaignWorktreeRetirementState;
   ok: boolean;
   error?: string;
