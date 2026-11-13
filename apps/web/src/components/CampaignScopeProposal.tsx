@@ -41,6 +41,7 @@ function checkedBy(proposal: CampaignScopeProposal): string {
       : "Deterministic checks only. It named only issues your message references, so no model was asked.";
   }
   switch (proposal.ownerCause) {
+    case "issue_ceiling_exceeded": return "The Decision Model confirmed the proposal against your message, but the matching issues exceed Maximum Issues, so it needs your approval.";
     case "proposal_unstructured": return "Deterministic checks, then your approval: the Orchestrator's machine can't send a structured proposal.";
     case "repository_name_unresolved": return "Deterministic checks, then your approval: a repository your message names matches nothing or several, so no repository limit applies and no model was asked.";
     case "constraint_check_uncertain": return `Deterministic checks, then the Decision Model couldn't confirm ${list}, so it needs your approval.`;

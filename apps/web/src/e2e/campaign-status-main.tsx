@@ -789,9 +789,22 @@ const ownerScopeRoutes = {
       ] } } },
 };
 const ownerScopeParam = params.get("ownerScope");
+const allScope = { ...ownerScopeRoutes.proposal,
+  summary: "Add team/repo#151, team/repo#152, raising Maximum Issues from 1 to 2",
+  derivedIncrease: { from: 1, increase: 1 },
+  snapshot: {
+  ...ownerScopeRoutes.proposal.snapshot,
+  before: [],
+  ownerReview: { cause: "lineage_missing" as const, maxIssuesIncrease: { from: 1, increase: 1 } },
+  scopeProposal: { ...ownerScopeRoutes.proposal.snapshot.scopeProposal,
+    requestedCount: "all" as const, ownerCause: "issue_ceiling_exceeded" as const,
+    ownerMessage: "Fix all open UI issues.",
+    constraintCheck: { occurrenceId: "dec_scope_151", verdict: "admit" as const },
+  },
+} };
 const ownerScopeChosen: Array<{ occurrenceId: string; summary: string; derivedIncrease?: { from: number; increase: number };
   snapshot: import("@wollipog/protocol").CampaignIssueScopeSnapshot }> = ownerScopeParam === "1" ? [ownerScopeRoutes.owner] : ownerScopeParam === "grant" ? [ownerScopeRoutes.grant]
-  : ownerScopeParam === "proposal" ? [ownerScopeRoutes.proposal]
+  : ownerScopeParam === "all" ? [allScope] : ownerScopeParam === "proposal" ? [ownerScopeRoutes.proposal]
     : ownerScopeParam === "routed" ? [ownerScopeRoutes.owner, ownerScopeRoutes.grant, ownerScopeRoutes.proposal] : [];
 const ownerScopeCards: import("@wollipog/protocol").PendingApproval[] = ownerScopeChosen.map(({ occurrenceId, snapshot, derivedIncrease }, index) => ({
   ...(derivedIncrease ? { scopeMaxIssuesIncrease: derivedIncrease } : {}),
@@ -839,6 +852,18 @@ function sessionsFor(rev: number): SessionView[] {
     ...(ownerCard ? { pendingApproval: ownerCard } : {}),
     ...(selectionCard ? { pendingApproval: selectionCard } : {}),
     ...(ownerScopeCards.length && rev === 1 ? { pendingApproval: { ...ownerScopeCards[0]!, ...(ownerScopeCards.length > 1 ? { additionalRequests: ownerScopeCards.slice(1) } : {}) } } : {}) });
+  if (params.get("runnerRecovery") === "1") {
+    root.title = "Orchestrator Recovery";
+    root.status = "input_required";
+    root.pendingApproval = { requestId: "runner-recovery:fixture", kind: "runner_recovery",
+      title: "Relaunch Orchestrator After Runner Restart",
+      options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }] };
+    root.orchestratorCampaign = { ...root.orchestratorCampaign!, status: "waiting_human",
+      pendingRequests: { human: 1, orchestrator: 0 }, ownerDecisions: { total: 1, items: [{
+        occurrenceId: "runner-recovery:fixture", sessionId: "s_root", category: "runner_recovery",
+        summary: "Relaunch Orchestrator After Runner Restart", handedOff: false, createdAt: NOW,
+      }] } };
+  }
   const child = baseSession({
     id: "s_child", title: "#2417 Slice 7: Campaign Status Panel", parentSessionId: "s_root",
     ...(scenario === "legacy" ? {} : { campaignMembership: { campaignSessionId: "s_root", currentWorkItemId: "cwi_2", currentAttemptId: "catt_2" } }),
@@ -875,7 +900,12 @@ const ownerRequests = (owners: "before" | "after" | "rule"): DescendantRequestVi
 };
 
 /** The request the blocked item's recorded blocker names, pending on its child. */
-const descendantRequests: DescendantRequestView[] = epicTracking || ownerScopeCards.length ? [] : ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
+const descendantRequests: DescendantRequestView[] = params.get("runnerRecovery") === "1" ? [{
+  sessionId: "s_root", sessionTitle: "Orchestrator Recovery", runnerId: "runner-1", runnerOnline: true,
+  eventEpoch: 1, createdAt: NOW, responseOwner: "human", occurrenceId: "runner-recovery:fixture",
+  request: { requestId: "runner-recovery:fixture", kind: "runner_recovery", title: "Relaunch Orchestrator After Runner Restart",
+    options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }] },
+}] : epicTracking || ownerScopeCards.length ? [] : ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
   sessionId: "s_child_3",
   sessionTitle: "#2417 Slice 5: Read API",
   runnerId: "runner-1",
@@ -938,9 +968,9 @@ let scopeGrantFixture: import("@wollipog/protocol").FullControlScopeGrant | null
 } : params.get("scope") === "proposal-repositories" ? {
   // A boundary of two repositories (#4118).
   version: 1, status: "proposal", namedIssues: [], ceilings: { ...launchCeilings(9), repositories: ["team/repo", "team/api"] },
-} : params.get("scope") === "proposal" || params.get("scope") === "proposal-waiting" ? {
+} : params.get("scope") === "all" || params.get("scope") === "proposal" || params.get("scope") === "proposal-waiting" ? {
   // The Orchestrator proposes the scope (#4282): the server read nothing from the message.
-  version: 1, status: "proposal", namedIssues: [], ceilings: launchCeilings(9),
+  version: 1, status: "proposal", namedIssues: [], ceilings: launchCeilings(params.get("scope") === "all" ? 1 : 9),
 } : params.get("scope") === "grant-uncertain" ? {
   version: 1, status: "uncertain", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET, namedIssues: [],
   reason: "The message doesn't say whether #12 is a request or background.", ceilings: launchCeilings(1),
@@ -1184,6 +1214,10 @@ const client = {
       ...(params.get("scope") === "grant" ? { contextIssueNumbers: [126] } : {}), scopeGrant: scopeGrantFixture, policyRevision: revision } : {}),
     // The Orchestrator's proposals (#4282): one waiting for the owner, after an earlier one it replaced.
     ...(params.get("scope") === "proposal" ? { issueNumbers: [], scopeProposals: SCOPE_PROPOSALS } : {}),
+    ...(params.get("scope") === "all" ? { issueNumbers: [], scopeProposals: [{
+      occurrenceId: "wd_scope_151", createdAt: NOW - MINUTE, outcome: "waiting_for_owner" as const,
+      explanation: allScope.snapshot.explanation, proposal: allScope.snapshot.scopeProposal,
+    }] } : {}),
     ...(params.get("scope") === "proposal-waiting" ? { issueNumbers: [], scopeProposals: [] } : {}),
     ...(params.get("scope") === "proposal-repositories" ? { issueNumbers: [], scopeProposals: SCOPE_PROPOSALS_ACROSS_REPOSITORIES, repositories: [
       { repository: "team/repo", issueNumbers: [], state: "verified" as const }, { repository: "team/api", issueNumbers: [], state: "verified" as const }] } : {}),

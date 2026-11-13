@@ -14,6 +14,15 @@ import { SCOPE_CHECKS_PER_ADDITIONS, scopeCheckAdditionsPrefix, scopeCheckInputs
   scopeProposalChosenLimit } from "./scope-check.js";
 
 const REPO = "owner/repo";
+
+test("all uses the hard ceiling, and a later addition cannot replace its admitted count (#4532)", () => {
+  assert.equal(scopeProposalChosenLimit({ requestedCount: "all" }), 100);
+  assert.equal(scopeProposalChosenLimit({ requestedCount: "all" }, undefined, 7), 7);
+  assert.equal(scopeProposalChosenLimit({ requestedCount: "all" }, {
+    admittedAt: 1, occurrenceId: "admitted-all", requestedCount: 7, constraints: [], withheldOperations: [],
+  }, 100), 7);
+  assert.equal(scopeProposalChosenLimit({ requestedCount: null }), 3);
+});
 const MESSAGE = "Fix the 3 most important UI bugs, skip anything labeled security.";
 
 const proposal = (overrides: Partial<CampaignScopeProposal> = {}): CampaignScopeProposal => ({

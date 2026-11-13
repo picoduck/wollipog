@@ -323,9 +323,9 @@ export const SCOPE_CHECK_TYPED: TypedDecisionDefinition = {
   questions: [
     { questionId: "count_consistent", label: "Count Matches Your Message",
       text: "Does the proposal's count agree with the owner's message? `proposal.requestedCount` is the number of issues the agent " +
-        "read in the message (null when it read none) and `proposal.issues` are the issues it adds; `campaign` gives the count already " +
+        "read in the message (null when it read none, or `all` for every issue matching the stated constraints) and `proposal.issues` are the issues it adds; `campaign` gives the count already " +
         "admitted and the issues already in scope, if any. Answer `consistent` when the message states that count, or states none and " +
-        "the agent read none; `inconsistent` when the message states a different count, or a count the agent ignored.",
+        "the agent read none. For `all`, confirm the owner asks for all/every matching issue, not just all steps, all tests, or a quoted example; numerical limits still bind. `inconsistent` when the message states a different count, or a count the agent ignored.",
       answer: { type: "choice", values: ["consistent", "inconsistent", "cannot_tell"], satisfied: ["consistent"], violated: ["inconsistent"] } },
     { questionId: "named_asked_for", label: "Asked For", parameterized: true,
       text: "The agent says the owner named the issue quoted below. Does the owner's message ask the campaign to work on it, rather " +

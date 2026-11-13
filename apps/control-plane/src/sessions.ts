@@ -7094,6 +7094,9 @@ export class SessionsService {
     // (#2940); nothing an agent or automation sends may reach it first.
     const firstMessageRefusal = this.firstMessageFence(sessionId, session);
     if (firstMessageRefusal) return fail(firstMessageRefusal, 409);
+    if (pendingRequests(session.pendingApproval).some((request) => request.kind === "runner_recovery")) {
+      return fail("relaunch this Orchestrator from its recovery action before sending messages", 409);
+    }
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     if (this.db.delegatedImageReviews.isReviewer(sessionId)) return fail(DELEGATED_IMAGE_REVIEWER_ERROR, 409);
     // An older runner would still resume a persisted exec session for this turn (#3259).
@@ -13694,7 +13697,8 @@ export class SessionsService {
     const requested = scopeSize + reservedPublicationSlots(this.db, latest);
     const limit = this.db.campaignIssueLimit(sessionId,
       proposalMaxIssues(latest.orchestratorPolicy, { scopeProposal: record }, latestBoundary, scopeSize) ?? latestBoundary.issueAuthority.maxIssues);
-    if (requested > limit) return refuse("capacity_exhausted", { limit, requested });
+    const allOverCeiling = structured && base.requestedCount === "all" && requested > limit && requested <= 100;
+    if (requested > limit && !allOverCeiling) return refuse("capacity_exhausted", { limit, requested });
     // Floor 6: no Human Required issue label rule.
     if (facts) {
       const policies = this.db.listGovernancePolicies();
@@ -13708,7 +13712,10 @@ export class SessionsService {
       organizationId: this.db.sessionScope(sessionId)?.organizationId, runnerId, workspaceId, agentId: latest.agentId ?? undefined }, fact.labels) !== null);
     if (otherLabeled) return refuse("human_required_label", issueDetails({ repository: otherLabeled.repository, number: otherLabeled.fact.number }));
     // Floor 7: a count the Orchestrator read is one the owner's message writes, as digits or a word.
-    if (structured && base.requestedCount !== null && !writtenAsCount(ownerMessage, base.requestedCount)) {
+    if (structured && base.requestedCount === "all" && !/\b(?:all|every)\b/iu.test(ownerMessage)) {
+      return refuse("requested_all_not_in_message");
+    }
+    if (structured && typeof base.requestedCount === "number" && !writtenAsCount(ownerMessage, base.requestedCount)) {
       return refuse("requested_count_not_in_message", { requested: base.requestedCount });
     }
     // Floor 8: the issues the Orchestrator chose stay within the count the owner stated, the admitted
@@ -13717,8 +13724,8 @@ export class SessionsService {
     // removed (so removing never frees room), and re-adding one of them takes no second slot.
     const chosenCount = new Set([...base.issues.filter((issue) => issue.origin === "orchestrator_chosen").map(issueKey),
       ...(first.initialScope ? this.db.appliedProposalChosenIssues(sessionId) : [])]).size;
-    const chosenLimit = scopeProposalChosenLimit(base, first.initialScope);
-    if (structured && chosenCount > chosenLimit) return refuse("proposal_count_exceeded", { limit: chosenLimit, requested: chosenCount });
+    const chosenLimit = scopeProposalChosenLimit(base, first.initialScope, first.derivedLimits?.maxIssues ? 100 : latestBoundary.issueAuthority.maxIssues);
+    if (structured && chosenCount > chosenLimit && !allOverCeiling) return refuse("proposal_count_exceeded", { limit: chosenLimit, requested: chosenCount });
     const scopeRequest: CampaignIssueScopeRequest = { requestId: request.requestId, expectedRevision: request.expectedRevision,
       additions: request.additions, removals: [], explanation: request.explanation };
     /** An Orchestrator-owned change bound to this exact proposal and the evidence that admitted it. */
@@ -13744,7 +13751,8 @@ export class SessionsService {
     const ownerApproval = (owned: CampaignScopeProposal): ServiceResult<WorkflowDecisionView> => {
       const pending = pendingOwnerApproval();
       if (pending) return ok(pending);
-      const snapshot = scopeSnapshot(this.db, latest, repository, scopeRequest, { scopeProposal: owned });
+      const snapshot = scopeSnapshot(this.db, latest, repository, scopeRequest, { scopeProposal: owned,
+        ...(allOverCeiling ? { ownerReview: { cause: "lineage_missing", maxIssuesIncrease: { from: latestBoundary.issueAuthority!.maxIssues, increase: requested - limit } } } : {}) });
       if (!snapshot) return malformed();
       // The owner's approval re-authorizes the boundary, so it lists and revokes every outstanding decision (#3915).
       snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId);
@@ -13803,6 +13811,7 @@ export class SessionsService {
       const existing = this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => d.sessionId === sessionId &&
         d.resourceSnapshot.category === "campaign_issue_scope" && d.resourceSnapshot.scopeProposal?.constraintCheck?.occurrenceId === occurrence.occurrenceId);
       if (existing) return ok(existing);
+      if (allOverCeiling) return ownerApproval(ownerRecord("issue_ceiling_exceeded", constraintCheck("admit")));
       return admit({ ...base, constraintCheck: constraintCheck("admit") }, { kind: "scope_proposal_check", occurrenceId: occurrence.occurrenceId });
     }
     // Uncertain, or failed after the runtime's retries: exactly one owner approval. Nothing is parsed.
@@ -16013,7 +16022,8 @@ export class SessionsService {
         ...(snapshot.lineage === undefined ? {} : { lineage: snapshot.lineage }) };
       const scopeSize = campaignScopeChangeResult(snapshot).length;
       const latest = scopeSnapshot(this.db, currentChild, snapshot.repository, request, snapshot.scopeProposal
-        ? { scopeProposal: snapshot.scopeProposal, ...(snapshot.issueAdmission ? { issueAdmission: snapshot.issueAdmission } : {}) } : {});
+        ? { scopeProposal: snapshot.scopeProposal, ...(snapshot.issueAdmission ? { issueAdmission: snapshot.issueAdmission } : {}),
+          ...(snapshot.ownerReview ? { ownerReview: snapshot.ownerReview } : {}) } : {});
       if (latest && snapshot.issueAdmission) latest.issueAdmission = snapshot.issueAdmission;
       if (latest && snapshot.verifiedPublications) latest.verifiedPublications = snapshot.verifiedPublications;
       if (latest && snapshot.grantReview) latest.grantReview = snapshot.grantReview;
@@ -19423,6 +19433,9 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (pendingRequests(session.pendingApproval).some((request) => request.kind === "runner_recovery")) {
+      return fail("relaunch this Orchestrator from its recovery action before answering provider questions", 409);
+    }
     // An Owner Question (#4270) is presented as a question but is the owner's workflow decision: the
     // control plane resolves it, and no runner is asked.
     const ownerQuestionCard = pendingRequests(session.pendingApproval)
@@ -19662,6 +19675,20 @@ export class SessionsService {
     if (!pending) return fail("no pending approval for this session", 409);
     if (pending.requestId !== requestId) return fail("approval request id does not match the pending one", 409);
     if (pending.expiresAt != null && pending.expiresAt <= now) return fail("approval request has expired", 409);
+    // This is a runner recovery action, never a provider tool permission. The old root's
+    // credential and delegated Parent Control cannot authorize its own relaunch.
+    if (pending.kind === "runner_recovery") {
+      if (actor.kind !== "human" || resolvedByParentSessionId || !canAccess(sessionId)) {
+        return fail("only the session owner can relaunch this Orchestrator", 403);
+      }
+      if (optionId !== "relaunch") return fail("choose Relaunch Orchestrator to recover this session", 409);
+      const restarted = this.restart(sessionId);
+      if (restarted.ok) {
+        this.recordGovernanceAudit(session, pending, "resolution", "allowed", actor, now, { optionId });
+        this.prompt(sessionId, "[Wollipog Runner Recovery] The owner relaunched this Orchestrator after its runner restarted. The new launch refreshes its credential and guard. Read the campaign and descendant requests, reconcile any uncertain outcomes before retrying, and continue the pending work within its existing authority.");
+      }
+      return restarted;
+    }
     if (pending.kind !== "workflow_decision" && actor.kind === "human" &&
         !pending.options.some((option) => option.optionId === optionId && option.kind?.startsWith("reject"))) {
       const hold = this.credentialScreenHold(session, pending);

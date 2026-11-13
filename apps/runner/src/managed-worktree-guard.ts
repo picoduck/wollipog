@@ -190,7 +190,7 @@ export function managedWorktreeGuardDecision(
   } catch (error) {
     return {
       kind: "block",
-      reason: `managed worktree guard could not load this session's protected worktrees: ${(error as Error).message}`,
+      reason: `managed worktree guard could not load this session's protected worktrees: ${(error as Error).message}. If the runner restarted, use the session's relaunch recovery action in Wollipog or have its owner restart it from the session controls`,
     };
   }
   const toolName = payload.tool_name;
@@ -514,7 +514,7 @@ export async function runManagedWorktreeGuardCli(
         const message = name ? (error as Error).message.split(name).join("<verdict socket>") : (error as Error).message;
         outcome = {
           stdout: "",
-          stderr: `Wollipog could not inspect this tool call (managed worktree guard could not get a verdict from the runner: ${message}), so it was not run.\n`,
+          stderr: `Wollipog could not inspect this tool call (managed worktree guard could not get a verdict from the runner: ${message}), so it was not run. If the runner restarted, use the session's relaunch recovery action in Wollipog; the session owner can also restart it from the session controls.\n`,
           exitCode: 2,
         };
       }

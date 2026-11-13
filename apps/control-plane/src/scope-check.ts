@@ -171,9 +171,9 @@ export function scopeCheckKey(rootId: string, boundaryRevision: number, revision
 /** The count a proposal's chosen issues may not exceed (#4282, as #4102). A later addition is bound
  * by the admitted count, never by its own; an initial proposal by the count it read, which a floor
  * proves the message writes and the check confirms; with none, the default selection of 3. */
-export function scopeProposalChosenLimit(proposal: Pick<CampaignScopeProposal, "requestedCount">, admitted?: FullControlInitialScope): number {
+export function scopeProposalChosenLimit(proposal: Pick<CampaignScopeProposal, "requestedCount">, admitted?: FullControlInitialScope, ceiling = 100): number {
   if (admitted) return admitted.requestedCount ?? SCOPE_GRANT_DEFAULT_SELECTION_COUNT;
-  return proposal.requestedCount ?? SCOPE_GRANT_DEFAULT_SELECTION_COUNT;
+  return proposal.requestedCount === "all" ? ceiling : proposal.requestedCount ?? SCOPE_GRANT_DEFAULT_SELECTION_COUNT;
 }
 
 /** A check's occurrence as Campaign Status shows it. */

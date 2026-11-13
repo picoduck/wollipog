@@ -6922,8 +6922,33 @@ export class SessionManager {
     return { requests: [...requests.values()], verified: true };
   }
 
-  /** On startup, demote sessions left mid-flight (their agent process is gone) to `idle` so the
-   * snapshots we report are honest — they remain resumable. */
+  private readonly runnerRestartCandidates = new Map<string, string | undefined>();
+
+  /** Registration supplies authoritative root identity and negotiated support before any card is
+   * published. A transport reconnect cannot mark a provider this manager already owns. */
+  reconcileRunnerRestartRecovery(rootSessionIds?: readonly string[]): void {
+    if (!Array.isArray(rootSessionIds) || rootSessionIds.some((id) => typeof id !== "string") ||
+        !runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "runnerRestartRecovery")) return;
+    const roots = new Set(rootSessionIds);
+    for (const [sessionId, existing] of this.runnerRestartCandidates) {
+      const current = this.store.readMeta(sessionId);
+      if (!roots.has(sessionId) || !current || this.active.has(sessionId) ||
+          ["completed", "failed", "stopped"].includes(current.status)) continue;
+      const request = {
+        requestId: existing ?? `runner-recovery:${randomUUID()}`, kind: "runner_recovery" as const,
+        title: "Relaunch Orchestrator After Runner Restart",
+        options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }],
+      };
+      this.store.patchMeta(sessionId, { status: "input_required", runnerRestartRecoveryRequestId: request.requestId,
+        pendingApproval: addPendingRequest(current.pendingApproval, request) });
+      if (!existing) this.log(JSON.stringify({ event: "runner_restart_recovery_required",
+        entryPoint: "startup_reconciliation", sessionId, requestId: request.requestId }));
+    }
+    this.runnerRestartCandidates.clear();
+  }
+
+  /** On startup, no previous provider is attached to this manager. Demote sessions left mid-flight
+   * and explicitly surface native Orchestrators whose loaded runtime bindings need replacement. */
   reconcileStore(): void {
     const pendingWorktreeCleanup = this.cleanupJournal.list();
     const currentCheckpointOwnershipKeys = new Set<string>();
@@ -6940,6 +6965,14 @@ export class SessionManager {
           this.log(`startup deletion reconciliation failed for ${m.sessionId}: ${errText(error)}`);
         });
         continue;
+      }
+      // Preserve the discriminator before startup clears the peer-facing pending card. This also
+      // migrates cards written before the discriminator existed, without a crash window between
+      // removing the card and saving its identity.
+      const restartRecoveryRequestId = pendingRequests(m.pendingApproval)
+        .find((request) => request.kind === "runner_recovery")?.requestId ?? m.runnerRestartRecoveryRequestId;
+      if (restartRecoveryRequestId && m.runnerRestartRecoveryRequestId !== restartRecoveryRequestId) {
+        this.store.patchMeta(m.sessionId, { runnerRestartRecoveryRequestId: restartRecoveryRequestId });
       }
       // The durable row's repository/context binding owns its checkpoint refs even while a live
       // session is between worktrees (for example, after interrupted or failed materialization).
@@ -7163,6 +7196,13 @@ export class SessionManager {
           reconciled.status === "queued" || reconciled.status === "input_required") {
         // The process that owned any other pending approval is gone — clear the stale card too.
         this.store.patchMeta(m.sessionId, { status: "idle", pendingApproval: null });
+      }
+      // Native providers can outlive their runner. Their loaded guard and credential bindings
+      // cannot be adopted by this process. Preserve one owner action instead of advertising a
+      // live root whose tools all refuse. Children retain recovery through their Orchestrator.
+      if (isOrchestratorLaunch(m) && m.context.kind === "native" && !m.review &&
+          !terminal && m.command && !m.providerAuthBlock && !m.providerHistoryBlock && !m.worktreeRecovery) {
+        this.runnerRestartCandidates.set(m.sessionId, restartRecoveryRequestId);
       }
       // A crash mid-worktree-setup leaves the pending flag stranded; nothing will resolve it
       // until a restart re-runs start(), so clear it rather than blocking Files/shells forever.
@@ -7604,6 +7644,36 @@ export class SessionManager {
     durable?: DurableCommandLifecycle,
     onMaterialized?: (ready: boolean) => void,
   ): Promise<boolean> {
+    const recovery = pendingRequests(this.store.readMeta(spec.sessionId)?.pendingApproval)
+      .find((request) => request.kind === "runner_recovery");
+    const previousGeneration = this.latestLaunchGenerations.get(spec.sessionId);
+    let recoveryGeneration: number | undefined;
+    let started = false;
+    try {
+      return started = await this.startAttempt(spec, initialPrompt, initialImages, durable, onMaterialized,
+        (generation) => { recoveryGeneration = generation; });
+    } finally {
+      const current = this.store.readMeta(spec.sessionId);
+      if (!started && recovery && current && !this.shuttingDown && !this.active.has(spec.sessionId) &&
+          this.latestLaunchGenerations.get(spec.sessionId) === (recoveryGeneration ?? previousGeneration) &&
+          !this.store.isDeleted(spec.sessionId) && current.status !== "stopped" &&
+          !current.worktreeRecovery && !current.providerAuthBlock && !current.providerHistoryBlock) {
+        const updated = this.store.patchMeta(spec.sessionId, { status: "input_required",
+          runnerRestartRecoveryRequestId: recovery.requestId,
+          pendingApproval: addPendingRequest(current.pendingApproval, recovery) });
+        if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+      }
+    }
+  }
+
+  private async startAttempt(
+    spec: SessionLaunchSpec,
+    initialPrompt?: string,
+    initialImages?: PromptImageInput[],
+    durable?: DurableCommandLifecycle,
+    onMaterialized?: (ready: boolean) => void,
+    onLaunchGeneration?: (generation: number) => void,
+  ): Promise<boolean> {
     let materializationReported = false;
     const reportMaterialized = (ready: boolean) => {
       if (materializationReported) return;
@@ -7698,6 +7768,7 @@ export class SessionManager {
       return false;
     }
     const launchGeneration = this.beginLaunchGeneration(spec.sessionId);
+    onLaunchGeneration?.(launchGeneration);
     this.preLaunchAdmissionGenerations.set(spec.sessionId, launchGeneration);
     if (spec.waitForProviderHome === true) this.providerHomeWaitLaunches.set(spec.sessionId, launchGeneration);
     let started = false;
@@ -11343,6 +11414,12 @@ export class SessionManager {
     launchInitialPrompt = false,
     providerRecovery = false,
   ): boolean {
+    const recoveryLaunch = this.launchGenerations.get(sessionId);
+    const admittedRecoveryLaunch = recoveryLaunch !== undefined && this.preLaunchAdmissionGenerations.get(sessionId) === recoveryLaunch;
+    if (!admittedRecoveryLaunch && pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.kind === "runner_recovery")) {
+      durable?.failed("relaunch this Orchestrator from its recovery action before sending messages", "COMMAND_CANCELLED");
+      return false;
+    }
     if (this.roleConversionPending(sessionId)) {
       durable?.failed("wait for the session role change to finish before sending a message", "COMMAND_CANCELLED");
       return false;
@@ -18032,6 +18109,7 @@ export class SessionManager {
         stoppedBackgroundTaskIds: undefined,
         preview: null,
         pendingApproval: null,
+        runnerRestartRecoveryRequestId: undefined,
         providerCredentialScopeId: undefined,
         providerCredentialIdentityId: undefined,
         providerCredentialIdentityEvidence: undefined,
@@ -23402,7 +23480,7 @@ export class SessionManager {
     }) ?? meta;
   }
 
-  /** A provider process cannot survive runner restart. Accepted continuations with no delivery
+  /** No previous provider remains attached after runner restart. Accepted continuations with no delivery
    * proof are therefore terminal, while submitted-only continuations remain conservatively
    * uncertain and are never replayed. */
   private reconcileMissingBackgroundContinuations(meta: SessionMeta): SessionMeta {
@@ -23475,7 +23553,8 @@ export class SessionManager {
   /** Automatic background work must not turn a restart into new spending authority. */
   private backgroundRecoveryHeld(meta: SessionMeta): boolean {
     const entry = this.active.get(meta.sessionId);
-    if (entry?.governanceTripped || entry?.controlPlaneHold || this.recoveryHolds.has(meta.sessionId)) return true;
+    if (entry?.governanceTripped || entry?.controlPlaneHold || this.recoveryHolds.has(meta.sessionId) ||
+        pendingRequests(meta.pendingApproval).some((request) => request.kind === "runner_recovery")) return true;
     if (meta.config.costBudgetUsd && meta.costUsd >= meta.config.costBudgetUsd) return true;
     if (!meta.config.maxToolCalls) return false;
     const toolCallIds = entry?.toolCallIds ?? new Set(this.store.toolCallIds(meta.sessionId));

@@ -406,14 +406,15 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
   // So does its request to add a repository (#4117): the owner never kept it, it is always theirs.
   const repositoryAddition = (item: (typeof ownerDecisions.items)[number]) => item.category === "campaign_repository_addition" && !item.ownerRule && !item.handedOff;
   const one = ownerDecisions.total === 1;
+  const runtimeRecovery = ownerDecisions.items.some((item) => item.category === "runner_recovery");
   return (
     <section className="campaign-status-handoffs" aria-labelledby={headingId}>
       <h3 id={headingId} className="section-title">Waiting for You</h3>
       <p className="section-note">
-        {ownerDecisions.items.some((item) => scopeApproval(item) || repositoryAddition(item))
+        {runtimeRecovery || ownerDecisions.items.some((item) => scopeApproval(item) || repositoryAddition(item))
           ? `Only you can make ${one ? "this decision" : "these decisions"}.`
           : `You kept ${one ? "this decision" : "these decisions"}, so only you can make ${one ? "it" : "them"}.`}{" "}
-        The Orchestrator keeps working on everything else meanwhile.
+        {runtimeRecovery ? "Relaunch the Orchestrator to restore its tools and continue its pending work." : "The Orchestrator keeps working on everything else meanwhile."}
       </p>
       <ul className="campaign-detail-list">
         {ownerDecisions.items.map((item) => {
@@ -429,12 +430,12 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
             <li key={item.occurrenceId}>
               <dl className="facts">
                 <div>
-                  <dt>{item.kind === "question" ? "Question" : item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval"
+                  <dt>{item.category === "runner_recovery" ? "Runner Recovery" : item.kind === "question" ? "Question" : item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval"
                     : repositoryAddition(item) ? "Add Repository" : "Owner Decision"}</dt>
                   <dd>
                     {item.summary}
                     <span className="campaign-status-meta">
-                      {item.ownerRule ? "Requested under a rule" : item.handedOff ? "Handed over by the Orchestrator"
+                      {item.category === "runner_recovery" ? "Runner restarted" : item.ownerRule ? "Requested under a rule" : item.handedOff ? "Handed over by the Orchestrator"
                         : scopeApproval(item) ? "Proposed by the Orchestrator" : "Asked by the Orchestrator"}{" "}
                       <RecordedTime at={item.createdAt} now={now} />
                     </span>

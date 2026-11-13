@@ -199,6 +199,7 @@ export function permissionDecisionRecord(item: PermissionItem): DecisionRecordMo
 const REQUEST_KIND_TITLES: Record<NonNullable<GovernanceDecision["requestKind"]>, string> = {
   workflow_decision: "Workflow Decision",
   authentication: "Sign-In",
+  runner_recovery: "Runner Recovery",
   cost_budget: "Cost Budget",
   cost_checkpoint: "Cost Checkpoint",
   cost_unpriced: "Unpriced Usage",
