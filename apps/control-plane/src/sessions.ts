@@ -12264,7 +12264,9 @@ export class SessionsService {
       this.hub.sendToRunner(watch.runnerId, { type: "pull_request_watch_cancel", watchId: watch.watchId });
       this.hub.sessionChangedById(watch.sessionId);
       this.deliverHeldPullRequestWatchWakes(watch.sessionId, now);
-      this.recordCampaignReadinessAfterWatch(watch.sessionId, watch.watchId, now);
+      if (this.db.sessionStatusOnly(watch.sessionId) === "idle") {
+        this.recordCampaignReadinessAfterWatch(watch.sessionId, watch.watchId, now);
+      }
     }
   }
 
@@ -12301,7 +12303,9 @@ export class SessionsService {
       return;
     }
     this.deliverHeldPullRequestWatchWakes(sessionId, now);
-    if (update.state === "lost") this.recordCampaignReadinessAfterWatch(sessionId, update.watchId, now);
+    if (update.state === "lost" && this.db.sessionStatusOnly(sessionId) === "idle") {
+      this.recordCampaignReadinessAfterWatch(sessionId, update.watchId, now);
+    }
   }
 
   /** On registration: resend every watch still `watching` on this runner, so a restarted runner

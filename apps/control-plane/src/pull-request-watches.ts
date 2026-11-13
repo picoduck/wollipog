@@ -55,6 +55,10 @@ function boundedReason(value: unknown, fallback: string): string {
 }
 
 export class PullRequestWatches {
+  /** After a control-plane outage, give runners one bounded lease interval to reconnect and
+   * prove polling again. This is process-local grace, not a persisted lease renewal; repeated
+   * reconnects cannot keep an orphan alive without a successful forge observation. */
+  private readonly openedAt = Date.now();
   /** Prepared once: session views read a watch for every session they project. */
   private readonly statements = new Map<string, ReturnType<DatabaseSync["prepare"]>>();
 
@@ -259,6 +263,7 @@ export class PullRequestWatches {
 
   /** Only progress-capable watches acquire a lease. Legacy runners keep their old contract. */
   expired(now: number): Array<{ watchId: string; sessionId: string; runnerId: string }> {
+    if (now < this.openedAt + PULL_REQUEST_WATCH_LEASE_MS) return [];
     return (this.stmt("SELECT watch_id,session_id,runner_id FROM pull_request_watches WHERE state='watching' AND observed_at IS NOT NULL AND observed_at<=?")
       .all(now - PULL_REQUEST_WATCH_LEASE_MS) as Array<{watch_id:string;session_id:string;runner_id:string}>).map(r =>
       ({watchId:r.watch_id,sessionId:r.session_id,runnerId:r.runner_id}));

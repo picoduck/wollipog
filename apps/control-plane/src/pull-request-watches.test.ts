@@ -11,6 +11,7 @@ import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { SessionsService } from "./sessions.js";
+import { PullRequestWatches } from "./pull-request-watches.js";
 
 const HEAD = "a".repeat(40);
 const WATCH = { repository: "picoduck/wollipog", number: 4071, headSha: HEAD };
@@ -56,6 +57,41 @@ function park(h: ReturnType<typeof harness>, sessionId = "s1", headSha = HEAD) {
   assert.ok(result.data, result.error ?? "refused");
   return result.data.watch;
 }
+
+test("control-plane recovery gives stale leases bounded time for a fresh observation (#4543)", () => {
+  const h = harness();
+  try {
+    const watch = park(h);
+    const now = Date.now();
+    h.db.raw().prepare("UPDATE pull_request_watches SET observed_at=? WHERE watch_id=?")
+      .run(now - 11 * 60_000, watch.watchId);
+    // A fresh store on the persisted table models a restarted control-plane process. It gives
+    // the still-polling runner time to reconnect, but does not renew a lease without evidence.
+    const recovered = new PullRequestWatches(h.db.raw());
+    assert.deepEqual(recovered.expired(now + 30_000), []);
+    assert.equal(recovered.expired(now + 11 * 60_000).length, 1, "reconnect grace is bounded");
+    recovered.accept("r", { type: "pull_request_watch_update", watchId: watch.watchId, state: "progress",
+      progress: { groupSha: HEAD, groupSince: watch.since, stalled: false, summary: "{}" } }, now + 9 * 60_000);
+    assert.deepEqual(recovered.expired(now + 11 * 60_000), [], "a real observation renews the lease");
+  } finally { h.db.close(); }
+});
+
+test("online lost-watch outcomes wake the child without an extra Orchestrator readiness event (#4543)", () => {
+  for (const path of ["report", "lease"] as const) {
+    const h = harness();
+    try {
+      const watch = park(h);
+      h.db.appendEvent("s1", { kind: "agent_message", text: "Waiting on CI.", final: true }, Date.now());
+      h.db.updateSessionStatus("s1", "idle", Date.now());
+      if (path === "report") h.svc.onPullRequestWatchUpdate("r", {
+        type: "pull_request_watch_update", watchId: watch.watchId, state: "lost", reason: "GitHub could not be read" });
+      else h.svc.maintainSessionWaits(watch.since + 11 * 60_000);
+      assert.equal(h.wakes().size, 1);
+      assert.equal(h.db.getSession("s1")!.status, "queued");
+      assert.equal(h.db.campaignContinuationEvents("root").filter(e => e.kind === "child_ready").length, 0);
+    } finally { h.db.close(); }
+  }
+});
 
 test("a failed queue group signals once, stays parked, and clears on a rebuilt group (#4543)", () => {
   const h = harness();
