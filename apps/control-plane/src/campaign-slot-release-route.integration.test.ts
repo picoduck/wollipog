@@ -78,7 +78,17 @@ function seed(database: string): { generation: string; userId: string } {
 
 async function reservePort(): Promise<number> {
   const server = createServer();
-  const port = Number(process.env.WOLLIPOG_PORT_BLOCK_START ?? 0);
+  // Playwright owns offsets 0 and 1. Keep this isolated control plane inside our block.
+  const blockStart = process.env.WOLLIPOG_PORT_BLOCK_START;
+  let port = 0;
+  if (blockStart) {
+    const blockEnd = process.env.WOLLIPOG_PORT_BLOCK_END ?? "";
+    assert.match(blockStart, /^\d+$/u, "port block start must be numeric");
+    assert.match(blockEnd, /^\d+$/u, "port block end must be numeric");
+    port = Number(blockStart) + 2;
+    assert.ok(Number(blockStart) >= 1024 && port <= Number(blockEnd) && Number(blockEnd) <= 65535,
+      "port block must contain an integration-test port after the two Playwright ports");
+  }
   await new Promise<void>((done, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", done); });
   const address = server.address();
   assert.ok(address && typeof address === "object");
