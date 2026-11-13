@@ -516,6 +516,9 @@ function activityProjection(state: "active" | "cleanup" | "complete" | "stuck"):
   const status = state === "active" ? "active" : state === "cleanup" ? (activityLegacy ? "active" : "complete_needs_cleanup")
     : state === "complete" ? "verified_complete" : activityLegacy ? "blocked" : "stuck";
   const repair = { state: "attempted" as const, startedAt: NOW - 9 * MINUTE, finishedAt: NOW - 8 * MINUTE, continuation: true };
+  const worktreeReason = params.get("retirement") === "ownership" ? "runner ownership could not be proven"
+    : params.get("retirement") === "1" ? "the branch has no upstream"
+      : "the worktree has uncommitted changes (2 paths): \"report.md\", \"notes.txt\"";
   return {
     status: status as import("@wollipog/protocol").OrchestratorCampaignStatus,
     children: state === "stuck"
@@ -534,10 +537,8 @@ function activityProjection(state: "active" | "cleanup" | "complete" | "stuck"):
         action: { kind: "delete_merged_branches" as const, occurrenceId: "workflow_delete_4223" } },
       { kind: "worktree" as const, sessionId: "s_child", path: "/home/dev/worktrees/wollipog/s_079714ea231c", status: "refused" as const,
         // The reason and action come from the protocol, as the control plane derives them.
-        reason: params.get("retirement") === "1" ? "The branch has no upstream."
-          : "The worktree has uncommitted changes (2 paths): \"report.md\", \"notes.txt\".",
-        action: worktreeRefusalAction(params.get("retirement") === "1" ? "the branch has no upstream"
-          : "the worktree has uncommitted changes (2 paths): \"report.md\", \"notes.txt\"") },
+        reason: worktreeReason.charAt(0).toUpperCase() + worktreeReason.slice(1) + ".",
+        action: worktreeRefusalAction(worktreeReason) },
     ] } } : {}),
     ...(state === "stuck" && !activityLegacy ? { stuck: { total: 2, items: [
       { kind: "unverified_child" as const, sessionId: "s_child", status: "idle", reason: "The child's latest report has not been verified." },

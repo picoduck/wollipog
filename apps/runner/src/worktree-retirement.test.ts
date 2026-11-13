@@ -25,6 +25,7 @@ for (const interrupted of [false, true]) test(`person retirement pins branch, ti
     writeFileSync(join(worktree.path, "unique.txt"), "unique committed work\n");
     git(worktree.path, "add", "."); git(worktree.path, "commit", "-m", "unique");
     const state = await inspectWorktreeRetirement(repo, "s_person", handle, { dataDir });
+    await assert.rejects(inspectWorktreeRetirement(repo, "s_other", handle, { dataDir }), /ownership could not be proven/);
     assert.equal(state.clean, true);
     assert.equal((await discardWorktreeIfSafe(repo, "s_person", handle, { dataDir })).removed, false,
       "ordinary agent discard still requires delivery evidence");
@@ -69,9 +70,12 @@ for (const interrupted of [false, true]) test(`person retirement pins branch, ti
     const inspected = await manager.campaignWorktreeRetirement("s_person", { operation: "inspect", path: worktree.path });
     assert.deepEqual(inspected.retirementState, state);
     await assert.rejects(manager.campaignWorktreeRetirement("s_person", { operation: "confirm", state: { ...state, worktreeId: "replacement" }, userId: "person", at: Date.now() }), /state changed/);
-    await assert.rejects(manager.campaignWorktreeRetirement("s_person", { operation: "confirm", state, userId: "person", at: Date.now() - 120_000 }), /expired/);
-    const confirmedAt = Date.now();
+    await assert.rejects(manager.campaignWorktreeRetirement("s_person", { operation: "confirm", state, userId: "person", at: Number.NaN }), /confirmation/);
+    // This is the control plane's audit clock, which need not agree with the runner's clock.
+    const confirmedAt = Date.now() + (interrupted ? 7_200_000 : -7_200_000);
     const confirmation = { operation: "confirm" as const, state, userId: "person", at: confirmedAt };
+    let finalConfirmation = confirmation;
+    let preservedCleanupId: string | undefined;
     if (interrupted) {
       const recovery = manager as unknown as {
         retireWorktreeProcesses(...args: unknown[]): Promise<void>;
@@ -88,16 +92,44 @@ for (const interrupted of [false, true]) test(`person retirement pins branch, ti
       recovery.refreshDeferredMergedHead = async () => { throw new Error("a person's pinned confirmation never depends on a forge read"); };
       await recovery.reapLiveSafeWorktree(record);
     } else {
-      const result = await manager.campaignWorktreeRetirement("s_person", confirmation);
+      const recovery = manager as unknown as {
+        runCleanupTeardown(record: WorktreeCleanupRecord, meta?: unknown): Promise<void>;
+        reapLiveSafeWorktree(record: WorktreeCleanupRecord): Promise<void>;
+      };
+      const teardown = recovery.runCleanupTeardown.bind(manager);
+      let wrote = false;
+      recovery.runCleanupTeardown = async (...args) => {
+        await teardown(...args);
+        if (!wrote) { writeFileSync(join(worktree.path, "after-teardown.txt"), "preserve changed work\n"); wrote = true; }
+      };
+      await assert.rejects(manager.campaignWorktreeRetirement("s_person", confirmation), /uncommitted/);
+      const pending = new WorktreeCleanupJournal(dataDir).list().find(item => item.worktreeId === handle.id)!;
+      preservedCleanupId = pending.cleanupId;
+      assert.ok(pending.processTerminationStartedAt);
+      await assert.rejects(manager.discardWorktree("s_person", worktree.path), /person-confirmed retirement is pending/,
+        "ordinary discard cannot reuse a person's confirmation");
+      await recovery.reapLiveSafeWorktree(pending);
+      assert.ok(existsSync(worktree.path), "a replay never follows a dirty, changed checkout");
+      await assert.rejects(manager.campaignWorktreeRetirement("s_person", { operation: "inspect", path: worktree.path }), /uncommitted/,
+        "inspection must report dirtiness instead of trapping the person behind a stale confirmation");
+      // Fixture-only save of the new work: a new clean tip needs a new person confirmation.
+      git(worktree.path, "add", "."); git(worktree.path, "commit", "-m", "save post-teardown work");
+      await recovery.reapLiveSafeWorktree(pending);
+      assert.ok(existsSync(worktree.path), "the old confirmation never follows an advanced clean tip either");
+      const next = await manager.campaignWorktreeRetirement("s_person", { operation: "inspect", path: worktree.path });
+      assert.notEqual(next.retirementState!.headSha, state.headSha);
+      finalConfirmation = { ...confirmation, state: next.retirementState!, at: confirmedAt + 1 };
+      const result = await manager.campaignWorktreeRetirement("s_person", finalConfirmation);
       assert.equal(result.retirement?.status, "removed");
     }
     assert.equal(existsSync(worktree.path), false);
-    assert.equal(git(repo, "rev-parse", `refs/heads/${worktree.branch}`), state.headSha,
+    assert.equal(git(repo, "rev-parse", `refs/heads/${worktree.branch}`), finalConfirmation.state.headSha,
       "person retirement never destroys unproved committed work");
     assert.equal(git(repo, "show", `${state.headSha}:unique.txt`), "unique committed work");
     assert.equal(git(repo, "rev-parse", "refs/heads/fix/replacement"), state.headSha);
     assert.equal(store.readMeta("s_person")?.worktreePath, null, "explicit retirement clears the selected checkout");
     const receipt = new WorktreeCleanupJournal(dataDir).history().find(item => item.worktreeId === handle.id);
-    assert.deepEqual(receipt?.ownerConfirmation, { state, userId: "person", at: confirmedAt });
+    assert.deepEqual(receipt?.ownerConfirmation, { state: finalConfirmation.state, userId: "person", at: finalConfirmation.at });
+    if (preservedCleanupId) assert.equal(receipt?.cleanupId, preservedCleanupId, "reconfirmation preserves cleanup progress and identity");
   } finally { manager?.shutdownAll(); rmSync(root, { recursive: true, force: true }); }
 });

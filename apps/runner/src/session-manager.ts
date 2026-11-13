@@ -5427,6 +5427,9 @@ export class SessionManager {
     if (worktree.source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
     }
+    if (!options.ownerConfirmation && this.pendingSafeWorktreeCleanup(sessionId, meta.context, worktree)?.ownerConfirmation) {
+      return { removed: false, reason: "a person-confirmed retirement is pending; use Campaign Status to inspect and confirm its current state" };
+    }
     const initiallySelectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (initiallySelectedIsLaunching) {
       if (options.ownerConfirmation) return { removed: false, reason: "the provider is launching; inspect again after it stops" };
@@ -5808,7 +5811,11 @@ export class SessionManager {
       const path = request.operation === "inspect" ? request.path : request.state.path;
       const worktree = this.attributedWorktrees(meta).find(item => sameWorktreePath(meta.context, item.path, path));
       if (!worktree || worktree.source === "attached") throw new Error("the worktree is not runner-created and linked to this session");
-      if (this.pendingSafeWorktreeCleanup(sessionId, meta.context, worktree)) throw new Error("cleanup is already pending; wait for it to finish");
+      const pending = this.pendingSafeWorktreeCleanup(sessionId, meta.context, worktree);
+      // A failed final check can leave an exact human confirmation stale after teardown. Only
+      // this human-only route may inspect and confirm a new state. Reuse the same intent below,
+      // preserving its process/teardown progress; automatic cleanup still waits for its own lane.
+      if (pending && !pending.ownerConfirmation) throw new Error("cleanup is already pending; wait for it to finish");
       if (this.launchingSelectionUsesPath(sessionId, meta, path) || this.liveWorktreeUsesPath(sessionId, path) ||
           this.transitioningProviderUsesPath(sessionId, meta.context, path) || this.providerTurnUsesPath(sessionId, meta.context, path)) {
         throw new Error("the worktree is still active; inspect again after the provider stops");
@@ -5817,9 +5824,11 @@ export class SessionManager {
         id: worktree.id, path: worktree.path, branch: worktree.branch, source: worktree.source,
       }, { context: meta.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash });
       if (request.operation === "inspect") return { snapshot: this.snapshot(meta), retirementState: state };
+      // `at` is audit attribution from the control plane, not the runner's clock or an expiry.
+      // Exact-state comparison is the freshness proof, including after waiting in this lane.
       if (!isDeepStrictEqual(request.state, state) || !request.userId || request.userId.length > 256 ||
-          !Number.isFinite(request.at) || Math.abs(Date.now() - request.at) > 60_000) {
-        throw new Error("the inspected state changed or confirmation expired; inspect again");
+          !Number.isFinite(request.at) || request.at <= 0) {
+        throw new Error("the inspected state changed or confirmation is invalid; inspect again");
       }
       const result = await this.discardWorktreeLocked(sessionId, path, { refreshMergedHead: false,
         ownerConfirmation: { state, userId: request.userId, at: request.at } });

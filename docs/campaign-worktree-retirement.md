@@ -12,7 +12,10 @@ worktree ID. Confirmation repeats inspection, then the normal cleanup lease, pro
 process retirement and approved teardown. The safe removal helper repeats cleanliness, head,
 branch and directory/repository identity checks after teardown awaits. It never force-removes a
 dirty or changed checkout. A refusal closes the dialog and requires fresh inspection and a new
-explicit confirmation. An active provider or existing cleanup intent must finish first.
+explicit confirmation. A prior human attempt can be re-inspected and confirmed at a new clean
+state, reusing its durable cleanup identity and process/teardown progress. Its old confirmation
+never automatically follows changed work. Automatic cleanup intents and active providers still
+block this action. Unproven ownership offers no inspection/confirmation that could waive it.
 
 This action retires a clean checkout, preserving **all local branch refs**. It does not turn human
 confirmation into evidence that commits landed. Keeping those refs means even unique, unpushed
@@ -23,7 +26,9 @@ Before dispatch, the control plane records a durable `CONFIRM` mutation audit wi
 person, time and child/worktree coordinate. The runner's durable cleanup record and completion
 history retain that same person/time and the complete inspected state. Lost replies do not erase
 that audit; refresh cleanup before retrying. An interrupted cleanup can replay only its pinned
-directory generation and branch/tip. It cannot follow a replacement checkout.
+directory generation and branch/tip. It cannot follow a replacement checkout. The confirmation time
+is audit attribution from the control plane; freshness comes from exact-state comparison, without
+assuming that the control plane and runner share a clock or that the operation's queue is short.
 
 Protocol 372 gates inspection and confirmation. Older/offline runners return an explicit refusal;
 they receive no confirmation. Deploy compatible peers through the normal authorized operator

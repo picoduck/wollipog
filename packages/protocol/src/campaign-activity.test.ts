@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cleanupReasonSentence, mergedBranchDeletionCommand, worktreeRefusalAction } from "./campaign-activity.js";
+import { cleanupReasonSentence, mergedBranchDeletionCommand, worktreeRefusalAction, worktreeRefusalAllowsInspection } from "./campaign-activity.js";
 
 /** Every reason the runner refuses a child worktree's retirement with (sessions.ts), plus one it may add later. */
 const REFUSALS = [
@@ -35,10 +35,15 @@ test("a refused worktree gets a next step in words, never a command to run insid
   assert.match(worktreeRefusalAction("the linked pull request is not verified as merged").text,
     /Wollipog retires the worktree once the forge reports the merge/u);
   assert.match(worktreeRefusalAction("a reason this version does not know").text, /Decide what to keep\. Choose Inspect Worktree/u);
-  for (const reason of ["the worktree has uncommitted changes", "the branch has unpushed commits", "the branch has no upstream", "runner ownership could not be proven"]) {
+  for (const reason of ["the worktree has uncommitted changes", "the branch has unpushed commits", "the branch has no upstream"]) {
     assert.match(worktreeRefusalAction(reason).text, /confirm retirement yourself\. Local branch refs are kept\.$/u, reason);
     assert.doesNotMatch(worktreeRefusalAction(reason).text, /ask the Orchestrator to retire/iu);
   }
+  for (const reason of ["runner ownership could not be proven", "attached operator-owned worktrees are not retired"]) {
+    assert.equal(worktreeRefusalAllowsInspection(reason), false);
+    assert.doesNotMatch(worktreeRefusalAction(reason).text, /Inspect Worktree|confirm retirement/u);
+  }
+  assert.match(worktreeRefusalAction("runner ownership could not be proven").text, /contents are kept/u);
 });
 
 test("cleanup reasons read as sentences, and a branch's deletion command names exactly that branch (#4146)", () => {

@@ -3,10 +3,9 @@ import { expect, test } from "@playwright/test";
 const path = "/home/dev/worktrees/wollipog/s_079714ea231c";
 const state = { worktreeId: "worktree_079714ea231c", path, registeredBranch: "fix/export-history", branch: "fix/export-history",
   headSha: "8c5e97f3c824db6750fbb994347e822d5f6e4619", clean: true, pathIdentity: "2049:834518" };
+const devices = [["desktop", { width: 1440, height: 1000 }], ["phone", { width: 390, height: 844 }]] as const;
 
-for (const [device, viewport] of [
-  ["desktop", { width: 1440, height: 1000 }], ["phone", { width: 390, height: 844 }],
-] as const) test(`person-only worktree inspection and exact confirmation fit ${device}`, async ({ page }) => {
+for (const [device, viewport] of devices) test(`person-only worktree inspection and exact confirmation fit ${device}`, async ({ page }) => {
   await page.setViewportSize(viewport);
   let confirmed: unknown;
   let refuse = true;
@@ -51,4 +50,19 @@ for (const [device, viewport] of [
   await dialog.getByRole("checkbox").check();
   await dialog.getByRole("button", { name: "Retire Worktree", exact: true }).click();
   await expect(row).toContainText("Local branch refs were kept");
+});
+
+for (const [device, viewport] of devices) test(`unproven ownership offers no inspection or confirmation on ${device}`, async ({ page }) => {
+  await page.setViewportSize(viewport);
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&activity=cleanup&automation=complete&retirement=ownership&theme=light");
+  const cleanup = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Cleanup", exact: true }) });
+  const row = cleanup.locator("li").filter({ hasText: path });
+  await expect(row).toContainText("retirement is unavailable and its contents are kept");
+  await expect(row.getByRole("button")).toHaveCount(0);
+  await expect(row.getByRole("link")).toHaveCount(1);
+  await row.scrollIntoViewIfNeeded();
+  await page.mouse.move(2, 2); await page.mouse.wheel(0, -100_000);
+  await expect.poll(() => page.evaluate(() => document.scrollingElement?.scrollTop ?? 0)).toBe(0);
+  const evidence = process.env.WORKTREE_RETIREMENT_EVIDENCE_DIR;
+  if (evidence) await row.screenshot({ path: `${evidence}/retirement-${device}-ownership-unproven.png` });
 });

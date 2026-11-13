@@ -98,7 +98,7 @@ test("a worktree item that still carries a command shows only its next step, nev
     assert.doesNotMatch(container.textContent ?? "", /git -C|@\{upstream\}/u);
     assert.ok([...container.querySelectorAll("button")].every(node => node.textContent?.trim() === "Inspect Worktree"));
     assert.doesNotMatch(container.textContent ?? "", /Then ask the Orchestrator/u);
-    assert.match(container.textContent ?? "", /Review the child's work from its session in Wollipog and decide what to keep\./u);
+    assert.match(container.textContent ?? "", /Review the child's work from its session in Wollipog\./u);
   } finally { view.unmount(); }
 });
 
@@ -136,6 +136,18 @@ test("person retirement requires inspection and explicit confirmation, sends exa
   } finally {
     view.unmount(); api.inspectCampaignWorktreeRetirement = originalInspect; api.confirmCampaignWorktreeRetirement = originalConfirm;
   }
+});
+
+test("unproven runner ownership has a truthful next step and no unsupported inspection action", async () => {
+  const view = await render(<CampaignCleanup campaignId="root-1" cleanup={{ total: 1, items: [
+    { kind: "worktree", sessionId: "child-3", path: "/worktrees/child-3", status: "refused",
+      reason: "Runner ownership could not be proven.", action: worktreeRefusalAction("runner ownership could not be proven") },
+  ] }} canAct onOpenSession={() => <a href="/sessions/child-3">Review Child</a>} />);
+  try {
+    assertNoDomNode(view.container.querySelector("button"), "ownership cannot be waived by inspecting or confirming");
+    assert.match(view.container.textContent ?? "", /retirement is unavailable and its contents are kept/u);
+    assert.equal(view.container.querySelector("a")?.getAttribute("href"), "/sessions/child-3");
+  } finally { view.unmount(); }
 });
 
 test("Delete Merged Branches is not offered without an approved deletion, or outside the campaign's own view (#4146)", async () => {
