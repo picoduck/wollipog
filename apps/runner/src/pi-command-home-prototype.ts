@@ -96,16 +96,21 @@ export function verifyPiCommandHomePrototypeRuntime(node: string, entrypoint: st
 function noProviderAliases(root: string, budget = { left: 10_000 }): void {
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (--budget.left < 0 || entry.isSymbolicLink()) throw new Error(REFUSAL);
+    // A pre-existing hard link could expose the same inode through a different writable mount.
+    // Refuse it in this dormant admission check; ordinary provider refresh behavior is unchanged.
+    if (entry.isFile() && lstatSync(`${root}/${entry.name}`).nlink !== 1) throw new Error(REFUSAL);
     if (entry.isDirectory()) noProviderAliases(`${root}/${entry.name}`, budget);
   }
 }
 
-export function createPiCommandHomePrototype(policy: PiCommandHomePrototypePolicy, deps: Partial<{
-  spawn: typeof spawnAgent; kill: typeof killTree; prove: typeof provenProcessTreeExit;
+export type PiCommandHomePrototypeAudit = Partial<{
   auditInstallation: typeof verifyPiCommandHomePrototypeInstallation;
   auditRuntime: typeof verifyPiCommandHomePrototypeRuntime;
-}> = {}) {
-  const shell = policy.shell;
+}>;
+
+/** Shared by the dormant Bash and fixed MCP-child experiments. This validates a policy snapshot;
+ * it is NOT an attestation of actual mounts or loaded imports, and has no production caller. */
+export function resolvePiCommandHomePrototypePolicy(policy: PiCommandHomePrototypePolicy, deps: PiCommandHomePrototypeAudit = {}) {
   const nodeRuntime = policy.nodeRuntime;
   const entrypoint = policy.commandEntrypoint;
   let inner: BwrapSpawnIsolation;
@@ -156,6 +161,16 @@ export function createPiCommandHomePrototype(policy: PiCommandHomePrototypePolic
   } catch {
     throw new Error(REFUSAL);
   }
+  return { inner, cwdRoot };
+}
+
+export function createPiCommandHomePrototype(policy: PiCommandHomePrototypePolicy, deps: PiCommandHomePrototypeAudit & Partial<{
+  spawn: typeof spawnAgent; kill: typeof killTree; prove: typeof provenProcessTreeExit;
+}> = {}) {
+  const { inner, cwdRoot } = resolvePiCommandHomePrototypePolicy(policy, deps);
+  const shell = policy.shell;
+  const nodeRuntime = policy.nodeRuntime;
+  const entrypoint = policy.commandEntrypoint;
   const spawn = deps.spawn ?? spawnAgent;
   const kill = deps.kill ?? killTree;
   const prove = deps.prove ?? provenProcessTreeExit;

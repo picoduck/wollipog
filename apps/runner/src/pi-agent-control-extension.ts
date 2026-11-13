@@ -74,7 +74,20 @@ export function piAgentControlProbeSource(nonce: string): string {
  * to a session-private 0600 file and supplies the command, args, and one-use readiness nonce only
  * through ephemeral launch environment. */
 export function piAgentControlExtensionSource(): string {
-  return `import { spawn } from "node:child_process";
+  return agentControlSourceWithImport('import { spawn } from "node:child_process";');
+}
+
+/** Dormant #3922 fixture seam only. Ordinary provisioning still calls the function above and
+ * emits identical source. The supplied module needs immutable mount/import attestation before
+ * any future production use; a file URL by itself grants no provenance or protection. */
+export function piInertAgentControlExtensionSource(spawnModuleUrl: string): string {
+  const url = new URL(spawnModuleUrl);
+  if (url.protocol !== "file:" || url.search || url.hash) throw new Error("Pi inert extension import refused.");
+  return agentControlSourceWithImport(`import { spawn } from ${JSON.stringify(url.href)};`);
+}
+
+function agentControlSourceWithImport(spawnImport: string): string {
+  return `${spawnImport}
 
 const MAX_FRAME_BYTES = 1024 * 1024;
 const MAX_TOOLS = 128;
