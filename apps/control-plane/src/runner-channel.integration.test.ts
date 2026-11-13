@@ -116,12 +116,14 @@ class ReconciliationDiagnostics {
       const lines = (partial + String(chunk)).split("\n");
       partial = (lines.pop() ?? "").slice(-16_384);
       for (const line of lines) {
-        if (!line.includes("runner_reconciliation_") && !line.includes("session_runtime_update_slow")) continue;
+        if (!line.includes("runner_reconciliation_") && !line.includes("session_runtime_update_slow") && !line.includes("runner_credential_")) continue;
         try {
           let value = JSON.parse(line);
           if (!value?.event && typeof value?.msg === "string") value = JSON.parse(value.msg);
           if (!["runner_reconciliation_started", "runner_reconciliation_completed", "runner_reconciliation_cancelled",
-            "runner_reconciliation_failed", "session_runtime_update_slow"].includes(value?.event)) continue;
+            "runner_reconciliation_failed", "runner_reconciliation_first_step_started", "runner_reconciliation_first_step_completed",
+            "runner_reconciliation_first_batch_started", "runner_reconciliation_first_batch_completed",
+            "runner_credential_received", "runner_credential_deferred", "runner_credential_ack_sent", "session_runtime_update_slow"].includes(value?.event)) continue;
           const item: Record<string, string | number> = { event: value.event };
           for (const key of ["snapshotCount", "batches", "snapshotBatchLimit", "affectedCampaigns", "maxBatchMs", "durationMs"])
             if (typeof value[key] === "number" && Number.isFinite(value[key])) item[key] = value[key];
@@ -157,10 +159,19 @@ test("reconciliation diagnostics survive noisy split logs while remaining bounde
   assert.equal(result.slowUpdates.length, 16);
   assert.equal(result.slowUpdates[0].durationMs, 24);
   assert.equal(result.slowUpdates.at(-1).durationMs, 39);
+  for (const event of ["runner_reconciliation_first_step_started", "runner_reconciliation_first_step_completed",
+    "runner_reconciliation_first_batch_started", "runner_reconciliation_first_batch_completed",
+    "runner_credential_received", "runner_credential_deferred", "runner_credential_ack_sent"]) {
+    stderr(JSON.stringify({ event, durationMs: 12, sessionId: "synthetic-private-session", tokenHash: "synthetic-private-token" }) + "\n");
+    assert.deepEqual(JSON.parse(trace.summary()).reconciliation.at(-1), { event, durationMs: 12 });
+  }
   assert.doesNotMatch(trace.summary(), /synthetic-private|must not be retained/);
 });
 
-test("1500 retained campaign children reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, async (t) => {
+test("1500 retained campaign children reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, (t) => retainedCampaignChildren(t));
+test("1500 retained campaign children acknowledge credentials before a slow first inventory write", { timeout: 180_000 }, (t) => retainedCampaignChildren(t, true));
+
+async function retainedCampaignChildren(t: TestContext, slowFirstWrite = false): Promise<void> {
   const port = await reservePort();
   const temp = mkdtempSync(join(tmpdir(), "wollipog-reconcile-responsive-"));
   const databasePath = join(temp, "control-plane.db");
@@ -192,6 +203,21 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   seed.createShell({ shellId: "burst-shell", sessionId: "child-1499", runnerId, name: "Synthetic Burst", createdAt: 1 });
   seed.raw().exec("PRAGMA synchronous=FULL");
   seed.close();
+  const preload = join(temp, "slow-first-write.mjs");
+  if (slowFirstWrite) writeFileSync(preload, `
+import { ControlPlaneDb } from ${JSON.stringify(new URL("./db.ts", import.meta.url).href)};
+const update = ControlPlaneDb.prototype.updateSessionsFromSnapshots;
+let first = true;
+ControlPlaneDb.prototype.updateSessionsFromSnapshots = function(...args) {
+  if (first) {
+    first = false;
+    const credentialReady = this.agentControlCredentialValid('child-1499', 'runner-limits-555', 'a'.repeat(64));
+    console.error('FIRST_WRITE_CREDENTIAL_READY=' + credentialReady);
+    if (!credentialReady) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2200);
+  }
+  return Reflect.apply(update, this, args);
+};
+`);
   let output = "";
   let reconciliationCompleted = false;
   const trace = new ReconciliationDiagnostics();
@@ -200,7 +226,7 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   const clientLoopDelay = monitorEventLoopDelay({ resolution: 20 });
   clientLoopDelay.enable();
   t.after(() => clientLoopDelay.disable());
-  const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
+  const child = spawn(process.execPath, ["--import", "tsx", ...(slowFirstWrite ? ["--import", preload] : []), "apps/control-plane/src/index.ts"], {
     cwd: REPO_ROOT, env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1",
       CONTROL_PLANE_PORT: String(port), CONTROL_PLANE_DB: databasePath },
     stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
@@ -360,7 +386,8 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   assert.equal(reconciliationCompleted, true);
   t.diagnostic(`Reconciliation cancellation observed: ${/runner_reconciliation_cancelled/.test(output)}`);
   assert.doesNotMatch(output, /runner frame handler threw|runner_frame_queue_closed/);
-});
+  if (slowFirstWrite) assert.match(output, /FIRST_WRITE_CREDENTIAL_READY=true/);
+}
 
 test("2100 retained children with bidirectional bulk reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, (t) => retainedBulk(t));
 test("2444 retained children with small reconnect queue frames keep pongs and the first processing ACK responsive", { timeout: 180_000 }, (t) => retainedBulk(t, true));

@@ -24608,12 +24608,15 @@ export class SessionsService {
       batches, snapshotBatchLimit: 32, affectedCampaigns, maxBatchMs: Math.round(maxBatchMs),
       durationMs: Math.round(performance.now() - started),
     }));
-    const steps = this.runnerSessionHydrationSteps(runnerId, snapshots, (count) => { affectedCampaigns = count; }, reconciliationId);
+    const steps = this.runnerSessionHydrationSteps(runnerId, snapshots, (count) => { affectedCampaigns = count; }, reconciliationId,
+      (event) => diagnostic(event));
     diagnostic("runner_reconciliation_started");
     try {
       while (options.isCurrent()) {
         const batchStarted = performance.now();
+        if (batches === 0) diagnostic("runner_reconciliation_first_step_started");
         const step = steps.next();
+        if (batches === 0) diagnostic("runner_reconciliation_first_step_completed");
         maxBatchMs = Math.max(maxBatchMs, performance.now() - batchStarted);
         if (step.done) {
           diagnostic("runner_reconciliation_completed");
@@ -24634,7 +24637,7 @@ export class SessionsService {
 
   private *runnerSessionHydrationSteps(
     runnerId: string, snapshots: SessionSnapshot[], onCampaignCount?: (count: number) => void,
-    reconciliationId = randomUUID(),
+    reconciliationId = randomUUID(), onProgress?: (event: string) => void,
   ): Generator<void, void> {
     const now = Date.now();
     const byId = new Set(snapshots.map((s) => s.id));
@@ -24652,6 +24655,14 @@ export class SessionsService {
     for (const { id } of snapshots) {
       if (seenSnapshotIds.has(id)) duplicateSnapshotIds.add(id);
       seenSnapshotIds.add(id);
+    }
+    // Only multi-chunk inventories need an initial scheduling window. Keep a single chunk
+    // eager: ACK-triggered API requests rely on its sessions/credentials already being restored.
+    // For a large inventory, capture optimistic fences first, then allow ACK delivery and
+    // the returning credential frame through the poll phase before the first write-heavy chunk.
+    if (snapshots.length > 32) {
+      yield;
+      yield;
     }
     // Capture the first before-view once per campaign. Publishing after every retained child
     // rescans the entire campaign and retries the same durable events quadratically (#2125).
@@ -24674,6 +24685,7 @@ export class SessionsService {
     // Chunk both eligibility reads and transactions, not just the final publications. All stop
     // and ownership checks are refreshed after yielding, so UI actions remain authoritative.
     for (let offset = 0; offset < snapshots.length; offset += 32) {
+      if (offset === 0) onProgress?.("runner_reconciliation_first_batch_started");
       const chunk = snapshots.slice(offset, offset + 32);
       for(const snap of chunk) {
         const owner=this.db.getSession(snap.id);
@@ -24852,6 +24864,7 @@ export class SessionsService {
         recordAppliedVersion(snap.id);
       }
       for(const snap of chunk) this.settleCampaignUsage(snap.id);
+      if (offset === 0) onProgress?.("runner_reconciliation_first_batch_completed");
       yield;
     }
     // A session the runner no longer holds has ended for good, whatever its stored status says: a

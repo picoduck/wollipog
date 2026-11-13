@@ -428,6 +428,26 @@ test("cleared-human event and checkpoint consumption roll back together on a wri
   } finally { db.close(); }
 });
 
+for (const snapshotCount of [1, 32]) {
+test(`registration materializes a ${snapshotCount}-snapshot inventory before its first yield`, async () => {
+  const { db, svc, snapshots } = fixture(snapshotCount - 1);
+  try {
+    snapshots.push({ id: "new-session", workspaceId: "ws", agentId: "claude", title: "Synthetic", status: "running",
+      driver: "claude-code", useWorktree: false, worktreePath: null, config: {}, preview: null,
+      pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1, updatedAt: 2 });
+    let yielded = false;
+    assert.equal(await svc.hydrateRunnerSessionsCooperatively("runner", snapshots, {
+      isCurrent: () => true,
+      yieldToLoop: async () => {
+        yielded = true;
+        assert.equal(db.getSession("new-session")?.status, "running", "ACK-triggered requests must see the first chunk restored");
+      },
+    }), true);
+    assert.equal(yielded, true);
+  } finally { db.close(); }
+});
+}
+
 test("cooperative registration yields and cancellation never settles absent sessions", async () => {
   const { db, svc, snapshots, logs } = fixture(100);
   try {
@@ -515,7 +535,10 @@ test("cancelled registration carries the first campaign before-view into its rep
     assert.equal(before, 1);
     let current = true;
     assert.equal(await svc.hydrateRunnerSessionsCooperatively("runner", snapshots, {
-      isCurrent: () => current, yieldToLoop: async () => { current = false; },
+      isCurrent: () => current, yieldToLoop: async () => {
+        // Cancel after the first applied chunk, including when registration yields before writes.
+        if (db.getSession("child-0")?.pendingApproval === null) current = false;
+      },
     }), false);
     assert.equal(db.getSession("child-0")?.pendingApproval, null);
     assert.equal(await svc.hydrateRunnerSessionsCooperatively("runner", snapshots, { isCurrent: () => true }), true);
