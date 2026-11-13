@@ -286,7 +286,10 @@ test("a child's provider question waits for its screen, then goes to the Orchest
     await settleScreens();
     const held = h.db.getSession("child")!.pendingRequestOwners!.requests!.find((r) => r.occurrenceId === "sessions")!;
     assert.deepEqual([held.owner, held.authorityEvaluation?.reason], ["human", "credential_screen_review"]);
-    assert.equal(h.svc.answerQuestion("child", "sessions", { choice: "Continue" }, h.owner).status, 409, "the owner classifies, never answers");
+    const refusal = h.svc.answerQuestion("child", "sessions", { choice: "Continue" }, h.owner);
+    assert.equal(refusal.status, 409, "the owner classifies, never answers");
+    assert.match(refusal.error!, /classify this request first in Campaign Status/u);
+    assert.doesNotMatch(refusal.error!, /request card/u);
     const occurrence = h.occurrences().find((o) => h.db.campaignDecisionSubject(o.occurrenceId)?.requestId === "sessions")!;
     assert.equal(occurrence.failureClass, "model_unavailable");
     assert.ok(h.svc.classifyCampaignDecision("root", occurrence.occurrenceId, { classification: "orchestrator" }, h.owner).ok);

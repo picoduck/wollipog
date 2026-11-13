@@ -1,6 +1,14 @@
 import { expect, test } from "@playwright/test";
 import { viewPath } from "../src/navigation.js";
 
+test("Decline on the session card removes the held question", async ({ page }) => {
+  await page.goto(`/command-inbox-projects-e2e.html?scenario=question-classification&fullShell=1&path=${encodeURIComponent(viewPath({ name: "session", id: "session-alpha" }))}`);
+  const group = page.getByRole("group", { name: "Question Classification" });
+  await group.getByRole("button", { name: "Decline", exact: true }).click();
+  await expect(group).toHaveCount(0);
+  await expect(page.locator(".request-card")).toHaveCount(0);
+});
+
 for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["phone", { width: 390, height: 844 }]] as const) {
   test(`held question opened from Campaign Status (${device})`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);

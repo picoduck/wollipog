@@ -1134,7 +1134,8 @@ function closureReasonChecked(snapshot: Pick<GithubIssueClosureSnapshot, "reason
 }
 
 /** #4104: a question the Decision Model could not screen waits for its owner's classification. */
-const CREDENTIAL_SCREEN_CLASSIFY_FIRST = "The campaign owner must classify this question first on its request card or in Campaign Status: " +
+const CREDENTIAL_SCREEN_CLASSIFY_FIRST = "The campaign owner must classify this request first in Campaign Status: Decline, or allow an answer. Nobody answers it until then.";
+const TYPED_QUESTION_CLASSIFY_FIRST = "The campaign owner must classify this question first on its request card or in Campaign Status: " +
   "Decline, Let the Orchestrator Answer, or Let Me Answer for an owner decision. " +
   "Nobody answers it until then.";
 /** #4104: a screen whose outcome, even a failure, could not be recorded admits nothing. */
@@ -15597,7 +15598,7 @@ export class SessionsService {
     // only its owner's Decline, which dismisses it, settles it from there.
     if (credentialScreenDecline && action !== "dismiss") return fail("a declined question cannot be answered", 400);
     if (decision.authorityEvaluation?.reason === "credential_screen_review" && !credentialScreenDecline) {
-      return fail(CREDENTIAL_SCREEN_CLASSIFY_FIRST, 409);
+      return fail(TYPED_QUESTION_CLASSIFY_FIRST, 409);
     }
     const root = this.db.getSession(sessionId);
     if (!root || isTerminal(root.status)) return fail("the Orchestrator that asked this question has ended", 409);
@@ -16216,12 +16217,12 @@ export class SessionsService {
     }
     if (decision.authority !== authority) {
       return fail(decision.authorityEvaluation?.reason === "credential_screen_review"
-        ? CREDENTIAL_SCREEN_CLASSIFY_FIRST : `this workflow decision requires a ${decision.authority} response`, 403);
+        ? TYPED_QUESTION_CLASSIFY_FIRST : `this workflow decision requires a ${decision.authority} response`, 403);
     }
     // A question the Decision Model could not screen is the owner's to classify, never to answer
     // (#4104): Decline, or Let the Orchestrator Answer, through the classification route only.
     if (decision.authorityEvaluation?.reason === "credential_screen_review" && !internal?.credentialScreenDecline) {
-      return fail(CREDENTIAL_SCREEN_CLASSIFY_FIRST, 409);
+      return fail(TYPED_QUESTION_CLASSIFY_FIRST, 409);
     }
     // A decision the campaign's owner kept (#4064) is theirs alone: never an agent's, and not any
     // other person's who can open the session.

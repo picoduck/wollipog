@@ -19,6 +19,8 @@ export function QuestionClassification({ sessionId, request, onSessionUpdate }: 
   const [busy, setBusy] = useState<string | null>(null);
   const inFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  const [classifiedScreen, setClassifiedScreen] = useState<string | null>(null);
+  const classified = screenId !== undefined && classifiedScreen === screenId;
   useEffect(() => {
     const controller = new AbortController();
     setCanClassify(false);
@@ -29,27 +31,45 @@ export function QuestionClassification({ sessionId, request, onSessionUpdate }: 
   }, [api, sessionId, screenId]);
 
   const classify = async (classification: "decline" | "orchestrator") => {
-    if (inFlight.current || !canClassify || !screenId) return;
+    if (inFlight.current || classified || !canClassify || !screenId) return;
     inFlight.current = true;
     setBusy(classification);
     setError(null);
     try {
       await api.classifyCampaignDecision(sessionId, screenId, classification);
-      // Read back the authoritative card; classification never grants local answer permission.
+      setClassifiedScreen(screenId);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not classify the question.");
+      return;
+    } finally { inFlight.current = false; setBusy(null); }
+    await refresh();
+  };
+  const refresh = async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy("refresh");
+    setError(null);
+    try {
+      // Classification never grants local answer permission; only the authoritative card does.
       const updated = await api.session(sessionId);
       onSessionUpdate?.(updated.session);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not classify the question.");
+      setError(cause instanceof Error ? cause.message : "Could not refresh the request.");
     } finally { inFlight.current = false; setBusy(null); }
   };
   return <>
-    {error && <Notice tone="danger" compact role="alert" title="Couldn't Classify the Question">{error}</Notice>}
-    {canClassify && screenId && <div className="campaign-screen-actions" role="group" aria-label="Question Classification">
+    {error && <Notice tone="danger" compact role="alert" title={classified ? "Couldn't Refresh the Request" : "Couldn't Classify the Question"}>{error}</Notice>}
+    {classified && <div className="request-card-reasons">
+      <p role="status">The question was classified. Waiting for the updated request.</p>
+      <BusyButton className="btn" busy={busy === "refresh"} disabled={busy !== null} progress="Refreshing the request…"
+        onClick={() => void refresh()}>Refresh Request</BusyButton>
+    </div>}
+    {canClassify && screenId && !classified && <div className="campaign-screen-actions" role="group" aria-label="Question Classification">
       <BusyButton className="btn" busy={busy === "decline"} disabled={busy !== null}
         progress="Declining the question…" onClick={() => void classify("decline")}>Decline</BusyButton>
       <BusyButton className="btn primary" busy={busy === "orchestrator"} disabled={busy !== null}
         progress="Allowing an answer…" onClick={() => void classify("orchestrator")}>
-        {decision?.category === "owner_decision" ? "Let Me Answer" : "Let the Orchestrator Answer"}
+        {decision?.category === "owner_decision" || decision?.ownerRule ? "Let Me Answer" : "Let the Orchestrator Answer"}
       </BusyButton>
     </div>}
   </>;
