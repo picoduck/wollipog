@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { PROTOCOL_VERSION, type SessionLaunchSpec } from "@wollipog/protocol";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,7 +10,7 @@ import { SessionStore } from "./session-store.js";
 import { requestedSlot, requestedWorktreeBoundary, type WorktreeCleanupRecord } from "./worktree.js";
 import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
-import { providerHomeRunnerMarker } from "./provider-home-lease-evidence.js";
+import { linuxLeaseProcessProbe, providerHomeRunnerMarker, proveLeaseAbandoned } from "./provider-home-lease-evidence.js";
 import { ProviderProcessOwnership } from "./provider-process-ownership.js";
 import { provisionAgentControl, removeAgentControlFiles, isCurrentAgentControlCredential } from "./agent-control.js";
 import { ManagedWorktreeGuardSockets } from "./managed-worktree-guard-socket.js";
@@ -30,6 +30,58 @@ async function waitFor(predicate: () => boolean, message: string, attempts = 150
   }
   assert.fail(message);
 }
+
+/** Closed-world fixture probe. Only scan is scoped; identity reads still use the real kernel. */
+function fixtureProcessProbe(root: string, children: Array<{ pid: number }>) {
+  const proc = join(root, "proc");
+  mkdirSync(proc);
+  for (const { pid } of children) symlinkSync(`/proc/${pid}`, join(proc, String(pid)));
+  const kernel = linuxLeaseProcessProbe()!;
+  const prune = () => {
+    for (const { pid } of children) {
+      const link = join(proc, String(pid));
+      if (!existsSync(`/proc/${pid}`)) { try { unlinkSync(link); } catch { /* already removed */ } }
+    }
+  };
+  // A pidfd reports exit before init reaps the zombie. Prune every scan round so a
+  // reaped child disappears from the next listing, just as it does from real procfs.
+  const scoped = linuxLeaseProcessProbe(proc, undefined, undefined, { afterListing: prune })!;
+  return { proc, probe: { ...kernel, scan: (...args: Parameters<typeof kernel.scan>) => {
+    prune();
+    return scoped.scan(...args);
+  } } };
+}
+
+test("the scoped relaunch fixture proof sees real survivors and refuses an uninspectable entry", { skip: process.platform !== "linux" }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-scoped-retirement-"));
+  const directory = join(root, "ownership");
+  const fixture = new URL("./fixtures/provider-owned-orphans.mjs", import.meta.url).pathname;
+  try {
+    // Truthy non-tree mode records two providers without acquiring a platform-dependent HOME.
+    execFileSync(process.execPath, ["--import", "tsx", fixture, directory, "runner", "owned"], { timeout: 10_000 });
+    const manifest = JSON.parse(readFileSync(join(root, "fixture-state.json"), "utf8")) as {
+      bootId: string; runnerPid: number; runnerStartTime: string; marker: string; children: Array<{ pid: number }>;
+    };
+    const { proc, probe } = fixtureProcessProbe(root, manifest.children);
+    const evidence = { bootId: manifest.bootId, startTime: manifest.runnerStartTime, marker: manifest.marker };
+    const survivor = proveLeaseAbandoned(evidence, manifest.runnerPid, probe);
+    assert.ok(!survivor.proven);
+    assert.equal(survivor.reason, "marked_process");
+    assert.equal((await new ProviderProcessOwnership(directory, "runner").recover()).retired, 2);
+    const unknown = join(proc, "2147483646");
+    mkdirSync(unknown);
+    writeFileSync(join(unknown, "stat"), "uninspectable");
+    writeFileSync(join(unknown, "status"), "uninspectable");
+    const uninspectable = proveLeaseAbandoned(evidence, manifest.runnerPid, probe);
+    assert.ok(!uninspectable.proven);
+    assert.equal(uninspectable.reason, "uninspectable");
+    rmSync(unknown, { recursive: true });
+    assert.deepEqual(proveLeaseAbandoned(evidence, manifest.runnerPid, probe), { proven: true, proof: "process_scan" });
+  } finally {
+    if (existsSync(directory)) await new ProviderProcessOwnership(directory, "runner").recover();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 /** Every entry under `root`, byte for byte, including Git's own files and links. */
 function bytes(root: string, prefix = ""): Record<string, string> {
@@ -210,8 +262,12 @@ test("recorded startup retirement clears the survivor lease, then owner relaunch
       const orphanFixture = new URL("./fixtures/provider-owned-orphans.mjs", import.meta.url).pathname;
       assert.equal(execFileSync(process.execPath, ["--import", "tsx", orphanFixture,
         directory, "runner", "complete", h.sessionId], { encoding: "utf8", timeout: 10_000 }).trim(), "ready");
-      const manifest = JSON.parse(readFileSync(join(h.root, "fixture-state.json"), "utf8")) as { home: string };
-      leases = new ProviderHomeLeaseRegistry("a".repeat(64), { runnerMarker: providerHomeRunnerMarker() });
+      const manifest = JSON.parse(readFileSync(join(h.root, "fixture-state.json"), "utf8")) as { home: string; children: Array<{ pid: number }> };
+      // A closed-world guard/credential rehearsal: inspect real fixture processes through
+      // a scoped proc view, so unrelated CI workloads cannot affect this legacy lease.
+      // Production still scans the whole host; ownership retirement still uses real pidfds.
+      const { proc, probe } = fixtureProcessProbe(h.root, manifest.children);
+      leases = new ProviderHomeLeaseRegistry("a".repeat(64), { runnerMarker: providerHomeRunnerMarker(), processProbe: probe });
       const homeLease = leases;
       await oldGuard.closeAll();
       removeAgentControlFiles(h.sessionId, controls); // The replaced runner's memory is gone.
@@ -220,6 +276,13 @@ test("recorded startup retirement clears the survivor lease, then owner relaunch
       const retired = await new ProviderProcessOwnership(directory, "runner").recover();
       assert.equal(retired.retired, 2);
       assert.equal(retired.retained, 0);
+      // The scoped probe must still fail closed on an uninspectable potential survivor.
+      const unknown = join(proc, "2147483646");
+      mkdirSync(unknown);
+      writeFileSync(join(unknown, "stat"), "uninspectable");
+      writeFileSync(join(unknown, "status"), "uninspectable");
+      assert.throws(() => homeLease.acquireHome(manifest.home, "fixture"), /cannot all be inspected/);
+      rmSync(unknown, { recursive: true });
       assert.doesNotThrow(() => homeLease.acquireHome(manifest.home, "fixture"));
       h.restart();
       h.manager.reconcileRunnerRestartRecovery([h.sessionId]);

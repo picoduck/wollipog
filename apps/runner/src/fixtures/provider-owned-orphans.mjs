@@ -1,5 +1,5 @@
 // Bounded fake runner: publish real launch ownership, then exit while inert providers survive.
-import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { dirname, join } from "node:path";
 import { ProviderProcessOwnership } from "../provider-process-ownership.ts";
@@ -23,7 +23,8 @@ const children = [rootSession, "child", ...(complete ? [] : ["unknown"])].map(se
   const ledger = new ProviderProcessLedger({ processOwnership: sessionId === "unknown" ? undefined : registry.owner(sessionId) });
   const script = complete?.startsWith("tree") && sessionId === rootSession ? `
 const c = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(inert)}], { detached: ${complete === "tree"}, stdio: 'ignore' });
-require('node:fs').writeFileSync(${JSON.stringify(descendantFile)}, JSON.stringify({ sessionId: 'grandchild', pid: c.pid }), { mode: 0o600 });
+require('node:fs').writeFileSync(${JSON.stringify(descendantFile + '.pending')}, JSON.stringify({ sessionId: 'grandchild', pid: c.pid }), { mode: 0o600 });
+require('node:fs').renameSync(${JSON.stringify(descendantFile + '.pending')}, ${JSON.stringify(descendantFile)});
 ${inert}` : inert;
   const child = ledger.launch(spawnAgent, { command: process.execPath, args: ["-e", script],
     cwd: process.cwd(), context: { kind: "native" } });
@@ -38,6 +39,7 @@ if (complete?.startsWith("tree")) {
   const child = JSON.parse(readFileSync(descendantFile, "utf8"));
   children.push({ ...child, startTime: start(child.pid) });
 }
-writeFileSync(join(dirname(directory), "fixture-state.json"), JSON.stringify({ ...owner, home, children }), { flag: "wx", mode: 0o600 });
+writeFileSync(join(dirname(directory), "fixture-state.json.pending"), JSON.stringify({ ...owner, home, children }), { flag: "wx", mode: 0o600 });
+renameSync(join(dirname(directory), "fixture-state.json.pending"), join(dirname(directory), "fixture-state.json"));
 process.stdout.write("ready\n");
 process.exit(0);
