@@ -1484,6 +1484,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 377: Trusted temporary branch creation receipts and receipt-bound compare-and-delete.
   377,
   // v378 slot
+  // 378: Record same-run failed required check evidence for campaign follow-ups (#4544).
+  378,
   // v379 slot
   // v380 slot
   // v381 slot

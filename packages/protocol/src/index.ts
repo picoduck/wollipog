@@ -680,6 +680,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v327 creates an approved follow-up issue in a named Location's repository (#4119). */
   locationIssuePublication: 327,
   campaignFailedRunEvidence: 351,
+  campaignFailedRunRequiredCheck: 378,
   /** Issue-less lineage requires server-recorded campaign-root creation (#4538). */
   issueLessCampaignOrigins: 371,
   /** The highest floor of the three gates above: a Location on an older runner doesn't join a campaign (#4319). */
@@ -4716,6 +4717,8 @@ export interface CampaignFailedRunEvidence {
   /** Read from the exact job's check_run_url and check run, never supplied by the requester. */
   checkRunId: number;
   checkName: string;
+  /** v378: Failed required check from the same PR run; may be the cited check itself. */
+  requiredCheck?: { checkRunId: number; checkName: string };
 }
 
 export interface CampaignIssueAdmission {
@@ -4944,7 +4947,7 @@ export type CampaignIssueScopeMessage = {
 } & ({ operation: "inspect"; epic?: number; issues?: number[]; publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] };
        /** v291 (#4103): also report `issueFacts` for each of `issues`. */
        facts?: true } |
-     { operation: "failed_run_inspect"; evidence: Omit<CampaignFailedRunEvidence, "checkRunId" | "checkName"> } |
+     { operation: "failed_run_inspect"; evidence: Omit<CampaignFailedRunEvidence, "checkRunId" | "checkName" | "requiredCheck"> } |
      { operation: "publication_inspect"; sanitizedTitle: string; sanitizedBody: string; labels: string[] } |
      { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl;
        /** v310 (#3363): the campaign root's policy revision `control` was read at. A runner never

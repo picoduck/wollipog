@@ -13261,8 +13261,10 @@ export class SessionsService {
     // model's reason, and an uncertain or failed check makes the publication the owner's.
     // An older requester's strict consume schema cannot echo the added admission metadata.
     const supportsRelatedness = runnerSupportsProtocol(this.db.getRunner(caller.runnerId)?.protocolVersion, "campaignFailedRunEvidence");
-    const failedRun = supportsRelatedness
+    let failedRun = supportsRelatedness
       ? await failedCampaignRun(this.db, this.hub, root, `${snapshot.sanitizedTitle}\n${snapshot.sanitizedBody}`, evidence.recommendation) : null;
+    // An older requester's strict consume schema cannot echo both check runs.
+    if (failedRun?.requiredCheck && !runnerSupportsProtocol(this.db.getRunner(caller.runnerId)?.protocolVersion, "campaignFailedRunRequiredCheck")) failedRun = null;
     if (!failedRun) {
       const related = await this.followUpRelatedness(root, sessionId, snapshot, evidence);
       if (related.outcome === "refused") return refused("unrelated_follow_up", boundaryRevision, related.reason);

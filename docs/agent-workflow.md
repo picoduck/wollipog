@@ -176,7 +176,9 @@ own evidence. With runner protocol 351, a specific GitHub Actions job URL
 server matches the origin item's recorded PR to a head admitted for
 that item's child through a valid completed review session or consumed merge gate. Its runner reads GitHub to
 prove a failed merge-group run with that PR/head queue ref and ancestry, or a failed required check
-whose run names that PR/head. The exact job must belong to that run and point to the exact failed
+whose run names that PR/head. With protocol 378, a non-required failed job also qualifies when a
+failed required check belongs to that same run, PR and head; admission records both check runs.
+Passing or pending required checks retain the Decision Model fallback. The exact job must belong to that run and point to the exact failed
 check run; cancelled, skipped and passing jobs/checks do not qualify. The sanitized title or body
 must contain the check name verbatim, compared server-side to the name the runner reads from the
 forge. Only relatedness skips the Decision Model. Structural floors and
