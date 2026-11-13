@@ -90,6 +90,15 @@ only as prose:
   words, the answer grants nothing, and no scope, boundary or policy change revokes the question.
 - Nobody, child or root, ends a turn with such a gate only in prose.
 
+A root's question to its owner, whatever the topic, is always an Owner Question through
+`request_owner_decision` with `kind: "question"`, never only a closing sentence in chat. Do not ask
+the owner about something you may decide yourself: resolve Orchestrator-owned implementation
+questions and accept, reject or defer follow-ups yourself. Never end a turn with a blocker that
+needs the owner without either a typed request or a recorded handoff with its reason and next
+action. When a Full Control campaign settles with human handoffs, the server keeps one Owner
+Question in the Inbox updated from that set; external handoffs are included but do not trigger it
+alone. Answering that question grants no authority.
+
 Children ask clarifications, preferences and design choices with `request_workflow_decision`,
 `category: "implementation_question"`, `kind: "question"` (protocol v332). These use normal question
 forms with 0–12 suggested options and free text. The existing policy still decides who answers,

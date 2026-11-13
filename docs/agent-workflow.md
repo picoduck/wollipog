@@ -44,6 +44,14 @@ provider, Human Required exceptions, unsupported or degraded capabilities, and e
 mandatory human rule with its exact source and typed route to the owner. It asks nothing and waits
 for nobody; the shipped authority reference lists what it names.
 
+A root's question to its owner, whatever its topic, must be an Owner Question through
+`request_owner_decision` with `kind: "question"`, never only prose. Never end a turn with a blocker
+that needs the owner without a typed request or a recorded handoff naming the reason and next
+action. Decide Orchestrator-owned implementation questions and follow-up acceptance, rejection or
+deferral yourself. On settlement, human handoffs reach the Inbox in one server-maintained question;
+external handoffs are listed alongside them but do not trigger a question alone. Its answer grants
+no authority. Housekeeping without human handoffs stays informational.
+
 Installed or user-authored workflows are independent instructions. Name any unresolved mandatory
 human rule with its exact file, quoted requirement and affected action before proceeding to that
 gate. For example, an installed third-party workflow may require consent to a disputed scope change,
