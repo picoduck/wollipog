@@ -1043,6 +1043,32 @@ test("#4538 scope lineage rechecks issue-less provenance and compatibility after
   }
 });
 
+test("#4538 consumption rechecks a downgraded requester while the root remains compatible", async () => {
+  const { h } = multiRepositoryCampaign();
+  try {
+    h.db.raw().prepare("UPDATE sessions SET runner_id='r2', workspace_id='a' WHERE id='child'").run();
+    const plan = h.svc.recordCampaignPlan("root", { items: [{ key: "investigation" }], planComplete: true });
+    assert.ok(plan.ok);
+    const rec = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/api", title: "Related repair",
+      originWorkItemIds: [plan.data!.items[0]!.workItemId] });
+    assert.ok(rec.ok);
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: rec.data!.id, disposition: "accepted",
+      reason: "Observed related defect", publicationRequired: true }).ok);
+    const publication = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "downgrade", resourceKey: "downgrade", resourceSnapshot: {
+      category: "follow_up_issue_publication", repository: "team/api", sanitizedTitle: "Related repair", sanitizedBody: body, labels: [], recommendationId: rec.data!.id } });
+    assert.ok(publication.ok);
+    const decision = publication.data!;
+    assert.equal(decision.authority, "orchestrator", JSON.stringify(decision.authorityEvaluation));
+    assert.ok(h.svc.resolveWorkflowDecision("root", "child", decision.occurrenceId, { outcome: "approve" },
+      "orchestrator", { kind: "agent", id: "root" }, () => true).ok);
+    h.db.raw().prepare("UPDATE runners SET protocol_version=370 WHERE runner_id='r2'").run();
+    const consumed = await h.svc.consumeWorkflowDecision("child", decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot });
+    assert.equal(consumed.ok, false);
+    assert.match(consumed.error ?? "", /older runners/u);
+    assert.notEqual(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "consumed");
+  } finally { h.db.close(); }
+});
+
 test("compatible reauthorization can admit an earlier consumed publication exactly once", async () => {
   const h=harness(true,3);
   try {

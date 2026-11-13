@@ -653,7 +653,10 @@ settles it. When the server cannot admit the request for any other reason, the d
 person, and its `authorityEvaluation.admissionFailure` names the failed condition (for example
 `capacity_exhausted`, `unsafe_payload`, `origin_outside_scope` or `inspection_failed`, or
 `no_issue_boundary` in a Custom campaign), which the server also logs. Under an issue boundary every
-person-owned publication carries one, with its fixed sentence in `admissionMessage`: a request that
+person-owned publication carries one, with its fixed catalog sentence in `admissionMessage`, or a
+server-fixed `origin_outside_scope` sentence distinguishing foreign/missing work, removed issues,
+unproven investigation provenance and older runners. It never carries request content or a Decision
+Model's free-text reason. A request that
 names no recommendation records `recommendation_missing`, and its sentence tells the requester that
 naming the accepted recommendation would let the Orchestrator review it. `capacity_exhausted` names
 Maximum Issues and the owner's route to raise it. Campaign recovery reports these decisions as

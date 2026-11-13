@@ -12670,7 +12670,8 @@ export class SessionsService {
       // approves and the requester consumes what it sent (#3918). Only the server's own
       // issueAdmission makes a publication bounded; a named recommendation never does.
       return this.createWorkflowDecision(sessionId, request, canAccess,
-        "failure" in admitted ? { publicationAdmissionFailure: admitted.failure, publicationAdmissionReason: admitted.reason } : undefined);
+        "failure" in admitted ? { publicationAdmissionFailure: admitted.failure,
+          ...(admitted.failure === "origin_outside_scope" ? { publicationAdmissionReason: admitted.reason } : {}) } : undefined);
     }
     if (normalized.ok && normalized.data?.category === "pr_merge") {
       return this.createMergeDecision(sessionId, request, normalized.data, canAccess);

@@ -159,7 +159,9 @@ export interface CampaignAuthorityEvaluation {
   /** A publication the server could not admit (#2940). Under an issue boundary every human-owned
    * publication carries one, including one that names no recommendation (#4065). */
   admissionFailure?: CampaignPublicationAdmissionFailure;
-  /** The fixed sentence for `admissionFailure` from CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES. */
+  /** The fixed catalog sentence, or a server-fixed origin_outside_scope reason distinguishing
+   * missing/foreign work, removed issues, unproven investigation provenance and older runners.
+   * Never request content or a Decision Model's free-text reason. */
   admissionMessage?: string;
   /** With `outside_issue_scope`: each issue the merge would close outside the scope, as sorted `owner/repo#N`. */
   unscopedClosures?: string[];
