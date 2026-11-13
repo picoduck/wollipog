@@ -4,6 +4,21 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CampaignIssueScopeSummary } from "./CampaignIssueScopePanel.js";
 
+test("an all proposal explains its ceiling without claiming missing lineage (#4532)", () => {
+  const markup = renderToStaticMarkup(<CampaignIssueScopeSummary snapshot={{
+    category: "campaign_issue_scope", repository: "team/repo", expectedRevision: 1, before: [], additions: [12, 13], removals: [],
+    explanation: "Every match", affectedAssignments: [], affectedDecisions: [], activeChildren: [],
+    ownerReview: { cause: "lineage_missing", maxIssuesIncrease: { from: 1, increase: 1 } },
+    scopeProposal: { initial: true, messageDigest: "a".repeat(64), requestedCount: "all", constraints: ["open"], withheldOperations: [],
+      checks: ["requested_count", "chosen_issues"], route: "owner", ownerCause: "issue_ceiling_exceeded", ownerMessage: "Fix all open issues.",
+      constraintCheck: { occurrenceId: "check", verdict: "admit" },
+      issues: [12, 13].map((number) => ({ number, title: "Issue", origin: "orchestrator_chosen", rationale: "Matches" })) },
+  }} />).replace(/<!-- -->/gu, "");
+  assert.ok(markup.includes("matching issues exceed Maximum Issues"));
+  assert.ok(markup.includes("raises Maximum Issues from 1 to 2"));
+  assert.equal(markup.includes("No authorized epic, published follow-up or issue selection admits it"), false);
+});
+
 test("scope approval displays exact qualified changes, revision and affected authority",()=>{
   const markup=renderToStaticMarkup(<CampaignIssueScopeSummary snapshot={{category:"campaign_issue_scope",repository:"team/repo",expectedRevision:3,
     before:[123],additions:[124,125],removals:[123],explanation:"Include members <literal>",

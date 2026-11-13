@@ -789,8 +789,13 @@ const ownerScopeRoutes = {
       ] } } },
 };
 const ownerScopeParam = params.get("ownerScope");
-const allScope = { ...ownerScopeRoutes.proposal, snapshot: {
+const allScope = { ...ownerScopeRoutes.proposal,
+  summary: "Add team/repo#151, team/repo#152, raising Maximum Issues from 1 to 2",
+  derivedIncrease: { from: 1, increase: 1 },
+  snapshot: {
   ...ownerScopeRoutes.proposal.snapshot,
+  before: [],
+  ownerReview: { cause: "lineage_missing" as const, maxIssuesIncrease: { from: 1, increase: 1 } },
   scopeProposal: { ...ownerScopeRoutes.proposal.snapshot.scopeProposal,
     requestedCount: "all" as const, ownerCause: "issue_ceiling_exceeded" as const,
     ownerMessage: "Fix all open UI issues.",
@@ -948,7 +953,7 @@ let scopeGrantFixture: import("@wollipog/protocol").FullControlScopeGrant | null
   version: 1, status: "proposal", namedIssues: [], ceilings: { ...launchCeilings(9), repositories: ["team/repo", "team/api"] },
 } : params.get("scope") === "all" || params.get("scope") === "proposal" || params.get("scope") === "proposal-waiting" ? {
   // The Orchestrator proposes the scope (#4282): the server read nothing from the message.
-  version: 1, status: "proposal", namedIssues: [], ceilings: launchCeilings(9),
+  version: 1, status: "proposal", namedIssues: [], ceilings: launchCeilings(params.get("scope") === "all" ? 1 : 9),
 } : params.get("scope") === "grant-uncertain" ? {
   version: 1, status: "uncertain", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET, namedIssues: [],
   reason: "The message doesn't say whether #12 is a request or background.", ceilings: launchCeilings(1),
