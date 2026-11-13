@@ -4077,8 +4077,11 @@ test("root credential refusals name owner recovery rather than referring the roo
     for (const state of ["running", "idle", "stopped"] as const) {
       db.updateSessionStatus("root", state, 2);
       const refusal = sessionCredentialRefusal(headers, db)!;
-      assert.equal(refusal.reason, state === "stopped" ? "session_stopped" : "root_unavailable");
-      assert.match(refusal.error!, /session owner restart.*credential and guard/);
+      assert.equal(refusal.reason, state === "stopped" ? "session_stopped" : state === "running" ? "session_unavailable" : "root_unavailable");
+      if (state === "running") {
+        assert.match(refusal.error!, /unavailable to the session credential.*owner-only actions/);
+        assert.doesNotMatch(refusal.error!, /restart/u);
+      } else assert.match(refusal.error!, /session owner restart.*credential and guard/);
       assert.doesNotMatch(refusal.error!, /ask the Orchestrator|with the Orchestrator/);
     }
     db.updateSessionStatus("root", "running", 3);

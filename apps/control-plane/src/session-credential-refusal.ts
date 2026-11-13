@@ -25,6 +25,9 @@ export function sessionCredentialRefusal(
     if (root) return { reason: "session_stopped", error: "session agent credential refused: this Orchestrator is stopped; have its session owner restart it from the session controls to refresh its credential and guard" };
     return { reason: "session_stopped", error: "session agent credential refused: session stopped; ask the Orchestrator to restart the session" };
   }
+  if (root && ["starting", "running", "input_required"].includes(session.status)) {
+    return { reason: "session_unavailable", error: "session agent credential refused: this request is unavailable to the session credential; check the requested operation and use the session owner's controls for owner-only actions" };
+  }
   if (root) return { reason: "root_unavailable", error: "session agent credential refused: this Orchestrator is unavailable; have the session owner restart it from the session controls to refresh its credential and guard" };
   return { reason: "session_unavailable", error: "session agent credential refused: this request is unavailable to the session credential; check the requested operation, session state and delegated access with the Orchestrator" };
 }

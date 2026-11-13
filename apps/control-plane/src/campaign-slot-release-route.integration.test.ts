@@ -78,7 +78,8 @@ function seed(database: string): { generation: string; userId: string } {
 
 async function reservePort(): Promise<number> {
   const server = createServer();
-  await new Promise<void>((done, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", done); });
+  const port = Number(process.env.WOLLIPOG_PORT_BLOCK_START ?? 0);
+  await new Promise<void>((done, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", done); });
   const address = server.address();
   assert.ok(address && typeof address === "object");
   await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done()));
@@ -159,7 +160,7 @@ test("only the campaign's owner releases a held slot; its Full Control Orchestra
   // No agent allowlist entry exists, so the credential layer refuses it before the route's own
   // human-only check (403) is even reached.
   assert.equal(asOrchestrator.status, 401, `${asOrchestrator.text}\n${cp.logs()}`);
-  assert.match(String(asOrchestrator.json.error), /unavailable to the session credential/u);
+  assert.match(String(asOrchestrator.json.error), /unavailable to the session credential.*owner-only actions/u);
   assert.equal(budget(cp.database).occupied, 1, "the agent's request changed nothing");
   assert.equal(budget(cp.database).slotReleases, undefined);
 
