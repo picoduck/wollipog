@@ -457,6 +457,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   workflowDecisionActionReconciliation: 153,
   /** v269 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
   workflowDecisionWithdrawal: 269,
+  workflowDecisionRetirement: 367,
   /** v281 owner decisions (#4064): a Full Control root's typed question for its campaign's owner,
    * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
    * root's runner by the control plane and against the control plane by the runner. */
@@ -5280,7 +5281,8 @@ export type WorkflowDecisionStatus =
   | "denied"
   | "consumed"
   | "revoked"
-  | "superseded";
+  | "superseded"
+  | "retired";
 
 export interface WorkflowDecisionAction {
   kind: "pr_merge_enqueue";
@@ -5356,6 +5358,9 @@ export interface WorkflowDecisionView {
   scopeRevokedDecisions?: string[];
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
+  /** Authority removed after a fresh, read-only forge observation; admission retained for settlement. */
+  retirement?: { bySessionId: string; reason: string; observedAt: number;
+    repository: string; pullRequest: number; headSha: string; state: "OPEN"; queued: false };
   /** v284 (#4067): what Wollipog did when it performed this approved forge action itself. */
   forgeAction?: import("./forge-decision-action.js").WorkflowDecisionForgeAction;
   /** v330 (#4323): a consumed merge's watch, from approval until it lands. */

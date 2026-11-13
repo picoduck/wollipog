@@ -483,7 +483,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       ["decision", "decisions", "workflow-decision", "workflow-decisions"].includes(arg));
     const verb = args[groupIndex + 1];
     const occurrenceId = args[groupIndex + 2];
-    if (optionPresent(args, "--session") && verb !== "get" && verb !== "list" && verb !== "withdraw" && verb !== "hand-to-owner") {
+    if (optionPresent(args, "--session") && verb !== "get" && verb !== "list" && verb !== "withdraw" && verb !== "retire" && verb !== "hand-to-owner") {
       return { error: "decision commands act only on the injected session and do not accept --session" };
     }
     if (verb === "ask-owner") {
@@ -621,18 +621,18 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       }
       return { tool: "execute_workflow_decision", input: { occurrenceId, resourceDigest } };
     }
-    if (verb === "withdraw") {
+    if (verb === "withdraw" || verb === "retire") {
       if (!occurrenceId || occurrenceId.startsWith("--")) {
-        return { error: "decision withdraw requires an occurrence id" };
+        return { error: `decision ${verb} requires an occurrence id` };
       }
       const reason = option(args, "--reason");
-      if (!reason || reason.startsWith("--") || !reason.trim()) return { error: "decision withdraw requires --reason" };
+      if (!reason || reason.startsWith("--") || !reason.trim()) return { error: `decision ${verb} requires --reason` };
       const sessionId = option(args, "--session");
       if (optionPresent(args, "--session") && (!sessionId || sessionId.startsWith("--"))) {
         return { error: "--session requires a session id" };
       }
       return {
-        tool: "withdraw_workflow_decision",
+        tool: verb === "retire" ? "retire_workflow_decision" : "withdraw_workflow_decision",
         input: { occurrenceId, reason, ...(sessionId ? { sessionId } : {}) },
       };
     }
@@ -1102,6 +1102,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach
     : parsed.tool === "reconcile_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation
+    : parsed.tool === "retire_workflow_decision"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionRetirement
     : parsed.tool === "withdraw_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal
     : parsed.tool === "execute_workflow_decision"

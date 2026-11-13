@@ -68,7 +68,8 @@ export const FORGE_DECISION_ACTION_STALE_REFUSALS: ReadonlySet<ForgeDecisionActi
 export type ForgeDecisionActionSuccess =
   | "deleted" | "already_deleted"
   | "enqueued" | "already_queued" | "already_merged"
-  | "published" | "already_published";
+  | "published" | "already_published"
+  | "open_unqueued";
 
 export type ForgeDecisionActionOutcome =
   | ForgeDecisionActionSuccess
@@ -111,6 +112,7 @@ export type ForgeDecisionAction =
    * performed. `already_merged` means GitHub merged exactly `headSha`; anything else refuses. Its own
    * kind, never a flag on the enqueue, so a runner that does not know it refuses it as unknown
    * instead of running an enqueue. */
+  | { kind: "pr_merge_retirement_observe"; repository: string; pullRequest: number; headSha: string }
   | { kind: "pr_merge_observe"; repository: string; pullRequest: number; headSha: string }
   /** Create the approved issue, once, through the Location named by the message. */
   | { kind: "issue_publication"; repository: string; title: string; body: string; labels: string[] }

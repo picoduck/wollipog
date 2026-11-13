@@ -1666,6 +1666,29 @@ test("CLI withdrawal forwards the exact reason and target, and refuses a pre-v26
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")), "an older control plane is never sent the withdrawal");
 });
 
+test("CLI retirement forwards the exact reason and target, and refuses a pre-v367 control plane (#4533)", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  let version = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionRetirement;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { occurrenceId: "workflow_1", status: "retired" }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "parent" };
+  const invoke = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", "decision", "retire", ...args, "--json"],
+    env, { stdout: () => {}, stderr: () => {} }, fetch);
+  assert.equal(await invoke(["workflow_1", "--reason", "Superseded by #2."]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/parent/workflow-decisions/workflow_1/retire");
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), { reason: "Superseded by #2." });
+  assert.equal(await invoke(["workflow_1", "--reason", "Not needed.", "--session", "child"]), 0);
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), { reason: "Not needed.", sessionId: "child" },
+    "an Orchestrator names its child in the body; the path stays its own session");
+  calls.length = 0;
+  version = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionRetirement - 1;
+  assert.equal(await invoke(["workflow_1", "--reason", "Not needed."]), 1);
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")), "an older control plane is never sent the retirement");
+});
+
 test("CLI issue closure preserves the exact proposal and refuses other sessions or old control planes", async () => {
   const proposal = { requestId: "close-123", issue: 123, reason: "completed", explanation: "Delivered.",
     evidence: ["Verified merged PR."], comment: "Exact\nclosing comment." };

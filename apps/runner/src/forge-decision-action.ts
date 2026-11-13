@@ -172,10 +172,17 @@ export async function observePullRequestMerge(
   return pullRequestEnqueue(action, gh, false);
 }
 
+export async function observePullRequestRetirement(
+  action: Extract<ForgeDecisionAction, { kind: "pr_merge_retirement_observe" }>, gh: GhRunner,
+): Promise<ForgeDecisionActionResult> {
+  return pullRequestEnqueue(action, gh, false, true);
+}
+
 async function pullRequestEnqueue(
   action: { repository: string; pullRequest: number; headSha: string },
   gh: GhRunner,
   write: boolean,
+  retirement = false,
 ): Promise<ForgeDecisionActionResult> {
   if (!REPOSITORY.test(action.repository) || !Number.isSafeInteger(action.pullRequest) || action.pullRequest < 1 || !SHA.test(action.headSha)) {
     return refused("pull_request_mismatch", "The decision does not name a GitHub pull request this runner can enqueue.");
@@ -188,6 +195,10 @@ async function pullRequestEnqueue(
   }
   if (pr.headRefOid !== action.headSha) {
     return refused("pull_request_mismatch", "The pull request's head is no longer the approved head.");
+  }
+  if (retirement) {
+    if (pr.state === "OPEN" && pr.mergeQueueEntry === null) return { outcome: "open_unqueued" };
+    return refused("pull_request_mismatch", "Retirement requires an open pull request outside the merge queue.");
   }
   if (pr.state === "MERGED") return { outcome: "already_merged" };
   if (!write) return refused("pull_request_mismatch", "The pull request has not merged; nothing was enqueued.");

@@ -1449,6 +1449,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // v365 slot
   // v366 slot
   // v367 slot
+  // 367: Retire ejected armed merge approvals with fresh forge evidence (#4533).
+  367,
   // v368 slot
   // v369 slot
   // v370 slot

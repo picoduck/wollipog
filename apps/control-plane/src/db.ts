@@ -7754,6 +7754,7 @@ export class ControlPlaneDb {
       "action_runner_history_epoch INTEGER",
       "child_message TEXT",
       "withdrawal TEXT",
+      "retirement TEXT",
       "delegated_video_evidence TEXT",
       // #4074: the delegated image reviewer whose verdict backed an Orchestrator approval.
       "delegated_image_review TEXT",
@@ -24860,6 +24861,19 @@ export class ControlPlaneDb {
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
 
+  /** Retain the armed admission as history while making every authority query terminal. */
+  retireWorkflowDecision(decision: WorkflowDecisionView, retirement: NonNullable<WorkflowDecisionView["retirement"]>): WorkflowDecisionView | null {
+    return this.atomic(() => {
+      const changed = this.stmt(`UPDATE workflow_decisions SET status='revoked', retirement=?
+        WHERE occurrence_id=? AND session_id=? AND status='approved' AND consumed_at IS NULL
+          AND action_command_digest=?`).run(JSON.stringify(retirement), decision.occurrenceId,
+            decision.sessionId, decision.actionAdmission!.commandDigest);
+      if (Number(changed.changes) !== 1) return null;
+      this.retireWorkflowDecisionResume(decision.occurrenceId, retirement.observedAt);
+      return this.workflowDecisionByOccurrence(decision.occurrenceId);
+    });
+  }
+
   /** #3917: retire one pending or approved occurrence that was never consumed and whose action was
    * never armed. Those conditions are part of the write, so a consume, arm or resolution that got
    * there first leaves it untouched. `unheard` says the child has not heard the decision's outcome:
@@ -26324,7 +26338,7 @@ export class ControlPlaneDb {
     try {
       const decision = this.workflowDecisionByOccurrence(occurrenceId);
       const eligible = decision?.sessionId === sessionId &&
-        (decision.status === "approved" ||
+        (decision.status === "approved" || decision.status === "retired" && Boolean(decision.retirement) ||
           this.isRecoverableWorkflowDecisionActionRevocation(
             sessionId,
             occurrenceId,
@@ -26350,13 +26364,14 @@ export class ControlPlaneDb {
       }
       const siblings = (this.stmt(
         `SELECT occurrence_id FROM workflow_decisions
-         WHERE session_id=? AND category='pr_merge' AND status='approved' AND consumed_at IS NULL
+         WHERE session_id=? AND category='pr_merge'
+           AND (status='approved' OR status='revoked' AND retirement IS NOT NULL) AND consumed_at IS NULL
            AND action_command_digest=? AND occurrence_id<>?`,
       ).all(sessionId, commandDigest, occurrenceId) as unknown as Array<{ occurrence_id: string }>)
         .map((row) => row.occurrence_id);
       const supersede = this.stmt(
         `UPDATE workflow_decisions SET status='superseded', resolved_at=?, superseded_by=?
-         WHERE occurrence_id=? AND status='approved' AND consumed_at IS NULL`,
+         WHERE occurrence_id=? AND (status='approved' OR status='revoked' AND retirement IS NOT NULL) AND consumed_at IS NULL`,
       );
       for (const sibling of siblings) {
         supersede.run(now, occurrenceId, sibling);
@@ -36690,6 +36705,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     action_runner_history_epoch?: number | null;
     child_message?: string | null;
     withdrawal?: string | null;
+    retirement?: string | null;
     superseded_by?: string | null;
     closure_approval?: string | null;
     scope_revoked_decisions?: string | null;
@@ -36768,6 +36784,8 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
         } }
       : {}),
     ...(row.child_message ? { childMessage: row.child_message } : {}),
+    ...(row.retirement ? { retirement: parseJson<NonNullable<WorkflowDecisionView["retirement"]>>(row.retirement) ?? undefined,
+      ...(row.status === "revoked" ? { status: "retired" as const } : {}) } : {}),
     ...(row.withdrawal ? { withdrawal: parseJson<NonNullable<WorkflowDecisionView["withdrawal"]>>(row.withdrawal) ?? undefined } : {}),
     ...(row.closure_approval ? { approval: parseJson<NonNullable<WorkflowDecisionView["approval"]>>(row.closure_approval) ?? undefined } : {}),
     ...(row.scope_revoked_decisions ? { scopeRevokedDecisions: parseJson<string[]>(row.scope_revoked_decisions) ?? undefined } : {}),

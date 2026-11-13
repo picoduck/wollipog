@@ -10076,7 +10076,8 @@ export class SessionsService {
       return fail(
         `campaign child still has an unresolved or unconsumed workflow decision: ${named.join(", ")}; ` +
           "the child must consume an approved one (a landed pr_merge through reconcile_workflow_decision), " +
-          "or withdraw one it no longer needs with withdraw_workflow_decision, as its Orchestrator can for one it owns",
+          "or withdraw one it no longer needs with withdraw_workflow_decision, as its Orchestrator can for one it owns. " +
+          "For an armed, unmerged pr_merge use retire_workflow_decision when the approved head is open and not queued",
         409,
       );
     }
@@ -16750,6 +16751,85 @@ export class SessionsService {
     void this.campaignForgeReadNow(campaign.id, [{ repository, number: pullRequest }]).catch(() => null);
   }
 
+  /** Remove authority from an ejected armed merge, retaining its admission for later settlement. */
+  async retireWorkflowDecision(
+    callerSessionId: string,
+    occurrenceId: string,
+    request: WithdrawWorkflowDecisionRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): Promise<ServiceResult<WorkflowDecisionView>> {
+    const requesterId = request?.sessionId ?? callerSessionId;
+    if (!boundedDecisionString(requesterId, 256)) return fail("sessionId must be a nonempty session id", 400);
+    if (!boundedDecisionString(request?.reason, WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS)) {
+      return fail("a bounded nonempty retirement reason is required", 400);
+    }
+    const reason = request.reason.trim();
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    const caller = this.db.getSession(callerSessionId);
+    const requester = this.db.getSession(requesterId);
+    const byRequester = callerSessionId === requesterId;
+    if (!decision || !caller || !requester || decision.sessionId !== requesterId ||
+        !canAccess(callerSessionId) || !canAccess(requesterId) ||
+        !(byRequester || decision.controllingSessionId === callerSessionId &&
+          this.workflowDecisionRelationship(callerSessionId, requesterId))) {
+      return fail("workflow decision not found", 404);
+    }
+    if (decision.status !== "approved" || decision.category !== "pr_merge" || !decision.actionAdmission ||
+        decision.consumedAt !== undefined) return fail("retirement requires an approved armed pr_merge", 409);
+    if (!byRequester && decision.authority !== "orchestrator") {
+      return fail("only its requester can retire a human-owned workflow decision", 403);
+    }
+    if (isTerminal(caller.status)) return fail("workflow decision authority was revoked or superseded", 409);
+    if (!byRequester) {
+      const policy = caller.parentControlPolicy;
+      if (!policy || policy.revision !== decision.policyRevision ||
+          !this.workflowDecisionAuthorityCurrent(caller, policy, decision)) {
+        this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: callerSessionId } });
+        return fail("workflow decision authority was revoked or superseded", 409);
+      }
+    }
+    const child = this.db.getSession(requesterId)!;
+    const unsupported = this.capabilityFailure(child.runnerId, "workflowDecisionRetirement", "armed merge retirement");
+    if (unsupported) return unsupported;
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "pr_merge" || !snapshot.repository.match(/^[^/]+\/[^/]+$/)) {
+      return fail("retirement currently requires a GitHub pull request", 409);
+    }
+    const requestId = `merge_retirement_${randomUUID()}`;
+    let proof;
+    try {
+      proof = await this.hub.requestFromRunner(child.runnerId, requestId, {
+        type: "forge_decision_action", requestId, sessionId: child.id, occurrenceId,
+        action: { kind: "pr_merge_retirement_observe", repository: snapshot.repository,
+          pullRequest: snapshot.pullRequest, headSha: snapshot.headSha },
+      }, 45_000);
+    } catch {
+      return fail("forge could not be read; retirement changed nothing", 409);
+    }
+    if (proof.type !== "forge_decision_action_result" || proof.requestId !== requestId ||
+        proof.sessionId !== child.id || proof.occurrenceId !== occurrenceId || proof.outcome !== "open_unqueued") {
+      return fail("retirement requires a fresh forge read showing the approved head open and not queued", 409);
+    }
+    // Repeat authority checks after the asynchronous forge read. No permission is created here.
+    const currentCaller = this.db.getSession(callerSessionId);
+    const current = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (!currentCaller || isTerminal(currentCaller.status) || !canAccess(callerSessionId) || !canAccess(requesterId) ||
+        !current || current.status !== "approved" || current.resourceDigest !== decision.resourceDigest ||
+        (!byRequester && (!this.workflowDecisionRelationship(callerSessionId, requesterId) ||
+          !currentCaller.parentControlPolicy || !this.workflowDecisionAuthorityCurrent(currentCaller,
+            currentCaller.parentControlPolicy, current)))) return fail("workflow decision changed during retirement", 409);
+    const now = Date.now();
+    const retired = this.db.retireWorkflowDecision(decision, { bySessionId: callerSessionId, reason,
+      observedAt: now, repository: snapshot.repository, pullRequest: snapshot.pullRequest,
+      headSha: snapshot.headSha, state: "OPEN", queued: false });
+    if (!retired) return fail("workflow decision changed during retirement", 409);
+    this.recordWorkflowDecisionAudit(retired, "revoked", { kind: "agent", id: callerSessionId }, now, reason);
+    this.settleWorkflowDecisionPause(requesterId, occurrenceId, now);
+    this.hub.sessionChangedById(requesterId);
+    this.hub.sessionChangedById(decision.controllingSessionId);
+    return ok(this.withMergeReviewEvidence(retired));
+  }
+
   /**
    * Withdraw one pending or approved workflow decision that was never consumed or armed (#3917).
    * It only ever reduces authority: the occurrence ends `revoked` with `withdrawal` provenance that
@@ -16788,7 +16868,7 @@ export class SessionsService {
     }
     if (decision.consumedAt !== undefined || decision.actionAdmission) {
       return fail("an armed pr_merge cannot be withdrawn: reconcile it with reconcile_workflow_decision " +
-        "once its pull request reads MERGED", 409);
+        "once its pull request reads MERGED, or use retire_workflow_decision when open at the approved head and not queued", 409);
     }
     if (decision.authority === "human" && PERSON_SETTLED_WORKFLOW_DECISION_CATEGORIES.has(decision.category)) {
       return fail(`a person settles this ${decision.category} decision, so it cannot be withdrawn`, 403);
@@ -16864,7 +16944,7 @@ export class SessionsService {
         error: `workflow decision ${occurrenceId} was superseded by workflow decision ${decision.supersededBy}; ` +
           "it is settled and has nothing left to reconcile" };
     }
-    if (decision.status !== "approved" &&
+    if (decision.status !== "approved" && decision.status !== "retired" &&
         !this.db.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId)) {
       return fail(`workflow decision cannot be reconciled from ${decision.status} state`, 409);
     }
@@ -16901,7 +16981,7 @@ export class SessionsService {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     }
     // An enqueue Wollipog ran itself left no provider receipt in any harness, so the forge settles it.
-    if (child.driver === "claude-code" || this.wollipogMayHaveEnqueued(decision)) {
+    if (decision.retirement || child.driver === "claude-code" || this.wollipogMayHaveEnqueued(decision)) {
       const proven = await this.forgeAttestedMergeProof(child, decision, normalized.data);
       if (!proven.ok) return fail(proven.error!, 409);
       const current = this.forgeAttestedMergeAuthority(decision, true, canAccess);
@@ -18827,7 +18907,7 @@ export class SessionsService {
     // Claude Code's proof below reads the forge alone. Another harness's proof is a provider receipt
     // that an enqueue Wollipog ran never produced, so that one is read the same way Wollipog ran it:
     // from the filesystem root through the session's own login, read only, never enqueuing.
-    if (child.driver !== "claude-code" && this.wollipogMayHaveEnqueued(decision)) {
+    if (decision.retirement || child.driver !== "claude-code" && this.wollipogMayHaveEnqueued(decision)) {
       const unsupported = this.capabilityFailure(child.runnerId, "forgeDecisionActions", "Wollipog-performed forge actions");
       if (unsupported) return failAs(unsupported);
       const requestId = `forge_decision_action_${randomUUID()}`;
@@ -18920,7 +19000,7 @@ export class SessionsService {
     const child = this.db.getSession(decision.sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
     const policy = parent?.parentControlPolicy;
-    if (!child || !parent || !policy || (child.driver !== "claude-code" && !this.wollipogMayHaveEnqueued(decision)) ||
+    if (!child || !parent || !policy || (!decision.retirement && child.driver !== "claude-code" && !this.wollipogMayHaveEnqueued(decision)) ||
         (requireLive && (isTerminal(child.status) || isTerminal(parent.status))) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
         !this.workflowDecisionRelationship(parent.id, child.id) ||

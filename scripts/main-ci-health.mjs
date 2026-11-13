@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -775,15 +776,22 @@ export async function reconcile(target, { api, log = console.log, collect = coll
 }
 
 export async function main(argv = [], { env = process.env, api, log = console.log, error = console.error,
-  waitForWorker = awaitWorkerTerminal, now = () => new Date().toISOString() } = {}) {
+  waitForWorker = awaitWorkerTerminal, now = () => new Date().toISOString(),
+  readGhToken = () => execFileSync("gh", ["auth", "token", "--hostname", "github.com"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 }).trim() } = {}) {
   let bounded, workerHandoff;
   const entryPoint = env.GITHUB_EVENT_NAME ?? "cli";
   const observationId = positive(Number(env.GITHUB_RUN_ID)) ? `${env.GITHUB_RUN_ID}:${env.GITHUB_RUN_ATTEMPT}` : randomUUID();
   try {
     const repository = env.GITHUB_REPOSITORY;
-    if (!REPOSITORY.test(repository ?? "") || !env.GITHUB_TOKEN || env.GITHUB_REF !== "refs/heads/main") fail("invalid-environment");
+    if (!REPOSITORY.test(repository ?? "") || env.GITHUB_REF !== "refs/heads/main") fail("invalid-environment");
+    let token = env.GITHUB_TOKEN;
+    if (!token && argv[0] === "report") {
+      try { token = readGhToken(); } catch { fail("invalid-environment"); }
+    }
+    if (!token) fail("invalid-environment");
     const injected = Boolean(api);
-    api = bounded = budgetApi(api ?? githubApi(env.GITHUB_TOKEN), {
+    api = bounded = budgetApi(api ?? githubApi(token), {
       requireHeaders: !injected, reserve: argv[0] === "report" ? 0 : API_WRITE_RESERVE,
     });
     // This endpoint is exempt from GitHub's primary rate limit. Low-quota event

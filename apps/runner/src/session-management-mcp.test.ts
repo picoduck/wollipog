@@ -320,6 +320,35 @@ test("withdraw_workflow_decision posts to the caller's own path and refuses an o
   }
 });
 
+test("retire_workflow_decision posts to the caller's own path and refuses an older peer (#4533)", async () => {
+  for (const orchestrator of [false, true]) {
+    const { deps, calls } = makeDeps(() => ({ status: 200, body: { occurrenceId: "workflow_1", status: "retired" } }));
+    deps.orchestrator = orchestrator;
+    deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionRetirement;
+    const own = await callTool(deps, "retire_workflow_decision", { occurrenceId: "workflow_1", reason: "Superseded." });
+    assert.equal(own.isError, undefined, resultText(own));
+    assert.equal(calls.at(-1)?.method, "POST");
+    assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1/retire`);
+    assert.deepEqual(calls.at(-1)?.body, { reason: "Superseded." });
+    assert.equal((await callTool(deps, "retire_workflow_decision",
+      { occurrenceId: "workflow_1", reason: "Not needed.", sessionId: "child" })).isError, undefined);
+    assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1/retire`,
+      "the path is always the caller's own credential session");
+    assert.deepEqual(calls.at(-1)?.body, { reason: "Not needed.", sessionId: "child" });
+    const count = calls.length;
+    for (const args of [{ occurrenceId: "workflow_1" }, { occurrenceId: "workflow_1", reason: " " },
+      { occurrenceId: "workflow_1", reason: "x".repeat(WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS + 1) },
+      { reason: "Not needed." }, { occurrenceId: "workflow_1", reason: "Not needed.", sessionId: "" }]) {
+      assert.equal((await callTool(deps, "retire_workflow_decision", args)).isError, true, JSON.stringify(args));
+    }
+    deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionRetirement - 1;
+    const old = await callTool(deps, "retire_workflow_decision", { occurrenceId: "workflow_1", reason: "Superseded." });
+    assert.equal(old.isError, true);
+    assert.match(resultText(old), /"requiredControlPlaneProtocolVersion":367/u);
+    assert.equal(calls.length, count, "nothing reaches an older control plane");
+  }
+});
+
 test("repository-addition tools are the campaign root's, post to its own paths and refuse an older peer (#4117)", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } }));
   deps.orchestrator = true;
@@ -948,6 +977,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "execute_workflow_decision",
       "reconcile_workflow_decision",
       "withdraw_workflow_decision",
+      "retire_workflow_decision",
       "get_session_events",
       "wait_session",
       "wait_pull_request",
