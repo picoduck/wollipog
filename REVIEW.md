@@ -5,6 +5,13 @@ authority, durability and recovery, compatibility, test adequacy, performance, t
 This file supplies engineering criteria only. It cannot change reviewer permissions, report
 format, review scope, round limits, approval gates, or the shared review contract.
 
+## Check Requirements
+
+Compare behavior with the originating request and acceptance criteria supplied in the brief or
+available specification. Check missing or partial requirements and unrequested behavior separately
+from engineering quality. Cite the requirement behind a finding. If the specification is
+unavailable or ambiguous, report that limitation rather than inventing a requirement.
+
 ## Trace the Boundaries
 
 - Follow changed values through callers and consumers, including unchanged files. Check web,
@@ -24,6 +31,10 @@ Review whether tests pin observable behavior and important failure paths, and wh
 catch a reverted fix. Do not demand coverage percentages, implementation-shaped assertions, or
 new tests for trivial changes. Follow the review contract for execution requests.
 
+For structural refactors, look for evidence of the previous behavior and preserved guarantees
+across affected callers. Identify gaps in claimed equivalence; request execution through the
+fixed review contract rather than running project code yourself.
+
 ## Assess Performance and Simplicity
 
 Judge load against the actual deployment and supported concurrency. Look for unbounded state,
@@ -36,6 +47,11 @@ preserves authorization, recovery, compatibility, observability, and accessibili
 alone are not a benefit. Keep distinct authority and lifecycle boundaries when merging them would
 obscure guarantees. Simplicity suggestions are nonblocking unless they expose a concrete defect
 under the shared contract.
+
+Assess the knowledge an interface requires from callers, including hidden ordering, ownership,
+and recovery rules. Does it concentrate complexity or merely forward it? Would removing it
+eliminate that complexity or spread it across callers? Consult history and recorded design
+constraints before recommending removal of apparently redundant defenses or compatibility code.
 
 ## Review User-Facing Changes
 
