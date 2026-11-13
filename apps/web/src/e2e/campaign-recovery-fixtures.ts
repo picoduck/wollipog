@@ -6,7 +6,7 @@ export function campaignRecoveryFixture(reason: CampaignRecoveryReason, now: num
   const blocked = ["hard_denial", "attempts_exhausted", "request_declined", "intentional_stop", "unverified_stop"].includes(reason);
   const automatic = ["failed_checks", "reviewer_objection", "transient_failure", "uncertain_outcome"].includes(reason);
   const requiredInput: CampaignRecoveryRecord["requiredInput"] = reason === "missing_access" ? "restore_existing_access"
-    : reason === "missing_human_information" ? "answer_existing_request"
+    : ["missing_human_information", "follow_up_limit", "owner_approval_required"].includes(reason) ? "answer_existing_request"
     : reason === "boundary_enlargement" ? "authorize_exact_boundary_change"
     : reason === "unsupported_capability" ? "use_supported_capability"
     : reason === "human_required_rule" ? "perform_human_required_action"

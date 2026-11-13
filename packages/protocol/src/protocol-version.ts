@@ -1466,7 +1466,11 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 371: Admit server-proven issue-less campaign investigation origins for follow-up lineage.
   371,
   // v372 slot
+  // 372: Person-only exact-state campaign worktree retirement, preserving local branch refs (#4535).
+  372,
   // v373 slot
+  // 373: Exact publication readback for follow-up ledger links and limit-specific recovery (#4537).
+  373,
   // v374 slot
   // v375 slot
   // v376 slot

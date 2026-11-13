@@ -13,6 +13,8 @@ import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } fro
 export * from "./orchestrator-review-policy.js";
 export * from "./provider-home-recovery.js";
 export * from "./worktree-dirty-paths.js";
+export * from "./worktree-retirement.js";
+import type { CampaignWorktreeRetirementState } from "./worktree-retirement.js";
 export * from "./fuzzy-path-match.js";
 export * from "./review-settings.js";
 import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference } from "./paced-video-review.js";
@@ -626,6 +628,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v193 enforces delivery proof on archive-triggered managed retirement and replay. */
   archiveWorktreeRetirement: 193,
   worktreePatchDelivery: 370,
+  campaignWorktreeConfirmation: 372,
   progressAwareSessionWorktrees: 113,
   /** v161 carries durable worktree-recovery state and its exact not-delivered receipt. */
   worktreeRecovery: 161,
@@ -5782,6 +5785,7 @@ export const WORKFLOW_DECISION_REVOCATION_REASONS = [
   "parent_control_policy_changed",
   "campaign_control_changed",
   "campaign_follow_up_limit_changed",
+  "follow_up_publication_linked",
   "campaign_boundary_restored",
   "session_ended",
   "session_restarted",
@@ -11420,6 +11424,10 @@ export type SessionWorktreeRequestMessage =
       requireDelivered?: boolean;
       /** v370: server-derived consumed merge records of this same campaign child. Never agent input. */
       campaignDeliveredPullRequests?: Array<{ repository: string; number: number; headSha: string }> }
+  /** Sent only by the authenticated-person Campaign Status routes. No agent operation maps here. */
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "inspect_retirement"; path: string }
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "confirm_retirement";
+      state: CampaignWorktreeRetirementState; confirmedBy: { userId: string; at: number } }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "generate_setup" }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "delete_refs";
       /** One of the session's recorded worktrees; the selected one when absent. Never a Git path. */
@@ -11557,7 +11565,8 @@ export interface SessionWorktreeResultMessage {
   requestId: string;
   /** Protocol v113+: exact request coordinates echoed for cross-operation correlation. */
   sessionId?: string;
-  operation?: "create" | "attach" | "select" | "discard" | "retry_setup" | "generate_setup" | "delete_refs";
+  operation?: "create" | "attach" | "select" | "discard" | "retry_setup" | "generate_setup" | "delete_refs" | "inspect_retirement" | "confirm_retirement";
+  retirementState?: CampaignWorktreeRetirementState;
   ok: boolean;
   error?: string;
   worktree?: SessionWorktreeView;

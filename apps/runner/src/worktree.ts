@@ -171,6 +171,12 @@ export interface WorktreeCleanupRecord {
   initiatingTrigger?: WorktreeCleanupRecord["trigger"] | "legacy_unknown";
   /** Explicit discard/reconciliation retains Git safety checks; deletion/rollback keeps legacy force cleanup. */
   removalMode?: "safe" | "force";
+  /** Human-only, one directory generation. Delivery is waived, but all branch refs are kept. */
+  ownerConfirmation?: {
+    state: import("@wollipog/protocol").CampaignWorktreeRetirementState;
+    userId: string;
+    at: number;
+  };
   /** Exact approved teardown material. Runner-private and never projected to the control plane. */
   hooks?: WorktreeHookSnapshot;
   /** Minimal runner-private launch identity needed to recreate the approved execution boundary
@@ -2767,10 +2773,35 @@ export async function reclaimRetainedWorktreeRef(
   }
 }
 
-/** Remove one inactive runner-owned worktree only after proving it has no local-only state.
- * The worktree removal is intentionally non-force, so a concurrent file write fails closed. The
- * branch delete is compare-and-delete against the exact inspected OID, so a concurrent commit is
- * retained even if it lands after the final status check. */
+/** Inspect the real checkout, never the cached branch in session metadata. No state is changed. */
+export async function inspectWorktreeRetirement(
+  repoPath: string,
+  sessionId: string,
+  handle: WorktreeHandle & { id: string; source: "legacy" | "created" },
+  options: WorktreeOptions = {},
+): Promise<import("@wollipog/protocol").CampaignWorktreeRetirementState> {
+  const context = options.context ?? nativeContext;
+  const boundary = await requestedWorktreeBoundaryPath(repoPath, sessionId, options, false);
+  const legacy = await sessionPath(repoPath, sessionId, options, false);
+  const owned = handle.source === "created"
+    ? pathWithin(context, handle.path, boundary) && !sameWorktreePath(context, handle.path, boundary)
+    : sameWorktreePath(context, handle.path, legacy);
+  if (!owned) throw new Error("runner ownership could not be proven");
+  const identity = await removalPathIdentity(context, handle.path);
+  if (!identity) throw new Error("the worktree path is absent; refresh cleanup instead");
+  const linked = await revalidateWorktreeRemovalIdentity(repoPath, handle.path, options, identity);
+  if (!linked?.worktree.branch) throw new Error("the checkout identity is unavailable or detached");
+  const dirty = await dirtyWorktreeReason(context, handle.path);
+  if (dirty) throw new Error(dirty);
+  const head = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
+  if (head !== linked.worktree.head || !/^[a-f0-9]{40,64}$/u.test(head)) throw new Error("the worktree changed during inspection");
+  return { worktreeId: handle.id, path: handle.path, registeredBranch: handle.branch,
+    branch: linked.worktree.branch, headSha: head, clean: true, pathIdentity: `${identity.dev}:${identity.ino}` };
+}
+
+/** Remove one inactive runner-owned worktree only after proving it has no uncommitted state and
+ * either proving delivery or matching a person's exact confirmation. Removal is non-force.
+ * Confirmed retirement keeps all refs; ordinary cleanup reclaims only its proven ref generation. */
 export async function discardWorktreeIfSafe(
   repoPath: string,
   sessionId: string,
@@ -2780,6 +2811,7 @@ export async function discardWorktreeIfSafe(
     /** A merged pull request head that may contain a tip without an upstream (#4068). */
     containingMergedHead?: string;
     patchDelivery?: WorktreePatchDeliveryProof;
+    ownerConfirmedState?: import("@wollipog/protocol").CampaignWorktreeRetirementState;
     requireDelivered?: boolean;
     beforeRemove?: () => Promise<void>;
     /** Fault-injection boundary after Git removes the worktree but before branch cleanup. */
@@ -2852,6 +2884,12 @@ export async function discardWorktreeIfSafe(
     }
     const head = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
     if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
+    const confirmation = options.ownerConfirmedState;
+    if (confirmation && (confirmation.clean !== true || confirmation.path !== handle.path ||
+        confirmation.registeredBranch !== recordedBranch || confirmation.branch !== branch || confirmation.headSha !== head ||
+        confirmation.pathIdentity !== `${initialPathIdentity.dev}:${initialPathIdentity.ino}`)) {
+      return { removed: false, reason: "unavailable" };
+    }
     const patchDelivered = !branchChanged && !!options.patchDelivery &&
       await patchDeliveryContains(repoPath, context, options.patchDelivery, head);
     // An accepted proof pins immutable objects and this exact tip. Failure to repeat it means
@@ -2863,13 +2901,16 @@ export async function discardWorktreeIfSafe(
     // Git permits another worktree to deliberately share this branch via
     // --ignore-other-worktrees. Removing this worktree must not detach that sibling from its ref,
     // whether this checkout still uses the recorded branch or switched to a replacement.
-    let preserveCheckedOutRef = branchCheckedOutElsewhere;
+    let preserveCheckedOutRef = branchCheckedOutElsewhere || !!confirmation;
     const checkedOutRefReasons: RetainedWorktreeRefReason[] = branchCheckedOutElsewhere
       ? ["shared_checkout"]
       : [];
     let checkedOutVerifiedMergedHead: string | undefined;
     let checkedOutContainingMergedHead: string | undefined;
-    if (branchChanged) {
+    if (confirmation) {
+      // The person retires only this clean checkout. Unique committed work remains reachable from
+      // its unchanged local branch; confirmation is never counterfeit delivery evidence.
+    } else if (branchChanged) {
       // A pushed-but-unmerged replacement is not enough: unlike the recorded branch, its upstream
       // was never part of the ownership record. Require delivery proof or no work beyond default.
       const mergedHead = options.verifiedMergedHead;
@@ -2964,7 +3005,7 @@ export async function discardWorktreeIfSafe(
       }
     }
 
-    if (options.requireDelivered && options.verifiedMergedHead !== head && !checkedOutContainingMergedHead &&
+    if (!confirmation && options.requireDelivered && options.verifiedMergedHead !== head && !checkedOutContainingMergedHead &&
         !patchDelivered) {
       const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
       let delivered = false;
@@ -2980,7 +3021,7 @@ export async function discardWorktreeIfSafe(
     }
 
     const retainedRefs: RetainedWorktreeRefCandidate[] = [];
-    if (branchChanged) {
+    if (branchChanged && !confirmation) {
       const recordedRef = `refs/heads/${recordedBranch}`;
       const recordedIdentity = await localBranchIdentity(context, repoPath, recordedRef);
       if (recordedIdentity) {
@@ -3007,7 +3048,7 @@ export async function discardWorktreeIfSafe(
       ...(checkedOutContainingMergedHead ? { containingMergedHead: checkedOutContainingMergedHead } : {}),
       ...(patchDelivered ? { patchDelivery: options.patchDelivery } : {}),
     };
-    retainedRefs.push(checkedOutCandidate);
+    if (!confirmation) retainedRefs.push(checkedOutCandidate);
     if (retainedRefs.length) await options.retainRefs?.(retainedRefs);
 
     // Hooks/process retirement are intentionally after the first complete safety proof and before

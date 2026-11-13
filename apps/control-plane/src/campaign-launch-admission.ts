@@ -25,6 +25,9 @@ export const FULL_CONTROL_LAUNCH_OPERATIONS: readonly CampaignAuthorityOperation
 ];
 const MAX_DERIVED_FOLLOW_UPS = 10;
 
+/** The existing bounded launch default, also used after server-admitted scope becomes known. */
+export const derivedFollowUpLimit = (scopeSize: number): number => Math.min(MAX_DERIVED_FOLLOW_UPS, Math.max(1, scopeSize));
+
 export function parseCampaignLaunchProposal(value: unknown): CampaignLaunchProposal | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const p = value as CampaignLaunchProposal;
@@ -169,13 +172,13 @@ export function firstMessageIssues(boundary: CampaignAuthorityBoundary, issueNum
  * `epicMembers`, the runner-verified members of target epics the message names (#4061), so the
  * Orchestrator's epic-lineage addition of them fits; it never counts toward follow-ups.
  *
- * A scope grant (#4102) adds its selection count to a derived Maximum Issues the same way, never to
- * follow-up room, and its operations replace the launch's only as their intersection. */
+ * A scope grant (#4102) adds its selection count to a derived Maximum Issues and can size derived
+ * follow-up room (#4537); its operations replace the launch's only as their intersection. */
 export function firstMessageBoundary(boundary: CampaignAuthorityBoundary, followUps: "recommend_only" | "execute_approved",
   issueNumbers: number[], objective: string, revision: number, issueScopeRevision: number, now: number,
   derived: FullControlDerivedLimits = { acceptedFollowUps: false, maxIssues: false }, epicMembers: readonly number[] = [],
   grant: { selectionCount?: number; operations?: readonly CampaignAuthorityOperation[] } = {}): CampaignAuthorityBoundary {
-  const derivedFollowUps = followUps === "execute_approved" ? Math.min(MAX_DERIVED_FOLLOW_UPS, Math.max(1, issueNumbers.length)) : 0;
+  const derivedFollowUps = followUps === "execute_approved" ? derivedFollowUpLimit(Math.max(issueNumbers.length, grant.selectionCount ?? 0)) : 0;
   const budget = boundary.budgetAuthority;
   // An explicit limit, including No Limit (omitted), is kept as the Human set it (#2940).
   const acceptedFollowUps = derived.acceptedFollowUps ? Math.max(budget?.acceptedFollowUps ?? 0, derivedFollowUps) : budget?.acceptedFollowUps;

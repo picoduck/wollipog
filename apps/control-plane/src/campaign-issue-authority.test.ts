@@ -9,7 +9,7 @@ import { CAMPAIGN_FORGE_OBSERVATION, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, DE
   type CampaignWorkItemDetail, type IssueClosureDeliveryGap, type IssueClosureEpicMembers, ISSUE_CLOSURE_DELIVERY_FAILURE_MAX, issueClosureDeliveryFailure,
   issueClosureDeliveryGap, normalizeIssueClosureDeliveryGaps, normalizeIssueClosureEpicMembers } from "@wollipog/protocol";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
-import { Hub } from "./hub.js";
+import { Hub, RunnerRequestNotSentError } from "./hub.js";
 import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
@@ -4727,6 +4727,31 @@ test("#4066 case A: after the requester withdraws the person's pending publicati
   } finally { h.db.close(); }
 });
 
+test("workflow approval card request IDs bind exact occurrences and caller request IDs cannot be reused (#4537)", () => {
+  const h = harness();
+  try {
+    const create = (requestId: string, title: string) => h.svc.createWorkflowDecision("child", { requestId, resourceKey: "publication-card",
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: title, sanitizedBody: body, labels: [] } });
+    const first = create("caller-one", "First Payload");
+    assert.ok(first.ok, first.error ?? "first card");
+    const card = h.db.getSession("child")!.pendingApproval!;
+    assert.equal(card.requestId, first.data!.occurrenceId);
+    assert.notEqual(card.requestId, first.data!.requestId);
+    assert.ok(h.svc.withdrawWorkflowDecision("child", first.data!.occurrenceId, { reason: "Revise payload" }).ok);
+    const replacement = create("caller-two", "Changed Payload");
+    assert.ok(replacement.ok, replacement.error ?? "replacement card");
+    // The database also enforces caller ID uniqueness, independently of the unique card ID.
+    assert.throws(() => h.db.raw().prepare("UPDATE workflow_decisions SET request_id=? WHERE occurrence_id=?")
+      .run("caller-one", replacement.data!.occurrenceId), /UNIQUE constraint failed/);
+    assert.equal(h.db.getSession("child")!.pendingApproval!.requestId, replacement.data!.occurrenceId);
+    const stale = h.svc.approve("child", card.requestId, "approve", { kind: "human", id: h.principal.userId });
+    assert.equal(stale.status, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(replacement.data!.occurrenceId)!.status, "pending");
+    assert.ok(h.svc.approve("child", replacement.data!.occurrenceId, "approve", { kind: "human", id: h.principal.userId }).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(replacement.data!.occurrenceId)!.status, "approved");
+  } finally { h.db.close(); }
+});
+
 test("#4066 case B: an admitted re-request retires the requester's person-owned publication for its recommendation, naming itself as the cause", async () => {
   for (const personApprovedFirst of [false, true]) {
     const label = personApprovedFirst ? "approved" : "pending";
@@ -4864,12 +4889,23 @@ test("a follow-up from work in the same repository, when that isn't the launch o
     assert.ok(h.approve(joined.data!).ok);
     assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueScope!.issues, [{ repository: "team/api", number: 50 }, { repository: "team/api", number: 77 }, { repository: "team/repo", number: 100 }]);
     assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100], "the launch repository's numbers are unchanged");
-    // It was published by the child's own login: Wollipog never performed it, and refuses to.
+    // The requester may also choose managed publication in its own repository (#4537), which
+    // records a forge-verified receipt instead of relying on an agent's claimed issue number.
     const local = recordPublication(h, "team/api", "Second api repair", origin.id);
     const own = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "own-repository", resourceKey: "own-repository", resourceSnapshot: local });
     assert.ok(h.svc.resolveWorkflowDecision("root", "child", own.data!.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true).ok);
+    const beforeManaged = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      if (message.type !== "forge_decision_action") return beforeManaged(runnerId, requestId, message, timeout);
+      assert.equal(runnerId, "r2");
+      assert.equal(message.location?.repository, "team/api");
+      return { type: "forge_decision_action_result", requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
+        outcome: "published", issue: 78 };
+    };
     const notRouted = await h.svc.executeWorkflowDecision("child", own.data!.occurrenceId, { resourceDigest: own.data!.resourceDigest });
-    assert.equal(notRouted.status, 403, notRouted.error ?? "");
+    assert.ok(notRouted.ok, notRouted.error ?? "managed own-repository publication");
+    assert.equal(notRouted.data!.status, "consumed");
+    assert.equal(notRouted.data!.forgeAction?.publicationVerified, true);
   } finally { h.db.close(); }
 });
 
@@ -4911,12 +4947,15 @@ function multiRepositoryCampaign() {
   const inspections: string[] = [];
   const actions: Array<{ runnerId: string; kind: string; location?: unknown; action: unknown }> = [];
   const control = { answer: (kind: string): Record<string, unknown> => kind === "issue_publication" ? { outcome: "published", issue: 77 } : { outcome: "uncertain" },
-    inspectionOk: true };
+    inspectionOk: true, readbackOk: true };
   const inner = h.hub.requestFromRunner;
   h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
     if (message.type === "forge_decision_action") {
       actions.push({ runnerId, kind: message.action.kind, location: message.location, action: message.action });
       return { type: "forge_decision_action_result", requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId, ...control.answer(message.action.kind) } as never;
+    }
+    if (message.type === "campaign_issue_scope" && message.operation === "inspect" && message.publication && !control.readbackOk) {
+      return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: false, publicationFailure: "body" };
     }
     if (message.type === "campaign_issue_scope" && message.operation === "publication_inspect") {
       inspections.push(runnerId);
@@ -4928,6 +4967,7 @@ function multiRepositoryCampaign() {
     const result = { type: "campaign_launch_inspection_result" as const, requestId, workspaceId: message.workspaceId, ok: true, repository: repositories[runnerId]!,
       issueNumbers: message.issueNumbers, digest: "d".repeat(64) };
     if (!control.inspectionOk) return { ...result, ok: false, failure: "publication_refused" as const };
+    if (message.issueNumbers.length && !control.readbackOk) return { ...result, ok: false, publicationFailure: "body" as const };
     return message.issueNumbers.length ? result : { ...result, publicationDigest: issueEvidenceDigest(message.publication), duplicateSearch: "subject" as const };
   };
   const approved = async (requestId: string, snapshot: ReturnType<typeof recordPublication>) => {
@@ -4940,6 +4980,170 @@ function multiRepositoryCampaign() {
   const perform = (decision: WorkflowDecisionView) => h.svc.executeWorkflowDecision("child", decision.occurrenceId, { resourceDigest: decision.resourceDigest });
   return { h, origin, inspections, actions, control, approved, perform, runner };
 }
+
+test("a same-repository managed publication requires exact forge readback and never recreates an uncertain issue (#4537)", async () => {
+  const c = multiRepositoryCampaign();
+  try {
+    const snapshot = recordPublication(c.h, "team/repo", "Read Back the Approved Payload", c.origin("team/repo"));
+    const decision = await c.approved("own-readback", snapshot);
+    c.control.readbackOk = false;
+    const uncertain = await c.perform(decision);
+    assert.ok(uncertain.ok, uncertain.error ?? "managed publication");
+    assert.equal(uncertain.data!.status, "approved");
+    assert.equal(uncertain.data!.forgeAction?.outcome, "uncertain");
+    assert.equal(uncertain.data!.forgeAction?.publicationCreatedIssue, 77, "known creation survives failed readback");
+    assert.notEqual(uncertain.data!.forgeAction?.publicationVerified, true);
+    assert.equal(c.actions[0]!.runnerId, "r");
+    assert.deepEqual(c.actions[0]!.location, { workspaceId: "w", workspacePath: "/repos/test", repository: "team/repo" });
+    c.control.readbackOk = true;
+    c.control.answer = () => ({ outcome: "already_published", issue: 78 });
+    const copied = await c.perform(decision);
+    assert.equal(copied.data!.status, "approved");
+    assert.equal(copied.data!.forgeAction?.outcome, "uncertain", "a copied matching payload is not the known created issue");
+    assert.equal((c.actions.at(-1)!.action as { issue?: number }).issue, 77, "the server pins the observation to its creation receipt");
+    c.control.answer = () => ({ outcome: "already_published", issue: 77 });
+    const reconciled = await c.perform(decision);
+    assert.ok(reconciled.ok, reconciled.error ?? "readback retry");
+    assert.equal(reconciled.data!.status, "consumed");
+    assert.equal(reconciled.data!.forgeAction?.publicationVerified, true);
+    assert.equal(reconciled.data!.forgeAction?.publishedIssue, 77);
+    assert.deepEqual(c.actions.map((action) => action.kind), ["issue_publication", "issue_publication_observe", "issue_publication_observe"]);
+  } finally { c.h.db.close(); }
+});
+
+test("a managed own-repository publication cannot hand creation to manual consumption while in flight or uncertain (#4537)", async () => {
+  for (const authority of ["human", "orchestrator"] as const) {
+    const c = multiRepositoryCampaign();
+    let release!: () => void;
+    try {
+      const snapshot = recordPublication(c.h, "team/repo", "Create Exactly Once", c.origin("team/repo"));
+      const requested = authority === "human" ? c.h.svc.createWorkflowDecision("child", {
+        requestId: "manual-or-managed", resourceKey: "manual-or-managed", resourceSnapshot: snapshot }) : null;
+      if (requested) assert.ok(requested.ok, requested.error ?? "human publication");
+      const decision = requested?.data ?? await c.approved("manual-or-managed", snapshot);
+      assert.equal(decision.authority, authority);
+      if (authority === "human") assert.ok(c.h.svc.resolveWorkflowDecision("root", "child", decision.occurrenceId,
+        { outcome: "approve" }, "human", { kind: "human", id: c.h.principal.userId }, () => true).ok);
+      const inner = c.h.hub.requestFromRunner;
+      let reading!: () => void;
+      const readback = new Promise<void>((resolve) => { reading = resolve; });
+      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      c.h.hub.requestFromRunner = async (runner, id, message, timeout) => {
+        if (message.type === "campaign_issue_scope" && message.operation === "inspect" && message.publication) {
+          reading(); await blocked;
+        }
+        return inner(runner, id, message, timeout);
+      };
+      c.control.readbackOk = false;
+      const executing = c.perform(decision);
+      await readback;
+      const consume = () => c.h.svc.consumeWorkflowDecision("child", decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot });
+      assert.equal((await consume()).status, 409, "a dispatched create owns the occurrence before readback returns");
+      release();
+      const uncertain = await executing;
+      assert.equal(uncertain.data!.forgeAction?.publicationCreatedIssue, 77);
+      assert.equal((await consume()).status, 409, "failed readback cannot hand an already-created issue to a manual writer");
+      assert.equal(c.h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+      c.control.readbackOk = true;
+      c.control.answer = () => ({ outcome: "already_published", issue: 77 });
+      assert.equal((await c.perform(decision)).data!.status, "consumed");
+      assert.deepEqual(c.actions.map((action) => action.kind), ["issue_publication", "issue_publication_observe"]);
+    } finally { release?.(); c.h.db.close(); }
+  }
+});
+
+test("a managed publication proven not sent can use manual consumption even after the attempt cap (#4537)", async () => {
+  const c = multiRepositoryCampaign();
+  try {
+    const decision = await c.approved("not-sent-fallback", recordPublication(c.h, "team/repo", "Publish After a Proven Refusal", c.origin("team/repo")));
+    const inner = c.h.hub.requestFromRunner;
+    let writes = 0;
+    c.h.hub.requestFromRunner = async (runner, id, message, timeout) => {
+      if (message.type === "forge_decision_action") { writes++; throw new RunnerRequestNotSentError(); }
+      return inner(runner, id, message, timeout);
+    };
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const refused = await c.perform(decision);
+      assert.equal(refused.data!.forgeAction?.outcome, "refused");
+      assert.equal(refused.data!.forgeAction?.publicationCreatedIssue, undefined);
+      assert.equal(refused.data!.status, "approved");
+    }
+    assert.equal((await c.perform(decision)).status, 409, "the bounded managed attempt cap still applies");
+    const manual = await c.h.svc.consumeWorkflowDecision("child", decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot });
+    assert.equal(manual.data?.status, "consumed", manual.error ?? "manual consumption after a proven no-op");
+    assert.equal(writes, 5);
+    assert.equal((await c.perform(decision)).status, 409, "consumption cannot be reused for managed creation");
+  } finally { c.h.db.close(); }
+});
+
+test("confirmed publication is consumed when policy changes during its readback, while new dispatch stays gated (#4537)", async () => {
+  const c = multiRepositoryCampaign();
+  try {
+    const decision = await c.approved("revision-during-readback", recordPublication(c.h, "team/repo", "Record the Created Issue", c.origin("team/repo")));
+    const inner = c.h.hub.requestFromRunner;
+    c.h.hub.requestFromRunner = async (runner, id, message, timeout) => {
+      const result = await inner(runner, id, message, timeout);
+      if (message.type === "campaign_issue_scope" && message.operation === "inspect" && message.publication) {
+        c.h.db.raw().prepare("UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1 WHERE id='root'").run();
+      }
+      return result;
+    };
+    const performed = await c.perform(decision);
+    assert.equal(performed.data!.status, "consumed", "an approval used before the revision change records its completed effect");
+    assert.equal(performed.data!.forgeAction?.outcome, "published");
+    assert.equal(performed.data!.forgeAction?.publicationVerified, true);
+    assert.equal((await c.perform(decision)).status, 409);
+    assert.equal(c.actions.length, 1);
+  } finally { c.h.db.close(); }
+});
+
+test("manual consumption rechecks managed ownership after its publication freshness read yields (#4537)", async () => {
+  const c = multiRepositoryCampaign();
+  let release!: () => void;
+  try {
+    const decision = await c.approved("consume-read-race", recordPublication(c.h, "team/repo", "Fence the Second Writer", c.origin("team/repo")));
+    const inner = c.h.hub.requestFromRunner;
+    let reading!: () => void;
+    const read = new Promise<void>((resolve) => { reading = resolve; });
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let first = true;
+    c.h.hub.requestFromRunner = async (runner, id, message, timeout) => {
+      if (first && message.type === "campaign_issue_scope" && message.operation === "publication_inspect") {
+        first = false; reading(); await blocked;
+      }
+      return inner(runner, id, message, timeout);
+    };
+    const consuming = c.h.svc.consumeWorkflowDecision("child", decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot });
+    await read;
+    c.control.readbackOk = false;
+    assert.equal((await c.perform(decision)).data!.forgeAction?.outcome, "uncertain");
+    release();
+    assert.equal((await consuming).status, 409);
+    assert.equal(c.h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+    assert.equal(c.actions.length, 1);
+  } finally { release?.(); c.h.db.close(); }
+});
+
+test("a publication revoked during readback records the confirmed effect without resurrecting the approval (#4537)", async () => {
+  const c = multiRepositoryCampaign();
+  try {
+    const decision = await c.approved("revoked-during-readback", recordPublication(c.h, "team/repo", "Record Without Reauthorizing", c.origin("team/repo")));
+    const inner = c.h.hub.requestFromRunner;
+    c.h.hub.requestFromRunner = async (runner, id, message, timeout) => {
+      const result = await inner(runner, id, message, timeout);
+      if (message.type === "campaign_issue_scope" && message.operation === "inspect" && message.publication) {
+        assert.ok(c.h.svc.withdrawWorkflowDecision("child", decision.occurrenceId, { reason: "Authority withdrawn after dispatch" }).ok);
+      }
+      return result;
+    };
+    const performed = await c.perform(decision);
+    assert.equal(performed.data!.status, "revoked");
+    assert.equal(performed.data!.forgeAction?.outcome, "published", "a known completed effect is not reported as an uncertain create");
+    assert.equal(performed.data!.forgeAction?.publicationCreatedIssue, 77);
+    assert.equal((await c.perform(decision)).status, 409);
+    assert.equal(c.actions.length, 1);
+  } finally { c.h.db.close(); }
+});
 
 test("a publication in another repository is created through a Location of it with that runner's login, and the requester's is never used (#4119)", async () => {
   const c = multiRepositoryCampaign();
@@ -5049,7 +5253,7 @@ test("a follow-up from a non-launch repository publishes into the launch reposit
     const web = await c.approved("to-web", toWeb);
     assert.deepEqual(publicationEvidence(h.db, h.db.getSession("root")!, toWeb)?.lineage, { target: "team/web", origins: ["team/api#50"] });
     assert.ok((await c.perform(web)).ok);
-    assert.deepEqual(c.inspections, ["r3", "r3"]);
+    assert.deepEqual(c.inspections, ["r3", "r3", "r3"], "proposal inspection, execution freshness, and created-issue readback");
     assert.deepEqual(c.actions.map((action) => [action.runnerId, action.location]),
       [["r3", { workspaceId: "b", workspacePath: "/repos/web", repository: "team/web" }]]);
 

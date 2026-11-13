@@ -1212,6 +1212,16 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/cleanup/delete-merged-branches`,
       { method: "POST", body: "{}" },
     ),
+  inspectCampaignWorktreeRetirement: (id: string, childSessionId: string, path: string) =>
+    req<{ state: import("@wollipog/protocol").CampaignWorktreeRetirementState }>(
+      `/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/cleanup/worktree/inspect`,
+      { method: "POST", body: JSON.stringify({ childSessionId, path }) },
+    ),
+  confirmCampaignWorktreeRetirement: (id: string, childSessionId: string, state: import("@wollipog/protocol").CampaignWorktreeRetirementState) =>
+    req<{ retirement: import("@wollipog/protocol").SessionWorktreeRetirementResult }>(
+      `/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/cleanup/worktree/confirm`,
+      { method: "POST", body: JSON.stringify({ childSessionId, state }) },
+    ),
   /** Authenticated Human-only change to a Full Control scope grant's selection count (#4102).
    * Compare-and-set on the campaign's policy revision. */
   setScopeGrantSelectionCount: (id: string, count: number, expectedRevision: number) =>

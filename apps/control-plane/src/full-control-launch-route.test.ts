@@ -1518,6 +1518,46 @@ async function admitNamed(f: ReturnType<typeof fixture>, id: string, numbers: nu
   assert.equal(applied.ok, true, applied.error ?? "");
 }
 
+test("an unnumbered launch derives follow-up room from current admitted scope, while an explicit limit and an issue-less investigation stay unchanged (#4537)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
+    for (const explicit of [false, true]) {
+      const c = await proposalCampaign(f, server, "Fix 5 open issues.", explicit ? { budget: { acceptedFollowUps: 0 } } : {});
+      assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueNumbers, []);
+      assert.equal(boundaryOf(f, c.id).budgetAuthority!.acceptedFollowUps, explicit ? 0 : 1);
+      const initial = await c.propose((explicit ? [41, 42, 43] : [31, 32, 33]).map((n) => chosen(n)), { requestedCount: 5 });
+      assert.ok(initial.ok, initial.error ?? "initial scope");
+      assert.ok(c.apply(initial.data!.occurrenceId).ok);
+      assert.equal(boundaryOf(f, c.id).budgetAuthority!.acceptedFollowUps, explicit ? 0 : 3);
+      assert.equal(f.db.campaignBudgets.view(c.id)!.authority.acceptedFollowUps, explicit ? 0 : 3);
+      if (!explicit) {
+        const more = await c.propose([34, 35].map((n) => chosen(n)), { requestedCount: 5 });
+        assert.ok(more.ok, more.error ?? "later admitted scope");
+        assert.ok(c.apply(more.data!.occurrenceId).ok);
+        assert.equal(boundaryOf(f, c.id).budgetAuthority!.acceptedFollowUps, 5);
+        assert.equal(f.db.campaignBudgets.view(c.id)!.authority.acceptedFollowUps, 5);
+        assert.equal(boundaryOf(f, c.id).issueAuthority!.maxIssues, 10, "derived issue room includes the new bounded follow-ups");
+        const removal = await f.sessions.proposeCampaignIssueScope(c.id, { requestId: "remove-admitted-issues", expectedRevision: c.revision(),
+          additions: [], removals: [33, 34, 35].map((number) => ({ repository: "owner/repo", number })), explanation: "Narrow the issue scope" });
+        assert.ok(removal.ok, removal.error ?? "scope removal");
+        const removed = f.sessions.resolveWorkflowDecision(c.id, c.id, removal.data!.occurrenceId, { outcome: "approve" },
+          removal.data!.authority, removal.data!.authority === "human" ? { kind: "human", id: f.human.userId } : { kind: "agent", id: c.id }, () => true);
+        assert.ok(removed.ok, removed.error ?? "scope removal approval");
+        assert.equal(boundaryOf(f, c.id).budgetAuthority!.acceptedFollowUps, 5, "scope removal does not lower an allocated budget");
+        assert.equal(f.db.campaignBudgets.view(c.id)!.authority.acceptedFollowUps, 5);
+      }
+    }
+    const investigation = await proposalCampaign(f, server, "Investigate this repository.");
+    const empty = await investigation.propose([]);
+    assert.ok(empty.ok, empty.error ?? "issue-less admitted task");
+    assert.ok(investigation.apply(empty.data!.occurrenceId).ok);
+    assert.equal(boundaryOf(f, investigation.id).budgetAuthority!.acceptedFollowUps, 1,
+      "task prose gives no server-proven basis for ten follow-ups");
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("the owner's first message reaches the Orchestrator unread: an empty scope, no Decision call, and nothing dispatched before an initial scope (#4282)", async () => {
   const f = fixture();
   const { server } = await app(f);
@@ -2366,9 +2406,10 @@ test("with a healthy Decision Model, five selection admissions need no prompt an
     assert.equal(sixth.ok, false);
     assert.deepEqual(sixth.errorDetails, { code: "selection_count_exhausted", count: 5, admitted: 5, requested: 1 });
     assert.equal(f.decision.reviewCalls.length, 4, "the count floor refuses before any model call");
-    // Admission moved no ceiling.
+    // Only derived room follows the owner's exact admitted selection count (#4537).
     assert.deepEqual({ ...boundaryOf(f, c.id), revision: 0, issueScopeRevision: 0, authorizedAt: 0 },
-      { ...boundaryBefore, revision: 0, issueScopeRevision: 0, authorizedAt: 0 });
+      { ...boundaryBefore, budgetAuthority: { ...boundaryBefore.budgetAuthority!, acceptedFollowUps: 5 },
+        issueAuthority: { ...boundaryBefore.issueAuthority!, maxIssues: 10 }, revision: 0, issueScopeRevision: 0, authorizedAt: 0 });
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -2480,9 +2521,11 @@ test("rationale or issue text that claims a higher count, another repository or 
     assert.doesNotMatch(/<owner_message>([\s\S]*?)<\/owner_message>/u.exec(input)![1]!, /other\/repo/u);
     assert.match(input, /<untrusted_data name="rationale">/u);
     assert.equal(c.apply(admitted.data!.occurrenceId).ok, true);
-    // Every ceiling is where it was: the count, Maximum Issues, the repository and the operations.
+    // The planted count changes nothing. Derived room follows the owner's actual count of two,
+    // while Maximum Issues, the repository and the operations stay where they were (#4537).
     assert.deepEqual({ ...boundaryOf(f, c.id), revision: 0, issueScopeRevision: 0, authorizedAt: 0 },
-      { ...boundaryBefore, revision: 0, issueScopeRevision: 0, authorizedAt: 0 });
+      { ...boundaryBefore, budgetAuthority: { ...boundaryBefore.budgetAuthority!, acceptedFollowUps: 2 },
+        revision: 0, issueScopeRevision: 0, authorizedAt: 0 });
     assert.equal(grantOf(f, c.id).selection!.count, 2);
     const third = await c.propose([31, 32], planted);
     assert.deepEqual(third.errorDetails, { code: "selection_count_exhausted", count: 2, admitted: 1, requested: 2 });

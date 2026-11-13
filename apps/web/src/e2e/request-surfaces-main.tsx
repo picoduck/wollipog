@@ -297,6 +297,24 @@ function issueScopeSession(): SessionView {
 
 /** A follow-up past the campaign's approval limit, the root's own Human decision (#2940); with
  * `scenario=follow-up-rebinding`, another recommendation accepted into a follow-up already admitted. */
+function followUpBatchSession(): SessionView {
+  const base = followUpAdmissionSession();
+  const original = base.pendingApproval!.workflowDecision!.resourceSnapshot;
+  if (original.category !== "campaign_follow_up_admission") throw new Error("admission fixture expected");
+  const admission = { ...base.pendingApproval!, requestId: "follow-up-admission", occurrenceId: "follow-up-admission",
+    workflowDecision: { ...base.pendingApproval!.workflowDecision!, requestId: "follow-up-admission", occurrenceId: "follow-up-admission", status: "pending" as const,
+      resourceSnapshot: { ...original, issue: null, title: "Show Runner Contention in Campaign Status",
+        recommendationTitle: "Show Runner Contention in Campaign Status" } } };
+  const publication: PendingApproval = { ...admission, requestId: "follow-up-publication", occurrenceId: "follow-up-publication", title: "Issue Publication Approval Required",
+    workflowDecision: { ...admission.workflowDecision, requestId: "follow-up-publication", occurrenceId: "follow-up-publication", category: "follow_up_issue_publication",
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "picoduck/wollipog", recommendationId: "rec_accepted_merge_retry",
+        sanitizedTitle: original.title, labels: ["bug"],
+        sanitizedBody: "## Problem\n\nA merge retry can wait after main recovers.\n\n## Expected Behavior\n\nRetry the unchanged reviewed head after verifying main and the exact approval." } } };
+  admission.context = { input: JSON.stringify(admission.workflowDecision.resourceSnapshot) };
+  publication.context = { input: JSON.stringify(publication.workflowDecision!.resourceSnapshot) };
+  return { ...base, pendingApproval: { ...admission, additionalRequests: [publication] } };
+}
+
 function followUpAdmissionSession(rebinding = false): SessionView {
   const base = evidenceSession();
   const snapshot = rebinding
@@ -964,7 +982,7 @@ function ReadingKeys({ scrollRef }: {
 function Fixture() {
   const [keyboard, updateKeyboard] = useState(keyboardOpen);
   setKeyboard = updateKeyboard;
-  const [session, setSession] = useState(() => scenario === "automation-creation" ? automationCreationSession() : scenario === "location-switch" ? locationSwitchSession() : scenario === "repository-addition" ? repositoryAdditionSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure-refused" ? issueClosureSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
+  const [session, setSession] = useState(() => scenario === "follow-up-batch" ? followUpBatchSession() : scenario === "automation-creation" ? automationCreationSession() : scenario === "location-switch" ? locationSwitchSession() : scenario === "repository-addition" ? repositoryAdditionSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure-refused" ? issueClosureSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
     : scenario === "held" || scenario === "both"
     ? heldCampaignSession()
@@ -1001,6 +1019,8 @@ function Fixture() {
       // The transcript's own artifacts, with no request pending.
       : scenario === "artifact-timeline" ? { ...evidenceSession(), status: "running", pendingApproval: null } as SessionView
       : evidenceSession());
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
   const viewedSession = respondAs === "viewer" ? {
     ...session,
     commandPermissions: {
@@ -1102,8 +1122,9 @@ function Fixture() {
         return session;
       }
       // Only the decided request leaves; the others stay pending in their order.
-      const remaining = removePendingRequest(session.pendingApproval, body.requestId);
-      const updated = { ...session, status: remaining ? "input_required" : "running", pendingApproval: remaining } as SessionView;
+      const remaining = removePendingRequest(sessionRef.current.pendingApproval, body.requestId);
+      const updated = { ...sessionRef.current, status: remaining ? "input_required" : "running", pendingApproval: remaining } as SessionView;
+      sessionRef.current = updated;
       setSession(updated);
       return updated;
     },
@@ -1119,6 +1140,12 @@ function Fixture() {
       return updated;
     },
   } as ApiClient;
+  const transcriptMessages = scenario === "follow-up-batch" ? [
+    "Please publish the reviewed follow-up drafts for picoduck/wollipog.",
+    "The merge retry draft is sanitized and ready. Runner contention is a separate recommendation awaiting admission.",
+    "Include both exact payloads in one review.",
+    "The publication will use its approved title, body and labels. The new recommendation will stay within the follow-up approval gate.",
+  ] : Array.from({ length: scenario === "artifact-timeline" ? 0 : 24 }, (_, index) => `Transcript message ${index + 1}`);
   const standaloneTemplate = scenario === "automation-creation" ? automationCreationSession().pendingApproval! : scenario === "issue-scope" ? issueScopeSession().pendingApproval! : scenario === "follow-up-admission" ? followUpAdmissionSession().pendingApproval! : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true).pendingApproval! : scenario === "issue-closure-refused" ? issueClosureSession(true).pendingApproval! : scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
     ? standaloneApprovalSession().pendingApproval!
     // Only a provider's permission has a transcript row; a policy ask or a pause is the control plane's.
@@ -1266,10 +1293,10 @@ function Fixture() {
                         event.preventDefault();
                         event.stopPropagation();
                       } : undefined}>
-                      {Array.from({ length: scenario === "artifact-timeline" ? 0 : 24 }, (_, index) => (
+                      {transcriptMessages.map((text, index) => (
                         <div className={`tl-row ${index % 2 ? "agent" : "user"}`} key={index}>
                           <div className={index % 2 ? "tl-agent-msg" : "tl-bubble"}>
-                            Transcript message {index + 1}
+                            {text}
                           </div>
                         </div>
                       ))}

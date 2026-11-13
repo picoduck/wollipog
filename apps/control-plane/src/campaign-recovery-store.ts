@@ -112,6 +112,7 @@ const inputFor: Partial<Record<CampaignRecoveryReason, CampaignRecoveryInput>> =
   boundary_enlargement: "authorize_exact_boundary_change", human_required_rule: "perform_human_required_action",
   unsupported_capability: "use_supported_capability", uncertain_outcome: "reconcile_original_outcome",
   publication_not_admitted: "perform_human_required_action",
+  follow_up_limit: "answer_existing_request", owner_approval_required: "answer_existing_request",
 };
 const terminal = new Set(["resolved", "cancelled"]);
 // A Full Control decline is final for its occurrence: blocked, never dispatched, never asked.
@@ -122,7 +123,7 @@ const hard = new Set<CampaignRecoveryReason>(["hard_denial", "attempts_exhausted
 // worker's denial is never hidden behind an inherited intentional stop, and nothing relabels a denial.
 const stopSeverity: Partial<Record<CampaignRecoveryReason, number>> = { intentional_stop: 1, unverified_stop: 2, hard_denial: 3 };
 const human = new Set<CampaignRecoveryReason>(["missing_human_information", "missing_access",
-  "boundary_enlargement", "human_required_rule", "unsupported_capability", "publication_not_admitted"]);
+  "boundary_enlargement", "human_required_rule", "follow_up_limit", "owner_approval_required", "unsupported_capability", "publication_not_admitted"]);
 
 /** How long a delivered, completed wake may stay unanswered (same signal, quiet campaign) before
  * the same record is woken again: 2, 4, 8 then 16 minutes, capped at 30. The attempt ceiling

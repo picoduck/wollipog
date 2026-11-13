@@ -92,7 +92,8 @@ test("Campaign Status shows the limit, pending approvals with their requests, an
     const input = [...container.querySelectorAll<HTMLInputElement>("input[type=text]")][0]!;
     assert.equal(input.value, "4", "starts from the current limit");
     assert.equal(container.querySelector("legend")?.textContent, "Change Follow-Up Limit");
-    assert.match(container.textContent ?? "", /Lowering it keeps follow-ups already accepted\. Saving re-authorizes Full Control\. Any request or approval the Orchestrator hasn't used yet is withdrawn, and it asks again\./);
+    assert.match(container.textContent ?? "", /Raising the limit keeps exact approved follow-up admissions that still fit\./);
+    assert.match(container.textContent ?? "", /Other unused requests and approvals are withdrawn/);
     await act(async () => setInput(input, "-2"));
     await act(async () => button(container, "Save Limit")!.click());
     assert.match(container.querySelector("[role=alert]")?.textContent ?? "", /Enter a whole number from 0 to 1000, or choose No Limit\./);
