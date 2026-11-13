@@ -273,7 +273,7 @@ test("a receipt with an older peer reports unavailable delegation instead of a c
         headSha: receipt.headSha, temporaryReceiptId: receipt.id, dependentPullRequests: { checkedAt: 1, open: [] } } });
     assert.ok(gate.ok, gate.error ?? "older-peer gate failed");
     assert.equal(gate.data!.authority, "human");
-    assert.equal(gate.data!.authorityEvaluation?.reason, "outside_boundary");
+    assert.equal(gate.data!.authorityEvaluation?.reason, "temporary_branch_peer_unsupported");
     const view = h.svc.descendantRequests("root", () => true, "human");
     assert.ok(view.ok);
     assert.equal(view.data!.requests.find((item) => item.request.workflowDecision?.occurrenceId === gate.data!.occurrenceId)?.request.title,

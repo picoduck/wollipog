@@ -266,10 +266,13 @@ export function evaluateCampaignAuthority(
   const control = controller.orchestratorPolicy?.control;
   const full = control?.mode === "full_control";
   const snapshot = "category" in request ? request : undefined;
-  if (snapshot?.category === "merged_branch_deletion" && snapshot.merged === false &&
-      (!runnerSupportsProtocol(protocol, "temporaryBranchReceipts") || !runnerSupportsProtocol(controllerProtocol, "temporaryBranchReceipts") ||
-       !matchingTemporaryBranchReceipt(requester.temporaryBranchReceipts, controller.id, requester.id, snapshot))) {
-    return { operation: "merged_branch_deletion", owner: "human", basis: "human_required", reason: "outside_boundary" };
+  if (snapshot?.category === "merged_branch_deletion" && snapshot.merged === false) {
+    if (!runnerSupportsProtocol(protocol, "temporaryBranchReceipts") || !runnerSupportsProtocol(controllerProtocol, "temporaryBranchReceipts")) {
+      return { operation: "merged_branch_deletion", owner: "human", basis: "human_required", reason: "temporary_branch_peer_unsupported" };
+    }
+    if (!matchingTemporaryBranchReceipt(requester.temporaryBranchReceipts, controller.id, requester.id, snapshot)) {
+      return { operation: "merged_branch_deletion", owner: "human", basis: "human_required", reason: "outside_boundary" };
+    }
   }
   const raw = "requestId" in request ? request : undefined;
   // Only a v230 runner attests worktree containment; an older runner's evidence is unresolved (#2940).

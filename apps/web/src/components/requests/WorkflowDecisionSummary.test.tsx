@@ -31,8 +31,10 @@ test("temporary deletion shows its exact tip and receipt without claiming a merg
   assert.match(ownerKept, /Orchestrator cannot approve deletion/u);
   assert.doesNotMatch(ownerKept, /Orchestrator may delete/u);
   const unavailable = text(snapshot, undefined, "human", "outside_boundary");
-  assert.match(unavailable, /outside the Orchestrator&#x27;s current verified authority/u);
+  assert.match(unavailable, /outside the campaign&#x27;s current approved boundary/u);
   assert.doesNotMatch(unavailable, /This campaign keeps branch deletion with you/u);
+  assert.match(text(snapshot, undefined, "human", "temporary_branch_peer_unsupported"), /campaign runner is too old/u);
+  assert.match(text(snapshot, undefined, "human", "unsupported_provider"), /provider does not support delegated approval/u);
   assert.doesNotMatch(rendered, /Merge Commit/u);
   const unknown = text({ ...snapshot, temporaryReceiptId: undefined, creation: undefined });
   assert.match(unknown, /No matching creation receipt exists/u);

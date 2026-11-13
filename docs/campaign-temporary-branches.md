@@ -38,6 +38,10 @@ Campaign recovery uses the same server-recorded receipts as admission when displ
 Cards distinguish a policy-kept decision (`custom_owner` or `owner_kept`) from unavailable
 delegation, such as an older peer or an unverified boundary. A valid receipt alone does not
 establish either delegation or the reason a person owns the decision.
+An unsupported participant protocol reports `temporary_branch_peer_unsupported`, which recovery
+classifies as an unsupported capability and the card explains as an old campaign runner.
+An `outside_boundary` evaluation instead explains that the deletion is outside the approved
+campaign boundary. The two causes do not borrow the policy-kept explanation.
 
 Temporary deletion uses the existing typed `merged_branch_deletion` category with `merged:false`,
 `headSha`, optional `temporaryReceiptId`, and `dependentPullRequests` evidence. It does not

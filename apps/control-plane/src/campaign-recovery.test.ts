@@ -29,6 +29,7 @@ test("irrecoverable requests distinguish boundary enlargement, Human Required ru
     ["human_required_rule", "human_required_rule"],
     ["custom_owner", "owner_approval_required"],
     ["unsupported_provider", "unsupported_capability"],
+    ["temporary_branch_peer_unsupported", "unsupported_capability"],
     ["unverified_intent", "unsupported_capability"],
     ["evidence_review_unavailable", "unsupported_capability"],
     ["provider_delivery_unavailable", "unsupported_capability"],

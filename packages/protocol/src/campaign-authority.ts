@@ -124,6 +124,8 @@ export interface CampaignAuthorityEvaluation {
   owner: "human" | "orchestrator";
   basis: "human_required" | "custom_policy" | "campaign_delegation" | "standing_authorization" | "standing_decline";
   reason: "custom_owner" | "authorized_operation" | "outside_boundary" | "protected_request" |
+    /** Temporary-branch delegation requires both participants' receipt-aware runner protocol. */
+    "temporary_branch_peer_unsupported" |
     "unverified_intent" | "unsupported_provider" | "human_required_rule" | "evidence_review_unavailable" | "provider_delivery_unavailable" |
     "declined_request" | "unresolved_effects" |
     /** #4062: a Full Control merge that would close an issue outside the campaign's issue scope. */

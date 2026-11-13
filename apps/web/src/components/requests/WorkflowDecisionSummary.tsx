@@ -8,6 +8,12 @@ import { followUpLimitText } from "../../follow-up-limit.js";
 import { issueRefLabel } from "../../campaign-status.js";
 import { StructuredQuestionText } from "../StructuredQuestionText.js";
 
+const TEMPORARY_DELEGATION_FAILURE_COPY: Partial<Record<CampaignAuthorityEvaluation["reason"], string>> = {
+  temporary_branch_peer_unsupported: "A campaign runner is too old to evaluate temporary-branch delegation. Wollipog cannot confirm whether the Orchestrator may delete this branch; the decision stays with you.",
+  outside_boundary: "This deletion is outside the campaign's current approved boundary, so it cannot be delegated. The decision stays with you even with a creation receipt.",
+  unsupported_provider: "This session's provider does not support delegated approval. The decision stays with you even with a creation receipt.",
+};
+
 /** The issues a merge would close (#3713; GitLab since #3762). The control plane creates the
  * decision only when they are exactly the snapshot's declared ones, so with a check this is what the
  * forge reported; a runner that predates the check reports nothing, and then only the declaration
@@ -50,6 +56,8 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
   /** The server-recorded closing-reference read of a GitHub merge, when there was one. */
   closingReferenceCheck?: PullRequestClosingReferenceCheck;
 }) {
+  const delegationFailure = (authorityReason && TEMPORARY_DELEGATION_FAILURE_COPY[authorityReason]) ??
+    "Your approval is required for this deletion; a creation receipt does not delegate the decision.";
   switch (snapshot.category) {
     case "automation_creation":
       return <AutomationCreationSummary snapshot={snapshot} />;
@@ -151,7 +159,7 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
               ? "After approval, the Orchestrator may delete this branch at the exact created tip, with no open head or base pull requests."
               : temporaryBranchDecisionKeptByPolicy(authorityReason)
                 ? "This campaign keeps branch deletion with you. The Orchestrator cannot approve deletion, even with a creation receipt."
-                : "This deletion is outside the Orchestrator's current verified authority. A receipt alone does not make it delegatable; the decision remains with you."
+                : delegationFailure
             : "No matching creation receipt exists. The Orchestrator cannot delete this branch; it stays the owner's decision."}</dd></div>
         </> : <div><dt>Merge Commit</dt><dd><code>{snapshot.mergeCommitSha.slice(0, 12)}</code></dd></div>}
       </dl>;

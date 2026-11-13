@@ -17,6 +17,7 @@ export function requestReason(evaluation: CampaignAuthorityEvaluation, category?
   switch (evaluation.reason) {
     case "outside_boundary": case "outside_issue_scope": case "review_extension_cap_reached": return "boundary_enlargement";
     case "unsupported_provider": case "unverified_intent": case "evidence_review_unavailable":
+    case "temporary_branch_peer_unsupported":
     case "provider_delivery_unavailable": case "unverified_closures": return "unsupported_capability";
     case "human_required_rule": return "human_required_rule";
     case "protected_request": return category === "campaign_follow_up_admission" ? "follow_up_limit" : "owner_approval_required";
