@@ -27,8 +27,7 @@ for (const scenario of ["merge failure", "required failure", "another PR", "pass
     };
     const result = await inspectCampaignFailedRun(run, evidence);
     assert.deepEqual(result.failedRun, scenario === "merge failure" || scenario === "required failure"
-      ? { ...evidence, checkRunId: 456, checkName: "Broken Check",
-        ...(scenario === "required failure" ? { requiredCheck: { checkRunId: 456, checkName: "Broken Check" } } : {}) } : undefined);
+      ? { ...evidence, checkRunId: 456, checkName: "Broken Check" } : undefined);
   });
 }
 

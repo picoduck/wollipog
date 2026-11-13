@@ -2,9 +2,22 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   campaignIssueForgeUrl, campaignScopeChangeBefore, campaignScopeChangeGroups, campaignScopeChangeResult, campaignScopeForRepository, campaignScopeHolds,
-  campaignScopeIssues, campaignScopeNumbers, campaignScopeWithIssues, canonicalCampaignIssues, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot,
+  campaignScopeIssues, campaignScopeNumbers, campaignScopeWithIssues, canonicalCampaignIssues, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot, validIssueAdmission,
 } from "./campaign-issue-scope.js";
 import type { CampaignIssueScope } from "./index.js";
+
+test("failed-run admission accepts both check runs and rejects malformed required-check proof", () => {
+  const relatedness = { basis: "failed_campaign_run", repository: "team/repo", pullRequest: 10, headSha: "a".repeat(40),
+    runId: 123, jobId: 321, checkRunId: 456, checkName: "Unit Tests (2)" };
+  const admission = { boundaryRevision: 1, evidenceDigest: "b".repeat(64), relatedness };
+  assert.ok(validIssueAdmission(admission));
+  const proof = { checkRunId: 789, checkName: "Required Summary" };
+  assert.ok(validIssueAdmission({ ...admission, relatedness: { ...relatedness, requiredCheck: proof } }));
+  for (const requiredCheck of [null, {}, { ...proof, extra: true }, { ...proof, checkRunId: 0 },
+    { ...proof, checkRunId: 1.5 }, { ...proof, checkName: " " }, { ...proof, checkName: "x".repeat(513) }]) {
+    assert.equal(validIssueAdmission({ ...admission, relatedness: { ...relatedness, requiredCheck } }), false);
+  }
+});
 
 test("only an owner-routed all proposal may retain its exact ceiling increase (#4532)", () => {
   const proposal = { initial: true, messageDigest: "a".repeat(64), requestedCount: "all", constraints: [], withheldOperations: [],

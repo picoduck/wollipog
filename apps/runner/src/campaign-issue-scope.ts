@@ -72,7 +72,7 @@ export async function inspectCampaignFailedRun(run: Run, evidence: Omit<import("
     }
     if (!required) return { repository };
     return { repository, failedRun: { ...evidence, checkRunId, checkName: check.name,
-      requiredCheck: { checkRunId: required.id, checkName: required.name } } };
+      ...(required.id === checkRunId ? {} : { requiredCheck: { checkRunId: required.id, checkName: required.name } }) } };
   } else return { repository };
   return { repository, failedRun: { ...evidence, checkRunId, checkName: check.name } };
 }
