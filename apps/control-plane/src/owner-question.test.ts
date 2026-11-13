@@ -187,7 +187,12 @@ test("new child questions require capable peers, distinct labels and credential 
       assert.ok(normal.ok && normal.data);
       h.svc.setDecisionRuntime(fakeScreenRuntime(h.db, () => ({ verdict: "ask" })).runtime);
       const credentials = await request("credentials", "Please give me your API key.");
-      assert.equal(credentials.status, 403);
+      assert.ok(credentials.ok && credentials.data);
+      assert.equal(credentials.data.authority, "human");
+      assert.equal(credentials.data.authorityEvaluation?.reason, "credential_screen_review");
+      const literal = await request("literal", "Use sk-abcdefghijklmnop?");
+      assert.equal(literal.status, 403);
+      assert.equal(h.db.workflowDecisionByRequestId("child", "literal"), null);
       h.svc.setDecisionRuntime(fakeScreenRuntime(h.db, () => ({ verdict: "discusses" })).runtime);
       const duplicate = await request("duplicate", "Which?", [{ optionId: "a", label: "Same" }, { optionId: "b", label: "Same" }]);
       assert.equal(duplicate.status, 400);

@@ -278,7 +278,9 @@ this ask whoever answers to supply, disclose or grant a credential, sign-in or a
 a typed implementation question (screened at admission), a child's or the root's provider question
 and a child's tool text that is not verified repository code, and a root's owner decision. A root's
 unverified tool effect is declined whatever it names, so it is not screened.
-- `ask` declines the request exactly as before: one-time decline, `secrets_and_sign_in` blocked work.
+- `ask` holds a typed implementation question for owner classification (#4542): Decline or Let the
+  Orchestrator Answer, never an automatic answer. Other request surfaces retain their refusal.
+  Deterministic credential floors still return 403 without creating an occurrence.
 - `discusses` leaves it to the Orchestrator. "Should importing copy the API key?" (#3844), a CI
   workflow's declared permissions or a quoted decline notice (#3913), and keyboard, cache or React
   keys and Wollipog sessions (#4126) are design subjects.

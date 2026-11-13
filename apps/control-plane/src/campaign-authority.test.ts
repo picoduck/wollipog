@@ -688,7 +688,7 @@ test("live Human Required, deny and withdrawn asks have the same effective owner
   }
 });
 
-test("questions the Decision Model finds asking for a credential are declined, never answered, on every question route (#4104)", async () => {
+test("model ask declines provider questions and holds typed questions for owner classification (#4542)", async () => {
   const h = harness();
   try {
     assert.ok(h.enable().ok);
@@ -702,13 +702,13 @@ test("questions the Decision Model finds asking for a credential are declined, n
       assert.deepEqual(delivered.map((m) => [m.action, Object.keys(m.answers).length]), [["dismiss", 0]], "the question is dismissed");
       const typed = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: question, resourceKey: question,
         resourceSnapshot: { ...h.snapshot, question } }, () => true);
-      assert.equal(typed.ok, false);
-      assert.equal(typed.status, 403);
-      assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0, "no decision is created for anyone to answer");
+      assert.ok(typed.ok);
+      assert.equal(typed.data?.authority, "human");
+      assert.equal(typed.data?.authorityEvaluation?.reason, "credential_screen_review");
     }
     const blocked = h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined");
     assert.deepEqual(blocked.map((record) => [record.resource.sessionId, record.state, record.effectiveOwner]).sort(),
-      [["child", "blocked", "orchestrator"], ["root", "blocked", "orchestrator"]], "one deduplicated blocked record per session and class");
+      [["root", "blocked", "orchestrator"]], "only provider questions are automatically declined");
     for (const record of blocked) assert.doesNotMatch(JSON.stringify(record), /password|credentials should/iu, "content-safe");
   } finally { h.db.close(); }
 });
@@ -750,7 +750,7 @@ test("a typed credential-handling design question reaches the Orchestrator; the 
       assert.equal(declined.status, 403, `${sessionId} ${requestId}`);
     }
     assert.equal(h.screen.calls.length, calls, "the floor never consults the Decision Model");
-    // Everything else is the Decision Model's: an `ask` verdict declines it on the same route.
+    // A model ask on a typed question requires the owner's classification (#4542).
     for (const [requestId, snapshot] of [
       ["key-value", { ...design, question: "What API key value should the importer use?" }],
       ["sign-in", option("Sign in to the provider now")],
@@ -761,9 +761,9 @@ test("a typed credential-handling design question reaches the Orchestrator; the 
       const snapshotText = snapshot.category === "implementation_question" ? snapshot.options.at(-1)!.label : "";
       h.asking.add(requestId === "key-value" ? "What API key value should the importer use?" : snapshotText);
       const declined = await ask(`${sessionId}-${requestId}`, snapshot, sessionId);
-      assert.equal(declined.status, 403, `${sessionId} ${requestId}`);
+      assert.equal(declined.data?.authority, "human", `${sessionId} ${requestId}`);
     }
-    assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0, "no declined decision is left for anyone to answer");
+    assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 10, "model asks remain held for classification");
     const blocked = h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined");
     assert.deepEqual(blocked.map((record) => [record.resource.sessionId, record.state]).sort(), [["child", "blocked"], ["root", "blocked"]]);
   } finally { h.db.close(); }
@@ -811,7 +811,7 @@ test("questions that only mention credentials or permissions reach their owner; 
       assert.ok(dismissed(`child-genuine-${index}`), `declined, never forwarded: ${question}`);
       for (const sessionId of ["child", "root"]) {
         const typed = await ask(sessionId, `${sessionId}-typed-genuine-${index}`, question);
-        assert.equal(typed.status, 403, `${sessionId} typed: ${question}`);
+        assert.equal(typed.data?.authority, "human", `${sessionId} typed: ${question}`);
       }
       provider("root", `root-genuine-${index}`, question);
       await settleScreens();

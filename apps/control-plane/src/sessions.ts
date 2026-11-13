@@ -59,7 +59,7 @@ import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisi
 import { DECISION_TOTAL_BOUND_MS, DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
 import { DecisionModelSettings } from "./decision-model-settings.js";
 import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
-import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
+import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, credentialFormFloorRule, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesAcrossRepositories, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { digitRangeMembers, firstMessageTargetEpics } from "./first-message-issue-intent.js";
 import { exactNamedRepositoryLimit, messageNamesRepository, onlyOtherRepositories, proposalMaxIssues, repositoryNameInMessage, resolveRepositoryName, writtenForRepository } from "./scope-grant.js";
@@ -15231,7 +15231,8 @@ export class SessionsService {
       }
       this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "workflow_request_declined",
         sessionId, controllingSessionId: controller.session.id, requestId: request.requestId, ...authorityEvaluation }));
-      return fail("Full Control declined this question: the campaign cannot supply credentials or sign-in. Continue without them; the request is recorded as blocked work.", 403);
+      const rule = normalized.data.category === "implementation_question" ? credentialFormFloorRule(normalized.data) : null;
+      return fail(`Full Control declined this question (deterministic floor: ${rule ?? authorityEvaluation.requestClass}): the campaign cannot supply credentials or sign-in. Continue without them; the request is recorded as blocked work.`, 403);
     }
     if (authorityEvaluation.owner !== authority) {
       authorityEvaluation.owner = authority;
@@ -15553,7 +15554,9 @@ export class SessionsService {
       return fail("Only the campaign's owner can classify a question the Decision Model could not screen", 403);
     }
     if (subject.surface === "issue_scope_seed") return this.releaseCampaignIssueScopeSeed(campaignSessionId, occurrenceId, request, actor);
-    if (occurrence.state !== "uncertain" && occurrence.state !== "failed") {
+    const typedModelAsk = subject.surface === "implementation_question" && occurrence.kind === "credential_screen" &&
+      occurrence.state === "decided" && occurrence.verdict === "ask";
+    if (occurrence.state !== "uncertain" && occurrence.state !== "failed" && !typedModelAsk) {
       return fail("the Decision Model already screened this request", 409);
     }
     const root = this.db.getSession(campaignSessionId);
