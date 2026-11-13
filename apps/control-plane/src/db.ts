@@ -23566,6 +23566,23 @@ export class ControlPlaneDb {
     }
   }
 
+  /** Keyset batches include children of stopped/archived roots. The service rechecks verification,
+   * ancestry, policy, generation and runner compatibility before sending any reconciliation. */
+  archivedChildrenWithRefusedWorktrees(after: string, runnerId?: string): string[] {
+    const rows = this.stmt(
+      `SELECT DISTINCT s.id FROM sessions s
+       JOIN orchestrator_campaign_worktree_cleanup c ON c.child_session_id=s.id
+       WHERE s.archived=1 AND c.status='refused' AND s.id>?
+         AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(s.worktrees)
+           THEN CASE WHEN json_type(s.worktrees)='array' THEN s.worktrees END END) w
+           WHERE json_extract(CASE WHEN w.type='object' THEN w.value END,'$.path')=c.path
+             AND json_extract(CASE WHEN w.type='object' THEN w.value END,'$.id')=c.worktree_id)
+         ${runnerId ? "AND s.runner_id=?" : ""}
+       ORDER BY s.id LIMIT 64`,
+    ).all(after, ...(runnerId ? [runnerId] : [])) as Array<{ id: string }>;
+    return rows.map(row => row.id);
+  }
+
   campaignWorktreeCleanup(sessionId: string): NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]> {
     // A SessionView embeds its campaign projection, so read the raw row here to avoid
     // projecting the campaign recursively while its children are being counted.

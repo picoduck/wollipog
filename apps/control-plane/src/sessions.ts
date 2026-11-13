@@ -2501,6 +2501,8 @@ export class SessionsService {
   /** When each campaign was last checked for leftovers to repair, so a tick never derives them all. */
   private readonly campaignRepairCheckedAt = new Map<string, number>();
   private readonly archiveWorktreeRetirements = new Set<string>();
+  private readonly refusedWorktreeRecheckedAt = new Map<string, number>();
+  private readonly refusedWorktreeSweep = new Map<string, { at: number; after: string }>();
   /** Full Control campaigns whose first message is being established (#2940). */
   private readonly firstMessagesInFlight = new Set<string>();
   /** The one session whose established first message is being admitted right now. */
@@ -7423,6 +7425,7 @@ export class SessionsService {
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
     this.expireAutomationCreationDecisions(now);
+    this.maintainArchivedWorktreeRemoval(now, runnerId);
     for (const campaignId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
       void this.reconcileUncertainIssueClosures(campaignId).catch(() => this.log.warn(`Issue closure recovery is pending for ${campaignId}`));
     }
@@ -9985,6 +9988,9 @@ export class SessionsService {
       return fail("campaign state is available only for the Orchestrator role", 409);
     }
     const projection = this.db.campaignProjection(sessionId);
+    // A refusal is never a fresh deletion intent. Re-reading Campaign Status only asks the runner
+    // to reconcile external removal, using the archived child's exact inventory generation.
+    this.reconcileRefusedCampaignWorktrees(projection);
     return projection ? ok(projection) : fail("campaign state is unavailable", 409);
   }
 
@@ -20696,20 +20702,39 @@ export class SessionsService {
     }
   }
 
+  private maintainArchivedWorktreeRemoval(now: number, runnerId?: string): void {
+    const key = runnerId ?? "*";
+    const previous = this.refusedWorktreeSweep.get(key);
+    if (previous && now - previous.at < 30_000) return;
+    const children = this.db.archivedChildrenWithRefusedWorktrees(previous?.after ?? "", runnerId);
+    this.refusedWorktreeSweep.set(key, { at: now, after: children.length === 64 ? children.at(-1)! : "" });
+    for (const childId of children) this.queueCampaignWorktreeRetirement(childId, false, now);
+  }
+
+  private reconcileRefusedCampaignWorktrees(projection: OrchestratorCampaignProjection | null): void {
+    for (const childId of new Set(projection?.cleanupWorktrees?.filter(item => item.status === "refused")
+      .map(item => item.sessionId))) this.queueCampaignWorktreeRetirement(childId);
+  }
+
   /** A verified child and its archived flag are the durable intent. Reconnect replays this
    * request if the control plane exited before sending it; the runner owns deferred replay after
-   * it accepts a request. Safety refusals are recorded once and never retried automatically. */
-  private queueCampaignWorktreeRetirement(sessionId: string, retryDeferred = false): void {
+   * it accepts a request. Refusals only receive metadata reconciliation, never a deletion retry. */
+  private queueCampaignWorktreeRetirement(sessionId: string, retryDeferred = false, recheckAt = Date.now()): void {
     const child = this.db.getSession(sessionId);
     const campaignId = this.db.campaignForVerifiedChild(sessionId);
     const campaign = campaignId ? this.db.getSession(campaignId) : null;
-    if (!child?.archived || !campaign?.orchestratorPolicy ||
+    if (!child?.archived || child.archiveStatus || !campaign?.orchestratorPolicy ||
         campaign.orchestratorPolicy.behavior.completion !== "stop_and_archive" ||
         !runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "archiveWorktreeRetirement") ||
         !this.hub.isRunnerOnline(child.runnerId) || this.archiveWorktreeRetirements.has(sessionId)) return;
+    const reconcileRefused = runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion,
+      "campaignWorktreeRemovalReconciliation") &&
+      (retryDeferred || recheckAt - (this.refusedWorktreeRecheckedAt.get(sessionId) ?? 0) >= 30_000);
     const pending = this.db.campaignWorktreeCleanup(sessionId).filter((item) =>
-      item.status === "pending" || (retryDeferred && item.status === "deferred"));
+      item.status === "pending" || (retryDeferred && item.status === "deferred") ||
+      (reconcileRefused && item.status === "refused"));
     if (!pending.length) return;
+    if (pending.some(item => item.status === "refused")) this.refusedWorktreeRecheckedAt.set(sessionId, recheckAt);
     this.archiveWorktreeRetirements.add(sessionId);
     void (async () => {
       let retry = false;
@@ -20722,6 +20747,28 @@ export class SessionsService {
           const worktreeId = worktree?.id ?? "";
           if (item.status !== this.db.campaignWorktreeCleanup(sessionId)
             .find((candidate) => candidate.path === item.path)?.status) continue;
+          if (item.status === "refused") {
+            if (!worktree || worktree.source !== "created") continue;
+            const requestId = `reconcile_worktree_${randomUUID().slice(0, 8)}`;
+            try {
+              const result = await this.hub.requestFromRunner(child.runnerId, requestId, {
+                type: "session_worktree", requestId, sessionId, operation: "reconcile_removal",
+                path: item.path, worktreeId,
+              }, 150_000);
+              if (result.type === "session_worktree_result" && result.sessionId === sessionId &&
+                  result.operation === "reconcile_removal" && result.ok && result.snapshot &&
+                  result.snapshot.worktreePath !== item.path &&
+                  !result.snapshot.worktrees?.some(tree => tree.path === item.path)) {
+                this.db.updateSessionFromSnapshot(sessionId, result.snapshot, Date.now());
+                this.hub.sessionChangedById(sessionId);
+                this.campaignViewsChanged(campaignId!, sessionId);
+              }
+            } catch {
+              this.log.warn(JSON.stringify({ event: "campaign_worktree_external_reconciliation_unavailable",
+                sessionId, requestId, refusalRetained: true }));
+            }
+            continue;
+          }
           const requestId = `archive_worktree_${randomUUID().slice(0, 8)}`;
           const campaignDeliveredPullRequests = runnerSupportsProtocol(
             this.db.getRunner(child.runnerId)?.protocolVersion, "worktreePatchDelivery")
