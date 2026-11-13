@@ -6,7 +6,7 @@ for (const [name, viewport] of [["Desktop", { width: 1440, height: 1000 }], ["Ph
     await page.goto("/campaign-status-e2e.html?scenario=campaign&pause=timed");
     const section = page.locator(".campaign-detail-section").filter({ has: page.getByRole("heading", { name: "Campaign Pause", exact: true }) });
     await expect(page.locator(".campaign-status-summary")).toContainText("Paused");
-    await expect(section).toContainText("Merge of picoduck/wollipog#4560 is still in flight; its merge watch is active.");
+    await expect(section).toContainText("Merge of team/repo#4560 is still in flight; its merge watch is active.");
     await expect(section).toContainText("1 session still has work in flight.");
     await expect(section.locator("dt").filter({ hasText: /^Resumes At$/ })).toBeVisible();
     await expect(section).toContainText("Sam Owner");
@@ -32,5 +32,8 @@ for (const [name, viewport] of [["Desktop", { width: 1440, height: 1000 }], ["Ph
     await expect(section.getByRole("heading", { name: "Campaign Pause", exact: true })).toBeInViewport();
     if (process.env.CAMPAIGN_PAUSE_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.CAMPAIGN_PAUSE_EVIDENCE_DIR}/${name.toLowerCase()}-manual.png` });
     expect(await page.locator(".campaign-status").evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&pause=timed&viewer=other");
+    await expect(section.getByRole("heading", { name: "Campaign Pause", exact: true })).toBeVisible();
+    await expect(section.getByRole("button", { name: "Resume Campaign", exact: true })).toHaveCount(0);
   });
 }

@@ -273,7 +273,7 @@ function AvailableCampaignStatus({
           <StaleContent stale={data.offline}>
             <div className="campaign-status-sections">
               {data.summary.campaign && <CampaignPause campaignId={availability.campaignSessionId}
-                pause={data.summary.campaign.pause} canEdit={availability.role === "campaign"}
+                pause={data.summary.campaign.pause} canEdit={availability.role === "campaign" && session.commandPermissions?.pauseCampaign?.allowed === true}
                 onChanged={data.retry} />}
               <CampaignSummarySection data={data} now={now} />
               {data.summary.campaign?.ownerDecisions && (

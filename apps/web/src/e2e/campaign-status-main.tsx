@@ -108,7 +108,7 @@ const NOW = params.has("closureRecovery") || params.has("epicTracking") ? Date.p
 let pauseFixture: import("@wollipog/protocol").CampaignPauseView | undefined = params.has("pause") ? {
   pausedAt: NOW - 10 * 60_000, pausedBy: "Sam Owner", resumeAt: params.get("pause") === "timed" ? NOW + 60 * 60_000 : null,
   stoppedSessionIds: ["s_child"], inFlightSessionIds: ["s_merge"],
-  inFlightWork: [{ sessionId: "s_merge", description: "Merge of picoduck/wollipog#4560 is still in flight; its merge watch is active." }],
+  inFlightWork: [{ sessionId: "s_merge", description: "Merge of team/repo#4560 is still in flight; its merge watch is active." }],
   ...(params.get("pause") === "resumed" ? { resumedAt: NOW - 60_000, resumedBy: "Sam Owner" } : {}),
 } : undefined;
 const epicTracking = params.has("epicTracking") ? epicTrackingFixture(NOW,
@@ -855,6 +855,9 @@ const selectionCard: import("@wollipog/protocol").PendingApproval | null = param
 
 function sessionsFor(rev: number): SessionView[] {
   const root = baseSession({ orchestratorCampaign: projectionFor(rev),
+    ...(pauseFixture ? { commandPermissions: { stop: { allowed: true as const }, restart: { allowed: true as const },
+      stopBackgroundJob: { allowed: true as const }, pauseCampaign: params.get("viewer") === "other"
+        ? { allowed: false as const, reason: "Only the campaign owner can pause or resume it." } : { allowed: true as const } } } : {}),
     ...(followUpCards.length ? { pendingApproval: { ...followUpCards[0]!, additionalRequests: followUpCards.slice(1) } } : {}),
     ...(ownerCard ? { pendingApproval: ownerCard } : {}),
     ...(selectionCard ? { pendingApproval: selectionCard } : {}),
@@ -1258,7 +1261,7 @@ const client = {
   setCampaignPause: async (_id: string, input: { action: "pause" | "resume"; resumeAt?: number | null }) => {
     pauseFixture = input.action === "pause" ? { pausedAt: NOW, pausedBy: "Sam Owner", resumeAt: input.resumeAt ?? null,
       stoppedSessionIds: ["s_child"], inFlightSessionIds: ["s_merge"],
-      inFlightWork: [{ sessionId: "s_merge", description: "Merge of picoduck/wollipog#4560 is still in flight; its merge watch is active." }] }
+      inFlightWork: [{ sessionId: "s_merge", description: "Merge of team/repo#4560 is still in flight; its merge watch is active." }] }
       : { ...pauseFixture!, resumedAt: NOW, resumedBy: "Sam Owner" };
     revision++;
     setRevision?.(revision);

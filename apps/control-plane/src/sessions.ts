@@ -6960,6 +6960,7 @@ export class SessionsService {
     /** The authenticated agent sending it; only its server-derived identity is read (#4022). */
     sender?: AgentPrincipal,
   ): Promise<ServiceResult<PromptAdmissionView>> {
+    if (this.db.campaignPaused(sessionId)) return fail("The campaign is paused; resume it before sending messages.", 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
     const steered = await this.steerMidTurnPrompt(sessionId, text, images, slashCommand, config, sender);
@@ -7082,7 +7083,8 @@ export class SessionsService {
     // its refusal or delivery report names only tools it can call (#1863).
     holdReader?: HoldAdviceReader,
   ): ServiceResult<PromptAdmissionView> {
-    if (this.db.campaignPaused(sessionId)) return fail("The campaign is paused; resume it before sending messages.", 409);
+    const pausedCampaign = this.db.campaignPaused(sessionId);
+    if (pausedCampaign && delivery) return fail("The campaign is paused; pre-staged deliveries wait until resume.", 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
     const snapshotCommand = delivery?.commandSnapshots?.[0];
@@ -7122,7 +7124,7 @@ export class SessionsService {
     }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
-    if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
+    if (isTerminal(session.status) && !(pausedCampaign && this.db.campaignPause(sessionId)?.stoppedSessionIds.includes(sessionId))) return fail(`session is ${session.status}`, 409);
     if (session.historyQuarantine) return fail(QUARANTINED_CONVERSATION_ERROR, 409);
     if (session.worktreeRecovery) {
       return fail(
@@ -7151,7 +7153,7 @@ export class SessionsService {
       this.hub.sessionChangedById(sessionId);
       return fail("daily budget reached — new turns pause until the day rolls over or an owner or admin raises it", 409);
     }
-    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    if (!pausedCampaign && !this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
     const admissionQueuedPrompt = !delivery &&
       (session.status === "queued" || session.status === "starting");
     if (admissionQueuedPrompt) {
@@ -7328,7 +7330,7 @@ export class SessionsService {
     // provider may need to relaunch, and verification can then prove that the prompt was not sent.
     // Persisting before that attempt retains attachments/workspace references and gives recovery
     // a stable idempotency identity instead of relying on a browser-local draft.
-    const durablePrompt = admissionQueuedPrompt || (retainAcrossWorktreeRecovery && !delivery &&
+    const durablePrompt = (pausedCampaign && !delivery) || admissionQueuedPrompt || (retainAcrossWorktreeRecovery && !delivery &&
       session.status === "idle" &&
       session.worktreePath != null &&
       runnerSupportsProtocol(
@@ -7349,7 +7351,7 @@ export class SessionsService {
     // A prompt admitted behind authoritative input is runner-queued work, not a new turn. Keep the
     // input card intact; the runner advances status only after the input resolves and this dequeues.
     // Otherwise preserve runner-authoritative admission state while its provider slot is queued.
-    if (!pendingInputBarrier && (!durablePrompt || (session.status !== "queued" && session.status !== "starting"))) {
+    if (!pausedCampaign && !pendingInputBarrier && (!durablePrompt || (session.status !== "queued" && session.status !== "starting"))) {
       // The socket send below can still reject synchronously. Defer campaign-attestation
       // invalidation until its success boundary so an undelivered prompt is a true no-op.
       // A caller that knows the provider is idle and follows the durable receipts admits the
@@ -9054,6 +9056,7 @@ export class SessionsService {
   }
 
   private requestStop(session: SessionView, now: number, archiveAfterStop = false, refreshProject = true): SessionView {
+    this.removeCampaignPauseMember(session.id);
     if (this.mediaSessionPurposes.owns(session.id) && session.status !== "queued" &&
       this.mediaSessionPurposes.lifecycleState(session.id) !== "cancelled") {
       this.requestDedicatedMediaStop(session);
@@ -9143,6 +9146,7 @@ export class SessionsService {
    * touching the socket, or a lost frame leaves nothing to resend and the runner's next live
    * snapshot restores the session the user stopped. */
   private stopAtGuardrail(session: SessionView, now: number): void {
+    this.removeCampaignPauseMember(session.id);
     if (this.mediaSessionPurposes.owns(session.id) || this.pendingMediaLifecycle(session)) {
       // Reuse only the exact same-DB locally unsent cancellation. Unknown delivery is not a
       // generic Stop authorization or terminal proof, even when the root budget is stopped.
@@ -9197,6 +9201,16 @@ export class SessionsService {
   private requestDedicatedMediaStop(session: SessionView): boolean {
     if (!this.mediaSessionPurposes.owns(session.id) || !this.sessionPacedVideoCompatible(session)) return false;
     return Boolean(this.preparedMediaActiveStops?.request(session.id));
+  }
+
+  /** An ordinary Stop or guardrail end supersedes preservation; scheduled resume must not undo it. */
+  private removeCampaignPauseMember(sessionId: string): void {
+    const pause = this.db.campaignPause(sessionId);
+    const rootId = this.db.campaignRootForMember(sessionId);
+    if (!rootId || !pause || pause.resumedAt !== undefined) return;
+    pause.stoppedSessionIds = pause.stoppedSessionIds.filter(id => id !== sessionId);
+    pause.inFlightSessionIds = pause.inFlightSessionIds.filter(id => id !== sessionId);
+    this.db.saveCampaignPause(rootId, pause);
   }
 
   setCampaignPause(sessionId: string, input: { action: "pause" | "resume"; resumeAt?: number | null }, principal: HumanPrincipal): ServiceResult<SessionView> {
@@ -18511,6 +18525,10 @@ export class SessionsService {
   ): boolean {
     const child = this.db.getSession(decision.sessionId);
     if (!child) return false;
+    if (this.db.campaignPaused(child.id)) {
+      if (from !== "held") this.db.setWorkflowDecisionResume(decision.occurrenceId, "held", null, now);
+      return false;
+    }
     const text = workflowDecisionResolutionPrompt(decision);
     if (!runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "worktreeRecovery")) {
       const delivered = this.prompt(child.id, text);
@@ -18837,7 +18855,8 @@ export class SessionsService {
    * and approved decisions, and any resume still owed for a denied or consumed one is abandoned
    * with them, so only a provisional disconnect stop leaves a resume held (#1759). */
   private revokeUnconsumedWorkflowDecisionsForSession(sessionId: string, actorId: string): void {
-    if (this.db.campaignPaused(sessionId)) return;
+    const pause = this.db.campaignPause(sessionId);
+    if (pause && pause.resumedAt === undefined && pause.stoppedSessionIds.includes(sessionId)) return;
     const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
       const settle = child ? this.forgeSettlesArmedMerge(child, decision) : false;

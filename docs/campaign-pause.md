@@ -28,3 +28,11 @@ receive Campaign Stuck (or the older Blocked fallback), with the pause recorded 
 Operational evidence: the timeline records each pause/resume with its actor and time; structured
 `campaign_paused` and `campaign_resumed` events correlate by campaign ID and pause timestamp.
 Campaign Status shows the latest pause and resume, selected time, and in-flight member count.
+
+An ordinary Stop, a guardrail Stop or an unrelated provider end retains the ordinary decision
+revocation and cleanup rules. Only the Stop issued to preserve an idle pause member keeps its
+queued notices for resume; a later ordinary Stop supersedes that preservation intent. Owner
+resolutions during pause keep their notification owed, including on older runners. Other internal
+notices queue durably without restarting the provider, while human/agent prompt admission remains
+held. Shared viewers can inspect the pause, but receive no pause/resume controls unless their
+principal-specific command permissions establish ownership.

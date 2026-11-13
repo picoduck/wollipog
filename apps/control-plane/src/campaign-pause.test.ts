@@ -8,14 +8,14 @@ import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { compatibleCampaignStatus } from "./campaign-status-compatibility.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 
-function fixture() {
+function fixture(protocolVersion = PROTOCOL_VERSION) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
   const owner = { ...identity, kind: "human" as const, actorId: identity.userId };
   const metadata: RunnerMetadata = { runnerId: "r", hostname: "test", os: "linux", version: "test",
     workspaces: [{ id: "w", name: "Repo", path: "/repos/test" }], agents: [{ id: "agent", name: "Agent",
       command: "claude", args: [], env: {}, driver: "claude-code", available: true }] };
-  db.registerRunner(metadata, 1, PROTOCOL_VERSION);
+  db.registerRunner(metadata, 1, protocolVersion);
   for (const id of ["root", "child"]) {
     db.createSession({ id, runnerId: "r", workspaceId: "w", agentId: "agent", title: id,
       useWorktree: false, driver: "claude-code", config: { model: "opus", ...(id === "root" ? { permissionMode: "orchestrator" as const } : {}) }, now: Date.now(),
@@ -43,7 +43,7 @@ test("pause is owner-only, holds continuations and admission, and preserves runn
     assert.equal(db.campaignProjection("root")!.stuck?.items.length ?? 0, 0);
     assert.equal(db.campaignContinuationAdmission("root").state, "lifecycle_held");
     assert.deepEqual(db.campaignPause("root")!.inFlightSessionIds.sort(), ["child", "root"]);
-    assert.equal(svc.prompt("child", "continue").ok, false);
+    assert.equal(svc.promptFromUser(owner.userId, "child", "continue").ok, false);
     const creation = svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "agent", useWorktree: false, config: {} },
       undefined, undefined, false, false, false, { parentSessionId: "root" });
     assert.match(creation.error!, /campaign is paused/);
@@ -149,5 +149,62 @@ test("pause never revokes or interrupts an armed merge or pending request", () =
     const resumeRows = db.raw().prepare("SELECT command_id,state FROM session_prompt_commands WHERE command_id LIKE 'campaign_resume_%'").all() as Array<{ command_id: string; state: string }>;
     assert.equal(resumeRows.length, 2);
     assert.ok(resumeRows.every(row => row.state === "pending"));
+  } finally { db.close(); }
+});
+
+test("an ordinary Stop during a pause still revokes a member's outstanding authority", () => {
+  const { db, svc, owner } = fixture();
+  try {
+    const decision = svc.createWorkflowDecision("child", { requestId: "retained-choice", resourceKey: "retained-choice",
+      resourceSnapshot: { category: "implementation_question", question: "Which retained behavior should continue?",
+        options: [{ optionId: "keep", label: "Keep" }, { optionId: "change", label: "Change" }] } }, () => true);
+    assert.ok(decision.ok, decision.error ?? "the choice should be admitted");
+    const occurrenceId = decision.data!.occurrenceId;
+    assert.ok(svc.resolveWorkflowDecision("root", "child", occurrenceId, { outcome: "approve", selectedOptionId: "keep" },
+      "human", { kind: "human", id: owner.userId }, () => true).ok);
+    assert.ok(svc.setCampaignPause("root", { action: "pause" }, owner).ok);
+    assert.equal(db.workflowDecisionByOccurrence(occurrenceId)!.status, "approved");
+    assert.ok(svc.stop("child").ok);
+    assert.equal(db.workflowDecisionByOccurrence(occurrenceId)!.status, "revoked");
+    assert.ok(svc.setCampaignPause("root", { action: "resume" }, owner).ok);
+    assert.equal(db.workflowDecisionByOccurrence(occurrenceId)!.status, "revoked");
+  } finally { db.close(); }
+});
+
+for (const protocolVersion of [160, PROTOCOL_VERSION]) test(`an owner's decision during pause remains owed and delivers after resume (v${protocolVersion})`, () => {
+  const { db, svc, owner } = fixture(protocolVersion);
+  try {
+    db.updateSessionStatus("child", "idle", Date.now());
+    const decision = svc.createWorkflowDecision("child", { requestId: "paused-choice", resourceKey: "paused-choice",
+      resourceSnapshot: { category: "implementation_question", question: "Which retained behavior should continue?",
+        options: [{ optionId: "keep", label: "Keep" }, { optionId: "change", label: "Change" }] } }, () => true);
+    assert.ok(decision.ok, decision.error ?? "the choice should be admitted");
+    const occurrenceId = decision.data!.occurrenceId;
+    assert.ok(svc.setCampaignPause("root", { action: "pause" }, owner).ok);
+    assert.ok(svc.resolveWorkflowDecision("root", "child", occurrenceId, { outcome: "approve", selectedOptionId: "keep" },
+      "human", { kind: "human", id: owner.userId }, () => true).ok);
+    const resumeState = () => (db.raw().prepare("SELECT resume_state FROM workflow_decisions WHERE occurrence_id=?")
+      .get(occurrenceId) as { resume_state: string }).resume_state;
+    assert.equal(resumeState(), "held");
+    assert.equal(db.getSession("child")!.status, "idle", "a held notification must not claim a running turn");
+    assert.ok(svc.setCampaignPause("root", { action: "resume" }, owner).ok);
+    svc.retryDuePrompts();
+    assert.equal(resumeState(), protocolVersion < 161 ? "delivered" : "delivering");
+  } finally { db.close(); }
+});
+
+test("server notices queue during pause without reviving a stopped provider; an explicit Stop still cancels them", () => {
+  const { db, svc, owner } = fixture();
+  try {
+    db.updateSessionStatus("child", "idle", Date.now());
+    assert.ok(svc.setCampaignPause("root", { action: "pause" }, owner).ok);
+    assert.equal(db.getSession("child")!.status, "stopped");
+    assert.ok(svc.prompt("child", "The merge closure list changed; recheck it before enqueueing.").ok);
+    assert.equal(db.getSession("child")!.status, "stopped", "staging a notice must not restore runtime status");
+    const pending = db.raw().prepare("SELECT COUNT(*) AS n FROM session_prompt_commands WHERE session_id='child' AND state='pending'").get() as { n: number };
+    assert.equal(pending.n, 1);
+    assert.ok(svc.stop("child").ok);
+    assert.equal(db.campaignPause("root")!.stoppedSessionIds.includes("child"), false, "a later ordinary Stop supersedes the pause's restart intent");
+    assert.equal((db.raw().prepare("SELECT COUNT(*) AS n FROM session_prompt_commands WHERE session_id='child' AND state='pending'").get() as { n: number }).n, 0);
   } finally { db.close(); }
 });

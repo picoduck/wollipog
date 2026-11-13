@@ -8319,6 +8319,8 @@ export type SessionCommandPermission = { allowed: true } | { allowed: false; rea
  * its controlling Orchestrator alone (#1780), while an organization owner or admin who merely can
  * see the session may still stop or restart it. */
 export interface SessionCommandPermissions {
+  /** Owner-only campaign suspension. Absence never proves ownership. */
+  pauseCampaign?: SessionCommandPermission;
   /** Stop Session. A person meets the same gates at Retry Stop, so the dashboard reads this for
    * it too; no agent credential may call Retry Stop, whatever this says. */
   stop: SessionCommandPermission;
