@@ -333,9 +333,11 @@ test("scope approval request shows exact changes and affected assignments",async
   await expect(page.locator(".request-dock .request-card-foot").getByRole("button", {name:/^Approve/u})).toBeEnabled();
   await expect(page.getByText("team/repo#125",{exact:true})).toBeVisible();
   await expect(page.getByText("team/repo#124",{exact:true})).toBeVisible();
+  await expect(page.getByText("closure-member-124",{exact:true})).toBeHidden();
+  await expect(page.getByText("Decision details unavailable; refresh before approving.", { exact: true })).toBeVisible();
+  await page.getByText("Raw Decision IDs", { exact: true }).click();
   await expect(page.getByText("closure-member-124",{exact:true})).toBeVisible();
-  await expect(page.getByText(/Issue closure still requires its own human approval/)).toBeVisible();
-  await expect(page.getByText(/Under Full Control, approving revokes every decision outstanding at that moment, including any filed after this request/)).toBeVisible();
+  await expect(page.getByText(/Under Full Control, pending and Orchestrator-approved decisions are revoked/)).toBeVisible();
 });
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "phone", width: 390, height: 844 }]) {

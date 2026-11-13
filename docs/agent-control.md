@@ -2541,8 +2541,9 @@ occurrence is resumed with the reason; one already holding an approval is not wo
 the campaign's own Orchestrator did not make reaches it as `request_resolved` with outcome
 `withdrawn`, the withdrawing session and the reason. Consumed occurrences, an armed `pr_merge`
 (reconcile it instead), another session's occurrences, a person-owned occurrence the caller did not
-request, and person-owned issue closure, scope, follow-up admission and automation requests are
-refused.
+request, and person-owned issue closure, follow-up admission and automation requests are
+refused. Only the requesting root may withdraw its own pending campaign issue-scope request before
+a person acts; other scope requests remain protected. Older control planes may refuse this exception.
 
 Before creating a child, an Orchestrator can call `get_agent_capabilities` with an exact `runnerId`
 and `agentId`. The matching CLI command is:

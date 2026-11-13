@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Fastify from "fastify";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, validCampaignControl,
-  type CampaignAuthorityBoundary, type CampaignControl, type CampaignEvidenceAuthority, type RunnerMetadata, type WorkflowDecisionView } from "@wollipog/protocol";
+  pendingRequests, type CampaignAuthorityBoundary, type CampaignControl, type CampaignEvidenceAuthority, type RunnerMetadata, type WorkflowDecisionView } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
@@ -31,7 +31,7 @@ test("a root withdraws only its own pending scope request before the owner acts 
   } finally { h.db.close(); }
 });
 
-test("scope additions preserve owner-approved armed merges but revoke delegated and pending decisions (#4547)", async () => {
+for (const remints of [true, false]) test(`scope additions preserve only independent human merges with a successful boundary re-mint (${remints}, #4547)`, async () => {
   const h = harness();
   try {
     const revision = h.db.getSession("root")!.parentControlPolicy!.revision;
@@ -48,9 +48,27 @@ test("scope additions preserve owner-approved armed merges but revoke delegated 
     }
     h.db.raw().prepare("UPDATE workflow_decisions SET policy_revision=? WHERE occurrence_id='stale-owner'").run(revision - 1);
     const proposal = await h.humanProposal("add-with-merges", 1, [101]);
-    assert.ok(h.approve(proposal).ok);
-    assert.equal(h.db.workflowDecisionByOccurrence("owner")?.status, "approved");
-    assert.equal(h.db.workflowDecisionByOccurrence("owner")?.policyRevision, h.db.getSession("root")!.parentControlPolicy!.revision);
+    const details = () => pendingRequests(h.db.getSession("root")!.pendingApproval)
+      .find((request) => request.workflowDecision?.occurrenceId === proposal.occurrenceId)?.scopeDecisionDetails;
+    assert.equal(details()?.find((d) => d.occurrenceId === "pending")?.approval, "pending");
+    for (const settled of ["denied", "revoked", "consumed"]) {
+      h.db.raw().prepare("UPDATE workflow_decisions SET status=? WHERE occurrence_id='pending'").run(settled);
+      assert.equal(details()?.some((d) => d.occurrenceId === "pending"), false, `${settled} is never labeled pending`);
+    }
+    h.db.raw().prepare("UPDATE workflow_decisions SET status='pending' WHERE occurrence_id='pending'").run();
+    if (remints) assert.ok(h.approve(proposal).ok);
+    else {
+      // Exercise storage's defense with history no scope approval explains. The service normally
+      // refuses this stale boundary earlier; storage must not preserve approvals either.
+      const policy = h.db.sessionOrchestratorPolicy("root")!;
+      assert.ok(policy.control?.mode === "full_control");
+      policy.control.boundary.issueScopeRevision = 2;
+      h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+      const result = h.db.approveCampaignIssueScope(proposal.occurrenceId, h.principal.userId, Date.now());
+      assert.ok("decision" in result, JSON.stringify(result));
+    }
+    assert.equal(h.db.workflowDecisionByOccurrence("owner")?.status, remints ? "approved" : "revoked");
+    if (remints) assert.equal(h.db.workflowDecisionByOccurrence("owner")?.policyRevision, h.db.getSession("root")!.parentControlPolicy!.revision);
     for (const id of ["delegated", "pending", "stale-owner"]) assert.equal(h.db.workflowDecisionByOccurrence(id)?.status, "revoked");
   } finally { h.db.close(); }
 });

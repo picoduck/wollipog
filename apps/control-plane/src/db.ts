@@ -6596,16 +6596,19 @@ export class ControlPlaneDb {
     if (stored.kind !== "workflow_decision" || decision?.authority !== "human" || decision.sessionId !== sessionId ||
         decision.controllingSessionId !== sessionId || decision.resourceSnapshot.category !== "campaign_issue_scope") return stored;
     const increase = this.scopeApprovalIncrease(sessionId, decision.resourceSnapshot);
-    const scopeDecisionDetails = decision.resourceSnapshot.affectedDecisions.map((occurrenceId) => {
+    const scopeDecisionDetails = decision.resourceSnapshot.affectedDecisions.flatMap((occurrenceId) => {
       const d = this.workflowDecisionByOccurrence(occurrenceId);
+      // A settled or missing occurrence is not a pending approval. The client already has an
+      // unavailable-details fallback prompting a refresh instead of inventing its state.
+      if (!d || d.status !== "pending" && d.status !== "approved") return [];
       const s = d?.resourceSnapshot;
       const resource = s?.category === "pr_merge" ? `${s.repository}#${s.pullRequest} at ${s.headSha.slice(0, 7)}`
         : s?.category === "follow_up_issue_publication" ? `${s.repository}: ${s.sanitizedTitle}`
         : s?.category === "issue_closure" ? `${s.repository}#${s.issue}`
         : s && s.category !== "campaign_issue_scope" ? ownerDecisionSummary(s) : "Unavailable Resource";
-      return { occurrenceId, category: d?.category ?? "unknown", resource,
-        approval: d?.status === "approved" ? d.authority : "pending" as const,
-        armed: d?.actionAdmission?.kind === "pr_merge_enqueue" };
+      return [{ occurrenceId, category: d.category, resource,
+        approval: d.status === "approved" ? d.authority : "pending" as const,
+        armed: d.actionAdmission?.kind === "pr_merge_enqueue" }];
     });
     return { ...stored, ...(increase ? { scopeMaxIssuesIncrease: increase } : {}), scopeDecisionDetails };
   }
@@ -19329,7 +19332,7 @@ export class ControlPlaneDb {
       }
       const affected = new Set(snapshot.affectedDecisions);
       const outstanding = this.authorityBoundWorkflowDecisionsForController(root.id);
-      const preserved = new Set(!agentSessionId && boundary !== null && !narrowed && !withheld.length
+      const preserved = new Set(!agentSessionId && reminted?.mode === "full_control" && !narrowed && !withheld.length
         ? outstanding.filter((d) => scopePreservesHumanApproval(this, root.id, snapshot, d, boundary!.revision)).map((d) => d.occurrenceId) : []);
       const revoked = outstanding.filter((stale) => !preserved.has(stale.occurrenceId) &&
         ((!agentSessionId && boundary !== null) || narrowed || agentWithholds || affected.has(stale.occurrenceId)));
