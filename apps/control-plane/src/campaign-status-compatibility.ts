@@ -16,6 +16,7 @@ export function compatibleCampaignStatus(status: OrchestratorCampaignStatus, uiP
   OrchestratorCampaignStatus {
   const version = uiProtocolVersion ?? 0;
   let compatible = status;
+  if (compatible === "paused" && version < RUNNER_CAPABILITY_MIN_PROTOCOL.campaignPause) compatible = "stuck";
   if (version < RUNNER_CAPABILITY_MIN_PROTOCOL.campaignActivityStatus) {
     if (compatible === "complete_needs_cleanup") compatible = "complete_with_handoffs";
     else if (compatible === "stuck") compatible = "blocked";
@@ -27,7 +28,7 @@ export function compatibleCampaignStatus(status: OrchestratorCampaignStatus, uiP
 }
 
 /** Statuses some older dashboard cannot read, so a payload without any is sent unchanged. */
-const NEWER_STATUSES: ReadonlySet<unknown> = new Set(["complete_with_handoffs", "complete_needs_cleanup", "stuck"]);
+const NEWER_STATUSES: ReadonlySet<unknown> = new Set(["paused", "complete_with_handoffs", "complete_needs_cleanup", "stuck"]);
 
 /** A campaign projection: it carries the status the session's own fields do not. */
 function projectionLike(value: Record<string, unknown>): boolean {
@@ -42,7 +43,7 @@ function projectionLike(value: Record<string, unknown>): boolean {
  * and agent principals receive the payload unchanged; so does every payload that has no such status.
  */
 export function projectCampaignStatusForUi<T>(payload: T, uiProtocolVersion: number | null | undefined, depth = 0): T {
-  if ((uiProtocolVersion ?? 0) >= RUNNER_CAPABILITY_MIN_PROTOCOL.campaignActivityStatus || depth > 3 ||
+  if ((uiProtocolVersion ?? 0) >= RUNNER_CAPABILITY_MIN_PROTOCOL.campaignPause || depth > 3 ||
       payload == null || typeof payload !== "object") return payload;
   if (Array.isArray(payload)) {
     const projected = payload.map((value) => projectCampaignStatusForUi(value, uiProtocolVersion, depth + 1));

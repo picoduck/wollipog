@@ -105,6 +105,12 @@ const scenario = params.get("scenario") ?? "campaign";
 if (params.get("theme") === "light") document.documentElement.dataset.theme = "light";
 
 const NOW = params.has("closureRecovery") || params.has("epicTracking") ? Date.parse("2026-01-01T12:00:00Z") : Date.now();
+let pauseFixture: import("@wollipog/protocol").CampaignPauseView | undefined = params.has("pause") ? {
+  pausedAt: NOW - 10 * 60_000, pausedBy: "Sam Owner", resumeAt: params.get("pause") === "timed" ? NOW + 60 * 60_000 : null,
+  stoppedSessionIds: ["s_child"], inFlightSessionIds: ["s_merge"],
+  inFlightWork: [{ sessionId: "s_merge", description: "Merge of team/repo#4560 is still in flight; its merge watch is active." }],
+  ...(params.get("pause") === "resumed" ? { resumedAt: NOW - 60_000, resumedBy: "Sam Owner" } : {}),
+} : undefined;
 const epicTracking = params.has("epicTracking") ? epicTrackingFixture(NOW,
   params.get("epicTracking") === "delivery" ? "delivery" : params.get("epicTracking") === "legacy" ? "legacy" : "complete") : null;
 const recoveryReason = params.get("recovery");
@@ -560,6 +566,7 @@ const projectionFor = (rev: number) => campaignProjection(
       : handoffScenario || activityScenario ? handoffWork(rev) : recordedWork(rev),
   {
     limits: { maximumConcurrentChildren: 4, occupied: 3, remaining: 1, costBudgetUsd: 40, maxToolCalls: null },
+    ...(pauseFixture ? { status: pauseFixture.resumedAt === undefined ? "paused" as const : "active" as const, pause: pauseFixture } : {}),
     // `repositories=1`: a multi-repository boundary with an exclusion, a removed Location and a
     // Location someone else added (#4117). Static rendering data only.
     ...(params.get("repositories") === "1" ? { repositoryBoundary: {
@@ -848,6 +855,9 @@ const selectionCard: import("@wollipog/protocol").PendingApproval | null = param
 
 function sessionsFor(rev: number): SessionView[] {
   const root = baseSession({ orchestratorCampaign: projectionFor(rev),
+    ...(pauseFixture ? { commandPermissions: { stop: { allowed: true as const }, restart: { allowed: true as const },
+      stopBackgroundJob: { allowed: true as const }, pauseCampaign: params.get("viewer") === "other"
+        ? { allowed: false as const, reason: "Only the campaign owner can pause or resume it." } : { allowed: true as const } } } : {}),
     ...(followUpCards.length ? { pendingApproval: { ...followUpCards[0]!, additionalRequests: followUpCards.slice(1) } } : {}),
     ...(ownerCard ? { pendingApproval: ownerCard } : {}),
     ...(selectionCard ? { pendingApproval: selectionCard } : {}),
@@ -1264,6 +1274,16 @@ const client = {
   deleteCampaignMergedBranches: async (id: string) => {
     (window as unknown as { __DELETE_MERGED_BRANCHES__: unknown }).__DELETE_MERGED_BRANCHES__ = id;
     return { performed: 1, refused: 0 };
+  },
+  setCampaignPause: async (_id: string, input: { action: "pause" | "resume"; resumeAt?: number | null }) => {
+    pauseFixture = input.action === "pause" ? { pausedAt: NOW, pausedBy: "Sam Owner", resumeAt: input.resumeAt ?? null,
+      stoppedSessionIds: ["s_child"], inFlightSessionIds: ["s_merge"],
+      inFlightWork: [{ sessionId: "s_merge", description: "Merge of team/repo#4560 is still in flight; its merge watch is active." }] }
+      : { ...pauseFixture!, resumedAt: NOW, resumedBy: "Sam Owner" };
+    revision++;
+    setRevision?.(revision);
+    for (const session of sessionsFor(revision)) pushToStore?.({ type: "session_upsert", session });
+    return sessionsFor(revision)[0]!;
   },
   proposeCampaignIssueScope: async (_id: string, proposal: import("@wollipog/protocol").CampaignIssueScopeRequest) => {
     (window as unknown as { __SCOPE_PROPOSAL__: unknown }).__SCOPE_PROPOSAL__ = proposal;

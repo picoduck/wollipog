@@ -81,6 +81,7 @@ const VOCABULARY = {
     /** An idle campaign with undelivered work and nothing scheduled to wake anyone (#4146). Derived
      * from facts, unlike the time-based Stalled warning; it needs a person. */
     campaign_stuck: warning("Campaign Stuck"),
+    campaign_paused: info("Paused"),
     failed: danger("Failed"),
     completed: success("Completed"),
     stopped: neutral("Stopped"),

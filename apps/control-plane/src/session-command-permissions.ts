@@ -154,6 +154,10 @@ export function sessionCommandPermissions(
       ? STOP_JOB_OWNER_REASON
       : null);
   return {
+    pauseCampaign: permission(
+      allowlistedRouteRefusal(["/api/sessions/:id/orchestrator-campaign/pause"], principal, target, facts) ??
+      (principal.kind === "human" && facts.ownsSession ? null : "Only the campaign owner can pause or resume it."),
+    ),
     stop: permission(routeRefusal(STOP_ROUTE, principal, target, facts)),
     restart: permission(routeRefusal(RESTART_ROUTE, principal, target, facts)),
     stopBackgroundJob: permission(stopJobRefusal),
