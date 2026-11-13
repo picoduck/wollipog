@@ -91,6 +91,11 @@ export const FORGE_DECISION_ACTION_MAX_ATTEMPTS = 5;
 /** The control plane's creation RPC budget; agent clients allow additional response time. */
 export const TEMPORARY_BRANCH_CREATION_RPC_TIMEOUT_MS = 120_000;
 
+/** A policy keeps the decision, unlike a capability or boundary verification failure. */
+export function temporaryBranchDecisionKeptByPolicy(reason: unknown): boolean {
+  return reason === "custom_owner" || reason === "owner_kept";
+}
+
 /** The decision's record of what Wollipog did with it (`WorkflowDecisionView.forgeAction`). */
 export interface WorkflowDecisionForgeAction {
   kind: ForgeDecisionActionKind;

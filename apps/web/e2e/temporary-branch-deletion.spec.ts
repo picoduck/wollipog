@@ -1,11 +1,11 @@
 import { expect, test } from "@playwright/test";
 
 for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
-  for (const state of ["receipted", "unproven", "owner-kept"] as const) {
+  for (const state of ["receipted", "unproven", "owner-kept", "unavailable"] as const) {
     const missing = state === "unproven";
     test(`temporary branch deletion ${viewport.width}px ${state}`, async ({ page }, info) => {
       await page.setViewportSize(viewport);
-      await page.goto(`/request-surfaces-e2e.html?scenario=temporary-branch${missing ? "&missing=1" : state === "owner-kept" ? "&owner=1" : ""}`);
+      await page.goto(`/request-surfaces-e2e.html?scenario=temporary-branch${missing ? "&missing=1" : state === "owner-kept" ? "&owner=1" : state === "unavailable" ? "&unavailable=1" : ""}`);
       await page.getByRole("button", { name: "Expand Decision", exact: true }).click();
       const summary = page.locator(".request-card-body");
       await expect(summary.getByText(missing ? "Requested Tip" : "Created Tip", { exact: true })).toBeVisible();
@@ -15,8 +15,13 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       else {
         await expect(summary.getByText(/Contained in main at/)).toBeVisible();
         await expect(summary.locator("dd").filter({ hasText: "Campaign Worktree Retirement" })).toBeVisible();
-        await expect(summary.getByText(state === "owner-kept" ? /This campaign keeps branch deletion with you/ : /Orchestrator may delete/)).toBeVisible();
+        await expect(summary.getByText(state === "owner-kept" ? /This campaign keeps branch deletion with you/
+          : state === "unavailable" ? /outside the Orchestrator's current verified authority/ : /Orchestrator may delete/)).toBeVisible();
         if (state === "owner-kept") await expect(page.getByRole("heading", { name: "Owner Decision: Delete Temporary Branch", exact: true })).toBeVisible();
+        if (state === "unavailable") {
+          await expect(page.getByRole("heading", { name: "Delegation Unavailable: Delete Temporary Branch", exact: true })).toBeVisible();
+          await expect(summary.getByText(/This campaign keeps branch deletion with you/)).toHaveCount(0);
+        }
       }
       await expect(page.getByText("Request Details", { exact: true })).toBeVisible();
       if (viewport.width === 390) await expect(page.getByRole("navigation", { name: "Primary Navigation" })).toBeVisible();

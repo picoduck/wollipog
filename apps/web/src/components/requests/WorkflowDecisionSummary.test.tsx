@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { PullRequestClosingReferenceCheck, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
+import type { CampaignAuthorityEvaluation, PullRequestClosingReferenceCheck, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { OwnerRuleSummary, WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
 
 Object.defineProperty(globalThis, "React", { configurable: true, writable: true, value: React });
@@ -12,8 +12,8 @@ const MERGE = {
   reviewResult: "merge", requiredChecks: { headSha: "d".repeat(40), status: "passed", checkedAt: 1, checks: [] },
 } as const satisfies WorkflowDecisionResourceSnapshot;
 
-const text = (snapshot: WorkflowDecisionResourceSnapshot, check?: PullRequestClosingReferenceCheck, authority: "human" | "orchestrator" = "orchestrator") =>
-  renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} authority={authority} {...(check ? { closingReferenceCheck: check } : {})} />)
+const text = (snapshot: WorkflowDecisionResourceSnapshot, check?: PullRequestClosingReferenceCheck, authority: "human" | "orchestrator" = "orchestrator", reason: CampaignAuthorityEvaluation["reason"] = "custom_owner") =>
+  renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} authority={authority} authorityReason={reason} {...(check ? { closingReferenceCheck: check } : {})} />)
     .replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ").trim();
 
 test("temporary deletion shows its exact tip and receipt without claiming a merged pull request (#4535)", () => {
@@ -30,6 +30,9 @@ test("temporary deletion shows its exact tip and receipt without claiming a merg
   assert.match(ownerKept, /This campaign keeps branch deletion with you/u);
   assert.match(ownerKept, /Orchestrator cannot approve deletion/u);
   assert.doesNotMatch(ownerKept, /Orchestrator may delete/u);
+  const unavailable = text(snapshot, undefined, "human", "outside_boundary");
+  assert.match(unavailable, /outside the Orchestrator&#x27;s current verified authority/u);
+  assert.doesNotMatch(unavailable, /This campaign keeps branch deletion with you/u);
   assert.doesNotMatch(rendered, /Merge Commit/u);
   const unknown = text({ ...snapshot, temporaryReceiptId: undefined, creation: undefined });
   assert.match(unknown, /No matching creation receipt exists/u);

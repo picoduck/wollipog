@@ -35,6 +35,9 @@ The creation facts normalize to the same digest as the admitted snapshot. Tempor
 cannot be consumed as a shell-command handoff; managed execution is mandatory.
 An idempotent replay retains the first admitted session label, even if the session is renamed.
 Campaign recovery uses the same server-recorded receipts as admission when displaying authority.
+Cards distinguish a policy-kept decision (`custom_owner` or `owner_kept`) from unavailable
+delegation, such as an older peer or an unverified boundary. A valid receipt alone does not
+establish either delegation or the reason a person owns the decision.
 
 Temporary deletion uses the existing typed `merged_branch_deletion` category with `merged:false`,
 `headSha`, optional `temporaryReceiptId`, and `dependentPullRequests` evidence. It does not

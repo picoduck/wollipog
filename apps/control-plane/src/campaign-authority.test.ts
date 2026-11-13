@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CodexAppServerDriver, approvalContext } from "../../runner/src/drivers/codex-app-server.js";
 import {
-  DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+  DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
   type PendingApproval, type RunnerMetadata, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
@@ -75,7 +75,7 @@ function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", dri
     kind: "question_request", requestId, occurrenceId: requestId, requestSource: source,
     questions: [{ id: "approach", question: snapshot.question, options: [{ label: "A" }, { label: "B" }] }],
   });
-  return { db, hub, svc, principal, sent, enable, ask, generic, snapshot, make, asking, screen };
+  return { db, hub, svc, principal, sent, enable, ask, generic, snapshot, make, asking, screen, metadata };
 }
 
 test("temporary branch creation records only a matching trusted response and never replays an uncertain intent (#4535)", async () => {
@@ -256,6 +256,28 @@ test("a valid temporary receipt under Custom keeps an explicit Owner Decision ti
     assert.ok(view.ok);
     assert.equal(view.data!.requests.find((item) => item.request.workflowDecision?.occurrenceId === gate.data!.occurrenceId)?.request.title,
       "Owner Decision: Delete Temporary Branch");
+  } finally { h.db.close(); }
+});
+
+test("a receipt with an older peer reports unavailable delegation instead of a campaign policy choice (#4535)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const receipt = { id: "tbr_older_peer", campaignId: "root", sessionId: "child", repository: "picoduck/wollipog",
+      branch: "temporary/older-peer", headSha: "a".repeat(40), createdAt: 1 };
+    h.db.beginTemporaryBranchCreation(receipt, "older-peer-creation");
+    h.db.finishTemporaryBranchCreation(receipt.id, true, { defaultBranch: "main", defaultHeadSha: "c".repeat(40) });
+    h.db.registerRunner(h.metadata, 2, RUNNER_CAPABILITY_MIN_PROTOCOL.temporaryBranchReceipts - 1);
+    const gate = h.svc.createWorkflowDecision("child", { requestId: "older-peer-delete", resourceKey: "older-peer-delete",
+      resourceSnapshot: { category: "merged_branch_deletion", merged: false, repository: receipt.repository, branch: receipt.branch,
+        headSha: receipt.headSha, temporaryReceiptId: receipt.id, dependentPullRequests: { checkedAt: 1, open: [] } } });
+    assert.ok(gate.ok, gate.error ?? "older-peer gate failed");
+    assert.equal(gate.data!.authority, "human");
+    assert.equal(gate.data!.authorityEvaluation?.reason, "outside_boundary");
+    const view = h.svc.descendantRequests("root", () => true, "human");
+    assert.ok(view.ok);
+    assert.equal(view.data!.requests.find((item) => item.request.workflowDecision?.occurrenceId === gate.data!.occurrenceId)?.request.title,
+      "Delegation Unavailable: Delete Temporary Branch");
   } finally { h.db.close(); }
 });
 

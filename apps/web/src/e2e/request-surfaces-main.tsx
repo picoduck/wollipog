@@ -367,9 +367,15 @@ function temporaryBranchSession(): SessionView {
         defaultHeadSha: "ccd213ef702537b220d3073779475498759481c4", checkedAt: Date.parse("2026-11-13T08:00:00Z") } }),
     dependentPullRequests: { checkedAt: 1, open: [] } };
   return { ...base, title: "Temporary Branch Cleanup", pendingApproval: { ...base.pendingApproval!,
-    title: query.get("owner") === "1" ? "Owner Decision: Delete Temporary Branch" : "Delete Temporary Branch", context: { input: JSON.stringify(snapshot) },
+    title: query.get("owner") === "1" ? "Owner Decision: Delete Temporary Branch"
+      : query.get("unavailable") === "1" ? "Delegation Unavailable: Delete Temporary Branch" : "Delete Temporary Branch", context: { input: JSON.stringify(snapshot) },
     workflowDecision: { ...base.pendingApproval!.workflowDecision!, category: "merged_branch_deletion",
-      resourceSnapshot: snapshot, authority: query.get("missing") === "1" || query.get("owner") === "1" ? "human" : "orchestrator" } } };
+      resourceSnapshot: snapshot, authority: query.get("missing") === "1" || query.get("owner") === "1" || query.get("unavailable") === "1" ? "human" : "orchestrator",
+      ...(query.get("owner") === "1" ? { authorityEvaluation: { owner: "human" as const, basis: "custom_policy" as const,
+        reason: "custom_owner" as const, operation: "merged_branch_deletion" as const } }
+        : query.get("unavailable") === "1" ? { authorityEvaluation: { owner: "human" as const, basis: "human_required" as const,
+          reason: "outside_boundary" as const, operation: "merged_branch_deletion" as const } } : {}),
+    } } };
 }
 
 function automationCreationSession(): SessionView {

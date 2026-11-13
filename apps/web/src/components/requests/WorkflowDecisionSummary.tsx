@@ -1,6 +1,6 @@
 import React from "react";
 import { CampaignIssueScopeSummary } from "../CampaignIssueScopePanel.js";
-import type { PendingApproval, PullRequestClosingReferenceCheck, WorkflowDecisionOwnerRule, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
+import { temporaryBranchDecisionKeptByPolicy, type CampaignAuthorityEvaluation, type PendingApproval, type PullRequestClosingReferenceCheck, type WorkflowDecisionOwnerRule, type WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { IssueClosureSummary } from "../IssueClosureSummary.js";
 import { AutomationCreationSummary } from "../AutomationCreationSummary.js";
 import { LocationSwitchSummary } from "./LocationSwitchSummary.js";
@@ -41,9 +41,10 @@ export function OwnerRuleSummary({ rule }: { rule: WorkflowDecisionOwnerRule }) 
 
 /** What a workflow decision decides, as facts (§5.4): the Request Card's body for the kinds without
  * a review of their own, and the read-only summary of a decision the Orchestrator owns. */
-export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scopeMaxIssuesIncrease, authority }: {
+export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scopeMaxIssuesIncrease, authority, authorityReason }: {
   snapshot: WorkflowDecisionResourceSnapshot;
   authority?: "human" | "orchestrator";
+  authorityReason?: CampaignAuthorityEvaluation["reason"];
   /** The card's server-derived Maximum Issues increase, for a scope request (#4334). */
   scopeMaxIssuesIncrease?: PendingApproval["scopeMaxIssuesIncrease"];
   /** The server-recorded closing-reference read of a GitHub merge, when there was one. */
@@ -148,7 +149,9 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
           <div><dt>Deletion Check</dt><dd>{snapshot.creation
             ? authority === "orchestrator"
               ? "After approval, the Orchestrator may delete this branch at the exact created tip, with no open head or base pull requests."
-              : "This campaign keeps branch deletion with you. The Orchestrator cannot approve deletion, even with a creation receipt."
+              : temporaryBranchDecisionKeptByPolicy(authorityReason)
+                ? "This campaign keeps branch deletion with you. The Orchestrator cannot approve deletion, even with a creation receipt."
+                : "This deletion is outside the Orchestrator's current verified authority. A receipt alone does not make it delegatable; the decision remains with you."
             : "No matching creation receipt exists. The Orchestrator cannot delete this branch; it stays the owner's decision."}</dd></div>
         </> : <div><dt>Merge Commit</dt><dd><code>{snapshot.mergeCommitSha.slice(0, 12)}</code></dd></div>}
       </dl>;

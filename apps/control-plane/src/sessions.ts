@@ -34,7 +34,7 @@ import { parseSessionWaitReport } from "./session-waits.js";
 import { isSessionLaunchFailureCode, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { campaignRepositoryLocation, supportsPacedVideoReviewPeer } from "@wollipog/protocol";
-import { forgeActionBranchName, matchingTemporaryBranchReceipt, TEMPORARY_BRANCH_CREATION_RPC_TIMEOUT_MS, type TemporaryBranchReceipt } from "@wollipog/protocol";
+import { forgeActionBranchName, matchingTemporaryBranchReceipt, temporaryBranchDecisionKeptByPolicy, TEMPORARY_BRANCH_CREATION_RPC_TIMEOUT_MS, type TemporaryBranchReceipt } from "@wollipog/protocol";
 import { normalizeIssueClosureEpicMembers } from "@wollipog/protocol";
 import { providerProfileSessionRefusal } from "./provider-profile-route.js";
 import type { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
@@ -18521,7 +18521,10 @@ export class SessionsService {
       // older client still shows this card with its options.
       title: isChildQuestionSnapshot(snapshot) ? "Question" : isOwnerQuestionSnapshot(snapshot) ? "Owner Question"
         : snapshot.category === "merged_branch_deletion" && snapshot.merged === false
-          ? snapshot.creation && decision.authority === "human" ? "Owner Decision: Delete Temporary Branch" : "Delete Temporary Branch"
+          ? snapshot.creation && decision.authority === "human"
+            ? temporaryBranchDecisionKeptByPolicy(decision.authorityEvaluation?.reason)
+              ? "Owner Decision: Delete Temporary Branch" : "Delegation Unavailable: Delete Temporary Branch"
+            : "Delete Temporary Branch"
           : categoryTitle[decision.category],
       options,
       kind: "workflow_decision",
