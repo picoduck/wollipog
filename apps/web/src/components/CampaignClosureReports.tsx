@@ -43,10 +43,11 @@ export function CampaignClosureReports() {
   return <section aria-label="Campaign Reports">
     <h2>Campaign Reports</h2>
     {reports.map(report => <div key={report.occurrenceId + report.kind}>
-      <button className="btn sm" onClick={() => setSelected(report.occurrenceId + report.kind)}>{labels[report.kind] ?? "Merge Report"}</button>
+      <button className="btn sm" aria-describedby={`closure-subject-${report.occurrenceId}-${report.kind}`}
+        onClick={() => { setError(""); setSelected(report.occurrenceId + report.kind); }}>{labels[report.kind] ?? "Merge Report"}</button>
       {report.acknowledgedAt ? <span> Acknowledged</span> : <span> Needs Acknowledgement</span>}
       <p>{report.campaignTitle ?? report.campaignId}</p>
-      <p>{report.repository && report.pullRequest ? `${report.repository} PR #${report.pullRequest}` : "Pull Request Unavailable"}
+      <p id={`closure-subject-${report.occurrenceId}-${report.kind}`}>{report.repository && report.pullRequest ? `${report.repository} PR #${report.pullRequest}` : "Pull Request Unavailable"}
         {report.issues.length ? ` · ${report.issues.join(", ")}` : " · No Issues Identified"}</p>
     </div>)}
     {current && <Modal title={labels[current.kind] ?? "Merge Report"} onClose={() => setSelected(null)}

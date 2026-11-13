@@ -1836,6 +1836,9 @@ in any other state. The decision records the result as `closureWatch`:
   Owner Question, including for older web clients. Delivery and acknowledgement emit
   `merge_closure_inbox_report_created` and `merge_closure_inbox_report_acknowledged` with the
   occurrence and campaign ids; report text is not logged.
+  Inbox entries name the campaign, pull request and issues from the original receipt. All
+  unacknowledged entries remain visible; acknowledged entries stay in the Inbox for seven days,
+  while their durable acknowledgement record is retained.
 - An unreadable forge or an offline runner never counts as unchanged: after 30 minutes the owner is
   told the merge cannot be checked, and after a day the watch ends `unverified`. Failing dequeues are
   retried up to ten times, then reported to the owner.

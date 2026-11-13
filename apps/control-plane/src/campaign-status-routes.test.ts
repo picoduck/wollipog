@@ -8,18 +8,22 @@ test("closure receipts refuse agent sessions and humans outside the campaign (#4
   f.ownBy(f.root, "alice");
   f.db.ensureClosureReport("report", "landed", f.root, "Review owner/app#3", "Closes #3");
   const app = Fastify();
-  const principals = { alice: human("alice"), bob: human("bob"), agent: agent(f.root, true) };
+  const principals = { alice: human("alice"), viewer: human("alice", "viewer"), bob: human("bob"), agent: agent(f.root, true) };
   registerCampaignStatusRoutes(app, { db: f.db,
     requestPrincipal: req => principals[String(req.headers["x-test-principal"]) as keyof typeof principals] ?? null });
-  for (const who of ["bob", "agent", "alice"] as const) {
+  for (const who of ["bob", "agent", "viewer", "alice"] as const) {
+    const allowed = who === "alice" || who === "viewer";
     const response = await app.inject({ method: "GET", url: "/api/campaign-closure-reports", headers: { "x-test-principal": who } });
     assert.equal(response.statusCode, who === "agent" ? 403 : 200);
-    if (who !== "agent") assert.equal(response.json().reports.length, who === "alice" ? 1 : 0);
+    if (who !== "agent") assert.equal(response.json().reports.length, allowed ? 1 : 0);
     const ack = await app.inject({ method: "POST", url: "/api/campaign-closure-reports/report/landed/acknowledge", headers: { "x-test-principal": who } });
-    assert.equal(ack.statusCode, who === "alice" ? 200 : who === "agent" ? 403 : 404);
-    assert.equal(f.db.closureReports()[0]!.acknowledgedAt !== null, who === "alice");
+    assert.equal(ack.statusCode, allowed ? 200 : who === "agent" ? 403 : 404);
+    assert.equal(f.db.closureReports()[0]!.acknowledgedAt !== null, allowed);
   }
   await app.close();
+  f.db.raw().prepare("UPDATE campaign_closure_reports SET acknowledged_at=1").run();
+  assert.equal(f.db.closureReports(true).length, 0, "old acknowledged receipts leave the Inbox");
+  assert.equal(f.db.closureReports().length, 1, "the durable acknowledgement is retained");
 });
 import { test } from "node:test";
 import Fastify from "fastify";

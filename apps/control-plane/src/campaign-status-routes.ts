@@ -141,6 +141,7 @@ export interface CampaignStatusDependencies {
   db: ControlPlaneDb;
   /** Slice 8: read these pull requests now, subject to the rate limit; never rejects. */
   refreshForge?(campaignId: string, refs: readonly CampaignPullRequestRef[]): Promise<void>;
+  closureReportAcknowledged?(sessionId: string): void;
 }
 
 /** Shared non-HTTP projection and forge-read operations for both adapters. */
@@ -219,7 +220,7 @@ export function createCampaignStatusManagement(deps: CampaignStatusDependencies)
   app.get("/api/campaign-closure-reports", (req, reply) => {
     if (req.principal?.kind !== "human") return reply.code(403).send({ error: "human access required" });
     const principal = req.principal;
-    return reply.send({ reports: db.closureReports().filter(entry =>
+    return reply.send({ reports: db.closureReports(true).filter(entry =>
       db.canAccessSession(principal, entry.campaignId) && (!req.access || req.access.session(entry.campaignId))) });
   });
   app.post("/api/campaign-closure-reports/:occurrenceId/:kind/acknowledge", (req, reply) => {
@@ -229,6 +230,8 @@ export function createCampaignStatusManagement(deps: CampaignStatusDependencies)
     if (!entry || !db.canAccessSession(req.principal, entry.campaignId) ||
         req.access && !req.access.session(entry.campaignId)) return reply.code(404).send({ error: "report not found" });
     db.acknowledgeClosureReport(occurrenceId, kind, req.principal.userId);
+    const sessionId = db.workflowDecisionByOccurrence(occurrenceId)?.sessionId;
+    if (sessionId) deps.closureReportAcknowledged?.(sessionId);
     req.log?.info({ event: "merge_closure_inbox_report_acknowledged", entryPoint: req.entryPoint ?? "dashboard",
       occurrenceId, campaignId: entry.campaignId, kind });
     return reply.send({ ok: true });
