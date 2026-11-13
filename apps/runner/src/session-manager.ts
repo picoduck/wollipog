@@ -16,7 +16,7 @@ import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, Gi
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
 import { executeBranchDeletion, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
 import { githubSlug } from "./git-ops.js";
-import { proveWorktreePatchDelivery, type CampaignDeliveredPullRequest } from "./worktree-patch-delivery.js";
+import { proveWorktreePatchDelivery, type CampaignDeliveredPullRequest, type WorktreePatchDeliveryResult } from "./worktree-patch-delivery.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
 import { githubMergePreflight } from "./github-merge-preflight.js";
@@ -4488,15 +4488,17 @@ export class SessionManager {
   }
 
   private async proveCleanupPatchDelivery(record: WorktreeCleanupRecord, meta: SessionMeta,
-    worktree: SessionWorktreeView): Promise<void> {
+    worktree: SessionWorktreeView): Promise<WorktreePatchDeliveryResult["state"]> {
     record.cleanupId ??= randomUUID();
     const startedAt = Date.now();
-    record.patchDelivery = await this.probePatchDelivery(worktree.path, worktree.branch,
+    const result = await this.probePatchDelivery(worktree.path, worktree.branch,
       record.campaignDeliveredPullRequests ?? [], { context: meta.context });
+    record.patchDelivery = result.state === "matched" ? result.proof : undefined;
     this.log(JSON.stringify({ event: "worktree_patch_delivery", sessionId: boundedSessionIdForLog(meta.sessionId),
       worktreeId: worktree.id, cleanupId: record.cleanupId, entryPoint: record.trigger,
-      outcome: record.patchDelivery ? "matched" : "unproven", durationMs: Date.now() - startedAt,
+      outcome: result.state, durationMs: Date.now() - startedAt,
       candidateCount: Math.min(record.campaignDeliveredPullRequests?.length ?? 0, 5) }));
+    return result.state;
   }
 
   /** Probe a rotating, bounded candidate slice outside the session mutation lanes. Only the short
@@ -5406,6 +5408,7 @@ export class SessionManager {
       return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard", options.campaignDeliveredPullRequests);
     }
     let unlinkedForgeUnavailable = false;
+    let patchDeliveryUnavailable = false;
     let deliveredHead: string | undefined;
     if (options.refreshMergedHead !== false && !worktree.pullRequest) {
       ({ forgeUnavailable: unlinkedForgeUnavailable, deliveredHead } = await this.discoverUnlinkedMergedWorktree(
@@ -5573,7 +5576,7 @@ export class SessionManager {
       if (!deliveredHead && !successorHead && containment?.state !== "contained" &&
           options.campaignDeliveredPullRequests?.length) {
         cleanup.campaignDeliveredPullRequests = options.campaignDeliveredPullRequests;
-        await this.proveCleanupPatchDelivery(cleanup, meta, worktree);
+        patchDeliveryUnavailable = await this.proveCleanupPatchDelivery(cleanup, meta, worktree) === "unavailable";
       }
       if (teardownIdentityError) {
         const now = Date.now();
@@ -5606,6 +5609,10 @@ export class SessionManager {
         }
         if (options.trigger === "archive_retirement" && unlinkedForgeUnavailable &&
             (result.reason === "no_upstream" || result.reason === "not_delivered")) {
+          return { removed: false, reason: "forge state is temporarily unavailable" };
+        }
+        if (options.trigger === "archive_retirement" && patchDeliveryUnavailable &&
+            (result.reason === "no_upstream" || result.reason === "unpushed" || result.reason === "not_delivered")) {
           return { removed: false, reason: "forge state is temporarily unavailable" };
         }
         if (options.trigger === "archive_retirement" && successorForgeUnavailable &&
@@ -20002,6 +20009,7 @@ export class SessionManager {
       let forgeState: "merged" | "unmerged" | "unavailable" = "unavailable";
       let successorState: Awaited<ReturnType<SessionManager["refreshDeferredSuccessorHead"]>> = "not_needed";
       let containmentState: Awaited<ReturnType<SessionManager["refreshDeferredContainment"]>> = "not_needed";
+      let patchDeliveryUnavailable = false;
       if (!record.worktreeRemovedAt) {
         forgeState = await this.refreshDeferredMergedHead(record);
         if (worktreeFenced()) return logFenced();
@@ -20024,7 +20032,7 @@ export class SessionManager {
         containmentState = await this.refreshDeferredContainment(record);
         if (worktreeFenced()) return logFenced();
         if (record.campaignDeliveredPullRequests?.length && !record.containingMergedHead) {
-          await this.proveCleanupPatchDelivery(record, meta, worktree);
+          patchDeliveryUnavailable = await this.proveCleanupPatchDelivery(record, meta, worktree) === "unavailable";
           if (worktreeFenced()) return logFenced();
           if (record.patchDelivery) {
             this.cleanupJournal.add(record);
@@ -20051,6 +20059,8 @@ export class SessionManager {
             this.store.readMeta(record.sessionId) ?? meta,
           );
           if (!removal.removed) {
+            if (record.trigger === "archive_retirement" && patchDeliveryUnavailable &&
+                (removal.reason === "no_upstream" || removal.reason === "unpushed" || removal.reason === "not_delivered")) return;
             if (record.trigger === "archive_retirement" && forgeState === "unavailable" &&
                 (removal.reason === "no_upstream" || removal.reason === "not_delivered")) return;
             if (record.trigger === "archive_retirement" && successorState === "unavailable" &&

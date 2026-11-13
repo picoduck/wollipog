@@ -4,11 +4,17 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { RunnerToControlPlane } from "@wollipog/protocol";
 import { createRequestedWorktree, discardWorktreeIfSafe, WorktreeCleanupJournal } from "./worktree.js";
-import { proveWorktreePatchDelivery, patchDeliveryContains } from "./worktree-patch-delivery.js";
+import { proveWorktreePatchDelivery as proveDetailed, patchDeliveryContains } from "./worktree-patch-delivery.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
+
+async function proveWorktreePatchDelivery(...args: Parameters<typeof proveDetailed>) {
+  const result = await proveDetailed(...args);
+  return result.state === "matched" ? result.proof : undefined;
+}
 
 test("same-child candidates prove reapplied commits in a fetched PR head before a squash, never unmatched or dirty work", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-patch-delivery-"));
@@ -17,6 +23,7 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
   const dataDir = join(root, "data");
   let manager: SessionManager | undefined;
   const logs: string[] = [];
+  const messages: RunnerToControlPlane[] = [];
   const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
   try {
     execFileSync("git", ["init", "--bare", remote]);
@@ -61,6 +68,11 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
       [{ ...candidate, headSha: "a".repeat(40) }], options), undefined, "moved admitted head refuses");
     const proof = await proveWorktreePatchDelivery(worktree.path, worktree.branch, [candidate], options);
     assert.ok(proof, "individual pre-squash commits match under different IDs");
+    const unavailableOptions = { ...options, runForgeCommand: async () => { throw new Error("temporary fixture outage"); } };
+    assert.equal((await proveDetailed(worktree.path, worktree.branch, [candidate], unavailableOptions)).state, "unavailable");
+    assert.equal((await proveDetailed(worktree.path, worktree.branch, [candidate], {
+      ...options, forgeFetchRepository: join(root, "unavailable.git"),
+    })).state, "unavailable", "a failed fetch is not a permanent patch mismatch");
     git(worktree.path, "reset", "--hard", first);
     writeFileSync(join(worktree.path, "work.txt"), "first \n");
     git(worktree.path, "add", "."); git(worktree.path, "commit", "--amend", "--no-edit");
@@ -76,6 +88,14 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
     git(worktree.path, "commit", "--amend", "--no-edit");
     assert.equal(await proveWorktreePatchDelivery(worktree.path, worktree.branch, [candidate], options), undefined,
       "an unmatched executable mode change is retained");
+    git(worktree.path, "reset", "--hard", tip);
+    git(worktree.path, "commit", "--allow-empty", "-m", "empty");
+    assert.equal(await proveWorktreePatchDelivery(worktree.path, worktree.branch, [candidate], options), undefined,
+      "batching cannot silently omit an empty commit");
+    git(worktree.path, "reset", "--hard", first);
+    git(worktree.path, "merge", "--no-ff", tip, "-m", "merge matched work");
+    assert.equal(await proveWorktreePatchDelivery(worktree.path, worktree.branch, [candidate], options), undefined,
+      "a merge commit cannot disappear from the compared history");
     git(worktree.path, "reset", "--hard", first);
     git(worktree.path, "update-index", "--add", "--cacheinfo", `160000,${first},submodule`);
     git(worktree.path, "commit", "--amend", "--no-edit");
@@ -86,6 +106,9 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
     git(worktree.path, "reset", "--hard", tip);
     assert.equal(await patchDeliveryContains(repo, { kind: "native" }, { ...proof, mergedHeadOid: defaultHead }, tip), false,
       "the squash commit alone is not the original commit sequence");
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_patch", { ...worktree, source: "created" },
+      { dataDir, requireDelivered: true, patchDelivery: { ...proof, mergedHeadOid: "f".repeat(40) } }),
+    { removed: false, reason: "unavailable" }, "missing immutable proof objects at deletion stay retryable");
     writeFileSync(join(worktree.path, "dirty.txt"), "do not remove\n");
     const dirty = await discardWorktreeIfSafe(repo, "s_patch", { ...worktree, source: "created" },
       { dataDir, requireDelivered: true, patchDelivery: proof });
@@ -105,18 +128,23 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
       driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" },
       agentSessionId: null, status: "idle", title: "Patch Delivery", config: {}, tokensIn: 0, tokensOut: 0,
       costUsd: 0, preview: null, pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1 });
-    manager = new SessionManager(() => {}, (message) => logs.push(message), store, "runner", undefined, undefined, dataDir);
+    manager = new SessionManager((message) => messages.push(message), (message) => logs.push(message), store, "runner", undefined, undefined, dataDir);
     const internals = manager as unknown as {
       discoverMergedWorktreePullRequest: () => Promise<null>;
       probeMergedPullRequestContainment: () => Promise<{ state: "not_contained" }>;
-      probePatchDelivery: typeof proveWorktreePatchDelivery;
+      probePatchDelivery: typeof proveDetailed;
       active: Map<string, unknown>;
       deleteActiveSession: (id: string, entry: unknown) => boolean;
     };
     internals.discoverMergedWorktreePullRequest = async () => null;
     internals.probeMergedPullRequestContainment = async () => ({ state: "not_contained" });
-    internals.probePatchDelivery = (cwd, branch, candidates) => proveWorktreePatchDelivery(cwd, branch, candidates, options);
+    let forgeAvailable = false;
+    internals.probePatchDelivery = (cwd, branch, candidates) => proveDetailed(cwd, branch, candidates,
+      forgeAvailable ? options : unavailableOptions);
     await assert.rejects(manager.discardWorktree("s_patch", worktree.path, { requireDelivered: true }), /no upstream/);
+    await assert.rejects(manager.discardWorktree("s_patch", worktree.path, {
+      requireDelivered: true, campaignDeliveredPullRequests: [candidate],
+    }), /forge state is temporarily unavailable/, "initial archive proof outage is retryable");
     const leaseOwner = "fixture-provider";
     assert.equal(store.acquireWorktreeLease("s_patch", leaseOwner), true);
     const active = { sessionId: "s_patch", context: { kind: "native" }, cwd: worktree.path, worktree,
@@ -128,6 +156,17 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
     assert.deepEqual(new WorktreeCleanupJournal(dataDir).list()[0]?.campaignDeliveredPullRequests, [candidate],
       "same-child candidate provenance survives the provider boundary");
     assert.equal(internals.deleteActiveSession("s_patch", active), true);
+    const unavailableEvents = () => logs.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
+      .filter((event) => event.event === "worktree_patch_delivery" && event.outcome === "unavailable");
+    for (let attempt = 0; attempt < 500 && unavailableEvents().length < 2; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(unavailableEvents().length, 2, "deferred replay also attempted proof during the outage");
+    assert.equal(existsSync(worktree.path), true);
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 1, "outage preserves durable retry intent");
+    assert.equal(messages.some((message) => message.type === "session_worktree_retirement_refused"), false);
+    forgeAvailable = true;
+    await manager.reconcileWorktreePullRequests();
     for (let attempt = 0; attempt < 500 && (store.readMeta("s_patch")?.worktrees?.length ||
         !new WorktreeCleanupJournal(dataDir).history().some((record) => record.patchDelivery?.tipOid === tip)); attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -135,7 +174,7 @@ test("same-child candidates prove reapplied commits in a fetched PR head before 
     assert.deepEqual(store.readMeta("s_patch")?.worktrees, [], "deferred replay proves patches and retires the worktree");
     assert.ok(new WorktreeCleanupJournal(dataDir).history().some((record) => record.patchDelivery?.tipOid === tip));
     const diagnostic = logs.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
-      .find((event) => event.event === "worktree_patch_delivery");
+      .find((event) => event.event === "worktree_patch_delivery" && event.outcome === "matched");
     assert.equal(diagnostic?.outcome, "matched");
     assert.equal(diagnostic?.entryPoint, "archive_retirement");
     assert.equal(diagnostic?.candidateCount, 1);

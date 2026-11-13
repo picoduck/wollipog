@@ -22,7 +22,9 @@ provenance across provider exit and restart. The retained-ref reclaimer repeats 
 existing generation and compare-and-delete checks before deleting a local branch.
 
 Proof is deliberately bounded: five candidate PRs, 128 local commits, 512 candidate commits,
-8 MiB per patch, and a 90-second attempt deadline. Empty or merge commits, undecodable patches,
+8 MiB per history batch, and a 90-second attempt deadline. Each history uses one commit walk,
+one batched diff and one patch-ID process. The local set is reused across candidates with the same
+observed default head. Empty or merge commits, undecodable patches,
 unavailable forge evidence, and unsupported Git features retain the worktree. No credentials are
 requested to fetch private heads. These limits never authorize deleting unproved work.
 
@@ -31,7 +33,10 @@ For diagnosis, ask:
 - Why was this checkout accepted? Its private cleanup history has `patchDelivery`, including the
   exact local tip, candidate PR/head, and fetched default head.
 - Was patch proof attempted or did it remain unavailable? The runner's structured
-  `worktree_patch_delivery` event records `matched` or `unproven`, candidate count and duration.
+  `worktree_patch_delivery` event distinguishes `matched`, `not_matched`, `unavailable` and
+  `ineligible`, with candidate count and duration. An initial archive attempt reports temporary
+  unavailability through the existing retryable reply; a deferred attempt retains its journal
+  intent without emitting a terminal refusal. Both retry after availability recovers.
 - Which lifecycle attempted it? That event carries `sessionId`, `worktreeId`, `cleanupId`, and the
   original `entryPoint` (`explicit_discard` or `archive_retirement`), retained on deferred replay.
 

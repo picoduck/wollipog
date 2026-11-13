@@ -2850,6 +2850,11 @@ export async function discardWorktreeIfSafe(
     if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
     const patchDelivered = !branchChanged && !!options.patchDelivery &&
       await patchDeliveryContains(repoPath, context, options.patchDelivery, head);
+    // An accepted proof pins immutable objects and this exact tip. Failure to repeat it means
+    // unavailable/corrupt Git evidence, not newly unmatched work; keep cleanup retryable.
+    if (!branchChanged && options.patchDelivery?.tipOid === head && !patchDelivered) {
+      return { removed: false, reason: "unavailable" };
+    }
 
     // Git permits another worktree to deliberately share this branch via
     // --ignore-other-worktrees. Removing this worktree must not detach that sibling from its ref,

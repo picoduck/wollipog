@@ -11,6 +11,9 @@ export interface WorktreePatchDeliveryProof {
   pullRequest: number;
 }
 export type CampaignDeliveredPullRequest = { repository: string; number: number; headSha: string };
+export type WorktreePatchDeliveryResult =
+  | { state: "matched"; proof: WorktreePatchDeliveryProof }
+  | { state: "not_matched" | "unavailable" | "ineligible" };
 const OID = /^[a-f0-9]{40,64}$/u;
 const LOCAL_LIMIT = 128;
 const MERGED_LIMIT = 512;
@@ -28,20 +31,27 @@ async function patchIds(cwd: string, context: AgentContext, base: string, tip: s
   const rows = (await git(["rev-list", "--parents", `--max-count=${limit + 1}`, `${base}..${tip}`]))
     .stdout.trim().split("\n").filter(Boolean);
   if (!rows.length || rows.length > limit) return null;
-  const ids = new Set<string>();
+  const commits = new Set<string>();
   for (const row of rows) {
-    const commits = row.split(" ");
-    if (commits.length !== 2 || !commits.every((value) => OID.test(value))) return null;
-    const patch = (await git(["diff-tree", "--no-commit-id", "-r", "-p", "--binary", "--full-index",
-      "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--unified=3",
-      "--ignore-submodules=none", "--submodule=short", "--no-relative", "--diff-algorithm=myers",
-      "--src-prefix=a/", "--dst-prefix=b/", commits[1]!, commits[0]!, "--"])).stdout;
-    if (!patch || patch.includes("\uFFFD")) return null;
-    const output = (await git(["patch-id", "--verbatim"], patch)).stdout.trim();
-    const id = /^([a-f0-9]{40,64}) [a-f0-9]{40,64}$/u.exec(output)?.[1];
-    if (!id) return null;
-    ids.add(id);
+    const parents = row.split(" ");
+    if (parents.length !== 2 || !parents.every((value) => OID.test(value))) return null;
+    commits.add(parents[0]!);
   }
+  // Git's stdin format preserves a commit boundary for patch-id. Verify one result for every
+  // input commit: an empty patch must not silently disappear from the proof.
+  const patch = (await git(["diff-tree", "--stdin", "-r", "-p", "--binary", "--full-index",
+    "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color", "--unified=3",
+    "--ignore-submodules=none", "--submodule=short", "--no-relative", "--diff-algorithm=myers",
+    "--src-prefix=a/", "--dst-prefix=b/", "--"], [...commits].join("\n") + "\n")).stdout;
+  if (!patch || patch.includes("\uFFFD")) return null;
+  const output = (await git(["patch-id", "--verbatim"], patch)).stdout.trim().split("\n");
+  const ids = new Set<string>();
+  for (const line of output) {
+    const parsed = /^([a-f0-9]{40,64}) ([a-f0-9]{40,64})$/u.exec(line);
+    if (!parsed || !commits.delete(parsed[2]!)) return null;
+    ids.add(parsed[1]!);
+  }
+  if (commits.size) return null;
   return ids;
 }
 
@@ -62,18 +72,21 @@ export async function patchDeliveryContains(cwd: string, context: AgentContext, 
 export async function proveWorktreePatchDelivery(
   cwd: string, branch: string, candidates: readonly CampaignDeliveredPullRequest[],
   options: { context: AgentContext; runForgeCommand?: typeof runContextCommand; forgeFetchRepository?: string },
-): Promise<WorktreePatchDeliveryProof | undefined> {
+): Promise<WorktreePatchDeliveryResult> {
+  if (!candidates.length) return { state: "ineligible" };
   const { context } = options;
   const signal = AbortSignal.timeout(90_000);
   const git = (args: string[], env = ENV) => runContextCommand(context, "git", [...SAFE_GIT, ...args],
     { cwd, signal, env, timeoutMs: 30_000, maxBuffer: 1024 * 1024 });
+  let unavailable = false;
+  const localSets = new Map<string, Set<string> | null>();
   try {
     // This proof never relaxes publication checks for a branch with a live upstream.
-    try { await git(["rev-parse", "--verify", `${branch}@{upstream}`]); return undefined; } catch { /* no live upstream */ }
+    try { await git(["rev-parse", "--verify", `${branch}@{upstream}`]); return { state: "ineligible" }; } catch { /* no live upstream */ }
     const tipOid = (await git(["rev-parse", "--verify", "HEAD"])).stdout.trim();
     const remote = parseForgeRemote((await git(["config", "--get", "remote.origin.url"])).stdout.trim());
     if (!OID.test(tipOid) || remote?.provider !== "github" || remote.host !== "github.com" ||
-        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(remote.project)) return undefined;
+        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(remote.project)) return { state: "ineligible" };
     const [owner, name] = remote.project.split("/");
     for (const candidate of candidates.slice(0, 5)) {
       if (candidate.repository.toLowerCase() !== remote.project.toLowerCase() ||
@@ -89,20 +102,30 @@ export async function proveWorktreePatchDelivery(
         const pr = repo?.pullRequest;
         const defaultBranch = repo?.defaultBranchRef?.name;
         const defaultHeadOid = repo?.defaultBranchRef?.target?.oid;
-        if (data.errors || pr?.state !== "MERGED" || pr.headRefOid !== candidate.headSha ||
-            typeof defaultBranch !== "string" || pr.baseRefName !== defaultBranch ||
-            typeof defaultHeadOid !== "string" || !OID.test(defaultHeadOid)) continue;
+        if (data.errors || !repo || !pr || !repo.defaultBranchRef ||
+            !["MERGED", "OPEN", "CLOSED"].includes(pr.state) ||
+            typeof pr.headRefOid !== "string" || !OID.test(pr.headRefOid) ||
+            typeof pr.baseRefName !== "string" || typeof defaultBranch !== "string" ||
+            typeof defaultHeadOid !== "string" || !OID.test(defaultHeadOid)) { unavailable = true; continue; }
+        if (pr.state !== "MERGED" || pr.headRefOid !== candidate.headSha || pr.baseRefName !== defaultBranch) continue;
         await git(["check-ref-format", `refs/heads/${defaultBranch}`]);
         await git([...CONTAINMENT_FETCH_GIT_CONFIG,
           ...(options.forgeFetchRepository ? ["-c", "protocol.file.allow=always"] : []),
           "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--quiet", "--",
           options.forgeFetchRepository ?? `https://github.com/${remote.project}.git`,
-          candidate.headSha, defaultHeadOid], { ...ENV, ...CONTAINMENT_FETCH_GIT_ENV });
+          // Named refs force a remote read even when both observed objects are cached locally.
+          // Fetching raw OIDs can succeed without contacting an unavailable endpoint.
+          `refs/pull/${candidate.number}/head`, `refs/heads/${defaultBranch}`], { ...ENV, ...CONTAINMENT_FETCH_GIT_ENV });
         const proof = { tipOid, mergedHeadOid: candidate.headSha, defaultHeadOid,
           repository: candidate.repository, pullRequest: candidate.number };
-        if (await patchDeliveryContains(cwd, context, proof, tipOid, signal)) return proof;
-      } catch { /* Missing/moved/unreadable forge objects never constitute delivery. */ }
+        if (!localSets.has(defaultHeadOid)) {
+          localSets.set(defaultHeadOid, await patchIds(cwd, context, defaultHeadOid, tipOid, LOCAL_LIMIT, signal));
+        }
+        const local = localSets.get(defaultHeadOid);
+        const merged = await patchIds(cwd, context, defaultHeadOid, candidate.headSha, MERGED_LIMIT, signal);
+        if (local && merged && [...local].every((id) => merged.has(id))) return { state: "matched", proof };
+      } catch { unavailable = true; }
     }
-  } catch { /* Unavailable Git or unsupported forge retains the worktree. */ }
-  return undefined;
+  } catch { unavailable = true; }
+  return { state: unavailable ? "unavailable" : "not_matched" };
 }
