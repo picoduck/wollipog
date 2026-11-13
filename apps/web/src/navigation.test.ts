@@ -731,3 +731,11 @@ test("resource codec is canonical exact UTF-16LE base64url and rejects invalid e
   assert.equal(decodeResourceId(encodeResourceId("\ud800")), "\ud800");
   for (const encoded of ["", "=", "YQ==", "YQ", "IA", "_w", "YWJj."]) assert.equal(decodeResourceId(encoded), null);
 });
+
+ test("campaign section, request and work-item targets survive a shared link", () => {
+  for (const campaignTarget of [{ section: "Waiting for You" }, { workItemId: "cwi/a ✅" }, { requestId: "merge:42" }]) {
+    const view: View = { name: "session", id: "campaign", campaign: true, campaignTarget };
+    const url = new URL(viewPath(view), "https://example.test");
+    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
+  }
+});

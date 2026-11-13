@@ -102,6 +102,11 @@ declare global {
 }
 
 const params = new URLSearchParams(window.location.search);
+const largeCampaign = params.has("largeCampaign");
+if (largeCampaign) {
+  params.set("repositories", "1"); params.set("decisions", "1");
+  params.set("recovery", "failed_checks"); params.set("owners", "after");
+}
 const scenario = params.get("scenario") ?? "campaign";
 if (params.get("theme") === "light") document.documentElement.dataset.theme = "light";
 
@@ -174,6 +179,16 @@ const items: CampaignWorkItemSummary[] = [
     createdAt: NOW - 3 * HOUR, activityAt: NOW - HOUR,
   }),
 ];
+
+// A realistically sized ledger for section navigation (#4549).
+if (largeCampaign) {
+  for (const item of items) item.repository = "picoduck/wollipog";
+  for (let n = items.length + 1; n <= 40; n++) items.push(itemSummary(`cwi_${n}`, NOW, {
+    title: `Deliver Campaign Improvement ${n}`, queuePosition: n,
+    repository: ["picoduck/wollipog", "picoduck/dev-box-setup", "picoduck/notes-site"][n % 3],
+    primaryState: n % 4 === 0 ? "delivered" : "queued", activityAt: NOW - n * MINUTE,
+  }));
+}
 
 // `workRepositories=1` (#4120): work in two repositories. The settings change in picoduck/wollipog
 // waits for the account field in picoduck/account-api, whose pull request is still in its queue.
@@ -335,8 +350,8 @@ const recordedWork = (revision: number) => workSummary(NOW, {
   revision,
   coverage: { untrackedChildren: 0, predatesLedger: false },
   counts: {
-    committed: 8, delivered: 1, original: 6, followUp: 2, cancelled: 0, removed: 1,
-    byState: { planned: 3, queued: 1, running: 1, waiting: 1, blocked: 1, delivered: 1, cancelled: 0, removed: 1 },
+    committed: largeCampaign ? 39 : 8, delivered: largeCampaign ? 9 : 1, original: largeCampaign ? 37 : 6, followUp: 2, cancelled: 0, removed: 1,
+    byState: { planned: 3, queued: largeCampaign ? 24 : 1, running: 1, waiting: 1, blocked: 1, delivered: largeCampaign ? 9 : 1, cancelled: 0, removed: 1 },
   },
   recommendations: { awaiting_adjudication: 1, accepted: 2, rejected: 1, deferred: 1, duplicate: 3 },
   obligations: { verification: 1, adjudication: 1, publication: 1, cleanup: 1 },
@@ -674,7 +689,7 @@ const projectionFor = (rev: number) => campaignProjection(
     } } : {}),
     ...(recoveryRecord ? { recovery: { unattendedReady: false, automatic: recoveryRecord.state === "dispatched" ? 1 : 0,
       waitingHuman: recoveryRecord.state === "waiting_human" ? 1 : 0, blocked: recoveryRecord.state === "blocked" ? 1 : 0,
-      records: [recoveryRecord], truncated: false } } : {}),
+      records: largeCampaign ? Array.from({ length: 5 }, (_, index) => ({ ...recoveryRecord, id: `rec_${index + 1}`, resource: { ...recoveryRecord.resource, repository: "picoduck/wollipog", pullRequest: 4570 + index, occurrenceId: "7ba64e18c93f205d862a9170bf4dce3950a6b124" }, createdAt: NOW - (index + 1) * MINUTE, updatedAt: NOW - index * MINUTE })) : [recoveryRecord], truncated: false } } : {}),
     ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
       // Static rendering only. Actual fresh authority/forge/completion composition is separately
       // exercised in the CP-to-runner journal test; these values cannot attest live readiness.
@@ -1227,6 +1242,13 @@ const client = {
   campaignDecisions: async (id: string) => params.get("decisions") === "1"
     ? (() => {
         const fixture = campaignDecisionsFixture(id);
+        if (largeCampaign) { fixture.decisions = Array.from({ length: 30 }, (_, index) => ({
+          ...fixture.decisions[index % fixture.decisions.length]!, occurrenceId: `decision_${index + 1}`,
+          createdAt: NOW - (index + 1) * MINUTE,
+          reason: fixture.decisions[index % fixture.decisions.length]!.reason?.replace("picoduck/example", "picoduck/wollipog"),
+        }));
+          fixture.usage = { calls: 30, inputTokens: 4200, outputTokens: 960, cacheReadInputTokens: 0, cacheCreationInputTokens: 64160, costUsd: 0.104, unpricedCalls: 0 };
+        }
         return { ...fixture, decisions: [...screenDecisions, ...fixture.decisions],
           usage: { ...fixture.usage, calls: fixture.usage.calls + screenDecisions.length } };
       })()
@@ -1238,7 +1260,10 @@ const client = {
       ? { ...decision, subject: { ...decision.subject!, classification } } : decision);
     return screenDecisions.find((decision) => decision.occurrenceId === occurrenceId)!.subject!;
   },
-  campaignIssueScope: async (id: string, epic?: number, _signal?: AbortSignal, epicRepository?: string) => params.get("scope") === "unsupported-target" ? api.campaignIssueScope(id)
+  campaignIssueScope: async (id: string, epic?: number, _signal?: AbortSignal, epicRepository?: string) => largeCampaign ? {
+    campaignSessionId: id, repository: "picoduck/wollipog", issueNumbers: Array.from({ length: 40 }, (_, index) => 4500 + index),
+    revision: 5, ...scopeCompatibility, outsideScope: [], candidates: [],
+  } : params.get("scope") === "unsupported-target" ? api.campaignIssueScope(id)
     : params.get("screen") === "ask" ? { campaignSessionId: id, repository: "picoduck/wollipog", issueNumbers: [4542], revision: 5,
       ...scopeCompatibility, outsideScope: [], candidates: [] }
     : ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
@@ -1426,9 +1451,9 @@ function Fixture() {
     consumeSubagentFocusRequest: () => {},
   };
   return (
-    <main className="app" style={{ display: params.has("queueStall") || (params.get("screen") === "ask" && window.innerWidth <= 760) ? "flex" : "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
-      {params.has("queueStall") && <Rail view={{ name: "session", id: sessionId }} blockedCount={0} onNavigate={() => {}} />}
-      <section className="session-detail expanded" style={{ height: params.has("queueStall") ? "auto" : "100%", ...(params.has("queueStall") ? { flex: 1, minWidth: 0, minHeight: 0 } : params.get("screen") === "ask" && window.innerWidth <= 760 ? { flex: "1 1 0", minHeight: 0 } : {}) }}>
+    <main className="app" style={{ display: (params.has("queueStall") || largeCampaign) || (params.get("screen") === "ask" && window.innerWidth <= 760) ? "flex" : "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
+      {(params.has("queueStall") || largeCampaign) && <Rail view={{ name: "session", id: sessionId }} blockedCount={0} onNavigate={() => {}} />}
+      <section className="session-detail expanded" style={{ height: (params.has("queueStall") || largeCampaign) ? "auto" : "100%", ...((params.has("queueStall") || largeCampaign) ? { flex: 1, minWidth: 0, minHeight: 0 } : params.get("screen") === "ask" && window.innerWidth <= 760 ? { flex: "1 1 0", minHeight: 0 } : {}) }}>
         <header className="detail-bar session-bar">
           <h1 className="detail-bar-title session-bar-title">{params.get("screen") === "ask" ? "Provider Configuration Campaign" : session.title}</h1>
         </header>
@@ -1466,9 +1491,9 @@ function Fixture() {
       </section>
       {/* On a phone the app's tab bar fills the band below the panel sheet (--bottom-bar-h); this
           stand-in shows that band for what it is in the captures. */}
-      {window.innerWidth <= 760 && params.get("screen") === "ask" && !params.has("queueStall") ? (
+      {window.innerWidth <= 760 && params.get("screen") === "ask" && !(params.has("queueStall") || largeCampaign) ? (
         <Rail view={{ name: "session", id: sessionId }} blockedCount={1} onNavigate={() => {}} />
-      ) : window.innerWidth <= 760 && !ownerScenario && !params.has("queueStall") && (
+      ) : window.innerWidth <= 760 && !ownerScenario && !(params.has("queueStall") || largeCampaign) && (
         <nav aria-label="App Navigation" style={{
           position: "fixed", left: 0, right: 0, bottom: 0, height: "var(--bottom-bar-h)",
           display: "flex", alignItems: "center", justifyContent: "center",
@@ -1488,6 +1513,7 @@ function PanelForSession({ state, session, onOpenSession }: { state: RightPanelS
   return (
     <RightPanel
       state={state}
+      campaignTarget={params.has("section") ? { section: params.get("section")! } : params.has("workItemId") ? { workItemId: params.get("workItemId")! } : undefined}
       session={session}
       runnerOnline
       runnerProtocolVersion={PROTOCOL_VERSION}
@@ -1514,6 +1540,9 @@ window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__ = {
   openedSession: () => openedSession,
   selectedRequestKey: () => selectedRequestKey,
   bumpRevision: () => {
+    if (largeCampaign && ownerProjection?.ownerDecisions?.items[0]) {
+      ownerProjection.ownerDecisions.items[0].occurrenceId = `occ_new_${revision}`;
+    }
     revision += 1;
     for (const session of sessionsFor(revision)) pushToStore?.({ type: "session_upsert", session });
     setRevision?.(revision);

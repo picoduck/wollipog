@@ -13,6 +13,7 @@ const themes = ["dark", "light"] as const;
 async function open(page: Page, query: string, viewport: (typeof viewports)[number], theme: string): Promise<Locator> {
   await page.setViewportSize(viewport);
   await page.goto(`/campaign-status-e2e.html?scenario=campaign&${query}&theme=${theme}`);
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   const section = page.getByRole("region", { name: "Full Control", exact: true });
   await expect(section).toBeVisible();
   return section;
@@ -22,7 +23,7 @@ async function open(page: Page, query: string, viewport: (typeof viewports)[numb
 function fact(section: Locator, title: string, term: string): Locator {
   const host = title === "Full Control" ? section
     : section.locator("section").filter({ has: section.page().getByRole("heading", { name: title, exact: true }) }).last();
-  return host.locator(":scope > dl.facts > div").filter({ has: section.page().getByRole("term").getByText(term, { exact: true }) }).locator("dd");
+  return host.locator(title === "Full Control" ? ":scope > div > dl.facts > div" : ":scope > dl.facts > div").filter({ has: section.page().getByRole("term").getByText(term, { exact: true }) }).locator("dd");
 }
 
 async function noOverflow(section: Locator) {
@@ -44,7 +45,7 @@ for (const viewport of viewports) {
   for (const theme of themes) {
     test(`${viewport.name} ${theme}: Human Required rules qualify readiness and the launch's capabilities and evidence are shown`, async ({ page }) => {
       const section = await open(page, "fullControl=rules&scope=grant", viewport, theme);
-      await expect(section.locator(":scope > p.section-note")).toHaveText(
+      await expect(section.locator(":scope > div > p.section-note")).toHaveText(
         "The Orchestrator runs this campaign end to end, except the decisions listed under Human Required.");
       await expect(fact(section, "Full Control", "Maximum Issues")).toHaveText("21 Derived");
       await expect(fact(section, "Full Control", "Operations")).toHaveText(/^Implementation Questions, PR Merge, .*Policy Asks$/);
@@ -88,7 +89,7 @@ for (const viewport of viewports) {
 
     test(`${viewport.name} ${theme}: with no Human Required rule and full capabilities the section claims end to end`, async ({ page }) => {
       const section = await open(page, "fullControl=ready", viewport, theme);
-      await expect(section.locator(":scope > p.section-note")).toHaveText("The Orchestrator runs this campaign end to end.");
+      await expect(section.locator(":scope > div > p.section-note")).toHaveText("The Orchestrator runs this campaign end to end.");
       await expect(section).toContainText("None. Nothing in this campaign comes to you.");
       await expect(section.getByRole("heading", { name: "Limited Capabilities", exact: true })).toHaveCount(0);
       await expect(fact(section, "Full Control", "Objective").getByRole("button")).toHaveCount(0);
@@ -108,7 +109,7 @@ for (const viewport of viewports) {
 
     test(`${viewport.name} ${theme}: an Orchestrator that can't view images qualifies readiness with its reason`, async ({ page }) => {
       const section = await open(page, "fullControl=degraded", viewport, theme);
-      await expect(section.locator(":scope > p.section-note")).toHaveText(
+      await expect(section.locator(":scope > div > p.section-note")).toHaveText(
         "The Orchestrator runs this campaign, but some capabilities it needs are limited, so it may not finish unattended.");
       await expect(fact(section, "Limited Capabilities", "Screenshot Evidence Review")).toHaveText(/does not accept image input/);
       await expect(fact(section, "Capabilities", "Screenshot Evidence Review")).toHaveText(/^Orchestrator Decides /);

@@ -5,6 +5,7 @@ for (const theme of ["dark", "light"]) {
     test(`campaign allowance has distinct spend, reservations and session limits at ${viewport.width} ${theme}`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&budget=1&theme=${theme}`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       const summary = page.locator(".campaign-status-summary");
       await expect(summary).toContainText("Campaign Allowance");
       // The follow-up limit is an approval threshold, not an allowance ceiling (#2940): it has its own section.
@@ -38,6 +39,7 @@ for (const theme of ["dark", "light"]) {
     test(`recorded campaign spend says when it includes running turns' estimates at ${viewport.width} ${theme}`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&budget=1&estimate=1&theme=${theme}`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       const summary = page.locator(".campaign-status-summary");
       const spend = summary.locator("dt", { hasText: "Recorded Campaign Spend" }).locator("+ dd");
       await expect(spend).toHaveText("$12.00, 100 tool callsIncludes an estimate for running turns.");

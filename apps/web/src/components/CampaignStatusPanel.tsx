@@ -1,3 +1,4 @@
+import { CampaignSection, CampaignSections, forgetCampaignSections, useCampaignEntries } from "./CampaignSections.js";
 import {
   useCallback,
   useEffect,
@@ -103,6 +104,7 @@ const listMemory = new Map<string, CampaignListMemory>();
 
 export function forgetCampaignStatusMemory(): void {
   listMemory.clear();
+  forgetCampaignSections();
 }
 
 type AvailableCampaign = Extract<CampaignStatusAvailability, { kind: "available" }>;
@@ -129,7 +131,11 @@ export function CampaignStatusPanel({
   findRequest,
   onOpenRequest,
   onOpenSessionRequest,
+  target,
+  attentionRequestId,
 }: {
+  target?: import("../navigation.js").CampaignTarget;
+  attentionRequestId?: string;
   session: SessionView;
   availability: Exclude<CampaignStatusAvailability, { kind: "hidden" }>;
   onOpenSession: (sessionId: string) => void;
@@ -152,6 +158,8 @@ export function CampaignStatusPanel({
     <AvailableCampaignStatus
       key={session.id}
       session={session}
+      target={target}
+      attentionRequestId={attentionRequestId ?? target?.requestId}
       availability={availability}
       onOpenSession={onOpenSession}
       findRequest={findRequest}
@@ -168,7 +176,11 @@ function AvailableCampaignStatus({
   findRequest,
   onOpenRequest,
   onOpenSessionRequest,
+  target,
+  attentionRequestId,
 }: {
+  target?: import("../navigation.js").CampaignTarget;
+  attentionRequestId?: string;
   session: SessionView;
   availability: AvailableCampaign;
   onOpenSession: (sessionId: string) => void;
@@ -178,7 +190,7 @@ function AvailableCampaignStatus({
 }) {
   const [memory, setMemoryState] = useState<CampaignListMemory>(() => listMemory.get(session.id) ?? {
     filters: DEFAULT_CAMPAIGN_WORK_FILTERS,
-    selectedItemId: null,
+    selectedItemId: target?.workItemId ?? null,
     scrollTop: 0,
     // A member starts on its own assignment.
     focusItemId: availability.currentWorkItemId,
@@ -202,6 +214,23 @@ function AvailableCampaignStatus({
   useEffect(() => {
     if (shownCount !== null && shownCount !== memory.shownCount) setMemory({ shownCount });
   }, [memory.shownCount, setMemory, shownCount]);
+  useEffect(() => {
+    if (target?.section || attentionRequestId) setMemory({ selectedItemId: null });
+  }, [target?.section, attentionRequestId, setMemory]);
+  const reachedWorkItem = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!target?.workItemId || reachedWorkItem.current === target.workItemId) return;
+    reachedWorkItem.current = target.workItemId;
+    setMemory({ selectedItemId: target.workItemId, focusItemId: target.workItemId });
+  }, [target?.workItemId, setMemory]);
+  const reachedRequest = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!attentionRequestId || reachedRequest.current === attentionRequestId) return;
+    const item = data.list.items.find(item => item.blocker?.requestOccurrenceId === attentionRequestId);
+    if (!item) return;
+    reachedRequest.current = attentionRequestId;
+    setMemory({ selectedItemId: item.id, focusItemId: item.id });
+  }, [attentionRequestId, data.list.items, setMemory]);
   const now = useTimelineClock(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -241,9 +270,48 @@ function AvailableCampaignStatus({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [memory.selectedItemId, shownRows, listSettled]);
 
+  const [checksNeedAttention, setChecksNeedAttention] = useState(false);
   const heldChildren = data.summary.campaign?.heldChildren ?? [];
+  const recovery = useCampaignEntries(data.summary.campaign?.recovery?.records ?? []);
+  const returns = useCampaignEntries(data.summary.campaign?.ownerReturns ?? []);
   // A child named by Cleanup or Campaign Stuck, as a link to its session.
   const sessionLink = (sessionId: string) => <CampaignChildLink sessionId={sessionId} onOpen={onOpenSession} />;
+  const recoveryNeedsAttention = data.summary.campaign?.recovery?.records.some(record => record.state === "waiting_human");
+  const recoverySection = !!data.summary.campaign?.recovery?.records.length && <CampaignSection key="recovery-records" title="Recovery Records" count={data.summary.campaign.recovery.records.length} attention={data.summary.campaign.recovery.records.filter(record => record.state === "waiting_human").map(record => record.id).join("|")} >
+              {recovery.visible.map(record => (
+                <CampaignRecoveryNotice key={record.id} record={record} />
+              ))}
+              {recovery.more}
+              {data.summary.campaign?.recovery?.truncated && <p>More recovery records are available through the campaign tools.</p>}</CampaignSection>;
+  const repositoriesNeedAttention = Boolean(data.summary.campaign?.repositoryBoundary?.pendingLocations.length);
+  const repositorySection = data.summary.campaign?.repositoryBoundary && (
+                <CampaignRepositories key="repositories"
+                  campaignId={availability.campaignSessionId}
+                  boundary={data.summary.campaign.repositoryBoundary}
+                  canInclude={availability.role === "campaign"}
+                />
+              );
+  const pauseNeedsAttention = Boolean(data.summary.campaign?.pause && data.summary.campaign.pause.resumedAt === undefined);
+  const pauseSection = data.summary.campaign && <CampaignPause key="pause" campaignId={availability.campaignSessionId}
+                pause={data.summary.campaign.pause} canEdit={availability.role === "campaign" && session.commandPermissions?.pauseCampaign?.allowed === true}
+                onChanged={data.retry} />;
+  const handoffsNeedAttention = Boolean(data.summary.campaign?.handoffs?.items.some(item => item.handoff.responsibleActor === "human"));
+  const handoffSection = data.summary.campaign?.handoffs && (
+                <CampaignHandoffs key="handoffs"
+                  handoffs={data.summary.campaign.handoffs}
+                  now={now}
+                  onOpen={(workItemId) => setMemory({ selectedItemId: workItemId, focusItemId: workItemId,
+                    scrollTop: scrollRef.current?.scrollTop ?? memory.scrollTop })}
+                />
+              );
+  const checksSection = <CampaignDecisionModelChecks key="checks" onAttentionChange={setChecksNeedAttention}
+                sessionId={session.id}
+                canClassify={availability.role === "campaign"}
+                refreshKey={data.summary.campaign}
+                onOpenSession={onOpenSession}
+                findRequest={findRequest}
+                onOpenRequest={onOpenRequest}
+              />;
   return (
     <div className="campaign-status" ref={scrollRef}>
       {memory.selectedItemId ? (
@@ -273,10 +341,8 @@ function AvailableCampaignStatus({
           )}
           {data.offline && <p className="campaign-status-offline" role="status">Reconnecting… Showing the last loaded campaign status.</p>}
           <StaleContent stale={data.offline}>
-            <div className="campaign-status-sections">
-              {data.summary.campaign && <CampaignPause campaignId={availability.campaignSessionId}
-                pause={data.summary.campaign.pause} canEdit={availability.role === "campaign" && session.commandPermissions?.pauseCampaign?.allowed === true}
-                onChanged={data.retry} />}
+            <CampaignSections campaignId={availability.campaignSessionId} targetTitle={target?.section ?? (attentionRequestId ? "Waiting for You" : availability.currentWorkItemId ? "Work Items" : undefined)}><div className="campaign-status-sections">
+              {pauseNeedsAttention && pauseSection}
               {data.summary.campaign?.ownerDecisions && (
                 <CampaignOwnerDecisions
                   sessionId={session.id}
@@ -288,22 +354,8 @@ function AvailableCampaignStatus({
                   onChanged={data.retry}
                 />
               )}
-              {!!data.summary.campaign?.ownerReturns?.length && <section className="campaign-status-handoffs">
-                <h3 className="section-title">Returned to the Orchestrator</h3>
-                <ul className="campaign-detail-list">{data.summary.campaign.ownerReturns.map((item) => <li key={item.occurrenceId} className="campaign-detail-section">
-                  <div><strong>{item.summary}</strong></div>
-                  <div>Returned by {item.byName} <RecordedTime at={item.at} now={now} />. Future requests follow the current boundary; pending requests remain yours.</div>
-                </li>)}</ul>
-              </section>}
-              <CampaignSummarySection data={data} now={now} />
-              <CampaignDecisionModelChecks
-                sessionId={session.id}
-                canClassify={availability.role === "campaign"}
-                refreshKey={data.summary.campaign}
-                onOpenSession={onOpenSession}
-                findRequest={findRequest}
-                onOpenRequest={onOpenRequest}
-              />
+
+              {checksNeedAttention && checksSection}
               {data.summary.campaign?.status === "stuck" && data.summary.campaign.stuck && (
                 <CampaignStuck
                   stuck={data.summary.campaign.stuck}
@@ -319,14 +371,30 @@ function AvailableCampaignStatus({
                   onOpenSession={sessionLink}
                 />
               )}
-              {data.summary.campaign?.handoffs && (
-                <CampaignHandoffs
-                  handoffs={data.summary.campaign.handoffs}
-                  now={now}
-                  onOpen={(workItemId) => setMemory({ selectedItemId: workItemId, focusItemId: workItemId,
-                    scrollTop: scrollRef.current?.scrollTop ?? memory.scrollTop })}
-                />
-              )}
+              {recoveryNeedsAttention && recoverySection}
+              {repositoriesNeedAttention && repositorySection}
+              {handoffsNeedAttention && handoffSection}
+              <CampaignSummarySection data={data} now={now} />
+              <CampaignWorkList
+                data={data}
+                filters={memory.filters}
+                onFiltersChange={(filters) => setMemory({ filters, scrollTop: 0 })}
+                focusItemId={memory.focusItemId}
+                onFocusItem={(id) => setMemory({ focusItemId: id })}
+                currentWorkItemId={availability.currentWorkItemId}
+                rowRefs={rowRefs}
+                now={now}
+                onOpen={openItem}
+              />
+              {!!data.summary.campaign?.ownerReturns?.length && <CampaignSection title="Returned to the Orchestrator" count={data.summary.campaign.ownerReturns.length} className="campaign-status-handoffs">
+                <ul className="campaign-detail-list">{returns.visible.map((item) => <li key={item.occurrenceId} className="campaign-detail-section">
+                  <div><strong>{item.summary}</strong></div>
+                  <div>Returned by {item.byName} <RecordedTime at={item.at} now={now} />. Future requests follow the current boundary; pending requests remain yours.</div>
+                </li>)}</ul>{returns.more}
+              </CampaignSection>}
+              {!pauseNeedsAttention && pauseSection}
+              {!handoffsNeedAttention && handoffSection}
+              {!checksNeedAttention && checksSection}
               {data.summary.campaign?.budget && (
                 <CampaignHeldSlots
                   campaignId={availability.campaignSessionId}
@@ -337,10 +405,7 @@ function AvailableCampaignStatus({
                 />
               )}
               <CampaignRecoveryAutomation campaign={data.summary.campaign} />
-              {data.summary.campaign?.recovery?.records.map(record => (
-                <CampaignRecoveryNotice key={record.id} record={record} />
-              ))}
-              {data.summary.campaign?.recovery?.truncated && <p>More recovery records are available through the campaign tools.</p>}
+              {!recoveryNeedsAttention && recoverySection}
               {data.summary.campaign?.budget?.followUpApprovals && (
                 <CampaignFollowUpLimit
                   campaignId={availability.campaignSessionId}
@@ -356,29 +421,13 @@ function AvailableCampaignStatus({
                 <CampaignAuthoritySummary campaign={{ ...data.summary.campaign, control: data.summary.campaign.control,
                   decisionOwners: data.summary.campaign.decisionOwners, uiEvidenceReview: data.summary.campaign.uiEvidenceReview }} />
               )}
-              {data.summary.campaign?.repositoryBoundary && (
-                <CampaignRepositories
-                  campaignId={availability.campaignSessionId}
-                  boundary={data.summary.campaign.repositoryBoundary}
-                  canInclude={availability.role === "campaign"}
-                />
-              )}
+              {!repositoriesNeedAttention && repositorySection}
               <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId}
                 policyRevision={availability.role === "campaign" ? data.summary.campaign?.policyRevision : undefined}
                 boundaryShown={data.summary.campaign?.control?.mode === "full_control"} />
               <CampaignDecisions campaignId={availability.campaignSessionId} />
-              <CampaignWorkList
-                data={data}
-                filters={memory.filters}
-                onFiltersChange={(filters) => setMemory({ filters, scrollTop: 0 })}
-                focusItemId={memory.focusItemId}
-                onFocusItem={(id) => setMemory({ focusItemId: id })}
-                currentWorkItemId={availability.currentWorkItemId}
-                rowRefs={rowRefs}
-                now={now}
-                onOpen={openItem}
-              />
-            </div>
+
+            </div></CampaignSections>
           </StaleContent>
         </>
       )}
@@ -392,9 +441,9 @@ function CampaignRecoveryAutomation({ campaign }: { campaign: CampaignStatusData
   const notice = campaignRecoveryAutomationNotice(campaign?.status, campaign?.recovery?.automation);
   if (!notice) return null;
   return (
-    <Notice tone={notice.tone} title={notice.title} role={notice.tone === "neutral" ? "status" : undefined}>
+    <CampaignSection title="Recovery Automation" count={1}><Notice tone={notice.tone} title={notice.title} role={notice.tone === "neutral" ? "status" : undefined}>
       {notice.body}
-    </Notice>
+    </Notice></CampaignSection>
   );
 }
 
@@ -413,7 +462,6 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
   onOpenSessionRequest?: (sessionId: string, requestId: string) => void;
   onChanged: () => void;
 }) {
-  const headingId = useId();
   const hidden = ownerDecisions.total - ownerDecisions.items.length;
   // A scope proposal the server routed to the owner waits for them without the owner keeping it: for
   // want of lineage (#4267), after a grant review (#4102, #4103) or a proposal check (#4282), all #4334.
@@ -423,8 +471,7 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
   const one = ownerDecisions.total === 1;
   const runtimeRecovery = ownerDecisions.items.some((item) => item.category === "runner_recovery");
   return (
-    <section className="campaign-status-handoffs" aria-labelledby={headingId}>
-      <h3 id={headingId} className="section-title">Waiting for You</h3>
+    <CampaignSection title="Waiting for You" count={ownerDecisions.total} attention={ownerDecisions.items.map(item => item.occurrenceId).join("|")} className="campaign-status-handoffs">
       <p className="section-note">
         {`Only you can make ${one ? "this decision" : "these decisions"}.`}{" "}
         {runtimeRecovery ? "Relaunch the Orchestrator to restore its tools and continue its pending work." : "The Orchestrator keeps working on everything else meanwhile."}
@@ -475,7 +522,7 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
         })}
       </ul>
       {hidden > 0 && <p className="section-note">{hidden} more decision{hidden === 1 ? " waits" : "s wait"} for you under Requests.</p>}
-    </section>
+    </CampaignSection>
   );
 }
 
@@ -486,17 +533,16 @@ function CampaignHandoffs({ handoffs, now, onOpen }: {
   now: number;
   onOpen: (workItemId: string) => void;
 }) {
-  const headingId = useId();
   const hidden = handoffs.total - handoffs.items.length;
+  const entries = useCampaignEntries(handoffs.items);
   return (
-    <section className="campaign-status-handoffs" aria-labelledby={headingId}>
-      <h3 id={headingId} className="section-title">Handed Off</h3>
+    <CampaignSection title="Handed Off" count={handoffs.total} attention={handoffs.items.filter(item => item.handoff.responsibleActor === "human").map(item => item.workItemId).join("|")} className="campaign-status-handoffs">
       <p className="section-note">
         The agent work on {handoffs.total === 1 ? "this item is" : "these items is"} done. What happens next is up to the
         person or outside party named.
       </p>
       <ul className="campaign-detail-list">
-        {handoffs.items.map((item) => (
+        {entries.visible.map((item) => (
           <li key={item.workItemId}>
             <dl className="facts">
               <div>
@@ -523,8 +569,9 @@ function CampaignHandoffs({ handoffs, now, onOpen }: {
           </li>
         ))}
       </ul>
+      {entries.more}
       {hidden > 0 && <p className="section-note">{hidden} more handed-off item{hidden === 1 ? " is" : "s are"} listed under Work Items.</p>}
-    </section>
+    </CampaignSection>
   );
 }
 
@@ -533,7 +580,6 @@ function CampaignHandoffs({ handoffs, now, onOpen }: {
  * ---------------------------------------------------------------------------------------------- */
 
 function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: number }) {
-  const headingId = useId();
   const { summary } = data;
   if (!summary.summary) {
     if (summary.status === "error") {
@@ -548,8 +594,7 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
   }
   const view = campaignSummaryView(summary.summary, summary.campaign, now);
   return (
-    <section className="campaign-status-summary" aria-labelledby={headingId}>
-      <h3 id={headingId} className="section-title">Summary</h3>
+    <CampaignSection title="Summary" count={1} defaultOpen className="campaign-status-summary">
       {summary.error && (
         <Notice tone="danger" compact role="alert" title="Couldn't Refresh Campaign Summary"
           actions={<button type="button" className="btn sm" onClick={data.retry}>Retry</button>}>
@@ -617,7 +662,7 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
           </div>
         </dl>
       </StaleContent>
-    </section>
+    </CampaignSection>
   );
 }
 
@@ -758,9 +803,10 @@ function CampaignWorkList({
   }
 
   return (
-    <section className="campaign-work" aria-labelledby={headingId}>
-      <div className="campaign-work-head">
-        <h3 id={headingId} className="section-title">Work Items</h3>
+    <CampaignSection title="Work Items" count={data.summary.summary
+      ? Object.values(data.summary.summary.counts.byState).reduce((total, count) => total + count, 0)
+      : data.list.total ?? 0} defaultOpen className="campaign-work"><div className="campaign-work-head">
+
         <Select label="Sort" value={filters.sort} options={CAMPAIGN_SORT_OPTIONS}
           onChange={(sort) => onFiltersChange({ ...filters, sort })} />
       </div>
@@ -775,7 +821,7 @@ function CampaignWorkList({
         )}
       </div>
       {body}
-    </section>
+    </CampaignSection>
   );
 }
 

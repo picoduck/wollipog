@@ -268,6 +268,7 @@ export function RightPanel({
   state,
   session,
   sourceLocation,
+  campaignTarget,
   attentionTarget,
   onOpenSourceLocation,
   onClearSourceLocation,
@@ -313,6 +314,7 @@ export function RightPanel({
   state: RightPanelState;
   session: SessionView;
   sourceLocation?: SourceLocation;
+  campaignTarget?: import("../navigation.js").CampaignTarget;
   attentionTarget?: import("../navigation.js").AttentionTarget;
   onOpenSourceLocation: (location: SourceLocation) => void;
   onClearSourceLocation: () => void;
@@ -387,6 +389,7 @@ export function RightPanel({
   const phone = useIsMobile();
   const switcherRef = useRef<HTMLButtonElement | null>(null);
   // The element the current tool's PanelHeaderActions portal into.
+  const [campaignEntryRequestId, setCampaignEntryRequestId] = useState<string | undefined>(undefined);
   const [actionSlot, setActionSlot] = useState<HTMLDivElement | null>(null);
 
   useLayoutEffect(() => {
@@ -784,6 +787,8 @@ export function RightPanel({
       case "campaign":
         return campaignAvailability.kind === "hidden" ? null : (
           <CampaignStatusPanel
+            target={campaignTarget}
+            attentionRequestId={attentionTarget?.requestId ?? campaignEntryRequestId}
             session={session}
             availability={campaignAvailability}
             onOpenSession={onOpenSession}
@@ -963,6 +968,10 @@ export function RightPanel({
       return;
     }
     // Requests opens the list, never a request left open from an earlier visit.
+    if (tool === "campaign") {
+      setCampaignEntryRequestId(ownRequests.find(request => ownRequestKey(request) === selectedRequestKey)?.occurrenceId
+        ?? descendantRequests.find(request => sessionRequestPanelKey(request.sessionId, request.occurrenceId) === selectedRequestKey)?.occurrenceId);
+    }
     if (tool === "requests") onSelectedRequestKeyChange(null);
     state.setMode(tool);
     // Files chosen by keyboard lands in Go to File, as Ctrl/⌘+P does (#2852).

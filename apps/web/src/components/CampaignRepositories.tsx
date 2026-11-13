@@ -1,4 +1,5 @@
-import React, { useId, useState } from "react";
+import { CampaignSection, useCampaignEntries } from "./CampaignSections.js";
+import React, { useState } from "react";
 import type { CampaignPendingCause, CampaignRepositoryBoundaryView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { projectAvailabilityMeta } from "../project-management.js";
@@ -29,9 +30,9 @@ export function CampaignRepositories({ campaignId, boundary, canInclude }: {
   canInclude: boolean;
 }) {
   const api = useApi();
-  const headingId = useId();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const entries = useCampaignEntries(boundary.repositories);
   const joinedAt = new Map(boundary.joins.map((join) => [join.locationId, join.revision]));
   const limitedBecause = new Map((boundary.limitedLocations ?? []).map((location) => [location.locationId, location.reason]));
   const include = async (locationId: string) => {
@@ -46,10 +47,9 @@ export function CampaignRepositories({ campaignId, boundary, canInclude }: {
     }
   };
 
-  return <section className="campaign-detail-section" aria-labelledby={headingId}>
-    <h3 id={headingId} className="section-title">Repositories</h3>
+  return <CampaignSection title="Repositories" count={boundary.repositories.length} attention={boundary.pendingLocations.map(item => item.locationId).join("|")} className="campaign-detail-section">
     <dl className="facts">
-      {boundary.repositories.map((entry) => {
+      {entries.visible.map((entry) => {
         const usable = entry.locations.some((location) => location.availability === "available");
         return <div key={entry.repository}>
           <dt>{entry.repository}</dt>
@@ -73,7 +73,7 @@ export function CampaignRepositories({ campaignId, boundary, canInclude }: {
         <dt>Boundary Revision</dt>
         <dd>{boundary.revision}</dd>
       </div>}
-    </dl>
+    </dl>{entries.more}
     {boundary.excludedLocations.length > 0 && <>
       <h4 className="section-title">Excluded Locations</h4>
       <ul className="campaign-detail-list" aria-label="Excluded Locations">
@@ -113,5 +113,5 @@ export function CampaignRepositories({ campaignId, boundary, canInclude }: {
       </ul>
     </>}
     {error && <Notice tone="danger" role="alert" title="Couldn't Include the Location">{error}</Notice>}
-  </section>;
+  </CampaignSection>;
 }

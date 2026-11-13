@@ -280,7 +280,7 @@ test("a Custom campaign's epic seed on the proposal check reads as the Epic Seed
 
 test("Campaign Status lists each Decision Model call in exactly one section: checks beside their request, every other call in Decision Model (#4265)", async () => {
   const read = api.campaignDecisions;
-  type Section = "Decision Model Checks" | "Decision Model";
+  type Section = "Decision Model Checks" | "Decisions";
   // One decision of every kind, keyed by kind so a new kind fails to typecheck until its section is chosen here.
   const byKind: Record<DecisionKind, [Section, CampaignDecisionsResponse["decisions"][number]]> = {
     credential_screen: ["Decision Model Checks", decision("credential_screen", { verdict: "discusses", reason: "[credential_screen]" })],
@@ -292,8 +292,8 @@ test("Campaign Status lists each Decision Model call in exactly one section: che
     // An Orchestrator scope proposal's constraint check (#4282) is a check beside the proposal it affects.
     scope_check: ["Decision Model Checks", decision("scope_check", { kind: "scope_check", verdict: "refuse", reason: "[scope_check]", subject: undefined })],
     // Full Control's scope grant has no section of its own, so Decision Model lists it.
-    scope_grant: ["Decision Model", decision("scope_grant", { kind: "scope_grant", verdict: "grant", reason: "[scope_grant]", subject: undefined })],
-    probe: ["Decision Model", decision("probe", { kind: "probe", verdict: "confirm", reason: "[probe]", subject: undefined })],
+    scope_grant: ["Decisions", decision("scope_grant", { kind: "scope_grant", verdict: "grant", reason: "[scope_grant]", subject: undefined })],
+    probe: ["Decisions", decision("probe", { kind: "probe", verdict: "confirm", reason: "[probe]", subject: undefined })],
   };
   const listed: Array<[Section, CampaignDecisionsResponse["decisions"][number]]> = [
     ...Object.values(byKind),
@@ -312,7 +312,7 @@ test("Campaign Status lists each Decision Model call in exactly one section: che
       title: node.querySelector("h3")?.textContent ?? "",
       items: [...node.querySelectorAll("li")].map((item) => item.textContent ?? ""),
     }));
-    assert.deepEqual(sections.map(({ title }) => title), ["Decision Model Checks", "Decision Model"]);
+    assert.deepEqual(sections.map(({ title }) => title), ["Decision Model Checks", "Decisions"]);
     assert.equal(sections.reduce((total, { items }) => total + items.length, 0), decisions.length, "one list item per decision across both sections");
     for (const [expected, item] of listed) {
       const listedIn = sections.flatMap(({ title, items }) => items.filter((text) => text.includes(item.reason!)).map(() => title));

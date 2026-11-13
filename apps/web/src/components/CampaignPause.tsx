@@ -1,3 +1,4 @@
+import { CampaignSection } from "./CampaignSections.js";
 import { useId, useState } from "react";
 import type { CampaignPauseView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
@@ -9,7 +10,6 @@ export function CampaignPause({ campaignId, pause, canEdit, onChanged }: {
   campaignId: string; pause?: CampaignPauseView; canEdit: boolean; onChanged: () => void;
 }) {
   const api = useApi();
-  const heading = useId();
   const untilId = useId();
   const [until, setUntil] = useState("");
   const [busy, setBusy] = useState(false);
@@ -28,8 +28,7 @@ export function CampaignPause({ campaignId, pause, canEdit, onChanged }: {
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not change campaign pause."); }
     finally { setBusy(false); }
   };
-  return <section className="campaign-detail-section" aria-labelledby={heading}>
-    <h3 id={heading} className="section-title">Campaign Pause</h3>
+  return <CampaignSection title="Campaign Pause" count={1} attention={paused ? String(pause.pausedAt) : ""} className="campaign-detail-section">
     {pause && <dl className="facts">
       <div><dt>Paused</dt><dd>{formatRecordedTimestamp(pause.pausedAt)?.label} by {pause.pausedBy}</dd></div>
       {paused && <div><dt>Resumes At</dt><dd>{pause.resumeAt === null ? "When the owner resumes"
@@ -54,5 +53,5 @@ export function CampaignPause({ campaignId, pause, canEdit, onChanged }: {
       </BusyButton>
     </>}
     {error && <p role="alert">{error}</p>}
-  </section>;
+  </CampaignSection>;
 }

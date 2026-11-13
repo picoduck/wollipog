@@ -15,6 +15,7 @@ const SCOPE_EVIDENCE_DIR = process.env.CAMPAIGN_SCOPE_EVIDENCE_DIR;
 for (const width of [1440, 390]) test(`queue stall is visible with the real tabs at ${width}px (#4543)`, async ({ page }) => {
   await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
   await page.goto("/campaign-status-e2e.html?scenario=campaign&queueStall=1");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   const summary = page.locator(".campaign-status-summary");
   await expect(page.getByRole("navigation", { name: "Primary Navigation" })).toBeVisible();
   await expect(summary.getByText("Pull Request Wait Stalled", { exact: true })).toHaveCount(2);
@@ -31,6 +32,7 @@ for (const width of [1440, 390]) test(`queue stall is visible with the real tabs
 for (const width of [1440, 390]) test(`owner can return a kept resource from both surfaces at ${width}px (#4539)`, async ({ page }) => {
   await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
   await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=after&fullControl=ready");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
   const action = waiting.getByRole("button", { name: "Return to the Orchestrator", exact: true });
   const resourceRow = waiting.locator("li", { has: page.getByRole("button", { name: "Return to the Orchestrator", exact: true }) });
@@ -51,6 +53,7 @@ for (const width of [1440, 390]) test(`owner can return a kept resource from bot
   await expect(waiting.getByRole("status")).toContainText("returned to the Orchestrator");
   expect(await page.evaluate(() => (window as unknown as { __RETURNED__: string }).__RETURNED__)).toBe("occ_1");
   await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=after&fullControl=ready");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   await waiting.getByRole("button", { name: "Open Request: Merge picoduck/wollipog#4141" }).click();
   const detail = page.locator(".request-panel-detail");
   const inboxAction = detail.getByRole("button", { name: "Return to the Orchestrator", exact: true });
@@ -67,6 +70,7 @@ for (const width of [1440, 390]) test(`owner can return a kept resource from bot
   await inboxAction.click();
   await expect(detail.getByRole("status").filter({ hasText: "Pending requests remain yours." })).toBeVisible();
   await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=after&fullControl=ready&ownerReturned=1");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   const returned = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Returned to the Orchestrator" }) });
   await expect(returned).toContainText("Sam Rivera");
   await expect(page.getByRole("button", { name: "Return to the Orchestrator", exact: true })).toHaveCount(0);
@@ -106,6 +110,7 @@ test("the launcher offers Campaign Status on a campaign, explains an unsupported
 test("the summary, filters, sorting and keyboard details flow keep the list's place", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/campaign-status-e2e.html?scenario=campaign");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   const summary = page.locator(".campaign-status-summary");
   await expect(summary).toContainText("1 of 8 Delivered");
   await expect(summary).toContainText("3 of 4 Occupied");
@@ -145,6 +150,7 @@ test("the summary, filters, sorting and keyboard details flow keep the list's pl
 
 test("details separate reported stages from observations and never show missing data as zero", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   await workRows(page).filter({ hasText: "Campaign Status Panel" }).click();
   const details = page.locator(".campaign-status");
   await expect(details).toContainText("Reported by the Orchestrator 20m ago");
@@ -178,6 +184,7 @@ async function deliveryFacts(page: Page): Promise<string[]> {
 
 test("details show observed GitHub facts beside the reported stage, with stale and unavailable ones explained", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   await workRows(page).filter({ hasText: "Campaign Status Panel" }).click();
   await expect(page.locator("h3.campaign-detail-title")).toHaveText("Campaign Status Panel");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.forgeRefreshes()))
@@ -219,6 +226,7 @@ for (const theme of ["dark", "light"] as const) {
     test(`dirty cleanup paths fit a ${device} ${theme} viewport`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&theme=${theme}`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       await workRows(page).filter({ hasText: "Ledger Read API" }).click();
       const cleanup = page.locator("dd").filter({ hasText: /Refused: \/w\/3/ });
       await expect(cleanup).toContainText('10 paths');
@@ -237,6 +245,7 @@ for (const theme of ["dark", "light"] as const) {
     test(`forge facts fit a ${device} ${theme} viewport`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&theme=${theme}`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       for (const [name, title] of [["observed", "Campaign Status Panel"], ["not-authorized", "Ledger Read API"]] as const) {
         await workRows(page).filter({ hasText: title }).click();
         await expect(page.locator("h3.campaign-detail-title")).toHaveText(title);
@@ -285,7 +294,8 @@ for (const theme of ["dark", "light"] as const) {
     test(`Repositories lists the boundary and includes a waiting Location on a ${device} ${theme} viewport (#4117)`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&repositories=1&theme=${theme}`);
-      const section = page.locator("section.campaign-detail-section", { has: page.locator("h3", { hasText: /^Repositories$/ }) });
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
+      const section = page.locator("section.campaign-detail-section", { has: page.getByRole("heading", { name: "Repositories", exact: true }) });
       await expect(section).toBeVisible();
       await expect(section.locator("dt")).toHaveText(["picoduck/wollipog", "picoduck/dev-box-setup", "picoduck/notes-site", "Boundary Revision"]);
       await expect(section.getByRole("list", { name: "Locations of picoduck/wollipog" })).toContainText("Wollipog on Laptop");
@@ -305,6 +315,7 @@ for (const theme of ["dark", "light"] as const) {
       await expect(include).toHaveText("Include in Campaign");
       await include.click();
       expect(await page.evaluate(() => (window as unknown as { __INCLUDED_LOCATION__?: string }).__INCLUDED_LOCATION__)).toBe("loc_shared");
+      await section.getByRole("button", { name: "Show All (4)", exact: true }).click();
       await expect(section.getByRole("list", { name: "Locations of picoduck/shared-docs" })).toContainText("Shared Docs");
       await expect(section.getByRole("button", { name: "Include Shared Docs in Campaign" })).toHaveCount(0);
       if (REPOSITORIES_EVIDENCE_DIR) await section.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/repositories-included-${device}-${theme}.png` });
@@ -313,7 +324,8 @@ for (const theme of ["dark", "light"] as const) {
     test(`Repositories keeps listing a Location its runner's version left out, with its repository, and a limited launch Location, on a ${device} ${theme} viewport (#4319)`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&repositories=1&limited=1&theme=${theme}`);
-      const section = page.locator("section.campaign-detail-section", { has: page.locator("h3", { hasText: /^Repositories$/ }) });
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
+      const section = page.locator("section.campaign-detail-section", { has: page.getByRole("heading", { name: "Repositories", exact: true }) });
       const row = section.getByRole("list", { name: "Excluded Locations" }).getByRole("listitem").filter({ hasText: "Wollipog on Old Mac" });
       await expect(row).toContainText("picoduck/old-tools");
       await expect(row).toContainText("The Location's runner can't perform this campaign's gates. Update and restart it to protocol version 327 or newer.");
@@ -322,32 +334,10 @@ for (const theme of ["dark", "light"] as const) {
       await row.scrollIntoViewIfNeeded();
       await assertNoHorizontalOverflow(page, ".campaign-status");
       if (device === "phone") {
-        // The limited launch row, its repository and its whole reason show together: scroll with the
-        // wheel (a forced scroll moves the phone's overflow-hidden panel) until the section's heading sits
-        // just below whatever covers the top of the scrolling region (the panel's sticky header).
-        const heading = section.locator("h3", { hasText: /^Repositories$/ });
-        const geometry = () => heading.evaluate((dt) => {
-          let scroller = dt.parentElement;
-          while (scroller && !(scroller.scrollHeight > scroller.clientHeight && /auto|scroll/.test(getComputedStyle(scroller).overflowY))) scroller = scroller.parentElement;
-          const area = scroller!.getBoundingClientRect();
-          const x = dt.getBoundingClientRect().left + 2;
-          // The first point down from the region's top that shows its scrolled content, not a stuck header.
-          const covers = (element: Element | null) => {
-            for (let at = element; at && at !== scroller; at = at.parentElement) if (/sticky|fixed/.test(getComputedStyle(at).position)) return true;
-            return !element || !scroller!.contains(element);
-          };
-          let visibleTop = Math.max(area.top, 0);
-          while (visibleTop < area.bottom && covers(document.elementFromPoint(x, visibleTop))) visibleTop += 1;
-          return { gap: dt.getBoundingClientRect().top - visibleTop - 12, middle: { x: area.left + area.width / 2, y: (visibleTop + Math.min(area.bottom, innerHeight)) / 2 } };
-        });
-        const gap = async () => (await geometry()).gap;
-        const { middle } = await geometry();
-        await page.mouse.move(middle.x, middle.y);
-        for (let step = 0; step < 6 && Math.abs(await gap()) > 2; step += 1) {
-          await page.mouse.wheel(0, await gap());
-          await page.waitForTimeout(100);
-        }
-        expect(Math.abs(await gap())).toBeLessThanOrEqual(2);
+        // The repository section is actionable and now precedes Summary. Reach it through the
+        // sticky index rather than assuming it can be wheeled below its natural top position.
+        await page.getByRole("navigation", { name: "Campaign Sections" }).getByRole("button", { name: /^Repositories/ }).click();
+        await expect(section.getByRole("heading", { name: "Repositories", exact: true })).toBeInViewport();
         expect(await page.locator("aside.rpanel").evaluate((panel) => panel.scrollTop)).toBe(0);
         // Nothing of the row is under the tab bar band.
         const band = await page.getByRole("navigation", { name: "App Navigation" }).boundingBox();
@@ -360,7 +350,8 @@ for (const theme of ["dark", "light"] as const) {
     test(`each Location waiting to be included says why it waits, and an entry stored before claims nothing, on a ${device} ${theme} viewport (#4312)`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&repositories=1&waiting=causes&theme=${theme}`);
-      const section = page.locator("section.campaign-detail-section", { has: page.locator("h3", { hasText: /^Repositories$/ }) });
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
+      const section = page.locator("section.campaign-detail-section", { has: page.getByRole("heading", { name: "Repositories", exact: true }) });
       const list = section.getByRole("list", { name: "Locations Waiting to Be Included" });
       const row = (name: string) => list.getByRole("listitem").filter({ hasText: name });
       await expect(row("Shared Docs")).toContainText("Someone other than the campaign's owner added this Location to the Project.");
@@ -386,7 +377,8 @@ for (const theme of ["dark", "light"] as const) {
     test(`a repository the first message left out shows as available on a ${device} ${theme} viewport (#4117)`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&repositories=limited&theme=${theme}`);
-      const section = page.locator("section.campaign-detail-section", { has: page.locator("h3", { hasText: /^Repositories$/ }) });
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
+      const section = page.locator("section.campaign-detail-section", { has: page.getByRole("heading", { name: "Repositories", exact: true }) });
       await expect(section.locator("dt")).toHaveText(["picoduck/wollipog", "picoduck/dev-box-setup", "Boundary Revision"]);
       await expect(section.getByRole("heading", { name: "Available but Not in This Campaign" })).toBeVisible();
       await expect(section).toContainText("Your first message limited this campaign to picoduck/wollipog, picoduck/dev-box-setup.");
@@ -405,7 +397,8 @@ for (const theme of ["dark", "light"] as const) {
     test(`a Custom campaign's repository list shows no boundary revision on a ${device} ${theme} viewport (#4117)`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&repositories=custom&theme=${theme}`);
-      const section = page.locator("section.campaign-detail-section", { has: page.locator("h3", { hasText: /^Repositories$/ }) });
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
+      const section = page.locator("section.campaign-detail-section", { has: page.getByRole("heading", { name: "Repositories", exact: true }) });
       await expect(section.locator("dt")).toHaveText(["picoduck/wollipog", "picoduck/shared-docs"]);
       await expect(section).toContainText("Joined after launch.");
       await expect(section).not.toContainText("Boundary Revision");
@@ -424,6 +417,7 @@ const GITLAB_EVIDENCE_DIR = process.env.CAMPAIGN_GITLAB_EVIDENCE_DIR;
 test("GitLab issue and merge request refs link to their host and show observed GitLab facts in GitLab's terms", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/campaign-status-e2e.html?scenario=campaign&forge=gitlab");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   const project = "gitlab.example.com/platform/agents/wollipog";
   const row = workRows(page).filter({ hasText: "Campaign Status Panel" });
   await expect(row).toContainText(`${project}#2417`);
@@ -459,6 +453,7 @@ test("GitLab issue and merge request refs link to their host and show observed G
 
 test("a member sees its assignment, and leaving the campaign returns the open panel to the launcher", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=member");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   await expect(page.locator(".campaign-status-context")).toContainText("#2417 Campaign Orchestrator");
   const assignment = page.locator(".campaign-work-row.is-assignment");
   await expect(assignment).toContainText("Campaign Status Panel");
@@ -473,6 +468,7 @@ test("a member sees its assignment, and leaving the campaign returns the open pa
 
 test("a ledger write reloads the shown list without an error", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   await expect(workRows(page)).toHaveCount(7);
   const before = (await queries(page)).length;
   await page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.bumpRevision());
@@ -482,6 +478,7 @@ test("a ledger write reloads the shown list without an error", async ({ page }) 
 
 test("a campaign complete with handoffs lists the owner's items without a recovery warning (#4070)", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign&handoffs=before");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   await expect(page.locator(".campaign-status-summary")).toContainText("Blocked");
   await expect(page.getByText("Authorized Recovery Unavailable")).toBeVisible();
   await expect(page.locator(".campaign-status-handoffs")).toHaveCount(0);
@@ -490,6 +487,7 @@ test("a campaign complete with handoffs lists the owner's items without a recove
   await expect(workRows(page)).toHaveCount(2);
 
   await page.goto("/campaign-status-e2e.html?scenario=campaign&handoffs=after");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   await expect(page.locator(".campaign-status-summary")).toContainText("Complete with Handoffs");
   await expect(page.locator(".campaign-status-summary")).toContainText("6 of 8 Delivered");
   await expect(workRows(page)).toHaveCount(2);
@@ -524,6 +522,7 @@ for (const theme of ["dark", "light"] as const) {
       test(`${hold.label} shows ${hold.notice ?? "no recovery notice"} for its recovery hold on a ${device} ${theme} viewport (#3361)`, async ({ page }) => {
         await page.setViewportSize(viewport);
         await page.goto(`/campaign-status-e2e.html?scenario=campaign&${hold.query}&theme=${theme}`);
+        await page.getByRole("button", { name: "Expand All", exact: true }).click();
         await expect(page.locator(".campaign-status-summary")).toContainText(hold.label);
         const titled = (title: string) => page.locator(".notice", { has: page.locator(".notice-title", { hasText: title }) });
         // Frame where the recovery notice is, or where it would be: just above Authorized Issue Scope.
@@ -556,6 +555,7 @@ for (const theme of ["dark", "light"] as const) {
       await page.clock.setFixedTime(new Date("2026-11-06T12:00:00Z"));
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&activity=cleanup&automation=complete&theme=${theme}`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       await expect(page.locator(".campaign-status-summary")).toContainText("Complete, Needs Cleanup");
       const cleanup = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Cleanup", exact: true }) });
       const row = cleanup.locator("li").filter({ hasText: "/home/dev/worktrees/wollipog/s_079714ea231c" });
@@ -579,6 +579,7 @@ for (const theme of ["dark", "light"] as const) {
 
 test("a campaign without a recorded plan says so", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=planless");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   const notice = page.locator(".campaign-status-summary .notice");
   await expect(notice).toContainText("Plan Not Recorded");
   await expect(notice).toContainText("2 child sessions without a work item are not counted");
@@ -590,6 +591,7 @@ for (const theme of ["dark", "light"] as const) {
     test(`the panel fits a ${viewport.width}px ${theme} viewport and scrolls its own content`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&theme=${theme}`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       if (theme === "light") await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
       await expect(workRows(page)).toHaveCount(7);
       await assertNoHorizontalOverflow(page, ".campaign-status");
@@ -609,6 +611,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
   test(`personal-rule approval shows the exact rule and campaign bounds at ${viewport.width}px (#4540)`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=after&personalRule=1");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     await page.getByRole("button", { name: "Open Request: Merge picoduck/wollipog#4141" }).click();
     await page.getByRole("button", { name: "All Requests" }).click();
     await page.getByText("Owner Decision Required", { exact: true }).click();
@@ -628,10 +631,12 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
 
 test("decisions the owner kept wait for them in Campaign Status, and each opens its card (#4064)", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=before");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   await expect(page.locator(".campaign-status-summary")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Waiting for You" })).toHaveCount(0);
 
   await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=after");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
   await expect(waiting).toContainText("Which credential design should the provider bridge use?");
   await expect(waiting).toContainText("Merge picoduck/wollipog#4141");
@@ -664,6 +669,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
     test(`${route.name} waits for the owner as a Scope Approval and opens its own request, ${viewport.name}`, async ({ page }) => {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&ownerScope=${route.scope}`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
       await expect(waiting.locator("dt")).toHaveText(["Scope Approval"]);
       await expect(waiting).toContainText(route.summary);
@@ -702,6 +708,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
   test(`each routed scope approval opens exactly its own request, ${viewport.name} (#4334)`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/campaign-status-e2e.html?scenario=campaign&ownerScope=routed");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
     await expect(waiting.locator("dt")).toHaveText(["Scope Approval", "Scope Approval", "Scope Approval"]);
     await expect(waiting.getByText("Only you can make these decisions.")).toBeVisible();
@@ -717,6 +724,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
   test(`routed scope approvals leave Waiting for You once settled, ${viewport.name} (#4334)`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/campaign-status-e2e.html?scenario=campaign&ownerScope=routed");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const heading = page.getByRole("heading", { name: "Waiting for You" });
     await expect(heading).toBeVisible();
     await page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__!.bumpRevision());
@@ -728,6 +736,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
   test(`a merge an installed rule keeps for the owner waits for them with the rule's source and quote, ${viewport.name} (#4137)`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=rule");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
     await expect(waiting).toContainText("Kept by Rule");
     await expect(waiting).toContainText("Merge picoduck/wollipog#4141");
@@ -747,6 +756,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
   test(`a request to add a repository waits for the owner in Waiting for You, ${viewport.name} (#4117)`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/campaign-status-e2e.html?scenario=campaign&ownerAddition=1");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
     await expect(waiting).toContainText("Only you can make this decision.");
     await expect(waiting.locator("dt")).toHaveText(["Add Repository"]);

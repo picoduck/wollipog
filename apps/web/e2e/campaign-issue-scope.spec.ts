@@ -17,6 +17,7 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
           : { error: message }) });
       });
       await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=unsupported-target");
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       const scope = page.getByRole("region", { name: "Authorized Issue Scope" });
       await expect(scope.getByRole("alert")).toContainText(message);
       await expect(scope.getByRole("alert")).not.toContainText("gh authentication");
@@ -44,6 +45,7 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
           unverifiedWork: [work("w_member", "Member Work", 12)], outsideScope: [work("w_stray", "Stray Work", 99)] }) });
     });
     await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=unsupported-target");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const scope = page.getByRole("region", { name: "Authorized Issue Scope" });
     const fact = (term: string) => scope.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText(term, { exact: true }) }).locator("dd");
     await expect(fact("Repository")).toHaveText("Not Verified");
@@ -83,6 +85,7 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
         outsideScope: [{ workItemId: "w_stray", title: "Stray Work", issue: { repository: "owner/api", number: 99 }, sessionId: null }] }) });
     });
     await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=unsupported-target");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const scope = page.getByRole("region", { name: "Authorized Issue Scope" });
     const repositories = scope.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText("Repositories", { exact: true }) });
     await expect(repositories.locator("li")).toHaveText(["owner/app: #5, #12", "owner/api: #5, #40",
@@ -118,6 +121,7 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
   test(`human scope recovery and epic selection at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const scope = page.getByRole("region", { name: "Authorized Issue Scope" });
     await expect(scope.getByText("Work Outside Authorized Scope", { exact: true })).toBeVisible();
     await scope.getByRole("checkbox", { name: /team\/repo#123/ }).check();
@@ -137,6 +141,7 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
   test(`a first message's context-only references sit beside its derived scope and promote through scope approval at ${viewport.width}px (#3920)`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=first-message");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const scope = page.getByRole("region", { name: "Authorized Issue Scope" });
     const facts = scope.locator("dl.facts");
     await expect(facts.locator("div").filter({ hasText: "Authorized Issues" }).locator("dd")).toHaveText("team/repo#123, team/repo#124, team/repo#125");
@@ -170,6 +175,7 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
     test(`Campaign Status shows the ${scope} Scope Grant at ${viewport.width}px (#4102)`, async ({ page }, info) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&scope=${scope}`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       const grant = page.getByRole("region", { name: "Scope Grant" });
       await expect(grant).toBeVisible();
       for (const [term, value] of Object.entries(rows)) {
@@ -192,6 +198,7 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
   test(`Campaign Status shows the Orchestrator's Scope Proposal with its rationale at ${viewport.width}px (#4282)`, async ({ page }, info) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=proposal");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const section = page.getByRole("region", { name: "Scope Proposal" });
     await expect(section).toBeVisible();
     await expect(page.getByRole("region", { name: "Scope Grant" })).toHaveCount(0);
@@ -223,6 +230,7 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
 
     // Before the Orchestrator proposes, the section says nothing is dispatched yet.
     await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=proposal-waiting");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const waiting = page.getByRole("region", { name: "Scope Proposal" });
     await expect(waiting.locator(".notice").filter({ hasText: "Waiting for the Orchestrator's Proposal" })).toContainText("Nothing is dispatched until it is admitted.");
     await expect(waiting.getByRole("article")).toHaveCount(0);
@@ -233,6 +241,7 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
   test(`a Scope Proposal names each issue by its own repository and shows the repository the owner named at ${viewport.width}px (#4118)`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=proposal-repositories");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const section = page.getByRole("region", { name: "Scope Proposal" });
     const latest = section.getByRole("article", { name: "Latest Proposal" });
     const row = (term: string) => latest.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText(term, { exact: true }) }).locator("dd");
@@ -257,6 +266,7 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
   test(`the owner resolves an epic in another repository from Authorized Issue Scope at ${viewport.width}px (#4118)`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=epic-repositories");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const section = page.getByRole("region", { name: "Authorized Issue Scope" });
     await section.getByRole("button", { name: "Epic Repository: team/repo", exact: true }).click();
     await page.getByRole("option", { name: "team/api", exact: true }).click();
@@ -283,6 +293,7 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
   test(`the owner changes a defaulted selection count from the Scope Grant at ${viewport.width}px (#4102)`, async ({ page }, info) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=grant-default");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const grant = page.getByRole("region", { name: "Scope Grant" });
     const row = (term: string) => grant.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText(term, { exact: true }) }).locator("dd");
     await expect(row("Selection Count")).toHaveText("3 Defaulted");
@@ -320,6 +331,7 @@ for (const [scope, requirement] of [
 ] as const) {
   test(`an ${scope} refusal names the runner update without a protocol number`, async ({ page }) => {
     await page.goto(`/campaign-status-e2e.html?scenario=campaign&scope=${scope}`);
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const panel = page.getByRole("region", { name: "Authorized Issue Scope" });
     const notice = panel.locator(".notice").filter({ hasText: "Scope Changes Unavailable" });
     await expect(notice).toContainText(requirement.error);

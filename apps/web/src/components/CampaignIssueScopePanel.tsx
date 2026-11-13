@@ -1,3 +1,4 @@
+import { CampaignSection } from "./CampaignSections.js";
 import React, { useEffect, useId, useRef, useState } from "react";
 import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, campaignScopeChangeGroups, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { browserRandomUUID } from "../browser-crypto.js";
@@ -81,8 +82,8 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision, b
    * Issues (#2940), so the Scope Grant section leaves those rows out. */
   boundaryShown?: boolean;
 }) {
+  const [allIssues, setAllIssues] = useState(false);
   const api = useApi();
-  const headingId = useId();
   const [view, setView] = useState<CampaignIssueScopeView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
@@ -128,6 +129,7 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision, b
   const repositories = view?.repositories?.length ? view.repositories
     : view ? [{ repository: view.repository, issueNumbers: view.issueNumbers, state: "saved" as const }] : [];
   const grouped = repositories.length > 1;
+  const authorizedCount = repositories.reduce((total, repository) => total + repository.issueNumbers.length, 0);
   const held = (repository: string, number: number) =>
     repositories.some((entry) => entry.repository.toLowerCase() === repository.toLowerCase() && entry.issueNumbers.includes(number));
   // The same number in two repositories is two issues, so a selection names its repository.
@@ -188,8 +190,7 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision, b
   return <>{view?.scopeGrant && (view.scopeGrant.status === "proposal"
     ? <CampaignScopeProposalSection grant={view.scopeGrant} proposals={view.scopeProposals ?? []} ceilingsShown={boundaryShown} />
     : <CampaignScopeGrantSection key={view.policyRevision} grant={view.scopeGrant} edit={grantEdit} ceilingsShown={boundaryShown} />)}
-  <section className="campaign-detail-section" aria-labelledby={headingId}>
-    <h3 id={headingId} className="section-title">Authorized Issue Scope</h3>
+  <CampaignSection title="Authorized Issue Scope" count={authorizedCount} className="campaign-detail-section">
     {error && <Notice tone="danger" role="alert" title="Couldn't Load or Update Issue Scope"
       actions={refreshButton}>{error}</Notice>}
     {view ? <>
@@ -198,13 +199,14 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision, b
           <ul className="campaign-detail-list">{repositories.map((entry) => <li key={entry.repository}>
             {entry.repository}
             {entry.state === "no_location_online" && <> <span className="muted">(No Location Online)</span></>}
-            {": "}{entry.issueNumbers.length ? entry.issueNumbers.map((n) => `#${n}`).join(", ") : "None"}
+            {": "}{entry.issueNumbers.length ? (allIssues ? entry.issueNumbers : entry.issueNumbers.slice(0, 3)).map((n) => `#${n}`).join(", ") : "None"}
           </li>)}</ul>
         </dd></div> : <div><dt>Repository</dt><dd>{view.repository || "Not Verified"}</dd></div>}
         <div><dt>Scope Revision</dt><dd>{view.revision}</dd></div>
-        {!grouped && <div><dt>Authorized Issues</dt><dd>{view.issueNumbers.length ? view.issueNumbers.map((n) => `${view.repository}#${n}`).join(", ") : "None"}</dd></div>}
+        {!grouped && <div><dt>Authorized Issues</dt><dd>{view.issueNumbers.length ? (allIssues ? view.issueNumbers : view.issueNumbers.slice(0, 3)).map((n) => `${view.repository}#${n}`).join(", ") : "None"}</dd></div>}
         {context.length > 0 && !selectable && <div><dt>Context-Only References</dt><dd>{context.map((n) => `${view.repository}#${n}`).join(", ")}</dd></div>}
       </dl>
+      {!allIssues && repositories.some(repository => repository.issueNumbers.length > 3) && <button type="button" className="btn ghost sm" onClick={() => setAllIssues(true)}>Show All ({authorizedCount})</button>}
       {view.candidateMessage && <Notice tone="warning" title="Epic Members Need Review">{view.candidateMessage}</Notice>}
       {!view.repository && view.issueNumbers.length > 0 && <Notice tone="info" title="Repository Not Verified">
         The saved issue numbers are shown without a repository because this campaign never recorded one. They are not confirmed to belong to any repository until the campaign runner verifies it.
@@ -247,5 +249,5 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision, b
         {pending && <p role="status">Scope is unchanged. Review the exact additions and removals in the campaign's approval request.</p>}
       </> : <p>Only the campaign owner can request issue scope changes here.</p>}
     </> : !error && <p role="status">Loading authorized issue scope…</p>}
-  </section></>;
+  </CampaignSection></>;
 }

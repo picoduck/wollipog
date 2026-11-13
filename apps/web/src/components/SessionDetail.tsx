@@ -609,6 +609,7 @@ export type SessionDetailProps = {
   sessionId: string;
   mode?: SessionDetailMode;
   sourceLocation?: SourceLocation;
+  campaignTarget?: import("../navigation.js").CampaignTarget;
   attentionTarget?: import("../navigation.js").AttentionTarget;
   rightPanel: RightPanelState;
   onOpenTerminal: () => void;
@@ -1137,6 +1138,7 @@ function composerOwns(box: Element | null | undefined, node: EventTarget | null)
 function SessionDetailLoaded({
   sessionId,
   sourceLocation,
+  campaignTarget,
   attentionTarget,
   rightPanel,
   onOpenTerminal,
@@ -8212,6 +8214,7 @@ function SessionDetailLoaded({
           session={session}
           earlierActivityUnloaded={isPartialHistory(eventWindow)}
           sourceLocation={sourceLocation}
+          campaignTarget={campaignTarget}
           attentionTarget={resolvedAttentionTarget}
           onOpenSourceLocation={openSourceLocation}
           onClearSourceLocation={clearSourceLocation}

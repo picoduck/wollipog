@@ -20405,3 +20405,51 @@ a.tab { text-decoration: none; }
     font-size: 16px;
   }
 }
+
+/* Campaign sections keep their live bodies mounted while disclosures hide them. */
+.campaign-section-index {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.campaign-section-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+  max-height: 30dvh;
+  overflow-y: auto;
+}
+.campaign-section-links button {
+  white-space: normal;
+  min-width: 0;
+  text-align: left;
+}
+.campaign-section-links [aria-current="location"] {
+  border-color: var(--accent);
+}
+.campaign-section-heading button {
+  width: 100%;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  background: transparent;
+  border: 0;
+  padding: var(--space-1);
+  overflow-wrap: anywhere;
+}
+[data-campaign-section] > div:not([hidden]) {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.campaign-status:has(.campaign-section-index) {
+  padding-top: 0;
+}

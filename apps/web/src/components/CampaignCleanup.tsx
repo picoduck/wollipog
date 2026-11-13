@@ -1,4 +1,5 @@
-import React, { useId, useState, type ReactNode } from "react";
+import { CampaignSection } from "./CampaignSections.js";
+import React, { useState, type ReactNode } from "react";
 import { worktreeRefusalAction, worktreeRefusalAllowsInspection, type CampaignCleanupItem, type CampaignStuckItem, type OrchestratorCampaignProjection } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { issueRefLabel } from "../campaign-status.js";
@@ -91,7 +92,6 @@ export function CampaignCleanup({ campaignId, cleanup, canAct, onOpenSession }: 
   onOpenSession: (sessionId: string) => ReactNode;
 }) {
   const api = useApi();
-  const headingId = useId();
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
   const items = cleanup.items.filter((item): item is CleanupItem => item.kind !== "handoff");
@@ -116,8 +116,7 @@ export function CampaignCleanup({ campaignId, cleanup, canAct, onOpenSession }: 
     }
   };
   return (
-    <section className="campaign-status-handoffs" aria-labelledby={headingId}>
-      <h3 id={headingId} className="section-title">Cleanup</h3>
+    <CampaignSection title="Cleanup" count={cleanup.total} attention={cleanup.total ? JSON.stringify(cleanup.items) : ""} className="campaign-status-handoffs">
       <p className="section-note">
         The campaign's work is delivered. {cleanup.total === 1 ? "This item is" : "These items are"} left; each says why and
         what settles it.
@@ -135,7 +134,7 @@ export function CampaignCleanup({ campaignId, cleanup, canAct, onOpenSession }: 
         {handoffs} handed-off item{handoffs === 1 ? " is" : "s are"} listed under Handed Off.
       </p>}
       {hidden > 0 && <p className="section-note">{hidden} more item{hidden === 1 ? " is" : "s are"} listed through the campaign tools.</p>}
-    </section>
+    </CampaignSection>
   );
 }
 
@@ -152,14 +151,12 @@ export function CampaignStuck({ stuck, repair, onOpenSession }: {
   repair: NonNullable<OrchestratorCampaignProjection["activity"]>["repair"];
   onOpenSession: (sessionId: string) => ReactNode;
 }) {
-  const headingId = useId();
   const hidden = stuck.total - stuck.items.length;
   const tried = repair?.state === "attempted"
     ? repair.continuation ? " Wollipog re-read the forge and woke the Orchestrator once; nothing changed." : " Wollipog re-read the forge; nothing changed."
     : "";
   return (
-    <section className="campaign-status-handoffs" aria-labelledby={headingId}>
-      <h3 id={headingId} className="section-title">Campaign Stuck</h3>
+    <CampaignSection title="Campaign Stuck" count={stuck.total} attention={JSON.stringify(stuck.items)} className="campaign-status-handoffs">
       <p className="section-note">
         Nothing is running and nothing is scheduled to move this campaign.{tried} {stuck.total === 1 ? "This is" : "These are"} still
         unfinished.
@@ -183,7 +180,7 @@ export function CampaignStuck({ stuck, repair, onOpenSession }: {
         ))}
       </ul>
       {hidden > 0 && <p className="section-note">{hidden} more item{hidden === 1 ? " is" : "s are"} listed through the campaign tools.</p>}
-    </section>
+    </CampaignSection>
   );
 }
 

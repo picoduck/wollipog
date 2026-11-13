@@ -16,6 +16,7 @@ for (const [device, viewport] of devices) test(`person-only worktree inspection 
       : { json: { retirement: { status: "removed" } } });
   });
   await page.goto("/campaign-status-e2e.html?scenario=campaign&activity=cleanup&automation=complete&retirement=1&theme=light");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   const cleanup = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Cleanup", exact: true }) });
   const row = cleanup.locator("li").filter({ hasText: path });
   await expect(row).not.toContainText(/ask the Orchestrator to retire/iu);
@@ -55,6 +56,7 @@ for (const [device, viewport] of devices) test(`person-only worktree inspection 
 for (const [device, viewport] of devices) test(`unproven ownership offers no inspection or confirmation on ${device}`, async ({ page }) => {
   await page.setViewportSize(viewport);
   await page.goto("/campaign-status-e2e.html?scenario=campaign&activity=cleanup&automation=complete&retirement=ownership&theme=light");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   const cleanup = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Cleanup", exact: true }) });
   const row = cleanup.locator("li").filter({ hasText: path });
   await expect(row).toContainText("retirement is unavailable and its contents are kept");

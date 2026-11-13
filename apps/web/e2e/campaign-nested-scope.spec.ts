@@ -9,6 +9,7 @@ for (const width of [1440, 390]) {
         issueNumbers: [33], revision: 2, supported: true, canPropose: true, outsideScope: [], candidates: [] }),
     }));
     await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=unsupported-target");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const scope = page.getByRole("region", { name: "Authorized Issue Scope" });
     await scope.getByLabel("Issue Additions", { exact: true }).fill(`${repository.toUpperCase()}#54`);
     await scope.getByLabel("Issue Removals", { exact: true }).fill(`${repository}#33`);

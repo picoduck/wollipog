@@ -1,3 +1,4 @@
+import { CampaignSection } from "./CampaignSections.js";
 import React, { useId } from "react";
 import { scopeProposalRepositoryConstraints, type CampaignScopeCheckView, type CampaignScopeProposal, type CampaignScopeProposalView, type FullControlScopeGrant,
   type ScopeProposalCheck as ScopeProposalCheckName } from "@wollipog/protocol";
@@ -110,10 +111,8 @@ export function CampaignScopeProposalSection({ grant, proposals, ceilingsShown =
    * section leaves those two rows out instead of repeating them. */
   ceilingsShown?: boolean;
 }) {
-  const headingId = useId();
   const repository = grant.ceilings.repositories[0] ?? "";
-  return <section className="campaign-detail-section" aria-labelledby={headingId}>
-    <h3 id={headingId} className="section-title">Scope Proposal</h3>
+  return <CampaignSection title="Scope Proposal" count={1} className="campaign-detail-section">
     {!proposals.length && <Notice tone="info" title="Waiting for the Orchestrator's Proposal">
       The Orchestrator reads your first message and proposes the campaign's issue scope. Nothing is dispatched until it is admitted.
     </Notice>}
@@ -130,5 +129,5 @@ export function CampaignScopeProposalSection({ grant, proposals, ceilingsShown =
         {view.check ? <ScopeProposalCheck check={view.check} /> : null}
       </article>;
     })}
-  </section>;
+  </CampaignSection>;
 }

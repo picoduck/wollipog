@@ -7,6 +7,7 @@ for (const theme of ["dark", "light"] as const) {
     test(`actionable exceptions fit ${device} ${theme} and preserve the existing request`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&recovery=missing_access&theme=${theme}`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       const notice = page.locator(".campaign-status .notice", { hasText: "Human Input Required" });
       await expect(notice).toBeVisible();
       await expect(notice).toContainText("cannot grant access or expose credentials");
@@ -38,6 +39,7 @@ for (const theme of ["dark", "light"] as const) {
     test(`a Full Control decline is blocked work that asks nobody on ${device} ${theme}`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&recovery=request_declined&theme=${theme}`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       const notice = page.locator(".campaign-status .notice", { hasText: "Request Declined" });
       await expect(notice).toBeVisible();
       await expect(notice).toContainText("Nobody is asked and the request is never replayed.");
@@ -60,6 +62,7 @@ for (const theme of ["dark", "light"] as const) {
     test(`verified children keep unfinished scoped repair active on ${device} ${theme}`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&recovery=failed_checks&completedChildren=1&theme=${theme}`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       const summary = page.locator(".campaign-status-summary");
       await expect(summary.locator("dt", { hasText: /^State$/ }).locator("..")).toContainText("Active");
       await expect(summary).not.toContainText("Campaign Complete");
@@ -97,6 +100,7 @@ for (const [reason, label, text] of [
   test(`a stopped worker reads as ${label} and stays blocked without an override (#3362)`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`/campaign-status-e2e.html?scenario=campaign&recovery=${reason}&subject=worker`);
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const notice = page.locator(".campaign-status .notice", { hasText: "Recovery Blocked" });
     await expect(notice).toContainText(text);
     await notice.getByRole("button", { name: "Show Details" }).click();
@@ -115,6 +119,7 @@ for (const [reason, label, text] of [
 
 test("denials and exhausted ceilings explain why no override is requested", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign&recovery=attempts_exhausted");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   const notice = page.locator(".campaign-status .notice", { hasText: "Recovery Blocked" });
   await notice.getByRole("button", { name: "Show Details" }).click();
   await expect(notice).toContainText("4 of 4");

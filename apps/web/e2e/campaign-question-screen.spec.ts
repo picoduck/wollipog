@@ -30,6 +30,7 @@ for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
   test(`a typed model ask waits for owner classification (${device})`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&screen=ask");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     if (device === "phone") await expect(page.getByRole("navigation", { name: "Primary Navigation" })).toBeInViewport();
     const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
     await expect(waiting).toContainText("#4542 Migrate Provider Account Configuration");
@@ -40,12 +41,12 @@ for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
     await expect(section).toContainText("Waiting for you to classify it.");
     await expect(section).toContainText("The configuration migration design could involve provider sign-in");
     await expect(section).toContainText("The model screen returned “ask”; no deterministic credential rule matched.");
-    await expect(section.getByRole("button")).toHaveText(["Decline", "Let the Orchestrator Answer", "Open Session"]);
+    await expect(section.locator("button:not([aria-expanded])")).toHaveText(["Decline", "Let the Orchestrator Answer", "Open Session"]);
     await wheelToCard(page, section);
     await page.screenshot({ path: testInfo.outputPath(`typed-ask-${device}.png`) });
     await section.getByRole("button", { name: "Decline", exact: true }).click();
     await expect(section).toContainText("You declined it.");
-    await expect(section.getByRole("button")).toHaveText(["Open Session"]);
+    await expect(section.locator("button:not([aria-expanded])")).toHaveText(["Open Session"]);
     await section.getByRole("button", { name: "Open Session", exact: true }).click();
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.openedSession())).toBe("s_child");
   });
@@ -58,6 +59,7 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390",
   test(`the owner classifies a question the Decision Model could not screen (${label}px)`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&screen=1&owner=1");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const section = page.getByRole("region", { name: "Decision Model Checks" });
     await expect(section).toBeVisible();
     const items = section.locator("li");
@@ -104,6 +106,7 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390",
   test(`follow-up relatedness and closure-reason checks read beside their request (${label}px)`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&checks=1");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const section = page.getByRole("region", { name: "Decision Model Checks" });
     const items = section.locator("li");
     await expect(items).toHaveCount(4);
@@ -130,6 +133,7 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 1500 }], ["390"
   test(`each selection proposal reads with its outcome, issues, rationale and reason (${label}px)`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&selection=1");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const section = page.getByRole("region", { name: "Decision Model Checks" });
     const items = section.locator("li");
     await expect(items).toHaveCount(3);
@@ -163,6 +167,7 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 1900 }], ["390"
   test(`a typed check's answers read as a checklist beside its verdict (${label}px)`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&selection=1&typed=1");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const section = page.getByRole("region", { name: "Decision Model Checks" });
     const items = section.locator(".campaign-screen-item");
     await expect(items).toHaveCount(3);
@@ -195,11 +200,13 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 1500 }], ["390"
     for (const [scenario, count] of [["screen=1&owner=1", 4], ["checks=1", 4]] as const) {
       const name = scenario.startsWith("screen") ? "credential-screen" : "follow-up-closure";
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&${scenario}`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       await expect(items).toHaveCount(count);
       await expect(section.getByRole("list", { name: "Answers" })).toHaveCount(0);
       await section.scrollIntoViewIfNeeded();
       await page.screenshot({ path: testInfo.outputPath(`typed-${name}-${label}-before.png`) });
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&${scenario}&typed=1`);
+      await page.getByRole("button", { name: "Expand All", exact: true }).click();
       await expect(items).toHaveCount(count);
       if (name === "credential-screen") {
         await expect(answers(0)).toHaveText([
@@ -239,6 +246,7 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390",
   test(`a Custom campaign's epic seed reads beside the other checks (${label}px)`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&checks=1&seed=1");
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
     const section = page.getByRole("region", { name: "Decision Model Checks" });
     const items = section.locator("li");
     await expect(items).toHaveCount(6);
@@ -264,8 +272,9 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390",
 
 test("Campaign Status lists each check once: the Decision Model section keeps only calls without a section of their own (#4265)", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign&checks=1&seed=1&decisions=1");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   await expect(page.getByRole("region", { name: "Decision Model Checks" }).locator("li")).toHaveCount(6);
-  const decisions = page.locator("section.campaign-status-handoffs").filter({ has: page.getByRole("heading", { name: "Decision Model", exact: true }) });
+  const decisions = page.locator("section.campaign-status-handoffs").filter({ has: page.getByRole("heading", { name: "Decisions", exact: true }) });
   // Only the three calls the fixture adds for this section; no follow-up, closure or epic-seed check a second time.
   await expect(decisions.locator(".campaign-decision-item")).toHaveCount(3);
   await expect(decisions).not.toContainText("It removes a temp file the crash fix exposed.");
@@ -274,6 +283,7 @@ test("Campaign Status lists each check once: the Decision Model section keeps on
 
 test("Campaign Status shows no Decision Model Checks before the Decision Model screens anything", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign");
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
   await expect(page.locator(".campaign-status-summary")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Decision Model Checks" })).toHaveCount(0);
 });

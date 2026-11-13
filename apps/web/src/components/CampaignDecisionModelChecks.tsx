@@ -1,4 +1,5 @@
-import { useEffect, useId, useState } from "react";
+import { CampaignSection } from "./CampaignSections.js";
+import { useEffect, useState } from "react";
 import type { CampaignDecisionsResponse, DecisionErrorClass } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
@@ -138,7 +139,7 @@ function outcomeText(decision: CampaignDecision): string {
  * classifies it here: Decline, or Let the Orchestrator Answer. A follow-up or closure it could not
  * check becomes the owner's own decision, which they make on its request. Nobody is asked for a value.
  */
-export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey, onOpenSession, findRequest, onOpenRequest }: {
+export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey, onOpenSession, findRequest, onOpenRequest, onAttentionChange }: {
   sessionId: string;
   /** The campaign's own session offers the classification; the server checks the person. */
   canClassify: boolean;
@@ -148,9 +149,9 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
   /** Where a pending selection's scope approval card is, so the owner can open it (#4103). */
   findRequest?: (target: CampaignRequestTarget) => string | null;
   onOpenRequest?: (requestKey: string) => void;
+  onAttentionChange?: (needsAttention: boolean) => void;
 }) {
   const api = useApi();
-  const headingId = useId();
   const [decisions, setDecisions] = useState<CampaignDecision[] | null>(null);
   // A selection proposal is the campaign Orchestrator's own, whichever session shows the list.
   const [campaignSessionId, setCampaignSessionId] = useState(sessionId);
@@ -186,10 +187,13 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
     }
   };
 
+  const attention = loadError ? "load-error" : (decisions ?? []).filter(decision =>
+    !decision.subject?.classification && (decision.state === "uncertain" || decision.state === "failed" || decision.subject?.classificationPending || decision.subject?.seed === "owner")
+  ).map(decision => decision.occurrenceId).join("|");
+  useEffect(() => onAttentionChange?.(Boolean(attention)), [attention, onAttentionChange]);
   if (!decisions?.length && !loadError) return null;
   return (
-    <section className="campaign-status-handoffs" aria-labelledby={headingId}>
-      <h3 id={headingId} className="section-title">Decision Model Checks</h3>
+    <CampaignSection title="Decision Model Checks" count={decisions?.length ?? 0} attention={attention} className="campaign-status-handoffs">
       <p className="section-note">
         The Decision Model checks whether a question asks for a credential, sign-in or access, whether a follow-up
         belongs to the work you asked for, whether a closure's reason fits its issue, whether the epic or issues the
@@ -299,6 +303,6 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
           );
         })}
       </ul>
-    </section>
+    </CampaignSection>
   );
 }
