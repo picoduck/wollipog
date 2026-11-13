@@ -199,12 +199,30 @@ test("server notices queue during pause without reviving a stopped provider; an 
     db.updateSessionStatus("child", "idle", Date.now());
     assert.ok(svc.setCampaignPause("root", { action: "pause" }, owner).ok);
     assert.equal(db.getSession("child")!.status, "stopped");
-    assert.ok(svc.prompt("child", "The merge closure list changed; recheck it before enqueueing.").ok);
+    assert.equal(svc.prompt("child", "Ordinary work should be refused.").ok, false);
+    assert.ok(svc.prompt("child", "The merge closure list changed; recheck it before enqueueing.", [],
+      undefined, undefined, undefined, "session", false, undefined, undefined, true).ok);
     assert.equal(db.getSession("child")!.status, "stopped", "staging a notice must not restore runtime status");
     const pending = db.raw().prepare("SELECT COUNT(*) AS n FROM session_prompt_commands WHERE session_id='child' AND state='pending'").get() as { n: number };
     assert.equal(pending.n, 1);
     assert.ok(svc.stop("child").ok);
     assert.equal(db.campaignPause("root")!.stoppedSessionIds.includes("child"), false, "a later ordinary Stop supersedes the pause's restart intent");
     assert.equal((db.raw().prepare("SELECT COUNT(*) AS n FROM session_prompt_commands WHERE session_id='child' AND state='pending'").get() as { n: number }).n, 0);
+  } finally { db.close(); }
+});
+
+test("Send Findings during pause refuses without marking findings sent or queueing work", () => {
+  const { db, svc, owner } = fixture();
+  try {
+    const created = svc.createReviewFinding("child", { scope: "uncommitted", diffHash: "a".repeat(64),
+      filePath: "src/example.ts", side: "right", line: 12,
+      body: "Preserve the retry invariant.", severity: "major", required: true });
+    assert.ok(created.ok, created.error ?? "the review finding should be admitted");
+    const finding = created.data!.findings[0]!;
+    assert.ok(svc.setCampaignPause("root", { action: "pause" }, owner).ok);
+    const bundled = svc.bundleReviewFindings("child", { findings: [{ findingId: finding.findingId, expectedUpdatedAt: finding.updatedAt }] });
+    assert.match(bundled.error!, /campaign is paused/);
+    assert.equal(db.listReviewFindings("child")[0]!.status, "open");
+    assert.equal((db.raw().prepare("SELECT COUNT(*) AS n FROM session_prompt_commands WHERE session_id='child'").get() as { n: number }).n, 0);
   } finally { db.close(); }
 });

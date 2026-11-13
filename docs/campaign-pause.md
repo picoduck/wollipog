@@ -33,6 +33,7 @@ An ordinary Stop, a guardrail Stop or an unrelated provider end retains the ordi
 revocation and cleanup rules. Only the Stop issued to preserve an idle pause member keeps its
 queued notices for resume; a later ordinary Stop supersedes that preservation intent. Owner
 resolutions during pause keep their notification owed, including on older runners. Other internal
-notices queue durably without restarting the provider, while human/agent prompt admission remains
-held. Shared viewers can inspect the pause, but receive no pause/resume controls unless their
+notices opt in to durable retention without restarting the provider. Human/agent prompts, Send
+Findings, pod relays and workflow dispatch refuse admission during pause, so a work timeout cannot
+run while its prompt waits for resume. Shared viewers can inspect the pause, but receive no pause/resume controls unless their
 principal-specific command permissions establish ownership.

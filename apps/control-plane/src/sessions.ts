@@ -7082,9 +7082,13 @@ export class SessionsService {
     // What the agent credential sending the prompt may do to this session, so the hold advice in
     // its refusal or delivery report names only tools it can call (#1863).
     holdReader?: HoldAdviceReader,
+    /** Trusted server notices may be retained unsent. Never populated from a caller's request. */
+    retainNoticeDuringCampaignPause = false,
   ): ServiceResult<PromptAdmissionView> {
     const pausedCampaign = this.db.campaignPaused(sessionId);
-    if (pausedCampaign && delivery) return fail("The campaign is paused; pre-staged deliveries wait until resume.", 409);
+    if (pausedCampaign && (delivery || !retainNoticeDuringCampaignPause && !binding)) {
+      return fail("The campaign is paused; resume it before admitting more work.", 409);
+    }
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
     const snapshotCommand = delivery?.commandSnapshots?.[0];
@@ -7402,6 +7406,10 @@ export class SessionsService {
           : undefined,
       }),
     });
+  }
+
+  private promptSystemNotice(sessionId: string, text: string): ServiceResult<PromptAdmissionView> {
+    return this.prompt(sessionId, text, [], undefined, undefined, undefined, "session", false, undefined, undefined, true);
   }
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
@@ -11168,7 +11176,7 @@ export class SessionsService {
       // the same rule in its campaign policy rather than being woken for its own decline.
       setImmediate(() => {
         try {
-          const delivered = this.prompt(session.id, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE);
+          const delivered = this.promptSystemNotice(session.id, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE);
           if (!delivered.ok) this.log.warn(`unresolved-effect decline guidance not delivered to ${session.id}: ${delivered.error}`);
         } catch (error) {
           this.log.warn(`unresolved-effect decline guidance failed for ${session.id}: ${(error as Error).message}`);
@@ -11189,7 +11197,7 @@ export class SessionsService {
       if (first) setImmediate(() => {
         try {
           // A root whose runner has the owner-decision tools (#4064) is told how to reach its owner.
-          const delivered = this.prompt(session.id, runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion,
+          const delivered = this.promptSystemNotice(session.id, runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion,
             "ownerDecisions") ? FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE : FULL_CONTROL_ROOT_QUESTION_MESSAGE);
           if (!delivered.ok) this.log.warn(`root question guidance not delivered to ${session.id}: ${delivered.error}`);
         } catch (error) {
@@ -14858,7 +14866,7 @@ export class SessionsService {
     // Nobody is left to tell; the decision itself records why.
     if (!child || isTerminal(child.status)) return true;
     if (!this.hub.isRunnerOnline(child.runnerId)) return false;
-    const result = this.prompt(decision.sessionId, mergeClosureChangedPrompt(decision, watch));
+    const result = this.promptSystemNotice(decision.sessionId, mergeClosureChangedPrompt(decision, watch));
     if (!result.ok) this.log.warn(`merge closure notice for ${decision.sessionId} was not sent: ${result.error}`);
     return result.ok;
   }
@@ -14906,7 +14914,7 @@ export class SessionsService {
       this.log.warn(`merge closure owner question for ${decision.occurrenceId} was refused: ${created.error}`);
     }
     // An older root, or a refused question: the root Orchestrator is told, and the record says so.
-    const told = this.prompt(root.id, `${text.question}\n\n${text.material}\n\nReport this to the campaign's owner.`);
+    const told = this.promptSystemNotice(root.id, `${text.question}\n\n${text.material}\n\nReport this to the campaign's owner.`);
     return { report: { reportedAt, unreported: told.ok
       ? "The campaign's root cannot carry an owner question, so its Orchestrator was told instead."
       : `Neither the owner nor the root Orchestrator could be told: ${told.error ?? "the message was refused"}` }, delivered: told.ok };
