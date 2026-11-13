@@ -57,6 +57,33 @@ test("periodic reconciliation clears external removal after refusal without dele
     assert.equal(existsSync(join(worktree.path, "private.txt")), true);
     rmSync(worktree.path, { recursive: true });
 
+    store.patchMeta("s_missing", { worktreePath: worktree.path, worktreeBranch: worktree.branch });
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(store.readMeta("s_missing")?.worktreePath, worktree.path,
+      "an idle session keeps its missing selection for launch-time recovery, never falling back to the primary checkout");
+    store.patchMeta("s_missing", { status: "stopped" });
+    const journal = (manager as unknown as { cleanupJournal: WorktreeCleanupJournal }).cleanupJournal;
+    journal.add({ sessionId: "s_missing", worktreeId: worktree.id, cleanupId: "original",
+      repoPath: repo, worktreePath: worktree.path, context: { kind: "native" },
+      branch: worktree.branch, removalMode: "safe", trigger: "archive_retirement" });
+    journal.addRetainedRef({ sessionId: "s_missing", worktreeId: worktree.id, cleanupId: "original",
+      repoPath: repo, context: { kind: "native" }, branch: worktree.branch, expectedOid: localTip,
+      reasons: ["recorded_branch"], state: "pending", createdAt: Date.now(), updatedAt: Date.now() });
+    const pending = journal.list();
+    const retained = journal.listRetainedRefs();
+    await manager.reconcileWorktreePullRequests({ replayDeferredRetirements: false });
+    assert.deepEqual(journal.list(), pending, "the original cleanup generation remains owned by its replay path");
+    assert.deepEqual(journal.listRetainedRefs(), retained, "its retained refs are not orphaned or rearmed under a new generation");
+    assert.equal(store.readMeta("s_missing")?.worktreePath, worktree.path);
+    journal.remove("s_missing", worktree.id);
+    journal.removeUnarmedRetainedRefs("s_missing", worktree.id, "original");
+    const teardownMarker = join(root, "teardown-ran");
+    store.patchMeta("s_missing", { worktreeHooks: { [worktree.id]: {
+      configHash: "fixture", environment: {}, teardown: [{ name: "Release Resources",
+        command: [process.execPath, "-e", `require('fs').writeFileSync(${JSON.stringify(teardownMarker)},'ran')`],
+        optional: false, timeoutSeconds: 30 }],
+    } } });
+
     await manager.reconcileWorktreePullRequests();
     assert.deepEqual(store.readMeta("s_missing")?.worktrees, []);
     assert.equal(store.readMeta("s_missing")?.worktreePath, null);
@@ -64,6 +91,11 @@ test("periodic reconciliation clears external removal after refusal without dele
     assert.ok(sent.some((message) => message.type === "session_runtime_updated" &&
       message.snapshot.worktreePath === null && message.snapshot.worktrees?.length === 0));
     assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 0);
+    const receipt = new WorktreeCleanupJournal(dataDir).history().find((record) => record.worktreeId === worktree.id);
+    assert.equal(receipt?.trigger, "external_removal");
+    assert.equal(receipt?.teardown?.status, "completed_with_failures");
+    assert.match(receipt?.teardown?.steps[0]?.error ?? "", /removed externally/);
+    assert.equal(existsSync(teardownMarker), false, "hooks never fall back to a different checkout");
     await manager.reconcileWorktreePullRequests();
     assert.equal(git("rev-parse", "refs/heads/fix/missing"), localTip, "repeated reconciliation is harmless");
     assert.equal(await worktreeIsAbsent(join(root, "unavailable"), worktree.path), false);

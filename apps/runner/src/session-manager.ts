@@ -5844,6 +5844,9 @@ export class SessionManager {
   private async reconcileMissingWorktrees(meta: SessionMeta): Promise<void> {
     for (const worktree of this.attributedWorktrees(meta)) {
       if (worktree.source !== "created" || this.active.has(meta.sessionId) ||
+          (!isTerminal(meta.status) && !!meta.worktreePath && sameWorktreePath(meta.context, meta.worktreePath, worktree.path)) ||
+          this.cleanupJournal.list().some((record) => record.sessionId === meta.sessionId &&
+            record.worktreeId === worktree.id) ||
           this.launchingSelectionUsesPath(meta.sessionId, meta, worktree.path) ||
           this.liveWorktreeUsesPath(meta.sessionId, worktree.path) ||
           this.transitioningProviderUsesPath(meta.sessionId, meta.context, worktree.path) ||
@@ -5852,11 +5855,26 @@ export class SessionManager {
       if (!this.store.acquireWorktreeLease(meta.sessionId, leaseOwner)) continue;
       try {
         if (!await worktreeIsAbsent(meta.repoPath, worktree.path, { context: meta.context })) continue;
-        const record = this.cleanupRecordForWorktree(meta, worktree, "pull_request_reconciliation", "safe");
+        const record = this.cleanupRecordForWorktree(meta, worktree, "external_removal", "safe");
         if (this.active.has(meta.sessionId) || this.launchingSelectionUsesPath(meta.sessionId, meta, worktree.path)) continue;
         await this.retireWorktreeProcesses(meta.sessionId, meta.context, worktree.path, record.processMarker);
         if (!await worktreeIsAbsent(meta.repoPath, worktree.path, { context: meta.context })) continue;
         record.worktreeRemovedAt = Date.now();
+        // The approved hook's cwd no longer exists. Never run repository code in the primary
+        // checkout as a fallback; record the unreleased external resources as teardown failures.
+        if (record.hooks?.teardown.length && !record.teardown?.completedAt) {
+          const now = Date.now();
+          record.teardown = {
+            status: "completed_with_failures", configHash: record.hooks.configHash,
+            attemptId: randomUUID(), startedAt: now, completedAt: now,
+            steps: record.hooks.teardown.map((step) => ({
+              name: step.name, optional: step.optional, status: "failed", startedAt: now,
+              durationMs: 0, error: "The worktree was removed externally; teardown cannot run in its missing directory.",
+              stdout: "", stderr: "",
+            })),
+          };
+          this.log(`external worktree removal for ${boundedSessionIdForLog(meta.sessionId)} left teardown hooks unrun; see cleanup history`);
+        }
         if (await this.forgetRemovedWorktree(record)) this.finishWorktreeCleanup(record);
       } finally {
         this.store.releaseWorktreeLease(meta.sessionId, leaseOwner);
