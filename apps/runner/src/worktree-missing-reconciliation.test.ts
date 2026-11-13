@@ -62,6 +62,14 @@ test("periodic reconciliation clears external removal after refusal without dele
     assert.equal(store.readMeta("s_missing")?.worktreePath, worktree.path,
       "an idle session keeps its missing selection for launch-time recovery, never falling back to the primary checkout");
     store.patchMeta("s_missing", { status: "stopped" });
+    for (const sessionStatus of ["stopped", "completed", "failed"] as const) {
+      store.patchMeta("s_missing", { status: sessionStatus });
+      await manager.reconcileWorktreePullRequests();
+      assert.equal(store.readMeta("s_missing")?.worktreePath, worktree.path,
+        `${sessionStatus} sessions can resume and must retain their missing selection for recovery`);
+    }
+    // Model choosing another working location before reconciling the old, unselected row.
+    store.patchMeta("s_missing", { worktreePath: null, worktreeBranch: undefined, status: "stopped" });
     const journal = (manager as unknown as { cleanupJournal: WorktreeCleanupJournal }).cleanupJournal;
     journal.add({ sessionId: "s_missing", worktreeId: worktree.id, cleanupId: "original",
       repoPath: repo, worktreePath: worktree.path, context: { kind: "native" },
@@ -74,7 +82,7 @@ test("periodic reconciliation clears external removal after refusal without dele
     await manager.reconcileWorktreePullRequests({ replayDeferredRetirements: false });
     assert.deepEqual(journal.list(), pending, "the original cleanup generation remains owned by its replay path");
     assert.deepEqual(journal.listRetainedRefs(), retained, "its retained refs are not orphaned or rearmed under a new generation");
-    assert.equal(store.readMeta("s_missing")?.worktreePath, worktree.path);
+    assert.equal(store.readMeta("s_missing")?.worktrees?.length, 1);
     journal.remove("s_missing", worktree.id);
     journal.removeUnarmedRetainedRefs("s_missing", worktree.id, "original");
     const teardownMarker = join(root, "teardown-ran");

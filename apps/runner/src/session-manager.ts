@@ -5844,7 +5844,9 @@ export class SessionManager {
   private async reconcileMissingWorktrees(meta: SessionMeta): Promise<void> {
     for (const worktree of this.attributedWorktrees(meta)) {
       if (worktree.source !== "created" || this.active.has(meta.sessionId) ||
-          (!isTerminal(meta.status) && !!meta.worktreePath && sameWorktreePath(meta.context, meta.worktreePath, worktree.path)) ||
+          // Terminal sessions can resume too. Without an explicit retirement request, retain
+          // every missing selection for launch-time recovery rather than using the primary tree.
+          (!!meta.worktreePath && sameWorktreePath(meta.context, meta.worktreePath, worktree.path)) ||
           this.cleanupJournal.list().some((record) => record.sessionId === meta.sessionId &&
             record.worktreeId === worktree.id) ||
           this.launchingSelectionUsesPath(meta.sessionId, meta, worktree.path) ||
