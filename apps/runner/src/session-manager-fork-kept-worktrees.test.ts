@@ -130,6 +130,22 @@ test("a fork does not take on the worktrees its source left in other Locations, 
   });
 });
 
+test("a provider fork gets its own runner restart recovery identity", async () => {
+  if (process.platform === "win32") return;
+  await withSource("fork-recovery", async (f) => {
+    const sourceRequestId = "runner-recovery:source";
+    f.store.patchMeta(f.source.sessionId, { runnerRestartRecoveryRequestId: sourceRequestId,
+      orchestrator: { strictProjectIsolation: false, integrationIsolation: false } });
+    const result = await f.manager.forkConversation(f.source.sessionId, "s_recovery_target", 1, "Fork");
+    assert.equal(result.ok, true, result.error);
+    f.manager.reconcileStore();
+    f.manager.reconcileRunnerRestartRecovery(["s_recovery_target"]);
+    const request = f.store.readMeta("s_recovery_target")!.pendingApproval!;
+    assert.equal(request.kind, "runner_recovery");
+    assert.notEqual(request.requestId, sourceRequestId);
+  });
+});
+
 test("a failed fork whose rollback keeps its worktree still stops what ran there and gives back its port block", async () => {
   if (process.platform === "win32") return;
   await withSource("fork-kept-rollback", async (f) => {

@@ -18109,6 +18109,7 @@ export class SessionManager {
         stoppedBackgroundTaskIds: undefined,
         preview: null,
         pendingApproval: null,
+        runnerRestartRecoveryRequestId: undefined,
         providerCredentialScopeId: undefined,
         providerCredentialIdentityId: undefined,
         providerCredentialIdentityEvidence: undefined,
