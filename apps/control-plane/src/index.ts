@@ -1308,6 +1308,7 @@ app.register(async (instance) => {
   let runtimeAttentionFrames = 0;
   let runtimeAttentionStarted = 0;
   let reconcilingInventory = false;
+  let credentialDiagnostics = 0;
   const deferNewCredentialBinding = (msg: Extract<RunnerToControlPlane,
     { type: "agent_control_credential" | "policy_hook_credential" }>) => {
     if (!reconcilingInventory || typeof msg.sessionId !== "string" ||
@@ -1628,7 +1629,13 @@ app.register(async (instance) => {
         break;
       case "agent_control_credential":
         {
-          if (deferNewCredentialBinding(msg)) break;
+          const diagnose = reconcilingInventory && credentialDiagnostics++ < 4;
+          const started = performance.now();
+          if (diagnose) app.log.info({ event: "runner_credential_received" }, "runner credential handshake");
+          if (deferNewCredentialBinding(msg)) {
+            if (diagnose) app.log.info({ event: "runner_credential_deferred" }, "runner credential awaits materialization");
+            break;
+          }
           const accepted = db.setAgentControlCredential(msg.sessionId, runnerId!, msg.tokenHash, Date.now());
           send(socket, {
             type: "agent_control_credential_registered",
@@ -1637,6 +1644,8 @@ app.register(async (instance) => {
             accepted,
             ...(!accepted ? { error: "session binding was rejected" } : {}),
           });
+          if (diagnose) app.log.info({ event: "runner_credential_ack_sent", durationMs: Math.round(performance.now() - started) },
+            "runner credential acknowledgement sent");
           if (!accepted) {
             app.log.warn(`runner ${runnerId} sent invalid agent-control credential binding for ${msg.sessionId}`);
           }

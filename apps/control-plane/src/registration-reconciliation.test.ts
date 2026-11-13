@@ -515,7 +515,10 @@ test("cancelled registration carries the first campaign before-view into its rep
     assert.equal(before, 1);
     let current = true;
     assert.equal(await svc.hydrateRunnerSessionsCooperatively("runner", snapshots, {
-      isCurrent: () => current, yieldToLoop: async () => { current = false; },
+      isCurrent: () => current, yieldToLoop: async () => {
+        // Cancel after the first applied chunk, including when registration yields before writes.
+        if (db.getSession("child-0")?.pendingApproval === null) current = false;
+      },
     }), false);
     assert.equal(db.getSession("child-0")?.pendingApproval, null);
     assert.equal(await svc.hydrateRunnerSessionsCooperatively("runner", snapshots, { isCurrent: () => true }), true);
