@@ -624,6 +624,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignWorktreeRecovery: 266,
   /** v193 enforces delivery proof on archive-triggered managed retirement and replay. */
   archiveWorktreeRetirement: 193,
+  worktreePatchDelivery: 370,
   progressAwareSessionWorktrees: 113,
   /** v161 carries durable worktree-recovery state and its exact not-delivered receipt. */
   worktreeRecovery: 161,
@@ -11405,7 +11406,9 @@ export type SessionWorktreeRequestMessage =
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "retry_setup"; path: string }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "discard"; path: string;
       /** Protocol v193: require proof the exact checkout head was delivered before removal. */
-      requireDelivered?: boolean }
+      requireDelivered?: boolean;
+      /** v370: server-derived consumed merge records of this same campaign child. Never agent input. */
+      campaignDeliveredPullRequests?: Array<{ repository: string; number: number; headSha: string }> }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "generate_setup" }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "delete_refs";
       /** One of the session's recorded worktrees; the selected one when absent. Never a Git path. */

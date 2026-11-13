@@ -1460,6 +1460,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 369: Retire ejected armed merge approvals with fresh forge evidence (#4533).
   369,
   // v370 slot
+  // 370: same-child campaign merged PR candidates for patch-identical worktree retirement (#4535).
+  370,
   // v371 slot
   // v372 slot
   // v373 slot

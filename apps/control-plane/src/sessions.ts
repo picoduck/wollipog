@@ -20599,11 +20599,15 @@ export class SessionsService {
           if (item.status !== this.db.campaignWorktreeCleanup(sessionId)
             .find((candidate) => candidate.path === item.path)?.status) continue;
           const requestId = `archive_worktree_${randomUUID().slice(0, 8)}`;
+          const campaignDeliveredPullRequests = runnerSupportsProtocol(
+            this.db.getRunner(child.runnerId)?.protocolVersion, "worktreePatchDelivery")
+            ? this.db.campaignChildDeliveredPullRequests(sessionId) : undefined;
           try {
             const result = await this.hub.requestFromRunner(child.runnerId, requestId, {
               type: "session_worktree", requestId, sessionId, operation: "discard", path: item.path,
               requireDelivered: true,
-            }, 150_000);
+              ...(campaignDeliveredPullRequests === undefined ? {} : { campaignDeliveredPullRequests }),
+            }, campaignDeliveredPullRequests?.length ? 330_000 : 150_000);
             if (result.type !== "session_worktree_result" || result.sessionId !== sessionId ||
                 result.operation !== "discard") {
               retry = true;

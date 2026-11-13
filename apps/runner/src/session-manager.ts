@@ -16,6 +16,7 @@ import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, Gi
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
 import { executeBranchDeletion, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
 import { githubSlug } from "./git-ops.js";
+import { proveWorktreePatchDelivery, type CampaignDeliveredPullRequest } from "./worktree-patch-delivery.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
 import { githubMergePreflight } from "./github-merge-preflight.js";
@@ -2017,6 +2018,7 @@ export class SessionManager {
   private discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch = mergedWorktreePullRequestForBranch;
   private discoverAttachedWorktreePullRequest: typeof branchPullRequestForAttachedWorktree = branchPullRequestForAttachedWorktree;
   private probeMergedPullRequestContainment: typeof mergedPullRequestContainingHead = mergedPullRequestContainingHead;
+  private probePatchDelivery: typeof proveWorktreePatchDelivery = proveWorktreePatchDelivery;
   private resolveWorktreePullRequestState: typeof worktreePullRequestState = worktreePullRequestState;
   private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
   /** The runner's ref-deleting Git runs only in its own confined mount view (#3316), because the
@@ -4485,6 +4487,18 @@ export class SessionManager {
     });
   }
 
+  private async proveCleanupPatchDelivery(record: WorktreeCleanupRecord, meta: SessionMeta,
+    worktree: SessionWorktreeView): Promise<void> {
+    record.cleanupId ??= randomUUID();
+    const startedAt = Date.now();
+    record.patchDelivery = await this.probePatchDelivery(worktree.path, worktree.branch,
+      record.campaignDeliveredPullRequests ?? [], { context: meta.context });
+    this.log(JSON.stringify({ event: "worktree_patch_delivery", sessionId: boundedSessionIdForLog(meta.sessionId),
+      worktreeId: worktree.id, cleanupId: record.cleanupId, entryPoint: record.trigger,
+      outcome: record.patchDelivery ? "matched" : "unproven", durationMs: Date.now() - startedAt,
+      candidateCount: Math.min(record.campaignDeliveredPullRequests?.length ?? 0, 5) }));
+  }
+
   /** Probe a rotating, bounded candidate slice outside the session mutation lanes. Only the short
    * proof-persistence step enters a lane, where current linkage and branch identity are rechecked.
    * A negative result is memoized against the full Git identity, so a changed head/upstream bypasses
@@ -5033,6 +5047,7 @@ export class SessionManager {
           reasons: candidate.reasons,
           ...(candidate.verifiedMergedHead ? { verifiedMergedHead: candidate.verifiedMergedHead } : {}),
           ...(candidate.containingMergedHead ? { containingMergedHead: candidate.containingMergedHead } : {}),
+          ...(candidate.patchDelivery ? { patchDelivery: candidate.patchDelivery } : {}),
           state: "pending",
           createdAt: now,
           updatedAt: now,
@@ -5108,6 +5123,7 @@ export class SessionManager {
           ownerHash: this.runnerOwnerHash,
           ...(record.verifiedMergedHead ? { verifiedMergedHead: record.verifiedMergedHead } : {}),
           ...(record.containingMergedHead ? { containingMergedHead: record.containingMergedHead } : {}),
+          ...(record.patchDelivery ? { patchDelivery: record.patchDelivery } : {}),
           requireDelivered: record.trigger === "archive_retirement",
           retainRefs,
           beforeRemove,
@@ -5314,6 +5330,7 @@ export class SessionManager {
     worktree: SessionWorktreeView,
     reason: "provider_active" | "provider_launching" | "cleanup_pending",
     trigger: "explicit_discard" | "archive_retirement" | "pull_request_reconciliation",
+    campaignDeliveredPullRequests?: CampaignDeliveredPullRequest[],
   ): Promise<{ removed: false; snapshot: SessionSnapshot; retirement: SessionWorktreeRetirementResult }> {
     let latest = meta;
     const existing = this.pendingSafeWorktreeCleanup(meta.sessionId, meta.context, worktree);
@@ -5329,8 +5346,13 @@ export class SessionManager {
         item.id === worktree.id && sameWorktreePath(latest.context, item.path, worktree.path));
       if (!current) throw new Error("worktree record changed while retirement was being deferred");
       deferredRecord = this.cleanupRecordForWorktree(latest, current, trigger, "safe");
+      deferredRecord.campaignDeliveredPullRequests = campaignDeliveredPullRequests;
       this.cleanupJournal.add(deferredRecord);
     } else {
+      if (campaignDeliveredPullRequests) {
+        existing.campaignDeliveredPullRequests = campaignDeliveredPullRequests;
+        this.cleanupJournal.add(existing);
+      }
       const verifiedMergedHead = verifiedMergedHeadOid(worktree.pullRequest);
       if (verifiedMergedHead && existing.verifiedMergedHead !== verifiedMergedHead) {
         existing.verifiedMergedHead = verifiedMergedHead;
@@ -5360,7 +5382,8 @@ export class SessionManager {
   private async discardWorktreeLocked(
     sessionId: string,
     path: string,
-    options: { refreshMergedHead?: boolean; trigger?: "explicit_discard" | "archive_retirement" | "pull_request_reconciliation" } = {},
+    options: { refreshMergedHead?: boolean; trigger?: "explicit_discard" | "archive_retirement" | "pull_request_reconciliation";
+      campaignDeliveredPullRequests?: CampaignDeliveredPullRequest[] } = {},
   ): Promise<{
     removed: boolean;
     reason?: string;
@@ -5380,7 +5403,7 @@ export class SessionManager {
     }
     const initiallySelectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (initiallySelectedIsLaunching) {
-      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
+      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard", options.campaignDeliveredPullRequests);
     }
     let unlinkedForgeUnavailable = false;
     let deliveredHead: string | undefined;
@@ -5486,19 +5509,19 @@ export class SessionManager {
     }
     const selectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (selectedIsLaunching) {
-      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
+      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard", options.campaignDeliveredPullRequests);
     }
     if (this.liveWorktreeUsesPath(sessionId, worktree.path) ||
         this.transitioningProviderUsesPath(sessionId, meta.context, worktree.path) ||
         this.providerTurnUsesPath(sessionId, meta.context, worktree.path)) {
-      return this.deferWorktreeRetirement(meta, worktree, "provider_active", options.trigger ?? "explicit_discard");
+      return this.deferWorktreeRetirement(meta, worktree, "provider_active", options.trigger ?? "explicit_discard", options.campaignDeliveredPullRequests);
     }
     // Last: the path an in-flight launch captured before the selection moved on. The row above no
     // longer names it and no provider entry, rebinding, or lease exists yet, so this is the only
     // remaining proof that a launch still owns it. Checking it after the fences above keeps every
     // reason those fences already report unchanged.
     if (this.launchingSelectionUsesPath(sessionId, meta, worktree.path)) {
-      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
+      return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard", options.campaignDeliveredPullRequests);
     }
     let teardownIdentityError: string | undefined;
     try {
@@ -5547,6 +5570,11 @@ export class SessionManager {
       if (successorHead) cleanup.verifiedMergedHead = successorHead;
       // A merged pull request's history contains this tip (#4068); removal re-proves it.
       if (containment?.state === "contained") cleanup.containingMergedHead = containment.headOid;
+      if (!deliveredHead && !successorHead && containment?.state !== "contained" &&
+          options.campaignDeliveredPullRequests?.length) {
+        cleanup.campaignDeliveredPullRequests = options.campaignDeliveredPullRequests;
+        await this.proveCleanupPatchDelivery(cleanup, meta, worktree);
+      }
       if (teardownIdentityError) {
         const now = Date.now();
         cleanup.teardown = {
@@ -5696,11 +5724,12 @@ export class SessionManager {
   async discardWorktree(
     sessionId: string,
     path: string,
-    options: { requireDelivered?: boolean } = {},
+    options: { requireDelivered?: boolean; campaignDeliveredPullRequests?: CampaignDeliveredPullRequest[] } = {},
   ): Promise<{ snapshot: SessionSnapshot; retirement: SessionWorktreeRetirementResult }> {
     return this.runWorktreeOperation(sessionId, async () => {
       const result = await this.discardWorktreeLocked(sessionId, path,
-        options.requireDelivered ? { trigger: "archive_retirement" } : {});
+        { ...(options.requireDelivered ? { trigger: "archive_retirement" as const } : {}),
+          campaignDeliveredPullRequests: options.campaignDeliveredPullRequests });
       if ((!result.removed && result.retirement?.status !== "deferred") || !result.snapshot || !result.retirement) {
         throw new Error(`worktree retained: ${result.reason ?? "cleanup did not complete"}`);
       }
@@ -19994,6 +20023,13 @@ export class SessionManager {
         }
         containmentState = await this.refreshDeferredContainment(record);
         if (worktreeFenced()) return logFenced();
+        if (record.campaignDeliveredPullRequests?.length && !record.containingMergedHead) {
+          await this.proveCleanupPatchDelivery(record, meta, worktree);
+          if (worktreeFenced()) return logFenced();
+          if (record.patchDelivery) {
+            this.cleanupJournal.add(record);
+          }
+        }
       }
 
       const cleanupLeaseOwner = `${this.lockOwner}:cleanup-replay:${randomUUID()}`;

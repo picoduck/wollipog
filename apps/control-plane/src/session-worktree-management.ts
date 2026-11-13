@@ -96,14 +96,20 @@ export function createSessionWorktreeManagement(deps: {
       };
     }
     const requestId = `worktree_${randomUUID().slice(0, 8)}`;
+    const campaignDeliveredPullRequests = request.operation === "discard" &&
+      runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "worktreePatchDelivery")
+      ? db.campaignChildDeliveredPullRequests(sessionId) : undefined;
+    const deliveryCandidates = campaignDeliveredPullRequests === undefined ? {} : { campaignDeliveredPullRequests };
     try {
       const res = await hub.requestFromRunner(
         session.runnerId,
         requestId,
-        { ...request, ...selfRequest, type: "session_worktree", requestId, sessionId },
+        { ...request, ...selfRequest, ...deliveryCandidates, type: "session_worktree", requestId, sessionId },
         request.operation === "create"
           ? 65 * 60_000
-          : request.operation === "retry_setup" ? 65 * 60_000 : 150_000,
+          : request.operation === "retry_setup" ? 65 * 60_000
+            // Discovery and deletion-boundary patch verification each have a 90-second deadline.
+            : campaignDeliveredPullRequests?.length ? 330_000 : 150_000,
       );
       if (res.type !== "session_worktree_result") return reply.code(502).send({ error: "unexpected runner reply" });
       if (!res.ok || !res.snapshot) {
