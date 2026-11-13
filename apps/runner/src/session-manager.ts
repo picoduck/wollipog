@@ -318,6 +318,7 @@ import {
   createWorktreeFromTree,
   captureTurnDiff,
   discardWorktreeIfSafe,
+  worktreeIsAbsent,
   isLegacyWslSessionWorktreePath,
   registeredSessionWorktree,
   sessionWorktreeBranch,
@@ -5838,6 +5839,31 @@ export class SessionManager {
     });
   }
 
+  /** Reconcile external removal without retrying a refused deletion. No removal intent is
+   * journaled: a crash merely leaves the inventory row for the next read-only absence check. */
+  private async reconcileMissingWorktrees(meta: SessionMeta): Promise<void> {
+    for (const worktree of this.attributedWorktrees(meta)) {
+      if (worktree.source !== "created" || this.active.has(meta.sessionId) ||
+          this.launchingSelectionUsesPath(meta.sessionId, meta, worktree.path) ||
+          this.liveWorktreeUsesPath(meta.sessionId, worktree.path) ||
+          this.transitioningProviderUsesPath(meta.sessionId, meta.context, worktree.path) ||
+          this.listedByAnotherSession(meta.sessionId, meta.context, worktree.path)) continue;
+      const leaseOwner = `${this.lockOwner}:missing:${randomUUID()}`;
+      if (!this.store.acquireWorktreeLease(meta.sessionId, leaseOwner)) continue;
+      try {
+        if (!await worktreeIsAbsent(meta.repoPath, worktree.path, { context: meta.context })) continue;
+        const record = this.cleanupRecordForWorktree(meta, worktree, "pull_request_reconciliation", "safe");
+        if (this.active.has(meta.sessionId) || this.launchingSelectionUsesPath(meta.sessionId, meta, worktree.path)) continue;
+        await this.retireWorktreeProcesses(meta.sessionId, meta.context, worktree.path, record.processMarker);
+        if (!await worktreeIsAbsent(meta.repoPath, worktree.path, { context: meta.context })) continue;
+        record.worktreeRemovedAt = Date.now();
+        if (await this.forgetRemovedWorktree(record)) this.finishWorktreeCleanup(record);
+      } finally {
+        this.store.releaseWorktreeLease(meta.sessionId, leaseOwner);
+      }
+    }
+  }
+
   /** Conservative startup/periodic reconciliation. Forge failures retain state, while a durable
    * terminal state is remembered so dirty or active trees can be retried after they become safe. */
   async reconcileWorktreePullRequests(options: { replayDeferredRetirements?: boolean } = {}): Promise<void> {
@@ -5860,6 +5886,8 @@ export class SessionManager {
           await this.runWorktreeOperation(candidate.sessionId, async () => {
             let meta = this.store.readMeta(candidate.sessionId);
             if (!meta || !this.sessionCanOpen(candidate.sessionId)) return;
+            await this.reconcileMissingWorktrees(meta);
+            meta = this.store.readMeta(candidate.sessionId) ?? meta;
             const recoveredIdentity = await this.recordLegacyWorktreeIdentity(meta);
             if (recoveredIdentity) {
               this.send({

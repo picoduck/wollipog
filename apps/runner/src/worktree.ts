@@ -3072,6 +3072,35 @@ export async function discardWorktreeIfSafe(
   }
 }
 
+/** Read-only inventory proof. Missing registration alone does not prove files are absent.
+ * Dangling symlinks, unavailable parents/repositories and remote contexts retain the record. */
+export async function worktreeIsAbsent(
+  repoPath: string, path: string, options: WorktreeOptions = {},
+): Promise<boolean> {
+  const context = options.context ?? nativeContext;
+  if (context.kind !== "native") return false;
+  try {
+    const absent = () => {
+      if (!statSync(dirname(path)).isDirectory()) return false;
+      try {
+        lstatSync(path);
+        return false;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ENOENT";
+      }
+    };
+    // Most inventory paths are present; do not spawn Git for those on every periodic pass.
+    if (!absent()) return false;
+    const listed = parseWorktreePorcelain(
+      await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
+    );
+    if (listed.some((entry) => sameWorktreePath(context, entry.path, path))) return false;
+    return absent();
+  } catch {
+    return false;
+  }
+}
+
 /** Remove a worktree this runner just checked out on an existing branch, keeping the branch. Git
  * refuses (and the worktree stays) if anything in it changed, unless `force` says those changes are
  * the runner's own: a setup that ran there before the worktree was given back (#4209). Either way

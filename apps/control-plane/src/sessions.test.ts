@@ -1989,6 +1989,39 @@ test("Stop and Archive leaves old runners pending and retries an undelivered arc
   }
 });
 
+test("runner inventory reconciliation clears refused cleanup and verifies a completed campaign", async () => {
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
+  try {
+    const child = spawn(parent.id, "Deliver the issue");
+    const path = `/worktrees/${child}/removed`;
+    db.setWorktreePath(child, path);
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify([
+      { id: "removed", path, branch: "agent/removed", source: "created" },
+    ]), child);
+    hub.requestHandler = (message) => {
+      assert.equal(message.type, "session_worktree");
+      return { type: "session_worktree_result", requestId: message.requestId,
+        sessionId: child, operation: "discard", ok: false,
+        error: "worktree retained: the branch has no upstream" };
+    };
+    svc.onSessionStatus(child, "idle");
+    assert.ok(verify(child, report(child, "Delivered issue")).ok);
+    svc.onSessionStatus(child, "stopped");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    db.updateSessionStatus(parent.id, "idle", Date.now());
+    assert.equal(db.campaignProjection(parent.id)?.status, "complete_needs_cleanup");
+    assert.equal(db.campaignProjection(parent.id)?.cleanupWorktrees?.[0]?.status, "refused");
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
+      id: child, status: "stopped", worktreePath: null, worktrees: [],
+    }));
+    assert.equal(db.campaignProjection(parent.id)?.cleanupWorktrees?.length ?? 0, 0);
+    assert.equal(db.campaignProjection(parent.id)?.children.cleanupPending, 0);
+    assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
+  } finally {
+    db.close();
+  }
+});
+
 test("a stopped campaign child with a final report can still be verified, and archived by that verification", async () => {
   const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {
