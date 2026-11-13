@@ -166,7 +166,7 @@ test("an owner return releases future requests, preserves pending authority, and
     const row = h.db.campaignProjection("root")!.ownerDecisions!.items.find((item) => item.occurrenceId === first.occurrenceId)!;
     const inbox = pendingRequests(h.db.getSession("child")!.pendingApproval).find((request) => request.occurrenceId === first.occurrenceId)!.workflowDecision!;
     assert.equal(row.resourceLabel, record.summary);
-    assert.equal(ownerResourceLabel(inbox.resourceSnapshot, ""), record.summary);
+    assert.equal(ownerResourceLabel(inbox.resourceSnapshot), record.summary);
     assert.equal(ownerResourceKeepReason(inbox), ownerResourceKeepReason(row));
     assert.equal(ownerResourceKeepReason(inbox), "The Orchestrator handed this resource to you.");
     assert.ok(record.at > 0);

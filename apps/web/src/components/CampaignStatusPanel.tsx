@@ -290,9 +290,9 @@ function AvailableCampaignStatus({
               )}
               {!!data.summary.campaign?.ownerReturns?.length && <section className="campaign-status-handoffs">
                 <h3 className="section-title">Returned to the Orchestrator</h3>
-                <ul className="campaign-detail-list">{data.summary.campaign.ownerReturns.map((item) => <li key={item.occurrenceId}>
-                  <p>{item.summary}</p>
-                  <p>Returned by {item.byName} <RecordedTime at={item.at} now={now} />. Future requests follow the current boundary; pending requests remain yours.</p>
+                <ul className="campaign-detail-list">{data.summary.campaign.ownerReturns.map((item) => <li key={item.occurrenceId} className="campaign-detail-section">
+                  <div><strong>{item.summary}</strong></div>
+                  <div>Returned by {item.byName} <RecordedTime at={item.at} now={now} />. Future requests follow the current boundary; pending requests remain yours.</div>
                 </li>)}</ul>
               </section>}
               <CampaignSummarySection data={data} now={now} />

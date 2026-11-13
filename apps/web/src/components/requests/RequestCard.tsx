@@ -634,7 +634,7 @@ export function RequestCard({
     </section>
     {!readOnly && workflowDecision?.returnableOwnerResource && <ReturnOwnerResource
       key={workflowDecision.occurrenceId} sessionId={workflowDecision.sessionId} occurrenceId={workflowDecision.occurrenceId}
-      resourceLabel={ownerResourceLabel(workflowDecision.resourceSnapshot, request.title)}
+      resourceLabel={ownerResourceLabel(workflowDecision.resourceSnapshot)}
       ownershipReason={ownerResourceKeepReason(workflowDecision)} />}
     </>
   );
