@@ -28,9 +28,17 @@ function fixture(mode?: "tree" | "tree-same-group") {
   assert.equal(result.stdout.trim(), "ready");
   const manifest = JSON.parse(readFileSync(join(root, "fixture-state.json"), "utf8")) as Manifest;
   const records = readdirSync(directory).filter(name => name.endsWith(".json")).map(name => join(directory, name));
-  const alive = (child: Manifest["children"][number]) =>
-    linuxLeaseProcessProbe()?.startTime(child.pid) === child.startTime &&
-    !/\) [ZX] /u.test(readFileSync(`/proc/${child.pid}/stat`, "utf8"));
+  const alive = (child: Manifest["children"][number]) => {
+    try {
+      return linuxLeaseProcessProbe()?.startTime(child.pid) === child.startTime &&
+        !/\) [ZX] /u.test(readFileSync(`/proc/${child.pid}/stat`, "utf8"));
+    } catch (error) {
+      // The child may be reaped between the start-time probe and the state read.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ESRCH") return false;
+      throw error;
+    }
+  };
   return { directory, manifest, records, alive, close() {
     // Only fixture-created identities, with the same pidfd verification as production.
     const helper = linuxCgroupHelper();
