@@ -7,8 +7,12 @@ ledger, issue approval, and output format. This job never edits code or opens a 
 
 ## Scope and Ground Truth
 
+After the parent's fetch, pin the baseline with `baseline_sha="$(git rev-parse origin/main)"`
+and record it. Use that exact commit for every history, caller, blame, and source read below;
+do not rely on the primary checkout's HEAD or a remote-tracking ref that another session can move.
+
 Use the named subsystem when supplied. Otherwise inspect the pinned baseline's change history
-with `git log --since='90 days ago' --name-only --format='%h %s' -- apps packages scripts` and
+with `git log "$baseline_sha" --since='90 days ago' --name-only --format='%h %s' -- apps packages scripts` and
 select one subsystem with recurring maintenance activity. State the scope and selection reason.
 Churn prioritizes investigation; it does not establish a defect. Apply the parent skill's
 per-line recent-change and open-PR exclusions before admitting candidates. If those exclusions
@@ -17,10 +21,12 @@ leave no suitable area, report no findings rather than reviewing active work as 
 For each candidate:
 
 - Trace an actual caller through the affected functions, state owners, and externally visible
-  result. Use `git grep -n -F '<symbol>'` and targeted source reads at the baseline, following
+  result. Use `git grep -n -F '<symbol>' "$baseline_sha" -- apps packages scripts` and
+  `git show "$baseline_sha":<path>` for targeted source reads, following
   re-exports, dispatch tables, and dynamic consumers where relevant. Record the caller knowledge
   required: ordering, configuration, ownership, errors, retries, and recovery.
-- Investigate why the shape exists with targeted `git blame`, `git log --follow -p -- <path>`,
+- Investigate why the shape exists with targeted `git blame "$baseline_sha" -- <path>`,
+  `git log --follow -p "$baseline_sha" -- <path>`,
   relevant PRs and issues via `gh`, and recorded design decisions or tests. Quote the evidence
   that establishes a constraint; label inferred rationale and missing history explicitly.
 - Demonstrate maintenance friction with a historical change, regression, or concrete current
