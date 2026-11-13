@@ -163,7 +163,7 @@ export interface WorktreeCleanupRecord {
    * session and its checkpoint generation remain live. */
   auxiliaryWorktreeRollback?: boolean;
   /** Exact initiating lifecycle. Startup replay preserves rather than replaces this value. */
-  trigger?: "explicit_discard" | "archive_retirement" | "pull_request_reconciliation" | "session_delete" | "creation_rollback";
+  trigger?: "explicit_discard" | "archive_retirement" | "pull_request_reconciliation" | "external_removal" | "session_delete" | "creation_rollback";
   /** Explicit discard/reconciliation retains Git safety checks; deletion/rollback keeps legacy force cleanup. */
   removalMode?: "safe" | "force";
   /** Exact approved teardown material. Runner-private and never projected to the control plane. */
@@ -3069,6 +3069,35 @@ export async function discardWorktreeIfSafe(
     return { removed: true };
   } catch {
     return { removed: false, reason: "unavailable" };
+  }
+}
+
+/** Read-only inventory proof. Missing registration alone does not prove files are absent.
+ * Dangling symlinks, unavailable parents/repositories and remote contexts retain the record. */
+export async function worktreeIsAbsent(
+  repoPath: string, path: string, options: WorktreeOptions = {},
+): Promise<boolean> {
+  const context = options.context ?? nativeContext;
+  if (context.kind !== "native") return false;
+  try {
+    const absent = () => {
+      if (!statSync(dirname(path)).isDirectory()) return false;
+      try {
+        lstatSync(path);
+        return false;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ENOENT";
+      }
+    };
+    // Most inventory paths are present; do not spawn Git for those on every periodic pass.
+    if (!absent()) return false;
+    const listed = parseWorktreePorcelain(
+      await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
+    );
+    if (listed.some((entry) => sameWorktreePath(context, entry.path, path))) return false;
+    return absent();
+  } catch {
+    return false;
   }
 }
 

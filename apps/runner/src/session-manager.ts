@@ -318,6 +318,7 @@ import {
   createWorktreeFromTree,
   captureTurnDiff,
   discardWorktreeIfSafe,
+  worktreeIsAbsent,
   isLegacyWslSessionWorktreePath,
   registeredSessionWorktree,
   sessionWorktreeBranch,
@@ -5838,6 +5839,51 @@ export class SessionManager {
     });
   }
 
+  /** Reconcile external removal without retrying a refused deletion. No removal intent is
+   * journaled: a crash merely leaves the inventory row for the next read-only absence check. */
+  private async reconcileMissingWorktrees(meta: SessionMeta): Promise<void> {
+    for (const worktree of this.attributedWorktrees(meta)) {
+      if (worktree.source !== "created" || this.active.has(meta.sessionId) ||
+          // Terminal sessions can resume too. Without an explicit retirement request, retain
+          // every missing selection for launch-time recovery rather than using the primary tree.
+          (!!meta.worktreePath && sameWorktreePath(meta.context, meta.worktreePath, worktree.path)) ||
+          this.cleanupJournal.list().some((record) => record.sessionId === meta.sessionId &&
+            record.worktreeId === worktree.id) ||
+          this.launchingSelectionUsesPath(meta.sessionId, meta, worktree.path) ||
+          this.liveWorktreeUsesPath(meta.sessionId, worktree.path) ||
+          this.transitioningProviderUsesPath(meta.sessionId, meta.context, worktree.path) ||
+          this.listedByAnotherSession(meta.sessionId, meta.context, worktree.path)) continue;
+      const leaseOwner = `${this.lockOwner}:missing:${randomUUID()}`;
+      if (!this.store.acquireWorktreeLease(meta.sessionId, leaseOwner)) continue;
+      try {
+        if (!await worktreeIsAbsent(meta.repoPath, worktree.path, { context: meta.context })) continue;
+        const record = this.cleanupRecordForWorktree(meta, worktree, "external_removal", "safe");
+        if (this.active.has(meta.sessionId) || this.launchingSelectionUsesPath(meta.sessionId, meta, worktree.path)) continue;
+        await this.retireWorktreeProcesses(meta.sessionId, meta.context, worktree.path, record.processMarker);
+        if (!await worktreeIsAbsent(meta.repoPath, worktree.path, { context: meta.context })) continue;
+        record.worktreeRemovedAt = Date.now();
+        // The approved hook's cwd no longer exists. Never run repository code in the primary
+        // checkout as a fallback; record the unreleased external resources as teardown failures.
+        if (record.hooks?.teardown.length && !record.teardown?.completedAt) {
+          const now = Date.now();
+          record.teardown = {
+            status: "completed_with_failures", configHash: record.hooks.configHash,
+            attemptId: randomUUID(), startedAt: now, completedAt: now,
+            steps: record.hooks.teardown.map((step) => ({
+              name: step.name, optional: step.optional, status: "failed", startedAt: now,
+              durationMs: 0, error: "The worktree was removed externally; teardown cannot run in its missing directory.",
+              stdout: "", stderr: "",
+            })),
+          };
+          this.log(`external worktree removal for ${boundedSessionIdForLog(meta.sessionId)} left teardown hooks unrun; see cleanup history`);
+        }
+        if (await this.forgetRemovedWorktree(record)) this.finishWorktreeCleanup(record);
+      } finally {
+        this.store.releaseWorktreeLease(meta.sessionId, leaseOwner);
+      }
+    }
+  }
+
   /** Conservative startup/periodic reconciliation. Forge failures retain state, while a durable
    * terminal state is remembered so dirty or active trees can be retried after they become safe. */
   async reconcileWorktreePullRequests(options: { replayDeferredRetirements?: boolean } = {}): Promise<void> {
@@ -5860,6 +5906,8 @@ export class SessionManager {
           await this.runWorktreeOperation(candidate.sessionId, async () => {
             let meta = this.store.readMeta(candidate.sessionId);
             if (!meta || !this.sessionCanOpen(candidate.sessionId)) return;
+            await this.reconcileMissingWorktrees(meta);
+            meta = this.store.readMeta(candidate.sessionId) ?? meta;
             const recoveredIdentity = await this.recordLegacyWorktreeIdentity(meta);
             if (recoveredIdentity) {
               this.send({
