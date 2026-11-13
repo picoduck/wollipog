@@ -6922,8 +6922,8 @@ export class SessionManager {
     return { requests: [...requests.values()], verified: true };
   }
 
-  /** On startup, demote sessions left mid-flight (their agent process is gone) to `idle` so the
-   * snapshots we report are honest — they remain resumable. */
+  /** On startup, no previous provider is attached to this manager. Demote sessions left mid-flight
+   * and explicitly surface native Orchestrators whose loaded runtime bindings need replacement. */
   reconcileStore(): void {
     const pendingWorktreeCleanup = this.cleanupJournal.list();
     const currentCheckpointOwnershipKeys = new Set<string>();
@@ -7163,6 +7163,26 @@ export class SessionManager {
           reconciled.status === "queued" || reconciled.status === "input_required") {
         // The process that owned any other pending approval is gone — clear the stale card too.
         this.store.patchMeta(m.sessionId, { status: "idle", pendingApproval: null });
+      }
+      // Native providers can outlive their runner. Their loaded guard and credential bindings
+      // cannot be adopted by this process. Preserve one owner action instead of advertising a
+      // live root whose tools all refuse. Children retain recovery through their Orchestrator.
+      if (isOrchestratorLaunch(m) && m.context.kind === "native" && !m.review &&
+          !terminal && m.command && !m.providerAuthBlock && !m.providerHistoryBlock && !m.worktreeRecovery) {
+        const current = this.store.readMeta(m.sessionId)!;
+        const existing = pendingRequests(m.pendingApproval).find((request) => request.kind === "runner_recovery");
+        const request = existing ?? {
+          requestId: `runner-recovery:${randomUUID()}`,
+          kind: "runner_recovery" as const,
+          title: "Relaunch Orchestrator After Runner Restart",
+          options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }],
+        };
+        this.store.patchMeta(m.sessionId, {
+          status: "input_required",
+          pendingApproval: addPendingRequest(current.pendingApproval, request),
+        });
+        if (!existing) this.log(JSON.stringify({ event: "runner_restart_recovery_required",
+          entryPoint: "startup_reconciliation", sessionId: m.sessionId, requestId: request.requestId }));
       }
       // A crash mid-worktree-setup leaves the pending flag stranded; nothing will resolve it
       // until a restart re-runs start(), so clear it rather than blocking Files/shells forever.
@@ -11343,6 +11363,10 @@ export class SessionManager {
     launchInitialPrompt = false,
     providerRecovery = false,
   ): boolean {
+    if (pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.kind === "runner_recovery")) {
+      durable?.failed("relaunch this Orchestrator from its recovery action before sending messages", "COMMAND_CANCELLED");
+      return false;
+    }
     if (this.roleConversionPending(sessionId)) {
       durable?.failed("wait for the session role change to finish before sending a message", "COMMAND_CANCELLED");
       return false;
@@ -23400,7 +23424,7 @@ export class SessionManager {
     }) ?? meta;
   }
 
-  /** A provider process cannot survive runner restart. Accepted continuations with no delivery
+  /** No previous provider remains attached after runner restart. Accepted continuations with no delivery
    * proof are therefore terminal, while submitted-only continuations remain conservatively
    * uncertain and are never replayed. */
   private reconcileMissingBackgroundContinuations(meta: SessionMeta): SessionMeta {
@@ -23473,7 +23497,8 @@ export class SessionManager {
   /** Automatic background work must not turn a restart into new spending authority. */
   private backgroundRecoveryHeld(meta: SessionMeta): boolean {
     const entry = this.active.get(meta.sessionId);
-    if (entry?.governanceTripped || entry?.controlPlaneHold || this.recoveryHolds.has(meta.sessionId)) return true;
+    if (entry?.governanceTripped || entry?.controlPlaneHold || this.recoveryHolds.has(meta.sessionId) ||
+        pendingRequests(meta.pendingApproval).some((request) => request.kind === "runner_recovery")) return true;
     if (meta.config.costBudgetUsd && meta.costUsd >= meta.config.costBudgetUsd) return true;
     if (!meta.config.maxToolCalls) return false;
     const toolCallIds = entry?.toolCallIds ?? new Set(this.store.toolCallIds(meta.sessionId));

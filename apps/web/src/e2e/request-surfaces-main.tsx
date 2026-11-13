@@ -984,6 +984,12 @@ function Fixture() {
             : scenario === "empty" ? { human: 0, orchestrator: 0 } : { human: 1, orchestrator: 0 },
         } as SessionView["orchestratorCampaign"],
       } as SessionView
+    : scenario === "runner-recovery"
+      ? { ...standaloneApprovalSession(), title: "Orchestrator Recovery", role: "orchestrator", pendingApproval: {
+          requestId: "runner-recovery:fixture", kind: "runner_recovery",
+          title: "Relaunch Orchestrator After Runner Restart",
+          options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }],
+        } } as SessionView
     : scenario === "standalone" || scenario === "worker"
       ? {
           ...standaloneApprovalSession(),

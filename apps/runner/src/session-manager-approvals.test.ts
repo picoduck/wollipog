@@ -10,6 +10,9 @@ import { test } from "node:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { ManagedWorktreeGuardSockets } from "./managed-worktree-guard-socket.js";
 import { pendingRequests, type RunnerToControlPlane } from "@wollipog/protocol";
 import { SessionManager, type DurableCommandLifecycle } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
@@ -78,6 +81,52 @@ function makeHarness(deliver: boolean | "none") {
 
 const eventsOf = (sent: RunnerToControlPlane[], kind: string) =>
   sent.filter((m) => m.type === "session_event" && (m as { payload: { kind: string } }).payload.kind === kind);
+
+test("runner restart leaves an unadoptable native root needing one durable owner relaunch", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    store.patchMeta("s_perm", { status: "running", config: { permissionMode: "orchestrator" }, agentSessionId: "survivor" });
+    sm.reconcileStore();
+    const first = store.readMeta("s_perm")!;
+    assert.equal(first.status, "input_required");
+    const recovery = pendingRequests(first.pendingApproval).filter((request) => request.kind === "runner_recovery");
+    assert.equal(recovery.length, 1);
+    assert.equal(recovery[0]!.options[0]!.name, "Relaunch Orchestrator");
+    assert.equal(sm.prompt("s_perm", "continue automatically"), false);
+    sm.reconcileStore();
+    assert.equal(store.readMeta("s_perm")!.pendingApproval!.requestId, recovery[0]!.requestId);
+  } finally { sm.shutdownAll(); cleanup(); }
+});
+
+test("a native provider survives the in-process runner replacement with its old guard closed and an explicit relaunch action", { skip: process.platform !== "linux" }, async () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  const guards = new ManagedWorktreeGuardSockets(join(store.rootPath(), "hooks"), () => []);
+  const provider = spawn(process.execPath, ["--import", "tsx", new URL("./fixtures/surviving-guard-provider.mjs", import.meta.url).pathname,
+    new URL("./managed-worktree-guard.ts", import.meta.url).href], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  try {
+    await once(provider, "message");
+    const address = await guards.ensure("s_perm", "abstract");
+    const payload = JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", cwd: "/work", tool_input: { command: "git status" } });
+    const ask = async () => {
+      const response = once(provider, "message");
+      provider.send({ address, payload });
+      return (await response)[0];
+    };
+    assert.equal((await ask()).judged, true);
+    store.patchMeta("s_perm", { status: "running", config: { permissionMode: "orchestrator" }, agentSessionId: "survivor" });
+    await guards.closeAll(); // Replace the runner service, never the hosting runner.
+    sm.reconcileStore();
+    assert.equal(provider.exitCode, null, "the native provider still lives");
+    assert.equal((await ask()).judged, false, "an unserved guard cannot judge or run the call");
+    assert.equal(store.readMeta("s_perm")!.status, "input_required");
+    assert.equal(store.readMeta("s_perm")!.pendingApproval!.kind, "runner_recovery");
+  } finally {
+    provider.kill();
+    await once(provider, "close");
+    await guards.closeAll();
+    sm.shutdownAll(); cleanup();
+  }
+});
 
 test("delivered approval emits exactly one permission_resolved and flips box meta to running", () => {
   const { sm, sent, store, cleanup } = makeHarness(true);

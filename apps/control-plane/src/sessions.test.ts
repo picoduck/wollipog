@@ -22576,6 +22576,28 @@ test("hydrateRunnerSessions won't let one runner overwrite another runner's sess
   assert.equal(s.title, "boxed work"); // unchanged by the non-owner
 });
 
+test("runner recovery is owner-only, retained offline, and relaunches through the existing restart path", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: "test-orchestrator", permissionMode: "orchestrator" });
+  const request: PendingApproval = { requestId: "runner-recovery:test", kind: "runner_recovery",
+    title: "Relaunch Orchestrator After Runner Restart", options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }] };
+  db.setPendingApproval(id, request);
+  db.updateSessionStatus(id, "input_required", Date.now());
+  assert.equal(db.getSession(id)!.attention!.humanActions.length, 1);
+  assert.equal(parentControlRequestEligible("questions_and_approvals", request), false);
+  assert.equal(svc.prompt(id, "continue automatically").status, 409);
+  assert.equal(svc.approve(id, request.requestId, "relaunch", { kind: "agent", id }).status, 403);
+  hub.online = false;
+  assert.equal(svc.approve(id, request.requestId, "relaunch").ok, false);
+  assert.equal(db.getSession(id)!.pendingApproval!.requestId, request.requestId);
+  hub.online = true;
+  const result = svc.approve(id, request.requestId, "relaunch");
+  assert.ok(result.ok, JSON.stringify(result));
+  assert.ok(hub.sentOfType("start_session").some((message) => message.spec.sessionId === id));
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+  assert.equal(svc.approve(id, request.requestId, "relaunch").ok, false);
+});
+
 test("hydrateRunnerSessions persists a snapshot's pendingApproval so it survives hydration (H3)", () => {
   const { db, svc } = makeHarness();
   const approval = {

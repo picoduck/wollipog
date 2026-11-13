@@ -4056,6 +4056,23 @@ test("agent-control credentials are hash-only, exact-session, runner-bound, repl
   assert.equal(db.agentControlCredentialValid("agent-session", "runner-1", second), false);
 });
 
+test("root credential refusals name owner recovery rather than referring the root to itself", () => {
+  const db = withRunner();
+  try {
+    db.createSession(newSession({ id: "root", role: "orchestrator", permissionMode: "orchestrator" }));
+    db.setAgentControlCredential("root", "runner-1", hashToken("known-secret"), 1);
+    const headers = { authorization: "Bearer known-secret", [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: "root" };
+    for (const state of ["running", "idle", "stopped"] as const) {
+      db.updateSessionStatus("root", state, 2);
+      const refusal = sessionCredentialRefusal(headers, db)!;
+      assert.equal(refusal.reason, "root_unavailable");
+      assert.match(refusal.error!, /session owner restart.*credential and guard/);
+      assert.doesNotMatch(refusal.error!, /ask the Orchestrator|with the Orchestrator/);
+    }
+    assert.deepEqual(sessionCredentialRefusal({ ...headers, authorization: "Bearer wrong" }, db), { reason: "unknown_credential" });
+  } finally { db.close(); }
+});
+
 test("refused session credentials disclose stop provenance only to the matching bearer", async () => {
   const db = withRunner();
   db.createSession(newSession({ id: "agent-session" }));

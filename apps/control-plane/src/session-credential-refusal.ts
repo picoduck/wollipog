@@ -1,5 +1,5 @@
 import { extractBearer, hashToken } from "./auth.js";
-import { WOLLIPOG_AGENT_ACTOR_SESSION_HEADER } from "@wollipog/protocol";
+import { WOLLIPOG_AGENT_ACTOR_SESSION_HEADER, sessionRole } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 
 /** Diagnostic only, after authentication has refused. Never grants access or trusts an actor
@@ -14,6 +14,9 @@ export function sessionCredentialRefusal(
   const session = db.getSession(claimed);
   if (!session || !bearer || !db.agentControlCredentialValid(session.id, session.runnerId, hashToken(bearer))) {
     return { reason: "unknown_credential" };
+  }
+  if (sessionRole(session) === "orchestrator" && !session.parentSessionId) {
+    return { reason: "root_unavailable", error: "session agent credential refused: this Orchestrator is unavailable; have the session owner restart it from the session controls to refresh its credential and guard" };
   }
   const stop = db.sessionStopProvenance(session.id);
   if (session.status === "stopped" && stop?.cause === "runner_disconnect" && !stop.confirmation) {

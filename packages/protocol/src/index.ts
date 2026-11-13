@@ -4586,6 +4586,8 @@ export function summarizeQuestionAnswers(
 }
 
 export type ApprovalKind =
+  /** Runner-owned, owner-resolved relaunch after loss of a native Orchestrator's runtime. */
+  | "runner_recovery"
   | "permission"
   | "authentication"
   | "cost_budget"

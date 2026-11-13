@@ -42,6 +42,8 @@ const META: Record<RequestKind, RequestKindMeta> = {
 
 export function requestKindMeta(request: Pick<PendingApproval, "kind" | "workflowDecision">): RequestKindMeta {
   switch (request.kind) {
+    case "runner_recovery":
+      return { kind: "permission", label: "Runner Recovery" };
     case "question":
       return META.question;
     case "authentication":
