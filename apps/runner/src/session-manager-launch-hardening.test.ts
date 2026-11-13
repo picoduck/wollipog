@@ -37,12 +37,17 @@ function fixtureProcessProbe(root: string, children: Array<{ pid: number }>) {
   mkdirSync(proc);
   for (const { pid } of children) symlinkSync(`/proc/${pid}`, join(proc, String(pid)));
   const kernel = linuxLeaseProcessProbe()!;
-  const scoped = linuxLeaseProcessProbe(proc)!;
-  return { proc, probe: { ...kernel, scan: (...args: Parameters<typeof kernel.scan>) => {
+  const prune = () => {
     for (const { pid } of children) {
       const link = join(proc, String(pid));
       if (!existsSync(`/proc/${pid}`)) { try { unlinkSync(link); } catch { /* already removed */ } }
     }
+  };
+  // A pidfd reports exit before init reaps the zombie. Prune every scan round so a
+  // reaped child disappears from the next listing, just as it does from real procfs.
+  const scoped = linuxLeaseProcessProbe(proc, undefined, undefined, { afterListing: prune })!;
+  return { proc, probe: { ...kernel, scan: (...args: Parameters<typeof kernel.scan>) => {
+    prune();
     return scoped.scan(...args);
   } } };
 }
