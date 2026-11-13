@@ -1444,6 +1444,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 363: Explicit contributor review admission and configured reviewer selection.
   363,
   // v364 slot
+  // 364: Campaign-scoped personal-rule Owner Approval (#4540); unknown sources stay owner-kept.
+  364,
   // v365 slot
   // v366 slot
   // v367 slot

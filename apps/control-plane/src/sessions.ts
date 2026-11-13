@@ -1,4 +1,5 @@
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
+import { personalRuleDelegation } from "./personal-rule-delegation.js";
 import { scheduledAssistantOwner, type AssistantAutomationAuthorization } from "./assistant-automation-authority.js";
 import { AssistantRefusal } from "./assistant-connections.js";
 import { normalizeDeliveryVerificationFailure, publishedIssueFailure, type PublishedIssueFailure } from "@wollipog/protocol";
@@ -1397,10 +1398,20 @@ export function normalizeWorkflowDecisionSnapshot(
     if (value.material !== undefined && !boundedDecisionString(value.material, OWNER_DECISION_LIMITS.material)) {
       return fail(`material must be nonempty text of at most ${OWNER_DECISION_LIMITS.material} characters`);
     }
-    if (Object.keys(value).some((key) => !["category", "question", "options", "recommendedOptionId", "material", "kind"].includes(key))) {
+    if (Object.keys(value).some((key) => !["category", "question", "options", "recommendedOptionId", "material", "kind", "ruleDelegation"].includes(key))) {
       return fail("an owner decision has only a question, options, a recommended option, material and a kind");
     }
-    const normalized = { category: "owner_decision" as const, ...question.data, ...(typeof value.material === "string" ? { material: value.material } : {}),
+    let ruleDelegation: import("@wollipog/protocol").OwnerDecisionSnapshot["ruleDelegation"];
+    if (value.ruleDelegation !== undefined) {
+      const d = value.ruleDelegation as Record<string, unknown> | null;
+      if (ownerQuestion || !d || typeof d !== "object" || Array.isArray(d) ||
+          Object.keys(d).some((k) => !["rule", "categories", "boundaryRevision"].includes(k))) return fail("invalid rule delegation");
+      const rule = personalRuleDelegation({ rule: d.rule, categories: d.categories });
+      if (!rule || !Number.isSafeInteger(d.boundaryRevision) || Number(d.boundaryRevision) < 1) return fail("invalid rule delegation");
+      ruleDelegation = { ...rule, boundaryRevision: Number(d.boundaryRevision) };
+    }
+    const normalized = { category: "owner_decision" as const, ...question.data,
+      ...(ruleDelegation ? { ruleDelegation } : {}), ...(typeof value.material === "string" ? { material: value.material } : {}),
       ...(ownerQuestion ? { kind: "question" as const } : {}) };
     // An Owner Question is answered by the label the owner sees, so each must name one option, the
     // recommended one's marked label included (#4270 review).
@@ -14974,17 +14985,22 @@ export class SessionsService {
     }
     // A resource its owner kept stays theirs (#4064): a later request for it, under any key and from
     // any campaign member, is the person's too, so withdrawing and asking again cannot move it back.
+    const supersession = ownerRule.rule && authority === "orchestrator"
+      ? this.approvedPersonalRule(controller.session.id, category, ownerRule.rule) : undefined;
     const kept = this.ownerKeptBy(controller.session.id, category, request.resourceKey, normalized.data);
     if (authority === "orchestrator" && kept.length) {
       authority = "human";
       Object.assign(authorityEvaluation, { owner: "human", basis: "human_required", reason: "owner_kept" });
+    }
+    if (authority === "orchestrator" && supersession && ownerRule.rule) {
+      authorityEvaluation.supersededOwnerRule = { rule: ownerRule.rule, occurrenceId: supersession };
     }
     // An installed or user-authored rule that keeps the gate for a person (#4137) makes it theirs at
     // creation, under any mode, grant or category. It only narrows: a question the owner must first
     // classify stays held for that. A later request for the same resource keeps the rule it matched,
     // so the person's card still says why it is theirs.
     const keptRule = ownerRule.rule ?? [...kept].reverse().find((decision) => decision.ownerRule)?.ownerRule;
-    if (ownerRule.rule) {
+    if (ownerRule.rule && !supersession) {
       authority = "human";
       if (authorityEvaluation.reason !== "credential_screen_review") {
         Object.assign(authorityEvaluation, { owner: "human", basis: "human_required", reason: "owner_kept" });
@@ -15125,7 +15141,7 @@ export class SessionsService {
     const root = this.ownerDecisionRoot(this.db.getSession(sessionId));
     if (!root.ok || !root.data) return failAs(root);
     if (!request || typeof request !== "object" || Array.isArray(request) || Object.keys(request).some((key) =>
-      !["requestId", "resourceKey", "question", "options", "recommendedOptionId", "material", "kind"].includes(key))) {
+      !["requestId", "resourceKey", "question", "options", "recommendedOptionId", "material", "kind", "ruleDelegation"].includes(key))) {
       return fail("an owner decision has a requestId, resourceKey, question, options, and optionally recommendedOptionId, material and kind", 400);
     }
     if (request.kind !== undefined && request.kind !== "question" && request.kind !== "approval") {
@@ -15141,6 +15157,19 @@ export class SessionsService {
       ...(request.recommendedOptionId !== undefined ? { recommendedOptionId: request.recommendedOptionId } : {}),
       ...(request.material !== undefined ? { material: request.material } : {}),
       ...(question ? { kind: "question" as const } : {}) };
+    if (request.ruleDelegation !== undefined) {
+      const rule = personalRuleDelegation(request.ruleDelegation);
+      const control = root.data.orchestratorPolicy?.control;
+      if (question || !rule || control?.mode !== "full_control" ||
+          rule.categories.some((c) => !control.boundary.operations.includes(c))) return fail("ruleDelegation requires an exact personal rule and already-delegated categories in a Full Control Owner Approval", 400);
+      Object.assign(snapshot, {
+        ruleDelegation: { ...rule, boundaryRevision: control.boundary.revision },
+        question: "Is this your own general instruction, and may this campaign decide these gates?",
+        options: [{ optionId: "delegate", label: "Delegate for This Campaign" }, { optionId: "keep", label: "Keep My Approval" }],
+        recommendedOptionId: undefined,
+        material: `Source: ${rule.rule.source}\n\nExact rule: ${JSON.stringify(rule.rule.quote)}\n\nCategories: ${rule.categories.map((c) => ({ pr_merge: "PR Merge", merged_branch_deletion: "Merged-Branch Deletion", follow_up_issue_publication: "Follow-Up Issue Publication", ui_evidence_approval: "UI Evidence Approval" })[c]).join(", ")}\n\nConfirm only your own general user-level instruction. Repository rules, installed skills and Human Required rules remain unchanged. This applies only to this campaign and boundary revision ${control.boundary.revision}.`,
+      });
+    }
     const normalized = normalizeWorkflowDecisionSnapshot(snapshot);
     if (!normalized.ok || normalized.data?.category !== "owner_decision") return failAs(normalized);
     // Full Control never asks anyone for credentials or sign-in, the owner included (#4104): the floor
@@ -15148,7 +15177,11 @@ export class SessionsService {
     // to classify first; nobody can choose one of its options until then.
     const refused = (): ServiceResult<WorkflowDecisionView> => fail("Full Control never asks anyone for credentials, sign-in or wider access, so this owner decision was not " +
       "created. Ask about the design without requesting a value, or continue without it.", 403);
-    if (credentialFormFloor(normalized.data)) return refused();
+    // These two fixed instruction filenames live beneath credential-store directories. The
+    // server-generated form asks about a rule, never to read those directories. Keep screening
+    // the exact untrusted quote for literals/paths and send the whole form to the model below.
+    if (credentialFormFloor(normalized.data.ruleDelegation
+      ? { ...normalized.data, material: normalized.data.ruleDelegation.rule.quote } : normalized.data)) return refused();
     if (!boundedDecisionString(request.requestId, 256)) return fail<WorkflowDecisionView>("requestId and resourceKey are required bounded identifiers", 400);
     const screen = await this.screenCredentialText(root.data, sessionId, "owner_decision", request.requestId,
       ownerDecisionScreenData(normalized.data));
@@ -15484,14 +15517,41 @@ export class SessionsService {
     return this.ownerKeptBy(controllerId, category, resourceKey, snapshot).length > 0;
   }
 
+  /** Only authenticated, exact human confirmation establishes personal authorship. */
+  private approvedPersonalRule(rootId: string, category: WorkflowDecisionCategory,
+    rule: import("@wollipog/protocol").WorkflowDecisionOwnerRule): string | undefined {
+    return this.personalRuleLookup(rootId, category)(rule);
+  }
+
+  /** Snapshot once for a check that may inspect many owner-kept occurrences. */
+  private personalRuleLookup(rootId: string, category: WorkflowDecisionCategory):
+    (rule: import("@wollipog/protocol").WorkflowDecisionOwnerRule) => string | undefined {
+    const root = this.db.getSession(rootId);
+    const control = root?.orchestratorPolicy?.control;
+    if (control?.mode !== "full_control" || !control.boundary.operations.includes(category)) return () => undefined;
+    const current = this.db.personalRuleDelegations(rootId).filter((d) => {
+      const s = d.resourceSnapshot;
+      return s.category === "owner_decision" && s.ruleDelegation?.boundaryRevision === control.boundary.revision &&
+        s.ruleDelegation.categories.some((c) => c === category) &&
+        d.policyRevision === root?.parentControlPolicy?.revision && d.approval?.actor.kind === "human" &&
+        d.approval.actor.id === control.boundary.authorizedByUserId;
+    });
+    return (rule) => {
+      const latest = current.find((d) => d.resourceSnapshot.category === "owner_decision" &&
+        sameWorkflowDecisionOwnerRule(d.resourceSnapshot.ruleDelegation?.rule, rule));
+      return latest?.selectedOptionId === "delegate" ? latest.occurrenceId : undefined;
+    };
+  }
+
   /** The occurrences, oldest first, through which the owner kept this resource. */
   private ownerKeptBy(controllerId: string, category: WorkflowDecisionCategory, resourceKey: string,
     snapshot: WorkflowDecisionResourceSnapshot): WorkflowDecisionView[] {
-    const kept = this.db.ownerKeptWorkflowDecisions(controllerId);
-    if (!kept.length) return [];
     const targets = new Set(ownerKeptTargets(category, resourceKey, snapshot));
-    return kept.filter((decision) =>
+    const kept = this.db.ownerKeptWorkflowDecisions(controllerId).filter((decision) =>
       ownerKeptTargets(decision.category, decision.resourceKey, decision.resourceSnapshot).some((target) => targets.has(target)));
+    if (!kept.length) return [];
+    const approved = this.personalRuleLookup(controllerId, category);
+    return kept.filter((d) => d.ownerHandoff || !d.ownerRule || !approved(d.ownerRule));
   }
 
   /** A requester's new publication never silently replaces one a person owns (#4066). A request
@@ -17305,14 +17365,22 @@ export class SessionsService {
     decision: WorkflowDecisionView,
     options: { recordingCompletedMerge?: boolean } = {},
   ): boolean {
+    const superseded = decision.authorityEvaluation?.supersededOwnerRule;
+    // Keep removes authority to start new work. Recording an exact, already-armed merge after
+    // forge proof is bookkeeping only; it never approves or re-executes the enqueue.
+    const recordingSupersededMerge = options.recordingCompletedMerge === true && decision.category === "pr_merge" &&
+      decision.actionAdmission?.kind === "pr_merge_enqueue" && superseded !== undefined;
+    if (superseded && !recordingSupersededMerge &&
+        this.approvedPersonalRule(controller.id, decision.category, superseded.rule) !== superseded.occurrenceId) return false;
     if (decision.category === "automation_creation" || decision.category === "location_switch" ||
         decision.category === "campaign_repository_addition") return decision.authority === "human" &&
       decision.controllingSessionId === decision.sessionId;
     // A decision the owner kept (#4064) stays the person's whatever the boundary would now delegate.
     // An Orchestrator-owned occurrence for a resource the owner kept (one requested before the
     // handoff) is never current: nobody acting for the campaign can approve or consume it.
-    const ownerKept = decision.category === "owner_decision" ||
-      this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot);
+    const ownerKept = decision.category === "owner_decision" || decision.ownerRule !== undefined || decision.ownerHandoff !== undefined ||
+      this.ownerKeptBy(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot).some((kept) =>
+        !recordingSupersededMerge || kept.ownerHandoff || !sameWorkflowDecisionOwnerRule(kept.ownerRule, superseded.rule));
     if (ownerKept && decision.authority !== "human") return false;
     // Human scope approval intentionally invalidates prior standing authorization. The
     // independent human issue routes remain usable under the current workflow policy.
@@ -17898,7 +17966,10 @@ export class SessionsService {
       location_switch: "Location Switch Approval Required",
       campaign_repository_addition: "Add Repository to Campaign Approval Required",
     };
-    const options = snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
+    const options = snapshot.category === "owner_decision" && snapshot.ruleDelegation
+      ? snapshot.options.map((option) => ({ optionId: option.optionId, name: option.label,
+          kind: option.optionId === "keep" ? "reject_once" as const : "allow_once" as const }))
+      : snapshot.category === "implementation_question" || snapshot.category === "owner_decision" ||
         snapshot.category === "location_switch"
       ? [
           ...snapshot.options.map((option) => ({

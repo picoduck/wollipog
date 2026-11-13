@@ -5121,7 +5121,14 @@ export interface AutomationCreationResult {
 }
 
 /** A decision the campaign's owner kept for themselves (#4064), as a Full Control root asks it. */
+export interface CampaignRuleDelegation {
+  rule: import("./workflow-decision-owner-rule.js").WorkflowDecisionOwnerRule;
+  categories: ("pr_merge" | "merged_branch_deletion" | "follow_up_issue_publication" | "ui_evidence_approval")[];
+}
+
 export interface OwnerDecisionSnapshot {
+  /** Campaign-scoped, authenticated approval of an exact personal instruction exception. */
+  ruleDelegation?: CampaignRuleDelegation & { boundaryRevision: number };
   category: "owner_decision";
   question: string;
   options: WorkflowDecisionOption[];
@@ -5382,6 +5389,8 @@ export interface WorkflowDecisionView {
 
 /** v281 (#4064): a Full Control root's question for its campaign's owner. */
 export interface CreateOwnerDecisionRequest {
+  /** Server supplies the approval wording and options; questions cannot delegate rules. */
+  ruleDelegation?: CampaignRuleDelegation;
   /** Caller-owned idempotency key. Reuse with different content fails. */
   requestId: string;
   /** Stable identity; a newer owner decision under the same key replaces an unanswered older one. */

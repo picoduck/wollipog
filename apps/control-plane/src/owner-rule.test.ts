@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, pendingRequests,
   type ControlPlaneToRunner, type RunnerMetadata, type SessionView, type WorkflowDecisionOwnerRule,
@@ -8,7 +9,7 @@ import { Hub } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { pushDecision } from "./push-decision.js";
-import { auditDigest, SessionsService } from "./sessions.js";
+import { auditDigest, SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
 import { fakeScreenRuntime } from "./credential-screen-test-fixture.js";
 
 /** Owner rules (#4137): a gate that an installed skill or user-authored instruction keeps for a
@@ -18,6 +19,180 @@ const RULE: WorkflowDecisionOwnerRule = {
   quote: "Merging a pull request requires per-PR user authorization through the structured question tool.",
 };
 const HEAD = "a".repeat(40);
+
+test("one authenticated campaign approval delegates the owner's exact personal rule across PRs (#4540)", async () => {
+  const h = harness();
+  const personal = { source: "~/.claude/CLAUDE.md", quote: "Ask before merging a pull request." };
+  try {
+    const before = h.merge("before", { ownerRule: personal });
+    assert.equal(before.data?.authority, "human", "a path claim alone proves nothing");
+    const requested = await h.svc.createOwnerDecision("root", { requestId: "personal-rule", resourceKey: "personal-rule",
+      question: "Agent wording must not hide the approval", options: [{ optionId: "x", label: "X" }, { optionId: "y", label: "Y" }],
+      material: "Agent material must not hide the exact rule",
+      ruleDelegation: { rule: personal, categories: ["pr_merge"] } });
+    assert.ok(requested.ok && requested.data, requested.error ?? "approval requested");
+    const grant = requested.data;
+    const card = h.svc.descendantRequests("root", () => true, "human").data?.requests.find((r) => r.occurrenceId === grant.occurrenceId)?.request;
+    assert.deepEqual(card?.options?.map((o) => [o.optionId, o.name, o.kind]),
+      [["delegate", "Delegate for This Campaign", "allow_once"], ["keep", "Keep My Approval", "reject_once"]]);
+    assert.match(grant.resourceSnapshot.category === "owner_decision" ? grant.resourceSnapshot.material! : "", /Ask before merging/);
+    assert.equal(h.rootResolve("root", grant).ok, false, "an agent cannot establish authorship");
+    assert.ok(h.svc.approve("root", grant.occurrenceId, "delegate", h.owner).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(grant.occurrenceId)?.status, "consumed");
+    assert.equal(h.db.workflowDecisionByOccurrence(before.data!.occurrenceId)?.status, "pending", "delegating never approves the gated merge");
+    assert.ok(h.svc.approve("child", before.data!.occurrenceId, "approve", h.owner).ok, "the owner can still answer their earlier pending merge");
+    for (const pullRequest of [7, 8]) {
+      const d = h.merge(`after-${pullRequest}`, { pullRequest, ownerRule: personal });
+      assert.ok(d.ok && d.data, d.error ?? "merge requested");
+      assert.equal(d.data.authority, "orchestrator");
+      assert.deepEqual(d.data.authorityEvaluation?.supersededOwnerRule, { rule: personal, occurrenceId: grant.occurrenceId });
+      assert.equal(d.data.ownerRule, undefined);
+      assert.ok(h.rootResolve("child", d.data).ok, "delegated decision can actually be resolved");
+    }
+    for (const source of ["AGENTS.md", "~/.claude/skills/third-party/SKILL.md", "/unknown/CLAUDE.md"]) {
+      const d = h.merge(`other-${source}`, { pullRequest: 9, ownerRule: { ...personal, source } });
+      assert.equal(d.data?.authorityEvaluation?.reason, "owner_kept", source);
+      const refused = await h.svc.createOwnerDecision("root", { requestId: source, resourceKey: source,
+        question: "Delegate?", options: [], ruleDelegation: { rule: { ...personal, source }, categories: ["pr_merge"] } });
+      assert.equal(refused.ok, false, source);
+    }
+    const undelegated = await h.svc.createOwnerDecision("root", { requestId: "undelegated", resourceKey: "undelegated",
+      question: "Delegate?", options: [], ruleDelegation: { rule: personal, categories: ["merged_branch_deletion"] } });
+    assert.equal(undelegated.ok, false, "cannot expand the boundary");
+    const changed = h.merge("changed-quote", { pullRequest: 10, ownerRule: { ...personal, quote: "Ask before every merge and deletion." } });
+    assert.equal(changed.data?.authorityEvaluation?.reason, "owner_kept", "approval binds the exact quote");
+    const handoff = h.merge("handoff", { pullRequest: 11 });
+    assert.ok(handoff.ok && handoff.data);
+    assert.ok(h.svc.handWorkflowDecisionToOwner("root", handoff.data.occurrenceId, { sessionId: "child", reason: "Contested merge" }).ok);
+    const handedAgain = h.merge("handed-again", { pullRequest: 11, ownerRule: personal });
+    assert.equal(handedAgain.data?.authority, "human");
+    assert.equal(handedAgain.data?.authorityEvaluation?.supersededOwnerRule, undefined, "an owner-kept decision has no supersession receipt");
+    const pending = h.merge("pending-exception", { pullRequest: 13, ownerRule: personal });
+    assert.ok(pending.data);
+    const keep = await h.svc.createOwnerDecision("root", { requestId: "keep-rule", resourceKey: "keep-rule", question: "Keep?", options: [],
+      ruleDelegation: { rule: personal, categories: ["pr_merge"] } });
+    assert.ok(keep.data);
+    assert.ok(h.svc.approve("root", keep.data.occurrenceId, "keep", h.owner).ok);
+    assert.equal(h.rootResolve("child", pending.data).ok, false, "keeping approval invalidates an unconsumed exception");
+    assert.equal(h.merge("kept-rule-again", { pullRequest: 14, ownerRule: personal }).data?.authority, "human");
+    const again = await h.svc.createOwnerDecision("root", { requestId: "delegate-again", resourceKey: "delegate-again", question: "Delegate?", options: [],
+      ruleDelegation: { rule: personal, categories: ["pr_merge"] } });
+    assert.ok(again.data);
+    assert.ok(h.svc.approve("root", again.data.occurrenceId, "delegate", h.owner).ok);
+    const changedBoundary = h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #100 with a new boundary",
+      operations: ["pr_merge"], delegatablePolicyIds: [] }, h.db.getSession("root")!.parentControlPolicy!.revision, h.principal);
+    assert.ok(changedBoundary.ok, changedBoundary.error ?? "boundary changed");
+    assert.equal(h.merge("stale-grant", { pullRequest: 12, ownerRule: personal }).data?.authority, "human");
+  } finally { h.db.close(); }
+});
+
+test("Keep does not prevent reconciliation of an already-enqueued personal-rule merge (#4540)", async () => {
+  const h = harness();
+  try {
+    const rule = { source: "~/.claude/CLAUDE.md", quote: "Ask before merging." };
+    const decide = async (id: string, choice: "delegate" | "keep") => {
+      const asked = await h.svc.createOwnerDecision("root", { requestId: id, resourceKey: id, question: "Confirm?", options: [],
+        ruleDelegation: { rule, categories: ["pr_merge"] } });
+      assert.ok(asked.data);
+      assert.ok(h.svc.approve("root", asked.data.occurrenceId, choice, h.owner).ok);
+    };
+    const earlier = h.merge("earlier-personal-rule", { ownerRule: rule });
+    assert.equal(earlier.data?.authority, "human");
+    await decide("delegate", "delegate");
+    const merge = h.merge("enqueued", { ownerRule: rule });
+    assert.ok(merge.data);
+    assert.ok(h.rootResolve("child", merge.data).ok);
+    const snapshot = h.snapshot();
+    const command = canonicalPrMergeEnqueueCommand(snapshot);
+    let merged = false;
+    h.hub.requestFromRunner = async (_runner, requestId, message) => {
+      if (message.type === "github_merge_preflight") return { type: "github_merge_preflight_result", requestId,
+        sessionId: message.sessionId, ok: true, check: { checkedAt: Date.now(), closures: [] } };
+      if (message.type === "reconcile_workflow_action") return { type: "workflow_action_reconciliation_result", requestId,
+        sessionId: "child", occurrenceId: message.occurrenceId, accepted: merged,
+        commandDigest: createHash("sha256").update(command).digest("hex"), forgeHeadSha: merged ? snapshot.headSha : undefined };
+      throw new Error(`Unexpected test runner request: ${message.type}`);
+    };
+    const armed = await h.svc.consumeWorkflowDecision("child", merge.data.occurrenceId, { resourceSnapshot: snapshot,
+      action: { kind: "pr_merge_enqueue", command } });
+    assert.ok(armed.ok, armed.error ?? "armed");
+    assert.ok(armed.data?.actionAdmission);
+    const unarmed = h.merge("unarmed", { pullRequest: 8, ownerRule: rule });
+    assert.ok(unarmed.data);
+    assert.ok(h.rootResolve("child", unarmed.data).ok);
+    await decide("keep", "keep");
+    const startAfterKeep = await h.svc.consumeWorkflowDecision("child", unarmed.data.occurrenceId, { resourceSnapshot: h.snapshot(HEAD, 8),
+      action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(h.snapshot(HEAD, 8)) } });
+    assert.equal(startAfterKeep.ok, false, "Keep still blocks an approved action that has not started");
+    const reconcile = () => h.svc.reconcileWorkflowDecision("child", merge.data!.occurrenceId, { resourceSnapshot: snapshot });
+    assert.equal((await reconcile()).ok, false, "unmerged forge proof cannot settle it");
+    merged = true;
+    const recorded = await reconcile();
+    assert.ok(recorded.ok, recorded.error ?? "recorded");
+    assert.equal(recorded.data?.status, "consumed");
+    assert.equal((await reconcile()).ok, false, "record once, never enqueue again");
+  } finally { h.db.close(); }
+});
+
+test("Custom, questions and Human Required rules cannot acquire a personal-rule exception (#4540)", async () => {
+  for (const mode of ["custom", "full_control"] as const) {
+    const h = harness({ mode });
+    try {
+      for (const [id, extra] of [
+        ["question", { kind: "question" as const }],
+        ["human-required", {}],
+      ] as const) {
+        const requested = await h.svc.createOwnerDecision("root", { requestId: id, resourceKey: id, question: "Delegate?", options: [],
+          ruleDelegation: { rule: { source: "~/.codex/AGENTS.md", quote: id === "human-required" ? "Human Required: ask me." : "Ask before merge." }, categories: ["pr_merge"] }, ...extra });
+        assert.equal(requested.ok, false, `${mode} ${id}`);
+      }
+      const secret = await h.svc.createOwnerDecision("root", { requestId: "secret-quote", resourceKey: "secret-quote", question: "Delegate?", options: [],
+        ruleDelegation: { rule: { source: "~/.codex/AGENTS.md", quote: "Read ~/.ssh/id_rsa before merging." }, categories: ["pr_merge"] } });
+      assert.equal(secret.ok, false, "the untrusted quote still passes the credential floor");
+    } finally { h.db.close(); }
+  }
+});
+
+test("Keep My Approval leaves the gated merge pending for its owner rather than stopping work (#4540)", async () => {
+  const h = harness();
+  try {
+    const rule = { source: "~/.codex/AGENTS.md", quote: "Ask before merging." };
+    const gated = h.merge("gated", { ownerRule: rule });
+    assert.ok(gated.data);
+    const asked = await h.svc.createOwnerDecision("root", { requestId: "keep-first", resourceKey: "keep-first", question: "Keep?", options: [],
+      ruleDelegation: { rule, categories: ["pr_merge"] } });
+    assert.ok(asked.data);
+    assert.ok(h.svc.approve("root", asked.data.occurrenceId, "keep", h.owner).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(gated.data.occurrenceId)?.status, "pending");
+    assert.equal(h.rootResolve("child", gated.data).ok, false);
+    assert.ok(h.svc.approve("child", gated.data.occurrenceId, "approve", h.owner).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(gated.data.occurrenceId)?.status, "approved", "owner can still approve the merge normally");
+  } finally { h.db.close(); }
+});
+
+test("delegation preserves an existing human-approved merge for action admission (#4540)", async () => {
+  const h = harness();
+  try {
+    const rule = { source: "~/.claude/CLAUDE.md", quote: "Ask before merging." };
+    const merge = h.merge("already-approved", { ownerRule: rule });
+    assert.ok(merge.data);
+    assert.ok(h.svc.approve("child", merge.data.occurrenceId, "approve", h.owner).ok);
+    const asked = await h.svc.createOwnerDecision("root", { requestId: "delegate-later", resourceKey: "delegate-later", question: "Delegate?", options: [],
+      ruleDelegation: { rule, categories: ["pr_merge"] } });
+    assert.ok(asked.data);
+    assert.ok(h.svc.approve("root", asked.data.occurrenceId, "delegate", h.owner).ok);
+    h.hub.requestFromRunner = async (_runner, requestId, message) => {
+      if (message.type === "github_merge_preflight") return { type: "github_merge_preflight_result", requestId,
+        sessionId: message.sessionId, ok: true, check: { checkedAt: Date.now(), closures: [] } };
+      throw new Error(`Unexpected test runner request: ${message.type}`);
+    };
+    const armed = await h.svc.consumeWorkflowDecision("child", merge.data.occurrenceId, { resourceSnapshot: h.snapshot(),
+      action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(h.snapshot()) } });
+    assert.ok(armed.ok, armed.error ?? "existing human approval remains usable");
+    assert.equal(armed.data?.authority, "human");
+    assert.equal(armed.data?.authorityEvaluation?.supersededOwnerRule, undefined);
+  } finally { h.db.close(); }
+});
 
 function harness(options: { mode?: "full_control" | "custom"; videoFrameReviewCandidate?: boolean } = {}) {
   const db = ControlPlaneDb.open(":memory:");
@@ -71,7 +246,7 @@ function harness(options: { mode?: "full_control" | "custom"; videoFrameReviewCa
     ...(db.raw().prepare("SELECT payload_json FROM session_prompt_commands WHERE session_id=?").all(sessionId) as Array<{ payload_json: string }>)
       .map((row) => (JSON.parse(row.payload_json) as { text: string }).text),
   ];
-  return { db, svc, owner, merge, snapshot, rootResolve, prompts, pushes };
+  return { db, hub, svc, owner, principal, merge, snapshot, rootResolve, prompts, pushes };
 }
 
 test("a child's ownerRule makes its merge the owner's even where Full Control gives merges to the Orchestrator (#4137)", () => {

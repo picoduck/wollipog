@@ -712,6 +712,12 @@ const ownerSnapshot = params.get("closureRecovery") === "owner" ? {
   question: "Review the uncertain closure of picoduck/wollipog#4398 (occurrence closure_4398).",
   material: "Wollipog could not prove the approved state reason and exact closing comment on the forge. Inspect [picoduck/wollipog/issues/4398](https://github.com/picoduck/wollipog/issues/4398). Answer or dismiss this request to acknowledge the uncertainty and clear this recovery record. This does not close the issue, post a comment, or authorize another attempt.",
   options: [{ optionId: "acknowledge", label: "Acknowledge Outcome", description: "Acknowledge the uncertainty." }],
+} : params.has("personalRule") ? {
+  category: "owner_decision" as const,
+  question: "Is this your own general instruction, and may this campaign decide these gates?",
+  material: 'Source: ~/.claude/CLAUDE.md\n\nExact rule: "Ask before merging a pull request."\n\nCategories: PR Merge\n\nConfirm only your own general user-level instruction. Repository rules, installed skills and Human Required rules remain unchanged. This applies only to this campaign and boundary revision 3.',
+  ruleDelegation: { rule: { source: "~/.claude/CLAUDE.md", quote: "Ask before merging a pull request." }, categories: ["pr_merge" as const], boundaryRevision: 3 },
+  options: [{ optionId: "delegate", label: "Delegate for This Campaign", description: undefined }, { optionId: "keep", label: "Keep My Approval", description: undefined }],
 } : { category: "owner_decision" as const, question: "Which credential design should the provider bridge use?",
   material: "PR picoduck/wollipog#4141 at head 3f9c2e1. Both designs pass CI; the broker adds a helper process the owner would run.",
   recommendedOptionId: "lease", options: [
@@ -720,8 +726,9 @@ const ownerSnapshot = params.get("closureRecovery") === "owner" ? {
   ] };
 const ownerCard: import("@wollipog/protocol").PendingApproval | null = ownerScenario === "after" ? {
   requestId: "workflow_owner_1", occurrenceId: "workflow_owner_1", kind: "workflow_decision", title: "Owner Decision Required", async: true,
-  options: [...ownerSnapshot.options.map((option) => ({ optionId: option.optionId, name: option.label, description: option.description, kind: "allow_once" as const })),
-    { optionId: "__workflow_deny__", name: "Do Not Proceed", kind: "reject_once" }],
+  options: [...ownerSnapshot.options.map((option) => ({ optionId: option.optionId, name: option.label, description: option.description,
+    kind: params.has("personalRule") && option.optionId === "keep" ? "reject_once" as const : "allow_once" as const })),
+    ...(params.has("personalRule") ? [] : [{ optionId: "__workflow_deny__", name: "Do Not Proceed", kind: "reject_once" as const }])],
   context: { toolName: "Typed Workflow Decision", input: JSON.stringify(ownerSnapshot, null, 2) },
   workflowDecision: { requestId: "credential-design", occurrenceId: "workflow_owner_1", sessionId: "s_root", controllingSessionId: "s_root",
     category: "owner_decision", resourceKey: "credential-design", resourceSnapshot: ownerSnapshot, resourceDigest: "e".repeat(64), policyRevision: 1,

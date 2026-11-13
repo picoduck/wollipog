@@ -938,13 +938,12 @@ Neither tool exists for a child or under Custom, where a person already sees the
 requests, and an older runner or control plane refuses them by name. Never decide an owner-kept
 decision yourself, and never ask the owner to approve one in chat.
 
-When an installed skill or user-authored instruction keeps a typed gate for a person (a per-PR
-merge approval, say), any requester, child or root and in any mode, files the exact typed decision
+When an installed skill or user-authored instruction keeps a typed gate for a person (for example, consent to a disputed scope change), any requester, child or root and in any mode, files the exact typed decision
 anyway and names the rule in `ownerRule` on `request_workflow_decision`: `source` is the file and
 `quote` the requirement, on one line (CLI `wollipog decision request ... --owner-rule-source <path>
 --owner-rule-quote <text>`; control plane v296). The occurrence is created owner-kept and reaches
 the owner's Inbox and Campaign Status with the rule; later requests for the same resource stay the
-owner's. It can never give the Orchestrator a decision. See
+owner's unless an authenticated campaign-scoped personal-rule approval applies. See
 [references/campaign-authority.md](references/campaign-authority.md). Never end a turn with such a
 gate only in prose.
 
@@ -1116,3 +1115,13 @@ payload is read back through that repository's Location. A target outside the bo
 is a person's (`target_outside_boundary`); if it is a repository of the campaign's Project, ask the
 owner to add it with `request_campaign_repository_addition` naming the follow-up, then request the
 publication again once the addition is carried out.
+
+
+### Personal Instructions in Full Control
+
+For the authenticated, campaign-scoped personal-rule Owner Approval alternative (v364), follow
+[Personal Instructions in Full Control](references/campaign-authority.md#personal-instructions-in-full-control).
+Never infer authorship from a path. Repository rules, installed skills, Human Required rules,
+Custom and unverifiable sources retain their human gates. The root first reports every exact
+rule set aside, its source/quote, categories and approval occurrence; report later confirmations
+before relying on them. Each action still requires its own exact typed approval and consumption.

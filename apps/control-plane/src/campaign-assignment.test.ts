@@ -66,8 +66,8 @@ test("Full Control describes the exact boundary and effective owners without cre
   assert.match(text, /request_owner_decision for a gate with no typed category/);
   assert.match(text, /Never end a turn with such a gate only in prose/);
   assert.match(text, /merge-group CI passes and the forge reports actual MERGED state/);
-  // #2940: the first report is the root Orchestrator's (its preset carries it), never a child's task.
-  assert.doesNotMatch(text, /first report/i);
+  // #4540: reporting a superseded personal rule is explicitly the root's task.
+  assert.match(text, /The root first reports every rule set aside/);
 });
 
 test("campaigns use review sessions without asking for admission, including without the native adapter", () => {
