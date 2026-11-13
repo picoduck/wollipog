@@ -7193,6 +7193,8 @@ export interface ClassifyCampaignDecisionRequest {
 }
 
 export interface CampaignDecisionsResponse {
+  /** v379: viewer-specific owner permission; absence never permits classification. */
+  canClassify?: boolean;
   campaignSessionId: string;
   decisions: Array<DecisionOccurrenceView & { subject?: CampaignDecisionSubject; selectionProposal?: CampaignSelectionProposal }>;
   usage: DecisionUsageView & { calls: number; unpricedCalls: number };

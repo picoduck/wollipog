@@ -51,6 +51,97 @@ for (const [name, value] of Object.entries({
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
 const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
+
+const heldQuestionCard = () => ({
+    requestId: "held", occurrenceId: "held", kind: "workflow_decision", title: "Question",
+    options: [{ optionId: "shared", name: "Shared Configuration", kind: "allow_once" }],
+    workflowDecision: {
+      occurrenceId: "held", sessionId: "session-dock", controllingSessionId: "root", category: "implementation_question",
+      resourceSnapshot: { category: "implementation_question", kind: "question", question: "Where should configuration live?", options: [] },
+      authority: "human", authorityEvaluation: { reason: "credential_screen_review", credentialScreen: { occurrenceId: "screen-held" } },
+    },
+  } as unknown as PendingApproval);
+
+test("held questions classify on the card, block answers, and route back to the Orchestrator", async () => {
+  const request = heldQuestionCard();
+  for (const permission of [true, false, undefined]) {
+    const calls: unknown[] = [];
+    const session = sessionWith(request);
+    const after: PendingApproval = { ...request, workflowDecision: { ...request.workflowDecision!, authority: "orchestrator",
+      authorityEvaluation: { ...request.workflowDecision!.authorityEvaluation!, reason: "authorized_operation" } } };
+    const card = (pending: PendingApproval) => <RequestCard session={session} request={pending} runnerOnline presentation="panel" />;
+    const view = await render(card(request), {
+      campaignDecisions: async () => ({ campaignSessionId: "root", canClassify: permission, decisions: [],
+        usage: { calls: 0, unpricedCalls: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 } }),
+      classifyCampaignDecision: async (...args) => { calls.push(args); return { sessionId: session.id, surface: "implementation_question", requestId: "held" }; },
+      session: async () => ({ session: sessionWith(after) }),
+      approve: async () => { throw new Error("Held answers must never be sent"); },
+    });
+    try {
+      const answer = view.container.querySelector<HTMLButtonElement>('[data-session-request-control="option:shared"]')!;
+      assert.equal(answer.disabled, true);
+      assert.match(view.container.textContent!, /owner must classify this question first/u);
+      const actions = view.container.querySelector('[aria-label="Question Classification"]');
+      assert.equal(Boolean(actions), permission === true);
+      if (actions) {
+        const buttons = [...actions.querySelectorAll<HTMLButtonElement>("button")];
+        assert.deepEqual(buttons.map((button) => button.textContent), ["Decline", "Let the Orchestrator Answer"]);
+        await act(async () => { buttons[1]!.click(); await tick(); });
+        assert.deepEqual(calls, [[session.id, "screen-held", "orchestrator"]]);
+        await view.rerender(card(after));
+        assertNoDomNode(view.container.querySelector('[aria-label="Question Classification"]'));
+        assertNoDomNode(view.container.querySelector('[data-session-request-control="option:shared"]'));
+        assert.match(view.container.textContent!, /The Orchestrator is handling this request/u);
+      }
+    } finally { await view.unmount(); }
+  }
+});
+
+test("Decline classifies once and refreshes the authoritative request", async () => {
+  const request = heldQuestionCard();
+  const calls: unknown[] = [];
+  const updates: SessionView[] = [];
+  const view = await render(<RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="panel"
+    onSessionUpdate={(session) => updates.push(session)} />, {
+    campaignDecisions: async () => ({ campaignSessionId: "root", canClassify: true, decisions: [],
+      usage: { calls: 0, unpricedCalls: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 } }),
+    classifyCampaignDecision: async (...args) => { calls.push(args); return { sessionId: "session-dock", surface: "implementation_question", requestId: "held" }; },
+    session: async () => ({ session: sessionWith(null) }),
+  });
+  try {
+    await act(async () => {
+      const decline = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Decline")!;
+      decline.click(); decline.click(); await tick();
+    });
+    assert.deepEqual(calls, [["session-dock", "screen-held", "decline"]]);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0]!.pendingApproval, null);
+  } finally { await view.unmount(); }
+});
+
+test("an owner-rule question offers Let Me Answer and retries only the read after classification succeeds", async () => {
+  const request = heldQuestionCard();
+  request.workflowDecision!.ownerRule = { source: "personal instructions", quote: "Keep this question for me." };
+  let classifications = 0;
+  let reads = 0;
+  const view = await render(<RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="panel" />, {
+    campaignDecisions: async () => ({ campaignSessionId: "root", canClassify: true, decisions: [],
+      usage: { calls: 0, unpricedCalls: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 } }),
+    classifyCampaignDecision: async () => { classifications++; return { sessionId: "session-dock", surface: "implementation_question", requestId: "held" }; },
+    session: async () => { reads++; throw new Error("Read connection failed"); },
+  });
+  try {
+    const button = (label: string) => [...view.container.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === label)!;
+    await act(async () => { button("Let Me Answer").click(); await tick(); });
+    assert.match(view.container.textContent!, /Couldn't Refresh the Request/u);
+    assert.match(view.container.textContent!, /The question was classified/u);
+    assertNoDomNode(view.container.querySelector('[aria-label="Question Classification"]'));
+    assert.equal(view.container.querySelector<HTMLButtonElement>('[data-session-request-control="option:shared"]')!.disabled, true);
+    await act(async () => { button("Refresh Request").click(); await tick(); });
+    assert.equal(classifications, 1);
+    assert.equal(reads, 2);
+  } finally { await view.unmount(); }
+});
 const body = () => domWindow.document.body as unknown as HTMLElement;
 
 const permission = (): PendingApproval => ({

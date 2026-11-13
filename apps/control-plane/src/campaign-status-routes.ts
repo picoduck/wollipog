@@ -242,6 +242,7 @@ export function createCampaignStatusManagement(deps: CampaignStatusDependencies)
     if (!read) return reply;
     const policy = db.getSession(read.rootId)?.orchestratorPolicy;
     const response: CampaignDecisionsResponse = {
+      canClassify: read.principal.kind === "human" && db.campaignOwnerUser(read.rootId, read.principal.userId),
       campaignSessionId: read.rootId,
       decisions: db.listCampaignDecisionOccurrences(read.rootId).map((occurrence) => {
         // What the decision affected (#4104), so its verdict reads beside that request.

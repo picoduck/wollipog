@@ -1487,6 +1487,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 378: Record same-run failed required check evidence for campaign follow-ups (#4544).
   378,
   // v379 slot
+  // 379: Expose viewer-specific campaign question classification permission (#4548).
+  379,
   // v380 slot
   // v381 slot
   // v382 slot
