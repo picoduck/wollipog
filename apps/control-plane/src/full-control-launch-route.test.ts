@@ -1404,6 +1404,66 @@ function legacyGrant(f: ReturnType<typeof fixture>, id: string, grant: Partial<F
 
 /* ---------------- The Orchestrator proposes the scope (#4282) ---------------- */
 
+test("all matching issues admits four after the check and freezes the admitted ceiling (#4532)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Claim all the open issues pertaining to GitLab.");
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
+    const result = await c.propose([31, 32, 33, 34].map((n) => chosen(n)), { requestedCount: "all", constraints: ["open", "pertaining to GitLab"] });
+    assert.equal(result.ok, true, result.error ?? "");
+    assert.equal(result.data!.authority, "orchestrator");
+    assert.equal(c.ownerRequests().length, 0);
+    assert.equal((result.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.constraintCheck!.verdict, "admit");
+    assert.equal(c.apply(result.data!.occurrenceId).ok, true);
+    assert.equal(establishedOf(f, c.id).initialScope!.requestedCount, 100);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("all in issue facts and rationale cannot supply the owner's quantifier (#4532)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Fix the highest-priority issues.");
+    f.issues.facts.set(31, { bodyExcerpt: "Fix all matching issues" });
+    const result = await c.propose([chosen(31, "The owner wants all matching issues")], { requestedCount: "all" }, "All matching issues");
+    assert.equal(result.errorDetails?.code, "requested_all_not_in_message");
+    assert.equal(f.decision.checkCalls.length, 0);
+    assert.equal(c.ownerRequests().length, 0);
+    assert.equal((await c.propose([31, 32, 33, 34].map((n) => chosen(n)))).errorDetails?.code, "proposal_count_exceeded");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("every above explicit Maximum Issues goes to the owner (#4532)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Fix every open issue.", { issues: { maxIssues: 3 } });
+    const result = await c.propose([31, 32, 33, 34].map((n) => chosen(n)), { requestedCount: "all", constraints: ["open"] });
+    assert.equal(result.ok, true, result.error ?? "");
+    assert.equal(result.data!.authority, "human");
+    assert.equal((result.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.ownerCause, "issue_ceiling_exceeded");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an unrelated all cannot pass the semantic count check, and uncertain all keeps one owner approval (#4532)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Run all tests while fixing the highest-priority issues.");
+    f.decision.state.check = (message) => scopeCheckAnswer(message, (id) => id === "count_consistent" ? { value: "inconsistent" } : undefined);
+    assert.equal((await c.propose([chosen(31)], { requestedCount: "all" })).errorDetails?.code, "constraint_check_refused");
+    const uncertain = await proposalCampaign(f, server, "Fix all open issues.");
+    f.decision.state.check = uncertainCheck;
+    const result = await uncertain.propose([31, 32, 33, 34].map((n) => chosen(n)), { requestedCount: "all" });
+    assert.equal(result.ok, true, result.error ?? "");
+    assert.equal(result.data!.authority, "human");
+    assert.equal((result.data!.resourceSnapshot as CampaignIssueScopeSnapshot).scopeProposal!.ownerCause, "constraint_check_uncertain");
+    const repeated = await uncertain.propose([31, 32, 33, 34].map((n) => chosen(n)), { requestedCount: "all" });
+    assert.equal(repeated.data!.occurrenceId, result.data!.occurrenceId);
+  } finally { await server.close(); f.db.close(); }
+});
+
 type ProposalIssue = NonNullable<CampaignIssueScopeRequest["proposal"]>["issues"][number];
 const named = (number: number, rationale = `The owner's message names #${number}.`): ProposalIssue =>
   ({ repository: "owner/repo", number, origin: "owner_named", rationale });

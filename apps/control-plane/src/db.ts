@@ -19137,7 +19137,9 @@ export class ControlPlaneDb {
         // (#4282), whoever approved it: dispatch can start.
         const first = memberPolicy.firstMessageScope;
         if (id === root.id && first?.state === "established" && first.grant?.status === "proposal" && !first.initialScope) {
-          first.initialScope = { admittedAt: now, occurrenceId, requestedCount: snapshot.scopeProposal?.requestedCount ?? null,
+          first.initialScope = { admittedAt: now, occurrenceId, requestedCount: snapshot.scopeProposal?.requestedCount === "all"
+              ? (first.derivedLimits?.maxIssues ? 100 : (reminted?.mode === "full_control" ? reminted.boundary : boundary)?.issueAuthority?.maxIssues ?? 100)
+              : snapshot.scopeProposal?.requestedCount ?? null,
             constraints: [...snapshot.scopeProposal?.constraints ?? []], withheldOperations: [...withheld],
             ...(limits.length ? { repositoryLimits: limits } : {}) };
           if (leftOut.length) memberPolicy.availableLocations = leftOut.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX);

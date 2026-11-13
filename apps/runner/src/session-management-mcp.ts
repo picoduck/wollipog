@@ -1658,7 +1658,7 @@ export const TOOLS: McpTool[] = [
             repository: { type: "string" }, number: { type: "integer", minimum: 1 },
             origin: { type: "string", enum: ["owner_named", "orchestrator_chosen"] },
             rationale: { type: "string", minLength: 1, maxLength: 500 } }, required: ["repository", "number", "origin", "rationale"], additionalProperties: false } },
-          requestedCount: { type: ["integer", "null"], minimum: 1, maximum: 100 },
+          requestedCount: { anyOf: [{ type: ["integer", "null"], minimum: 1, maximum: 100 }, { type: "string", enum: ["all"] }] },
           constraints: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 } },
           withheldOperations: { type: "array", items: { type: "string", enum: [...CAMPAIGN_SCOPE_PROPOSAL_OPERATIONS] } },
           repositoryNames: { type: "array", minItems: 1, maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 }, description: "Every repository the owner's message limits the work to, each in the message's own words (\"the api repo\"). The server resolves each and the constraint check judges whether the message really limits the work to them. Admission removes every other repository from the campaign. Leave it out when the message sets no such limit." },

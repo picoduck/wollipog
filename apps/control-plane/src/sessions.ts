@@ -13688,7 +13688,8 @@ export class SessionsService {
     const requested = scopeSize + reservedPublicationSlots(this.db, latest);
     const limit = this.db.campaignIssueLimit(sessionId,
       proposalMaxIssues(latest.orchestratorPolicy, { scopeProposal: record }, latestBoundary, scopeSize) ?? latestBoundary.issueAuthority.maxIssues);
-    if (requested > limit) return refuse("capacity_exhausted", { limit, requested });
+    const allOverCeiling = structured && base.requestedCount === "all" && requested > limit && requested <= 100;
+    if (requested > limit && !allOverCeiling) return refuse("capacity_exhausted", { limit, requested });
     // Floor 6: no Human Required issue label rule.
     if (facts) {
       const policies = this.db.listGovernancePolicies();
@@ -13702,7 +13703,10 @@ export class SessionsService {
       organizationId: this.db.sessionScope(sessionId)?.organizationId, runnerId, workspaceId, agentId: latest.agentId ?? undefined }, fact.labels) !== null);
     if (otherLabeled) return refuse("human_required_label", issueDetails({ repository: otherLabeled.repository, number: otherLabeled.fact.number }));
     // Floor 7: a count the Orchestrator read is one the owner's message writes, as digits or a word.
-    if (structured && base.requestedCount !== null && !writtenAsCount(ownerMessage, base.requestedCount)) {
+    if (structured && base.requestedCount === "all" && !/\b(?:all|every)\b/iu.test(ownerMessage)) {
+      return refuse("requested_all_not_in_message");
+    }
+    if (structured && typeof base.requestedCount === "number" && !writtenAsCount(ownerMessage, base.requestedCount)) {
       return refuse("requested_count_not_in_message", { requested: base.requestedCount });
     }
     // Floor 8: the issues the Orchestrator chose stay within the count the owner stated, the admitted
@@ -13711,8 +13715,8 @@ export class SessionsService {
     // removed (so removing never frees room), and re-adding one of them takes no second slot.
     const chosenCount = new Set([...base.issues.filter((issue) => issue.origin === "orchestrator_chosen").map(issueKey),
       ...(first.initialScope ? this.db.appliedProposalChosenIssues(sessionId) : [])]).size;
-    const chosenLimit = scopeProposalChosenLimit(base, first.initialScope);
-    if (structured && chosenCount > chosenLimit) return refuse("proposal_count_exceeded", { limit: chosenLimit, requested: chosenCount });
+    const chosenLimit = scopeProposalChosenLimit(base, first.initialScope, first.derivedLimits?.maxIssues ? 100 : latestBoundary.issueAuthority.maxIssues);
+    if (structured && chosenCount > chosenLimit && !allOverCeiling) return refuse("proposal_count_exceeded", { limit: chosenLimit, requested: chosenCount });
     const scopeRequest: CampaignIssueScopeRequest = { requestId: request.requestId, expectedRevision: request.expectedRevision,
       additions: request.additions, removals: [], explanation: request.explanation };
     /** An Orchestrator-owned change bound to this exact proposal and the evidence that admitted it. */
@@ -13738,7 +13742,8 @@ export class SessionsService {
     const ownerApproval = (owned: CampaignScopeProposal): ServiceResult<WorkflowDecisionView> => {
       const pending = pendingOwnerApproval();
       if (pending) return ok(pending);
-      const snapshot = scopeSnapshot(this.db, latest, repository, scopeRequest, { scopeProposal: owned });
+      const snapshot = scopeSnapshot(this.db, latest, repository, scopeRequest, { scopeProposal: owned,
+        ...(allOverCeiling ? { ownerReview: { cause: "lineage_missing", maxIssuesIncrease: { from: latestBoundary.issueAuthority!.maxIssues, increase: requested - limit } } } : {}) });
       if (!snapshot) return malformed();
       // The owner's approval re-authorizes the boundary, so it lists and revokes every outstanding decision (#3915).
       snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId);
@@ -13753,6 +13758,7 @@ export class SessionsService {
       log("owner_review", { checks, cause: "owner_pending", ownerRequest: awaitingOwner.occurrenceId });
       return ok(awaitingOwner);
     }
+    if (allOverCeiling) return ownerApproval(ownerRecord("issue_ceiling_exceeded"));
     // Nothing checkable: admitted by the floors alone, with no model call.
     if (!checks.length) return admit(record, { kind: "scope_proposal_floors" });
     // An older runner's unstructured proposal can't be checked, and a repository name that means
