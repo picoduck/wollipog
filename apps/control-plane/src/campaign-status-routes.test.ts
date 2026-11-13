@@ -3,6 +3,24 @@
  * their invalidation, and the browser routes with their authorization and cost visibility.
  */
 import assert from "node:assert/strict";
+test("closure receipts refuse agent sessions and humans outside the campaign (#4551)", async () => {
+  const f = campaignFixture();
+  f.ownBy(f.root, "alice");
+  f.db.ensureClosureReport("report", "landed", f.root, "Review owner/app#3", "Closes #3");
+  const app = Fastify();
+  const principals = { alice: human("alice"), bob: human("bob"), agent: agent(f.root, true) };
+  registerCampaignStatusRoutes(app, { db: f.db,
+    requestPrincipal: req => principals[String(req.headers["x-test-principal"]) as keyof typeof principals] ?? null });
+  for (const who of ["bob", "agent", "alice"] as const) {
+    const response = await app.inject({ method: "GET", url: "/api/campaign-closure-reports", headers: { "x-test-principal": who } });
+    assert.equal(response.statusCode, who === "agent" ? 403 : 200);
+    if (who !== "agent") assert.equal(response.json().reports.length, who === "alice" ? 1 : 0);
+    const ack = await app.inject({ method: "POST", url: "/api/campaign-closure-reports/report/landed/acknowledge", headers: { "x-test-principal": who } });
+    assert.equal(ack.statusCode, who === "alice" ? 200 : who === "agent" ? 403 : 404);
+    assert.equal(f.db.closureReports()[0]!.acknowledgedAt !== null, who === "alice");
+  }
+  await app.close();
+});
 import { test } from "node:test";
 import Fastify from "fastify";
 import {

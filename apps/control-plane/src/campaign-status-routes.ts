@@ -215,6 +215,25 @@ export function createCampaignStatusManagement(deps: CampaignStatusDependencies)
   const everySessionVisible = (read: CampaignReader) =>
     read.canSee(read.rootId) && db.campaignDescendantIds(read.rootId).every((id) => read.canSee(id));
 
+  // Deliberately no agent route: these are human receipts, never action grants.
+  app.get("/api/campaign-closure-reports", (req, reply) => {
+    if (req.principal?.kind !== "human") return reply.code(403).send({ error: "human access required" });
+    const principal = req.principal;
+    return reply.send({ reports: db.closureReports().filter(entry =>
+      db.canAccessSession(principal, entry.campaignId) && (!req.access || req.access.session(entry.campaignId))) });
+  });
+  app.post("/api/campaign-closure-reports/:occurrenceId/:kind/acknowledge", (req, reply) => {
+    if (req.principal?.kind !== "human") return reply.code(403).send({ error: "human access required" });
+    const { occurrenceId, kind } = req.params as { occurrenceId: string; kind: string };
+    const entry = db.closureReports().find(entry => entry.occurrenceId === occurrenceId && entry.kind === kind);
+    if (!entry || !db.canAccessSession(req.principal, entry.campaignId) ||
+        req.access && !req.access.session(entry.campaignId)) return reply.code(404).send({ error: "report not found" });
+    db.acknowledgeClosureReport(occurrenceId, kind, req.principal.userId);
+    req.log?.info({ event: "merge_closure_inbox_report_acknowledged", entryPoint: req.entryPoint ?? "dashboard",
+      occurrenceId, campaignId: entry.campaignId, kind });
+    return reply.send({ ok: true });
+  });
+
   app.get("/api/sessions/:id/campaign/summary", async (req, reply) => {
     const { id } = req.params as { id: string };
     const read = reader(req, reply, id);

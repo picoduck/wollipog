@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, MERGE_CLOSURE_WATCH, PROTOCOL_VERSION,
@@ -17,6 +20,42 @@ import { MergeClosureWatcher } from "./merge-closure-watch.js";
 type Forge = { state: "open" | "merged" | "closed"; headSha: string; closures: PullRequestClosure[]; queued: boolean; readable: boolean };
 
 const GITHUB_HEAD = "a".repeat(40);
+test("Inbox receipts and acknowledgements survive a disk database restart (#4551)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "closure-report-"));
+  try {
+    const path = join(dir, "control.db");
+    let db = ControlPlaneDb.open(path);
+    db.ensureClosureReport("decision", "landed", "root", "Review the merge", "Closes #3");
+    db.close();
+    db = ControlPlaneDb.open(path);
+    db.ensureClosureReport("decision", "landed", "root", "Duplicate", "Duplicate");
+    assert.equal(db.closureReports().length, 1);
+    assert.equal(db.closureReports()[0]!.question, "Review the merge");
+    db.acknowledgeClosureReport("decision", "landed", "owner");
+    const acknowledgedAt = db.closureReports()[0]!.acknowledgedAt;
+    db.close();
+    db = ControlPlaneDb.open(path);
+    assert.equal(db.closureReports()[0]!.acknowledgedAt, acknowledgedAt);
+    db.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("all three owed kinds reach the ended-root Inbox (#4551)", async () => {
+  for (const kind of ["landed", "unverified", "not_dequeued"] as const) {
+    const f = fixture();
+    const { occurrenceId } = f.consumedMerge(f.github(70));
+    await f.pass();
+    const previous = f.watch(occurrenceId)!;
+    f.db.saveMergeClosureWatch(occurrenceId, previous, { ...previous, state: "unverified", reportPending: kind });
+    f.db.updateSessionStatus("root", "failed", 3);
+    await f.pass();
+    assert.equal(f.db.closureReports()[0]!.kind, kind);
+    await f.pass();
+    assert.equal(f.db.closureReports().length, 1);
+    f.db.acknowledgeClosureReport(occurrenceId, kind, "owner");
+    assert.equal(f.watch(occurrenceId)!.reportPending, undefined);
+  }
+});
 const GITLAB_REPOSITORY = "gitlab.example.com/group/app";
 
 function fixture(options: { childProtocol?: number; full?: boolean } = {}) {
@@ -323,27 +362,43 @@ test("under Full Control the report is the owner's, in their Waiting for You req
   assert.match((question.resourceSnapshot as { material: string }).material, /- owner\/app#6: linked to the pull request on the forge/u);
 });
 
-test("a landing report owed while the campaign's root has ended stays owed and reaches the owner once the root runs again (#4323)", async () => {
+test("an ended root gets one durable Inbox receipt and is never asked again (#4551)", async () => {
+  for (const ended of ["failed", "completed", "archived"] as const) {
+    const f = fixture();
+    const { occurrenceId, forge } = f.consumedMerge(f.github(52));
+    await f.pass();
+    if (ended === "archived") f.db.raw().prepare("UPDATE sessions SET archived=1 WHERE id='root'").run();
+    else f.db.updateSessionStatus("root", ended, 3);
+    forge.state = "merged";
+    forge.closures = [closure("owner/app#3", "Closes #3\n<script>")];
+    await f.pass();
+    assert.equal(f.watch(occurrenceId)!.reportPending, "landed");
+    assert.equal(f.db.closureReports().length, 1);
+    assert.match(f.db.closureReports()[0]!.material, /Closes #3 'script'/u);
+    await f.pass();
+    f.db.updateSessionStatus("root", "running", 4);
+    await f.pass();
+    assert.deepEqual(f.ownerQuestions(), []);
+    assert.equal(f.db.closureReports().length, 1);
+    f.db.acknowledgeClosureReport(occurrenceId, "landed", "owner");
+    assert.equal(f.watch(occurrenceId)!.reportPending, undefined);
+    assert.ok(f.db.closureReports()[0]!.acknowledgedAt);
+    await f.pass();
+    assert.deepEqual(f.ownerQuestions(), []);
+  }
+});
+
+test("a root that ends with a waiting question transfers it to the Inbox (#4551)", async () => {
   const f = fixture();
-  const { occurrenceId, forge } = f.consumedMerge(f.github(52));
+  const { occurrenceId, forge } = f.consumedMerge(f.github(53));
+  forge.state = "merged"; forge.closures = [closure("owner/app#3", "Closes #3")];
   await f.pass();
+  assert.equal(f.ownerQuestions().length, 1);
   f.db.updateSessionStatus("root", "completed", 3);
-  forge.state = "merged";
-  forge.closures = [closure("owner/app#3", "Closes #3")];
   await f.pass();
-  assert.equal(f.watch(occurrenceId)!.state, "landed_unapproved");
+  assert.equal(f.db.closureReports().length, 1);
+  assert.equal(f.ownerQuestions().length, 0);
   assert.equal(f.watch(occurrenceId)!.reportPending, "landed");
-  assert.match(f.watch(occurrenceId)!.report!.unreported!, /root Orchestrator has ended/u);
-  assert.deepEqual(f.ownerQuestions(), []);
-  await f.pass();
-  assert.equal(f.watch(occurrenceId)!.reportPending, "landed", "still owed");
-  f.db.updateSessionStatus("root", "running", 4);
-  await f.pass();
-  assert.equal(f.watch(occurrenceId)!.reportPending, undefined);
-  const [question] = f.ownerQuestions();
-  assert.ok(question);
-  assert.equal(f.watch(occurrenceId)!.report?.occurrenceId, question.occurrenceId);
-  assert.equal(f.requests.length, 2, "an owed report is retried without reading the forge again");
 });
 
 test("a report owed when the control plane stopped is delivered exactly once after restart (#4323)", async () => {

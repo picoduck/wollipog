@@ -6119,6 +6119,13 @@ export class ControlPlaneDb {
   ) {
     this.db = db = runnerRetryConnection(db);
     if (!attached) {
+      // Additive, idempotent migration: receipts survive root and control-plane lifetimes.
+      db.exec(`CREATE TABLE IF NOT EXISTS campaign_closure_reports (
+        occurrence_id TEXT NOT NULL, kind TEXT NOT NULL, campaign_id TEXT NOT NULL,
+        question TEXT NOT NULL, material TEXT NOT NULL, created_at INTEGER NOT NULL,
+        acknowledged_at INTEGER, acknowledged_by TEXT,
+        PRIMARY KEY (occurrence_id, kind)
+      )`);
       AssistantConnections.install(db);
       installAssistantAutomationAuthority(db);
       installSkillManagementRevisions(db);
@@ -25012,7 +25019,11 @@ export class ControlPlaneDb {
     return (this.stmt(
       `SELECT * FROM workflow_decisions WHERE category='pr_merge'
          AND (closure_watch IS NULL OR json_extract(closure_watch, '$.state') IN ('watching','invalidated')
-           OR json_extract(closure_watch, '$.reportPending') IS NOT NULL)
+           OR json_extract(closure_watch, '$.reportPending') IS NOT NULL
+           OR EXISTS (SELECT 1 FROM workflow_decisions question JOIN sessions root ON root.id=question.session_id
+             WHERE question.occurrence_id=json_extract(workflow_decisions.closure_watch, '$.report.occurrenceId')
+               AND question.status IN ('pending','revoked')
+               AND (root.archived=1 OR root.status IN ('completed','failed','stopped'))))
          AND (closure_watch IS NOT NULL OR status='consumed' OR
            (forge_action IS NOT NULL AND json_extract(forge_action, '$.outcome') NOT IN ('refused','in_progress')))
        ORDER BY closure_watch IS NOT NULL, COALESCE(json_extract(closure_watch, '$.updatedAt'), 0) ASC, created_at ASC, occurrence_id ASC
@@ -25020,6 +25031,38 @@ export class ControlPlaneDb {
     ).all(limit) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
     );
+  }
+
+  closureReports(): Array<{ occurrenceId: string; kind: string; campaignId: string; question: string; material: string; createdAt: number; acknowledgedAt: number | null }> {
+    return this.stmt(`SELECT occurrence_id AS occurrenceId, kind, campaign_id AS campaignId,
+      question, material, created_at AS createdAt, acknowledged_at AS acknowledgedAt
+      FROM campaign_closure_reports ORDER BY created_at DESC`).all() as ReturnType<ControlPlaneDb["closureReports"]>;
+  }
+
+  ensureClosureReport(occurrenceId: string, kind: string, campaignId: string, question: string, material: string): void {
+    this.stmt(`INSERT OR IGNORE INTO campaign_closure_reports
+      (occurrence_id, kind, campaign_id, question, material, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(occurrenceId, kind, campaignId, question, material, Date.now());
+  }
+
+  closureReport(occurrenceId: string, kind: string): { acknowledgedAt: number | null } | null {
+    return this.stmt(`SELECT acknowledged_at AS acknowledgedAt FROM campaign_closure_reports
+      WHERE occurrence_id=? AND kind=?`).get(occurrenceId, kind) as { acknowledgedAt: number | null } | undefined ?? null;
+  }
+
+  acknowledgeClosureReport(occurrenceId: string, kind: string, userId: string): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.stmt(`UPDATE campaign_closure_reports SET acknowledged_at=?, acknowledged_by=?
+        WHERE occurrence_id=? AND kind=? AND acknowledged_at IS NULL`).run(Date.now(), userId, occurrenceId, kind);
+      const decision = this.workflowDecisionByOccurrence(occurrenceId);
+      if (decision?.closureWatch?.reportPending === kind) {
+        const next = { ...decision.closureWatch, report: { reportedAt: Date.now() } };
+        delete next.reportPending;
+        this.saveMergeClosureWatch(occurrenceId, decision.closureWatch, next);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
   /** Store a merge's closure watch if it is still `previous` (compare-and-set). */

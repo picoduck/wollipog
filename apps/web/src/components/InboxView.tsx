@@ -1,3 +1,4 @@
+import { CampaignClosureReports } from "./CampaignClosureReports.js";
 import { lazy, Suspense, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { presentOwnerQuestionRequest, prioritizedPendingRequests, providerSupportsConversationFork, type BoardColumn, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
@@ -1854,6 +1855,7 @@ export function InboxView({
         {/* One mounted notice slot: above the list on desktop, below its scroller on a phone so
             asynchronously loaded recommendations cannot move the already rendered top rows. */}
         <div className="inbox-list-notices" ref={listNoticesRef}>
+          <CampaignClosureReports />
           <SessionsListNotices
             signIns={machineProviderLogins}
             machineName={machineName}
