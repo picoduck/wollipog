@@ -13,7 +13,7 @@ import { Hub } from "./hub.js";
 import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
-import { closureCampaignPullRequests, closureEvidence, closureDeliveryGaps, issueEvidenceDigest, publicationEvidence } from "./campaign-issue-authority.js";
+import { closureCampaignPullRequests, closureEvidence, closureDeliveryGaps, issueEvidenceDigest, followUpOriginEvidence, publicationEvidence } from "./campaign-issue-authority.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
@@ -952,8 +952,8 @@ test("Custom scope and closure stay human-owned, and old peers cannot execute th
 
 const body = "## Problem\nRelated failure\n## Proposed Behavior\nRepair it\n## Acceptance Criteria\n- Verified repair\n## Security and Compatibility\nNone";
 
-async function consumedPublication(h: ReturnType<typeof harness>, title = "Lifecycle repair", issue = 101) {
-  const rec=h.svc.recordCampaignFollowUp("root",{originSessionId:"child",repository:"team/repo",title,originWorkItemIds:[h.item.id]}); assert.ok(rec.ok);
+async function consumedPublication(h: ReturnType<typeof harness>, title = "Lifecycle repair", issue = 101, originWorkItemIds = [h.item.id]) {
+  const rec=h.svc.recordCampaignFollowUp("root",{originSessionId:"child",repository:"team/repo",title,originWorkItemIds}); assert.ok(rec.ok);
   assert.ok(h.svc.adjudicateCampaignRecommendation("root",{recommendationId:rec.data!.id,disposition:"accepted",reason:"Observed related work",publicationRequired:true}).ok);
   const result=await h.svc.createWorkflowDecisionWithVideo("root",{requestId:`publish-${title}`,resourceKey:"publication",resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",
     sanitizedTitle:title,sanitizedBody:body,labels:[],recommendationId:rec.data!.id}}); assert.ok(result.ok);
@@ -964,6 +964,110 @@ async function consumedPublication(h: ReturnType<typeof harness>, title = "Lifec
     resultingWorkItemKey:`followup:${rec.data!.id}`,resultingIssue:{repository:"team/repo",number:issue}}).ok);
   return {decision,recommendationId:rec.data!.id};
 }
+
+test("#4538 issue-less and mixed origins admit publication and consumed scope lineage", async () => {
+  for (const mixed of [false, true]) {
+    const h = harness();
+    try {
+      // Server-scheduled tasks also recordPlan as the root.
+      const plan = h.svc.recordCampaignPlan("root", { items: [{ key: "investigation" }], planComplete: true });
+      assert.ok(plan.ok);
+      const investigation = plan.data!.items[0]!.workItemId;
+      const p = await consumedPublication(h, "Lifecycle repair", 101, [investigation, ...(mixed ? [h.item.id] : [])]);
+      const scope = await followUpScope(h, "investigation-scope", p.decision.occurrenceId);
+      assert.ok(scope.ok, scope.error ?? "scope");
+      assert.equal(scope.data!.authority, "orchestrator");
+      assert.ok(h.approve(scope.data!).ok);
+      assert.equal(h.logs.filter((line) => line.includes('"outcome":"admitted"') &&
+        line.includes('"basis":"issue-less campaign origin"')).length, 2);
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4538 unproven investigation provenance and older runners retain origin_outside_scope", async () => {
+  for (const kind of ["foreign", "child-created", "legacy", "cleared", "old-root", "old-requester"] as const) {
+    const h = harness();
+    try {
+      const plan = h.db.campaignWorkLedger.recordPlan("root", kind === "child-created" ? "child" : "root",
+        { items: [{ key: "investigation" }], planComplete: true }, Date.now());
+      assert.ok(plan.ok);
+      const id = plan.data.items[0]!.workItemId;
+      if (kind === "foreign") h.db.raw().prepare("UPDATE campaign_work_items SET campaign_session_id='child' WHERE id=?").run(id);
+      if (kind === "legacy") h.db.raw().prepare("INSERT INTO campaign_work_legacy_items VALUES (?)").run(id);
+      if (kind === "cleared") {
+        assert.ok(h.svc.recordCampaignPlan("root", { items: [{ key: "investigation", issue: { repository: "team/repo", number: 150 } }], planComplete: true }).ok);
+        assert.ok(h.svc.recordCampaignPlan("root", { items: [{ key: "investigation", issue: null }], planComplete: true }).ok);
+      }
+      if (kind === "old-root") h.db.raw().prepare("UPDATE runners SET protocol_version=370 WHERE runner_id='r'").run();
+      if (kind === "old-requester") {
+        h.db.registerRunner({ ...h.metadata, runnerId: "old" }, 1, 370);
+        h.db.raw().prepare("UPDATE sessions SET runner_id='old' WHERE id='child'").run();
+      }
+      const checked = followUpOriginEvidence(h.db, h.db.getSession("root")!, [id], kind === "old-requester" ? "old" : "r");
+      assert.ok("failure" in checked, kind);
+      assert.equal(checked.failure, "origin_outside_scope");
+      assert.match(checked.reason, kind === "foreign" ? /another campaign/u : kind.startsWith("old") ? /older runners/u : /not proven/u);
+      if (kind === "foreign") continue; // The recommendation API also rejects foreign ids.
+      const rec = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/repo", title: "Related repair", originWorkItemIds: [id] });
+      assert.ok(rec.ok);
+      assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: rec.data!.id, disposition: "accepted", reason: "Observed defect", publicationRequired: true }).ok);
+      const publication = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "unproven", resourceKey: "unproven", resourceSnapshot: {
+        category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Related repair", sanitizedBody: body, labels: [], recommendationId: rec.data!.id } });
+      assert.ok(publication.ok, publication.error ?? "publication");
+      assert.equal(publication.data!.authority, "human");
+      assert.equal(publication.data!.authorityEvaluation?.admissionFailure, "origin_outside_scope");
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4538 scope lineage rechecks issue-less provenance and compatibility after publication", async () => {
+  for (const changed of ["foreign", "removed-issue", "old-root"] as const) {
+    const h = harness();
+    try {
+      const plan = h.svc.recordCampaignPlan("root", { items: [{ key: "investigation" }], planComplete: true });
+      assert.ok(plan.ok);
+      const id = plan.data!.items[0]!.workItemId;
+      const p = await consumedPublication(h, "Lifecycle repair", 101, [id, h.item.id]);
+      if (changed === "foreign") h.db.raw().prepare("UPDATE campaign_work_items SET campaign_session_id='child' WHERE id=?").run(id);
+      if (changed === "removed-issue") {
+        const swap = await h.svc.proposeCampaignIssueScope("root", { requestId: "remove-origin", expectedRevision: 1,
+          additions: [], removals: [{ repository: "team/repo", number: 100 }], explanation: "Owner removes origin" }, () => true, h.principal);
+        assert.ok(swap.ok);
+        assert.ok(h.approve(swap.data!).ok);
+      }
+      if (changed === "old-root") h.db.raw().prepare("UPDATE runners SET protocol_version=370 WHERE runner_id='r'").run();
+      const scope = await followUpScope(h, "changed-origin", p.decision.occurrenceId, 101, changed === "removed-issue" ? 2 : 1);
+      assert.equal(refusalCode(scope), "origin_outside_scope");
+      assert.match(scope.error ?? "", changed === "foreign" ? /another campaign/u : changed === "removed-issue" ? /origin issue was removed/u : /older runners/u);
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4538 consumption rechecks a downgraded requester while the root remains compatible", async () => {
+  const { h } = multiRepositoryCampaign();
+  try {
+    h.db.raw().prepare("UPDATE sessions SET runner_id='r2', workspace_id='a' WHERE id='child'").run();
+    const plan = h.svc.recordCampaignPlan("root", { items: [{ key: "investigation" }], planComplete: true });
+    assert.ok(plan.ok);
+    const rec = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/api", title: "Related repair",
+      originWorkItemIds: [plan.data!.items[0]!.workItemId] });
+    assert.ok(rec.ok);
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: rec.data!.id, disposition: "accepted",
+      reason: "Observed related defect", publicationRequired: true }).ok);
+    const publication = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "downgrade", resourceKey: "downgrade", resourceSnapshot: {
+      category: "follow_up_issue_publication", repository: "team/api", sanitizedTitle: "Related repair", sanitizedBody: body, labels: [], recommendationId: rec.data!.id } });
+    assert.ok(publication.ok);
+    const decision = publication.data!;
+    assert.equal(decision.authority, "orchestrator", JSON.stringify(decision.authorityEvaluation));
+    assert.ok(h.svc.resolveWorkflowDecision("root", "child", decision.occurrenceId, { outcome: "approve" },
+      "orchestrator", { kind: "agent", id: "root" }, () => true).ok);
+    h.db.raw().prepare("UPDATE runners SET protocol_version=370 WHERE runner_id='r2'").run();
+    const consumed = await h.svc.consumeWorkflowDecision("child", decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot });
+    assert.equal(consumed.ok, false);
+    assert.match(consumed.error ?? "", /older runners/u);
+    assert.notEqual(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "consumed");
+  } finally { h.db.close(); }
+});
 
 test("compatible reauthorization can admit an earlier consumed publication exactly once", async () => {
   const h=harness(true,3);
@@ -1397,7 +1501,7 @@ test("#4065 an origin outside scope keeps the person fallback with its condition
       category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Related repair", sanitizedBody: body, labels: [], recommendationId } });
     assert.ok(p.ok, p.error ?? "origin");
     assert.deepEqual([p.data!.authority, p.data!.authorityEvaluation?.admissionFailure], ["human", "origin_outside_scope"]);
-    assert.equal(p.data!.authorityEvaluation?.admissionMessage, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES.origin_outside_scope);
+    assert.match(p.data!.authorityEvaluation?.admissionMessage ?? "", /origin issue was removed/u);
   } finally { h.db.close(); }
   const custom = harness(false);
   try {
@@ -2835,7 +2939,7 @@ test("#2940 a person-approved publication names the failed condition: removed or
     assert.ok(swap.ok, swap.error ?? "swap"); assert.ok(removed.approve(swap.data!).ok);
     const refused = await followUpScope(removed, "removed-origin", p.decision.occurrenceId, 101, 2);
     assert.equal(refusalCode(refused), "origin_outside_scope");
-    assert.equal(refused.error, "The published follow-up's authorized origins were removed from scope");
+    assert.match(refused.error ?? "", /origin issue was removed/u);
   } finally { removed.db.close(); }
   const unaccepted = harness(true, 3);
   try {

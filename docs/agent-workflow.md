@@ -190,6 +190,13 @@ per read; a failed read immediately returns to the ordinary check. No agent-writ
 supplied admission can establish this basis. This proves the follow-up names a real failed check
 of the campaign's own PR, not causality. The Orchestrator's accept/adjudicate step and exact-payload
 publication review remain the semantic gate; all structural floors remain required.
+Follow-up origins may include issue-less investigation items when the server ledger proves this
+campaign's root created them, including its server-scheduled tasks. Protocol 371 is required on
+the root and publication requester's runners; older runners retain the refusal. Items with unknown
+history, child-created items, foreign items and items whose issue was cleared cannot establish
+this basis. Publication and scope admission record `issue-less campaign origin` with the proven
+item ids. Accepted recommendations, exact consumed publication lineage, related-follow-up
+authority and capacity limits still apply to every origin mix.
 Scope and closure use their dedicated exact typed routes. Current hosts without eligible issue
 authority retain human review even when the campaign requests Full Control. Use non-closing PR
 references in campaigns so merge cannot bypass the closure gate: write "Refs #N", and never put

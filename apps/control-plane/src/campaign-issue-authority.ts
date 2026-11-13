@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { campaignBoundaryRepository, campaignPublicationSafe, campaignPublicationTitle, campaignScopeIssues, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
+import { campaignBoundaryRepository, runnerSupportsProtocol, campaignPublicationSafe, campaignPublicationTitle, campaignScopeIssues, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
   type WorkflowDecisionResourceSnapshot, type CampaignWorkItemDetail, type CampaignPullRequestRef, type CampaignRecommendation,
   ISSUE_CLOSURE_DELIVERY_GAPS_MAX, issueClosureDeliveryGap, type IssueClosureDeliveryGap, type IssueClosureDeliveryGapCode,
   type IssueClosureEpicMembers, type CampaignForgeChangeRequestObservation } from "@wollipog/protocol";
@@ -102,6 +102,32 @@ function trackedIssueWork(db: ControlPlaneDb, root: SessionView, issue: number, 
   return items;
 }
 
+/** Shared publication/scope floor. Missing and foreign items never count as owned work. */
+export function followUpOriginEvidence(db: ControlPlaneDb, root: SessionView, ids: readonly string[],
+  requesterRunnerId = root.runnerId) {
+  const failed = (reason: string) => ({ failure: "origin_outside_scope" as const, reason });
+  if (!ids.length) return failed("The follow-up has no recorded origin work items.");
+  const origins: NonNullable<CampaignWorkItemDetail["issue"]>[] = [];
+  const issueLessOrigins: string[] = [];
+  for (const id of ids) {
+    const item = db.campaignWorkLedger.detail(root.id, id, Date.now());
+    if (!item) return failed("The follow-up's origin work item is missing or belongs to another campaign.");
+    if (item.issue) {
+      if (!campaignIssueInScope(root.orchestratorPolicy, item.issue))
+        return failed("The published follow-up's origin issue was removed from this campaign's scope.");
+      origins.push(item.issue);
+    } else {
+      if (!db.campaignWorkLedger.issueLessCampaignOrigin(root.id, id))
+        return failed("The follow-up's issue-less origin is not proven to be investigation work created by this campaign's root or scheduled automation.");
+      if (![root.runnerId, requesterRunnerId].every((runnerId) =>
+        runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "issueLessCampaignOrigins")))
+        return failed("The follow-up's issue-less campaign origin requires newer runners; older runners retain issue-scope review.");
+      issueLessOrigins.push(id);
+    }
+  }
+  return { origins, ...(issueLessOrigins.length ? { originBasis: { basis: "issue-less campaign origin" as const, workItemIds: issueLessOrigins } } : {}) };
+}
+
 export function publicationEvidence(db: ControlPlaneDb, root: SessionView,
   snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>) {
   const checked = publicationEvidenceCheck(db, root, snapshot);
@@ -123,10 +149,9 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
   if (recommendation.disposition !== "accepted" || recommendation.duplicateOfId || !recommendation.dispositionReason) return failed("recommendation_not_accepted");
   if (recommendation.publication !== "awaiting_publication") return failed("recommendation_spent");
   if (campaignPublicationTitle(recommendation.title) !== campaignPublicationTitle(snapshot.sanitizedTitle)) return failed("title_mismatch");
-  if (!recommendation.originWorkItemIds.length) return failed("origin_outside_scope");
-  const origins = recommendation.originWorkItemIds.map((id) => db.campaignWorkLedger.detail(root.id, id, Date.now())?.issue);
-  // #4119: the originating work is in the campaign's scope, in whichever of its repositories.
-  if (origins.some((issue) => !issue || !campaignIssueInScope(root.orchestratorPolicy, issue))) return failed("origin_outside_scope");
+  const originEvidence = followUpOriginEvidence(db, root, recommendation.originWorkItemIds);
+  if ("failure" in originEvidence) return originEvidence;
+  const { origins, originBasis } = originEvidence;
   // A follow-up in another repository than its origins records both in its lineage.
   const originRefs = [...new Set(origins.map((issue) => `${issue!.repository.toLowerCase()}#${issue!.number}`))].sort();
   const lineage = originRefs.some((ref) => !ref.startsWith(`${snapshot.repository}#`))
@@ -139,7 +164,7 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
   if (heldCampaignIssues(root) + reservations >= db.campaignIssueLimit(root.id, boundary.issueAuthority.maxIssues)) {
     return failed("capacity_exhausted");
   }
-  return { evidence: { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision,
+  return { evidence: { recommendation, origins, ...(originBasis ? { originBasis } : {}), scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision,
     ...(lineage ? { lineage } : {}) } };
 }
 

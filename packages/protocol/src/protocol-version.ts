@@ -1463,6 +1463,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 370: same-child campaign merged PR candidates for patch-identical worktree retirement (#4535).
   370,
   // v371 slot
+  // 371: Admit server-proven issue-less campaign investigation origins for follow-up lineage.
+  371,
   // v372 slot
   // v373 slot
   // v374 slot
