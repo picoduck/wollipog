@@ -21,6 +21,7 @@ import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { filterInboxSplitsForReminderMode, InboxView } from "./InboxView.js";
 import { AppearancePanel } from "./SettingsView.js";
+import { VirtualMeasurementCommitTestProvider } from "./MeasuredVirtualList.js";
 import { COLOR_SCHEMES, DENSITY_OPTIONS, THEME_OPTIONS } from "../theme.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { INBOX_COLLAPSED_THREADS_KEY, type InboxSplit } from "../inbox.js";
@@ -3723,6 +3724,127 @@ test("the phone app bar's Search swaps the bar for a focused full-width field, a
   assertNoDomNode(field());
   assert.equal(domWindow.document.activeElement, searchButton());
 });
+
+for (const userScroll of [false, true]) {
+  test(`Inbox restore waits for measured geometry${userScroll ? " and yields to user scrolling" : ""} (#4525)`, async () => {
+    mobileViewport = false;
+    const callbacks = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    const requestFrame = ((callback: FrameRequestCallback) => {
+      const id = nextFrame++;
+      callbacks.set(id, callback);
+      return id;
+    }) as unknown as typeof domWindow.requestAnimationFrame;
+    const cancelFrame = ((id: number) => { callbacks.delete(id); }) as unknown as typeof domWindow.cancelAnimationFrame;
+    const originalRequest = domWindow.requestAnimationFrame;
+    const originalCancel = domWindow.cancelAnimationFrame;
+    const originalGlobalRequest = globalThis.requestAnimationFrame;
+    const originalGlobalCancel = globalThis.cancelAnimationFrame;
+    domWindow.requestAnimationFrame = requestFrame;
+    domWindow.cancelAnimationFrame = cancelFrame;
+    Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, writable: true, value: requestFrame });
+    Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, writable: true, value: cancelFrame });
+    cleanup(() => {
+      domWindow.requestAnimationFrame = originalRequest;
+      domWindow.cancelAnimationFrame = originalCancel;
+      globalThis.requestAnimationFrame = originalGlobalRequest;
+      globalThis.cancelAnimationFrame = originalGlobalCancel;
+    });
+    const frame = () => act(async () => {
+      const batch = [...callbacks];
+      for (const [id, callback] of batch) {
+        if (!callbacks.delete(id)) continue;
+        callback(id * 16);
+      }
+    });
+    const { container, root } = mountTestRoot();
+    const socket = new FakeSocket();
+    const connection: UiConnectionRuntime = {
+      instanceId: `inbox-restore-race-${userScroll}`,
+      runtimeKey: `inbox-restore-race-${userScroll}:1`,
+      createSocket: () => socket,
+      close() {},
+    };
+    const render = (expandedSessionId: string | null, deferred = true) => act(async () => {
+      root.render(
+        <VirtualMeasurementCommitTestProvider deferred={deferred}>
+          <StoreProvider connection={connection} navigation={navigation}>
+            <InboxView expandedSessionId={expandedSessionId} rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+          </StoreProvider>
+        </VirtualMeasurementCommitTestProvider>,
+      );
+    });
+    await render(null, false);
+    await act(async () => { socket.push(snapshot([session("restore-target", 10)])); });
+    await frame();
+    const outgoingGrid = container.querySelector<HTMLElement>(".inbox-list")!;
+    assert.equal(outgoingGrid.querySelector<HTMLElement>("[data-virtual-measurements]")?.dataset.virtualMeasurements, "ready");
+    await act(async () => {
+      outgoingGrid.scrollTop = 116;
+      outgoingGrid.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as unknown as Event);
+    });
+    // App navigation can remount Inbox already expanded. The saved viewport survives that
+    // remount, but the new virtual list must seed its own measurements before restoring it.
+    await act(async () => { root.render(null); });
+    await render("restore-target");
+    await act(async () => { socket.push(snapshot([session("restore-target", 10)])); });
+    await frame(); // Record the expanded surface; measurement seeding is still deferred.
+    const grid = container.querySelector<HTMLElement>(".inbox-list")!;
+    assert.ok(grid !== outgoingGrid, "the returning list must be a new DOM node");
+    const measurements = () => grid.querySelector<HTMLElement>("[data-virtual-measurements]")!;
+    assert.equal(measurements().dataset.virtualMeasurements, "pending");
+
+    // happy-dom does not clamp scrollTop. Model the browser's scroll range explicitly: the
+    // outgoing layout permits 116px, while the returning estimate-backed sizer is too short.
+    // The real deferred measurement commit, rather than a manually flipped readiness attribute,
+    // releases that clamp. Keep the selected row in view so minimum-reveal cannot mask the retry.
+    let estimatedMax = 0;
+    let scrollTop = 0;
+    const writes: Array<{ requested: number; actual: number }> = [];
+    Object.defineProperty(grid, "scrollHeight", { configurable: true, get: () => VIEWPORT_HEIGHT +
+      (measurements().dataset.virtualMeasurements === "ready" ? 1_000 : estimatedMax) });
+    Object.defineProperty(grid, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (requested: number) => {
+        scrollTop = Math.max(0, Math.min(requested, grid.scrollHeight - grid.clientHeight));
+        writes.push({ requested, actual: scrollTop });
+      },
+    });
+    await act(async () => {
+      grid.scrollTop = 0;
+      grid.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as unknown as Event);
+    });
+    await render(null);
+    assert.ok(container.querySelector(".inbox-list") === grid);
+    writes.length = 0;
+    await frame(); // First restore precedes the deferred measurement commit.
+    assert.equal(measurements().dataset.virtualMeasurements, "pending");
+    assert.ok(writes.some(({ requested, actual }) => requested === 116 && actual === 0),
+      "the first restore must try the saved position, ignoring the outgoing expanded-view save, and clamp");
+    assert.equal(grid.scrollTop, 0);
+
+    if (userScroll) {
+      await act(async () => {
+        grid.dispatchEvent(new domWindow.WheelEvent("wheel", { bubbles: true, deltaY: 60 }) as unknown as Event);
+        estimatedMax = 60;
+        grid.scrollTop = 60;
+        grid.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as unknown as Event);
+      });
+    }
+    await frame(); // Measurements are still pending on the third frame.
+    assert.equal(measurements().dataset.virtualMeasurements, "pending");
+    await frame(); // The fourth measurement frame commits readiness.
+    assert.equal(measurements().dataset.virtualMeasurements, "ready");
+    writes.length = 0;
+    await frame(); // First reveal frame with measured geometry.
+    assert.equal(grid.scrollTop, userScroll ? 60 : 116,
+      userScroll ? "user scrolling cancels the pending restore" : "the ready frame retries the original saved position");
+    if (userScroll) assert.deepEqual(writes, [], "a cancelled restore must not write scrollTop");
+    for (let remaining = 0; remaining < 8; remaining++) await frame();
+    assert.equal(grid.scrollTop, userScroll ? 60 : 116, "later settle frames preserve the chosen viewport");
+  });
+}
 
 test("every mounted root is torn down before the next test starts", () => {
   assert.deepEqual(mountedRoots, [], "a previous test left a React root mounted");
