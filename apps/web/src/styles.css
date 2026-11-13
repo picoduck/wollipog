@@ -9749,7 +9749,7 @@ textarea {
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--text-faint);
   animation: working-bounce 1.2s infinite ease-in-out both;
 }
 .working-dots span:nth-child(1) {

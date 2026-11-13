@@ -3,6 +3,25 @@ import { expectDelayedTooltip } from "./tooltip-delay";
 
 type Scenario = "running" | "failing" | "silent" | "approval" | "agents";
 
+for (const theme of ["light", "dark"]) {
+  test(`working dots use the neutral palette in ${theme} theme`, async ({ page }) => {
+    await page.goto(`/active-turn-progress-e2e.html?scenario=running&theme=${theme}`);
+    const dots = page.locator(".working-dots span");
+    await expect(dots).toHaveCount(3);
+    const neutral = await page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--text-faint)";
+      document.body.append(probe);
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      return color;
+    });
+    for (const dot of await dots.all()) {
+      await expect(dot).toHaveCSS("background-color", neutral);
+    }
+  });
+}
+
 async function openScenario(page: Page, scenario: Scenario, viewport: { width: number; height: number }) {
   await page.setViewportSize(viewport);
   await page.goto(`/active-turn-progress-e2e.html?scenario=${scenario}`);
