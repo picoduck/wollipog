@@ -192,7 +192,8 @@ export class ShellManager {
   /** Set by runner shutdown; ended callbacks are not reported after it. */
   private disposed = false;
 
-  constructor(private readonly cb: ShellCallbacks, directory?: string, registry?: ReviewWriterRegistry) {
+  constructor(private readonly cb: ShellCallbacks, directory?: string, registry?: ReviewWriterRegistry,
+    private readonly providerProcesses?: import("./provider-process-ownership.js").ProviderProcessOwnership) {
     this.reviewWriters = registry ?? new ReviewWriterRegistry(directory);
   }
 
@@ -286,6 +287,7 @@ export class ShellManager {
           // historical user-owned daemon behavior.
           trackDescendants: meta?.kind === "agent_tui" || meta?.cleanupOwnsDescendants === true,
           descendantMarker: meta?.cleanupDescendantMarker,
+          processOwnership: meta?.kind === "agent_tui" && context.kind === "native" ? this.providerProcesses?.owner(sessionId) : undefined,
         });
     const group = this.reviewWriters.group(this.agentTuiWriterTokens.get(shellId));
     const child = group ? group.run(spawn) : spawn();

@@ -727,7 +727,7 @@ export class CodexAppServerDriver implements Driver {
     }> = {},
   ) {
     this.sandboxProbeCommand = deps.sandboxProbeCommand ?? (() => codexSandboxProbeCommand());
-    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
+    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup, processOwnership: opts.processOwnership });
     this.cwd = opts.review ? prepareCodexReviewWorkingDirectory(opts.cwd) : opts.cwd;
     this.config = opts.config;
     this.spawn = deps.spawn ?? spawnAgent;

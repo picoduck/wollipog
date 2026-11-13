@@ -310,10 +310,12 @@ class ClaudeNamespace implements ClaudeNamespaceLifetime {
       const args = buildBwrapArgs({
         command: TARGET, args: ["--supervisor", this.token.toString("hex")], cwd: opts.cwd,
       }, isolation);
+      const ownership = opts.processOwnership?.prepare();
       const launch = spawnWithLinuxCgroup(isolation.command, args, {
         cwd: opts.cwd, env, detached: true,
       });
       this.outer = launch.child;
+      ownership?.spawned(this.outer);
       this.containment = launch.containment;
     } catch (error) {
       rmSync(this.tempRoot, { recursive: true, force: true });

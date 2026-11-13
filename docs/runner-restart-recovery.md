@@ -40,12 +40,48 @@ they replace the in-process runner services while keeping the provider alive. Th
 lost binding, fail-closed verdict transport, durable action and owner-only service restart. It is
 not a live-stack restart or an installed-provider end-to-end rehearsal.
 
-## Remaining for #4546
+## Startup Retirement of Recorded Providers
 
-This slice does not retire a native provider that outlived the runner. A surviving provider can
-keep its provider-HOME lease busy; the launch then refuses, starts no replacement provider, and
-restores the owner's recovery action. An unleased surviving process also has no session-bound
-retirement proof in this slice. No unproven PID is signalled and no lease record is removed.
-Safe retirement requires a durable, owner-only record binding the provider process to this
-session, with fresh process-identity verification before signalling. That remains a second slice
-of the original issue; the issue must stay open until it is delivered and verified.
+On Linux, runner-owned native structured provider launches and Native TUI controllers publish
+owner-only process ownership under the runner's private `provider-processes-v1` directory.
+The enclosing data-directory lease is acquired for the attested runner/control-plane identity
+before any retirement is considered; foreign data-directory ownership is never adopted here.
+An admission intent is durable before spawn; the runner captures its child's kernel start time
+synchronously before the event loop can reap and recycle it. Every record binds one process to
+its session, this runner's identity and its random startup generation. Partial records never
+authorize a signal. The records and their fields are never logged or projected to the provider.
+
+Before startup registration admits any commands, the new runner examines prior-generation
+records belonging to this same runner and OS user. A still-live recording runner, the current
+generation, unknown/legacy evidence, changed private-file permissions or unverifiable identity
+retain their records and processes. The native worker opens a pidfd first, then checks boot,
+start time, user and prior-runner liveness before signalling through that handle. PID reuse can
+therefore never redirect a signal to its replacement. A graceful TERM/CONT gets a short grace
+period, followed by KILL through the same handle if necessary; kernel exit must be observed.
+The worker never sends a signal through a numeric PID. Startup work has record and elapsed-time
+bounds; anything beyond them is retained.
+
+Deploying this version retires proven recorded orphan providers at the next runner startup. A version that has never
+recorded ownership cannot supply retrospective proof: existing unrecorded providers are left
+untouched. Other platforms retain the existing behavior until an equivalent kernel primitive is
+implemented. Unrecorded descendants and ambiguous survivors continue to block HOME recovery;
+this does not delete lease evidence, exclude processes from the production scan or weaken its
+complete-tree standard. No agent management route invokes startup retirement.
+
+Retiring a root's provider does not restart it. The owner's action above still admits its fresh
+credential/guard and continuation. Children continue through their Orchestrator. A failed HOME
+proof preserves the existing refusal and recovery card.
+
+Startup retirement was chosen over an owner-cohort action because HOME lease evidence covers
+all providers launched by the old runner. Retiring only one clicked root can leave its relaunch
+blocked by another session's orphan. Independently retiring every proven old provider restores
+the existing startup assumption that prior runtime has ended, without adding a broad human
+action or changing unknown-survivor authority. This decision does not authorize deployment or
+restart of the stack hosting an agent.
+
+Runner logs emit `provider_startup_retirement` with retired/retained counts and retired session
+IDs only. Fixture tests cover independent orphan sessions, unknown survivors, PID identity
+mismatch, foreign ownership, current generation, private-file permissions, and owner recovery.
+The combined HOME/guard/credential rehearsal requires an unremapped host root: the existing
+lease bootstrap intentionally rejects a filesystem root owned by a foreign remapped UID. It
+must run without that skip in CI; this is not a live-stack restart.

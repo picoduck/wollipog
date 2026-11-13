@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,9 +18,34 @@ import {
 import { EventEmitter } from "node:events";
 import { waitForPendingKills, type AgentProcess } from "./spawn.js";
 import { WindowsConptyProcess } from "./windows-conpty.js";
+import { ProviderProcessOwnership } from "./provider-process-ownership.js";
 
 const NATIVE = { kind: "native" } as const;
 const ENTER = process.platform === "win32" ? "\r" : "\n";
+
+test("Native TUI ownership is journaled for its session while an ordinary shell creates no provider record",
+  { skip: process.platform !== "linux" }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "tui-provider-ownership-"));
+  const directory = join(root, "ownership");
+  const ownership = new ProviderProcessOwnership(directory, "runner");
+  const manager = new ShellManager({ onOutput() {}, onExit() {} }, undefined, undefined, ownership);
+  const launch = { command: process.execPath, args: ["-e", "setInterval(()=>{},1000);setTimeout(()=>process.exit(0),30000)"], cwd: root, env: { HOME: root } };
+  try {
+    manager.open("human", "human-session", root, NATIVE, undefined, { kind: "shell", launch });
+    assert.deepEqual(readdirSync(directory), []);
+    manager.open("tui", "tui-session", root, NATIVE, undefined, { kind: "agent_tui", launch });
+    const files = readdirSync(directory);
+    assert.equal(files.length, 1);
+    const record = JSON.parse(readFileSync(join(directory, files[0]!), "utf8"));
+    assert.equal(record.sessionId, "tui-session");
+    assert.ok(record.pid > 1 && record.startTime);
+    assert.equal((await ownership.recover()).retired, 0, "startup cannot signal current-generation TUIs");
+  } finally {
+    manager.dispose();
+    await waitForPendingKills(10_000);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function collector() {
   const out: { shellId: string; stream: string; data: string; seq: number }[] = [];
