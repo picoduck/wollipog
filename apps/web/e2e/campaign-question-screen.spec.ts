@@ -5,7 +5,14 @@ async function wheelToCard(page: Page, card: Locator) {
     let scroller = element.parentElement;
     while (scroller && !(scroller.scrollHeight > scroller.clientHeight && /auto|scroll/.test(getComputedStyle(scroller).overflowY))) scroller = scroller.parentElement;
     const area = scroller!.getBoundingClientRect();
-    return { gap: element.getBoundingClientRect().top - area.top - 100,
+    const x = element.getBoundingClientRect().left + 2;
+    const covers = (candidate: Element | null) => {
+      for (let at = candidate; at && at !== scroller; at = at.parentElement) if (/sticky|fixed/.test(getComputedStyle(at).position)) return true;
+      return !candidate || !scroller!.contains(candidate);
+    };
+    let visibleTop = Math.max(area.top, 0);
+    while (visibleTop < area.bottom && covers(document.elementFromPoint(x, visibleTop))) visibleTop++;
+    return { gap: element.getBoundingClientRect().top - visibleTop - 12,
       x: area.left + area.width / 2, y: Math.min(area.bottom - 20, innerHeight - 100) };
   });
   for (let step = 0; step < 8; step++) {
@@ -15,6 +22,7 @@ async function wheelToCard(page: Page, card: Locator) {
     await page.mouse.wheel(0, gap);
     await page.waitForTimeout(100);
   }
+  await page.evaluate(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); });
   await expect.poll(() => page.locator("aside.rpanel").evaluate((el) => el.scrollTop)).toBe(0);
 }
 
@@ -22,6 +30,7 @@ for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
   test(`a typed model ask waits for owner classification (${device})`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&screen=ask");
+    if (device === "phone") await expect(page.getByRole("navigation", { name: "Primary Navigation" })).toBeInViewport();
     const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
     await expect(waiting).toContainText("#4542 Migrate Provider Account Configuration");
     await expect(waiting).toContainText("Held for the owner's classification by the model credential screen.");

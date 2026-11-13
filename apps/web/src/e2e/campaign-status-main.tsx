@@ -54,6 +54,7 @@ import {
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
+import { Rail } from "../components/Rail.js";
 import { RequestDock, dockRequests } from "../components/requests/RequestDock.js";
 import { useCampaignStatusAvailability } from "../components/useCampaignStatus.js";
 import { applyCampaignWorkFilters, type CampaignWorkFilters } from "../campaign-status.js";
@@ -1409,8 +1410,8 @@ function Fixture() {
     consumeSubagentFocusRequest: () => {},
   };
   return (
-    <main className="app" style={{ display: "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
-      <section className="session-detail expanded" style={{ height: "100%" }}>
+    <main className="app" style={{ display: params.get("screen") === "ask" && window.innerWidth <= 760 ? "flex" : "block", height: (ownerScopeCards.length || params.has("closureRecovery")) && window.innerWidth <= 760 ? "calc(100dvh - var(--bottom-bar-h))" : "100dvh" }}>
+      <section className="session-detail expanded" style={{ height: "100%", ...(params.get("screen") === "ask" && window.innerWidth <= 760 ? { flex: "1 1 0", minHeight: 0 } : {}) }}>
         <header className="detail-bar session-bar">
           <h1 className="detail-bar-title session-bar-title">{params.get("screen") === "ask" ? "Provider Configuration Campaign" : session.title}</h1>
         </header>
@@ -1441,14 +1442,16 @@ function Fixture() {
       </section>
       {/* On a phone the app's tab bar fills the band below the panel sheet (--bottom-bar-h); this
           stand-in shows that band for what it is in the captures. */}
-      {window.innerWidth <= 760 && (
+      {window.innerWidth <= 760 && params.get("screen") === "ask" ? (
+        <Rail view={{ name: "session", id: sessionId }} blockedCount={1} onNavigate={() => {}} />
+      ) : window.innerWidth <= 760 && (
         <nav aria-label="App Navigation" style={{
           position: "fixed", left: 0, right: 0, bottom: 0, height: "var(--bottom-bar-h)",
           display: "flex", alignItems: "center", justifyContent: "center",
           borderTop: "1px solid var(--border)", background: "var(--bg-elev)", color: "var(--text-dim)",
           font: "var(--type-small)",
         }}>
-          {params.get("screen") === "ask" ? "Sessions · Inbox · Settings" : "App Tab Bar"}
+          App Tab Bar
         </nav>
       )}
     </main>
