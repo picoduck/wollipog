@@ -18540,7 +18540,9 @@ export class SessionsService {
       else {
         if (!parked) this.gateOnPolicy(sessionId, now);
         this.clearSettledPolicyResumeStatus(sessionId);
-        resume?.(false);
+        // Async owner cards never parked the root, so its idle status is already authoritative.
+        // Its answer notification is queued until the runner starts it, just like a restored idle.
+        resume?.(!parked && !recovering && current.status === "idle");
       }
     }
   }

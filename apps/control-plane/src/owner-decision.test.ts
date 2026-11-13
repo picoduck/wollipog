@@ -341,6 +341,7 @@ for (const kind of ["approval", "question"] as const) test(`pending root owner $
     assert.equal(h.db.workflowDecisionByOccurrence(asked.data.occurrenceId)!.status, "pending");
     const answer = () => h.svc.approve("root", asked.data!.occurrenceId, "a", h.owner);
     assert.ok(answer().ok, "the unchanged owner card remains answerable");
+    assert.equal(h.db.getSession("root")!.status, "queued", "an idle root's answer notification has not started a provider turn");
     const resumes = () => h.prompts("root").filter(text => text.includes(asked.data!.occurrenceId) && !text.includes("Campaign Continuation"));
     const delivered = resumes().length;
     assert.equal(delivered, 1, "one durable answer notification is owed");
