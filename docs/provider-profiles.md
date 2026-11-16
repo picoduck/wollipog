@@ -183,6 +183,14 @@ an orderly shutdown, the replacement acquires it, binds new sessions to the same
 resumable conversations, without any filesystem change. Because a managed HOME is outside the
 owner-namespaced data directory, the replacement may also retire it when the account is removed.
 
+A config-less runner (an SSH Machine launched by the control plane, with no `--config` and no
+default `runner.config.json`) publishes its accounts to `provider-accounts.json` in its own leased
+data directory instead (#3276), so Machines and control planes sharing one SSH account never share
+an account list. Its accounts follow that data directory: the same Machine keeps them across
+restarts and runner updates, while a replacement Machine with a new data directory starts with none;
+its managed HOMEs remain on disk for adoption. A runner with a config file, explicit or default,
+keeps publishing to that file, including an existing `~/runner.config.json`.
+
 A runner connected to another control-plane instance is refused at the lease as
 `profile_not_granted`, and its account reports show `not_granted`, until an Owner or Admin there
 adopts the profile.

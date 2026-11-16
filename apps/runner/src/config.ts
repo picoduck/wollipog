@@ -1,11 +1,15 @@
 /** Runner configuration loading + CLI argument parsing. */
 
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
+  openSync,
   readFileSync,
   realpathSync,
+  writeSync,
 } from "node:fs";
-import { posix, resolve, win32 } from "node:path";
+import { join, posix, resolve, win32 } from "node:path";
 import { homedir } from "node:os";
 import type { AcpEnvironmentReference, AcpMcpServerConfig, AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
@@ -346,7 +350,7 @@ function readConfigFile(
   configPath: string,
   overrides: Partial<RunnerConfig>,
   explicitConfig: boolean,
-): Partial<RunnerConfig> {
+): { file: Partial<RunnerConfig>; configLess: boolean } {
   let raw: string;
   try {
     raw = readFileSync(configPath, "utf8");
@@ -356,14 +360,54 @@ function readConfigFile(
     // Tolerate ONLY a missing DEFAULT config during a config-less (flags/env) launch. An explicit
     // `--config`, or any non-ENOENT failure (permissions, etc.), is a hard error — we never
     // silently drop a config the operator asked us to merge.
-    if (code === "ENOENT" && !explicitConfig && haveConn) return {};
+    if (code === "ENOENT" && !explicitConfig && haveConn) return { file: {}, configLess: true };
     throw new Error(`could not read runner config at ${configPath}: ${(err as Error).message}`);
   }
   try {
-    return JSON.parse(raw) as Partial<RunnerConfig>;
+    return { file: JSON.parse(raw) as Partial<RunnerConfig>, configLess: false };
   } catch (err) {
     throw new Error(`invalid JSON in ${configPath}: ${(err as Error).message}`);
   }
+}
+
+/**
+ * #3276: the file a config-less runner publishes provider accounts to, inside its own data
+ * directory. A config-less launch (the control plane's SSH Machines) has no operator config, and
+ * the default `./runner.config.json` is the SSH account's HOME, which every Machine and control
+ * plane on that account would share.
+ */
+export const CONFIG_LESS_PROVIDER_ACCOUNTS_FILE = "provider-accounts.json";
+
+/**
+ * Open a config-less runner's account list: `<dataDir>/provider-accounts.json`, created empty
+ * (0600, exclusive) on first use so the fenced account publication has a source to replace. Call
+ * only once the data-directory lease is held, so the directory is this runner's own. An existing
+ * list is validated like an operator config; a damaged one fails closed and is never reset.
+ */
+export function openConfigLessProviderAccounts(dataDir: string): { path: string; providerAccounts: RunnerProviderAccount[] } {
+  const path = join(resolve(dataDir), CONFIG_LESS_PROVIDER_ACCOUNTS_FILE);
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "wx", 0o600);
+    writeSync(fd, "{}\n");
+    fsyncSync(fd);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw new Error(`could not create the runner's provider accounts at ${path}: ${(error as Error).message}`);
+    }
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(`could not read the runner's provider accounts at ${path}: ${(error as Error).message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`the runner's provider accounts at ${path} must be a JSON object`);
+  }
+  return { path, providerAccounts: validateProviderAccounts((parsed as Partial<RunnerConfig>).providerAccounts ?? []) };
 }
 
 /**
@@ -879,7 +923,18 @@ export function loadConfig(
   overrides: Partial<RunnerConfig> = {},
   explicitConfig = false,
 ): RunnerConfig {
-  return resolveConfig(readConfigFile(configPath, overrides, explicitConfig), overrides);
+  return loadRunnerConfig(configPath, overrides, explicitConfig).config;
+}
+
+/** `loadConfig`, also reporting whether the launch was config-less: no `--config` and no default
+ * file. Only then do provider accounts live in the data directory (`openConfigLessProviderAccounts`). */
+export function loadRunnerConfig(
+  configPath: string,
+  overrides: Partial<RunnerConfig> = {},
+  explicitConfig = false,
+): { config: RunnerConfig; configLess: boolean } {
+  const { file, configLess } = readConfigFile(configPath, overrides, explicitConfig);
+  return { config: resolveConfig(file, overrides), configLess };
 }
 
 /** Capture before an asynchronous adoption, not after its marker side effect. */

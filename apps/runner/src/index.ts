@@ -80,7 +80,8 @@ import {
   isOrchestratorLaunch,
 } from "@wollipog/protocol";
 import {
-  loadConfig,
+  loadRunnerConfig,
+  openConfigLessProviderAccounts,
   parseAndConsumeRunnerEnvironment,
   parseArgs,
   projectAgentDiscoveryEnvironment,
@@ -391,8 +392,9 @@ if (tokenFile) {
 }
 
 let config: RunnerConfig;
+let configLess: boolean;
 try {
-  config = loadConfig(parsed.configPath, overrides, parsed.explicitConfig);
+  ({ config, configLess } = loadRunnerConfig(parsed.configPath, overrides, parsed.explicitConfig));
 } catch (err) {
   console.error(`[runner] ${(err as Error).message}`);
   process.exit(1);
@@ -471,6 +473,20 @@ config.dataDir = dataDirLease.dataDir;
 // Runtime containment is selected before provider-HOME acquisitions; staging can use the owned
 // runner data directory when the temporary filesystem is noexec. This never moves the runner.
 process.once("exit", dataDirLease.release);
+// #3276: a config-less runner (an SSH Machine) publishes provider accounts in its own leased data
+// directory, never in a runner.config.json in the SSH account's shared HOME. A runner with a
+// config file, explicit or default, keeps publishing to that file.
+let providerAccountsConfigPath = parsed.configPath;
+if (configLess) {
+  try {
+    const opened = openConfigLessProviderAccounts(config.dataDir);
+    providerAccountsConfigPath = opened.path;
+    config.providerAccounts = opened.providerAccounts;
+  } catch (error) {
+    console.error(`[runner ${config.runnerId}] ${(error as Error).message}`);
+    process.exit(1);
+  }
+}
 // The data-directory lease binds these private records to the attested runner/control plane.
 // No new provider or HOME work exists yet, and no socket can admit an agent recovery request.
 const providerProcesses = new ProviderProcessOwnership(join(config.dataDir, "provider-processes-v1"), config.runnerId);
@@ -942,7 +958,7 @@ function defaultCodexImportSource(): ProviderCredentialImportSourceHome | undefi
 const providerCredentialImportSupported = providerCredentialImportHostSupported();
 const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSupervisor({
   dataDir: config.dataDir,
-  configPath: parsed.configPath,
+  configPath: providerAccountsConfigPath,
   accounts: config.providerAccounts,
   agents: () => metadata.agents,
   resolveEnv: (agent) => runnerLocalAgentEnv(
@@ -1354,7 +1370,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
   attestation.instanceId,
 );
 sessions.onProviderAccountCooldown = publishProviderAccountInventory;
-const sharedDirectoryForbiddenRoots = [parsed.configPath,
+const sharedDirectoryForbiddenRoots = [parsed.configPath, providerAccountsConfigPath,
   ...(tokenFile ? [tokenFile] : []), ...config.providerAccounts.map((account) => account.directory)];
 sessions.configureSharedDirectories(config.workspaces, sharedDirectoryForbiddenRoots);
 sessions.configureProviderProfiles({
@@ -1370,8 +1386,8 @@ const providerProfileCommands: ProviderProfileCommandDeps = {
   revoke: (home, provider, profileId, grantId) => sessions.revokeProviderProfileGrant(home, provider, profileId, grantId),
   retire: (home, provider, expectedProfileId) => sessions.retireProviderAccountHome(home, provider, expectedProfileId),
   profileRoot: managedProviderProfileRoot(),
-  captureAccountsPreimage: () => captureProviderAccountsConfigPreimage(parsed.configPath, config.providerAccounts),
-  persistAccounts: (accounts, preimage) => writeProviderAccountsConfig(parsed.configPath, accounts, preimage),
+  captureAccountsPreimage: () => captureProviderAccountsConfigPreimage(providerAccountsConfigPath, config.providerAccounts),
+  persistAccounts: (accounts, preimage) => writeProviderAccountsConfig(providerAccountsConfigPath, accounts, preimage),
   removeAccount: (accountId, options) => providerLoginSupervisor.removeAccount(accountId, options),
   publish: () => publishProviderAccountInventory(),
   log,

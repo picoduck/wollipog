@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { isAbsolute } from "node:path";
 import { join } from "node:path";
@@ -22,6 +22,9 @@ import {
   validateProviderAccounts,
   writeProviderAccountsConfig,
   captureProviderAccountsConfigPreimage,
+  CONFIG_LESS_PROVIDER_ACCOUNTS_FILE,
+  loadRunnerConfig,
+  openConfigLessProviderAccounts,
 } from "./config.js";
 
 test("parseArgs defaults to runner.config.json (absolute)", () => {
@@ -607,6 +610,40 @@ test("loadConfig tolerates a MISSING DEFAULT config during config-less launch", 
   const missing = join(tmpdir(), `wollipog-no-such-${process.pid}.json`);
   const cfg = loadConfig(missing, { runnerId: "b", controlPlaneUrl: "ws://h/runner" }, /* explicit */ false);
   assert.equal(cfg.runnerId, "b");
+});
+
+test("loadRunnerConfig reports a config-less launch only for a missing default config (#3276)", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-config-source-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const conn = { runnerId: "b", controlPlaneUrl: "ws://h/runner" };
+  assert.equal(loadRunnerConfig(join(dir, "runner.config.json"), conn, false).configLess, true);
+  const present = join(dir, "present.json");
+  writeFileSync(present, "{}\n");
+  assert.equal(loadRunnerConfig(present, conn, false).configLess, false, "an existing default config keeps owning accounts");
+  assert.equal(loadRunnerConfig(present, conn, true).configLess, false);
+});
+
+test("a config-less runner keeps provider accounts in its own data directory (#3276)", { skip: process.platform === "win32" }, (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-config-less-accounts-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const first = join(home, "runner-data", "box-11111111"), second = join(home, "runner-data", "box-22222222");
+  mkdirSync(first, { recursive: true, mode: 0o700 }); mkdirSync(second, { recursive: true, mode: 0o700 });
+
+  const opened = openConfigLessProviderAccounts(first);
+  assert.equal(opened.path, join(first, CONFIG_LESS_PROVIDER_ACCOUNTS_FILE));
+  assert.deepEqual(opened.providerAccounts, []);
+  assert.equal(statSync(opened.path).mode & 0o777, 0o600);
+
+  // Sign-in publishes through the same fenced writer as an operator config.
+  const account = { id: "work", label: "Work", provider: "claude" as const, directory: join(home, "profiles", "work") };
+  writeProviderAccountsConfig(opened.path, [account], captureProviderAccountsConfigPreimage(opened.path, []));
+  assert.deepEqual(openConfigLessProviderAccounts(first).providerAccounts, [account], "a restart reads the published account");
+  assert.deepEqual(openConfigLessProviderAccounts(second).providerAccounts, [], "another Machine never sees it");
+  assert.equal(existsSync(join(home, "runner.config.json")), false, "nothing is written to the shared HOME");
+
+  writeFileSync(opened.path, "not json");
+  assert.throws(() => openConfigLessProviderAccounts(first), /provider accounts/, "a damaged list fails closed, never resets");
+  assert.equal(readFileSync(opened.path, "utf8"), "not json");
 });
 
 test("loadConfig throws on a MISSING EXPLICIT config even with connection overrides", () => {
