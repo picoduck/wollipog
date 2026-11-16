@@ -24,6 +24,13 @@ unexercised behavior. Apply this classification before the failing-test reruns b
 failures still follow those rules. Do not weaken ancestry, lease, staging, namespace checks,
 assertions, or retry policies or silently skip tests to claim green.
 
+This classification records unexercised behavior, not the refusal's root cause. These signatures
+also cover writable modes and other setup defects. Retain the failing-test diagnostics below
+and consult `flaky-test-triage`'s CI-history, environment and umask checks to diagnose such causes,
+including test-isolation findings or a production regression that blocks setup. Attribute
+ownership mapping only with correlated probe and refusal evidence; otherwise leave that cause
+unproven. Diagnosing a setup defect does not turn its blocked behavior into a coverage gap.
+
 Run the suite with coverage:
 
 ```

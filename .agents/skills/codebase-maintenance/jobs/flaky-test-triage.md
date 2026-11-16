@@ -62,6 +62,13 @@ Recommended Action to schedule validation in a compatible execution context, ded
 the shared reporting rules. No clean or complete result may be claimed for that subset. Do not
 weaken checks, assertions, or retry policies or silently skip tests to claim green.
 
+This classification records unexercised behavior, not the refusal's root cause. These signatures
+also cover writable modes and other setup defects. Retain the CI-history check and environment
+and umask reruns below to diagnose the cause, including test-isolation findings or a production
+regression that blocks setup. Attribute ownership mapping only with correlated probe and refusal
+evidence; otherwise leave that cause unproven. A diagnosed setup defect does not establish that
+the blocked behavior was exercised.
+
 For the remaining exercised tests:
 
 - Failing in all three runs: a **broken test**, not a flaky one. It is a real regression or a test
