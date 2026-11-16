@@ -112,6 +112,34 @@ test("a removal of the current head is reported with GitHub's reason; one of an 
   assert.equal(pushed.value.removal, null);
 });
 
+test("merge-group checks past the first page of contexts are unknown unless a failure is already seen", async () => {
+  const paged = (nodes: unknown[]) => ({
+    mergeQueueEntry: {
+      state: "AWAITING_CHECKS", position: 1, enqueuedAt: "2026-10-12T11:00:00Z",
+      headCommit: { oid: GROUP, statusCheckRollup: { contexts: { pageInfo: { hasNextPage: true }, nodes } } },
+    },
+  });
+  const passingSoFar = await readPullRequestQueue("o/r", 7, fakeGh(ok(pr(paged([run("CI", "SUCCESS", { isRequired: true })])))).gh);
+  assert.ok(passingSoFar.ok);
+  assert.equal(passingSoFar.value.entry?.groupChecks, null, "never passing from a partial page");
+  const pendingSoFar = await readPullRequestQueue("o/r", 7, fakeGh(ok(pr(paged([run("CI", null)])))).gh);
+  assert.ok(pendingSoFar.ok);
+  assert.equal(pendingSoFar.value.entry?.groupChecks, null);
+  const failingSoFar = await readPullRequestQueue("o/r", 7, fakeGh(ok(pr(paged([run("CI", "FAILURE", { isRequired: true })])))).gh);
+  assert.ok(failingSoFar.ok);
+  assert.equal(failingSoFar.value.entry?.groupChecks, "failing", "a failure already seen is real");
+});
+
+test("a removal from a queue the base no longer has is never recorded or shown", async () => {
+  const removed = { __typename: "RemovedFromMergeQueueEvent", createdAt: "2026-10-12T12:00:00Z", reason: "failed_checks" };
+  const read = await readPullRequestQueue("o/r", 7, fakeGh(ok(pr({ isMergeQueueEnabled: false, queueEvents: { nodes: [removed] } }))).gh);
+  assert.ok(read.ok);
+  assert.notEqual(read.value.removal, null, "the read still attributes it to the current head");
+  const facts = mergeQueueFactsFromRead(read.value);
+  assert.deepEqual(facts, { enabled: false, entry: null, removal: null });
+  assert.equal(mergeQueueStatus(facts, "OPEN"), null, "no queue UI");
+});
+
 test("a merged or closed pull request carries no queue facts", async () => {
   for (const state of ["MERGED", "CLOSED"]) {
     const read = await readPullRequestQueue("o/r", 7, fakeGh(ok(pr({ state, ...entry("LOCKED") }))).gh);

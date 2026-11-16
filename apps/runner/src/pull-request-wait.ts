@@ -1124,9 +1124,12 @@ export async function readPullRequestQueue(
   if (queue?.headSha) {
     const group = evaluateCommitChecks(queue.headSha, queue.rollup, []);
     const other = group.summary.other;
-    groupChecks = group.requiredState === "failed" ? "failing" : group.requiredState === "pending" ? "pending"
+    const seen: QueueGroupChecks = group.requiredState === "failed" ? "failing" : group.requiredState === "pending" ? "pending"
       : group.requiredState === "passed" ? "passing"
       : other.failed > 0 ? "failing" : other.pending > 0 ? "pending" : other.passed > 0 ? "passing" : null;
+    // One read sees the first page of contexts only. A failure seen there is real; anything else
+    // could still change on a later page, so it stays unknown rather than passing or pending.
+    groupChecks = group.complete || seen === "failing" ? seen : null;
   }
   return {
     ok: true,

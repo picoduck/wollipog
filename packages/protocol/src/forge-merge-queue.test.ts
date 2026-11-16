@@ -63,6 +63,10 @@ test("nothing shows for unknown facts, a repository without a queue, or a pull r
   assert.equal(mergeQueueStatus(null), null);
   assert.equal(mergeQueueStatus({ enabled: false, entry: null, removal: null }, "OPEN"), null);
   assert.equal(mergeQueueStatus({ enabled: true, entry: null, removal: null }, "OPEN"), null, "a queue alone is not a state");
+  // A removal recorded before the queue was disabled (or the pull request retargeted) is history.
+  const removal = { reason: "failed_checks", removedAt: 9 };
+  assert.equal(mergeQueueStatus({ enabled: false, entry: null, removal }, "OPEN"), null);
+  assert.equal(mergeQueueStatus({ enabled: null, entry: null, removal }, "OPEN")?.kind, "removed", "unknown keeps it");
   for (const state of ["MERGED", "merged", "CLOSED", "closed"]) {
     assert.equal(mergeQueueStatus(queued("queued"), state), null, state);
   }

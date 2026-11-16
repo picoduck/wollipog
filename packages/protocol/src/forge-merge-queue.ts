@@ -137,7 +137,9 @@ export function mergeQueueStatus(
     }
   }
   const removal = facts.removal;
-  if (!removal) return null;
+  // A base whose queue is now off (disabled, or the pull request was retargeted) makes an earlier
+  // removal history, not a state to act on. Unknown (null) keeps the removal.
+  if (!removal || facts.enabled === false) return null;
   // GitHub records a removal when the entry lands; the pull request reads MERGED a moment later.
   if ((removal.reason ?? "").toLowerCase() === "merged") {
     return { kind: "merging", label: "Merging", tone: "success", attention: false, detail: "GitHub merged this pull request from the merge queue." };

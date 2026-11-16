@@ -41,7 +41,9 @@ export function mergeQueueFactsFromRead(read: PullRequestQueueRead): ForgeMergeQ
     ? { state, position: read.entry.position, enqueuedAt: epoch(read.entry.enqueuedAt), groupChecks: read.entry.groupChecks }
     : null;
   const removedAt = read.removal ? epoch(read.removal.removedAt) : null;
-  const removal = !entry && read.removal && removedAt !== null ? { reason: read.removal.reason, removedAt } : null;
+  // A removal from a queue the base no longer has is history, not state: never record it.
+  const removal = !entry && read.mergeQueueEnabled !== false && read.removal && removedAt !== null
+    ? { reason: read.removal.reason, removedAt } : null;
   return validForgeMergeQueueFacts({ enabled: read.mergeQueueEnabled, entry, removal }) ?? undefined;
 }
 
