@@ -840,6 +840,8 @@ test("Seatbelt denies the managed link file after the writable roots that contai
   const resolved = await resolveExecutionIsolation(
     { mode: "seatbelt", network: "deny" }, { kind: "native" }, {
       platform: "darwin",
+      // This modeled host has no inherited provider installation to add read-only paths.
+      nativeEnvironment: () => ({}),
       nativeHome: () => "/Users/me",
       nativeTmp: () => "/private/var/folders/tmp",
       realpathNative: async (path) => path === "/Users/me/Work/tree/.git"
@@ -885,6 +887,7 @@ test("Seatbelt denies the managed link file after the writable roots that contai
 test("sessions without a managed worktree keep exactly today's sandbox boundary", async () => {
   const linux = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
     platform: "linux", uid: () => 1000, mkdirNative: async () => {},
+    nativeEnvironment: () => ({}),
     resolveNative: async (name) => name === "bwrap" ? {
       path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] },
     } : null,
@@ -894,6 +897,7 @@ test("sessions without a managed worktree keep exactly today's sandbox boundary"
 
   const mac = await resolveExecutionIsolation({ mode: "seatbelt", network: "deny" }, { kind: "native" }, {
     platform: "darwin",
+    nativeEnvironment: () => ({}),
     nativeHome: () => "/Users/me",
     nativeTmp: () => "/private/var/folders/tmp",
     realpathNative: async (path) => path,
