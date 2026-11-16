@@ -98,7 +98,8 @@ test("an open gate enqueues exactly the confirmed head after a confirmation nami
   try {
     assert.equal(view.button().textContent, "Enqueue for Merge");
     assert.equal(view.button().disabled, false);
-    assert.equal(view.host.querySelector('[role="group"]')?.getAttribute("aria-label"), "Enqueue for Merge");
+    // No group of its own: the summary row it sits in is the request's group (#4631 CI).
+    assert.equal(view.host.querySelector('[role="group"]'), null);
     await view.click();
     assert.equal(view.confirmations.length, 1);
     const confirmation = view.confirmations[0]!;

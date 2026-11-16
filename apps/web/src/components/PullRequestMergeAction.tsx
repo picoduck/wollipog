@@ -109,7 +109,9 @@ export function PullRequestMergeAction({ session, pr, refreshKey, onMerged }: {
   };
 
   return (
-    <div role="group" aria-label={label}>
+    // No group role: the request summary row is already the "Pull Request" group, and the button
+    // carries its own name and its reasons (aria-describedby).
+    <div>
       <div className="review-pr-meta">
         <button
           type="button"

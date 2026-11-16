@@ -592,7 +592,8 @@ test("resolving or adding a Required finding re-reads the merge gate without a f
   const pr: GitPrSummary = { number: 42, title: "Speed up checkout", url: "https://github.com/acme/shop/pull/42", state: "OPEN", provider: "github", kind: "pull_request" };
   const harness = await mountReview({ findings: [mine, required], pr });
   try {
-    const action = () => harness.container.querySelector<HTMLButtonElement>('[aria-label="Enqueue for Merge"] button')!;
+    const action = () => [...harness.container.querySelectorAll<HTMLButtonElement>(".review-summary button")]
+      .find((button) => button.textContent === "Enqueue for Merge")!;
     assert.equal(action().disabled, true);
     assert.match(harness.container.textContent ?? "", /Resolve the open Required finding first\./u);
     const reads = harness.readinessReads();
@@ -614,7 +615,8 @@ for (const state of ["BLOCKED", "UNKNOWN"]) {
     const pr: GitPrSummary = { number: 42, title: "Speed up checkout", url: "https://github.com/acme/shop/pull/42", state: "OPEN", provider: "github", kind: "pull_request" };
     const harness = await mountReview({ findings: [mine], pr, mergeState: state });
     try {
-      const action = () => harness.container.querySelector<HTMLButtonElement>('[aria-label="Enqueue for Merge"] button')!;
+      const action = () => [...harness.container.querySelectorAll<HTMLButtonElement>(".review-summary button")]
+      .find((button) => button.textContent === "Enqueue for Merge")!;
       assert.equal(action().disabled, true);
       // GitHub now reports it mergeable; nothing the panel shows (checks, queue, findings) changed.
       await harness.render({ mergeState: "CLEAN" });
