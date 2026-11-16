@@ -12,7 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
   },
   "dependencies": {
-    "@fastify/cors": "^11.4.1",
+    "@fastify/cors": "^11.4.3",
     "@fastify/static": "^10.1.10",
     "@fastify/websocket": "^11.3.7",
     "@wollipog/protocol": "workspace:*",
