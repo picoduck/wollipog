@@ -56,6 +56,23 @@ test("each failing condition disables the action with its own sentence-case expl
   assert.equal(pullRequestMergeReadiness(facts({ mergeMethod: null }), allowed).ready, true);
 });
 
+test("only GitHub's mergeable states pass, so an admin login never merges past the base branch's rules", () => {
+  const codes = (overrides: Partial<PullRequestMergeFacts>) => forgeMergeBlockers(facts(overrides)).map((blocker) => blocker.code);
+  for (const mergeStateStatus of ["CLEAN", "HAS_HOOKS", "UNSTABLE"]) {
+    assert.deepEqual(codes({ mergeStateStatus }), [], mergeStateStatus);
+    assert.deepEqual(codes({ mergeStateStatus, mergeQueueEnabled: false }), [], `${mergeStateStatus} direct`);
+  }
+  assert.deepEqual(codes({ mergeStateStatus: "BLOCKED" }), ["blocked"], "a required review GitHub still wants");
+  assert.deepEqual(codes({ mergeStateStatus: "BLOCKED", requiredChecks: { state: "pending", failing: [], pending: ["CI"] } }),
+    ["checks_pending"], "pending checks already explain a blocked state");
+  assert.deepEqual(codes({ mergeStateStatus: "BEHIND" }), [], "a queue tests on the latest base anyway");
+  assert.deepEqual(codes({ mergeStateStatus: "BEHIND", mergeQueueEnabled: false }), ["behind"]);
+  for (const mergeStateStatus of ["UNKNOWN", "DRAFT", null, "SOMETHING_NEW"]) {
+    assert.deepEqual(codes({ mergeStateStatus }), ["merge_state_unknown"], String(mergeStateStatus));
+  }
+  assert.match(forgeMergeBlockers(facts({ mergeStateStatus: "BLOCKED" }))[0]!.message, /^GitHub reports the base branch's rules are not met yet/u);
+});
+
 test("a merged, closed, or unread pull request explains itself and nothing else", () => {
   assert.deepEqual(forgeMergeBlockers(facts({ state: "merged" })), [{ code: "not_open", message: "This pull request is already merged." }]);
   assert.deepEqual(forgeMergeBlockers(facts({ state: "closed", isDraft: true })), [{ code: "not_open", message: "This pull request is already closed." }]);

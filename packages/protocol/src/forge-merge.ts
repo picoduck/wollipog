@@ -61,6 +61,9 @@ export type PullRequestMergeBlockerCode =
   | "checks_failed"
   | "checks_pending"
   | "conflicts"
+  | "behind"
+  | "blocked"
+  | "merge_state_unknown"
   | "no_merge_method"
   | "role"
   | "runner_unsupported"
@@ -134,8 +137,23 @@ export function forgeMergeBlockers(facts: PullRequestMergeFacts | null | undefin
         : "Required checks haven't passed on the current head yet.",
     });
   }
-  if (facts.mergeStateStatus === "DIRTY") {
+  // GitHub's own verdict on every base-branch rule, reviews included. The runner's login may be an
+  // admin that GitHub would let merge past those rules, so anything but a mergeable state blocks
+  // (fails closed): UNSTABLE means only optional checks are unfinished, HAS_HOOKS is mergeable, and
+  // BEHIND is fine for a queue, which tests the pull request on top of the latest base anyway.
+  const mergeState = facts.mergeStateStatus;
+  const checksDecided = facts.requiredChecks.state === "passed" || facts.requiredChecks.state === "none";
+  if (mergeState === "DIRTY") {
     blockers.push({ code: "conflicts", message: `The pull request has merge conflicts with ${facts.baseRef}.` });
+  } else if (mergeState === "BEHIND" && mode !== "enqueue") {
+    blockers.push({ code: "behind", message: `The branch is behind ${facts.baseRef}; update it before merging.` });
+  } else if (mergeState === "BLOCKED") {
+    // Pending or failing required checks already explain a blocked state.
+    if (checksDecided) {
+      blockers.push({ code: "blocked", message: "GitHub reports the base branch's rules are not met yet, such as a required review." });
+    }
+  } else if (!["CLEAN", "HAS_HOOKS", "UNSTABLE", "BEHIND"].includes(mergeState ?? "")) {
+    blockers.push({ code: "merge_state_unknown", message: "GitHub hasn't worked out whether this pull request can merge yet; try again in a moment." });
   }
   if (mode === "merge" && facts.mergeMethod === null) {
     blockers.push({ code: "no_merge_method", message: "The repository allows no merge method for pull requests." });
