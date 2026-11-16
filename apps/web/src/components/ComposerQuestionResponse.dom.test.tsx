@@ -139,6 +139,43 @@ test("a failed expanded-question dismissal keeps the draft and can be retried", 
   }
 });
 
+test("expanded recovery questions keep Dismiss and Continue", async () => {
+  const { container, root } = mount();
+  try {
+    await act(async () => root.render(<ApiProvider client={recordingClient([])}>
+      <ComposerQuestionResponse sessionId="session-1" requestId="dismiss-recovery" recovery
+        questions={[{ id: "answer", question: "What next?", options: [], allowOther: true }]}
+        runnerOnline active inputRef={{ current: null }} onExit={() => {}} />
+    </ApiProvider>));
+    assert.ok(buttonNamed(container, "Dismiss and Continue"));
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Dismiss never describes itself with a missing offline help element", async () => {
+  const { container, root } = mount();
+  const questions: AgentQuestion[] = [{ id: "answer", question: "What next?", options: [], allowOther: true }];
+  const render = (runnerOnline: boolean) => root.render(<ApiProvider client={recordingClient([])}>
+    <ComposerQuestionResponse sessionId="session-1" requestId="dismiss-offline" questions={questions}
+      runnerOnline={runnerOnline} active inputRef={{ current: null }} onExit={() => {}} />
+  </ApiProvider>);
+  try {
+    await act(async () => render(true));
+    await act(async () => { buttonNamed(container, "Submit Answers").click(); });
+    assert.match(container.textContent!, /Enter a response/);
+    await act(async () => render(false));
+    const dismiss = buttonNamed(container, "Dismiss");
+    assert.equal(dismiss.disabled, true);
+    const description = dismiss.getAttribute("aria-describedby");
+    assert.ok(!description || [...container.querySelectorAll("[id]")].some((node) => node.id === description));
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 /** As SessionDetail: Answer Mode while it is open, and the dock's Answer while it is closed. */
 function Harness({
   client,

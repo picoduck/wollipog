@@ -46,6 +46,8 @@ const readBar = (page: Page) =>
 const composerOverlaps = (page: Page) =>
   page.locator(".composer-box").evaluate((card) => {
     const rects = [...card.querySelectorAll(".composer-bar > * > *, .composer-usage-row > *, .answer-foot > :not(.composer-answer-usage), .composer-answer-usage > *")]
+      // BusyButton's clipped status siblings have 1px boxes but are not visible controls.
+      .filter((element) => !element.matches(".sr-only"))
       .map((element) => ({ name: element.className, rect: element.getBoundingClientRect() }))
       .filter(({ rect }) => rect.width > 0 && rect.height > 0);
     const overlaps: string[] = [];

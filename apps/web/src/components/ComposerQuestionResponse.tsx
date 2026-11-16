@@ -593,9 +593,9 @@ export function ComposerQuestionResponse({
         <div className="answer-foot">
           <BusyButton className="btn ghost" busy={busy && responseAction === "dismiss"}
             progress={QUESTION_CARD_COPY.dismissing} disabled={!runnerOnline || (busy && responseAction !== "dismiss")}
-            aria-describedby={!runnerOnline ? helpId : undefined}
+            aria-describedby={helpShown && !runnerOnline ? helpId : undefined}
             onClick={() => void respond("dismiss", {})}>
-            {QUESTION_CARD_COPY.dismiss}
+            {recovery ? QUESTION_CARD_COPY.dismissAndContinue : QUESTION_CARD_COPY.dismiss}
           </BusyButton>
           {currentIndex > 0 && (
             <button type="button" className="btn" disabled={busy} onClick={() => goToStep(currentIndex - 1)}>
