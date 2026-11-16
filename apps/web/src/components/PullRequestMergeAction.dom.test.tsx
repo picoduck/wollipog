@@ -16,6 +16,7 @@ import {
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import type { ConfirmationOptions } from "./FeedbackProvider.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { PullRequestMergeAction } from "./PullRequestMergeAction.js";
@@ -99,7 +100,7 @@ test("an open gate enqueues exactly the confirmed head after a confirmation nami
     assert.equal(view.button().textContent, "Enqueue for Merge");
     assert.equal(view.button().disabled, false);
     // No group of its own: the summary row it sits in is the request's group (#4631 CI).
-    assert.equal(view.host.querySelector('[role="group"]'), null);
+    assertNoDomNode(view.host.querySelector('[role="group"]'), "the action has no group of its own");
     await view.click();
     assert.equal(view.confirmations.length, 1);
     const confirmation = view.confirmations[0]!;
