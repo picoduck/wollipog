@@ -6447,7 +6447,8 @@ export class ControlPlaneDb {
         full && !campaignAuthorityPreflight(policy.control, row.driver, runner?.protocolVersion).supported) {
       return { state: "unsupported_capability", reason: "The current provider cannot enforce authorized recovery." };
     }
-    const budget = this.campaignBudgets.governingRoot(campaignId) ? this.campaignBudgets.view(campaignId) : undefined;
+    const budgetRoot = this.campaignBudgets.governingRoot(campaignId);
+    const budget = budgetRoot ? this.campaignBudgets.view(campaignId) : undefined;
     const profile = budget?.authority.controlledReview;
     if (profile && (!runner?.runtime?.campaignReview ||
         controlledReviewCapabilityKey(profile) !== controlledReviewCapabilityKey(runner.runtime.campaignReview)) ||
@@ -6456,18 +6457,27 @@ export class ControlPlaneDb {
     }
     const owner = this.sessionPersonalUser(campaignId);
     const daily = owner ? this.getUsageDailyBudget(owner.organizationId).perUserUsd : null;
-    const used = this.stmt(`SELECT MAX(cost_usd,usage_peak_cost_usd)+MAX(0,child_cost_reserved_usd) AS cost,
-      MAX(${toolCallCountSql("sessions.id")},usage_peak_tool_calls)+MAX(0,child_tool_calls_reserved) AS tools
-      FROM sessions WHERE id=?`).get(campaignId) as { cost: number; tools: number };
+    // The governing ledger already reserves workers against the campaign envelope. Only the
+    // root's own usage belongs against its allocation; ordinary/nested campaigns retain roll-up.
+    const ownAllocation = budgetRoot === campaignId && budget?.rootAllocation !== undefined;
+    const used = this.stmt(`SELECT MAX(cost_usd,usage_peak_cost_usd)+CASE WHEN ? THEN 0 ELSE MAX(0,child_cost_reserved_usd) END AS cost,
+      MAX(${toolCallCountSql("sessions.id")},usage_peak_tool_calls)+CASE WHEN ? THEN 0 ELSE MAX(0,child_tool_calls_reserved) END AS tools
+      FROM sessions WHERE id=?`).get(ownAllocation ? 1 : 0, ownAllocation ? 1 : 0, campaignId) as { cost: number; tools: number };
     const rules = rulesFromSession({ costBudgetUsd: row.cost_budget_usd, maxToolCalls: row.max_tool_calls,
       costCheckpointsUsd: ControlPlaneDb.parseCheckpoints(row.cost_checkpoints_usd),
       costCheckpointApprovedUsd: row.cost_checkpoint_approved_usd, costUnpricedAcknowledged: row.cost_unpriced_ack === 1,
       dailyBudget: owner && daily !== null && daily > 0
         ? { budgetUsd: daily, spentUsd: this.userCostTodayUsd(owner.organizationId, owner.userId) } : null });
-    if (this.campaignBudgets.admissionError(campaignId) || firstAsk(evaluatePolicies({ status: row.status as SessionStatus,
+    const allowanceError = this.campaignBudgets.admissionError(campaignId);
+    const sessionAsk = firstAsk(evaluatePolicies({ status: row.status as SessionStatus,
       costUsd: used.cost, toolCallCount: used.tools,
-      unpriced: rules.some(rule => rule.kind === "cost_unpriced") && this.sessionUsageUnpriced(campaignId) }, rules))) {
-      return { state: "budget_held", reason: "Automatic continuation is blocked by current accounting or an existing allowance. Recovery cannot reset spend or request an override." };
+      unpriced: rules.some(rule => rule.kind === "cost_unpriced") && this.sessionUsageUnpriced(campaignId) }, rules));
+    if (allowanceError || sessionAsk) {
+      const allocation = budget ? this.campaignBudgets.allocation(campaignId) : undefined;
+      const amounts = budget
+        ? ` Campaign cost: ${budget.actual.costUsd} USD spent, ${budget.outstanding.costUsd} USD reserved, limit ${budget.authority.costUsd ?? "unset"} USD; tool calls: ${budget.actual.toolCalls} used, ${budget.outstanding.toolCalls} reserved, limit ${budget.authority.toolCalls ?? "unset"}. Session allocation: ${allocation?.costUsd ?? "unset"} USD, ${allocation?.toolCalls ?? "unset"} tool calls; evaluated usage: ${used.cost} USD, ${used.tools} tool calls.`
+        : "";
+      return { state: "budget_held", reason: `Automatic continuation is blocked: ${allowanceError ?? sessionAsk!.title}.${amounts} Recovery cannot reset spend or request an override.` };
     }
     return { state: "available" };
   }

@@ -63,6 +63,63 @@ function seedHistoricalReview(h: ReturnType<typeof harness>, request: import("@w
   return { ok: true, data: h.db.campaignReviewJobs.view(command.jobId)!, error: undefined as string | undefined };
 }
 
+test("campaign root continuations do not charge admitted workers against the root allocation (#4619)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 166, toolCalls: 6400, concurrency: 3 })).ok);
+    assert.equal(h.db.campaignBudgets.view("root")!.rootAllocation!.costUsd, 41.5);
+    for (const costBudgetUsd of [30, 20]) {
+      const result = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude",
+        config: { model: "claude-opus-5-5", costBudgetUsd, maxToolCalls: 1700 }, prompt: "Implement authorized #2936" },
+      undefined, undefined, false, false, false, { parentSessionId: "root" });
+      assert.ok(result.ok, result.error ?? "child admission failed");
+    }
+    h.usage("root", 9.31);
+    h.db.updateSessionStatus("root", "idle", 6);
+    assert.ok(h.db.campaignBudgets.view("root")!.remaining.costUsd! > 0);
+    assert.equal(h.db.campaignContinuationAdmission("root").state, "available");
+    h.sent.length = 0;
+    h.db.recordCampaignContinuationEvent({ campaignSessionId: "root", eventId: "workers-ready", kind: "child_ready", now: 7 });
+    h.svc.retryDuePrompts(10000);
+    assert.ok(h.sent.some(m => (m as { type: string }).type === "durable_session_command"), "the scheduler delivers the continuation");
+
+  } finally { h.db.close(); }
+});
+
+test("revoked campaign allowances retain ordinary continuation roll-up (#4619)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 166, toolCalls: 6400, concurrency: 3 })).ok);
+    h.make("worker", "root", { costBudgetUsd: 50, maxToolCalls: 2000 });
+    h.usage("root", 9.31);
+    h.db.updateSessionStatus("root", "idle", 6);
+    assert.equal(h.db.campaignContinuationAdmission("root").state, "available");
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+    assert.equal(h.db.campaignContinuationAdmission("root").state, "budget_held");
+  } finally { h.db.close(); }
+});
+
+for (const resource of ["cost", "tools", "envelope"] as const) test(`root continuation still enforces ${resource} and explains the amounts (#4619)`, () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 120, toolCalls: 120, concurrency: 2 })).ok);
+    h.db.updateSessionStatus("root", "idle", 6);
+    if (resource === "cost") h.usage("root", 40);
+    if (resource === "tools") for (let i = 0; i < 40; i++) h.tool("root", `call-${i}`);
+    if (resource === "envelope") {
+      h.make("worker", "root", { costBudgetUsd: 60, maxToolCalls: 60 });
+      h.usage("worker", 120);
+    }
+    const admission = h.db.campaignContinuationAdmission("root");
+    assert.equal(admission.state, "budget_held");
+    assert.match(admission.reason!, /limit 120 USD; tool calls:/u);
+    assert.match(admission.reason!, /limit 120\. Session allocation: 40 USD, 40 tool calls/u);
+    if (resource === "cost") assert.match(admission.reason!, /evaluated usage: 40 USD, 0 tool calls/u);
+    if (resource === "tools") assert.match(admission.reason!, /evaluated usage: 0 USD, 40 tool calls/u);
+    if (resource === "envelope") assert.match(admission.reason!, /120 USD spent/u);
+  } finally { h.db.close(); }
+});
+
 test("service launches use the exact reservation and agent reallocations preserve tighter limits", () => {
   const h = harness();
   try {
