@@ -490,8 +490,12 @@ function initialModel(): FixtureModel {
       })],
       ["session-open", "Tidy Settings Copy", row("open", 4603)],
     ];
+    // Idle for a while, as a queued pull request's session usually is: "25m ago", no activity strip.
+    const recent = Date.now() - 25 * 60_000;
     initial.sessions = rows.map(([id, title, extra], index) => Object.assign(session(id, title, "alpha", "alpha-workspace"), {
-      status: "idle", updatedAt: 100 - index, lastEventAt: 100 - index, ...extra,
+      status: "idle", updatedAt: recent - index, lastEventAt: recent - index,
+      attention: { version: 1, meaningfulAt: recent - index, humanActions: [], result: null, acknowledgedRevision: null },
+      ...extra,
     }));
     initial.projects[0]!.unarchivedSessionCount = initial.sessions.length;
     initial.projects[0]!.totalSessionCount = initial.sessions.length;
