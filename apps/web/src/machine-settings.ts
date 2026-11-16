@@ -4,13 +4,11 @@ import {
   type AgentDefinition,
   type BoxView,
   type HarnessInstallationSelection,
-  type ProviderAccountDefinition,
   type RunnerView,
   type TargetHarnessInstallation,
 } from "@wollipog/protocol";
 import { agentDisplayName } from "./agent-presentation.js";
 import { runnerDisplay } from "./runners.js";
-import { statusMeta } from "./status-meta.js";
 
 /**
  * Machine Settings as one form (#2991): what each field starts from, which fields changed against
@@ -74,13 +72,6 @@ export function nameError(text: string): string | null {
   const trimmed = text.trim();
   if (!trimmed) return "Enter a name for this machine.";
   return trimmed.length > NAME_MAX ? `Use ${NAME_MAX} characters or fewer.` : null;
-}
-
-/** An account's sign-in in the shared provider account words (§11.2): Signed In, Sign-In Required
- * or Status Unknown. */
-export function accountStatusLabel(authStatus: ProviderAccountDefinition["authStatus"]): string {
-  return statusMeta("provider_account", authStatus === "authenticated" ? "signed_in"
-    : authStatus === "unauthenticated" ? "sign_in_required" : "status_unknown").label;
 }
 
 /* ------------------------------------------------------------------------------------------------
