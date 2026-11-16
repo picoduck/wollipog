@@ -61,6 +61,7 @@ export function ReviewSummary({
   canPrompt,
   onForgeChanged,
   requiredFindingsOpen,
+  refreshGeneration,
 }: {
   session: SessionView;
   status: GitStatusInfo | null;
@@ -74,6 +75,8 @@ export function ReviewSummary({
   onForgeChanged?: () => void;
   /** Open Required findings the panel holds; a change re-reads the merge gate (#604). */
   requiredFindingsOpen?: number;
+  /** Changes when the person refreshes Review; the merge gate is read again (#604). */
+  refreshGeneration?: number;
 }) {
   if (!status && !pr) return null;
   const facts = reviewSummaryFacts(status);
@@ -97,18 +100,19 @@ export function ReviewSummary({
         </div>
       )}
       {pr && <PullRequestRow session={session} pr={pr} checks={checks} canPrompt={canPrompt} onForgeChanged={onForgeChanged}
-        requiredFindingsOpen={requiredFindingsOpen} />}
+        requiredFindingsOpen={requiredFindingsOpen} refreshGeneration={refreshGeneration} />}
     </section>
   );
 }
 
-function PullRequestRow({ session, pr, checks, canPrompt, onForgeChanged, requiredFindingsOpen }: {
+function PullRequestRow({ session, pr, checks, canPrompt, onForgeChanged, requiredFindingsOpen, refreshGeneration }: {
   session: SessionView;
   pr: GitPrSummary;
   checks: GitChecksSummary | null;
   canPrompt: boolean;
   onForgeChanged?: () => void;
   requiredFindingsOpen?: number;
+  refreshGeneration?: number;
 }) {
   const api = useApi();
   const [busy, setBusy] = useState(false);
@@ -213,7 +217,10 @@ function PullRequestRow({ session, pr, checks, canPrompt, onForgeChanged, requir
         <PullRequestMergeAction
           session={session}
           pr={pr}
-          refreshKey={`${checks?.passing ?? 0}/${checks?.pending ?? 0}/${checks?.failing ?? 0}/${JSON.stringify(pr.mergeQueue ?? null)}/${requiredFindingsOpen ?? "unknown"}`}
+          refreshKey={[
+            checks?.passing ?? 0, checks?.pending ?? 0, checks?.failing ?? 0, JSON.stringify(pr.mergeQueue ?? null),
+            requiredFindingsOpen ?? "unknown", pr.mergeability ?? "", refreshGeneration ?? 0,
+          ].join("/")}
           onMerged={onForgeChanged}
         />
       )}

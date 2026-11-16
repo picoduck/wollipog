@@ -217,6 +217,8 @@ interface Options {
   runnerOnline: boolean;
   /** The branch's open pull request, which renders the merge action (#604). */
   pr?: GitPrSummary;
+  /** GitHub's merge state the gate reads; only the server-side facts change with it. */
+  mergeState?: string;
 }
 
 interface Harness {
@@ -261,7 +263,7 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
     // The server's gate, counting the Required findings it holds now (#604).
     pullRequestMergeReadiness: async () => {
       readinessReads += 1;
-      const facts = mergeFactsFor(options.pr!);
+      const facts = { ...mergeFactsFor(options.pr!), mergeStateStatus: options.mergeState ?? "CLEAN" };
       const requiredFindingsOpen = options.findings.filter((entry) => entry.required && (entry.status === "open" || entry.status === "sent")).length;
       return { facts, readiness: pullRequestMergeReadiness(facts, { roleRefusal: null, runnerSupported: true, requiredFindingsOpen }) };
     },
@@ -606,6 +608,26 @@ test("resolving or adding a Required finding re-reads the merge gate without a f
     await harness.unmount();
   }
 });
+
+for (const state of ["BLOCKED", "UNKNOWN"]) {
+  test(`Refresh Review re-reads the merge gate once a ${state} merge state clears on GitHub alone (#604)`, async () => {
+    const pr: GitPrSummary = { number: 42, title: "Speed up checkout", url: "https://github.com/acme/shop/pull/42", state: "OPEN", provider: "github", kind: "pull_request" };
+    const harness = await mountReview({ findings: [mine], pr, mergeState: state });
+    try {
+      const action = () => harness.container.querySelector<HTMLButtonElement>('[aria-label="Enqueue for Merge"] button')!;
+      assert.equal(action().disabled, true);
+      // GitHub now reports it mergeable; nothing the panel shows (checks, queue, findings) changed.
+      await harness.render({ mergeState: "CLEAN" });
+      assert.equal(action().disabled, true, "nothing re-reads it by itself");
+      const reads = harness.readinessReads();
+      await harness.reloadFindings([mine]);
+      assert.ok(harness.readinessReads() > reads, "Refresh Review reads the gate again");
+      assert.equal(action().disabled, false);
+    } finally {
+      await harness.unmount();
+    }
+  });
+}
 
 test("with no findings the section says how to add one, and settled findings start folded (#2850)", async () => {
   const empty = await mountReview({ findings: [] });
