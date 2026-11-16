@@ -161,6 +161,48 @@ test("scoped approval policies match every governance dimension and stateful con
   assert.equal(evaluateApprovalPolicies(approvalInput({ scope: { ...approvalInput().scope, branch: "main" } }), [policy]).effect, "ask");
 });
 
+for (const { name, conditions, outside, boundary } of [
+  {
+    name: "status outside the allowed statuses",
+    conditions: { statuses: ["running"] },
+    outside: { status: "idle" },
+    boundary: { status: "running" },
+  },
+  {
+    name: "cost below the minimum",
+    conditions: { minCostUsd: 2 },
+    outside: { costUsd: 1.99 },
+    boundary: { costUsd: 2 },
+  },
+  {
+    name: "tool calls above the maximum",
+    conditions: { maxToolCalls: 4 },
+    outside: { toolCallCount: 5 },
+    boundary: { toolCallCount: 4 },
+  },
+] satisfies {
+  name: string;
+  conditions: GovernancePolicy["conditions"];
+  outside: Partial<import("./policy-engine.js").ApprovalPolicyInput>;
+  boundary: Partial<import("./policy-engine.js").ApprovalPolicyInput>;
+}[]) {
+  test(`scoped approval policies refuse ${name} and match the boundary`, () => {
+    const policy = storedPolicy({ conditions });
+    const { createdAt: _createdAt, updatedAt: _updatedAt, ...policyInput } = policy;
+    assert.equal(validateGovernancePolicy(policyInput), null);
+    assert.deepEqual(evaluateApprovalPolicies(approvalInput(outside), [policy]), {
+      effect: "ask",
+      policy: null,
+      matchedPolicyIds: [],
+    });
+    assert.deepEqual(evaluateApprovalPolicies(approvalInput(boundary), [policy]), {
+      effect: "allow",
+      policy,
+      matchedPolicyIds: [policy.policyId],
+    });
+  });
+}
+
 test("policy precedence is priority first, then deny > ask > allow, with stable match provenance", () => {
   const allow = storedPolicy({ policyId: "allow", effect: "allow", priority: 5 });
   const ask = storedPolicy({ policyId: "ask", effect: "ask", priority: 5 });
