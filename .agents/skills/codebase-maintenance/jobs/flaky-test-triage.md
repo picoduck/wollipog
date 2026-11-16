@@ -29,6 +29,29 @@ Launch each full-suite pass as its own command and await its completion before s
 Do not chain the three passes into one background command: a per-command lifetime limit can end
 the batch partway through a later pass (the 2026-10-06 batch was cut off after two hours). Use
 separate run logs and completion records, and resume from those records if the session yields.
+Give each pass a unique launcher and output paths. Finish writing and checking the launcher
+before starting it, then keep it immutable: never edit a script while an active pass uses it,
+including its post-run recording steps. Use a new launcher for a replacement pass; never reuse
+or overwrite an earlier pass's launcher or evidence.
+
+For each browser pass, retain Playwright's JSON report beside its text log. Set
+`PLAYWRIGHT_JSON_OUTPUT_NAME` to that pass's unique absolute JSON path when running
+`pnpm test:e2e`; the repository config enables JSON alongside the normal text reporter. Use the
+structured report for collection counts, outcomes, durations, and failure sets. Separately record
+the directly observed test command exit status (not a logging pipeline's status) and the before/after
+HEAD checks required below. Write the completion record only after the command and recording
+steps finish, noting any recording failure; preserve each receipt independently of the text log.
+
+On recovery, inspect those artifacts before scheduling replacements. A parseable JSON file alone
+does not prove a complete pass: verify that it is finalized, accounts for the full collected suite,
+and has no interruption or missing execution, using its summary and per-test results together
+with the terminal job evidence. A finalized report can preserve complete test results even when
+post-run recording failed or the text log was lost. In that case, label any reconstructed record,
+the original recording failure, and every missing receipt explicitly; never infer the observed
+process exit status from test outcomes or invent missing HEAD checks. If completion or baseline
+comparability cannot be established, treat the pass as incomplete and replace it under the rules
+below. A killed, interrupted, or partial report never proves completion.
+
 A killed, interrupted, or partial pass does not count toward the three comparable complete runs;
 report incomplete coverage explicitly if replacements cannot be completed.
 
