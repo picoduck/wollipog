@@ -8,6 +8,7 @@ import { ReviewWriterRegistry } from "./review-writers.js";
 import { ProviderProcessOwnership } from "./provider-process-ownership.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
 import { ReviewerSecurity } from "./reviewer-security.js";
+import { isUserPrivateGroup } from "./review-private-group.js";
 import { defaultReviewSessionDependencies, reviewLaunchArgs, reviewSessionDiscoveryReason, ReviewSessionLauncher } from "./review-sessions.js";
 import { DiscoveryCoordinator } from "./discovery-recovery.js";
 import { PullRequestWatcher } from "./pull-request-watches.js";
@@ -987,6 +988,9 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
   // #3239: Add Account with this control plane's grant creates a managed profile HOME.
   profiles: {
     root: managedProviderProfileRoot(),
+    // A umask-002 runner created `~/.agent-manager` group-writable. Tighten it when its group lets
+    // no one else write (a proven user-private group) or the owner chose Personal Machine.
+    groupWriteRepair: (uid, gid) => reviewerSecurity.policy === "personal_machine" || isUserPrivateGroup(uid, gid),
     create: async (home, provider, profileId, grantId) => {
       if (!attestation.instanceId || !providerProfileGrants.supportsProfiles()) {
         throw new Error("This control plane did not negotiate provider profiles.");

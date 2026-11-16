@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, realpathSync, type Stats } from "node:fs";
+import { closeSync, constants as fsConstants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, realpathSync, type Stats } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isProviderProfileId } from "./provider-profile.js";
@@ -49,13 +49,53 @@ function privateDirectory(stat: Stats): boolean {
   return privateDirectoryReason(stat) === undefined;
 }
 
-function ensurePrivateDirectory(path: string, component: ManagedProfileDirectoryComponent): void {
+/** How managed profile creation may treat Wollipog's own roots when they are group-writable. */
+export interface ManagedProfileRootOptions {
+  /**
+   * Whether a root owned by `uid` whose group `gid` may write it can be tightened in place
+   * (group and other write removed) instead of refused. Return true only when that group grants
+   * no one the runner does not already trust: a proven user-private group, or a Machine whose
+   * owner chose Personal Machine. A throw counts as false. Absent, such roots are refused.
+   */
+  groupWriteRepair?: (uid: number, gid: number) => boolean;
+}
+
+/**
+ * Remove group and other write from a group-writable (never world-writable) root this account
+ * owns when `groupWriteRepair` trusts its group. Removing write permission grants nothing; the
+ * descriptor is opened without following links and must be the directory just inspected.
+ * Returns whether the root was tightened; on any doubt it is left as it was.
+ */
+function tightenTrustedGroupWrite(path: string, stat: Stats, options: ManagedProfileRootOptions): boolean {
+  if (!options.groupWriteRepair || typeof process.getuid !== "function") return false;
+  if ((stat.mode & 0o002) !== 0 || (stat.mode & 0o020) === 0) return false;
+  try { if (!options.groupWriteRepair(stat.uid, stat.gid)) return false; } catch { return false; }
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (opened.dev !== stat.dev || opened.ino !== stat.ino || opened.uid !== process.getuid() || opened.mode !== stat.mode) return false;
+    fchmodSync(fd, opened.mode & 0o7777 & ~0o022);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) try { closeSync(fd); } catch { /* the descriptor is already gone */ }
+  }
+}
+
+function ensurePrivateDirectory(path: string, component: ManagedProfileDirectoryComponent, options: ManagedProfileRootOptions = {}): void {
   try { mkdirSync(path, { mode: 0o700 }); } catch (error) {
     if (errorCode(error) !== "EEXIST") throw new ManagedProfileDirectoryError(component, "unavailable");
   }
   let stat: Stats;
   try { stat = lstatSync(path); } catch { throw new ManagedProfileDirectoryError(component, "unavailable"); }
-  const reason = privateDirectoryReason(stat);
+  let reason = privateDirectoryReason(stat);
+  if (reason === "group_or_other_write" && tightenTrustedGroupWrite(path, stat, options)) {
+    // Judge the directory as it is now, never as the repair intended it to be.
+    try { stat = lstatSync(path); } catch { throw new ManagedProfileDirectoryError(component, "unavailable"); }
+    reason = privateDirectoryReason(stat);
+  }
   if (reason) throw new ManagedProfileDirectoryError(component, reason);
 }
 
@@ -74,11 +114,12 @@ function verifiedRoot(root: string): boolean {
  * missing and must be private real directories, and `<profileId>` itself must not exist yet. POSIX
  * only: profile markers cannot be verified on Windows. Returns the HOME path.
  */
-export function createManagedProviderProfileHome(root: string, profileId: string, platform: NodeJS.Platform = process.platform): string {
+export function createManagedProviderProfileHome(root: string, profileId: string, platform: NodeJS.Platform = process.platform,
+  options: ManagedProfileRootOptions = {}): string {
   if (platform === "win32") throw new Error("Managed provider profiles are not supported on this Machine.");
   if (!isAbsolute(root) || !isProviderProfileId(profileId)) throw new Error("The managed provider profile path is invalid.");
-  ensurePrivateDirectory(dirname(root), "manager_root");
-  ensurePrivateDirectory(root, "profiles_root");
+  ensurePrivateDirectory(dirname(root), "manager_root", options);
+  ensurePrivateDirectory(root, "profiles_root", options);
   const home = join(root, profileId);
   try { mkdirSync(home, { mode: 0o700 }); } catch (error) {
     throw new Error(errorCode(error) === "EEXIST"

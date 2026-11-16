@@ -116,6 +116,9 @@ export interface ProviderLoginProfileOptions {
   /** `~/.agent-manager/profiles`: new managed HOMEs are created here. Their location and profile
    * identity do not prove exclusive retirement authority, so cleanup retains them. */
   root: string;
+  /** Whether a group-writable root this account owns, with group `gid`, may be tightened rather
+   * than refused (see `ManagedProfileRootOptions`). Absent, such roots are refused. */
+  groupWriteRepair?: (uid: number, gid: number) => boolean;
   /** Write the new HOME's first marker, identity `profileId` with this control plane's grant, under
    * the HOME's lease, and make the grant usable for this sign-in. */
   create(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<void>;
@@ -633,7 +636,8 @@ export class ProviderLoginSupervisor {
   private async createProfileHome(resolved: ResolvedProviderLogin, profile: { id: string; grantId: string }): Promise<void> {
     const profiles = this.options.profiles!;
     // Its refusals are path-free; the grant is not recorded yet, so the refused start is enough.
-    createManagedProviderProfileHome(profiles.root, profile.id, this.options.platform);
+    createManagedProviderProfileHome(profiles.root, profile.id, this.options.platform,
+      profiles.groupWriteRepair ? { groupWriteRepair: profiles.groupWriteRepair } : {});
     try {
       await profiles.create(resolved.directory, resolved.provider, profile.id, profile.grantId);
     } catch (error) {
