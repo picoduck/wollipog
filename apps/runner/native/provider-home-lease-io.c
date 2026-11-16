@@ -1,4 +1,5 @@
-/* Fixed lease-only I/O transaction. JSON and ownership transitions are verified by the runner;
+/* Fixed lease I/O transaction plus separately dispatched profile directory metadata modes.
+ * JSON and ownership transitions are verified by the runner;
  * this helper pins no-follow ancestry, fences publishers, and compares the exact verified bytes
  * before publishing or retiring anything. Binary input/output is bounded independently here. */
 #ifdef __APPLE__
@@ -24,6 +25,7 @@
 #include <sys/xattr.h>
 #elif defined(__APPLE__)
 #include <sys/mount.h>
+#include <sys/acl.h>
 #endif
 
 #define MAX_ENTRIES 8208U
@@ -446,9 +448,201 @@ static int profile_root_command(int argc, char **argv) {
   printf("{\"ok\":true,\"component\":\"%s\",\"reason\":\"repaired\",\"repairable\":false}\n", component);
   return 0;
 }
+/* Fixed managed-profile creation, separate from repair and WPLL4. No payload I/O,
+ * cleanup, permission changes or caller-selected descendant names. */
+static int profile_create_result(const char *component, const char *reason, int changed) {
+  printf("{\"ok\":false,\"component\":\"%s\",\"reason\":\"%s\"", component, changed ? "may_have_changed" : reason);
+  if (changed) printf(",\"failureReason\":\"%s\"", reason);
+  puts("}");
+  return 0;
+}
+static int profile_create_id(const char *id) {
+  if (strlen(id) != 36) return 0;
+  for (unsigned i = 0; i < 36; i++) {
+    if (i == 8 || i == 13 || i == 18 || i == 23) { if (id[i] != '-') return 0; }
+    else if (!((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f'))) return 0;
+  }
+  return id[14] == '4' && (id[19] == '8' || id[19] == '9' || id[19] == 'a' || id[19] == 'b');
+}
+/* Unlike the lease transaction's binary-error opener, creation has a path-free JSON
+ * error contract even when the OS home or an ancestor cannot be opened. */
+static int profile_create_open_home(const char *path) {
+  if (path[0] != '/' || strlen(path) >= 32768) return -1;
+  int current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (current < 0) return -1;
+  char *copy = strdup(path + 1), *context = NULL;
+  if (!copy) return -1;
+  for (char *part = strtok_r(copy, "/", &context); part; part = strtok_r(NULL, "/", &context)) {
+    if (!strcmp(part, ".") || !strcmp(part, "..") || ancestry_count >= 1024) { free(copy); return -1; }
+    int next = openat(current, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (next < 0) { free(copy); return -1; }
+    ancestry_fds[ancestry_count] = current; ancestry_names[ancestry_count] = strdup(part);
+    if (!ancestry_names[ancestry_count] || fstat(next, &ancestry_ids[ancestry_count])) { free(copy); return -1; }
+    ancestry_count++; current = next;
+  }
+  free(copy); return current;
+}
+/* Creation-only Darwin ACL admission. Repair deliberately keeps its separate unsupported
+ * Darwin gate. A deny ACE cannot grant a foreign principal write/delete rights. Inheritance
+ * of known deny flags preserves that property; allow ACEs and deferred/unknown flags do not.
+ * No ACL is edited and no principal names or ACL bytes leave this helper. */
+#ifdef __APPLE__
+static int profile_create_acl_fault(const char *point) {
+#ifdef WOLLIPOG_PROFILE_CREATE_DARWIN_TEST
+  const char *fault = getenv("WOLLIPOG_PROFILE_CREATE_DARWIN_FAULT");
+  return fault && !strcmp(fault, point);
+#else
+  (void)point; return 0;
+#endif
+}
+static int profile_create_darwin_acl(int fd) {
+  struct stat before, metadata, after; struct statfs filesystem;
+  if (fstat(fd, &before) || fstatfs(fd, &filesystem) ||
+      (strcmp(filesystem.f_fstypename, "apfs") && strcmp(filesystem.f_fstypename, "hfs"))) return 0;
+  filesec_t security = filesec_init();
+  if (!security) return 0;
+  acl_t acl = NULL, empty = NULL, one = NULL; int safe = 0, present = 0;
+  if (profile_create_acl_fault("stat") || fstatx_np(fd, &metadata, security) || !same_stamp(&before, &metadata) ||
+      before.st_uid != metadata.st_uid || before.st_mode != metadata.st_mode) goto done;
+  /* Successful metadata plus an explicit property query establishes absence. Neither NULL
+   * from acl_get_fd_np nor an errno by itself establishes that an ACL is absent. */
+  if (profile_create_acl_fault("query") || filesec_query_property(security, FILESEC_ACL, &present)) goto done;
+  if (!present) { safe = 1; goto done; }
+  if (profile_create_acl_fault("property") || filesec_get_property(security, FILESEC_ACL, &acl) ||
+      !acl || (void *)acl == _FILESEC_REMOVE_ACL || acl_valid(acl)) goto done;
+#ifdef WOLLIPOG_PROFILE_CREATE_DARWIN_TEST
+  if (profile_create_acl_fault("empty")) { acl_free(acl); acl = acl_init(0); if (!acl) goto done; }
+#endif
+  acl_flagset_t flags;
+  if (acl_get_flagset_np(acl, &flags)) goto done;
+#ifdef WOLLIPOG_PROFILE_CREATE_DARWIN_TEST
+  if (profile_create_acl_fault("unknown_flags") && acl_add_flag_np(flags, (acl_flag_t)(1U << 30))) goto done;
+  if (profile_create_acl_fault("deferred") && acl_add_flag_np(flags, ACL_FLAG_DEFER_INHERIT)) goto done;
+#endif
+  if (acl_get_flag_np(flags, (acl_flag_t)~(unsigned)ACL_FLAG_NO_INHERIT) != 0) goto done;
+  /* Derive the entry count from public serialized sizes, not iterator exhaustion/errno or
+   * private structure layout. Every expected entry must be retrieved and classified. */
+  empty = acl_init(0); one = acl_init(1); acl_entry_t sample;
+  if (!empty || !one || acl_create_entry(&one, &sample)) goto done;
+  ssize_t base = acl_size(empty), unit = acl_size(one) - base, size = acl_size(acl);
+  if (base < 0 || unit <= 0 || size < base || (size - base) % unit || (size - base) / unit > ACL_MAX_ENTRIES) goto done;
+  unsigned count = (unsigned)((size - base) / unit);
+  acl_permset_mask_t supported;
+  if (acl_maximal_permset_mask_np(&supported)) goto done;
+  unsigned known_flags = ACL_ENTRY_INHERITED | ACL_ENTRY_FILE_INHERIT | ACL_ENTRY_DIRECTORY_INHERIT |
+    ACL_ENTRY_LIMIT_INHERIT | ACL_ENTRY_ONLY_INHERIT;
+  for (unsigned i = 0; i < count; i++) {
+    acl_entry_t entry; acl_tag_t tag; acl_permset_mask_t permissions;
+    if (profile_create_acl_fault("entry") || acl_get_entry(acl, (int)i, &entry) ||
+        acl_get_tag_type(entry, &tag) || tag != ACL_EXTENDED_DENY ||
+        acl_get_flagset_np(entry, &flags) || acl_get_flag_np(flags, (acl_flag_t)~known_flags) != 0 ||
+        acl_get_permset_mask_np(entry, &permissions) || (permissions & ~supported)) goto done;
+  }
+  safe = 1;
+done:
+  if (one) acl_free(one);
+  if (empty) acl_free(empty);
+  if (acl && (void *)acl != _FILESEC_REMOVE_ACL) acl_free(acl);
+  filesec_free(security);
+  return safe && !fstat(fd, &after) && same_stamp(&before, &after) &&
+    before.st_uid == after.st_uid && before.st_mode == after.st_mode;
+}
+#endif
+static int profile_create_acl_clear(int fd) {
+#ifdef __APPLE__
+  return profile_create_darwin_acl(fd);
+#else
+  return profile_root_acl_clear(fd);
+#endif
+}
+static const char *profile_create_safe(int fd, struct stat *info) {
+  if (fstat(fd, info)) return "unavailable";
+  const char *reason = profile_root_stat_reason(info);
+  if (reason) return reason;
+  if (info->st_mode & 0022) return "group_or_other_write";
+  if (info->st_mode & 07000) return "unsupported_layout";
+  if (!profile_create_acl_clear(fd)) return "unsupported_acl";
+  return NULL;
+}
+/* A failed check after any successful mkdir cannot imply a clean refusal. */
+static const char *profile_create_check(int *fds, const char **names, struct stat *ids, unsigned count,
+    const char **components, const char **component) {
+  struct stat opened, named;
+  *component = "os_home";
+  if (!profile_root_pinned()) return "identity_changed";
+  for (unsigned i = 0; i < count; i++) {
+    *component = components[i];
+    const char *reason = profile_create_safe(fds[i], &opened);
+    if (reason) return reason;
+    if (!same_identity(&opened, &ids[i])) return "identity_changed";
+    if (i && (fstatat(fds[i - 1], names[i], &named, AT_SYMLINK_NOFOLLOW) ||
+        !same_identity(&opened, &named) || !S_ISDIR(named.st_mode))) return "identity_changed";
+  }
+  return NULL;
+}
+static int profile_create_command(int argc, char **argv) {
+  if (argc == 3 && !strcmp(argv[2], "--capabilities")) {
+#if defined(__linux__) || defined(__APPLE__)
+    puts("{\"version\":1,\"supported\":true}");
+#else
+    puts("{\"version\":1,\"supported\":false}");
+#endif
+    return 0;
+  }
+  if (argc != 4 || !profile_create_id(argv[3])) return profile_create_result("profile_home", "unsupported_layout", 0);
+#if !defined(__linux__) && !defined(__APPLE__)
+  return profile_create_result("os_home", "unsupported_platform", 0);
+#endif
+  parent = getppid(); root_path = argv[2]; root_fd = profile_create_open_home(root_path);
+  if (root_fd < 0 || fstat(root_fd, &root_identity)) return profile_create_result("os_home", "unavailable", 0);
+  int fds[4] = { root_fd, -1, -1, -1 }, changed = 0;
+  const char *names[4] = { "", ".agent-manager", "profiles", argv[3] };
+  const char *components[4] = { "os_home", "manager_root", "profiles_root", "profile_home" };
+  const char *stages[4] = { "", "create-after-manager", "create-after-profiles", "create-after-profile" };
+  struct stat ids[4]; ids[0] = root_identity;
+  for (unsigned i = 1; i < 4; i++) {
+    const char *component = components[i], *failed_component = component;
+    if (i == 3 && !profile_root_barrier("create-before-profile")) return profile_create_result(component, "identity_changed", changed);
+    const char *reason = profile_create_check(fds, names, ids, i, components, &failed_component);
+    if (reason) return profile_create_result(failed_component, reason, changed);
+    if (i == 3 && !profile_root_barrier("create-before-mkdir-profile")) return profile_create_result(component, "identity_changed", changed);
+    struct stat named, opened;
+    int found = fstatat(fds[i - 1], names[i], &named, AT_SYMLINK_NOFOLLOW);
+    if (!found && i == 3) return profile_create_result(component, "already_exists", changed);
+    if (found) {
+      if (errno != ENOENT) return profile_create_result(component, "unavailable", changed);
+      /* mkdirat does not return an inode/descriptor. Observe and pin immediately; a
+       * same-UID writer can still replace a directory before this first observation.
+       * No root is group/other writable, and no open follows a link. */
+      if (mkdirat(fds[i - 1], names[i], 0700)) {
+        if (errno != EEXIST) {
+          /* Definite local admission/resource failures cannot have created this directory.
+           * An ambiguous I/O/interruption result still preserves uncertainty. */
+          int definite = errno == EACCES || errno == EPERM || errno == EROFS || errno == ENOSPC || errno == EDQUOT ||
+            errno == ENOENT || errno == ENOTDIR || errno == ELOOP || errno == ENAMETOOLONG || errno == EMLINK;
+          return profile_create_result(component, "unavailable", changed || !definite);
+        }
+        if (i == 3) return profile_create_result(component, "already_exists", changed);
+      } else changed = 1;
+      if (fstatat(fds[i - 1], names[i], &named, AT_SYMLINK_NOFOLLOW)) return profile_create_result(component, "unavailable", changed);
+    }
+    reason = profile_root_stat_reason(&named);
+    if (reason) return profile_create_result(component, reason, changed);
+    fds[i] = openat(fds[i - 1], names[i], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fds[i] < 0 || fstat(fds[i], &opened) || !same_identity(&opened, &named))
+      return profile_create_result(component, "identity_changed", changed);
+    ids[i] = opened;
+    if (!profile_root_barrier(stages[i])) return profile_create_result(component, "identity_changed", changed);
+    reason = profile_create_check(fds, names, ids, i + 1, components, &failed_component);
+    if (reason) return profile_create_result(failed_component, reason, changed);
+  }
+  puts("{\"ok\":true,\"component\":\"profile_home\",\"reason\":\"created\"}");
+  return 0;
+}
 int main(int argc, char **argv) {
   if (argc == 2 && !strcmp(argv[1], "--probe")) return 0;
   if (argc >= 2 && !strcmp(argv[1], "--profile-root")) return profile_root_command(argc, argv);
+  if (argc >= 2 && !strcmp(argv[1], "--profile-create")) return profile_create_command(argc, argv);
   require(argc == 1, "unsupported lease helper arguments");
   unsigned char magic[5]; input(magic, sizeof(magic)); require(!memcmp(magic, "WPLL4", 5), "invalid lease I/O protocol");
   unsigned operation = in8(); parent = (pid_t)in32(); allowed_reads = in32(); allowed_bytes = in64(); fence_wait_ms = in32(); require((fence_wait_ms == 0 || fence_wait_ms == 10000) && allowed_reads <= MAX_READS && allowed_bytes <= MAX_WORK, "invalid remaining lease work budget"); alive(); root_path = in_text(32768);
