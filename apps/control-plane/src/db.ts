@@ -6484,7 +6484,7 @@ export class ControlPlaneDb {
         ? ` Campaign cost: ${usd(budget.actual.costUsd)} USD spent, ${usd(budget.outstanding.costUsd)} USD reserved, limit ${budget.authority.costUsd ?? "unset"} USD; tool calls: ${budget.actual.toolCalls} used, ${budget.outstanding.toolCalls} reserved, limit ${budget.authority.toolCalls ?? "unset"}. Session allocation: ${allocation?.costUsd ?? "unset"} USD, ${allocation?.toolCalls ?? "unset"} tool calls; evaluated usage: ${usd(used.cost)} USD, ${used.tools} tool calls.`
         : "";
       const cause = (allowanceError ?? sessionAsk!.title ?? "an existing allowance was reached")
-        .replace(/ Continue\?$/u, "").replace(/across your sessions/u, "across the owner's sessions").replace(/[.\s]+$/u, "");
+        .replace(/ Continue(?: without it)?\?$/u, "").replace(/across your sessions/u, "across the owner's sessions").replace(/[.\s]+$/u, "");
       return { state: "budget_held", reason: `Automatic continuation is blocked: ${cause}.${amounts} Recovery cannot reset spend or request an override.` };
     }
     return { state: "available" };

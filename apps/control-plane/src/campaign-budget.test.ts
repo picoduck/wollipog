@@ -159,6 +159,18 @@ test("session hold explanations do not invite overrides or expose float noise (#
   } finally { h.db.close(); }
 });
 
+test("unpriced session holds do not invite an override (#4619)", () => {
+  const h = harness();
+  try {
+    h.db.updateSessionCostBudget("root", 10, 4);
+    h.db.appendEvent("root", { kind: "token_usage", inputTokens: 100, outputTokens: 2, model: "unpriced-model" }, 5, { accrueUsage: true });
+    const admission = h.db.campaignContinuationAdmission("root");
+    assert.equal(admission.state, "budget_held");
+    assert.match(admission.reason!, /Usage cannot be priced/u);
+    assert.doesNotMatch(admission.reason!, /Continue|\?\./u);
+  } finally { h.db.close(); }
+});
+
 test("service launches use the exact reservation and agent reallocations preserve tighter limits", () => {
   const h = harness();
   try {
