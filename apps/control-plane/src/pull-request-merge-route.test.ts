@@ -111,7 +111,8 @@ test("only an Owner or Admin may merge, exactly as confirmed, and both the reque
     const accepted = await f.merge("admin");
     assert.equal(accepted.statusCode, 200);
     assert.equal(accepted.json().result.outcome, "enqueued");
-    assert.deepEqual(f.dispatched.map((message) => message.action),
+    // An earlier `assert.deepEqual(f.dispatched, [])` narrowed the array; read it afresh.
+    assert.deepEqual((f.dispatched as Array<{ action: unknown }>).map((message) => message.action),
       [{ kind: "merge_pull_request", pullRequestUrl: URL, headSha: HEAD, mode: "enqueue" }]);
     const audit = f.db.listGovernanceAudit("s1").filter((entry) => entry.approvalKind === "pull_request_merge");
     assert.deepEqual(audit.map((entry) => [entry.stage, entry.outcome, entry.actor.kind, entry.actor.id, entry.optionId ?? null]),
