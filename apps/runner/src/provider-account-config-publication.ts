@@ -46,7 +46,8 @@ export function accountConfigPublicationErrorMessage(error: unknown, fallback: s
   if (!(error instanceof AccountConfigPublicationError)) return fallback;
   if (error.publication !== "not_published") return error.message;
   if (error.code !== "STORE_UNVERIFIABLE") return fallback;
-  return `${fallback} Account publication proof is unavailable. On supported POSIX hosts, an operator must verify that the config and its parent directory are owned by the runner OS account and are not group- or world-writable; private publication evidence must also remain verifiable. Windows requires a supported native proof adapter and its documented trusted OS PowerShell/.NET installation prerequisite; config/store owner SIDs, DACLs and retained evidence must remain verifiable. Preserve the config, credential HOMEs and publication evidence; no automatic permission change or repair is attempted.`;
+  // Sign-in endings carry this text, and the control plane bounds them to 500 characters.
+  return `${fallback} Account publication proof is unavailable. On POSIX, verify the config and its parent directory are owned by the runner OS account and not group- or world-writable. Windows requires a supported native proof adapter with verifiable owner SIDs and DACLs. Preserve the config, credential HOMEs and publication evidence; no automatic permission change or repair is attempted.`;
 }
 export function accountConfigPublicationMayHaveOccurred(error: unknown): boolean {
   return error instanceof AccountConfigPublicationError && error.publication !== "not_published";

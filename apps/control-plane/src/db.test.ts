@@ -2376,6 +2376,30 @@ test("provider sign-in projections are validated, version-gated, and replace ato
   assert.equal(db.getRunner("runner-1")?.providerLogins, undefined);
 });
 
+test("an over-long sign-in error is shortened, never discarding the runner's whole sign-in inventory", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const login = {
+    operationId: "login_12345678-1234-4123-8123-123456789abc",
+    accountId: "work",
+    label: "Work",
+    provider: "claude" as const,
+    status: "waiting_for_provider" as const,
+    startedAt: 500,
+  };
+  db.registerRunner(meta({ providerLogins: [login] }), 500, RUNNER_CAPABILITY_MIN_PROTOCOL.providerLogin);
+  // A v0.37 runner's unverifiable-store ending is 659 characters; rejecting it froze the dashboard
+  // on the last accepted status, where Cancel then reports the sign-in is no longer running.
+  const error = `Authentication succeeded, but the runner configuration could not be updated. ${"x".repeat(600)}`;
+  db.updateRunnerProviderLogins("runner-1", [{ ...login, status: "failed", error }], 550);
+  const stored = db.getRunner("runner-1")?.providerLogins?.[0];
+  assert.equal(stored?.status, "failed");
+  assert.equal(stored?.error?.length, 500);
+  assert.ok(stored?.error?.startsWith("Authentication succeeded, but the runner configuration could not be updated."));
+  assert.ok(stored?.error?.endsWith("…"));
+  assert.throws(() => db.updateRunnerProviderLogins("runner-1", [{ ...login, status: "failed", error: `bad\u0000${error}` }], 575),
+    /provider sign-in inventory/, "control characters are still refused");
+});
+
 test("a failed sign-in's failure code is only ever one from the closed set, and its error is validated as before (#3519)", () => {
   const db = ControlPlaneDb.open(":memory:");
   const duplicate = {
@@ -2411,9 +2435,11 @@ test("a failed sign-in's failure code is only ever one from the closed set, and 
   }], 575);
   assert.equal(stored()?.failureCode, undefined, "only a failed sign-in carries a failure code");
 
-  assert.throws(() => db.updateRunnerProviderLogins("runner-1", [{
+  db.updateRunnerProviderLogins("runner-1", [{
     ...duplicate, failureCode: "account_already_on_machine", error: "x".repeat(501),
-  }], 600), /provider sign-in inventory/, "the error sentence is still validated beside a code");
+  }], 600);
+  assert.equal(stored()?.error?.length, 500, "the error sentence is still bounded beside a code");
+  assert.equal(stored()?.failureCode, "account_already_on_machine");
   assert.throws(() => db.updateRunnerProviderLogins("runner-1", [{
     ...duplicate, failureCode: "account_already_on_machine", error: "bad\u0000sentence",
   }], 625), /provider sign-in inventory/);
