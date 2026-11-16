@@ -503,6 +503,17 @@ function safeProviderAccounts(value: RunnerView["providerAccounts"], readinessSu
   });
 }
 
+const PROVIDER_LOGIN_ERROR_LIMIT = 500;
+
+/** Shorten an over-long sign-in error instead of refusing the inventory. A refusal drops every
+ * sign-in in the update, so the dashboard keeps the last accepted status (for example "Waiting for
+ * Claude to confirm") of an operation the runner already ended, and Cancel can no longer reach it. */
+function boundedProviderLoginError(error: string): string {
+  const characters = Array.from(error);
+  return characters.length <= PROVIDER_LOGIN_ERROR_LIMIT ? error
+    : `${characters.slice(0, PROVIDER_LOGIN_ERROR_LIMIT - 1).join("")}…`;
+}
+
 function safeProviderLogins(value: RunnerView["providerLogins"]): ProviderLoginView[] {
   if (!Array.isArray(value) || value.length > 32) throw new Error("runner provider sign-in inventory is invalid");
   const operationIds = new Set<string>();
@@ -520,7 +531,7 @@ function safeProviderLogins(value: RunnerView["providerLogins"]): ProviderLoginV
           /[\u0000-\u001f\u007f]/u.test(login.sessionId))) ||
         (login.userCode !== undefined && (typeof login.userCode !== "string" || login.userCode.length > 128 ||
           /[\u0000-\u001f\u007f]/u.test(login.userCode))) ||
-        (login.error !== undefined && (typeof login.error !== "string" || login.error.length > 500 ||
+        (login.error !== undefined && (typeof login.error !== "string" ||
           /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(login.error)))) {
       throw new Error("runner provider sign-in inventory is invalid");
     }
@@ -546,7 +557,7 @@ function safeProviderLogins(value: RunnerView["providerLogins"]): ProviderLoginV
       ...(login.verificationUrl === undefined ? {} : { verificationUrl: login.verificationUrl }),
       ...(login.userCode === undefined ? {} : { userCode: login.userCode }),
       ...(login.sessionId === undefined ? {} : { sessionId: login.sessionId }),
-      ...(login.error === undefined ? {} : { error: login.error }),
+      ...(login.error === undefined ? {} : { error: boundedProviderLoginError(login.error) }),
       ...providerLoginFailureCodeField(login),
     };
   });

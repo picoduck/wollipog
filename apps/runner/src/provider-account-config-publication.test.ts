@@ -151,6 +151,13 @@ test("publication refusal guidance is actionable without disclosing raw filesyst
   assert.match(guidance, /not group- or world-writable/u);
   assert.match(guidance, /no automatic permission change or repair/u);
   assert.match(guidance, /Windows requires a supported native proof adapter/u);
+  // A sign-in ending carries this guidance; the control plane bounds sign-in errors to 500 characters.
+  for (const ending of [fallback, "Authentication succeeded, but the runner configuration could not be updated.",
+    "The adoption authorization changed; evidence was retained without local activation.",
+    "The sign-in was copied, but the runner configuration could not be updated."]) {
+    const message = accountConfigPublicationErrorMessage(new AccountConfigPublicationError("not_published", "STORE_UNVERIFIABLE"), ending);
+    assert.ok(message.length <= 500, `${message.length} characters`);
+  }
   assert.equal(accountConfigPublicationErrorMessage(new Error("secret-config-path and credential-content"), fallback), fallback);
   assert.equal(accountConfigPublicationErrorMessage(new AccountConfigPublicationError("not_published", "IO"), fallback), fallback);
   for (const publication of ["unknown", "committed"] as const) {
