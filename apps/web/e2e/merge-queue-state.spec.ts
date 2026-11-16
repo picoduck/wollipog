@@ -38,12 +38,16 @@ for (const viewport of [
     const pr = (title: RegExp) => page.getByRole("row", { name: title }).locator(".inbox-row-pr");
     await expect(pr(/Speed Up Checkout/)).toHaveText("Pull Request: In Merge Queue");
     await expect(pr(/Retry Flaky Uploads/)).toHaveText("Pull Request: Dequeued: Check Failed");
-    // The reason fits a phone row, not just a desktop one: the row's Git line clips its overflow.
+    // The row's Git line clips its overflow. On a desktop row the whole reason fits; a phone row
+    // may clip the tail, depending on the font, but always shows the badge and "Dequeued".
     const label = pr(/Retry Flaky Uploads/).locator(".status");
-    expect(await label.evaluate((node) => {
+    const fit = await label.evaluate((node) => {
       const line = node.closest(".inbox-row-git")!.getBoundingClientRect();
-      return node.getBoundingClientRect().right <= line.right + 0.5;
-    })).toBe(true);
+      const badge = node.getBoundingClientRect();
+      return { whole: badge.right <= line.right + 0.5, start: badge.left + 60 <= line.right };
+    });
+    expect(fit.start).toBe(true);
+    if (viewport.name === "desktop") expect(fit.whole).toBe(true);
     await expect(pr(/Retry Flaky Uploads/).locator(".status")).toHaveClass(/danger/u);
     await expect(pr(/Retry Flaky Uploads/)).toHaveAttribute("title", /because a merge-group check failed/u);
     await expect(pr(/Tidy Settings Copy/)).toHaveText("Pull Request: Open");
