@@ -16,6 +16,8 @@ export * from "./worktree-dirty-paths.js";
 export * from "./worktree-retirement.js";
 import type { CampaignWorktreeRetirementState } from "./worktree-retirement.js";
 export * from "./fuzzy-path-match.js";
+export * from "./forge-merge-queue.js";
+import type { ForgeMergeQueueFacts } from "./forge-merge-queue.js";
 export * from "./review-settings.js";
 import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 /**
@@ -8905,6 +8907,9 @@ export interface SessionWorktreeView {
     headOid?: string;
     provider?: ForgeProvider;
     kind?: ForgeChangeRequestKind;
+    /** v381 (#604): the runner's latest merge-queue observation of an open GitHub pull request,
+     * refreshed by its pull request reconciliation. Absent means none observed. */
+    mergeQueue?: ForgeMergeQueueFacts;
   };
 }
 
@@ -12666,6 +12671,10 @@ export interface GitPrSummary {
   baseRef?: string;
   headRef?: string;
   mergeability?: string;
+  /** v381 (#604): merge-queue state of an open GitHub pull request, read through the runner's `gh`
+   * login. Absent means unknown (older runner, GitLab, not open, or a failed read). Map it with
+   * `mergeQueueStatus`. */
+  mergeQueue?: ForgeMergeQueueFacts;
 }
 
 /** Check rollup for that PR (CheckRuns + commit StatusContexts combined). */

@@ -716,6 +716,36 @@ test("GitLab summary shows base/head, mergeability and named job links with safe
   } finally { await harness.unmount(); }
 });
 
+test("a queued pull request shows its merge-queue state, position and merge-group checks; a removal shows GitHub's reason (#604)", async () => {
+  const queued = { ...openPr, mergeQueue: { enabled: true, removal: null,
+    entry: { state: "awaiting_checks" as const, position: 3, enqueuedAt: 5, groupChecks: "failing" as const } } };
+  const harness = await mountReview({ forgeFacts: { pr: queued, checks: null } });
+  try {
+    const row = harness.container.querySelector('[aria-label="Pull Request"]')!;
+    const badge = row.querySelector<HTMLElement>(".review-pr-meta .status")!;
+    assert.equal(badge.textContent, "In Merge Queue");
+    assert.match(badge.className, /info/u);
+    const facts = row.querySelector(".review-request-facts")!.textContent!;
+    assert.match(facts, /Merge QueueIn the merge queue at position 3; a merge-group check failed, and GitHub may rebuild the group or remove it\./u);
+    assert.match(facts, /Queue Position3/u);
+    assert.match(facts, /Merge Group ChecksFailing/u);
+
+    await harness.render({ forgeFacts: { pr: { ...openPr, mergeQueue: { enabled: true, entry: null,
+      removal: { reason: "merge_conflict", removedAt: 9 } } }, checks: null } });
+    const removed = harness.container.querySelector('[aria-label="Pull Request"]')!;
+    assert.equal(removed.querySelector(".review-pr-meta .status")?.textContent, "Removed from Merge Queue");
+    assert.match(removed.querySelector(".review-pr-meta .status")!.className, /danger/u);
+    assert.match(removed.textContent!, /because it conflicts with the base branch or a pull request ahead of it\./u);
+    assert.doesNotMatch(removed.textContent!, /Queue Position/u);
+
+    // A repository without a queue shows no queue UI.
+    await harness.render({ forgeFacts: { pr: { ...openPr, mergeQueue: { enabled: false, entry: null, removal: null } }, checks: null } });
+    const plain = harness.container.querySelector('[aria-label="Pull Request"]')!;
+    assertNoDomNode(plain.querySelector(".review-pr-meta .status"));
+    assert.doesNotMatch(plain.textContent!, /Merge Queue/u);
+  } finally { await harness.unmount(); }
+});
+
 test("MR pipeline status stays distinct from jobs, including a successful empty job read (#1270)", async () => {
   const pr = { ...openPr, kind: "merge_request" as const, provider: "gitlab" as const };
   const checks = { ...failingChecks, passing: 0, pending: 0, failing: 1, jobs: [

@@ -1655,10 +1655,37 @@ test("GitHub summary requests and forwards forge context and named check results
     assert.equal(command, "gh");
     assert.deepEqual(args, ["pr", "view", "--json", "number,title,url,state,statusCheckRollup,baseRefName,headRefName,mergeable"]);
     return { stdout: JSON.stringify({ number: 7, title: "Feature", url: "https://github.com/org/repo/pull/7", state: "OPEN", baseRefName: "release", headRefName: "feature", mergeable: "CONFLICTING", statusCheckRollup: [{ name: "unit", status: "COMPLETED", conclusion: "FAILURE", detailsUrl: "https://github.com/org/repo/actions/runs/1" }] }), stderr: "" };
-  });
+  }, async () => undefined);
   assert.equal(summary.pr?.baseRef, "release");
   assert.equal(summary.pr?.headRef, "feature");
   assert.equal(summary.pr?.mergeability, "CONFLICTING");
   assert.equal(summary.checks?.failing, 1);
   assert.deepEqual(summary.checks?.jobs, [{ name: "unit", state: "failing", url: "https://github.com/org/repo/actions/runs/1" }]);
+});
+
+test("GitHub summary adds an open pull request's merge-queue facts, read through the same gh context (#604)", async () => {
+  const queued = { enabled: true, removal: null, entry: { state: "queued" as const, position: 2, enqueuedAt: 5, groupChecks: null } };
+  for (const [state, expected] of [["OPEN", queued], ["MERGED", undefined], ["CLOSED", undefined]] as const) {
+    const reads: string[] = [];
+    const ghArgs: string[][] = [];
+    const summary = await ghPrSummary(`/repo-604-${state}`, async (_context, command, args) => {
+      assert.equal(command, "gh");
+      ghArgs.push(args);
+      return { stdout: JSON.stringify({ number: 7, title: "Feature", url: "https://github.com/org/repo/pull/7", state, statusCheckRollup: [] }), stderr: "" };
+    }, async (url, gh) => {
+      reads.push(url);
+      // The reader gets a gh runner over the summary's own command seam.
+      await gh(["api", "graphql"]);
+      return queued;
+    });
+    assert.deepEqual(summary.pr?.mergeQueue, expected, state);
+    assert.deepEqual(reads, state === "OPEN" ? ["https://github.com/org/repo/pull/7"] : [], state);
+    assert.equal(ghArgs.length, state === "OPEN" ? 2 : 1);
+  }
+  // An unreadable queue leaves the summary as it was.
+  const plain = await ghPrSummary("/repo-604-unreadable", async () => ({
+    stdout: JSON.stringify({ number: 7, title: "Feature", url: "https://github.com/org/repo/pull/7", state: "OPEN", statusCheckRollup: [] }), stderr: "",
+  }), async () => undefined);
+  assert.equal(plain.pr?.number, 7);
+  assert.equal("mergeQueue" in plain.pr!, false);
 });

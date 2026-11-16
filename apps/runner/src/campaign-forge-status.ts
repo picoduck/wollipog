@@ -44,10 +44,15 @@ export type GhRunner = (args: string[], signal?: AbortSignal) => Promise<GhOutco
  * launched with (`agentEnv`: the runner-local agent configuration, never persisted), so a
  * `GH_TOKEN`, `GH_CONFIG_DIR`, or `HOME` configured for that agent selects the same login the
  * Orchestrator's own `gh` uses. */
-export function contextGhRunner(context: AgentContext, cwd: string, agentEnv: Record<string, string> = {}): GhRunner {
+export function contextGhRunner(
+  context: AgentContext,
+  cwd: string,
+  agentEnv: Record<string, string> = {},
+  run: typeof runContextCommand = runContextCommand,
+): GhRunner {
   return async (args, signal) => {
     try {
-      const { stdout, stderr } = await runContextCommand(context, "gh", args, {
+      const { stdout, stderr } = await run(context, "gh", args, {
         cwd,
         timeoutMs: GH_TIMEOUT_MS,
         maxBuffer: 4 * 1024 * 1024,

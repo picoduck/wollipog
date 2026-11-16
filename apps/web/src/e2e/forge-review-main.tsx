@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { PROTOCOL_VERSION, type GitStatusInfo, type ReviewFinding, type SessionView } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type GitPrSummary, type GitStatusInfo, type ReviewFinding, type SessionView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
@@ -12,6 +12,15 @@ const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
 const legacy = params.get("legacy") === "1";
 const request = params.get("request") === "1";
+/** #604: `queue=queued|removed` shows a GitHub pull request in, or removed from, its merge queue. */
+const queue = params.get("queue");
+const queueFacts: GitPrSummary | null = queue === "queued" || queue === "removed" ? {
+  number: 4601, title: "Speed Up Checkout", state: "OPEN", provider: "github", kind: "pull_request",
+  url: "https://github.com/picoduck/wollipog/pull/4601", baseRef: "main", headRef: "fix/issue-4601", mergeability: "MERGEABLE",
+  mergeQueue: queue === "queued"
+    ? { enabled: true, removal: null, entry: { state: "awaiting_checks", position: 2, enqueuedAt: 1_794_800_000_000, groupChecks: "pending" } }
+    : { enabled: true, entry: null, removal: { reason: "failed_checks", removedAt: 1_794_800_000_000 } },
+} : null;
 
 const session: SessionView = {
   id: "gitlab-review-e2e", runnerId: "runner-1", workspaceId: "workspace-1", workspaceName: "Wollipog",
@@ -108,7 +117,10 @@ function Fixture() {
               runnerOnline
               runnerProtocolVersion={legacy ? 105 : params.has("oldDiff") ? 343 : PROTOCOL_VERSION}
               git={git}
-              forgeFacts={request ? {
+              forgeFacts={queueFacts ? {
+                pr: queueFacts,
+                checks: { passing: 6, failing: 0, pending: 0, failingNames: [], url: `${queueFacts.url}/checks` },
+              } : request ? {
                 pr: {
                   number: 19, title: "Add GitLab Integration", state: "OPENED", provider: "gitlab", kind: "merge_request",
                   url: "https://gitlab.example.test/team/sub/wollipog/-/merge_requests/19",
@@ -124,7 +136,9 @@ function Fixture() {
                   ],
                 },
               } : null}
-              forge={legacy ? undefined : {
+              forge={legacy ? undefined : queueFacts ? {
+                provider: "github", host: "github.com", project: "picoduck/wollipog", authenticated: true,
+              } : {
                 provider: "gitlab", host: "gitlab.example.test", project: "team/sub/wollipog", authenticated: true,
               }}
               onOpenSourceLocation={() => {}}

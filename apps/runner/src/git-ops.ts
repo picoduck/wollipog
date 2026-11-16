@@ -44,6 +44,9 @@ import type {
   AgentContext,
 } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
+// Function-level use only: campaign-forge-status imports this module's check-rollup helpers.
+import { contextGhRunner } from "./campaign-forge-status.js";
+import { githubMergeQueueFacts } from "./pull-request-queue.js";
 
 export { safeHttpUrl };
 
@@ -2257,7 +2260,11 @@ async function requestDiff(cwd: string, requestUrl: string): Promise<GitRequestD
 
 /** The PR + checks for the branch checked out in `cwd`, via gh. Null when gh is missing,
  * unauthenticated, the repo isn't on GitHub, or the branch has no PR — never a throw. */
-export async function ghPrSummary(cwd: string, runCommand: typeof runContextCommand = runContextCommand): Promise<{ pr: GitPrSummary | null; checks: GitChecksSummary | null }> {
+export async function ghPrSummary(
+  cwd: string,
+  runCommand: typeof runContextCommand = runContextCommand,
+  readMergeQueue: typeof githubMergeQueueFacts = githubMergeQueueFacts,
+): Promise<{ pr: GitPrSummary | null; checks: GitChecksSummary | null }> {
   const context = executionContext.getStore() ?? { kind: "native" as const };
   const cacheKey = `${context.kind === "wsl" ? `wsl:${context.distro}` : "native"}:${cwd}`;
   const hit = ghPrCache.get(cacheKey);
@@ -2300,6 +2307,12 @@ export async function ghPrSummary(cwd: string, runCommand: typeof runContextComm
         jobsIncomplete: latestCheckContexts(d.statusCheckRollup).length > 100,
         url: `${url.replace(/\/$/, "")}/checks`,
       } : null;
+      // v381 (#604): the queue entry and any removal, which `gh pr view` cannot read. A failed read
+      // leaves the field absent (unknown), never "not queued".
+      if (pr.state.toUpperCase() === "OPEN") {
+        const mergeQueue = await readMergeQueue(url, contextGhRunner(context, cwd, {}, runCommand));
+        if (mergeQueue) pr.mergeQueue = mergeQueue;
+      }
     }
   } catch {
     // gh absent/unauth/no PR — the card simply hides the PR/checks rows.

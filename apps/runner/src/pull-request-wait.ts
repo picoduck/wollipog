@@ -292,7 +292,7 @@ export const PULL_REQUEST_WAIT_QUERY = `query($owner:String!,$name:String!,$numb
   repository(owner:$owner,name:$name){
     defaultBranchRef{name}
     pullRequest(number:$number){
-      url state isDraft headRefOid headRefName baseRefName mergeStateStatus createdAt
+      url state isDraft headRefOid headRefName baseRefName mergeStateStatus createdAt isMergeQueueEnabled
       timelineItems(last:1,itemTypes:[READY_FOR_REVIEW_EVENT]){nodes{... on ReadyForReviewEvent{createdAt}}}
       queueEvents:timelineItems(last:1,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{
         __typename ... on AddedToMergeQueueEvent{createdAt} ... on RemovedFromMergeQueueEvent{createdAt reason}
@@ -532,6 +532,8 @@ interface Observation {
   baseRef: string;
   defaultBranch: string | null;
   mergeStateStatus: string | null;
+  /** The base branch has a merge queue; null when GitHub did not say. */
+  mergeQueueEnabled: boolean | null;
   mergeCommitSha: string | null;
   queue: null | { state: string; position: number | null; enqueuedAt: string | null; headSha: string | null; rollup: unknown };
   rollup: unknown;
@@ -619,6 +621,7 @@ function observation(data: unknown): Observation | null {
     baseRef: pr.baseRefName,
     defaultBranch: typeof defaultBranch === "string" ? clip(defaultBranch, MAX_NAME) : null,
     mergeStateStatus: typeof pr.mergeStateStatus === "string" ? pr.mergeStateStatus : null,
+    mergeQueueEnabled: typeof pr.isMergeQueueEnabled === "boolean" ? pr.isMergeQueueEnabled : null,
     mergeCommitSha: typeof mergeCommit === "string" && SHA.test(mergeCommit) ? mergeCommit : null,
     queue: entry
       ? {
@@ -1076,4 +1079,63 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     // The read after the final pause lands at the deadline, so a timeout summary is current.
     if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
   }
+}
+
+/** A check rollup reduced to one word, or null when nothing was reported. */
+export type QueueGroupChecks = "passing" | "failing" | "pending" | null;
+
+/** One read of a pull request's merge-queue state (#604): no wait, no required-check rules. */
+export interface PullRequestQueueRead {
+  state: "open" | "closed" | "merged";
+  headSha: string;
+  /** The base branch has a merge queue; null when GitHub did not say. */
+  mergeQueueEnabled: boolean | null;
+  entry: null | {
+    /** GitHub's `MergeQueueEntryState`, as GitHub spells it. */
+    state: string;
+    position: number | null;
+    enqueuedAt: string | null;
+    /** The merge group's checks: its required checks when GitHub marks any, otherwise every check. */
+    groupChecks: QueueGroupChecks;
+  };
+  /** GitHub's latest removal of the current head from the queue, when no entry replaced it. */
+  removal: null | { reason: string | null; removedAt: string };
+}
+
+/**
+ * Read a pull request's merge-queue entry and its current head's latest removal with the wait's own
+ * query and parser (one GraphQL call). The removal is attributed to the current head exactly as a
+ * wait attributes it, so a summary and a wait never disagree about whether it was ejected.
+ */
+export async function readPullRequestQueue(
+  repository: string,
+  number: number,
+  gh: GhRunner,
+): Promise<{ ok: true; value: PullRequestQueueRead } | { ok: false; error: string }> {
+  const ref = githubRepository({ repository, number });
+  if (!ref) return { ok: false, error: "a valid GitHub repository and pull request number are required" };
+  const read = await graphqlRead(gh, [
+    "-f", `query=${PULL_REQUEST_WAIT_QUERY}`, "-f", `owner=${ref.owner}`, "-f", `name=${ref.name}`, "-F", `number=${number}`,
+  ], `could not read ${ref.owner}/${ref.name}#${number}`, observation);
+  if (!read.ok) return { ok: false, error: read.error };
+  const seen = read.value;
+  const queue = seen.state === "open" ? seen.queue : null;
+  let groupChecks: QueueGroupChecks = null;
+  if (queue?.headSha) {
+    const group = evaluateCommitChecks(queue.headSha, queue.rollup, []);
+    const other = group.summary.other;
+    groupChecks = group.requiredState === "failed" ? "failing" : group.requiredState === "pending" ? "pending"
+      : group.requiredState === "passed" ? "passing"
+      : other.failed > 0 ? "failing" : other.pending > 0 ? "pending" : other.passed > 0 ? "passing" : null;
+  }
+  return {
+    ok: true,
+    value: {
+      state: seen.state,
+      headSha: seen.headSha,
+      mergeQueueEnabled: seen.mergeQueueEnabled,
+      entry: queue ? { state: queue.state, position: queue.position, enqueuedAt: queue.enqueuedAt, groupChecks } : null,
+      removal: seen.state === "open" ? headRemoval(seen) ?? null : null,
+    },
+  };
 }

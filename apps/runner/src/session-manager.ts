@@ -14,6 +14,8 @@ import { executeGithubIssueClosure, inspectGithubIssueClosure, reconcileGithubIs
 import type { GithubIssueClosureLocation, GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, GitLabMergeClosuresMessage, GitLabMergeClosuresResultMessage, ForgeDecisionAction, ForgeDecisionActionMessage, ForgeDecisionActionOutcome, ForgeDecisionActionRefusalReason, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
+import { sameForgeMergeQueueFacts } from "@wollipog/protocol";
+import { githubMergeQueueFacts } from "./pull-request-queue.js";
 import { executeBranchDeletion, executeTemporaryBranch, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
 import { githubSlug } from "./git-ops.js";
 import { proveWorktreePatchDelivery, type CampaignDeliveredPullRequest, type WorktreePatchDeliveryResult } from "./worktree-patch-delivery.js";
@@ -2022,6 +2024,9 @@ export class SessionManager {
   private probeMergedPullRequestContainment: typeof mergedPullRequestContainingHead = mergedPullRequestContainingHead;
   private probePatchDelivery: typeof proveWorktreePatchDelivery = proveWorktreePatchDelivery;
   private resolveWorktreePullRequestState: typeof worktreePullRequestState = worktreePullRequestState;
+  /** v381 (#604): an open GitHub pull request's merge-queue facts, read through `gh` in its context. */
+  private resolveWorktreeMergeQueue = (pullRequestUrl: string, context: AgentContext, cwd: string) =>
+    githubMergeQueueFacts(pullRequestUrl, contextGhRunner(context, cwd));
   private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
   /** The runner's ref-deleting Git runs only in its own confined mount view (#3316), because the
    * session can race the runner's path checks; a runner that cannot confine it refuses. */
@@ -6098,6 +6103,34 @@ export class SessionManager {
 
   /** Conservative startup/periodic reconciliation. Forge failures retain state, while a durable
    * terminal state is remembered so dirty or active trees can be retried after they become safe. */
+  /** v381 (#604): record an open GitHub pull request's merge-queue facts on its worktree link, so the
+   * Inbox shows a queued or removed pull request without anyone opening the session. Runs inside
+   * the session's worktree operation. A failed read keeps the last observation; an unchanged one
+   * writes nothing. */
+  private async refreshWorktreeMergeQueue(sessionId: string, path: string, pullRequestUrl: string): Promise<void> {
+    const meta = this.store.readMeta(sessionId);
+    if (!meta) return;
+    const before = this.attributedWorktrees(meta).find((item) => sameWorktreePath(meta.context, item.path, path));
+    if (before?.pullRequest?.url !== pullRequestUrl || before.pullRequest.state !== "open" ||
+        (before.pullRequest.provider ?? "github") !== "github") return;
+    const observed = await this.resolveWorktreeMergeQueue(pullRequestUrl, meta.context, before.path);
+    if (!observed) return;
+    // Only an entry or a removal is worth showing; a queue-enabled base alone is not.
+    const mergeQueue = observed.entry || observed.removal ? observed : undefined;
+    const latest = this.store.readMeta(sessionId);
+    if (!latest) return;
+    const current = this.attributedWorktrees(latest).find((item) => sameWorktreePath(latest.context, item.path, path));
+    if (current?.pullRequest?.url !== pullRequestUrl || current.pullRequest.state !== "open" ||
+        sameForgeMergeQueueFacts(current.pullRequest.mergeQueue, mergeQueue)) return;
+    const worktrees = this.attributedWorktrees(latest).map((item) => {
+      if (!sameWorktreePath(latest.context, item.path, path) || !item.pullRequest) return item;
+      const { mergeQueue: _previous, ...pullRequest } = item.pullRequest;
+      return { ...item, pullRequest: mergeQueue ? { ...pullRequest, mergeQueue } : pullRequest };
+    });
+    const updated = this.store.patchMeta(sessionId, { worktrees });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
   async reconcileWorktreePullRequests(options: { replayDeferredRetirements?: boolean } = {}): Promise<void> {
     if (this.worktreePullRequestReconciling || this.shuttingDown) return;
     this.worktreePullRequestReconciling = true;
@@ -6147,7 +6180,11 @@ export class SessionManager {
                   worktree.pullRequest.url,
                   { context: meta.context, provider: worktree.pullRequest.provider },
                 );
-                if (state === "open" && (!verified || verified.state === "open")) continue;
+                if (state === "open" && verified?.state === "open") {
+                  await this.refreshWorktreeMergeQueue(candidate.sessionId, path, worktree.pullRequest.url);
+                  continue;
+                }
+                if (state === "open" && !verified) continue;
                 if (state === "open" && verified) state = verified.state;
                 const canPersist = verified &&
                   (!needsMergedHead || (verified.state === "merged" && verified.headOid));

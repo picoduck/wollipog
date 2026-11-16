@@ -469,6 +469,33 @@ function initialModel(): FixtureModel {
     initial.projects[0]!.unarchivedSessionCount = initial.sessions.length;
     initial.projects[0]!.totalSessionCount = initial.sessions.length;
   }
+  if (SCENARIO === "merge-queue") {
+    // #604: a queued pull request, one GitHub removed from the queue, and an ordinary open one.
+    const row = (id: string, number: number, mergeQueue?: unknown): Partial<SessionView> => ({
+      useWorktree: true,
+      worktreePath: `/repos/alpha/.agent-worktrees/${id}`,
+      worktrees: [{
+        id: `wt-${id}`, path: `/repos/alpha/.agent-worktrees/${id}`, branch: `fix/issue-${number}`, baseRef: "origin/main",
+        source: "created",
+        pullRequest: { url: `https://github.com/picoduck/wollipog/pull/${number}`, state: "open", provider: "github",
+          kind: "pull_request", ...(mergeQueue ? { mergeQueue } : {}) },
+      }] as SessionView["worktrees"],
+    });
+    const rows: Array<[string, string, Partial<SessionView>]> = [
+      ["session-queued", "Speed Up Checkout", row("queued", 4601, {
+        enabled: true, removal: null, entry: { state: "awaiting_checks", position: 2, enqueuedAt: 1_794_800_000_000, groupChecks: "pending" },
+      })],
+      ["session-removed", "Retry Flaky Uploads", row("removed", 4602, {
+        enabled: true, entry: null, removal: { reason: "failed_checks", removedAt: 1_794_800_000_000 },
+      })],
+      ["session-open", "Tidy Settings Copy", row("open", 4603)],
+    ];
+    initial.sessions = rows.map(([id, title, extra], index) => Object.assign(session(id, title, "alpha", "alpha-workspace"), {
+      status: "idle", updatedAt: 100 - index, lastEventAt: 100 - index, ...extra,
+    }));
+    initial.projects[0]!.unarchivedSessionCount = initial.sessions.length;
+    initial.projects[0]!.totalSessionCount = initial.sessions.length;
+  }
   if (SCENARIO === "inbox-row-layout") {
     // The shapes #664 has to survive at once: a title long enough to fill any viewport, a branch
     // name long enough to fill the third line on its own, a default base ref that must stay hidden,

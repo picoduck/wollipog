@@ -1493,6 +1493,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 380: scope-card settled decision details; older dashboards retain unavailable-detail rows.
   380,
   // v381 slot
+  // 381: merge-queue state on pull request summaries and worktree pull request links (#604).
+  381,
   // v382 slot
   // v383 slot
   // v384 slot
