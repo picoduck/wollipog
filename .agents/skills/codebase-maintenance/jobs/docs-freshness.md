@@ -19,19 +19,30 @@ Mechanical checks first, because they are provable:
   script exists in the relevant `package.json`.
 - **Stale identifiers.** For symbols, routes, environment variables, and config keys named in docs,
   confirm they still exist with `git grep`.
+- **Stale counts.** Compare stated counts of repository-defined items (shards, jobs, required
+  checks, and similar) with the tracked constant or configuration that defines those items.
 
 Then, for the agent-instruction files only, read them fully and check each behavioral claim against
 the code.
 
 ## Gate
 
-- Every finding must be mechanically demonstrable: the path, link, command, or identifier is named
-  in the doc and provably absent from the tree.
+- Every finding must be mechanically demonstrable: either a path, link, command, or identifier is
+  named in the doc and provably absent from the tree, or a stated count of repository-defined items
+  contradicts a tracked source of truth.
+- For a count finding, cite both the doc file and line containing the count and the source file and
+  defining constant or configuration line; show how that source yields the contradictory count.
+  For example, a claim of "five browser shards" can be checked against `BROWSER_SHARD_COUNT` in
+  `scripts/browser-shard-count.mjs`, and "all nine checkout jobs" against `CHECKOUT_JOBS` in
+  `scripts/main-rolling-validation.mjs`.
 - Do not report prose you would phrase differently. This job fixes falsehoods, not style.
 - Do not report intentionally illustrative examples — placeholder paths such as `<private-path>`,
-  `mcp.example.com`, or `/home/you/` in sample configuration are correct as written.
-- Release notes and ADRs describe the past. A statement that was true at the time is not stale;
-  check the document's purpose before flagging it.
+  `mcp.example.com`, or `/home/you/` in sample configuration are correct as written. Proposals
+  suggesting wording are also exempt; suggested text is not a claim about the current repository.
+- Release notes, ADRs, and dated measurement reports describe the past. A statement that was true
+  at the time is not stale; check the document's purpose before flagging it. Records of a past
+  setting are also exempt: "the current workflow" in a dated doc can refer to the workflow at that
+  date, not today's configuration.
 - Path references in a nested document are doc-relative. Test each candidate relative to the
   document's own directory before reporting it broken — `scripts/build-sidecar.mjs` named in
   `apps/desktop/README.md` resolves to `apps/desktop/scripts/build-sidecar.mjs`, and testing it
