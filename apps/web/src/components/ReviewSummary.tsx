@@ -60,6 +60,7 @@ export function ReviewSummary({
   checks,
   canPrompt,
   onForgeChanged,
+  requiredFindingsOpen,
 }: {
   session: SessionView;
   status: GitStatusInfo | null;
@@ -71,6 +72,8 @@ export function ReviewSummary({
   canPrompt: boolean;
   /** Re-read the forge summary, after the pull request was enqueued or merged (#604). */
   onForgeChanged?: () => void;
+  /** Open Required findings the panel holds; a change re-reads the merge gate (#604). */
+  requiredFindingsOpen?: number;
 }) {
   if (!status && !pr) return null;
   const facts = reviewSummaryFacts(status);
@@ -93,17 +96,19 @@ export function ReviewSummary({
           {facts.map((fact) => <span key={fact}>{fact}</span>)}
         </div>
       )}
-      {pr && <PullRequestRow session={session} pr={pr} checks={checks} canPrompt={canPrompt} onForgeChanged={onForgeChanged} />}
+      {pr && <PullRequestRow session={session} pr={pr} checks={checks} canPrompt={canPrompt} onForgeChanged={onForgeChanged}
+        requiredFindingsOpen={requiredFindingsOpen} />}
     </section>
   );
 }
 
-function PullRequestRow({ session, pr, checks, canPrompt, onForgeChanged }: {
+function PullRequestRow({ session, pr, checks, canPrompt, onForgeChanged, requiredFindingsOpen }: {
   session: SessionView;
   pr: GitPrSummary;
   checks: GitChecksSummary | null;
   canPrompt: boolean;
   onForgeChanged?: () => void;
+  requiredFindingsOpen?: number;
 }) {
   const api = useApi();
   const [busy, setBusy] = useState(false);
@@ -208,7 +213,7 @@ function PullRequestRow({ session, pr, checks, canPrompt, onForgeChanged }: {
         <PullRequestMergeAction
           session={session}
           pr={pr}
-          refreshKey={`${checks?.passing ?? 0}/${checks?.pending ?? 0}/${checks?.failing ?? 0}/${JSON.stringify(pr.mergeQueue ?? null)}`}
+          refreshKey={`${checks?.passing ?? 0}/${checks?.pending ?? 0}/${checks?.failing ?? 0}/${JSON.stringify(pr.mergeQueue ?? null)}/${requiredFindingsOpen ?? "unknown"}`}
           onMerged={onForgeChanged}
         />
       )}

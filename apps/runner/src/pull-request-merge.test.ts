@@ -171,6 +171,21 @@ test("GitHub's own refusal is reported, and an unconfirmed request is uncertain 
   assert.equal(accepted.outcome, "uncertain", "accepted but not seen in the queue is not reported as enqueued");
 });
 
+test("a merge of another head after the gate is never reported as this request's success", async () => {
+  const fake = fakeGh({
+    mutation: { stdout: JSON.stringify({ errors: [{ message: "Head branch was modified. Review and try the merge again." }] }), stderr: "", code: 1, timedOut: false },
+    after: ok(pr({ state: "MERGED", headRefOid: OTHER, mergeCommit: { oid: OTHER },
+      commits: { nodes: [{ commit: { oid: OTHER, statusCheckRollup: null } }] } })),
+  });
+  const result = await mergePullRequest({ pullRequestUrl: URL, headSha: HEAD, mode: "enqueue" }, fake.gh);
+  assert.equal(result.outcome, "refused");
+  assert.equal(result.state, "merged");
+  assert.match(result.message, /merged at another head than the one you confirmed/u);
+  // Without any refusal from GitHub, a merge at another head still is not this request's.
+  const quiet = fakeGh({ after: ok(pr({ state: "MERGED", headRefOid: OTHER, commits: { nodes: [{ commit: { oid: OTHER, statusCheckRollup: null } }] } })) });
+  assert.equal((await mergePullRequest({ pullRequestUrl: URL, headSha: HEAD, mode: "enqueue" }, quiet.gh)).outcome, "refused");
+});
+
 test("the direct merge method prefers the login's default when the repository allows it", () => {
   assert.equal(directMergeMethod({ viewerDefaultMergeMethod: "SQUASH", squashMergeAllowed: true, mergeCommitAllowed: true }), "squash");
   assert.equal(directMergeMethod({ viewerDefaultMergeMethod: "REBASE", squashMergeAllowed: true, rebaseMergeAllowed: false }), "squash");

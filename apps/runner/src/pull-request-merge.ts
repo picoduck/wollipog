@@ -187,6 +187,11 @@ export async function mergePullRequest(
   // Read back, whatever the mutation printed: an accepted request is proven by the pull request
   // itself, and a transport failure may still have landed.
   const back = await readPullRequestQueue(facts.repository, facts.number, gh);
+  // A merge of another head (someone pushed and merged meanwhile) is not this request's success.
+  if (back.ok && back.value.state === "merged" && back.value.headSha !== request.headSha) {
+    return result("refused", "The pull request merged at another head than the one you confirmed; this request did not merge it.",
+      { state: "merged" });
+  }
   if (back.ok && back.value.state === "merged") {
     return result("merged", request.mode === "enqueue"
       ? "GitHub merged the pull request from the merge queue."

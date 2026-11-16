@@ -1369,6 +1369,8 @@ export function ReviewPanel({
               checks={summaryPr === forgeFacts?.pr ? forgeFacts?.checks ?? null : null}
               canPrompt={canPrompt}
               onForgeChanged={() => void git.refresh()}
+              // #604: the merge gate counts open Required findings, so a change re-reads it.
+              requiredFindingsOpen={findings.filter((finding) => finding.required && isOpenFinding(finding)).length}
             />
             {/* The review's result, above the diff it is about (#2850). Keyed by session so a switch
                 starts from the new session's own default fold. */}
