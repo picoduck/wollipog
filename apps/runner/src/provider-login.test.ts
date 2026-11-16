@@ -274,6 +274,25 @@ async function exposeStructuredCeremony(
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+test("cancelling a sign-in the runner already ended republishes its inventory so a stale card can clear", async () => {
+  const fx = fixture({ writeFails: true });
+  try {
+    const started = await fx.supervisor.startAccount({ provider: "claude", label: "Work Claude" });
+    fx.children[0]!.close(0);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(fx.supervisor.views()[0]?.status, "failed");
+    // The control plane may have refused the update that ended it and still show it waiting.
+    const before = fx.updates.length;
+    assert.throws(() => fx.supervisor.cancel(started.operationId), /no longer running/);
+    assert.equal(fx.updates.length, before + 1, "the ended sign-in is republished");
+    assert.equal(fx.updates.at(-1)?.[0]?.status, "failed");
+    assert.throws(() => fx.supervisor.cancel("login_00000000-0000-4000-8000-000000000000"), /no longer running/);
+    assert.equal(fx.updates.length, before + 2, "an unknown sign-in republishes too, dropping the stale entry");
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("Claude sign-in exposes its HTTPS link, accepts one transient code, and persists the account", async () => {
   const fx = fixture();
   try {

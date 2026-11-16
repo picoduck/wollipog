@@ -804,7 +804,13 @@ export class ProviderLoginSupervisor {
 
   cancel(operationId: string): ProviderLoginView {
     const operation = this.active.get(operationId);
-    if (!operation || operation.settled) throw new Error("This sign-in is no longer running.");
+    if (!operation || operation.settled) {
+      // The control plane still shows a sign-in this runner already ended, for example because
+      // it refused the update that ended it. Republish the authoritative inventory so the
+      // stale card is replaced by the real ending (or dropped) instead of staying stuck.
+      this.publish();
+      throw new Error("This sign-in is no longer running.");
+    }
     operation.cancelled = true;
     this.update(operation, {
       status: "cancelled",
