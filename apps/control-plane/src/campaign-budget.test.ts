@@ -120,6 +120,39 @@ for (const resource of ["cost", "tools", "envelope"] as const) test(`root contin
   } finally { h.db.close(); }
 });
 
+test("budget-held diagnostics respect the campaign budget audience gate (#4619)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 120, toolCalls: 120, concurrency: 2 })).ok);
+    h.make("private-worker", "root", { costBudgetUsd: 60, maxToolCalls: 60 });
+    h.usage("private-worker", 120);
+    h.db.updateSessionStatus("root", "idle", 6);
+    assert.match(h.db.campaignProjection("root")!.recovery!.automation!.reason!, /120 USD spent/u);
+    // The root becomes organization-visible while its worker stays personal.
+    h.db.raw().prepare("UPDATE session_ownership SET owner_kind='organization',owner_id=organization_id WHERE session_id='root'").run();
+    const projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.budget, undefined);
+    assert.equal(projection.recovery!.automation!.state, "budget_held");
+    assert.equal(projection.recovery!.automation!.reason,
+      "Automatic continuation is blocked by current accounting or an existing allowance. Recovery cannot reset spend or request an override.");
+    assert.equal(h.db.campaignContinuationAdmission("root").reason, projection.recovery!.automation!.reason,
+      "scheduler diagnostics must not leak amounts either");
+  } finally { h.db.close(); }
+});
+
+test("session hold explanations do not invite overrides or expose float noise (#4619)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 120, toolCalls: 120, concurrency: 2 })).ok);
+    h.usage("root", 9.310000000000002);
+    h.db.updateSessionCostBudget("root", 8, 6);
+    const reason = h.db.campaignContinuationAdmission("root").reason!;
+    assert.match(reason, /evaluated usage: 9\.31 USD/u);
+    assert.match(reason, /Cost budget reached/u);
+    assert.doesNotMatch(reason, /Continue\?|9\.310000000/u);
+  } finally { h.db.close(); }
+});
+
 test("service launches use the exact reservation and agent reallocations preserve tighter limits", () => {
   const h = harness();
   try {

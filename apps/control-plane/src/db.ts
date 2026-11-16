@@ -6473,11 +6473,19 @@ export class ControlPlaneDb {
       costUsd: used.cost, toolCallCount: used.tools,
       unpriced: rules.some(rule => rule.kind === "cost_unpriced") && this.sessionUsageUnpriced(campaignId) }, rules));
     if (allowanceError || sessionAsk) {
+      // This reason also rides on the root's shared projection. Apply the same audience gate
+      // as its budget field, including to organization-daily/session policy details.
+      if (budget && !this.campaignBudgetVisibleToRoot(campaignId)) {
+        return { state: "budget_held", reason: "Automatic continuation is blocked by current accounting or an existing allowance. Recovery cannot reset spend or request an override." };
+      }
       const allocation = budget ? this.campaignBudgets.allocation(campaignId) : undefined;
+      const usd = (amount: number) => Number(amount.toFixed(6));
       const amounts = budget
-        ? ` Campaign cost: ${budget.actual.costUsd} USD spent, ${budget.outstanding.costUsd} USD reserved, limit ${budget.authority.costUsd ?? "unset"} USD; tool calls: ${budget.actual.toolCalls} used, ${budget.outstanding.toolCalls} reserved, limit ${budget.authority.toolCalls ?? "unset"}. Session allocation: ${allocation?.costUsd ?? "unset"} USD, ${allocation?.toolCalls ?? "unset"} tool calls; evaluated usage: ${used.cost} USD, ${used.tools} tool calls.`
+        ? ` Campaign cost: ${usd(budget.actual.costUsd)} USD spent, ${usd(budget.outstanding.costUsd)} USD reserved, limit ${budget.authority.costUsd ?? "unset"} USD; tool calls: ${budget.actual.toolCalls} used, ${budget.outstanding.toolCalls} reserved, limit ${budget.authority.toolCalls ?? "unset"}. Session allocation: ${allocation?.costUsd ?? "unset"} USD, ${allocation?.toolCalls ?? "unset"} tool calls; evaluated usage: ${usd(used.cost)} USD, ${used.tools} tool calls.`
         : "";
-      return { state: "budget_held", reason: `Automatic continuation is blocked: ${allowanceError ?? sessionAsk!.title}.${amounts} Recovery cannot reset spend or request an override.` };
+      const cause = (allowanceError ?? sessionAsk!.title ?? "an existing allowance was reached")
+        .replace(/ Continue\?$/u, "").replace(/across your sessions/u, "across the owner's sessions").replace(/[.\s]+$/u, "");
+      return { state: "budget_held", reason: `Automatic continuation is blocked: ${cause}.${amounts} Recovery cannot reset spend or request an override.` };
     }
     return { state: "available" };
   }
@@ -24561,7 +24569,7 @@ export class ControlPlaneDb {
           ? this.campaignRepositoryBoundaryView(resolvedCampaignId, policy) : null;
         return boundary ? { repositoryBoundary: boundary } : {};
       })(),
-      ...(budget && this.campaignBudgets.members(resolvedCampaignId).every((id) => !this.stmt("SELECT 1 FROM sessions WHERE id=?").get(id) || this.campaignRootAudienceCanSee(resolvedCampaignId)(id))
+      ...(budget && this.campaignBudgetVisibleToRoot(resolvedCampaignId)
         ? { budget } : {}),
       ...(recovery ? { recovery } : {}),
       decisionOwners: effectiveOwners,
@@ -24694,6 +24702,12 @@ export class ControlPlaneDb {
       }
       return visible;
     };
+  }
+
+  private campaignBudgetVisibleToRoot(rootId: string): boolean {
+    const canSee = this.campaignRootAudienceCanSee(rootId);
+    return this.campaignBudgets.members(rootId).every(id =>
+      !this.stmt("SELECT 1 FROM sessions WHERE id=?").get(id) || canSee(id));
   }
 
   private campaignContinuationProjection(
