@@ -3,7 +3,6 @@ import React, { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   type BackgroundDeliveryWatchdogState,
   type BackgroundNotificationReceiptState,
-  type SessionStatus,
   type SessionView,
 } from "@wollipog/protocol";
 import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "../background-delivery-status.js";
