@@ -50,6 +50,27 @@ flight, and re-run the affected suite three times at the new HEAD before compari
 The shared install-freshness check in `SKILL.md` applies here first of all: a stale install fails
 the same files in every run and must be reported as `environment`, never as broken tests.
 
+Before comparing failure sets, apply the shared ownership-mapping preflight and identify setup
+refusals: `helper parent permits unprotected foreign renames`, `Provider-HOME lease helper
+unavailable`, `release staging refuses unsafe ancestor ownership or writable permissions`, and
+`HTTP 409: Provider HOME ownership blocked discovery`. Matching setup failures are an
+**environment-blocked, unexercised** subset, never broken or flaky tests, even when repeated in
+every run. Preserve sanitized refusal evidence and per-run outcomes (including file/test names,
+counts, and whether execution stopped before session creation); do not attribute independent
+failures to this blocker. List the subset separately in the report with one `environment`
+Recommended Action to schedule validation in a compatible execution context, deduplicated under
+the shared reporting rules. No clean or complete result may be claimed for that subset. Do not
+weaken checks, assertions, or retry policies or silently skip tests to claim green.
+
+This classification records unexercised behavior, not the refusal's root cause. These signatures
+also cover writable modes and other setup defects. Retain the CI-history check and environment
+and umask reruns below to diagnose the cause, including test-isolation findings or a production
+regression that blocks setup. Attribute ownership mapping only with correlated probe and refusal
+evidence; otherwise leave that cause unproven. A diagnosed setup defect does not establish that
+the blocked behavior was exercised.
+
+For the remaining exercised tests:
+
 - Failing in all three runs: a **broken test**, not a flaky one. It is a real regression or a test
   that no longer matches intended behavior.
 - Failing in some runs and not others: **flaky**. Capture the failure output from each run.

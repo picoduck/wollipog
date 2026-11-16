@@ -136,6 +136,23 @@ Wollipog session must instead use `wollipog worktree discard`. If cleanup is ref
 path and reason and leave it intact; do not prune an old scratch directory containing a registered
 worktree until this same safe removal check succeeds.
 
+Before the first test or coverage run, probe the observed isolated-session ownership mapping
+with this single, bounded command line (fixed ancestors only; no environment or private paths):
+
+```sh
+timeout 5 node -e 'const fs = require("node:fs"); const uid = process.getuid?.(); function probe(path) { try { if (uid === undefined) return { uid0: "unknown", currentUid: "unknown" }; const owner = fs.lstatSync(path).uid; return { uid0: owner === 0 ? "match" : "mismatch", currentUid: owner === uid ? "match" : "mismatch" }; } catch { return { uid0: "unknown", currentUid: "unknown" }; } } console.log(JSON.stringify({ root: probe("/"), homeAncestor: probe("/home") }));'
+```
+
+Record the command's exit status and sanitized match/mismatch/unknown output in **Tree State**.
+A mismatch against both uid 0 and the current uid for either ancestor detects the observed
+ownership-mapping incompatibility: native helper/release staging can refuse before tests reach
+their behavior. Unknown results, a timeout, or an unavailable command leave the probe inconclusive;
+record that limitation. Matches only rule out this fixed-ancestor mismatch, not other unsafe
+ancestry, permission, namespace, or lease conditions. This is a diagnostic, not staging admission.
+Do not change isolation or weaken `protectedAncestry`, ownership, lease, staging, or namespace
+checks. Correlate actual test refusal output using the job's environment-blocked rule; the probe
+alone does not attribute every failure or authorize silently skipping tests to claim green.
+
 Check install freshness before any job that executes code (tests, coverage, knip, type checks):
 compare the installed lockfile with the analysis checkout's wanted lockfile using
 `cmp -s node_modules/.pnpm/lock.yaml pnpm-lock.yaml`. A missing installed lockfile or a content
