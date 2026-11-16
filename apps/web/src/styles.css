@@ -7666,9 +7666,10 @@ body.shell-dock-dragging * {
   font: var(--type-reading);
 }
 .composer-answer-input::placeholder { color: var(--text-faint); }
-/* Back from question 2, the usage triggers, then Next or Submit Answers, last. */
+/* Dismiss, Back from question 2, the usage triggers, then Next or Submit Answers, last. */
 .answer-foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);

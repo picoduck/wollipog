@@ -13,6 +13,23 @@ async function openOwnerQuestion(page: Page) {
   return card;
 }
 
+for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }, { name: "narrow-phone", width: 320, height: 740 }]) {
+  test(`an expanded handoff question can be dismissed without an answer (${viewport.name})`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/agent-questions-e2e.html?set=owner-question&style=composer&handoffs=true");
+    const card = page.locator(".composer-answer");
+    const dismiss = card.getByRole("button", { name: "Dismiss", exact: true });
+    await expect(card.locator("input.composer-answer-input")).toHaveValue("");
+    await expect(dismiss).toBeInViewport({ ratio: 1 });
+    if (process.env.WOLLIPOG_CAPTURE_DISMISS) await page.screenshot({ path: `/tmp/owner-question-dismiss-${viewport.name}.png`, fullPage: true });
+    await dismiss.click();
+    await expect(card).toHaveCount(0);
+    expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([
+      expect.objectContaining({ answers: {}, action: "dismiss" }),
+    ]);
+  });
+}
+
 for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }]) {
   test(`campaign handoffs appear in the Inbox as Needs Your Input (${viewport.name})`, async ({ page }) => {
     await page.setViewportSize(viewport);

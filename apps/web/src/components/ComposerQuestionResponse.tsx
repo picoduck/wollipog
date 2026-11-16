@@ -188,6 +188,7 @@ export function ComposerQuestionResponse({
   const [validationError, setValidationError] = useState<string | null>(null);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [responseAction, setResponseAction] = useState<"submit" | "dismiss">("submit");
   const sectionRef = useRef<HTMLElement>(null);
   const operationPendingRef = useRef<string | null>(null);
   const previousActiveRef = useRef(active);
@@ -334,6 +335,10 @@ export function ComposerQuestionResponse({
       focusSoon(inputRef);
       return;
     }
+    await respond("submit", resolved.answers);
+  };
+
+  const respond = async (action: "submit" | "dismiss", answers: Record<string, string | string[]>) => {
     if (operationPendingRef.current === answerKey || !runnerOnline) return;
     const submittedRequestId = requestId;
     const submittedRequest = liveRequestRef.current;
@@ -345,13 +350,15 @@ export function ComposerQuestionResponse({
     }
     operationPendingRef.current = answerKey;
     setBusy(true);
+    setResponseAction(action);
+    setValidationError(null);
     setSubmissionError(null);
     try {
       const updated = await api.answerQuestion(sessionId, {
         requestId: submittedRequestId,
         ...(occurrenceId ? { occurrenceId } : {}),
-        answers: resolved.answers,
-        action: "submit",
+        answers,
+        action,
       });
       if (liveRequestRef.current !== submittedRequest) return;
       clearQuestionDrafts(sessionId, answerKey);
@@ -529,7 +536,8 @@ export function ComposerQuestionResponse({
         {submissionError && (
           <Notice tone="danger" compact role="alert"
             details={submissionError !== QUESTION_CARD_COPY.alreadySending ? submissionError : undefined}>
-            {submissionError === QUESTION_CARD_COPY.alreadySending ? submissionError : QUESTION_CARD_COPY.notSent}
+            {submissionError === QUESTION_CARD_COPY.alreadySending ? submissionError
+              : responseAction === "dismiss" ? QUESTION_CARD_COPY.notDismissed : QUESTION_CARD_COPY.notSent}
           </Notice>
         )}
         {question.secret ? (
@@ -583,6 +591,12 @@ export function ComposerQuestionResponse({
         {helpShown && <p className="answer-help" id={helpId}>{help}</p>}
         {usage && usageOwnRow && <div className="composer-answer-usage own-row">{usage}</div>}
         <div className="answer-foot">
+          <BusyButton className="btn ghost" busy={busy && responseAction === "dismiss"}
+            progress={QUESTION_CARD_COPY.dismissing} disabled={!runnerOnline || (busy && responseAction !== "dismiss")}
+            aria-describedby={!runnerOnline ? helpId : undefined}
+            onClick={() => void respond("dismiss", {})}>
+            {QUESTION_CARD_COPY.dismiss}
+          </BusyButton>
           {currentIndex > 0 && (
             <button type="button" className="btn" disabled={busy} onClick={() => goToStep(currentIndex - 1)}>
               {QUESTION_CARD_COPY.back}
@@ -591,9 +605,9 @@ export function ComposerQuestionResponse({
           {usage && !usageOwnRow && <div className="composer-answer-usage">{usage}</div>}
           <BusyButton
             className="btn primary"
-            busy={busy}
+            busy={busy && responseAction === "submit"}
             progress={QUESTION_CARD_COPY.sending}
-            disabled={responseUnavailable}
+            disabled={responseUnavailable || (busy && responseAction !== "submit")}
             aria-describedby={helpShown && responseUnavailable ? helpId : undefined}
             onClick={() => accept()}
           >
