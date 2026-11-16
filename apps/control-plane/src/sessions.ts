@@ -63,7 +63,7 @@ import { validCampaignLaunchDisclosure } from "@wollipog/protocol";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, credentialFormFloorRule, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesAcrossRepositories, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { digitRangeMembers, firstMessageTargetEpics } from "./first-message-issue-intent.js";
-import { exactNamedRepositoryLimit, messageNamesRepository, onlyOtherRepositories, proposalMaxIssues, repositoryNameInMessage, resolveRepositoryName, writtenForRepository } from "./scope-grant.js";
+import { exactNamedRepositoryLimit, messageNamesRepository, onlyOtherRepositories, proposalMaxIssues, repositoryNameInMessage, resolveRepositoryName, writtenRangeMembersForRepository, writtenForRepository } from "./scope-grant.js";
 import { initialScopeRepositoryLimits, normalizeScopeProposalInput, scopeProposalAgentQuestions, scopeProposalAnswer, scopeProposalChecks, scopeProposalOfRequest,
   scopeProposalRepositoryLimits, type CampaignScopeProposal, type ScopeProposalCheck, type ScopeProposalOwnerCause } from "@wollipog/protocol";
 import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, ownerReviewMaxIssues, writtenAsCount, writtenAsDigits } from "./scope-grant.js";
@@ -13774,13 +13774,20 @@ export class SessionsService {
     // Only a v308 root runner sends a structured proposal. Anything else, including a proposal an
     // older runner could not have built, is unstructured: nothing in it can be checked.
     const structured = request.proposal !== undefined && runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "campaignScopeProposals");
-    const proposal = structured ? normalizeScopeProposalInput(request.proposal, request.additions) : null;
+    let proposal = structured ? normalizeScopeProposalInput(request.proposal, request.additions) : null;
     if (typeof proposal === "string") return malformed(proposal);
     // Floor 2: owner-named issues are written in the owner's exact message, the one the server knows
     // the owner wrote: the transcript's first message when it still matches, else the boundary's record.
     const exact = this.db.initialUserMessageText(sessionId);
     const ownerMessage = exact !== null && firstMessageDigest(exact) === first.messageDigest ? exact : boundary.objective;
-    const unnamed = proposal?.issues.find((issue) => issue.origin === "owner_named" && !writtenForRepository(ownerMessage, issue.number, issue.repository, launch));
+    // Normalize initial range members so they spend no choice slots, including in later cumulative
+    // accounting. Unwritten interiors remain unreferenced named issues: the constraint check's
+    // per-issue questions must confirm intent (or the proposal goes to the owner).
+    const rangeMembers = new Map(repositories.map((repo) => [repo, writtenRangeMembersForRepository(ownerMessage, repo, launch)]));
+    if (initial && proposal) proposal = { ...proposal, issues: proposal.issues.map((issue) =>
+      rangeMembers.get(issue.repository)?.has(issue.number) ? { ...issue, origin: "owner_named" as const } : issue) };
+    const unnamed = proposal?.issues.find((issue) => issue.origin === "owner_named" && !writtenForRepository(ownerMessage, issue.number, issue.repository, launch) &&
+      !(initial && rangeMembers.get(issue.repository)?.has(issue.number)));
     if (unnamed) return refuse("owner_named_not_in_message", issueDetails(unnamed));
     // The repositories the Orchestrator says the owner's message limits the work to (#4117, #4118): a
     // name the owner never wrote limits nothing, and every issue must be in a repository the names
@@ -13885,6 +13892,10 @@ export class SessionsService {
         ...(repositoryConstraints && !unresolvedName && !repositoryLimitVerified ? ["repository_limit" as const] : []),
         ...(repositoryMentioned ? ["repository_mentioned" as const] : [])]
       : ["proposal_unstructured"];
+    // A range is spelling evidence, not a no-model intent proof, even if its interiors also occur
+    // literally elsewhere (for example as exclusions). Keep the per-issue intent questions.
+    if (initial && proposal?.issues.some((issue) => rangeMembers.get(issue.repository)?.has(issue.number)) &&
+        !checks.includes("unreferenced_named_issues")) checks.push("unreferenced_named_issues");
     // Text after the literal request can add restrictions the proposal failed to list. Keep the
     // completeness/operations questions for all such text, even when the agent listed nothing.
     if (repositoryLimitVerified && /[\p{L}\p{N}]/u.test(ownerMessage.slice(ownerMessage.toLowerCase().indexOf(exactRepository!) + exactRepository!.length)) && !checks.includes("constraints")) checks.push("constraints");

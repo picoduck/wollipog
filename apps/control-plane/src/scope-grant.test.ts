@@ -8,9 +8,22 @@ import type { CampaignAuthorityBoundary } from "@wollipog/protocol";
 import { DECISION_KINDS, decisionOutputSchema, renderDecisionInput, validateDecisionOutput } from "./decision-kinds.js";
 import {
   boundaryRepositories, exactNamedRepositoryLimit, grantOperations, grantReviewMaxIssues, grantSelection, messageNamesRepository, onlyOtherRepositories, repositoryNameInMessage, resolveGrantRepository, resolveRepositoryName,
-  writtenAsCount, writtenAsDigits, writtenAsRange, writtenForRepository,
+  writtenAsCount, writtenAsDigits, writtenAsRange, writtenForRepository, writtenRangeMembersForRepository,
 } from "./scope-grant.js";
 import { issueReferencesAcrossRepositories } from "./campaign-launch-admission.js";
+
+test("literal range spelling is bounded and keeps the first endpoint's repository", () => {
+  for (const text of ["#10–#14", "#10—#14", "#10-#14", "issues 10 through 14", "#10..#14", "#10 to #14"]) {
+    assert.deepEqual([...writtenRangeMembersForRepository(text, "owner/repo", "owner/repo")], [10, 11, 12, 13, 14], text);
+  }
+  const foreign = "other/repo#10–#14";
+  assert.deepEqual([...writtenRangeMembersForRepository(foreign, "owner/repo", "owner/repo")], []);
+  assert.deepEqual([...writtenRangeMembersForRepository(foreign, "other/repo", "owner/repo")], [10, 11, 12, 13, 14]);
+  for (const text of ["#10 and #14", "#10 through", "through #14", "#14–#10", "#0–#5", "#1–#101", "10–14", "#10–other/repo#14"]) {
+    assert.deepEqual([...writtenRangeMembersForRepository(text, "owner/repo", "owner/repo")], [], text);
+  }
+  assert.equal(writtenRangeMembersForRepository("#1–#100", "owner/repo", "owner/repo").size, 100);
+});
 import { EMPTY_GRANT } from "./scope-grant-test-fixture.js";
 
 test("the campaign launch request proves only its named repository, never another limit (#4402)", () => {

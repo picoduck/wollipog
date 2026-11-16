@@ -316,6 +316,12 @@ the check confirming it means every matching issue; it uses the explicit Maximum
 the derived ceiling of at most 100. More matches than that ceiling need the owner's approval.
 Your chosen issues stay within the count (3 when none is stated), and later additions take the
 same route within the numeric ceiling recorded on admission.
+For the initial proposal, a literal issue range of at most 100 members (hyphen, en dash, em dash or
+"through") spends no choice slots: the server normalizes its members to `owner_named` even if you
+propose interiors as `orchestrator_chosen`. Both endpoints must be written together for the same
+repository; a bare last endpoint inherits the first one's repository. Every proposed range member
+still needs the per-issue intent check, or one owner approval if the check cannot decide. Never
+include withheld or context-only members. Explicit Maximum Issues and every other floor still apply.
 
 A Custom campaign's first message gets the same propose-then-check treatment, with the authority it
 always had and no new person step. When the first message writes an issue number, `create_session`

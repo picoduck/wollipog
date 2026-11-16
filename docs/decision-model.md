@@ -247,10 +247,14 @@ scope and context references. `issueReferenceSpans` remains only as the exact-re
 and the reference bounds; the digit-string floor is `writtenAsDigits` in `scope-grant.ts`. The #3920
 and #4061 regression cases run through structured proposal admission and the typed `scope_check`
 in `full-control-launch-route.test.ts`; `scope-grant.test.ts` retains the live spelling and
-repository floors. Range members absent as literal numbers are proposed as Orchestrator choices,
-with their range rationale checked against the owner's message. Without a count stated by the
-owner, the live default permits at most three such choices. The #4061 epic-range case therefore
-asserts `proposal_count_exceeded` and an empty scope; it does not demonstrate full range admission.
+repository floors. In an initial Full Control proposal, members of a literal issue range of at most
+100 issues are normalized to owner-named, regardless of their proposed origin, and spend no choice
+slots. Both endpoints must be written together (`#10–#14`, em dash, hyphen, or `issues 10 through 14`);
+a bare last endpoint inherits the first endpoint's repository. Range spelling never proves intent:
+every proposed range member goes through the existing per-issue constraint check, or one owner
+approval on uncertainty/failure. Withheld and context-only members are refused by that check.
+Invented or foreign numbers, missing endpoints, oversized ranges, explicit Maximum Issues and
+Human Required label floors retain their refusals. The #4061 regression admits the epic and units.
 Restoring that admission needs a separate authority change, outside the unused-helper removal.
 
 ### Custom Epic Seed (`issue_scope_seed`, #4104)

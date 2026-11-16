@@ -1,5 +1,5 @@
 import {
-  SCOPE_GRANT_DEFAULT_SELECTION_COUNT, campaignScopeChangeResult,
+  CAMPAIGN_ISSUE_SCOPE_MAX, SCOPE_GRANT_DEFAULT_SELECTION_COUNT, campaignScopeChangeResult,
   type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type CampaignIssueScopeSnapshot, type FullControlDerivedLimits,
   type OrchestratorCampaignPolicy, type ScopeGrantSelection,
 } from "@wollipog/protocol";
@@ -163,6 +163,27 @@ export function writtenAsRange(text: string, first: number, last: number): boole
     const from = start + String(first).length;
     return ends.some((end) => end > from && end - from <= 32 && RANGE_JOIN.test(text.slice(from, end)));
   });
+}
+
+/** Literal bounded range members, proving spelling only, never intent. Interiors still need
+ * named_asked_for or owner approval. A bare last endpoint inherits the first one's repository. */
+export function writtenRangeMembersForRepository(text: string, repository: string, launch: string): Set<number> {
+  const members = new Set<number>();
+  const digits = [...text.matchAll(/(?<![0-9])[0-9]+(?![0-9])/gu)];
+  for (let i = 0; i + 1 < digits.length; i++) {
+    const start = digits[i]!;
+    const end = digits[i + 1]!;
+    const from = start.index! + start[0].length;
+    if (end.index! - from > 32 || !RANGE_JOIN.test(text.slice(from, end.index))) continue;
+    const qualified = qualifyingRepository(text, start.index!);
+    if (qualified === null && !/(?:#|\bissues?\s+)$/iu.test(text.slice(0, start.index))) continue;
+    if ((qualified ?? launch.toLowerCase()) !== repository.toLowerCase()) continue;
+    const first = Number(start[0]);
+    const last = Number(end[0]);
+    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last) || first < 1 || last < first || last - first >= CAMPAIGN_ISSUE_SCOPE_MAX) continue;
+    for (let n = first; n <= last; n++) members.add(n);
+  }
+  return members;
 }
 
 /** The fields of a `scope_grant` verdict, as `validateDecisionOutput` returns them. */
