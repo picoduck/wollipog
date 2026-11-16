@@ -150,6 +150,12 @@ test("session hold explanations do not invite overrides or expose float noise (#
     assert.match(reason, /evaluated usage: 9\.31 USD/u);
     assert.match(reason, /Cost budget reached/u);
     assert.doesNotMatch(reason, /Continue\?|9\.310000000/u);
+    h.db.updateSessionCostBudget("root", 40, 7);
+    h.db.updateSessionCostCheckpoints("root", [8], 7);
+    h.make("checkpoint-worker-a", "root", { costBudgetUsd: 40, maxToolCalls: 40 });
+    h.make("checkpoint-worker-b", "root", { costBudgetUsd: 40, maxToolCalls: 40 });
+    assert.equal(h.db.campaignContinuationAdmission("root").reason,
+      "Automatic continuation is blocked: Cost checkpoint — $9.31 of $8.00. Campaign cost: 9.31 USD spent, 110.69 USD reserved, limit 120 USD; tool calls: 0 used, 120 reserved, limit 120. Session allocation: 40 USD, 40 tool calls; evaluated usage: 9.31 USD, 0 tool calls. Recovery cannot reset spend or request an override.");
   } finally { h.db.close(); }
 });
 

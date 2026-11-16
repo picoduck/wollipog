@@ -502,7 +502,9 @@ const automationHold = params.get("automation") === "complete"
   ? { state: "lifecycle_held" as const, reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.complete }
   : params.get("automation") === "held" ? { state: "lifecycle_held" as const, reason: CAMPAIGN_AUTOMATION_HOLD_REASONS.recoveryHeld }
   : params.get("automation") === "budget" ? { state: "budget_held" as const,
-    reason: "Automatic continuation is blocked: session campaign allocation reached; reallocate within the existing envelope before dispatch. Campaign cost: 40 USD spent, 0 USD reserved, limit 120 USD; tool calls: 0 used, 120 reserved, limit 120. Session allocation: 40 USD, 40 tool calls; evaluated usage: 40 USD, 0 tool calls. Recovery cannot reset spend or request an override." }
+    reason: "Automatic continuation is blocked: Cost checkpoint — $9.31 of $8.00. Campaign cost: 9.31 USD spent, 110.69 USD reserved, limit 120 USD; tool calls: 0 used, 120 reserved, limit 120. Session allocation: 40 USD, 40 tool calls; evaluated usage: 9.31 USD, 0 tool calls. Recovery cannot reset spend or request an override." }
+  : params.get("automation") === "budget-hidden" ? { state: "budget_held" as const,
+    reason: "Automatic continuation is blocked by current accounting or an existing allowance. Recovery cannot reset spend or request an override." }
   : params.get("automation") === "unsupported"
     ? { state: "unsupported_capability" as const, reason: "The current provider cannot enforce authorized recovery." } : null;
 // Each state's work matches its facts: delivered states have every committed item delivered; Active
