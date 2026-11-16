@@ -58,10 +58,50 @@ async function routeSettings(page: Page, writes: unknown[], options: { answered?
 }
 
 // A closed <details> is never rendered, so transitions inside it never finish; they cannot affect a screenshot.
-const settle = (page: Page) => page.evaluate(() => Promise.all(document.getAnimations()
-  .filter((animation) => !(animation.effect as KeyframeEffect | null)?.target?.closest("details:not([open])"))
-  .map((animation) => animation.finished))
-  .then(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))));
+const settle = (page: Page) => page.evaluate(async () => {
+  const running = () => document.getAnimations()
+    .filter((animation) => animation.playState === "running"
+      && animation.effect?.getComputedTiming().iterations !== Infinity
+      && !(animation.effect as KeyframeEffect | null)?.target?.closest("details:not([open])"));
+  // Cancellation rejects finished; look again for the finite motion that replaced it.
+  for (let motion = running(); motion.length > 0; motion = running()) {
+    await Promise.allSettled(motion.map((animation) => animation.finished));
+  }
+  await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+});
+
+for (const cancel of [false, true]) {
+  test(`settle waits for ${cancel ? "replacement motion after cancellation" : "ordinary finite motion"}`, async ({ page }) => {
+    await page.setContent('<div id="motion">Motion</div>');
+    await page.locator("#motion").evaluate((element) => {
+      element.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 60_000, fill: "forwards" });
+    });
+    // Playwright dispatches these evaluations in order: settle observes the original before
+    // the next evaluation finishes or cancels it. Capture rejection to avoid an unhandled promise.
+    let completed = false;
+    const settled = settle(page).then(() => { completed = true; return null; }, (error: Error) => error.message);
+    await page.locator("#motion").evaluate((element, cancel) => {
+      const original = element.getAnimations()[0]!;
+      if (cancel) {
+        original.cancel();
+        element.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 60_000, fill: "forwards" });
+      } else {
+        original.finish();
+      }
+    }, cancel);
+    if (cancel) {
+      // Give a single-snapshot wait time to return; the replacement must still hold this wait.
+      await page.evaluate(() => new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      }));
+      expect(completed).toBe(false);
+      await page.locator("#motion").evaluate((element) => element.getAnimations()[0]!.finish());
+    }
+    expect(await settled).toBeNull();
+    expect(await page.locator("#motion").evaluate((element) => element.getAnimations()[0]!.playState)).toBe("finished");
+  });
+}
+
 /** Under Full Control the dialog shows only its mode, its line and its action (#2940): the boundary
  * owns every gate, so no Custom owner, request choice or evidence note is shown. Once Full Control is
  * in effect Campaign Behavior stays, since it governs every child the campaign creates (#3580). */
