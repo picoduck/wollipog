@@ -4959,6 +4959,31 @@ function snapshot(overrides: Partial<SessionSnapshot> = {}): SessionSnapshot {
   };
 }
 
+test("a runner recovery action survives snapshots beside a control-plane owner question", () => {
+  const db = withRunner();
+  try {
+    const id = "recovery-with-owner-question";
+    db.createSessionFromSnapshot(snapshot({ id }), "runner-1", 2_000);
+    const question: PendingApproval = { requestId: "owner-question", kind: "workflow_decision", async: true,
+      title: "Owner Question", options: [] };
+    const recovery: PendingApproval = { requestId: "runner-recovery:test", kind: "runner_recovery",
+      title: "Relaunch Orchestrator After Runner Restart",
+      options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }] };
+    db.setPendingApproval(id, question);
+    db.updateSessionFromSnapshot(id, snapshot({ id, status: "input_required", pendingApproval: recovery }), 3_000);
+    const current = db.getSession(id)!;
+    const cards = [current.pendingApproval!, ...(current.pendingApproval?.additionalRequests ?? [])];
+    assert.ok(cards.some((card) => card.kind === "runner_recovery"), "the owner must be able to relaunch without first answering the question");
+    assert.ok(cards.some((card) => card.requestId === question.requestId), "the owner question remains pending");
+    db.updateSessionFromSnapshot(id, snapshot({ id, status: "input_required", pendingApproval: recovery }), 4_000);
+    assert.equal(db.getSession(id)!.pendingApproval?.additionalRequests?.length, 1, "replays do not duplicate the recovery action");
+    db.updateSessionFromSnapshot(id, snapshot({ id, status: "idle" }), 5_000);
+    assert.equal(db.getSession(id)!.status, "idle");
+    assert.equal(db.getSession(id)!.pendingApproval?.requestId, question.requestId);
+    assert.equal(db.getSession(id)!.pendingApproval?.additionalRequests, undefined, "a successful relaunch retires the old recovery action");
+  } finally { db.close(); }
+});
+
 test("the provider-resolved model round-trips through create and update snapshots", () => {
   const db = withRunner();
   db.createSessionFromSnapshot(

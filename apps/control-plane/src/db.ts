@@ -20116,9 +20116,16 @@ export class ControlPlaneDb {
     }
     const status = keepPolicyPause ? "input_required" : snap.status;
     const currentPending = parseJson<PendingApproval>(existing?.pending_approval ?? null);
+    const snapshotPending = snap.pendingApproval ? pendingApprovalWithOccurrenceIds(snap.pendingApproval, currentPending) : null;
+    // A CP-owned card must not hide the runner's owner-only relaunch action. Its presence and
+    // retirement follow each authoritative snapshot, even while the CP retains its own question.
+    const retained = pendingRequests(currentPending).filter((request) => request.kind !== "runner_recovery");
+    const recovery = pendingRequests(snapshotPending).filter((request) => request.kind === "runner_recovery" &&
+      !retained.some((current) => current.requestId === request.requestId));
+    const [first, ...rest] = [...retained, ...recovery];
     const pending = this.withoutSubmittedAsyncQuestions(id, keepPolicyCards
-      ? currentPending
-      : snap.pendingApproval ? pendingApprovalWithOccurrenceIds(snap.pendingApproval, currentPending) : null);
+      ? first ? { ...first, ...(rest.length ? { additionalRequests: rest } : {}) } : null
+      : snapshotPending);
     const pendingJson = pending ? JSON.stringify(pending) : null;
     const snapshotTitleSource = snap.titleSource ?? "generated";
     // The control plane owns explicit rename order. A runner snapshot can carry an OLDER user

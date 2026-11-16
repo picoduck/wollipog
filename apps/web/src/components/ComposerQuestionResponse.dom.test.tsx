@@ -86,6 +86,96 @@ function buttonNamed(container: HTMLElement, name: string): HTMLButtonElement {
   return found;
 }
 
+test("an expanded owner question can be dismissed without entering an answer", async () => {
+  const { container, root } = mount();
+  const calls: Parameters<ApiClient["answerQuestion"]>[1][] = [];
+  let exited = false;
+  try {
+    await act(async () => root.render(<ApiProvider client={recordingClient(calls)}>
+      <ComposerQuestionResponse sessionId="session-1" requestId="owner-handoff"
+        occurrenceId="workflow-owner-handoff" isAsync
+        questions={[{ id: "owner_question_answer", header: "Owner Question", question: "What should happen next?", options: [], allowOther: true }]}
+        runnerOnline active inputRef={{ current: null }} onExit={() => { exited = true; }} />
+    </ApiProvider>));
+    assert.equal(answerInput(container).value, "");
+    await act(async () => { buttonNamed(container, "Dismiss").click(); await tick(); });
+    assert.deepEqual(calls, [{ requestId: "owner-handoff", occurrenceId: "workflow-owner-handoff", answers: {}, action: "dismiss" }]);
+    assert.equal(exited, true);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a failed expanded-question dismissal keeps the draft and can be retried", async () => {
+  const { container, root } = mount();
+  const calls: Parameters<ApiClient["answerQuestion"]>[1][] = [];
+  let exited = false;
+  const client = recordingClient(calls);
+  client.answerQuestion = async (_id, body) => {
+    calls.push(structuredClone(body));
+    if (calls.length === 1) throw new Error("Runner disconnected");
+    return { id: "session-1" } as SessionView;
+  };
+  try {
+    await act(async () => root.render(<ApiProvider client={client}>
+      <ComposerQuestionResponse sessionId="session-1" requestId="dismiss-retry"
+        occurrenceId="workflow-dismiss-retry" isAsync
+        questions={[{ id: "answer", question: "What next?", options: [], allowOther: true }]}
+        runnerOnline active inputRef={{ current: null }} onExit={() => { exited = true; }} />
+    </ApiProvider>));
+    await act(async () => setInputValue(answerInput(container), "Keep this draft"));
+    await act(async () => { buttonNamed(container, "Dismiss").click(); await tick(); });
+    assert.equal(exited, false);
+    assert.equal(answerInput(container).value, "Keep this draft");
+    assert.match(container.textContent!, /Couldn't dismiss this question/);
+    await act(async () => { buttonNamed(container, "Dismiss").click(); await tick(); });
+    assert.equal(exited, true);
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every((call) => call.action === "dismiss" && Object.keys(call.answers).length === 0));
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("expanded recovery questions keep Dismiss and Continue", async () => {
+  const { container, root } = mount();
+  try {
+    await act(async () => root.render(<ApiProvider client={recordingClient([])}>
+      <ComposerQuestionResponse sessionId="session-1" requestId="dismiss-recovery" recovery
+        questions={[{ id: "answer", question: "What next?", options: [], allowOther: true }]}
+        runnerOnline active inputRef={{ current: null }} onExit={() => {}} />
+    </ApiProvider>));
+    assert.ok(buttonNamed(container, "Dismiss and Continue"));
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Dismiss never describes itself with a missing offline help element", async () => {
+  const { container, root } = mount();
+  const questions: AgentQuestion[] = [{ id: "answer", question: "What next?", options: [], allowOther: true }];
+  const render = (runnerOnline: boolean) => root.render(<ApiProvider client={recordingClient([])}>
+    <ComposerQuestionResponse sessionId="session-1" requestId="dismiss-offline" questions={questions}
+      runnerOnline={runnerOnline} active inputRef={{ current: null }} onExit={() => {}} />
+  </ApiProvider>);
+  try {
+    await act(async () => render(true));
+    await act(async () => { buttonNamed(container, "Submit Answers").click(); });
+    assert.match(container.textContent!, /Enter a response/);
+    await act(async () => render(false));
+    const dismiss = buttonNamed(container, "Dismiss");
+    assert.equal(dismiss.disabled, true);
+    const description = dismiss.getAttribute("aria-describedby");
+    assert.ok(!description || [...container.querySelectorAll("[id]")].some((node) => node.id === description));
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 /** As SessionDetail: Answer Mode while it is open, and the dock's Answer while it is closed. */
 function Harness({
   client,

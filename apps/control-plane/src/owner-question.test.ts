@@ -116,6 +116,29 @@ test("a child clarification reaches the owner as a question and returns free tex
   } finally { h.db.close(); }
 });
 
+test("an owner question cannot hide or bypass the runner relaunch gate", async () => {
+  const h = harness();
+  try {
+    const asked = await h.askQuestion("recovery-handoff", false);
+    assert.ok(asked.ok && asked.data, asked.error ?? "created");
+    const recovery = { requestId: "runner-recovery:test", kind: "runner_recovery" as const,
+      title: "Relaunch Orchestrator After Runner Restart",
+      options: [{ optionId: "relaunch", name: "Relaunch Orchestrator", kind: "allow_once" }] };
+    h.svc.applySessionRuntimeUpdate("r", { id: "root", workspaceId: "w", agentId: "claude", title: "root",
+      status: "input_required", driver: "claude-code", useWorktree: false, worktreePath: null, config: {},
+      preview: null, pendingApproval: recovery, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1, updatedAt: 3 });
+    const held = h.svc.answerQuestion("root", asked.data.occurrenceId, {}, h.owner,
+      "dismiss", undefined, asked.data.occurrenceId);
+    assert.equal(held.status, 409, "owner responses cannot bypass the relaunch fence");
+    const session = h.db.getSession("root")!;
+    assert.equal(session.status, "input_required");
+    assert.ok(pendingRequests(session.pendingApproval).some((card) => card.kind === "runner_recovery"));
+    assert.ok(h.card(asked.data), "a refused dismissal keeps the question");
+    assert.equal(h.svc.prompt("root", "continue automatically").status, 409);
+    assert.equal(h.svc.approve("root", recovery.requestId, "relaunch", { kind: "agent", id: "root" }).status, 403);
+  } finally { h.db.close(); }
+});
+
 test("child questions preserve delegated ownership, choices, dismissal and legacy action approvals (#4359)", async () => {
   const h = harness();
   try {
