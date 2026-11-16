@@ -10783,9 +10783,9 @@ test("an unread record recovered from a malformed or overflowing exclusion of so
   }
 });
 
-// Messages and expected scope migrated from the retired candidate-expansion tests.
-test("structured proposals preserve the #3920 and #4061 intent regressions (#4104)", async () => {
-  const cases: Array<{ text: string; explicit: number[]; context: number[] }> = [
+// Original messages migrated to live admission; the large #4061 range pins an existing refusal.
+test("structured proposals check #3920 context and #4061 ranges under live count ceilings (#4104)", async () => {
+  const cases: Array<{ text: string; explicit: number[]; context: number[]; refusal?: string }> = [
     // #3920: the observed launch names its targets and mentions two more issues as background.
     { text: "Deliver #11, #12, #13 and #14 (members of the epic), then close #15 and #16. In passing, this run serves as a live " +
         "acceptance test for #20, and #21, a test flake, is a known cause of failures.", explicit: [11, 12, 13, 14, 15, 16], context: [20, 21] },
@@ -10798,8 +10798,8 @@ test("structured proposals preserve the #3920 and #4061 intent regressions (#410
     { text: "Fix #1 and #2 is handled elsewhere.", explicit: [1], context: [2] },
     // A reading that lists a number both as named and as context leaves it context.
     { text: "Fix #1 and #2. Don't close #2 yet.", explicit: [1], context: [2] },
-    // #4061: the epic and every unit in its range.
-    { text: "Implement epic #3032 in owner/repo: units #2997–#3005. Close #3032 when all its units have merged.", explicit: [2997, 2998, 2999, 3000, 3001, 3002, 3003, 3004, 3005, 3032], context: [] },
+    // #4061: proposing the epic and every unit exceeds the live default for unwritten members.
+    { text: "Implement epic #3032 in owner/repo: units #2997–#3005. Close #3032 when all its units have merged.", explicit: [2997, 2998, 2999, 3000, 3001, 3002, 3003, 3004, 3005, 3032], context: [], refusal: "proposal_count_exceeded" },
     // #4061: a range with one issue withheld; a range read the way the old classifier could not ("issues 10 through 14").
     { text: "Fix #10–#13. Don't close #12.", explicit: [10, 11, 13], context: [12] },
     { text: "Fix issues 10 through 14.", explicit: [10, 11, 12, 13, 14], context: [] },
@@ -10808,7 +10808,7 @@ test("structured proposals preserve the #3920 and #4061 intent regressions (#410
     { text: "Fix #1–#101.", explicit: [], context: [] },
   ];
 
-  for (const { text, explicit, context } of cases) {
+  for (const { text, explicit, context, refusal } of cases) {
     const f = fixture();
     const { server } = await app(f);
     try {
@@ -10824,9 +10824,9 @@ test("structured proposals preserve the #3920 and #4061 intent regressions (#410
       const proposed = explicit.map((n) => !new RegExp(`(?<![0-9])${n}(?![0-9])`, "u").test(text)
         ? chosen(n, "Member of the range the owner requested.") : named(n));
       const result = await c.propose(proposed);
-      if (proposed.filter((issue) => issue.origin === "orchestrator_chosen").length > 3) {
+      if (refusal) {
         // Expansion is retired: a range cannot invent a selection count above the live default.
-        assert.equal(result.errorDetails?.code, "proposal_count_exceeded", text);
+        assert.equal(result.errorDetails?.code, refusal, text);
         assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueNumbers, []);
         continue;
       }

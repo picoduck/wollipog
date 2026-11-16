@@ -248,7 +248,10 @@ and the reference bounds; the digit-string floor is `writtenAsDigits` in `scope-
 and #4061 regression cases run through structured proposal admission and the typed `scope_check`
 in `full-control-launch-route.test.ts`; `scope-grant.test.ts` retains the live spelling and
 repository floors. Range members absent as literal numbers are proposed as Orchestrator choices,
-with their range rationale checked against the owner’s message.
+with their range rationale checked against the owner's message. Without a count stated by the
+owner, the live default permits at most three such choices. The #4061 epic-range case therefore
+asserts `proposal_count_exceeded` and an empty scope; it does not demonstrate full range admission.
+Restoring that admission needs a separate authority change, outside the unused-helper removal.
 
 ### Custom Epic Seed (`issue_scope_seed`, #4104)
 

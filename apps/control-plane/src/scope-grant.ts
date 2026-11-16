@@ -1,7 +1,7 @@
 import {
   SCOPE_GRANT_DEFAULT_SELECTION_COUNT, campaignScopeChangeResult,
   type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type CampaignIssueScopeSnapshot, type FullControlDerivedLimits,
-  type OrchestratorCampaignPolicy, type ScopeGrantDropReason, type ScopeGrantSelection,
+  type OrchestratorCampaignPolicy, type ScopeGrantSelection,
 } from "@wollipog/protocol";
 import { MAX_MESSAGE_ISSUES } from "./first-message-issue-intent.js";
 import { derivedFollowUpLimit } from "./campaign-launch-admission.js";
@@ -179,18 +179,14 @@ export interface ScopeGrantFields {
   operations: string[];
 }
 
-/** What a verdict may grant after the floors that need no runner, before the runner verifies the
- * numbers. Every number is in the campaign repository (`repository`). */
-export interface ScopeGrantCandidates {
+/** The selection input retained by the live ceiling calculation. A model-supplied count
+ * absent from the owner's words (`unstatedCount`) can only lower the default. */
+interface GrantSelectionInput {
   repository: string;
-  explicit: number[];
-  context: number[];
-  dropped: Array<{ repository: string; number: number; reason: ScopeGrantDropReason }>;
-  /** `requestedCount` is a count the message states; `unstatedCount` one the model gave that the
-   * message does not, which can only lower the default. */
-  selection: { repository: string; requestedCount: number | null; unstatedCount?: number; criteria: string; constraints: string[] } | null;
-  /** The operations the message leaves, when it narrowed them; null when it did not. */
-  operations: string[] | null;
+  requestedCount: number | null;
+  unstatedCount?: number;
+  criteria: string;
+  constraints: string[];
 }
 
 /** The Maximum Issues the owner's approval of a failed or uncertain grant's proposal re-mints
@@ -239,7 +235,7 @@ export function grantOperations(launch: readonly CampaignAuthorityOperation[], a
 /** The selection a grant keeps under the boundary's ceilings: a stated count, or the default when
  * the message stated none, never more than an explicit Maximum Issues leaves after the named
  * issues, nor than the 100-issue scope ceiling. */
-export function grantSelection(selection: ScopeGrantCandidates["selection"], scoped: number, boundary: CampaignAuthorityBoundary,
+export function grantSelection(selection: GrantSelectionInput | null, scoped: number, boundary: CampaignAuthorityBoundary,
   derived: FullControlDerivedLimits | undefined): ScopeGrantSelection | undefined {
   if (!selection) return undefined;
   const wanted = selection.requestedCount ?? Math.min(SCOPE_GRANT_DEFAULT_SELECTION_COUNT, selection.unstatedCount ?? SCOPE_GRANT_DEFAULT_SELECTION_COUNT);

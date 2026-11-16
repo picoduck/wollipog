@@ -8,10 +8,10 @@ import type { CampaignAuthorityBoundary } from "@wollipog/protocol";
 import { DECISION_KINDS, decisionOutputSchema, renderDecisionInput, validateDecisionOutput } from "./decision-kinds.js";
 import {
   boundaryRepositories, exactNamedRepositoryLimit, grantOperations, grantReviewMaxIssues, grantSelection, messageNamesRepository, onlyOtherRepositories, repositoryNameInMessage, resolveGrantRepository, resolveRepositoryName,
-  writtenAsCount, writtenAsDigits, writtenAsRange, writtenForRepository, type ScopeGrantFields,
+  writtenAsCount, writtenAsDigits, writtenAsRange, writtenForRepository,
 } from "./scope-grant.js";
 import { issueReferencesAcrossRepositories } from "./campaign-launch-admission.js";
-import { EMPTY_GRANT, issues } from "./scope-grant-test-fixture.js";
+import { EMPTY_GRANT } from "./scope-grant-test-fixture.js";
 
 test("the campaign launch request proves only its named repository, never another limit (#4402)", () => {
   const message = "Use the orchestrate-issues skill to fix #4398, #4399, #4400, #4401, #4402, #4403, #4404 and #4405 in picoduck/wollipog. Each issue specifies its behavior and acceptance criteria. Follow them, say so in each PR, and close each issue only after verifying every criterion against merged main.";
