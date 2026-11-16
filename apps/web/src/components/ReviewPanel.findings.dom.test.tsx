@@ -6,15 +6,26 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import {
   PROTOCOL_VERSION,
+  pullRequestMergeReadiness,
   type BundleReviewFindingsRequest,
   type GitDiffFile,
   type GitDiffInfo,
   type GitDiffScope,
+  type GitPrSummary,
   type GitStatusInfo,
+  type PullRequestMergeFacts,
   type ReviewFinding,
   type SessionView,
   type SourceLocation,
 } from "@wollipog/protocol";
+
+/** Forge facts that pass every forge condition, so only Required findings decide the gate (#604). */
+const mergeFactsFor = (pr: GitPrSummary): PullRequestMergeFacts => ({
+  url: pr.url, repository: "acme/shop", number: pr.number, state: "open", headSha: "c".repeat(40), isDraft: false,
+  baseRef: "main", mergeQueueEnabled: true, inMergeQueue: false, mergeStateStatus: "CLEAN",
+  requiredChecks: { state: "passed", failing: [], pending: [] }, viewerPermission: "admin", mergeMethod: "squash",
+  deleteBranchOnMerge: false, observedAt: 1,
+});
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -204,11 +215,17 @@ interface Options {
   status: GitStatusInfo;
   protocolVersion: number;
   runnerOnline: boolean;
+  /** The branch's open pull request, which renders the merge action (#604). */
+  pr?: GitPrSummary;
+  /** GitHub's merge state the gate reads; only the server-side facts change with it. */
+  mergeState?: string;
 }
 
 interface Harness {
   container: HTMLElement;
   bundles: BundleReviewFindingsRequest[];
+  /** Merge-readiness reads (#604). */
+  readinessReads: () => number;
   opened: SourceLocation[];
   render: (over?: Partial<Options>) => Promise<void>;
   reloadFindings: (findings: ReviewFinding[]) => Promise<void>;
@@ -238,10 +255,18 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
     findings: options.findings,
     summary: { total: 0, unresolved: 0, requiredUnresolved: 0, sent: 0, resolved: 0, dismissed: 0, completion: "complete" as const },
   });
+  let readinessReads = 0;
   const client = {
     ...api,
     gitDiff: async (_id: string, scope: GitDiffScope) => ({ diff: diffOf(scope) }),
     reviewFindings: async () => response(),
+    // The server's gate, counting the Required findings it holds now (#604).
+    pullRequestMergeReadiness: async () => {
+      readinessReads += 1;
+      const facts = { ...mergeFactsFor(options.pr!), mergeStateStatus: options.mergeState ?? "CLEAN" };
+      const requiredFindingsOpen = options.findings.filter((entry) => entry.required && (entry.status === "open" || entry.status === "sent")).length;
+      return { facts, readiness: pullRequestMergeReadiness(facts, { roleRefusal: null, runnerSupported: true, requiredFindingsOpen }) };
+    },
     git: async (_id: string, request: { action: string }) => {
       if (request.action !== "forge_review_sync" && request.action !== "github_review_sync") return {};
       await gates.sync;
@@ -285,6 +310,7 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
               runnerOnline={options.runnerOnline}
               runnerProtocolVersion={options.protocolVersion}
               git={git}
+              forgeFacts={options.pr ? { pr: options.pr, checks: null } : null}
               onOpenSourceLocation={(location) => { opened.push(location); }}
             />
           </PanelActionSlotContext.Provider>
@@ -296,6 +322,7 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
   return {
     container: host as unknown as HTMLElement,
     bundles,
+    readinessReads: () => readinessReads,
     opened,
     render: async (over = {}) => {
       options = { ...options, ...over };
@@ -559,6 +586,50 @@ test("the head counts open findings and shows one summary status: Required, All 
     await harness.unmount();
   }
 });
+
+test("resolving or adding a Required finding re-reads the merge gate without a forge change (#604)", async () => {
+  const required = finding({ findingId: "rf_required", required: true });
+  const pr: GitPrSummary = { number: 42, title: "Speed up checkout", url: "https://github.com/acme/shop/pull/42", state: "OPEN", provider: "github", kind: "pull_request" };
+  const harness = await mountReview({ findings: [mine, required], pr });
+  try {
+    const action = () => [...harness.container.querySelectorAll<HTMLButtonElement>(".review-summary button")]
+      .find((button) => button.textContent === "Enqueue for Merge")!;
+    assert.equal(action().disabled, true);
+    assert.match(harness.container.textContent ?? "", /Resolve the open Required finding first\./u);
+    const reads = harness.readinessReads();
+
+    await harness.reloadFindings([mine, { ...required, status: "resolved" }]);
+    assert.ok(harness.readinessReads() > reads, "the gate is read again");
+    assert.equal(action().disabled, false, "enabled once no Required finding is open");
+    assert.doesNotMatch(harness.container.textContent ?? "", /Resolve the open Required finding first\./u);
+
+    await harness.reloadFindings([mine, { ...required, findingId: "rf_new", status: "open" }]);
+    assert.equal(action().disabled, true, "a new Required finding disables it again");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+for (const state of ["BLOCKED", "UNKNOWN"]) {
+  test(`Refresh Review re-reads the merge gate once a ${state} merge state clears on GitHub alone (#604)`, async () => {
+    const pr: GitPrSummary = { number: 42, title: "Speed up checkout", url: "https://github.com/acme/shop/pull/42", state: "OPEN", provider: "github", kind: "pull_request" };
+    const harness = await mountReview({ findings: [mine], pr, mergeState: state });
+    try {
+      const action = () => [...harness.container.querySelectorAll<HTMLButtonElement>(".review-summary button")]
+      .find((button) => button.textContent === "Enqueue for Merge")!;
+      assert.equal(action().disabled, true);
+      // GitHub now reports it mergeable; nothing the panel shows (checks, queue, findings) changed.
+      await harness.render({ mergeState: "CLEAN" });
+      assert.equal(action().disabled, true, "nothing re-reads it by itself");
+      const reads = harness.readinessReads();
+      await harness.reloadFindings([mine]);
+      assert.ok(harness.readinessReads() > reads, "Refresh Review reads the gate again");
+      assert.equal(action().disabled, false);
+    } finally {
+      await harness.unmount();
+    }
+  });
+}
 
 test("with no findings the section says how to add one, and settled findings start folded (#2850)", async () => {
   const empty = await mountReview({ findings: [] });

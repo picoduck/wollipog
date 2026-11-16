@@ -9,6 +9,7 @@ import { titleCaseLabel } from "../format.js";
 import { Spinner } from "./common.js";
 import { BranchIcon, PullRequestIcon } from "./Icons.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { PullRequestMergeAction } from "./PullRequestMergeAction.js";
 
 /** "origin/main" reads as "main": the remote's name is not what the reviewer compares against. */
 function baseName(ref: string | null | undefined): string | null {
@@ -58,6 +59,9 @@ export function ReviewSummary({
   pr,
   checks,
   canPrompt,
+  onForgeChanged,
+  requiredFindingsOpen,
+  refreshGeneration,
 }: {
   session: SessionView;
   status: GitStatusInfo | null;
@@ -67,6 +71,12 @@ export function ReviewSummary({
   checks: GitChecksSummary | null;
   /** The session can take a prompt now: online, not finished, not held by a policy approval. */
   canPrompt: boolean;
+  /** Re-read the forge summary, after the pull request was enqueued or merged (#604). */
+  onForgeChanged?: () => void;
+  /** Open Required findings the panel holds; a change re-reads the merge gate (#604). */
+  requiredFindingsOpen?: number;
+  /** Changes when the person refreshes Review; the merge gate is read again (#604). */
+  refreshGeneration?: number;
 }) {
   if (!status && !pr) return null;
   const facts = reviewSummaryFacts(status);
@@ -89,16 +99,20 @@ export function ReviewSummary({
           {facts.map((fact) => <span key={fact}>{fact}</span>)}
         </div>
       )}
-      {pr && <PullRequestRow session={session} pr={pr} checks={checks} canPrompt={canPrompt} />}
+      {pr && <PullRequestRow session={session} pr={pr} checks={checks} canPrompt={canPrompt} onForgeChanged={onForgeChanged}
+        requiredFindingsOpen={requiredFindingsOpen} refreshGeneration={refreshGeneration} />}
     </section>
   );
 }
 
-function PullRequestRow({ session, pr, checks, canPrompt }: {
+function PullRequestRow({ session, pr, checks, canPrompt, onForgeChanged, requiredFindingsOpen, refreshGeneration }: {
   session: SessionView;
   pr: GitPrSummary;
   checks: GitChecksSummary | null;
   canPrompt: boolean;
+  onForgeChanged?: () => void;
+  requiredFindingsOpen?: number;
+  refreshGeneration?: number;
 }) {
   const api = useApi();
   const [busy, setBusy] = useState(false);
@@ -197,6 +211,18 @@ function PullRequestRow({ session, pr, checks, canPrompt }: {
       )}
       {failing && canPrompt && promptRefusal !== null && (
         <p id={refusalId} className="review-pr-refusal">{promptRefusal}</p>
+      )}
+      {/* #604: gated by the control plane's readiness gate; re-read when checks or the queue move. */}
+      {/^open(ed)?$/i.test(pr.state) && (
+        <PullRequestMergeAction
+          session={session}
+          pr={pr}
+          refreshKey={[
+            checks?.passing ?? 0, checks?.pending ?? 0, checks?.failing ?? 0, JSON.stringify(pr.mergeQueue ?? null),
+            requiredFindingsOpen ?? "unknown", pr.mergeability ?? "", refreshGeneration ?? 0,
+          ].join("/")}
+          onMerged={onForgeChanged}
+        />
       )}
     </div>
   );

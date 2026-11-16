@@ -21,6 +21,8 @@ import {
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.js";
+import { mutationAuthorizationError, PULL_REQUEST_MERGE_ROUTE } from "./identity.js";
+import { isAgentControlApiRouteAllowed } from "./auth.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
 import {
@@ -60,7 +62,11 @@ const ALL_ALLOWED: SessionCommandPermissions = {
   manageWorktrees: { allowed: true },
   worktreeSetup: { allowed: true },
   gitActions: { allowed: true },
+  mergePullRequest: { allowed: true },
 };
+const MERGE_ROLE = "Merging requires an Admin or Owner role.";
+/** An Operator keeps every command but merging a pull request (#604). */
+const OPERATOR_ALLOWED: SessionCommandPermissions = { ...ALL_ALLOWED, mergePullRequest: { allowed: false, reason: MERGE_ROLE } };
 /** The commands #1864 added. An agent credential's allowlist names only the worktree routes. */
 const ISSUE_COMMANDS = ["fork", "rewind", "manageReviewFindings", "manageWorktrees", "worktreeSetup"] as const;
 /** The commands #1857 added, none of which an agent credential's allowlist names except configure. */
@@ -82,9 +88,11 @@ test("a person's command permissions follow the role gate and Stop Job's owner r
   const child = { id: "s_child", parentSessionId: "s_parent" };
   const owns = { ownsSession: true, isDescendant: false };
   const sees = { ownsSession: false, isDescendant: false };
-  for (const role of ["owner", "admin", "operator"] as const) {
+  for (const role of ["owner", "admin"] as const) {
     assert.deepEqual(sessionCommandPermissions(human(role), child, owns), ALL_ALLOWED, `an owning ${role} keeps every command`);
   }
+  assert.deepEqual(sessionCommandPermissions(human("operator"), child, owns), OPERATOR_ALLOWED,
+    "an owning operator keeps every command but merging");
   for (const role of ["owner", "admin"] as const) {
     assert.deepEqual(sessionCommandPermissions(human(role), child, sees), NON_OWNER,
       `a non-owning ${role} may stop, restart, archive, unarchive, prompt and delete, but not stop one job`);
@@ -97,7 +105,7 @@ test("a person's command permissions follow the role gate and Stop Job's owner r
       archive: readOnly, unarchive: readOnly, prompt: readOnly, delete: readOnly,
       cancelTurn: readOnly, manageQueue: readOnly, rename: readOnly, configure: readOnly, respond: readOnly,
       fork: readOnly, rewind: readOnly, manageReviewFindings: readOnly, manageWorktrees: readOnly, worktreeSetup: readOnly,
-      gitActions: readOnly,
+      gitActions: readOnly, mergePullRequest: readOnly,
     }, "a Viewer is read-only even for a session its scope names");
   }
 });
@@ -124,6 +132,7 @@ test("an agent credential's command permissions follow descendant confinement an
     manageReviewFindings: { allowed: false, reason: AGENT_ROUTE },
     worktreeSetup: { allowed: false, reason: AGENT_ROUTE },
     gitActions: { allowed: false, reason: AGENT_ROUTE },
+    mergePullRequest: { allowed: false, reason: AGENT_ROUTE },
   }, "the controlling Orchestrator may also unarchive its child, but cannot delete it or use a route outside its allowlist");
   assert.deepEqual(sessionCommandPermissions(orchestrator, child, { ...descendant,
     archivedWorktreeRecoveryError: "campaignWorktreeRecovery is required" }).unarchive,
@@ -948,6 +957,34 @@ test("Git actions follow the role gate and the agent route allowlist (#1870)", (
   }
 });
 
+test("merging a pull request is its own command: Owner and Admin only, never a session credential (#604)", () => {
+  const child = { id: "s_child", parentSessionId: "s_parent" };
+  for (const ownsSession of [true, false]) {
+    for (const role of ["owner", "admin"] as const) {
+      assert.deepEqual(sessionCommandPermissions(human(role), child, { ownsSession, isDescendant: false }).mergePullRequest, { allowed: true });
+    }
+    assert.deepEqual(sessionCommandPermissions(human("operator"), child, { ownsSession, isDescendant: false }).mergePullRequest,
+      { allowed: false, reason: MERGE_ROLE }, "an Operator may commit and open pull requests, but not merge");
+    assert.deepEqual(sessionCommandPermissions(human("viewer"), child, { ownsSession, isDescendant: false }).mergePullRequest,
+      { allowed: false, reason: VIEWER }, "a Viewer keeps the read-only explanation");
+  }
+  const scope = { organizationId: "org_1", owner: { kind: "user" as const, userId: "usr_1" } };
+  const orchestrator: AgentPrincipal = {
+    kind: "agent", actorId: "s_parent", credentialSessionId: "s_parent", orchestrator: true,
+    organizationId: "org_1", delegatedScope: scope,
+  };
+  for (const principal of [orchestrator, { ...orchestrator, orchestrator: undefined }]) {
+    assert.deepEqual(sessionCommandPermissions(principal, child, { ownsSession: false, isDescendant: true }).mergePullRequest,
+      { allowed: false, reason: AGENT_ROUTE }, "agents use the typed pr_merge decision instead");
+  }
+  // The API's own role gate refuses the route the same way, before any handler runs.
+  assert.equal(mutationAuthorizationError("POST", PULL_REQUEST_MERGE_ROUTE, human("operator")), "merging requires an Admin or Owner role");
+  assert.equal(mutationAuthorizationError("POST", PULL_REQUEST_MERGE_ROUTE, human("admin")), null);
+  assert.equal(mutationAuthorizationError("POST", PULL_REQUEST_MERGE_ROUTE, human("viewer")), "read-only members cannot mutate organization resources");
+  assert.equal(isAgentControlApiRouteAllowed("POST", PULL_REQUEST_MERGE_ROUTE, "orchestrator"), false);
+  assert.equal(isAgentControlApiRouteAllowed("POST", PULL_REQUEST_MERGE_ROUTE, null), false);
+});
+
 test("reads carry the requester's command permissions; a trusted local read is unchanged (#1843)", async (t) => {
   const db = ControlPlaneDb.open(":memory:");
   const local = db.localIdentityContext();
@@ -995,7 +1032,7 @@ test("reads carry the requester's command permissions; a trusted local read is u
     assert.equal(response.statusCode, 200);
     return (response.json() as { session: { commandPermissions?: SessionCommandPermissions } }).session.commandPermissions;
   };
-  assert.deepEqual(await read("owner", "s_owned"), ALL_ALLOWED);
+  assert.deepEqual(await read("owner", "s_owned"), OPERATOR_ALLOWED);
   assert.deepEqual((await read("admin", "s_owned"))?.stopBackgroundJob, { allowed: false, reason: STOP_JOB_OWNER });
   assert.deepEqual((await read("admin", "s_owned"))?.stop, { allowed: true });
   assert.deepEqual(await read("admin", "s_shared"), ALL_ALLOWED, "an organization-scoped session is the admin's own");
@@ -1045,7 +1082,7 @@ test("each live client receives its own command permissions for one session chan
     const snapshot = messages[0];
     return snapshot?.type === "snapshot" ? snapshot.sessions.find((s) => s.id === "s_owned")?.commandPermissions : "no snapshot";
   };
-  assert.deepEqual(snapshotPermissions(clients.owner), ALL_ALLOWED);
+  assert.deepEqual(snapshotPermissions(clients.owner), OPERATOR_ALLOWED);
   assert.deepEqual(snapshotPermissions(clients.admin), NON_OWNER);
   assert.equal(snapshotPermissions(clients.local), undefined, "a trusted local client keeps every command offered");
 
@@ -1056,7 +1093,7 @@ test("each live client receives its own command permissions for one session chan
       .find((message) => message.type === "session_upsert" && message.session.id === "s_owned");
     return upsert?.type === "session_upsert" ? upsert.session.commandPermissions : "no upsert";
   };
-  assert.deepEqual(upsertPermissions(clients.owner), ALL_ALLOWED);
+  assert.deepEqual(upsertPermissions(clients.owner), OPERATOR_ALLOWED);
   assert.deepEqual(upsertPermissions(clients.admin), snapshotPermissions(clients.admin));
   assert.deepEqual(upsertPermissions(clients.otherAdmin), snapshotPermissions(clients.admin),
     "clients sharing a verdict share one serialization and still receive it");

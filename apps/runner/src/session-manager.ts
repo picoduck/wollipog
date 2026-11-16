@@ -6131,6 +6131,16 @@ export class SessionManager {
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
   }
 
+  /** v382 (#604): record a pull request's queue state right after a person enqueued it. Best effort:
+   * the next reconciliation records it anyway. */
+  async refreshWorktreeMergeQueueNow(sessionId: string, path: string, pullRequestUrl: string): Promise<void> {
+    try {
+      await this.runWorktreeOperation(sessionId, () => this.refreshWorktreeMergeQueue(sessionId, path, pullRequestUrl));
+    } catch (error) {
+      this.log(`merge queue refresh failed for ${boundedSessionIdForLog(sessionId)}: ${errText(error)}`);
+    }
+  }
+
   async reconcileWorktreePullRequests(options: { replayDeferredRetirements?: boolean } = {}): Promise<void> {
     if (this.worktreePullRequestReconciling || this.shuttingDown) return;
     this.worktreePullRequestReconciling = true;

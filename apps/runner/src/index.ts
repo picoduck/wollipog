@@ -4415,6 +4415,7 @@ const GIT_MUTATIONS = new Set<GitAction["kind"]>([
   "commit",
   "open_pr",
   "pod_reconcile",
+  "merge_pull_request",
 ]);
 
 /** Run a git/PR action in a session worktree and report the result upstream. */
@@ -4475,6 +4476,10 @@ async function runOneGitAction(msg: GitActionRequestMessage): Promise<void> {
         data.pr.provider,
         data.pr.kind,
       );
+    }
+    if (msg.action.kind === "merge_pull_request" && data.mergeResult?.outcome === "enqueued") {
+      // The Inbox shows the queued state now rather than at the next reconciliation.
+      void sessions.refreshWorktreeMergeQueueNow(msg.sessionId, execution.cwd, msg.action.pullRequestUrl);
     }
     sendUp({ type: "git_result", requestId: msg.requestId, ok: true, data });
   } catch (err) {

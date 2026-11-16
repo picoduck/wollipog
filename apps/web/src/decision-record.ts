@@ -198,6 +198,7 @@ export function permissionDecisionRecord(item: PermissionItem): DecisionRecordMo
 /** What a person settled, when it was neither a tool request nor a question (#2213). */
 const REQUEST_KIND_TITLES: Record<NonNullable<GovernanceDecision["requestKind"]>, string> = {
   workflow_decision: "Workflow Decision",
+  pull_request_merge: "Pull Request Merge",
   authentication: "Sign-In",
   runner_recovery: "Runner Recovery",
   cost_budget: "Cost Budget",
