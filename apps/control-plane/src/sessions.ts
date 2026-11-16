@@ -4179,6 +4179,28 @@ export class SessionsService {
     }
   }
 
+  /** v382 (#604): a person's enqueue or merge of the session's pull request, recorded like every other
+   * governed action. `content` (pull request, head, mode) is stored only as a digest. */
+  recordPullRequestMergeAudit(
+    session: SessionView,
+    requestId: string,
+    stage: "request" | "resolution",
+    outcome: GovernanceAuditOutcome,
+    actor: GovernanceActor,
+    content: { pullRequestUrl: string; headSha: string; mode: string },
+    optionId?: string,
+  ): GovernanceAuditEntry {
+    return this.db.appendGovernanceAudit(this.governanceAuditRecord(
+      session,
+      { requestId, kind: "pull_request_merge", context: undefined },
+      stage,
+      outcome,
+      actor,
+      Date.now(),
+      { content, ...(optionId ? { optionId } : {}) },
+    ));
+  }
+
   private governanceAuditRecord(
     session: SessionView,
     request: Pick<PendingApproval, "requestId" | "kind" | "context">,

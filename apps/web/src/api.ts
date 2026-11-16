@@ -53,6 +53,9 @@ import type {
   ExternalSessionDescriptor,
   GitActionData,
   GitActionRequest,
+  PullRequestMergeReadinessResponse,
+  PullRequestMergeRequest,
+  PullRequestMergeResponse,
   GitDiffInfo,
   GitDiffScope,
   GitSummaryInfo,
@@ -1868,6 +1871,17 @@ export function createApiClient(transport: ApiTransport) {
 
   git: (id: string, body: GitActionRequest) =>
     req<GitActionData>(`/api/sessions/${id}/git`, { method: "POST", body: JSON.stringify(body) }),
+
+  /** #604: the readiness gate for enqueueing or merging the session's pull request. */
+  pullRequestMergeReadiness: (id: string) =>
+    req<PullRequestMergeReadinessResponse>(`/api/sessions/${encodeURIComponent(id)}/pull-request/merge-readiness`),
+
+  /** #604: enqueue or directly merge the session's pull request (Owner and Admin only). */
+  mergePullRequest: (id: string, body: PullRequestMergeRequest) =>
+    req<PullRequestMergeResponse>(`/api/sessions/${encodeURIComponent(id)}/pull-request/merge`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   // Phase 2: fetch a parsed diff for the given scope (uncommitted / all_branch / last_turn).
   gitDiff: (id: string, scope: GitDiffScope) =>

@@ -45,8 +45,9 @@ import type {
 } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 // Function-level use only: campaign-forge-status imports this module's check-rollup helpers.
-import { contextGhRunner } from "./campaign-forge-status.js";
+import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
 import { githubMergeQueueFacts } from "./pull-request-queue.js";
+import { mergePullRequest, readPullRequestMergeFacts } from "./pull-request-merge.js";
 
 export { safeHttpUrl };
 
@@ -1557,8 +1558,40 @@ const ghPrCache = new Map<string, { at: number; pr: GitPrSummary | null; checks:
 
 /** Test-only: drop forge summary caches. */
 export function clearGhPrCacheForTests(): void {
+  clearForgeSummaryCaches();
+}
+
+/** Drop cached forge summaries after a forge mutation, so the next summary reads it back. */
+function clearForgeSummaryCaches(): void {
   ghPrCache.clear();
   forgeSummaryCache.clear();
+}
+
+/** `gh` in the current execution context and `cwd`. */
+function branchGhRunner(cwd: string): GhRunner {
+  return contextGhRunner(executionContext.getStore() ?? { kind: "native" }, cwd);
+}
+
+/** The open-or-not GitHub pull request for the branch checked out in `cwd`, read fresh (#604). A
+ * GitLab remote, a missing PR, or a failed read is a sentence for the person instead. */
+async function branchPullRequest(cwd: string): Promise<{ url: string } | { unavailable: string }> {
+  const remoteUrl = (await gitSoft(cwd, ["remote", "get-url", "origin"])).trim();
+  const remote = parseForgeRemote(remoteUrl) ?? credentialFreeGitHubRemote(remoteUrl);
+  if (remote?.provider === "gitlab") {
+    return { unavailable: "Merging from Wollipog supports GitHub pull requests only; merge this merge request on GitLab." };
+  }
+  const outcome = await branchGhRunner(cwd)(["pr", "view", "--json", "url"]);
+  const url = outcome.code === null ? safeHttpUrl((jsonObject(parseJsonSoft(outcome.stdout)) ?? {}).url) : null;
+  if (!url) return { unavailable: "This branch has no pull request GitHub could find." };
+  return { url };
+}
+
+function parseJsonSoft(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
 }
 
 type JsonObject = Record<string, unknown>;
@@ -3290,6 +3323,22 @@ export async function runGitAction(cwd: string, action: GitAction, ctx: GitActio
       return await discardFile(cwd, action, ctx);
     case "pod_reconcile":
       throw new Error("pod reconciliation requires runner-owned source session metadata");
+    case "merge_readiness": {
+      const branch = await branchPullRequest(cwd);
+      if ("unavailable" in branch) return { mergeReadiness: { facts: null, unavailable: branch.unavailable } };
+      const read = await readPullRequestMergeFacts(branch.url, branchGhRunner(cwd));
+      return { mergeReadiness: read.ok ? { facts: read.facts } : { facts: null, unavailable: read.reason } };
+    }
+    case "merge_pull_request": {
+      // The pull request for HEAD must still be the one the person confirmed.
+      const branch = await branchPullRequest(cwd);
+      if ("unavailable" in branch || branch.url !== action.pullRequestUrl) {
+        throw new Error("this branch's pull request is no longer the one you confirmed — reload and try again");
+      }
+      const mergeResult = await mergePullRequest(action, branchGhRunner(cwd));
+      clearForgeSummaryCaches();
+      return { mergeResult };
+    }
     case "open_pr": {
       // One-click flow: commit any uncommitted changes first, then push + open the PR.
       // Use the explicit commit message when provided, else the PR title.

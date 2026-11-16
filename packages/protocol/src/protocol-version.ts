@@ -1496,6 +1496,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 381: merge-queue state on pull request summaries and worktree pull request links (#604).
   381,
   // v382 slot
+  // 382: pull request merge readiness and the gated enqueue/direct merge action (#604).
+  382,
   // v383 slot
   // v384 slot
   // v385 slot

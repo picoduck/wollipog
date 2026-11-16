@@ -1368,6 +1368,7 @@ export function ReviewPanel({
               // The forge's checks belong to the forge's request, never to one this panel just opened.
               checks={summaryPr === forgeFacts?.pr ? forgeFacts?.checks ?? null : null}
               canPrompt={canPrompt}
+              onForgeChanged={() => void git.refresh()}
             />
             {/* The review's result, above the diff it is about (#2850). Keyed by session so a switch
                 starts from the new session's own default fold. */}

@@ -17,6 +17,7 @@ import {
   backgroundJobStopAuthorizationError,
   mutationAuthorizationError,
   orchestratorSelfWorktreeAuthorizationError,
+  PULL_REQUEST_MERGE_ROUTE,
   type AuthPrincipal,
   type HumanPrincipal,
 } from "./identity.js";
@@ -192,6 +193,8 @@ export function sessionCommandPermissions(
       ))),
     worktreeSetup: permission(allowlistedRouteRefusal(WORKTREE_SETUP_ROUTES, principal, target, facts)),
     gitActions: permission(allowlistedRouteRefusal([GIT_ROUTE], principal, target, facts)),
+    // #604: Owner and Admin only; no session credential's allowlist names the route.
+    mergePullRequest: permission(allowlistedRouteRefusal([PULL_REQUEST_MERGE_ROUTE], principal, target, facts)),
   };
 }
 

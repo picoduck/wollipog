@@ -18,6 +18,8 @@ import type { CampaignWorktreeRetirementState } from "./worktree-retirement.js";
 export * from "./fuzzy-path-match.js";
 export * from "./forge-merge-queue.js";
 import type { ForgeMergeQueueFacts } from "./forge-merge-queue.js";
+export * from "./forge-merge.js";
+import type { GitMergeReadinessInfo, GitMergeResultInfo, PullRequestMergeMode } from "./forge-merge.js";
 export * from "./review-settings.js";
 import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 /**
@@ -338,6 +340,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   githubReviewReconciliation: 51,
   forgeIntegration: 106,
   requestDiff: 345,
+  /** v382 (#604): merge readiness facts and the gated enqueue/direct merge of a session's pull request. */
+  pullRequestMerge: 382,
   podReconciliation: 52,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
@@ -4638,7 +4642,9 @@ export type ApprovalKind =
   | "max_tool_calls"
   | "policy_hook"
   | "workflow_decision"
-  | "question";
+  | "question"
+  /** v382 (#604): a person enqueued or merged a session's pull request from Wollipog. */
+  | "pull_request_merge";
 
 export interface WorkflowDecisionOption {
   optionId: string;
@@ -8422,6 +8428,9 @@ export interface SessionCommandPermissions {
    * request, stage, unstage or discard changes, and import forge review threads. One route serves
    * every Git action, including the status and diff reads, so this verdict covers them too (#1870). */
   gitActions?: SessionCommandPermission;
+  /** v382 (#604): enqueue or merge the session's pull request. Owner and Admin roles only; a
+   * session credential never may (agents use the typed `pr_merge` decision). */
+  mergePullRequest?: SessionCommandPermission;
 }
 
 /** Compact CP-owned follow-up facts. No transcript fetch or lifecycle inference is required. */
@@ -12128,7 +12137,14 @@ export type GitAction =
   /** Read-only import/reconciliation of review threads for the PR associated with HEAD. */
   | { kind: "github_review_sync" }
   /** Provider-selected read-only import for the change request associated with HEAD. */
-  | { kind: "forge_review_sync" };
+  | { kind: "forge_review_sync" }
+  /** v382 (#604): read the merge facts of the pull request for HEAD. Sent only by the control
+   * plane's merge-readiness route; the `/git` route never accepts it. */
+  | { kind: "merge_readiness" }
+  /** v382 (#604): enqueue (merge-queue base) or directly merge the pull request for HEAD, pinned to
+   * the head and mode the person confirmed, then read it back. Never deletes a branch. Sent only by
+   * the control plane's Owner/Admin merge route; the `/git` route never accepts it. */
+  | { kind: "merge_pull_request"; pullRequestUrl: string; headSha: string; mode: PullRequestMergeMode };
 
 export interface GitActionRequestMessage {
   type: "git_action";
@@ -12913,6 +12929,9 @@ export interface GitActionData {
   };
   reviewFindings?: ReviewFindingsResponse;
   reviewReconciliation?: GitHubReviewReconciliation;
+  /** v382 (#604). */
+  mergeReadiness?: GitMergeReadinessInfo;
+  mergeResult?: GitMergeResultInfo;
 }
 
 /** Machine-readable failure classes handled across the runner/control-plane/UI boundary. */

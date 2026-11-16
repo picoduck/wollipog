@@ -69,6 +69,9 @@ export function canAdministerIdentity(role: OrganizationRole): boolean {
   return role === "owner" || role === "admin";
 }
 
+/** The one route that enqueues or merges a session's pull request (#604): Owner and Admin only. */
+export const PULL_REQUEST_MERGE_ROUTE = "/api/sessions/:id/pull-request/merge";
+
 /** These management APIs belong to the authenticated organization rather than only the personal
  * installation organization. Their handlers retain role and exact-resource owner checks. */
 export function isOrganizationAdministrationRoute(routePath: string): boolean {
@@ -164,6 +167,11 @@ export function mutationAuthorizationError(
     return null;
   }
   if (!canOperate(principal.role)) return "read-only members cannot mutate organization resources";
+  // #604: enqueueing or merging lands code on the base branch with the runner's forge login, a step
+  // above the commit and open-PR actions operators have.
+  if (routePath === PULL_REQUEST_MERGE_ROUTE && !canAdministerIdentity(principal.role)) {
+    return "merging requires an Admin or Owner role";
+  }
   if (
     (routePath === "/api/identity" || routePath.startsWith("/api/identity/") ||
       routePath === "/api/devices" || routePath.startsWith("/api/devices/")) &&
