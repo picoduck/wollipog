@@ -96,7 +96,8 @@ test("the success check rejects unexpected smoke warnings even when dispatch and
   const work = mkdtempSync(join(tmpdir(), "wollipog-smoke-warning-"));
   t.after(() => rmSync(work, { recursive: true, force: true }));
   const preload = join(work, "warning.mjs");
-  writeFileSync(preload, 'process.emitWarning("unexpected smoke warning");\n');
+  // NODE_OPTIONS also reaches the fake CLI children; warn only in the smoke process.
+  writeFileSync(preload, `if (process.argv[1] === ${JSON.stringify(smoke)}) process.emitWarning("unexpected smoke warning");\n`);
   const result = await runSmoke(t, { NODE_OPTIONS: `--import=${pathToFileURL(preload).href}` });
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, new RegExp(`^${passed}$`, "mu"));
