@@ -124,8 +124,10 @@ the callback must be idempotent per occurrence ID: return the request it already
 creating a second one. Nothing ever falls back to text parsing.
 
 Only `outcome: "verdict"` may be acted on, and only to narrow or confirm. No verdict can raise a
-ceiling, change a repository or grant an operation; callers enforce that before acting, for example
-with `narrowToProposal`. Write a repository floor as "a repository in the campaign's boundary" so it
+ceiling, change a repository or grant an operation; callers enforce that before acting. `SessionsService.proposeOrchestratorScope` keeps the
+submitted additions and deterministic floors; `scopeProposalCheck` only confirms or refuses
+that proposal. Campaign relatedness and closure checks in `campaign-decision-checks.ts` likewise
+return a status, never replacement authority. Write a repository floor as "a repository in the campaign's boundary" so it
 holds for single- and multi-repository boundaries.
 
 ## Typed Questions (#4283)
@@ -243,7 +245,10 @@ No verb list decides what a first message asks for. The `DIRECTIVE`, `BACKGROUND
 classification (#3920) is removed. Under Full Control, the scope grant above is the only source of
 scope and context references. `issueReferenceSpans` remains only as the exact-reference fast path
 and the reference bounds; the digit-string floor is `writtenAsDigits` in `scope-grant.ts`. The #3920
-and #4061 regression cases run through `scopeGrantCandidates` in `scope-grant.test.ts`.
+and #4061 regression cases run through structured proposal admission and the typed `scope_check`
+in `full-control-launch-route.test.ts`; `scope-grant.test.ts` retains the live spelling and
+repository floors. Range members absent as literal numbers are proposed as Orchestrator choices,
+with their range rationale checked against the owner’s message.
 
 ### Custom Epic Seed (`issue_scope_seed`, #4104)
 

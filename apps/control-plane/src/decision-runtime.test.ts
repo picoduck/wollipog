@@ -18,7 +18,6 @@ import {
   decisionInputDigests,
   decisionOutputSchema,
   decisionRequestDigest,
-  narrowToProposal,
   renderDecisionInput,
   validateDecisionOutput,
 } from "./decision-kinds.js";
@@ -257,10 +256,6 @@ test("validation projects only declared fields and bounds the reason", () => {
   assert.equal(validateDecisionOutput(definition, ""), null);
 });
 
-test("the Decision Model can only narrow a proposal, never add to it", () => {
-  assert.deepEqual(narrowToProposal([4101, 4102, 4103], [4103, 4101, 9999]), [4101, 4103]);
-  assert.deepEqual(narrowToProposal([4101], []), []);
-});
 
 test("duplicate concurrent decisions for one occurrence record one verdict and admit once", async () => {
   let release!: () => void;

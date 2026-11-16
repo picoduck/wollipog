@@ -10782,3 +10782,84 @@ test("an unread record recovered from a malformed or overflowing exclusion of so
     } finally { await c.server.close(); f.db.close(); }
   }
 });
+
+// Messages and expected scope migrated from the retired candidate-expansion tests.
+test("structured proposals preserve the #3920 and #4061 intent regressions (#4104)", async () => {
+  const cases: Array<{ text: string; explicit: number[]; context: number[] }> = [
+    // #3920: the observed launch names its targets and mentions two more issues as background.
+    { text: "Deliver #11, #12, #13 and #14 (members of the epic), then close #15 and #16. In passing, this run serves as a live " +
+        "acceptance test for #20, and #21, a test flake, is a known cause of failures.", explicit: [11, 12, 13, 14, 15, 16], context: [20, 21] },
+    // #3920: targets after "fix …:", one issue only in a parenthetical citation.
+    { text: "Use the orchestrate-issues skill to fix the decision-lifecycle findings in owner/repo: #101, #102, #103, #104, #105, #106 " +
+        "and #107. Order: 1. #105 and #106 together. 2. #103 before #102. Commands: the guard refuses heredocs (#900).", explicit: [101, 102, 103, 104, 105, 106, 107], context: [900] },
+    // #3920: refusals, rejected alternatives and work handled elsewhere grant nothing.
+    { text: "Implement #5, not #6.", explicit: [5], context: [6] },
+    { text: "Don't touch #3.", explicit: [], context: [3] },
+    { text: "Fix #1 and #2 is handled elsewhere.", explicit: [1], context: [2] },
+    // A reading that lists a number both as named and as context leaves it context.
+    { text: "Fix #1 and #2. Don't close #2 yet.", explicit: [1], context: [2] },
+    // #4061: the epic and every unit in its range.
+    { text: "Implement epic #3032 in owner/repo: units #2997–#3005. Close #3032 when all its units have merged.", explicit: [2997, 2998, 2999, 3000, 3001, 3002, 3003, 3004, 3005, 3032], context: [] },
+    // #4061: a range with one issue withheld; a range read the way the old classifier could not ("issues 10 through 14").
+    { text: "Fix #10–#13. Don't close #12.", explicit: [10, 11, 13], context: [12] },
+    { text: "Fix issues 10 through 14.", explicit: [10, 11, 12, 13, 14], context: [] },
+    { text: "See #10–#14.", explicit: [], context: [10] },
+    // #4061: an oversized range expands nothing, however the reading names it.
+    { text: "Fix #1–#101.", explicit: [], context: [] },
+  ];
+
+  for (const { text, explicit, context } of cases) {
+    const f = fixture();
+    const { server } = await app(f);
+    try {
+      const c = await proposalCampaign(f, server, text);
+      if (text === "Fix #1–#101.") {
+        const oversized = await c.propose(Array.from({ length: 101 }, (_, i) => chosen(i + 1)));
+        assert.equal(oversized.ok, false, "an oversized range cannot enter scope");
+        assert.equal(oversized.status, 400);
+      }
+      f.decision.state.check = (message) => scopeCheckAnswer(message, (id, parameter) =>
+        id.startsWith("named_asked_for__") && context.some((n) => parameter?.startsWith(`owner/repo#${n} `))
+          ? { value: "only_mentioned", evidence: "The owner withheld this issue or cited it for background." } : undefined);
+      const proposed = explicit.map((n) => !new RegExp(`(?<![0-9])${n}(?![0-9])`, "u").test(text)
+        ? chosen(n, "Member of the range the owner requested.") : named(n));
+      const result = await c.propose(proposed);
+      if (proposed.filter((issue) => issue.origin === "orchestrator_chosen").length > 3) {
+        // Expansion is retired: a range cannot invent a selection count above the live default.
+        assert.equal(result.errorDetails?.code, "proposal_count_exceeded", text);
+        assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueNumbers, []);
+        continue;
+      }
+      assert.ok(result.ok, result.error ?? text);
+      assert.equal(result.data!.authority, "orchestrator", text);
+      const snapshot = result.data!.resourceSnapshot as CampaignIssueScopeSnapshot;
+      assert.deepEqual(snapshot.additions, explicit, text);
+      assert.ok(c.apply(result.data!.occurrenceId).ok, text);
+      assert.deepEqual(f.db.getSession(c.id)!.orchestratorPolicy!.issueNumbers, explicit, text);
+      for (const n of context) {
+        const refused = await c.propose([named(n)]);
+        assert.equal(refused.ok, false, `${text}: context #${n} must not enter scope`);
+        assert.equal(refused.errorDetails?.code, "constraint_check_refused");
+      }
+    } finally { await server.close(); f.db.close(); }
+  }
+});
+
+test("structured proposal floors reject invented and foreign numbers and check unwritten range members", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await proposalCampaign(f, server, "Fix #5 and other/repo#6. See #10 and, later, #14.");
+    for (const n of [6, 7, 11, 12, 13, 31337]) {
+      const result = await c.propose([named(n)]);
+      assert.equal(result.errorDetails?.code, "owner_named_not_in_message", String(n));
+    }
+    const foreign = await c.propose([{ ...named(6), repository: "other/repo" }]);
+    assert.equal(foreign.errorDetails?.code, "repository_outside_boundary");
+    f.decision.state.check = checkAnswering((p) => p.startsWith("owner/repo#10 ") || p.startsWith("owner/repo#14 "), "only_mentioned");
+    const joined = await c.propose([named(10), named(14)]);
+    assert.equal(joined.errorDetails?.code, "constraint_check_refused");
+    const admitted = await c.propose([named(5)]);
+    assert.deepEqual((admitted.data!.resourceSnapshot as CampaignIssueScopeSnapshot).additions, [5]);
+  } finally { await server.close(); f.db.close(); }
+});
