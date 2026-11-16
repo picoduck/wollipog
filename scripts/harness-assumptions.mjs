@@ -124,6 +124,7 @@ export const HARNESSES = [
     documentation: "docs/claude-assumption-probes.md",
     sources: [
       "scripts/claude-assumptions.mjs",
+      "scripts/codex-assumptions.mjs",
       "scripts/harness-assumptions-prepare-claude.sh",
       "apps/runner/src/discovery/claude-code.ts",
       "apps/runner/src/claude-media-reviewer.ts",

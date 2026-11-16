@@ -285,3 +285,22 @@ readline.createInterface({input:process.stdin}).on('line',line => {
     assert.ok(!result.stdout.includes("WebSocket success\""));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+
+test("shared report helpers preserve exit and freshness boundaries", () => {
+  assert.equal(reportExit([]), 0);
+  assert.equal(reportExit([{ status: "optional drift" }, { status: "acknowledged unavailable" }]), 0);
+  assert.equal(reportExit([{ status: "could not run" }, { status: "changed" }]), 1);
+  assert.throws(() => reportExit(null), TypeError);
+  const now = Date.parse("2026-11-15T00:00:00Z");
+  const report = age => ({ complete: true, completedAt: new Date(now - age).toISOString() });
+  const maxAge = 48 * 60 * 60_000;
+  assert.equal(reportFresh(report(0), now), true);
+  assert.equal(reportFresh(report(maxAge), now), true);
+  assert.equal(reportFresh(report(maxAge + 1), now), false);
+  assert.equal(reportFresh(report(100), now, 100), true);
+  assert.equal(reportFresh(report(101), now, 100), false);
+  assert.equal(reportFresh({ ...report(0), complete: 1 }, now), false);
+  assert.equal(reportFresh({ complete: true, completedAt: "invalid" }, now), false);
+  assert.equal(reportFresh(report(0), Infinity), false);
+});
