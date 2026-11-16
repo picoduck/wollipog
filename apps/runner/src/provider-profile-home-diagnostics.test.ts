@@ -55,3 +55,44 @@ test("an unavailable parent reports its safe component without retaining the raw
     return true;
   });
 });
+
+for (const component of ["manager_root", "profiles_root"] as const) {
+  test(`a trusted group-writable ${component} owned by this account is tightened, not refused`, { skip: process.platform === "win32" }, (t) => {
+    const home = mkdtempSync(join(tmpdir(), "wollipog-root-tighten-"));
+    t.after(() => rmSync(home, { force: true, recursive: true }));
+    const manager = join(home, ".agent-manager");
+    const target = component === "manager_root" ? manager : managedProviderProfileRoot(home);
+    if (component === "profiles_root") mkdirSync(manager, { mode: 0o700 });
+    mkdirSync(target); chmodSync(target, 0o775);
+    const sentinel = join(target, "preserved");
+    writeFileSync(sentinel, "private-data");
+    const asked: Array<[number, number]> = [];
+    const profile = createManagedProviderProfileHome(managedProviderProfileRoot(home), id, process.platform, {
+      groupWriteRepair: (uid, gid) => { asked.push([uid, gid]); return true; },
+    });
+    assert.deepEqual(asked, [[process.getuid!(), statSync(target).gid]]);
+    assert.equal(statSync(target).mode & 0o777, 0o755);
+    assert.equal(readFileSync(sentinel, "utf8"), "private-data");
+    assert.equal(statSync(profile).mode & 0o777, 0o700);
+  });
+}
+
+test("an untrusted group, a world-writable root or a throwing proof keeps the refusal and the mode", { skip: process.platform === "win32" }, (t) => {
+  const cases: Array<[number, (uid: number, gid: number) => boolean]> = [
+    [0o775, () => false],
+    [0o775, () => { throw new Error("cannot prove membership"); }],
+    [0o777, () => true],
+  ];
+  for (const [mode, groupWriteRepair] of cases) {
+    const home = mkdtempSync(join(tmpdir(), "wollipog-root-untrusted-"));
+    t.after(() => rmSync(home, { force: true, recursive: true }));
+    const manager = join(home, ".agent-manager"); mkdirSync(manager); chmodSync(manager, mode);
+    assert.throws(() => createManagedProviderProfileHome(managedProviderProfileRoot(home), id, process.platform, { groupWriteRepair }),
+      (error: unknown) => {
+        assert.deepEqual(JSON.parse(JSON.stringify(error)), { code: "managed_profile_directory", component: "manager_root", reason: "group_or_other_write" });
+        return true;
+      });
+    assert.equal(statSync(manager).mode & 0o777, mode);
+    assert.equal(existsSync(managedProviderProfileRoot(home)), false);
+  }
+});
