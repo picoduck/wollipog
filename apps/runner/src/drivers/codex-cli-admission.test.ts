@@ -36,3 +36,16 @@ test("CLI proof refuses failed, duplicate, and oversized responses", () => {
   assert.equal(parse(script, `${JSON.stringify(response)}\n${JSON.stringify(response)}`)?.approved, false);
   assert.equal(parse(script, "x".repeat(100_001))?.approved, false);
 });
+
+test("CLI arm may omit --action but still requires the exact armed provider response", () => {
+  const implicit = script.replace(` --action '${JSON.stringify(action)}'`, "");
+  assert.equal(parse(implicit)?.approved, true);
+  for (const decision of [
+    { ...response.decision, occurrenceId: "other" },
+    { ...response.decision, status: "consumed" },
+    { ...response.decision, actionAdmission: { ...response.decision.actionAdmission, providerTurnId: "other" } },
+    { ...response.decision, actionAdmission: { ...response.decision.actionAdmission, providerThreadId: "other" } },
+  ]) assert.equal(parse(implicit, JSON.stringify({ decision }))?.approved, false);
+  assert.equal(parse(implicit, "{}"), null);
+  assert.equal(parse(implicit + "; echo fake"), null);
+});

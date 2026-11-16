@@ -669,6 +669,26 @@ test("retroactive action reconciliation requires the original App Server thread 
   }
 });
 
+test("reconciliation preserves the provider's specific admission refusal", async () => {
+  const h = harness({}, true);
+  try {
+    for (const reason of ["admission not found", "admission found after the command", "fenced by another admission"]) {
+      (h.entry.client as any).reconcileCompletedCommand = async (
+        _occurrence: string, _command: string, _fence: unknown, onFailure: (reason: string) => void,
+      ) => { onFailure(reason); return null; };
+      const result = await h.sm.reconcileWorkflowAction("s_governance", {
+        occurrenceId: "workflow-history",
+        command: "gh pr merge https://github.com/team/repo/pull/1 --squash --match-head-commit " + "a".repeat(40),
+        commandDigest: "b".repeat(64),
+        pullRequestUrl: "https://github.com/team/repo/pull/1",
+        expectedHeadSha: "a".repeat(40),
+      });
+      assert.equal(result.accepted, false);
+      assert.equal(result.error, reason);
+    }
+  } finally { h.cleanup(); }
+});
+
 test("policy-hook decisions wait for their exact buffered tool event and deduplicate by audit id", async () => {
   const h = harness({});
   try {
