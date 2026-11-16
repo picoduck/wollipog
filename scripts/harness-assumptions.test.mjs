@@ -670,3 +670,10 @@ test("a Claude Code target without its native binary is could not run, never mea
   assert.ok(missing.report.targets.every(target => target.status === "could not run" &&
     target.reason === `the installed release has no executable at node_modules/@anthropic-ai/claude-code-${process.platform}-${process.arch}/claude`));
 });
+
+
+test("every suite fingerprints the shared report helpers", () => {
+  for (const harness of HARNESSES) {
+    assert.ok(sourceFiles(harness).includes("scripts/codex-assumptions.mjs"), harness.id);
+  }
+});

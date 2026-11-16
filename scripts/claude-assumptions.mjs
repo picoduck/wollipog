@@ -3,9 +3,12 @@ import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, renameSync
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { reportExit, reportFresh } from "./codex-assumptions.mjs";
 import { closedLoopbackPort, detectorSeesCanary, foreignTraceAttempts, isolatedClaudeEnv, isolatedHome, runClaude, startRefusingProxy } from "../apps/runner/scripts/claude-probe-support.ts";
 import { REVIEWER_PIN, silenceVerdict } from "../apps/runner/scripts/claude-assumption-probes.ts";
 import { CLAUDE_CONTROL_CONTRACT_MIN_VERSION, CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION, CLAUDE_STEERING_MIN_VERSION, claudeVersionAtLeast } from "../apps/runner/src/discovery/claude-code.ts";
+
+export { reportExit, reportFresh };
 
 // Same report and exit contract as scripts/codex-assumptions.mjs: exit 0 matched, 1 changed,
 // 2 could not run; latest.json and latest.md written atomically; a run that could not measure is
@@ -45,10 +48,6 @@ export function parseVersion(output) {
   return output.match(/^(\d+\.\d+\.\d+(?:[-+][\w.-]+)?) \(Claude Code\)/m)?.[1] ?? null;
 }
 
-export function reportExit(results) {
-  return results.some(r => r.status === "changed") ? 1 : results.some(r => r.status === "could not run") ? 2 : 0;
-}
-
 export function collectResult(probe, execution) {
   const events = execution.stdout.split("\n").flatMap(line => {
     try { const value = JSON.parse(line); return value.event === "claude_assumption" ? [value] : []; } catch { return []; }
@@ -78,11 +77,6 @@ export function reviewerPinResult(version, reviewer) {
 
 export function floorResults(version) {
   return FLOORS.map(floor => ({ ...floor, met: version ? claudeVersionAtLeast(version, floor.version) : null }));
-}
-
-export function reportFresh(report, now = Date.now(), maxAgeMs = 48 * 60 * 60_000) {
-  const age = now - Date.parse(report?.completedAt);
-  return Number.isFinite(age) && age >= 0 && age <= maxAgeMs && report?.complete === true;
 }
 
 export function markdown(report) {
