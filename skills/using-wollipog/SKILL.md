@@ -1064,8 +1064,8 @@ as an Owner Question with your proposal and rationale; proposing the same issues
 same request, and an answer in the owner's own words declines it and reaches you as a prompt. A
 stated count must be one the message writes, your chosen issues stay within it (3 when none is
 stated), and later additions take the same route within the admitted count.
-For the initial proposal, a literal issue range of at most 100 members (hyphen, en dash, em dash or
-"through") spends no choice slots: the server normalizes its members to `owner_named` even if you
+For the initial proposal, a literal issue range of at most 100 members (hyphen, en dash, em dash,
+`..`, "to", "through" or "thru") spends no choice slots: the server normalizes its members to `owner_named` even if you
 propose interiors as `orchestrator_chosen`. Both endpoints must be written together for the same
 repository; a bare last endpoint inherits the first one's repository. Every proposed range member
 still needs the per-issue intent check, or one owner approval if the check cannot decide. Never
