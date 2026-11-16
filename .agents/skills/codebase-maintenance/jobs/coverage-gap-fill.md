@@ -10,6 +10,20 @@ tautologies, no assertions on fixtures the test built, no duplicate of existing 
 
 ## Ground Truth
 
+Apply the shared ownership-mapping preflight before running coverage. Setup refusals containing
+`helper parent permits unprotected foreign renames`, `Provider-HOME lease helper unavailable`,
+`release staging refuses unsafe ancestor ownership or writable permissions`, or
+`HTTP 409: Provider HOME ownership blocked discovery` identify an **environment-blocked,
+unexercised** subset, never broken tests, flaky tests, or coverage gaps. Record sanitized refusal
+evidence and per-run outcomes (including file/test names, counts, and whether execution stopped
+before session creation) separately in the report, with one `environment` Recommended Action to
+schedule validation in a compatible execution context, deduplicated under the shared reporting
+rules. No clean or complete result may be claimed for that subset. Exclude coverage candidates
+whose missing execution is caused by these refusals; populated lcov does not establish gaps for
+unexercised behavior. Apply this classification before the failing-test reruns below; unrelated
+failures still follow those rules. Do not weaken ancestry, lease, staging, namespace checks,
+assertions, or retry policies or silently skip tests to claim green.
+
 Run the suite with coverage:
 
 ```
