@@ -84,6 +84,10 @@ const GLAB_TIMEOUT_MS = 45_000;
 const FORGE_MAX_BUFFER = 8 * 1024 * 1024;
 const GITLAB_REVIEW_PAGE_SIZE = 100;
 const GITLAB_REVIEW_MAX_PAGES = 5;
+// GitLab caps a merge request's changes_count at "1000+", so ten full pages cover every count it
+// reports exactly; anything larger is already incomplete.
+const GITLAB_DIFF_PAGE_SIZE = 100;
+const GITLAB_DIFF_MAX_PAGES = 10;
 
 const GH_REVIEW_QUERY = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){
   repository(owner:$owner,name:$name){
@@ -2186,6 +2190,36 @@ async function forgeReviewSync(cwd: string): Promise<ForgeReviewSyncInfo> {
   return gitlabReviewSync(cwd, readiness.remote);
 }
 
+/** One validated GitLab /diffs entry as a git patch section. Paths are refused when unsafe; a
+ * file whose content GitLab withheld or cannot explain is returned but marked incomplete. */
+function gitlabDiffEntryPatch(entry: unknown): { patch: string; incomplete: boolean } {
+  const change = jsonObject(entry);
+  const path = githubReviewPath(change?.new_path);
+  const oldPath = githubReviewPath(change?.old_path);
+  if (!path || !oldPath || /[\x00-\x1f\x7f]/.test(path + oldPath) || typeof change?.diff !== "string") throw new Error("GitLab returned invalid diff paths");
+  // Modes are interpolated into the patch, so only octal strings are used; "0" is GitLab's
+  // absent side of an added or deleted file.
+  const mode = (value: unknown) => typeof value === "string" && /^[0-7]{1,6}$/.test(value) ? value : null;
+  const aMode = mode(change.a_mode);
+  const bMode = mode(change.b_mode);
+  let incomplete = change.collapsed === true || change.too_large === true || !aMode || !bMode;
+  const modeChanged = !!aMode && !!bMode && !change.new_file && !change.deleted_file && aMode !== bMode;
+  // An empty diff is explained by a rename, or by a mode-only change when GitLab (18.4+) states
+  // explicitly that no content was withheld.
+  const explained = change.renamed_file === true || (modeChanged && change.collapsed === false && change.too_large === false);
+  if (!change.diff && !explained) incomplete = true;
+  const header = change.new_file ? (bMode ? `new file mode ${bMode}\n` : "")
+    : change.deleted_file ? (aMode ? `deleted file mode ${aMode}\n` : "")
+    : modeChanged ? `old mode ${aMode}\nnew mode ${bMode}\n` : "";
+  return {
+    incomplete,
+    patch: `diff --git a/${oldPath} b/${path}\n` + header
+      + (change.renamed_file ? `rename from ${oldPath}\nrename to ${path}\n` : "")
+      + `--- ${change.new_file ? "/dev/null" : `a/${oldPath}`}\n+++ ${change.deleted_file ? "/dev/null" : `b/${path}`}\n`
+      + change.diff + "\n",
+  };
+}
+
 /** Read only the origin's exact request. URLs never select another host or repository. */
 export async function loadRequestDiff(
   remote: ForgeRemote,
@@ -2219,8 +2253,10 @@ export async function loadRequestDiff(
         !headOid || !baseOid || !targetOid || !baseRef || !headRef) {
       throw new Error("the forge returned invalid request revisions");
     }
+    // GitLab's changes_count is a string, capped at "1000+", that fills in asynchronously; it is
+    // compared before and after the diff pages like the revisions.
     return { headOid, baseOid, targetOid, baseRef, headRef, state: value?.state,
-      files: value?.changed_files, additions: value?.additions, deletions: value?.deletions };
+      files: github ? value?.changed_files : value?.changes_count, additions: value?.additions, deletions: value?.deletions };
   };
   const before = metadata(await read(["api", endpoint]));
   let diffBaseOid = before.baseOid;
@@ -2234,28 +2270,42 @@ export async function loadRequestDiff(
     diffBaseOid = mergeBase;
     raw = await read(["api", endpoint, "-H", "Accept: application/vnd.github.diff"]);
   } else {
-    // /changes carries diff_refs and overflow on supported GitLab API v4 servers. Failure on
-    // a future API does not fall back to a local comparison or unvalidated raw patch.
-    const response = await read(["api", `${endpoint}/changes`]);
-    const changesMeta = metadata(response);
-    if (JSON.stringify(changesMeta) !== JSON.stringify(before)) throw new Error("the request changed while its diff was loading — reload");
-    const value = jsonObject(JSON.parse(response))!;
-    if (!Array.isArray(value.changes) || typeof value.overflow !== "boolean") throw new Error("GitLab returned incomplete diff metadata");
-    incomplete = value.overflow;
-    expectedFiles = /^\d+$/.test(String(value.changes_count)) ? Number(value.changes_count) : null;
-    raw = value.changes.map((entry) => {
-      const change = jsonObject(entry);
-      const path = githubReviewPath(change?.new_path);
-      const oldPath = githubReviewPath(change?.old_path);
-      if (!path || !oldPath || /[\x00-\x1f\x7f]/.test(path + oldPath) || typeof change?.diff !== "string") throw new Error("GitLab returned invalid diff paths");
-      if (change.collapsed || change.too_large) incomplete = true;
-      if (!change.diff && !change.renamed_file) incomplete = true;
-      return `diff --git a/${oldPath} b/${path}\n`
-        + (change.new_file ? "new file mode 100644\n" : change.deleted_file ? "deleted file mode 100644\n" : "")
-        + (change.renamed_file ? `rename from ${oldPath}\nrename to ${path}\n` : "")
-        + `--- ${change.new_file ? "/dev/null" : `a/${oldPath}`}\n+++ ${change.deleted_file ? "/dev/null" : `b/${path}`}\n`
-        + change.diff + "\n";
-    }).join("");
+    // GitLab 15.7+ /diffs (the replacement for the deprecated /changes) is a paginated file list
+    // without diff_refs, overflow or a total. The detail reads before and after every page pin the
+    // revisions and changes_count; completeness comes from that count, the page bounds and the
+    // per-file flags. Failure never falls back to /changes, a local comparison or a raw patch.
+    const count = typeof before.files === "string" && /^\d+$/.test(before.files) ? Number(before.files) : null;
+    expectedFiles = count;
+    const pageLimit = count === null ? GITLAB_DIFF_MAX_PAGES : Math.min(GITLAB_DIFF_MAX_PAGES, Math.max(1, Math.ceil(count / GITLAB_DIFF_PAGE_SIZE)));
+    const readPage = async (page: number) => {
+      const response = await read(["api", `${endpoint}/diffs?per_page=${GITLAB_DIFF_PAGE_SIZE}&page=${page}`]);
+      let parsed: unknown;
+      try { parsed = JSON.parse(response); } catch { throw new Error("GitLab returned an invalid diff page"); }
+      if (!Array.isArray(parsed) || parsed.length > GITLAB_DIFF_PAGE_SIZE) throw new Error("GitLab returned an invalid diff page");
+      return parsed;
+    };
+    const parts: string[] = [];
+    let bytes = 0;
+    let lastPageFull = false;
+    for (let page = 1; page <= pageLimit; page += 1) {
+      const entries = await readPage(page);
+      for (const entry of entries) {
+        const part = gitlabDiffEntryPatch(entry);
+        if (part.incomplete) incomplete = true;
+        bytes += Buffer.byteLength(part.patch);
+        if (bytes > FORGE_MAX_BUFFER) throw new Error("the request diff exceeds this machine's display limit — open the forge");
+        parts.push(part.patch);
+      }
+      lastPageFull = entries.length === GITLAB_DIFF_PAGE_SIZE;
+      if (!lastPageFull) break;
+    }
+    if (lastPageFull) {
+      // A count of "1000+" (or none) is already incomplete. An exact count whose last allowed page
+      // is full needs one sentinel page to prove nothing follows; its entries are never admitted.
+      if (count === null) incomplete = true;
+      else if ((await readPage(pageLimit + 1)).length > 0) incomplete = true;
+    }
+    raw = parts.join("");
   }
   if (Buffer.byteLength(raw) > FORGE_MAX_BUFFER) throw new Error("the request diff exceeds this machine's display limit — open the forge");
   const files = parseDiff(raw);

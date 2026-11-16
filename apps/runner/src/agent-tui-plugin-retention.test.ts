@@ -54,10 +54,13 @@ function fixture(provider: "claude" | "codex", orchestrator: boolean) {
     (() => assert.fail("no structured provider should start")) as never, join(root, "data"));
   const registry = new RecordingRegistry();
   const internals = manager as unknown as {
+    runnerEnvironment: NodeJS.ProcessEnv;
     providerHomeLeases: RecordingRegistry;
     driverProviderHomes: Map<unknown, unknown>;
     agentTuiProviderHomeHandles: number;
   };
+  // Model only the fixture's provider environment, never the invoking agent's account.
+  internals.runnerEnvironment = { HOME: root };
   internals.providerHomeLeases = registry;
   const handles: AgentTuiProviderHome[] = [];
   const settlements: Array<boolean | null> = [];

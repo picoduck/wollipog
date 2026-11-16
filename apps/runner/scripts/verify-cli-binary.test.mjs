@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { removeTemporaryRoot, temporaryRootRemoval } from "./remove-temporary-root.mjs";
 
 const smoke = fileURLToPath(new URL("./verify-cli-binary.mjs", import.meta.url));
@@ -68,7 +68,8 @@ function runSmoke(t, env) {
   });
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(process.execPath, [smoke, binary], {
-      env: { ...process.env, TMPDIR: smokeTemp, ...env },
+      // Keep Node's inherited color-conflict warning out of the smoke's own diagnostics.
+      env: { ...process.env, TMPDIR: smokeTemp, ...env, FORCE_COLOR: undefined, NO_COLOR: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -80,12 +81,29 @@ function runSmoke(t, env) {
   });
 }
 
-test("a passing smoke prints its success line and removes its temporary directory", { skip: posixOnly }, async (t) => {
-  const result = await runSmoke(t, {});
+function assertPassingSmoke(result) {
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, new RegExp(`^${passed}$`, "mu"));
   assert.doesNotMatch(result.stderr, /Warning/u);
   assert.deepEqual(result.leftovers, []);
+}
+
+test("a passing smoke prints its success line and removes its temporary directory", { skip: posixOnly }, async (t) => {
+  assertPassingSmoke(await runSmoke(t, {}));
+});
+
+test("the success check rejects unexpected smoke warnings even when dispatch and cleanup pass", { skip: posixOnly }, async (t) => {
+  const work = mkdtempSync(join(tmpdir(), "wollipog-smoke-warning-"));
+  t.after(() => rmSync(work, { recursive: true, force: true }));
+  const preload = join(work, "warning.mjs");
+  // NODE_OPTIONS also reaches the fake CLI children; warn only in the smoke process.
+  writeFileSync(preload, `if (process.argv[1] === ${JSON.stringify(smoke)}) process.emitWarning("unexpected smoke warning");\n`);
+  const result = await runSmoke(t, { NODE_OPTIONS: `--import=${pathToFileURL(preload).href}` });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, new RegExp(`^${passed}$`, "mu"));
+  assert.match(result.stderr, /Warning: unexpected smoke warning/u);
+  assert.deepEqual(result.leftovers, []);
+  assert.throws(() => assertPassingSmoke(result), { code: "ERR_ASSERTION", operator: "doesNotMatch" });
 });
 
 test("a passing smoke whose temporary directory cannot be removed warns and still exits 0", { skip: unprivilegedOnly }, async (t) => {
