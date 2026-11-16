@@ -630,10 +630,3 @@ export function validateDecisionOutput(
   }
   return { verdict, reason: normalizedReason, fields };
 }
-
-/** The Decision Model may only narrow or confirm. Keep only the returned items that were already
- * proposed, in the proposal's order; a verdict can never add an item. */
-export function narrowToProposal<T>(proposed: readonly T[], returned: readonly unknown[]): T[] {
-  const kept = new Set(returned);
-  return proposed.filter((item) => kept.has(item));
-}

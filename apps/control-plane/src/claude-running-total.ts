@@ -20,33 +20,11 @@ function covers(later: ClaudeUsageCheckpoint, earlier: ClaudeUsageCheckpoint): b
   });
 }
 
-/**
- * #4069: a runner that read restored conversation totals as process totals billed every new
- * provider process's whole running total as one turn. Such a turn closes with a process-scoped
- * checkpoint, its records bill exactly that checkpoint's total, and that total covers an earlier
- * non-zero checkpoint of the same conversation, so it includes earlier turns that were already
- * billed. Returns the cost the turn billed when `current` closes such a turn, else null.
- *
- * `earlier` holds the session's earlier usage records, newest first. The signature cannot tell a
- * genuinely old CLI whose new process outgrew the previous one in every counter from the defect,
- * so a match is shown as uncertain, never corrected.
- */
-export function claudeRunningTotalBilled(current: Usage, earlier: Usage[]): number | null {
-  let billedBefore = 0;
-  let index = 0;
-  // The turn's other records follow the previous checkpoint.
-  for (; index < earlier.length; index++) {
-    const event = earlier[index]!;
-    if (!accrued(event)) continue;
-    if (event.claudeUsageCheckpoint) break;
-    billedBefore += event.costUsd ?? 0;
-  }
-  const prior = earlier.slice(index).find((event) => accrued(event) && (event.claudeUsageCheckpoint?.totalCostUsd ?? 0) > 0);
-  return claudeTurnRunningTotal(current, billedBefore, prior?.claudeUsageCheckpoint ?? null);
-}
-
-/** The same decision from what the turn's other records billed since the previous checkpoint
- * (`billedBefore`) and the latest earlier non-zero checkpoint of the session (`prior`). */
+/** #4069: Detect a process-scoped total that repeats earlier billed turns, from what the turn's
+ * other records billed since the previous checkpoint (`billedBefore`) and the latest earlier
+ * non-zero checkpoint of the session (`prior`). Returns the billed cost or null.
+ * An old CLI whose new process outgrew the previous one in every counter is indistinguishable
+ * from the defect, so a match is shown as uncertain, never corrected. */
 export function claudeTurnRunningTotal(current: Usage, billedBefore: number, prior: ClaudeUsageCheckpoint | null): number | null {
   const checkpoint = current.claudeUsageCheckpoint;
   if (!checkpoint || checkpoint.accountingScope !== "process" || !(checkpoint.totalCostUsd > 0) || !accrued(current)) return null;
