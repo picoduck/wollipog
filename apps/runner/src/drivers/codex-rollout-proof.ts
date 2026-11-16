@@ -156,7 +156,11 @@ export function parseCodexRolloutCompletedCommand(
   const completed = own ? window?.length === 1 && window[0] === commands.at(-1) ? window[0] : undefined :
     commands.length === 1 ? commands[0] : undefined;
   if (!completed || ownCli.length > 1) {
-    onFailure?.("provider rollout could not uniquely bind the successful command to its action admission");
+    onFailure?.(own && commands.every((item) => item.ordinal < own.item.ordinal)
+      ? "provider rollout admission found after the command"
+      : own && (next || nextMcp)
+        ? "provider rollout fenced by another admission"
+        : "provider rollout could not uniquely bind the successful command to its action admission");
     return null;
   }
   const turnCompletions = completedTurns.get(completed.turnId) ?? [];
@@ -188,7 +192,11 @@ export function parseCodexRolloutCompletedCommand(
   const admissions = items.filter((item) => item.turnId === completed.turnId &&
     item.ordinal < completed.ordinal && legacyAdmission(item, occurrenceId));
   if (admissions.length !== 1) {
-    onFailure?.("provider rollout did not prove the exact action admission before the successful command");
+    const late = items.some((item) => item.turnId === completed.turnId &&
+      item.ordinal > completed.ordinal && legacyAdmission(item, occurrenceId));
+    onFailure?.(late ? "provider rollout admission found after the command" :
+      cliAdmissions.length || mcpBoundaries.length ? "provider rollout fenced by another admission or an unproven admission" :
+        "provider rollout admission not found");
     return null;
   }
   return {

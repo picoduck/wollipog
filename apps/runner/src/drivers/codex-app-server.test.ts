@@ -28,6 +28,7 @@ import {
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
 import type { StagedPromptImages } from "./prompt-images.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
+import { parseCodexRolloutCompletedCommand } from "./codex-rollout-proof.js";
 import { codexReviewWorkingDirectory } from "../review-sessions.js";
 import type { AgentProcess } from "../spawn.js";
 
@@ -4104,10 +4105,68 @@ test("standalone CLI admissions reconcile in the active turn and preserve re-enq
   enqueue.exitCode = 0;
   turn.items = [enqueue, admission("workflow-cli")];
   assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command, undefined, onFailure), null);
-  assert.match(failure, /action admission before/u);
+  assert.match(failure, /admission found after the command/u);
   turn.items = [admission("workflow-cli"), enqueue, admission("workflow-latest"), { ...enqueue, id: "latest" }];
   assert.equal(await h.driver.reconcileCompletedCommand("workflow-cli", command), null);
   assert.equal((await h.driver.reconcileCompletedCommand("workflow-latest", command))?.providerItemId, "latest");
+});
+
+test("CLI arm without --action reconciles in a later turn from live and rollout history (#4647)", async () => {
+  const thread = "thread-no-action", turn = "turn-arm", occurrence = "workflow-no-action";
+  const command = "gh pr merge https://github.com/team/repo/pull/1 --squash --match-head-commit " + "a".repeat(40);
+  const script = `"$WOLLIPOG_CLI" decision consume ${occurrence} --snapshot '{"category":"pr_merge"}' --json`;
+  const output = JSON.stringify({ decision: { occurrenceId: occurrence, status: "approved", actionAdmission: {
+    kind: "pr_merge_enqueue", command, providerThreadId: thread, providerTurnId: turn,
+  } } });
+  const admission = { id: "arm", type: "commandExecution", command: script, status: "completed",
+    exitCode: 0, aggregatedOutput: output };
+  const enqueue = { id: "enqueue", type: "commandExecution", command, status: "completed", exitCode: 0 };
+  const h = makeHarness({ resumeId: thread, context: { kind: "native" } });
+  (h.driver as any).threadId = thread;
+  (h.driver as any).turnId = "turn-reconcile";
+  let items = [admission, enqueue];
+  (h.driver as any).peer = { request: async () => ({ thread: { id: thread, turns: [
+    { id: turn, status: "completed", itemsView: "full", items },
+    { id: "turn-reconcile", status: "inProgress", items: [] },
+  ] } }) };
+  const rollout = [
+    JSON.stringify({ type: "session_meta", payload: { id: thread } }),
+    ...[admission, enqueue].map((item) => JSON.stringify({ type: "event_msg", payload: {
+      type: "item_completed", thread_id: thread, turn_id: turn, item: {
+        type: "CommandExecution", id: item.id, status: item.status, exit_code: item.exitCode,
+        command: ["/usr/bin/zsh", "-lc", item.command],
+        aggregated_output: "aggregatedOutput" in item ? item.aggregatedOutput : "",
+      },
+    } })),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: turn } }),
+  ].join("\n");
+  (h.driver as any).readRolloutProof = async (...args: any[]) =>
+    parseCodexRolloutCompletedCommand(rollout, args[2], args[3], args[4], args[5], args[6]);
+  const check = async () => {
+    const proof = await h.driver.reconcileCompletedCommand(occurrence, command);
+    assert.equal(proof?.providerAdmissionItemId, "arm");
+    assert.equal(proof?.providerItemId, "enqueue");
+  };
+  admission.command = `/usr/bin/zsh -lc '${script.replaceAll("'", "'\\''")}'`;
+  await check();
+  items = [enqueue]; // Compacted thread/read must independently recover the same CLI arm.
+  await check();
+  const failureFor = async (candidate: typeof items) => {
+    items = candidate;
+    let failure = "";
+    const proof = await h.driver.reconcileCompletedCommand(occurrence, command, undefined,
+      (reason) => { failure = reason; });
+    assert.equal(proof, null);
+    return failure;
+  };
+  assert.match(await failureFor([enqueue, admission]), /admission found after the command/u);
+  const other = { ...admission, id: "other", command: script.replace(occurrence, "workflow-other"),
+    aggregatedOutput: output.replace(occurrence, "workflow-other") };
+  assert.match(await failureFor([admission, other, enqueue]), /fenced by another admission/u);
+  (h.driver as any).readRolloutProof = async (...args: any[]) =>
+    parseCodexRolloutCompletedCommand(rollout.split("\n").filter((row) => !row.includes('"id":"arm"')).join("\n"),
+      args[2], args[3], args[4], args[5], args[6]);
+  assert.match(await failureFor([enqueue]), /admission not found/u);
 });
 
 test("concurrent command reconciliations keep their failure diagnostics local to the request", async () => {

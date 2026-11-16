@@ -6,13 +6,11 @@ import { basename, isAbsolute } from "node:path";
 export function codexCliAdmission(script: string, output: string, threadId: string, turnId: string): {
   occurrenceId: string; command: string; approved: boolean;
 } | null {
-  const match = /^(?:"\$WOLLIPOG_CLI"|wollipog) decision consume ([A-Za-z0-9_-]{1,512}) --snapshot '([^'\n]+)' --action '([^'\n]+)' --json$/u.exec(script);
+  const match = /^(?:"\$WOLLIPOG_CLI"|wollipog) decision consume ([A-Za-z0-9_-]{1,512}) --snapshot '([^'\n]+)'(?: --action '([^'\n]+)')? --json$/u.exec(script);
   if (!match) return null;
   try {
     const snapshot = JSON.parse(match[2]!);
-    const action = JSON.parse(match[3]!);
-    if (snapshot?.category !== "pr_merge" || action?.kind !== "pr_merge_enqueue" ||
-        typeof action.command !== "string" || !action.command || action.command.length > 2000) return null;
+    if (snapshot?.category !== "pr_merge") return null;
     // Node warnings precede the CLI's one JSON response in aggregated_output. Only complete
     // JSON lines count, and multiple responses are ambiguous. No substring extraction.
     const responses = output.length > 100_000 ? [] : output.split("\n").flatMap((line) => {
@@ -20,6 +18,11 @@ export function codexCliAdmission(script: string, output: string, threadId: stri
     });
     const decision = responses.length === 1 ? responses[0]?.decision : undefined;
     const admission = decision?.actionAdmission;
+    // --action is optional: the server derives the canonical enqueue from the snapshot.
+    // Only the provider-recorded armed response supplies its identity in that form.
+    const action = match[3] === undefined ? admission : JSON.parse(match[3]);
+    if (action?.kind !== "pr_merge_enqueue" || typeof action.command !== "string" ||
+        !action.command || action.command.length > 2000) return null;
     return {
       occurrenceId: match[1]!, command: action.command,
       approved: decision?.occurrenceId === match[1] && decision?.status === "approved" &&

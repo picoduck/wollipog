@@ -156,10 +156,10 @@ test("native rollout lookup recovers the historical child proof after process re
 
 // Shape observed in Codex 0.154+ provider-owned item_completed records. These are fake
 // commands/responses; no test starts a provider or runs an enqueue.
-function cliItem(occurrence = OCCURRENCE, id = "admission-modern", extra: Record<string, unknown> = {}): string {
+function cliItem(occurrence = OCCURRENCE, id = "admission-modern", extra: Record<string, unknown> = {}, explicitAction = true): string {
   return commandItem(id, `"$WOLLIPOG_CLI" decision consume ${occurrence} --snapshot '${JSON.stringify({
     category: "pr_merge",
-  })}' --action '${JSON.stringify({ kind: "pr_merge_enqueue", command: COMMAND })}' --json`,
+  })}'${explicitAction ? ` --action '${JSON.stringify({ kind: "pr_merge_enqueue", command: COMMAND })}'` : ""} --json`,
   "2026-11-06T23:00:00Z", "completed", { aggregated_output: `(node:123) Warning: example warning\n${JSON.stringify({
     decision: { occurrenceId: occurrence, status: "approved", actionAdmission: {
       kind: "pr_merge_enqueue", command: COMMAND, providerThreadId: THREAD, providerTurnId: TURN,
@@ -203,4 +203,29 @@ test("an unrecognized historical status stays fail closed and is diagnosed accur
   assert.equal(parseCodexRolloutCompletedCommand(content, THREAD, OCCURRENCE, COMMAND, undefined,
     (reason) => { failure = reason; }), null);
   assert.match(failure, /unrecognized exact-command status/u);
+});
+
+test("implicit CLI rollout admission retains refusal fences and explains missing proof", () => {
+  const arm = cliItem(OCCURRENCE, "arm", {}, false);
+  const other = cliItem("workflow-latest", "other", {}, false);
+  const merge = commandItem("merge", COMMAND, "");
+  const check = (rows: string[], reason?: RegExp) => {
+    let failure = "";
+    const proof = parseCodexRolloutCompletedCommand([
+      line("session_meta", { id: THREAD }, ""), ...rows, completedTurn(),
+    ].join("\n"), THREAD, OCCURRENCE, COMMAND, undefined, (value) => { failure = value; });
+    if (reason) {
+      assert.equal(proof, null);
+      assert.match(failure, reason);
+    }
+    return proof;
+  };
+  assert.equal(check([arm, merge])?.providerAdmissionItemId, "arm");
+  check([merge], /admission not found/u);
+  check([merge, arm], /admission found after the command/u);
+  check([arm, other, merge], /fenced by another admission/u);
+  check([arm, merge, other, commandItem("latest", COMMAND, "")], /fenced by another admission/u);
+  assert.equal(check([arm, commandItem("failed", COMMAND, "", "completed", { exit_code: 1 })]), null);
+  assert.equal(check([arm, commandItem("different", COMMAND + " --delete-branch", "")]), null);
+  assert.equal(check([arm, merge, commandItem("unfinished", COMMAND, "", "inProgress")]), null);
 });

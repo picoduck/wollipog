@@ -883,6 +883,18 @@ export class CodexAppServerDriver implements Driver {
             onFailure?.("provider history contains an unfinished exact command");
             return null;
           }
+          const admissionFailure = () => {
+            const own = timeline.findIndex((event) => event.kind === "admission" && event.own);
+            const firstCommand = timeline.findIndex((event) => event.kind === "command");
+            if (own === -1) return liveSawAdmissionCandidate
+              ? "provider history fenced by another admission or an unproven admission"
+              : "provider history admission not found";
+            if (firstCommand !== -1 && own > firstCommand &&
+                !timeline.slice(own + 1).some((event) => event.kind === "command")) {
+              return "provider history admission found after the command";
+            }
+            return "provider history fenced by another admission or ambiguous command ordering";
+          };
           if (matches.length !== 0) {
             // A same-head re-enqueue leaves an earlier successful command behind its own admission
             // (#3991), so a count cannot decide; provider order ties the landed command to this one.
@@ -891,6 +903,7 @@ export class CodexAppServerDriver implements Driver {
               candidate.providerTurnId === landed.turnId && candidate.providerItemId === landed.itemId);
             if (!match || (fence && (fence.providerThreadId !== this.threadId ||
                 fence.providerTurnId !== match.providerTurnId || fence.providerItemId !== match.providerItemId))) {
+              onFailure?.(admissionFailure());
               return null;
             }
             return match;
@@ -919,7 +932,7 @@ export class CodexAppServerDriver implements Driver {
                 ? "provider history did not prove successful completion of the exact command"
                 : successfulExactCommands.length > 1
                   ? "provider history contains ambiguous repeated successful exact commands"
-                  : "provider history did not prove the exact action admission before the successful command");
+                  : admissionFailure());
               return null;
             }
             liveProjectionRequiresAgreement = true;
