@@ -646,10 +646,6 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundJobEndedBy: 192,
   /** v247 releases a worktree or account handoff hold at once (`release_queue_hold`, #3752). */
   queueHoldRelease: 247,
-  /** v250 names a queue hold's work that Background Work does not list (`unlistedJobs`, #3752). */
-  queueHoldUnlistedJobs: 250,
-  /** v253 reports a failed provider sign-in's stable `failureCode` beside its `error` (#3519). */
-  providerLoginFailureCode: 253,
   /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
   hostAdministration: 114,
   /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */

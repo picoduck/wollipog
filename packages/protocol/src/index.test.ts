@@ -528,12 +528,6 @@ test("public runner capability floors retain their recorded version boundaries",
   // A v254 runner cannot continue a session's own worktree switch after its relaunch (#3810).
   assert.equal(runnerSupportsProtocol(254, "worktreeSwitchContinuation"), false);
   assert.equal(runnerSupportsProtocol(255, "worktreeSwitchContinuation"), true);
-  // A v252 runner reports a duplicate-account sign-in by its sentence alone (#3519).
-  assert.equal(runnerSupportsProtocol(252, "providerLoginFailureCode"), false);
-  assert.equal(runnerSupportsProtocol(253, "providerLoginFailureCode"), true);
-  // A v249 runner does not name the unlisted work a queue hold waits on (#3752).
-  assert.equal(runnerSupportsProtocol(249, "queueHoldUnlistedJobs"), false);
-  assert.equal(runnerSupportsProtocol(250, "queueHoldUnlistedJobs"), true);
   // A v246 runner cannot release a queue hold on request (#3752).
   assert.equal(runnerSupportsProtocol(246, "queueHoldRelease"), false);
   assert.equal(runnerSupportsProtocol(247, "queueHoldRelease"), true);
