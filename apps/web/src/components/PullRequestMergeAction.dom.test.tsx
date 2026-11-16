@@ -13,7 +13,7 @@ import {
   type PullRequestMergeSessionFacts,
   type SessionView,
 } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import type { ConfirmationOptions } from "./FeedbackProvider.js";
@@ -44,7 +44,9 @@ const respond = (facts: PullRequestMergeFacts | null, session = ALLOWED, unavail
   ({ facts, ...(unavailable ? { unavailable } : {}), readiness: pullRequestMergeReadiness(facts, session, unavailable) });
 
 async function mount(options: {
-  readiness: PullRequestMergeReadinessResponse[];
+  /** An Error entry is thrown by that read. */
+  readiness: Array<PullRequestMergeReadinessResponse | Error>;
+  mergeError?: Error;
   confirm?: boolean;
   merge?: PullRequestMergeResponse["result"];
   pr?: GitPrSummary;
@@ -60,10 +62,13 @@ async function mount(options: {
     ...api,
     pullRequestMergeReadiness: async () => {
       reads.push(1);
-      return options.readiness[Math.min(reads.length - 1, options.readiness.length - 1)]!;
+      const next = options.readiness[Math.min(reads.length - 1, options.readiness.length - 1)]!;
+      if (next instanceof Error) throw next;
+      return next;
     },
     mergePullRequest: async (_id: string, body: PullRequestMergeRequest) => {
       merges.push(body);
+      if (options.mergeError) throw options.mergeError;
       return { result: options.merge ?? { outcome: "enqueued", message: "Added to the merge queue at position 2.", mode: "enqueue", headSha: HEAD, state: "open", queuePosition: 2 } };
     },
   } as unknown as ApiClient;
@@ -183,6 +188,32 @@ test("a GitLab merge request, an unreadable gate, a declined confirmation, or a 
     assert.equal(refused.merged(), 0);
   } finally {
     await refused.unmount();
+  }
+});
+
+test("a transport error never reaches the person, and a lost merge reply is uncertain, never refused or done", async () => {
+  const unread = await mount({ readiness: [new TypeError("fetch failed")] });
+  try {
+    assert.equal(unread.button().disabled, true);
+    assert.match(unread.host.textContent ?? "", /Merge readiness could not be read; refresh Review to try again\./u);
+    assert.doesNotMatch(unread.host.textContent ?? "", /fetch failed/u);
+  } finally {
+    await unread.unmount();
+  }
+  const server = await mount({ readiness: [new ApiError("runner is offline", 409)] });
+  try {
+    assert.match(server.host.textContent ?? "", /runner is offline/u, "the server's own sentence is shown");
+  } finally {
+    await server.unmount();
+  }
+  const lost = await mount({ readiness: [respond(FACTS)], mergeError: new TypeError("network connection lost") });
+  try {
+    await lost.click();
+    assert.equal(lost.host.querySelector('[role="status"]')?.textContent,
+      "The request's result could not be read; check the pull request before trying again.");
+    assert.equal(lost.merged(), 0);
+  } finally {
+    await lost.unmount();
   }
 });
 

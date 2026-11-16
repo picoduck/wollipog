@@ -5,6 +5,7 @@ import type {
   PullRequestMergeReadinessResponse,
   SessionView,
 } from "@wollipog/protocol";
+import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { Spinner } from "./common.js";
@@ -45,7 +46,8 @@ export function PullRequestMergeAction({ session, pr, refreshKey, onMerged }: {
     } catch (e) {
       if (mine !== generation.current) return;
       setReadiness(null);
-      setError((e as Error).message || "Merge readiness could not be read.");
+      // The server's own refusal is a sentence for the person; a transport error's text is not.
+      setError(e instanceof ApiError && e.message ? e.message : "Merge readiness could not be read; refresh Review to try again.");
     }
   }, [api, session.id]);
 
@@ -70,20 +72,23 @@ export function PullRequestMergeAction({ session, pr, refreshKey, onMerged }: {
 
   const run = async () => {
     if (!ready || !gate || !facts || !gate.mode || !gate.headSha) return;
-    const enqueue = gate.mode === "enqueue";
-    const message = enqueue
-      ? `GitHub adds pull request #${facts.number} to the ${facts.baseRef} merge queue at this head, tests it on top of the latest ${facts.baseRef}, and merges it with the queue's method. The branch is not deleted.`
-      : `GitHub merges pull request #${facts.number} into ${facts.baseRef} at this head with the repository's ${gate.mergeMethod} method. The branch is not deleted.`;
-    const confirmed = await confirm({
-      title: gate.label,
-      message: facts.deleteBranchOnMerge
-        ? `${message.replace(" The branch is not deleted.", "")} This repository's own setting deletes the head branch after it merges.`
-        : message,
-      detailRows: [
-        { label: `#${facts.number} ${pr.title}`.trim() },
-        { label: gate.headSha, labelStyle: "mono" },
-      ],
-      confirmLabel: gate.label,
+    const branchNote = facts.deleteBranchOnMerge
+      ? "This repository's own setting deletes the head branch after it merges."
+      : "The branch is not deleted.";
+    const detailRows = [
+      { label: `#${facts.number} ${pr.title}`.trim() },
+      { label: gate.headSha, labelStyle: "mono" as const },
+    ];
+    const confirmed = await confirm(gate.mode === "enqueue" ? {
+      title: "Enqueue for Merge",
+      message: `GitHub adds pull request #${facts.number} to the ${facts.baseRef} merge queue at this head, tests it on top of the latest ${facts.baseRef}, and merges it with the queue's method. ${branchNote}`,
+      detailRows,
+      confirmLabel: "Enqueue for Merge",
+    } : {
+      title: "Merge Pull Request",
+      message: `GitHub merges pull request #${facts.number} into ${facts.baseRef} at this head with the repository's ${gate.mergeMethod} method. ${branchNote}`,
+      detailRows,
+      confirmLabel: "Merge Pull Request",
     });
     if (!confirmed) return;
     setBusy(true);
@@ -93,7 +98,10 @@ export function PullRequestMergeAction({ session, pr, refreshKey, onMerged }: {
       setResult(response.result);
       if (response.result.outcome === "enqueued" || response.result.outcome === "merged") onMerged?.();
     } catch (e) {
-      setResult({ outcome: "refused", message: (e as Error).message, mode: gate.mode, headSha: gate.headSha, state: null });
+      // A lost reply may still have enqueued or merged: never claim either, and say to check.
+      const message = e instanceof ApiError && e.message ? e.message
+        : "The request's result could not be read; check the pull request before trying again.";
+      setResult({ outcome: "uncertain", message, mode: gate.mode, headSha: gate.headSha, state: null });
     } finally {
       setBusy(false);
       void load();
