@@ -7,7 +7,6 @@ import type { SessionView } from "@wollipog/protocol";
 import {
   BackgroundDeliveryBadge,
   BackgroundNotificationBadge,
-  AttentionBadge,
   COPY_RESULT_MS,
   CopyButton,
   SessionStatusIndicators,
@@ -196,14 +195,14 @@ test("background-work indicators become keyboard-native panel controls when acti
   }
 });
 
-test("attention badges retain their own accessible name without an override", async () => {
+test("live status indicators name an answer-required question accessibly", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   try {
     await act(async () => {
-      root.render(<AttentionBadge session={{
+      root.render(<SessionStatusIndicators session={{
         status: "input_required",
         pendingApproval: {
           requestId: "question",
@@ -213,7 +212,7 @@ test("attention badges retain their own accessible name without an override", as
         },
       }} />);
     });
-    assert.equal(container.querySelector(".status")?.getAttribute("aria-label"), "Answer Required");
+    assert.equal(container.querySelector('.status[aria-label="Attention: Answer Required"]')?.textContent, "Answer Required");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

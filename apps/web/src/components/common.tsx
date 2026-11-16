@@ -1,16 +1,10 @@
 import { sessionCampaignRequests } from "@wollipog/protocol";
 import React, { useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  sessionAttentionStatus,
-  type ArchiveStatus,
-  type ArchiveOperationView,
-  type StopOperationView,
   type BackgroundDeliveryWatchdogState,
   type BackgroundNotificationReceiptState,
   type SessionStatus,
   type SessionView,
-  type SessionAttentionGroup,
-  sessionAttentionBreakdown,
 } from "@wollipog/protocol";
 import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "../background-delivery-status.js";
 import {
@@ -204,34 +198,6 @@ export function CopyButton({
   );
 }
 
-export function SessionStatusBadge({ status, archiveStatus, archiveOperation, stopOperation, historyQuarantine, runnerOnline, ariaLabel }: {
-  status: SessionStatus;
-  archiveStatus?: ArchiveStatus;
-  archiveOperation?: ArchiveOperationView;
-  stopOperation?: StopOperationView;
-  historyQuarantine?: SessionView["historyQuarantine"];
-  runnerOnline?: boolean;
-  ariaLabel?: string;
-}) {
-  const meta = sessionLifecycleMeta(status, { archiveStatus, archiveOperation, stopOperation, historyQuarantine, runnerOnline });
-  const operation = stopOperation ?? archiveOperation;
-  return <StatusBadge meta={meta} title={operation?.failure?.message} ariaLabel={ariaLabel} />;
-}
-
-export function AttentionBadge({ session, ariaLabel, onOpen }: {
-  session: Pick<SessionView, "status" | "pendingApproval"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners">>;
-  ariaLabel?: string;
-  onOpen?: () => void;
-}) {
-  const attention = sessionAttentionStatus(session);
-  if (!attention) return null;
-  return (
-    <StatusBadge meta={statusMeta("attention", attention.kind)} label={attention.label}
-      title={attention.description} ariaLabel={ariaLabel ?? attention.label} onClick={onOpen} />
-  );
-}
-
 /** One child's dot on a parent's family chip (#896). Literal class names, so the stylesheet guard can
  * see every state rendered; the state itself comes off the wire. */
 export function ThreadDot({ state, title }: { state: "blocked" | "running" | "done" | "idle"; title: string }) {
@@ -243,52 +209,6 @@ export function ThreadDot({ state, title }: { state: "blocked" | "running" | "do
         : state === "done" ? "inbox-thread-dot done" : "inbox-thread-dot"}
     title={title}
   />;
-}
-
-/**
- * Attention as one pill PER KIND, each carrying its count, in priority order: "Answer Required 2 ·
- * Approval Required" where the rolled-up badge says "3 Actions Required" (#896). A single request
- * keeps the rolled-up label so a child-owned request still names its owner; the tooltip lists each
- * request's owner and title, bounded so a runaway provider cannot grow a card's title attribute.
- */
-export function AttentionPills({ session, compact = false }: {
-  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners">>;
-  /** A phone card has one line for the sender AND the signals: show the top-priority kind with a
-   * "+N" for the rest instead of one pill per kind, so three kinds cannot push the sender off the card. */
-  compact?: boolean;
-}) {
-  const groups = sessionAttentionBreakdown(session);
-  if (groups.length === 0) return null;
-  if (groups.length === 1 && groups[0]!.count <= 1) {
-    const attention = sessionAttentionStatus(session);
-    return attention
-      ? <StatusBadge meta={statusMeta("attention", attention.kind)} label={attention.label}
-        title={attention.description} ariaLabel={"Attention: " + attention.label} />
-      : null;
-  }
-  const describe = (group: SessionAttentionGroup) =>
-    group.requests.slice(0, 10).map((request, index) => `${group.owners[index]}: ${request.title}`);
-  if (compact) {
-    const top = groups[0]!;
-    const total = groups.reduce((sum, group) => sum + group.count, 0);
-    const listed = groups.flatMap(describe).slice(0, 10);
-    const more = total - listed.length;
-    return <StatusBadge meta={statusMeta("attention", top.kind)} label={top.label}
-      title={[...listed, ...(more > 0 ? [`${more} more`] : [])].join("\n")}
-      ariaLabel={`Attention: ${top.label}, ${total} Requests`}>
-      <StatusCount>+{total - 1}</StatusCount>
-    </StatusBadge>;
-  }
-  return <>{groups.map((group) => {
-    const listed = describe(group);
-    const more = group.count - listed.length;
-    const title = [...listed, ...(more > 0 ? [`${more} more`] : [])].join("\n");
-    return <StatusBadge key={group.label} meta={statusMeta("attention", group.kind)} label={group.label} title={title}
-      ariaLabel={`Attention: ${group.label}${group.count > 1 ? `, ${group.count} Requests` : ""}`}>
-      {group.count > 1 && <StatusCount>{group.count}</StatusCount>}
-    </StatusBadge>;
-  })}</>;
 }
 
 export function SessionStatusIndicators({

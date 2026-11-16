@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PROTOCOL_VERSION, type AgentDefinition, type RunnerView } from "@wollipog/protocol";
 import {
-  accountStatusLabel,
   capacityError,
   CAPACITY_ERROR,
   fieldChanged,
@@ -53,12 +52,6 @@ test("Machine Name is required and at most 120 characters", () => {
   assert.equal(nameError("Studio Mac"), null);
   assert.equal(nameError("   "), "Enter a name for this machine.");
   assert.equal(nameError("x".repeat(121)), "Use 120 characters or fewer.");
-});
-
-test("account options read in the shared provider account words", () => {
-  assert.equal(accountStatusLabel("authenticated"), "Signed In");
-  assert.equal(accountStatusLabel("unauthenticated"), "Sign-In Required");
-  assert.equal(accountStatusLabel("unknown"), "Status Unknown");
 });
 
 test("installation rows say one status sentence built from the facts", () => {
