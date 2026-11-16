@@ -13657,7 +13657,9 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 /* The phone card's first line: the sender and, trailing, the flags. */
 .inbox-row-sender-line > .inbox-row-flags { margin-left: auto; }
 /* The phone card's status line: the time is trailing, and the branch between gives way. */
-.stacked .inbox-row-status-line:has(.status + .status) { height: auto; min-height: var(--space-5); flex-wrap: wrap; }
+/* So does one with a pull request attention badge (#604), rather than clip its reason or the branch. */
+.stacked .inbox-row-status-line:has(.status + .status),
+.stacked .inbox-row-status-line:has(.inbox-row-pr .status) { height: auto; min-height: var(--space-5); flex-wrap: wrap; }
 .inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-time { margin-left: auto; }
 /* Dense phone cards grow a status line rather than clipping either lifecycle or secondary label. */
 .inbox-row-shell.stacked .inbox-row-status-line > .row-status { flex: 0 1 auto; min-width: 0; max-width: 100%; flex-wrap: wrap; }
@@ -13679,12 +13681,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .inbox-row-branch,
 .inbox-row-pr {
   display: inline-flex;
-  min-width: 0;
   align-items: center;
   gap: var(--space-1);
 }
-.inbox-row-branch { flex: 0 1 auto; overflow: hidden; }
-.inbox-row-pr { flex: none; }
+/* The branch shrinks to a few characters and an ellipsis, never to an icon alone (#604). */
+.inbox-row-branch { flex: 0 1 auto; overflow: hidden; min-width: calc(var(--icon-sm) + var(--space-1) + 3em); }
+.inbox-row-pr { flex: none; min-width: 0; }
 .inbox-row-branch > .app-icon,
 .inbox-row-pr > .app-icon,
 .inbox-row-time > .app-icon { flex: none; }

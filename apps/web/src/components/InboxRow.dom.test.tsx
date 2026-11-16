@@ -256,6 +256,37 @@ test("the branch shows with its icon, its base as \"from\", and its pull request
   });
 });
 
+test("a queued pull request reads In Merge Queue, and a removal is a danger badge naming GitHub's reason (#604)", async () => {
+  const rowWith = (mergeQueue: unknown, state = "open") => baseSession({
+    status: "idle", useWorktree: true, worktreePath: "/repos/alpha/wt",
+    worktrees: [{
+      id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-604", defaultBranch: "main", source: "created",
+      pullRequest: { url: "https://github.com/acme/shop/pull/1", state, provider: "github", mergeQueue },
+    }],
+  } as unknown as Partial<SessionView>);
+  await withRow(rowWith({ enabled: true, removal: null, entry: { state: "awaiting_checks", position: 2, enqueuedAt: 5, groupChecks: "pending" } }), (container) => {
+    const pr = container.querySelector<HTMLElement>(".inbox-row-pr")!;
+    assert.equal(pr.textContent, "Pull Request: In Merge Queue");
+    assert.match(pr.title, /In the merge queue at position 2; its merge-group checks are running\./u);
+    assertNoDomNode(pr.querySelector(".status"));
+  });
+  await withRow(rowWith({ enabled: true, entry: null, removal: { reason: "failed_checks", removedAt: 9 } }), (container) => {
+    const pr = container.querySelector<HTMLElement>(".inbox-row-pr")!;
+    assert.equal(pr.textContent, "Pull Request: Dequeued: Check Failed");
+    assert.match(pr.title, /removed this pull request from the merge queue because a merge-group check failed/u);
+    const badge = pr.querySelector<HTMLElement>(".status");
+    assert.notEqual(badge, null, "an attention badge, not a neutral word");
+    assert.match(badge!.className, /danger/u);
+  });
+  // Merged reads Merged whatever the last queue observation was; no queue facts read as before.
+  await withRow(rowWith({ enabled: true, removal: null, entry: { state: "locked", position: 1, enqueuedAt: 5, groupChecks: "passing" } }, "merged"), (container) => {
+    assert.equal(container.querySelector(".inbox-row-pr")?.textContent, "Pull Request: Merged");
+  });
+  await withRow(rowWith(undefined), (container) => {
+    assert.equal(container.querySelector(".inbox-row-pr")?.textContent, "Pull Request: Open");
+  });
+});
+
 test("a stop-failed row shows Stop Failed and its time", async () => {
   const session = baseSession({
     status: "stopped", lastEventAt: null, updatedAt: NOW - 3 * 60_000,

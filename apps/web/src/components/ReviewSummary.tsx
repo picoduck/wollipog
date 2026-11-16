@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import type { GitChecksSummary, GitDiffStats, GitPrSummary, GitStatusInfo, SessionView } from "@wollipog/protocol";
+import { mergeQueueStatus, type GitChecksSummary, type GitDiffStats, type GitPrSummary, type GitStatusInfo, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { safeExternalHref } from "../external-href.js";
 import { fixChecksPrompt, forgeStateLabel } from "../pinned-summary.js";
@@ -125,6 +125,10 @@ function PullRequestRow({ session, pr, checks, canPrompt }: {
     }
   };
   const title = pr.title || `${mergeRequest ? "MR" : "PR"} #${pr.number}`;
+  // #604: shown only for a pull request in, or just removed from, its base branch's merge queue.
+  const queue = mergeQueueStatus(pr.mergeQueue, pr.state);
+  const queuePosition = queue?.kind === "queued" ? pr.mergeQueue?.entry?.position ?? null : null;
+  const groupChecks = queue?.kind === "queued" ? pr.mergeQueue?.entry?.groupChecks ?? null : null;
   return (
     <div className="review-pr" role="group" aria-label={noun}>
       <div className="review-pr-line">
@@ -133,6 +137,9 @@ function PullRequestRow({ session, pr, checks, canPrompt }: {
       </div>
       <div className="review-pr-meta">
         <span>{forgeStateLabel(pr.state)}</span>
+        {queue && (
+          <StatusBadge label={queue.label} tone={queue.tone} pulse={queue.kind === "merging"} title={queue.detail} />
+        )}
         {(failing || pending) && checks && (
           <StatusBadge
             meta={statusMeta("checks", failing ? "failing" : "pending")}
@@ -156,11 +163,14 @@ function PullRequestRow({ session, pr, checks, canPrompt }: {
           <a className="link" href={href} target="_blank" rel="noreferrer">Open on {forgeName}</a>
         )}
       </div>
-      {(pr.baseRef || pr.headRef || pr.mergeability) && (
+      {(pr.baseRef || pr.headRef || pr.mergeability || queue) && (
         <dl className="review-request-facts">
           {pr.baseRef && <div><dt>Base</dt><dd>{pr.baseRef}</dd></div>}
           {pr.headRef && <div><dt>Head</dt><dd>{pr.headRef}</dd></div>}
           {pr.mergeability && <div><dt>Mergeability</dt><dd>{titleCaseLabel(pr.mergeability.replaceAll("_", " ").toLowerCase()).replace(/\bCi\b/g, "CI")}</dd></div>}
+          {queue && <div><dt>Merge Queue</dt><dd>{queue.detail}</dd></div>}
+          {queuePosition !== null && <div><dt>Queue Position</dt><dd>{queuePosition}</dd></div>}
+          {groupChecks && <div><dt>Merge Group Checks</dt><dd>{groupChecks === "passing" ? "Passing" : groupChecks === "failing" ? "Failing" : "Pending"}</dd></div>}
         </dl>
       )}
       {checks && (

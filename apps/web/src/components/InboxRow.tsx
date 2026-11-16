@@ -10,7 +10,8 @@ import { sessionArchiveActionRefusal } from "../session-command-permissions.js";
 import { sessionRowStatus } from "../session-row-status.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { useOptionalStoreSelector } from "../store.js";
-import { displayBaseRef, pullRequestStateLabel, sessionBranchState } from "../worktree-identity.js";
+import { displayBaseRef, sessionBranchState, worktreePullRequestPresentation } from "../worktree-identity.js";
+import { StatusBadge } from "./StatusBadge.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
 import { SessionPinIndicator, ThreadDot } from "./common.js";
@@ -205,6 +206,7 @@ function InboxRowInner({
   /* The branch, only when there is one (#2209): a session without a branch says nothing rather than
      "No Branch" on every row. Meta items each lead with their 14px icon (§11.3); the base reads
      "from <ref>" and the pull request is its state word, both neutral. */
+  const pullRequest = worktree?.pullRequest ? worktreePullRequestPresentation(worktree.pullRequest) : null;
   const branch = worktree ? (
     <span className="inbox-row-git">
       <span className="inbox-row-branch" title={`Branch: ${worktree.branch}`}>
@@ -213,11 +215,14 @@ function InboxRowInner({
         <span className="inbox-row-branch-name">{worktree.branch}</span>
       </span>
       {baseRef && <span className="inbox-row-base" title={`Based on ${baseRef}`}>from {baseRef}</span>}
-      {worktree.pullRequest && (
-        <span className="inbox-row-pr" title={`Pull request: ${pullRequestStateLabel(worktree.pullRequest.state).toLowerCase()}`}>
+      {pullRequest && (
+        <span className="inbox-row-pr" title={pullRequest.description}>
           <PullRequestIcon size={14} />
           <span className="sr-only">Pull Request: </span>
-          {pullRequestStateLabel(worktree.pullRequest.state)}
+          {/* #604: GitHub giving up on a queued pull request needs a person, as failing checks do. */}
+          {pullRequest.queue?.attention
+            ? <StatusBadge inline tone="danger" label={pullRequest.label} />
+            : pullRequest.label}
         </span>
       )}
     </span>

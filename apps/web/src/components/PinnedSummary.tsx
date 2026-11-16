@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { isPolicyApproval, isTerminal, normalizeSourcePath, sessionRole, type GitChecksSummary, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
+import { isPolicyApproval, isTerminal, mergeQueueStatus, normalizeSourcePath, sessionRole, type GitChecksSummary, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useLiveSession, useStoreActions, useStoreSelector } from "../store.js";
 import { deriveSidePaneContent, type TimelineItem } from "../timeline.js";
@@ -17,7 +17,7 @@ import {
   type GitPresentation,
 } from "../pinned-summary.js";
 import { backgroundWorkCondition, statusMeta } from "../status-meta.js";
-import { pullRequestStateLabel } from "../worktree-identity.js";
+import { worktreePullRequestPresentation } from "../worktree-identity.js";
 import type { GitStatus, GitSummary } from "./useGitStatus.js";
 import { GitPinnedSection, type GitBranchFallback } from "./GitVisibility.js";
 import { SummaryDisclosure, SummaryRow, SummarySection } from "./PinnedSummaryRows.js";
@@ -151,14 +151,14 @@ export function PinnedSummary({
   const pullRequest = pr
     ? {
         title: pr.title || `${pr.kind === "merge_request" ? "MR" : "PR"} #${pr.number}`,
-        state: forgeStateLabel(pr.state),
+        state: mergeQueueStatus(pr.mergeQueue, pr.state)?.label ?? forgeStateLabel(pr.state),
         href: safeExternalHref(pr.url),
         tooltip: `${requestNoun(pr.kind)} #${pr.number}${pr.title ? `: ${pr.title}` : ""}`,
       }
     : activeWorktree?.pullRequest
       ? {
           title: requestNoun(activeWorktree.pullRequest.kind),
-          state: pullRequestStateLabel(activeWorktree.pullRequest.state),
+          state: worktreePullRequestPresentation(activeWorktree.pullRequest).label,
           href: safeExternalHref(activeWorktree.pullRequest.url),
           tooltip: activeWorktree.pullRequest.url,
         }

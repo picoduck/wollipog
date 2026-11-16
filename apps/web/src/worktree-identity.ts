@@ -1,10 +1,37 @@
-import type { SessionView, SessionWorktreeView } from "@wollipog/protocol";
+import {
+  mergeQueueRemovalReasonLabel,
+  mergeQueueStatus,
+  type MergeQueueStatus,
+  type SessionView,
+  type SessionWorktreeView,
+} from "@wollipog/protocol";
 
 export type WorktreePullRequestState = NonNullable<SessionWorktreeView["pullRequest"]>["state"];
 
 /** Title Case state label for a worktree's linked pull request. */
 export function pullRequestStateLabel(state: WorktreePullRequestState): string {
   return state === "open" ? "Open" : state === "merged" ? "Merged" : "Closed";
+}
+
+/** How a row shows a worktree's linked pull request (#604): its merge-queue status while it has
+ * one, otherwise its state word. A removal names GitHub's reason in the label itself, so a row
+ * says why without anyone opening the session; it reads "Dequeued" so the reason still fits a
+ * phone row. */
+export function worktreePullRequestPresentation(pullRequest: NonNullable<SessionWorktreeView["pullRequest"]>): {
+  label: string;
+  /** Sentence-case description for a tooltip. */
+  description: string;
+  queue: MergeQueueStatus | null;
+} {
+  const queue = mergeQueueStatus(pullRequest.mergeQueue, pullRequest.state);
+  if (!queue) {
+    const label = pullRequestStateLabel(pullRequest.state);
+    return { label, description: `Pull request: ${label.toLowerCase()}`, queue: null };
+  }
+  const label = queue.kind === "removed"
+    ? `Dequeued: ${mergeQueueRemovalReasonLabel(pullRequest.mergeQueue?.removal?.reason)}`
+    : queue.label;
+  return { label, description: queue.detail, queue };
 }
 
 /**
