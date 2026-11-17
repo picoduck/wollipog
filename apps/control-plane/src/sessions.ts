@@ -1,7 +1,8 @@
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { personalRuleDelegation } from "./personal-rule-delegation.js";
 import { scheduledAssistantOwner, type AssistantAutomationAuthorization } from "./assistant-automation-authority.js";
-import { AssistantRefusal } from "./assistant-connections.js";
+import { AssistantRefusal, assistantCallContext } from "./assistant-connections.js";
+import { WOLLIPOG_ASSISTANT_SKILL } from "./assistant-skill.js";
 import { normalizeDeliveryVerificationFailure, publishedIssueFailure, type PublishedIssueFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import { failedCampaignRun } from "./campaign-failed-run.js";
@@ -169,6 +170,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   ownerQuestionAnswer,
   type OwnerQuestionSnapshot,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
+  ASSISTANT_THREAD_LIMITS,
   type AgentContext,
   type AgentDriverKind,
   type AcpSessionContextConfig,
@@ -2205,6 +2207,16 @@ export function launchForRestart(db: ControlPlaneDb, session: SessionView): Agen
 /** Placeholder title for a session created without a first prompt (named by its first message). */
 export const UNTITLED = "Untitled session";
 
+/** The launch marker of an Assistant thread's session, carrying the shared `wollipog` assistant
+ * skill (#4663), so every launch has it. */
+function assistantLaunchPolicy(threadId: string): import("@wollipog/protocol").AssistantLaunchPolicy {
+  return { threadId, guide: WOLLIPOG_ASSISTANT_SKILL.content };
+}
+
+/** A multi-session run or workflow would start several sessions outside one thread launch. */
+const ASSISTANT_THREAD_RUN_REFUSAL = "A Wollipog Assistant thread launches one session at a time and cannot start runs or workflows. " +
+  "Launch a session instead, or ask your owner to start it.";
+
 /** A run's title derived from its task, short enough that each member's " · <role>" still fits in 120. */
 const RUN_TASK_TITLE_MAX = 60;
 
@@ -4236,6 +4248,26 @@ export class SessionsService {
   /** Reject commands an older/unknown runner would silently ignore, before starting a timeout or
    * mutating cached state. `protocolVersion == null` is intentionally unsupported: the runner did
    * not prove its capability because protocol metadata itself arrived in v15. */
+  /** The Assistant thread whose call is launching work, with what it may still spend, or why it may
+   * launch nothing more (#4663). Null outside a thread's Assistant call. */
+  private assistantThreadLaunch(): { threadId: string; remainingUsd: number } | { refusal: string } | null {
+    const call = assistantCallContext.getStore();
+    const thread = call ? this.db.assistantThreads.forConnection(call.connectionId) : null;
+    if (!thread) return null;
+    const limits = ASSISTANT_THREAD_LIMITS;
+    const launched = this.db.assistantThreads.launchedSessionIds(thread.id).length;
+    if (launched >= limits.launchedSessions) {
+      return { refusal: `This Wollipog Assistant thread has launched ${launched} of the ${limits.launchedSessions} sessions it may launch, ` +
+        "so it cannot launch another. Tell your owner; they can continue in a new thread." };
+    }
+    const spent = this.db.assistantThreads.costUsd(thread.id);
+    if (spent >= limits.costUsd) {
+      return { refusal: `This Wollipog Assistant thread has spent $${spent.toFixed(2)} of its $${limits.costUsd} budget, ` +
+        "so it cannot launch another session. Tell your owner; they can continue in a new thread." };
+    }
+    return { threadId: thread.id, remainingUsd: Math.round((limits.costUsd - spent) * 100) / 100 };
+  }
+
   /** Why an `assistant`-role session cannot launch here (#4663), or null when it can. */
   private assistantLaunchRefusal(runnerId: string, driver: AgentDriverKind, context: AgentContext | undefined): ServiceResult<never> | null {
     const unsupported = this.capabilityFailure(runnerId, "assistantRole", "Wollipog assistant threads");
@@ -4892,6 +4924,14 @@ export class SessionsService {
       [DELEGATED_IMAGE_REVIEW]?: NewDelegatedImageReview;
     },
   ): ServiceResult<SessionView> {
+    // A Wollipog Assistant thread's assistant launches within its thread's limits (#4663): a launch
+    // past them is refused, and the new session is capped at what the thread has left to spend.
+    const threadLaunch = creationContext?.assistantThread ? null : this.assistantThreadLaunch();
+    if (threadLaunch && "refusal" in threadLaunch) return fail(threadLaunch.refusal, 409);
+    if (threadLaunch) {
+      req = { ...req, config: { ...req.config,
+        costBudgetUsd: Math.min(req.config?.costBudgetUsd ?? Number.POSITIVE_INFINITY, threadLaunch.remainingUsd) } };
+    }
     // Attribution is supplied only by the authenticated route, never by the request payload.
     const capture = creationContext?.[PREPARED_MEDIA_CAPTURE];
     if (capture && (!this.preparedMediaCaptures.has(capture) || delivery || !this.db.raw().isTransaction)) return fail("Private media preparation capability is unavailable.", 409);
@@ -5880,7 +5920,7 @@ export class SessionsService {
       } } : {}),
       acpSessionContext,
       ...(creationContext?.review ? { review: creationContext.review.policy } : {}),
-      ...(assistantThread ? { assistant: { threadId: assistantThread.threadId } } : {}),
+      ...(assistantThread ? { assistant: assistantLaunchPolicy(assistantThread.threadId) } : {}),
       ...(imageReview
         ? { uiEvidenceReviewer: { reviewId: imageReview.reviewId } } : {}),
     };
@@ -5966,6 +6006,7 @@ export class SessionsService {
       orchestratorPolicy,
       role,
       ...(assistantThread ? { assistantThreadId: assistantThread.threadId } : {}),
+      ...(threadLaunch ? { assistantThreadLaunch: threadLaunch.threadId } : {}),
       // Remember the ad-hoc browsed directory so restart re-launches from it (workspaceId is null).
       workspacePath: adHoc || null,
       acpSessionContext,
@@ -9843,7 +9884,7 @@ export class SessionsService {
           ...this.orderedRunnerControl(sessionId, this.db.getRunner(session.runnerId)?.protocolVersion),
         } }
         : {}),
-      ...(assistantThreadId ? { assistant: { threadId: assistantThreadId } } : {}),
+      ...(assistantThreadId ? { assistant: assistantLaunchPolicy(assistantThreadId) } : {}),
       acpSessionContext: this.db.getAcpSessionContext(sessionId),
     };
     // Persist replacement identity before the ambiguous socket write. A false send leaves the
@@ -21444,6 +21485,7 @@ export class SessionsService {
       const reviewRefusal = this.reviewSessionRefusal(parentSessionId, "creates no sessions");
       if (reviewRefusal) return fail(reviewRefusal, 409);
     }
+    if (this.assistantThreadLaunch()) return fail(ASSISTANT_THREAD_RUN_REFUSAL, 409);
     if (parentSessionId && delivery) return fail("agent-created workflow runs cannot use automation delivery snapshots", 409);
     if (!req || typeof req !== "object" || Array.isArray(req)) return fail("workflow run request is malformed", 400);
     const allowed = new Set([
@@ -22961,6 +23003,7 @@ export class SessionsService {
       const reviewRefusal = this.reviewSessionRefusal(parentSessionId, "creates no sessions");
       if (reviewRefusal) return fail(reviewRefusal, 409);
     }
+    if (this.assistantThreadLaunch()) return fail(ASSISTANT_THREAD_RUN_REFUSAL, 409);
     if (!req.agentIds?.length) return fail("at least one agent is required");
     if (req.agentIds.length > MAX_UI_SESSION_SUBSCRIPTIONS) {
       return fail(`at most ${MAX_UI_SESSION_SUBSCRIPTIONS} agents are allowed in one run`);

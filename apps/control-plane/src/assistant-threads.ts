@@ -1,6 +1,7 @@
 import {
   ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
   ASSISTANT_THREAD_HARNESSES,
+  ASSISTANT_THREAD_LIMITS,
   resolveAgentHarnessRow,
   runnerCapabilityRequirementError,
   runnerSupportsProtocol,
@@ -101,6 +102,7 @@ export class AssistantThreads {
   }
 
   view(row: ThreadRow, session = row.session_id ? this.deps.getSession(row.session_id) : null): AssistantThread {
+    const launched = this.store.launchedSessionIds(row.id);
     return {
       id: row.id,
       assistant: row.assistant,
@@ -111,7 +113,11 @@ export class AssistantThreads {
       status: assistantThreadStatus(row.state, session),
       access: { level: "full_access", destructive: "ask" },
       connectionId: row.connection_id,
-      launchedSessionIds: [],
+      launchedSessionIds: launched,
+      usage: {
+        launchedSessions: { used: launched.length, limit: ASSISTANT_THREAD_LIMITS.launchedSessions },
+        costUsd: { used: Math.round(this.store.costUsd(row.id) * 10_000) / 10_000, limit: ASSISTANT_THREAD_LIMITS.costUsd },
+      },
       lastActivityAt: Math.max(row.updated_at, session?.updatedAt ?? 0),
       createdAt: row.created_at,
       archivedAt: row.archived_at,
@@ -213,6 +219,8 @@ export class AssistantThreads {
         ...(title === null ? {} : { title }),
         useWorktree: false,
         role: "normal",
+        // The assistant's own spend counts against the thread's budget too.
+        config: { costBudgetUsd: ASSISTANT_THREAD_LIMITS.costUsd },
       }, threadId);
     } catch (error) {
       this.store.abandon(threadId);

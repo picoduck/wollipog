@@ -541,7 +541,7 @@ export function provisionAgentControl(
       // Claude Code reads them from its private config file; Codex forwards them by name.
       if (configFile) writeAssistantMcpConfig(configFile, mcp);
       else Object.assign(spec.env, mcp.env);
-      spec.args = assistantLaunchArgs(spec.driver, spec.args, { ...mcp, configFile });
+      spec.args = assistantLaunchArgs(spec.driver, spec.args, { ...mcp, configFile }, spec.assistant?.guide);
     })();
   }
   const supported = runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionAgentControl");

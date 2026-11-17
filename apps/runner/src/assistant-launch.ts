@@ -86,15 +86,17 @@ export function stripAssistantLaunchArgs(args: readonly string[]): string[] {
  * agent-control server, CLI or credential. Refuses a harness that cannot carry it, so it never
  * launches as an ordinary session instead. */
 export function assistantLaunchArgs(driver: SessionLaunchSpec["driver"], args: readonly string[],
-  mcp: AssistantMcpLaunch & { configFile?: string }): string[] {
+  mcp: AssistantMcpLaunch & { configFile?: string }, guide?: string): string[] {
   if (!assistantLaunchSupported(driver)) {
     throw new Error("Wollipog Assistant threads run only on Claude Code or Codex. Start the thread with one of them.");
   }
   const baseline = stripAssistantLaunchArgs(args);
+  // The shared `wollipog` skill follows the role instructions; both start with the same marker.
+  const instructions = guide?.trim() ? `${ASSISTANT_INSTRUCTIONS}\n\n${guide.trim()}` : ASSISTANT_INSTRUCTIONS;
   if (driver === "claude-code") {
     if (!mcp.configFile) throw new Error("a Claude Code assistant launch needs its proxy configuration file");
     return [...baseline, "--mcp-config", mcp.configFile, "--allowedTools", CLAUDE_ALLOWED_TOOLS,
-      "--append-system-prompt", ASSISTANT_INSTRUCTIONS];
+      "--append-system-prompt", instructions];
   }
   // Codex has no append form: the last `developer_instructions` wins, as for an Orchestrator.
   // The relay endpoint and key reach the adapter by name from the provider's environment, never
@@ -102,5 +104,5 @@ export function assistantLaunchArgs(driver: SessionLaunchSpec["driver"], args: r
   return [...baseline,
     "-c", `${CODEX_SERVER_KEY}${toml({ command: mcp.command, args: mcp.args, env_vars: Object.keys(mcp.env), enabled: true,
       default_tools_approval_mode: "approve" })}`,
-    "-c", `developer_instructions=${JSON.stringify(ASSISTANT_INSTRUCTIONS)}`];
+    "-c", `developer_instructions=${JSON.stringify(instructions)}`];
 }

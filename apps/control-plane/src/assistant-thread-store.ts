@@ -41,7 +41,13 @@ export class AssistantThreadStore {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       archived_at INTEGER);
-      CREATE INDEX IF NOT EXISTS assistant_threads_owner ON assistant_threads(owner_user_id, organization_id, state);`);
+      CREATE INDEX IF NOT EXISTS assistant_threads_owner ON assistant_threads(owner_user_id, organization_id, state);
+      -- Sessions a thread's assistant launched (#4663): its work cards and its launch limit.
+      CREATE TABLE IF NOT EXISTS assistant_thread_launches (
+        session_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS assistant_thread_launches_thread ON assistant_thread_launches(thread_id, created_at);`);
   }
 
   constructor(private readonly db: DatabaseSync) {}
@@ -68,6 +74,28 @@ export class AssistantThreadStore {
 
   activate(id: string, sessionId: string, now: number): void {
     this.db.prepare("UPDATE assistant_threads SET session_id=?, state='active', updated_at=? WHERE id=? AND state='creating'").run(sessionId, now, id);
+  }
+
+  forConnection(connectionId: string): ThreadRow | null {
+    return (this.db.prepare("SELECT * FROM assistant_threads WHERE connection_id=?").get(connectionId) as ThreadRow | undefined) ?? null;
+  }
+
+  recordLaunch(threadId: string, sessionId: string, now: number): void {
+    this.db.prepare("INSERT OR IGNORE INTO assistant_thread_launches (session_id, thread_id, created_at) VALUES (?, ?, ?)").run(sessionId, threadId, now);
+  }
+
+  launchedSessionIds(threadId: string): string[] {
+    return (this.db.prepare("SELECT session_id FROM assistant_thread_launches WHERE thread_id=? ORDER BY created_at, session_id")
+      .all(threadId) as Array<{ session_id: string }>).map((row) => row.session_id);
+  }
+
+  /** The thread's spend so far: its backing session's cost plus every launched session's, including
+   * the in-flight estimate of a running turn. */
+  costUsd(threadId: string): number {
+    const row = this.db.prepare(`SELECT COALESCE(SUM(session.cost_usd + session.live_cost_usd), 0) AS cost FROM sessions session
+      WHERE session.id IN (SELECT session_id FROM assistant_threads WHERE id=? AND session_id IS NOT NULL
+        UNION SELECT session_id FROM assistant_thread_launches WHERE thread_id=?)`).get(threadId, threadId) as { cost: number };
+    return row.cost;
   }
 
   setConnection(id: string, connectionId: string): void {

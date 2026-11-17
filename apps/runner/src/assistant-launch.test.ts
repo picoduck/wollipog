@@ -92,6 +92,16 @@ test("an assistant launch refuses another harness, a second role, WSL and an old
   });
 });
 
+test("the shared skill follows the role instructions and is replaced, not repeated, on relaunch", async () => {
+  await withHost(async (host) => {
+    const launch: SessionLaunchSpec = { ...assistantSpec("claude-code"), assistant: { threadId: "thr_fixture", guide: "## Discover First\n\nCall assistant_discover." } };
+    await provisionAgentControl(launch, { ...config, assistantProxy: fakeProxy() }, () => {}, host);
+    await provisionAgentControl(launch, { ...config, assistantProxy: fakeProxy() }, () => {}, host);
+    const prompts = launch.args.filter((_arg, index) => launch.args[index - 1] === "--append-system-prompt");
+    assert.deepEqual(prompts, [`${ASSISTANT_INSTRUCTIONS}\n\n## Discover First\n\nCall assistant_discover.`]);
+  });
+});
+
 test("stripping keeps a user's own instructions and servers", () => {
   const own = ["--append-system-prompt", "Prefer short answers", "-c", 'developer_instructions="Mine"',
     "--mcp-config", "/home/owner/.mcp.json", "--allowedTools", "Bash", "-c", "mcp_servers.mine={}"];

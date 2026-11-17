@@ -4,6 +4,7 @@ import { PassThrough } from "node:stream";
 import Fastify from "fastify";
 import {
   ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
+  ASSISTANT_THREAD_LIMITS,
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   type AgentDefinition,
@@ -18,6 +19,8 @@ import { SessionsService } from "./sessions.js";
 import { createAssistantThreads } from "./assistant-threads.js";
 import { registerAssistantThreadRoutes } from "./assistant-thread-routes.js";
 import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
+import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
+import { assistantCallContext } from "./assistant-connections.js";
 import type { HumanPrincipal } from "./identity.js";
 
 const claude: AgentDefinition = { id: "claude", name: "Claude", driver: "claude-code", context: { kind: "native" }, command: "claude", args: [], env: {}, available: true,
@@ -36,6 +39,12 @@ async function harness(protocolVersion = PROTOCOL_VERSION) {
   const threads = createAssistantThreads(db, hub, svc);
   const app = Fastify();
   const operations = createAssistantOperations(db);
+  registerAssistantSessionOperations(operations, db, svc);
+  // A scheduling operation a thread may not call; registered here only to reach the gate.
+  operations.register({ name: "auto_create", description: "fixture", inputSchema: { type: "object" }, metadata: true,
+    resolveTarget: () => ({ kind: "automation", id: "new" }), ownerCanAccess: () => true, execute: () => ({ created: true }) });
+  const project = db.createProject({ name: "Work" });
+  const location = db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w" });
   registerAssistantRoutes(app, { db, operations, requestHuman: (req) => req.headers.authorization === "Bearer owner" ? owner : null });
   registerAssistantThreadRoutes(app, { threads, requestHuman: (req) => req.headers.authorization === "Bearer owner" ? owner : null });
   await app.ready();
@@ -71,7 +80,7 @@ async function harness(protocolVersion = PROTOCOL_VERSION) {
     const relay = await proxies.provision(sessionId, "http://control-plane.invalid");
     return { WOLLIPOG_ASSISTANT_RELAY_ENDPOINT: relay.endpoint, WOLLIPOG_ASSISTANT_RELAY_KEY: relay.relayKey };
   };
-  return { db, owner, svc, threads, toRunner, ownerCall, proxies, provision, callTools, setRunner: (id: string) => { runnerId = id; },
+  return { db, owner, svc, threads, toRunner, ownerCall, proxies, provision, callTools, location, setRunner: (id: string) => { runnerId = id; },
     close: async () => { await proxies.closeAll(); await app.close(); db.close(); } };
 }
 
@@ -97,6 +106,9 @@ test("a thread's session calls its granted tools, authorized live and audited ag
     const result = JSON.parse(discovered.result.content[0].text);
     assert.equal(result.connection.id, thread.connectionId);
     assert.equal(result.connection.threadId, thread.id);
+    // Outside assistants read the same guide the thread's session was launched with.
+    assert.equal(result.skill.name, "wollipog");
+    assert.match(result.skill.content, /Never approve, confirm, answer or dismiss anything on the owner's behalf/u);
     const activity = h.db.assistantConnections.activity(thread.connectionId!);
     assert.deepEqual(activity.map((row) => [row.operation, row.outcome]), [["assistant_discover", "succeeded"]]);
 
@@ -178,5 +190,70 @@ test("a runner without the proxy cannot start a thread", async () => {
     assert.equal(refused.status, 409);
     assert.equal(refused.body.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.assistantRole);
     assert.deepEqual(h.db.assistantConnections.list(h.owner as HumanPrincipal), [], "no connection is left behind");
+  } finally { await h.close(); }
+});
+
+const launch = (id: number, locationId: string) => ({ jsonrpc: "2.0", id, method: "tools/call",
+  params: { name: "session_launch", arguments: { commandId: `launch-${id}`, locationId, agentId: "claude", prompt: "Summarize the open pull requests" } } });
+const resultOf = (reply: { result: { content: Array<{ text: string }> } }) => JSON.parse(reply.result.content[0]!.text);
+
+test("a thread launches sessions within its limits and the assistant hears why it is stopped", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    // The assistant's own session is capped at the thread budget and carries the shared skill.
+    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, ASSISTANT_THREAD_LIMITS.costUsd);
+    const start = h.toRunner.find((message) => message.type === "start_session" && message.spec.sessionId === thread.sessionId);
+    assert.ok(start?.type === "start_session" && start.spec.assistant?.guide?.includes("## Discover First"));
+
+    const env = await h.provision(thread.sessionId);
+    const first = resultOf((await h.callTools(env, launch(1, h.location.id)))[0]);
+    assert.equal(first.receipt.status, "succeeded", JSON.stringify(first));
+    const launched = h.db.getSession(first.sessionId)!;
+    assert.equal(launched.costBudgetUsd, ASSISTANT_THREAD_LIMITS.costUsd, "a launch is capped at what the thread has left");
+    let view = (await h.ownerCall("GET", `/api/assistant-threads/${thread.id}`)).body.thread as AssistantThread;
+    assert.deepEqual(view.launchedSessionIds, [first.sessionId]);
+    assert.deepEqual(view.usage?.launchedSessions, { used: 1, limit: ASSISTANT_THREAD_LIMITS.launchedSessions });
+
+    // Reaching the launch limit stops further launches with a clear message, and creates nothing.
+    for (let index = 1; index < ASSISTANT_THREAD_LIMITS.launchedSessions; index++) h.db.assistantThreads.recordLaunch(thread.id, `s_prior_${index}`, Date.now());
+    const sessionsBefore = h.db.listSessions({ includeArchived: true }).length;
+    const refused = resultOf((await h.callTools(env, launch(2, h.location.id)))[0]);
+    assert.equal(refused.receipt.status, "failed");
+    assert.match(refused.error, /has launched 10 of the 10 sessions it may launch/);
+    assert.equal(h.db.listSessions({ includeArchived: true }).length, sessionsBefore);
+
+    // Spending the budget stops launches too.
+    const spender = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const spenderEnv = await h.provision(spender.sessionId);
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=? WHERE id=?").run(ASSISTANT_THREAD_LIMITS.costUsd - 5, spender.sessionId);
+    const capped = resultOf((await h.callTools(spenderEnv, launch(3, h.location.id)))[0]);
+    assert.equal(h.db.getSession(capped.sessionId)!.costBudgetUsd, 5);
+    h.db.raw().prepare("UPDATE sessions SET live_cost_usd=? WHERE id=?").run(5, spender.sessionId);
+    const broke = resultOf((await h.callTools(spenderEnv, launch(4, h.location.id)))[0]);
+    assert.match(broke.error, /has spent \$25\.00 of its \$25 budget/);
+    view = (await h.ownerCall("GET", `/api/assistant-threads/${spender.id}`)).body.thread as AssistantThread;
+    assert.deepEqual(view.usage?.costUsd, { used: 25, limit: ASSISTANT_THREAD_LIMITS.costUsd });
+  } finally { await h.close(); }
+});
+
+test("a thread cannot schedule work or start runs that would escape its limits", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const env = await h.provision(thread.sessionId);
+    const [scheduled] = await h.callTools(env, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "auto_create", arguments: {} } });
+    assert.equal(scheduled.result.isError, true);
+    assert.match(scheduled.result.content[0].text, /cannot call auto_create/);
+    // The same operation is fine for an owner-issued connection.
+    const issued = h.db.assistantConnections.create(h.owner, "Outside Assistant", { operations: "all", projects: "all" });
+    assert.equal(h.db.assistantConnections.get(issued.connection.id)!.threadId, undefined);
+    const run = assistantCallContext.run({ connectionId: thread.connectionId! }, () => h.svc.createRun({
+      runnerId: "r", workspaceId: "w", agentIds: ["claude"], task: "Fan out" }));
+    assert.equal(run.status, 409);
+    assert.match(run.error ?? "", /cannot start runs or workflows/);
+    // Outside a thread's call the same request is not refused for this reason.
+    const ordinary = h.svc.createRun({ runnerId: "r", workspaceId: "w", agentIds: ["claude"], task: "Fan out" });
+    assert.doesNotMatch(ordinary.error ?? "", /cannot start runs or workflows/);
   } finally { await h.close(); }
 });

@@ -52,6 +52,31 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
 - The `sessions.session_role` column keeps `normal` for these sessions; `assistant_thread_id`
   carries the role, because widening that column's CHECK would mean rebuilding the sessions table.
 
+## Thread Limits
+
+`ASSISTANT_THREAD_LIMITS` bounds what one thread does, so a runaway or recursive assistant stops:
+
+- The backing session's own cost budget is the thread budget ($25).
+- While a thread's Assistant call executes, every session it creates counts as a launch of that
+  thread. This covers `session_launch`, forks, side chats and campaign launches, all of which
+  pass through session creation inside the call. A launch is refused with a message to the
+  assistant once the thread has launched 10 sessions, or once its backing session plus its
+  launched sessions have spent the budget. Each launched session is capped at what the thread
+  has left to spend.
+- A thread cannot start runs or workflows, and its connection cannot call `auto_create`,
+  `auto_update`, `auto_enable`, `auto_test` or `workflow_run`, since scheduled or multi-session
+  work would run outside these limits. The owner can still do any of these directly.
+- `usage` on the thread view reports both limits and what the thread has used of them.
+  `launchedSessionIds` lists the sessions it launched.
+
+## The Shared `wollipog` Skill
+
+Every thread's session receives the shared `wollipog` assistant skill with its role instructions,
+through `SessionLaunchSpec.assistant.guide`. It covers discovery, command IDs and receipts,
+reporting, and never confirming or approving on the owner's behalf. Outside assistants read the
+same text from `assistant_discover` (`skill`). It is not a Skill Library entry: it guides an
+assistant acting through Assistant tools, not coding agents in ordinary sessions.
+
 ## Thread Credential and Runner Proxy
 
 Each thread has its own Assistant connection (v384), listed in the owner's Assistant Connections

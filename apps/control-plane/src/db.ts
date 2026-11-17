@@ -5083,6 +5083,8 @@ export interface NewSessionInput {
   role?: SessionRole;
   /** Required with role `assistant`: the thread this session backs (#4663). */
   assistantThreadId?: string;
+  /** The Assistant thread whose assistant launched this session, counted against its limit. */
+  assistantThreadLaunch?: string;
   /** Ad-hoc browsed directory (when workspaceId is null); lets restart re-launch from it. */
   workspacePath?: string | null;
   acpSessionContext?: AcpSessionContextConfig;
@@ -19793,6 +19795,7 @@ export class ControlPlaneDb {
       if (reviewUserId) this.reviewSettings.attributeSession(input.id, reviewUserId);
       if (input.reviewPolicyCapture) this.reviewSettings.captureSessionPolicy(input.id, reviewUserId, projectId, input.reviewPolicyCapture);
       if (input.assistantWorkOrigin) this.assistantWork.attachAcceptedOrigin(input.assistantWorkOrigin, input.id);
+      if (input.assistantThreadLaunch) this.assistantThreads.recordLaunch(input.assistantThreadLaunch, input.id, input.now);
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-created:${input.id}`,
         kind: "session.created",

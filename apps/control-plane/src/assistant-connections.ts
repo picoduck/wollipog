@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { DatabaseSync } from "node:sqlite";
 import { hashToken } from "./auth.js";
 import type { HumanPrincipal } from "./identity.js";
@@ -21,6 +22,14 @@ export interface AssistantOperationReceipt {
   resourceId?: string;
 }
 export class AssistantRefusal extends Error {}
+
+/** The Assistant connection whose operation is executing, for services that apply a thread's
+ * limits to work it starts (#4663). Absent outside an Assistant call. */
+export const assistantCallContext = new AsyncLocalStorage<{ connectionId: string }>();
+
+/** Operations an Assistant thread may not call: each schedules future work that would run outside
+ * the thread's session-launch and cost limits. Its owner can still use them directly. */
+const THREAD_EXCLUDED_OPERATIONS = new Set(["auto_create", "auto_update", "auto_enable", "auto_test", "workflow_run"]);
 export class AssistantConflict extends AssistantRefusal {}
 export interface AssistantActivityRecord {
   connection_id: string; grant_revision: number; operation: string;
@@ -212,6 +221,9 @@ export class AssistantOperations {
     const owner = this.ownerPrincipal(connection.ownerUserId, connection.organizationId);
     if (!owner || owner.role !== "owner") throw new AssistantRefusal("The granting owner is no longer an active owner. An active owner must recreate this connection.");
     if (connection.grant.operations !== "all" && !connection.grant.operations.includes(name)) throw new AssistantRefusal(`Operation ${name} is excluded. The owner can allow it in Assistant Connections.`);
+    if (connection.threadId && THREAD_EXCLUDED_OPERATIONS.has(name)) {
+      throw new AssistantRefusal(`A Wollipog Assistant thread cannot call ${name}: it schedules work outside the thread's limits. Ask your owner to do it.`);
+    }
     if (!operation.metadata && connection.grant.projects !== "all" && (!target.projectId || !connection.grant.projects.includes(target.projectId))) throw new AssistantRefusal("The target project is excluded by this connection. The owner can select it or grant all projects in Assistant Connections.");
     if (!operation.ownerCanAccess(owner, target)) throw new AssistantRefusal("The granting owner cannot access this target. Restore the owner's resource access or use another connection.");
     return owner;
@@ -230,7 +242,8 @@ export class AssistantOperations {
         return this.authorize(connection.id, name, target);
       };
       const owner = await recheck();
-      const result = await operation.execute(args, { owner, connection, recheck });
+      const result = await assistantCallContext.run({ connectionId: connection.id },
+        () => operation.execute(args, { owner, connection, recheck }));
       // A delivered RPC can still report a refused service command or uncertain dispatch.
       // Registered services return receipts/status, never a private error in the activity row.
       const response = result && typeof result === "object" ? result as {status?: unknown; receipt?: {status?: unknown}} : undefined;

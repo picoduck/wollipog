@@ -74,13 +74,14 @@ test("a new thread launches an assistant-role session whose every launch carries
       id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined,
       assistant: "wollipog", title: "Weekly Cleanup", harness: "claude-code", status: "working",
       access: { level: "full_access", destructive: "ask" }, launchedSessionIds: [], archivedAt: null,
+      usage: { launchedSessions: { used: 0, limit: 10 }, costUsd: { used: 0, limit: 25 } },
     });
     const session = h.db.getSession(thread.sessionId)!;
     assert.equal(session.role, "assistant");
     assert.equal(session.agentId, "claude");
     assert.equal(session.parentSessionId ?? null, null);
     assert.equal(h.sent.length, 1);
-    assert.deepEqual(h.sent[0]!.spec.assistant, { threadId: thread.id });
+    assert.equal(h.sent[0]!.spec.assistant?.threadId, thread.id);
     assert.equal(h.sent[0]!.spec.orchestrator, undefined);
     assert.ok(h.dashboard.threads().some((published) => published.id === thread.id));
     assert.deepEqual(h.stranger.threads(), []);
@@ -95,7 +96,7 @@ test("a new thread launches an assistant-role session whose every launch carries
     h.db.updateSessionStatus(thread.sessionId, "completed", Date.now());
     const restarted = h.svc.restart(thread.sessionId, {});
     assert.equal(restarted.ok, true, restarted.error ?? "");
-    assert.deepEqual(h.sent.at(-1)!.spec.assistant, { threadId: thread.id });
+    assert.equal(h.sent.at(-1)!.spec.assistant?.threadId, thread.id);
 
     const listed = await h.call("GET", "/api/assistant-threads");
     assert.deepEqual(listed.body.threads.map((t: AssistantThread) => t.id), [thread.id]);

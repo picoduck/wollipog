@@ -20,6 +20,18 @@ export interface AssistantThreadAccess {
   destructive: "ask";
 }
 
+/** What one thread may spend and launch (#4663). They stop a runaway or recursive assistant: the
+ * backing session is capped at the cost budget, a launch is refused once the thread has launched
+ * `launchedSessions` sessions or spent its budget, and each launched session is capped at what
+ * remains. The owner can always start a new thread. */
+export const ASSISTANT_THREAD_LIMITS = { launchedSessions: 10, costUsd: 25 } as const;
+
+export interface AssistantThreadUsage {
+  launchedSessions: { used: number; limit: number };
+  /** The backing session's cost plus every launched session's. */
+  costUsd: { used: number; limit: number };
+}
+
 export interface AssistantThread {
   /** `thr_…` */
   id: string;
@@ -34,6 +46,8 @@ export interface AssistantThread {
   connectionId: string | null;
   /** Sessions this thread's assistant launched, oldest first. */
   launchedSessionIds: string[];
+  /** Additive: the thread's limits and what it has used of them. */
+  usage?: AssistantThreadUsage;
   lastActivityAt: number;
   createdAt: number;
   archivedAt: number | null;
@@ -79,4 +93,7 @@ export const ASSISTANT_MCP_SERVER_NAME = "wollipog_assistant";
  * launch that way. */
 export interface AssistantLaunchPolicy {
   threadId: string;
+  /** The shared `wollipog` assistant skill, given to the session with its role instructions.
+   * Older runners ignore it and launch with the instructions alone. */
+  guide?: string;
 }
