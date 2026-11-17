@@ -90,38 +90,37 @@ for (const theme of ["dark", "light"] as const) {
       await expect(page).toHaveURL(/path=%2Fsessions%2F(~|%7E)/);
     });
 
-    test("work launched mid-turn appears without a status change, and a rename outlasts an older list read", async ({ page }) => {
-      const open_ = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
-      await open(page, theme, "", open_);
+    test("a thread change arrives as an event, and one that lands during a list read survives it", async ({ page }) => {
+      await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
       const cards = page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-card");
       await expect(cards).toHaveCount(2);
       // The launched sessions arrive as summaries, without their requests' options: the card reads
       // the detail and still offers the inline approval.
       await expect(cards.filter({ hasText: "Bump the Vite Group" }).getByRole("button", { name: "Approve Once" })).toBeVisible();
 
-      // The backing session keeps its status while the assistant launches more work. The page's own
-      // first refresh settles first, so only the launch's activity can bring the new card.
-      await page.waitForTimeout(2_500);
+      // Mid-turn the assistant launches more work while its own status stays put. The control plane
+      // republishes the thread, and the card follows from that event alone: well inside the 15s poll.
       await page.evaluate(() => (window as unknown as { assistantsLaunch: () => void }).assistantsLaunch());
-      await expect(cards).toHaveCount(3, { timeout: 5_000 });
+      await expect(cards).toHaveCount(3, { timeout: 2_000 });
       await expect(cards.filter({ hasText: "Write the Changelog" })).toHaveCount(1);
 
-      // A list read that began before a rename must not put the old title back.
-      await page.evaluate(() => {
-        const fixture = window as unknown as { assistantsHoldNextList: () => void; assistantsActivity: () => void };
-        fixture.assistantsHoldNextList();
-        fixture.assistantsActivity();
-      });
-      await expect(page.locator("body")).toHaveAttribute("data-list-held", "true", { timeout: 5_000 });
+      // A rename starts a list read; hold that read, publish another change to the thread while it
+      // is in flight, then let it land. The read began before the change, so the change must stay.
+      await page.evaluate(() => (window as unknown as { assistantsHoldNextList: () => void }).assistantsHoldNextList());
       await page.locator(".assistant-thread-head").getByRole("button", { name: "Thread Actions" }).click();
       await page.getByRole("menuitem", { name: "Rename" }).click();
       const rename = page.getByRole("dialog", { name: "Rename Thread" });
+      await expect(rename.getByRole("textbox", { name: "Title" })).toHaveAttribute("maxlength", "120");
       await rename.getByRole("textbox", { name: "Title" }).fill("Triage Last Night's CI");
       await rename.getByRole("button", { name: "Rename" }).click();
+      await expect(page.locator("body")).toHaveAttribute("data-list-held", "true", { timeout: 5_000 });
       await expect(threadRow(page, "Triage Last Night's CI")).toBeVisible();
+      await page.evaluate(() => (window as unknown as { assistantsThreadStatus: (id: string, status: string) => void })
+        .assistantsThreadStatus("thr_triage", "done"));
+      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveText("Done");
       await page.evaluate(() => (window as unknown as { assistantsReleaseList: () => void }).assistantsReleaseList());
       await page.waitForTimeout(500);
-      await expect(threadRow(page, "Triage Last Night's CI")).toBeVisible();
+      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveText("Done");
       await expect(page.locator(".assistant-thread-head").getByRole("heading", { level: 2 })).toHaveText("Triage Last Night's CI");
     });
 
@@ -144,24 +143,69 @@ for (const theme of ["dark", "light"] as const) {
       }
     });
 
-    test("work launched while the thread streams appears even when the list answers slower than the stream", async ({ page }) => {
+    test("a list read that outlives more changes than the store keeps reads again instead of undoing one", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
-      const cards = page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-card");
-      await expect(cards).toHaveCount(2);
-      await page.waitForTimeout(2_500);
-      // Each list read now takes two seconds while the backing session reports activity every 100ms
-      // for ten seconds: refreshes must wait for the read in flight rather than discard it.
-      await page.evaluate(() => {
+      await expect(threadsList(page).locator("[data-thread-id]")).toHaveCount(3);
+      type Fixture = {
+        assistantsHoldNextList: () => void;
+        assistantsReleaseList: () => void;
+        assistantsThreadStatus: (id: string, status: string) => void;
+        assistantsFlood: (id: string, count: number, spacedMs: number) => Promise<void>;
+      };
+      // A rename starts a list read; hold it, change the triage thread while it is in flight, then
+      // send more changes to another thread than the store keeps, each in its own render.
+      await page.evaluate(() => (window as unknown as Fixture).assistantsHoldNextList());
+      await page.locator(".assistant-thread-head").getByRole("button", { name: "Thread Actions" }).click();
+      await page.getByRole("menuitem", { name: "Rename" }).click();
+      const rename = page.getByRole("dialog", { name: "Rename Thread" });
+      await rename.getByRole("textbox", { name: "Title" }).fill("Triage Last Night's CI");
+      await rename.getByRole("button", { name: "Rename" }).click();
+      await expect(page.locator("body")).toHaveAttribute("data-list-held", "true", { timeout: 5_000 });
+      await page.evaluate(() => (window as unknown as Fixture).assistantsThreadStatus("thr_triage", "done"));
+      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveText("Done");
+      await page.evaluate(() => (window as unknown as Fixture).assistantsFlood("thr_cleanup", 70, 5));
+      // The held read predates the status change, and the store no longer has it to replay: the
+      // read lands, sees that, and reads again rather than leaving the old status in place.
+      await page.evaluate(() => (window as unknown as Fixture).assistantsReleaseList());
+      await page.waitForTimeout(1_000);
+      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveText("Done");
+    });
+
+    test("an archived thread open on its own follows a change the store could not keep", async ({ page }) => {
+      await open(page, theme, "", "/assistants/~dABoAHIAXwByAGUAdABpAHIAZQBkAA");
+      const head = page.locator(".assistant-thread-head");
+      await expect(head.getByRole("heading", { level: 2, name: "Retire the Old Runner" })).toBeVisible();
+      // Its rename and more changes than the store keeps arrive in one render: the list is read
+      // again, and so is the archived thread, which the list leaves out.
+      await page.evaluate(async () => {
         const fixture = window as unknown as {
-          assistantsSlowLists: (ms: number) => void; assistantsLaunch: () => void; assistantsActivity: () => void;
+          assistantsRenameElsewhere: (id: string, title: string) => void;
+          assistantsFlood: (id: string, count: number, spacedMs: number) => Promise<void>;
         };
-        fixture.assistantsSlowLists(2_000);
-        fixture.assistantsLaunch();
-        const timer = window.setInterval(fixture.assistantsActivity, 100);
-        window.setTimeout(() => window.clearInterval(timer), 10_000);
+        fixture.assistantsRenameElsewhere("thr_retired", "Runner Retired in November");
+        await fixture.assistantsFlood("thr_cleanup", 70, 0);
       });
-      await expect(cards).toHaveCount(3, { timeout: 8_000 });
-      await expect(cards.filter({ hasText: "Write the Changelog" })).toHaveCount(1);
+      await expect(head.getByRole("heading", { level: 2, name: "Runner Retired in November" })).toBeVisible({ timeout: 3_000 });
+    });
+
+    test("a link to an archived thread opens it on its own, though the list leaves it out", async ({ page }) => {
+      // thr_retired
+      await open(page, theme, "", "/assistants/~dABoAHIAXwByAGUAdABpAHIAZQBkAA");
+      await expect(threadsList(page).locator("[data-thread-id]")).toHaveCount(3);
+      const head = page.locator(".assistant-thread-head");
+      await expect(head.getByRole("heading", { level: 2, name: "Retire the Old Runner" })).toBeVisible();
+      await expect(head.locator(".status")).toHaveText("Archived");
+    });
+
+    test("someone who isn't an organization owner sees why there are no threads, with nothing to start", async ({ page }) => {
+      await open(page, theme, "threads=owner-only");
+      await expect(threadsList(page).getByText("Threads Are for Owners", { exact: true })).toBeVisible();
+      await expect(threadsList(page)).toContainText("Only an organization owner can use Wollipog Assistant threads.");
+      await expect(page.getByRole("button", { name: "New Thread" })).toHaveCount(0);
+      await expect(page.getByRole("alert")).toHaveCount(0);
+      await expect(page.locator(".assistant-thread-pane")).toBeEmpty();
+      await expectEmptyStateAligned(page);
+      await capture(page, `assistants-owner-only-${theme}-desktop`);
     });
 
     test("New Thread preselects the Orchestrator harness, and rename and archive act on the thread", async ({ page }) => {
@@ -171,6 +215,8 @@ for (const theme of ["dark", "light"] as const) {
       await expect(dialog.getByRole("radio", { name: /Claude Code/ })).toBeChecked();
       await capture(page, `assistants-new-thread-${theme}-desktop`);
       await dialog.getByRole("radio", { name: /Codex/ }).check();
+      // The control plane takes titles of up to 120 characters; the field stops there.
+      await expect(dialog.getByRole("textbox", { name: "Title (Optional)" })).toHaveAttribute("maxlength", "120");
       await dialog.getByRole("textbox", { name: "Title (Optional)" }).fill("Plan the Next Release");
       await dialog.getByRole("button", { name: "Start Thread" }).click();
       await expect(dialog).toHaveCount(0);
@@ -257,6 +303,13 @@ for (const theme of ["dark", "light"] as const) {
       await expect(threadsList(page).getByText("No Threads Yet", { exact: true })).toBeVisible();
       await expectEmptyStateAligned(page);
       await capture(page, `assistants-unavailable-${theme}-mobile`);
+    });
+
+    test("a phone that isn't an owner's sees why there are no threads", async ({ page }) => {
+      await open(page, theme, "threads=owner-only");
+      await expect(threadsList(page).getByText("Threads Are for Owners", { exact: true })).toBeVisible();
+      await expectEmptyStateAligned(page);
+      await capture(page, `assistants-owner-only-${theme}-mobile`);
     });
   });
 }

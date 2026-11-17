@@ -50,6 +50,8 @@ export function assistantThreadRoutes(req: JsonRequest) {
       req<AssistantThreadListResponse>(
         options.includeArchived ? `${ASSISTANT_THREADS_PATH}?includeArchived=true` : ASSISTANT_THREADS_PATH,
       ),
+    /** One thread, archived ones included: what a link to a thread the list leaves out opens. */
+    assistantThread: (threadId: string) => req<AssistantThreadResponse>(threadPath(threadId)),
     assistantThreadDefaults: () => req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults`),
     /** An unsupported runner or harness is refused with 409 and the server's guidance. */
     createAssistantThread: (body: CreateAssistantThreadRequest) =>
@@ -64,9 +66,55 @@ export function assistantThreadRoutes(req: JsonRequest) {
   };
 }
 
-/** Whether a Thread API failure means this control plane has no threads at all (it predates them). */
+/** The longest title the control plane accepts (#4663); the title fields stop there. */
+export const ASSISTANT_THREAD_TITLE_MAX = 120;
+
+/** The body a control plane sends for a route it does not have (its not-found handler). */
+const MISSING_ROUTE_ERROR = "not found";
+
+/**
+ * Whether a Thread API failure means this control plane has no threads at all (it predates them).
+ * A 404 counts only when it is the server's answer for a route it lacks, or carries no body: a
+ * refusal names what was not found ("Machine not found.") and is the person's to read.
+ */
 export function assistantThreadsUnavailable(cause: unknown): boolean {
-  return cause instanceof ApiError && (cause.status === 404 || cause.status === 405 || cause.status === 501);
+  if (!(cause instanceof ApiError)) return false;
+  if (cause.status === 405 || cause.status === 501) return true;
+  if (cause.status !== 404) return false;
+  const error = cause.details?.error;
+  return error === undefined || error === MISSING_ROUTE_ERROR;
+}
+
+/** Whether the person is refused because only an organization owner can use threads (403), with
+ * the control plane's own words for it. */
+export function assistantThreadsOwnerOnly(cause: unknown): string | null {
+  if (!(cause instanceof ApiError) || cause.status !== 403) return null;
+  return cause.message.trim() || "Only an organization owner can use Wollipog Assistant threads.";
+}
+
+/** One thread change the control plane published, numbered in arrival order (the store's log). */
+export interface NumberedAssistantThread {
+  seq: number;
+  thread: AssistantThread;
+}
+
+/**
+ * The list with every event after `afterSeq` applied, in order: a changed thread replaces its row,
+ * a new one joins, and an archived one leaves. Applying the events newer than a read's start to
+ * what the read returned keeps a change that landed while the read was in flight.
+ */
+export function applyAssistantThreadEvents(
+  threads: readonly AssistantThread[],
+  events: readonly NumberedAssistantThread[],
+  afterSeq: number,
+): AssistantThread[] {
+  let next = [...threads];
+  for (const { seq, thread } of events) {
+    if (seq <= afterSeq) continue;
+    next = next.filter((candidate) => candidate.id !== thread.id);
+    if (thread.status !== "archived") next.push(thread);
+  }
+  return sortAssistantThreads(next);
 }
 
 /** The words the person sees for each harness, whatever the server's defaults call them. */

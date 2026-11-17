@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  AssistantThread,
   BoxView,
   ControlPlaneToUi,
   PodContextEntry,
@@ -335,6 +336,14 @@ export function projectCreationRetryAvailable(state: Pick<State, "conn" | "proje
   return state.conn === "online" && state.projectCreationRetrySupported;
 }
 
+/** One `assistant_thread_upsert`, numbered in the order this dashboard received it. */
+export interface AssistantThreadEvent {
+  seq: number;
+  thread: AssistantThread;
+}
+/** Enough for every thread a person keeps between two renders of the Assistants view. */
+export const ASSISTANT_THREAD_EVENTS_KEPT = 64;
+
 export interface State {
   conn: ConnState;
   currentTurnOpeningSupported: boolean;
@@ -421,6 +430,9 @@ export interface State {
   /** The open assistant thread's backing session (#4664): its stream is the thread view's to keep.
    * Absent or null while no thread is open. */
   assistantSessionId?: string | null;
+  /** The newest `assistant_thread_upsert` events (#4663), numbered in arrival order and capped at
+   * `ASSISTANT_THREAD_EVENTS_KEPT`. Absent until the first one arrives. */
+  assistantThreadEvents?: readonly AssistantThreadEvent[];
   filters: Filters;
 }
 
@@ -1247,6 +1259,16 @@ function reducer(state: State, action: Action): State {
             pendingStreamRecovery: null,
           };
           return next;
+        }
+        case "assistant_thread_upsert": {
+          // The newest events only, each numbered: the Assistants view applies every event it has
+          // not seen, including those that land while a list read is in flight (#4664).
+          const previous = state.assistantThreadEvents ?? [];
+          const seq = (previous.at(-1)?.seq ?? 0) + 1;
+          return {
+            ...state,
+            assistantThreadEvents: [...previous.slice(1 - ASSISTANT_THREAD_EVENTS_KEPT), { seq, thread: msg.thread }],
+          };
         }
         case "runner_upsert": {
           const runners = new Map(state.runners);
