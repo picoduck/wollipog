@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from "react";
-import { prioritizedPendingRequests, type SessionView } from "@wollipog/protocol";
+import { useEffect, useState, type ReactNode } from "react";
+import { prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { relativeTime } from "../format.js";
 import { approvalOptionForIntent } from "../inbox.js";
@@ -79,10 +79,29 @@ function AssistantWorkCard({ sessionId }: { sessionId: string }) {
 /** A launched session's waiting request, inline on its card: Approve Once / Deny / Open Session. */
 function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView; requestId: string; onOpen: () => void }) {
   const api = useApi();
-  const { loadSession } = useStoreActions();
+  const { loadSession, beginSessionDetailLoad } = useStoreActions();
   const { showToast } = useFeedback();
   const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
-  const request = prioritizedPendingRequests(session.pendingApproval).find((candidate) => candidate.requestId === requestId);
+  const listed = prioritizedPendingRequests(session.pendingApproval).find((candidate) => candidate.requestId === requestId);
+  // The live list carries summary sessions, whose requests arrive without their options. The card
+  // reads the session's detail once per request and keeps that request's options, so a later
+  // summary upsert of the same request cannot take Approve Once and Deny away again.
+  const [hydrated, setHydrated] = useState<PendingApproval | null>(null);
+  const needsDetail = listed !== undefined && listed.options.length === 0 && listed.kind !== "question" &&
+    hydrated?.requestId !== requestId;
+  useEffect(() => {
+    if (!needsDetail) return;
+    const load = beginSessionDetailLoad(session.id);
+    let current = true;
+    void api.session(session.id).then(({ session: detail }) => {
+      const match = prioritizedPendingRequests(detail.pendingApproval).find((candidate) => candidate.requestId === requestId);
+      if (current && match) setHydrated(match);
+      load.apply(detail);
+    }, () => { /* The card still offers Open Session, where the request can be answered. */ })
+      .finally(() => load.cancel());
+    return () => { current = false; };
+  }, [api, beginSessionDetailLoad, needsDetail, requestId, session.id]);
+  const request = listed && listed.options.length === 0 && hydrated?.requestId === requestId ? hydrated : listed;
   if (!request) return null;
   // Only a request with exactly one once-only option per intent is decided from the card; anything
   // richer (a question, a choice of scopes) is answered in the session, where its context is.

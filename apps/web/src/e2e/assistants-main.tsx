@@ -157,13 +157,22 @@ class FixtureSocket implements UiSocket {
   }
 }
 
+/** A session as the live list carries it: a summary, whose waiting requests have no options. Only
+ * `api.session` returns the detail, as the control plane's summary projection does. */
+function summary(full: SessionView): SessionView {
+  const pending = full.pendingApproval;
+  return { ...structuredClone(full), projection: "summary",
+    pendingApproval: pending ? { ...structuredClone(pending), options: [] } : null } as SessionView;
+}
+
 function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
     runners: [structuredClone(runner)],
     boxes: [],
-    sessions: structuredClone([...sessions.values()]),
+    // The launched sessions arrive as summaries; the backing sessions in full.
+    sessions: [...sessions.values()].map((entry) => launched(entry.id) ? summary(entry) : structuredClone(entry)),
     runs: [],
     pods: [],
   } as UiSnapshotMessage;
@@ -184,10 +193,19 @@ const connection: UiConnectionRuntime = {
   close() {},
 };
 
+function launched(id: string): boolean {
+  return threads.some((candidate) => candidate.launchedSessionIds.includes(id));
+}
+
 function upsert(next: SessionView) {
   sessions.set(next.id, next);
-  socket?.push({ type: "session_upsert", session: structuredClone(next) } as ControlPlaneToUi);
+  socket?.push({ type: "session_upsert", session: launched(next.id) ? summary(next) : structuredClone(next) } as ControlPlaneToUi);
 }
+
+/** `assistantsHoldNextList()`: the next list read answers with the threads as they were when it
+ * began, but only once `assistantsReleaseList()` lets it, as a slow read would. */
+let holdNextList = false;
+let releaseHeldList: (() => void) | null = null;
 
 const unavailable = () => Promise.reject(new ApiError("Not Found", 404));
 const found = (threadId: string) => {
@@ -198,8 +216,14 @@ const found = (threadId: string) => {
 
 const client = {
   ...api,
-  assistantThreads: (options: { includeArchived?: boolean } = {}) => scenario === "unavailable" ? unavailable()
-    : Promise.resolve({ threads: structuredClone(threads.filter((candidate) => options.includeArchived || candidate.status !== "archived")) }),
+  assistantThreads: (options: { includeArchived?: boolean } = {}) => {
+    if (scenario === "unavailable") return unavailable();
+    const read = { threads: structuredClone(threads.filter((candidate) => options.includeArchived || candidate.status !== "archived")) };
+    if (!holdNextList) return Promise.resolve(read);
+    holdNextList = false;
+    document.body.dataset.listHeld = "true";
+    return new Promise((resolve) => { releaseHeldList = () => resolve(read); });
+  },
   assistantThreadDefaults: () => scenario === "unavailable" ? unavailable() : Promise.resolve(structuredClone(defaults)),
   createAssistantThread: async (body: CreateAssistantThreadRequest) => {
     if (scenario === "unavailable") return unavailable();
@@ -247,9 +271,28 @@ const client = {
   runnerSkills: async () => ({ desired: [], reported: null }),
 } as unknown as ApiClient;
 
+/** The triage thread's backing session reports activity without changing its status. */
+function backingActivity() {
+  const backing = sessions.get("sess-triage")!;
+  upsert({ ...backing, messageCount: backing.messageCount + 1, lastEventAt: Date.now(), updatedAt: Date.now() });
+}
+
 Object.assign(window, {
   /** The running launched session finishes, as its stream would report it. */
   assistantsAdvance: () => upsert({ ...sessions.get("sess-flaky")!, status: "completed", updatedAt: Date.now() }),
+  /** Mid-turn, the assistant launches another session: the thread's status stays as it was. */
+  assistantsLaunch: () => {
+    threads = threads.map((candidate) => candidate.id === "thr_triage"
+      ? { ...candidate, launchedSessionIds: [...candidate.launchedSessionIds, "sess-changelog"] } : candidate);
+    upsert(session("sess-changelog", "Write the Changelog", { status: "running", updatedAt: Date.now() }));
+    backingActivity();
+  },
+  assistantsActivity: backingActivity,
+  assistantsHoldNextList: () => { holdNextList = true; },
+  assistantsReleaseList: () => {
+    releaseHeldList?.();
+    releaseHeldList = null;
+  },
 });
 
 /** The harness page's own URL scheme: the SPA path rides in `?path=`. */

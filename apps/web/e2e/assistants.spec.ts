@@ -77,6 +77,41 @@ for (const theme of ["dark", "light"] as const) {
       await expect(page).toHaveURL(/path=%2Fsessions%2F(~|%7E)/);
     });
 
+    test("work launched mid-turn appears without a status change, and a rename outlasts an older list read", async ({ page }) => {
+      const open_ = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
+      await open(page, theme, "", open_);
+      const cards = page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-card");
+      await expect(cards).toHaveCount(2);
+      // The launched sessions arrive as summaries, without their requests' options: the card reads
+      // the detail and still offers the inline approval.
+      await expect(cards.nth(1).getByRole("button", { name: "Approve Once" })).toBeVisible();
+
+      // The backing session keeps its status while the assistant launches more work. The page's own
+      // first refresh settles first, so only the launch's activity can bring the new card.
+      await page.waitForTimeout(2_500);
+      await page.evaluate(() => (window as unknown as { assistantsLaunch: () => void }).assistantsLaunch());
+      await expect(cards).toHaveCount(3, { timeout: 5_000 });
+      await expect(cards.nth(2)).toContainText("Write the Changelog");
+
+      // A list read that began before a rename must not put the old title back.
+      await page.evaluate(() => {
+        const fixture = window as unknown as { assistantsHoldNextList: () => void; assistantsActivity: () => void };
+        fixture.assistantsHoldNextList();
+        fixture.assistantsActivity();
+      });
+      await expect(page.locator("body")).toHaveAttribute("data-list-held", "true", { timeout: 5_000 });
+      await page.locator(".assistant-thread-head").getByRole("button", { name: "Thread Actions" }).click();
+      await page.getByRole("menuitem", { name: "Rename" }).click();
+      const rename = page.getByRole("dialog", { name: "Rename Thread" });
+      await rename.getByRole("textbox", { name: "Title" }).fill("Triage Last Night's CI");
+      await rename.getByRole("button", { name: "Rename" }).click();
+      await expect(threadRow(page, "Triage Last Night's CI")).toBeVisible();
+      await page.evaluate(() => (window as unknown as { assistantsReleaseList: () => void }).assistantsReleaseList());
+      await page.waitForTimeout(500);
+      await expect(threadRow(page, "Triage Last Night's CI")).toBeVisible();
+      await expect(page.locator(".assistant-thread-head").getByRole("heading", { level: 2 })).toHaveText("Triage Last Night's CI");
+    });
+
     test("New Thread preselects the Orchestrator harness, and rename and archive act on the thread", async ({ page }) => {
       await open(page, theme);
       await page.getByRole("button", { name: "New Thread" }).first().click();

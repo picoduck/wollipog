@@ -31,8 +31,10 @@ import { useIsMobile } from "./useIsMobile.js";
 /** The one assistant today; the section lists it first and names its threads under it. */
 const WOLLIPOG_ASSISTANT = "Wollipog Assistant";
 const ASSISTANTS = destination("assistants");
-/** A burst of session events refetches the threads once (#4663 adds a thread-updated event). */
-const REFETCH_DEBOUNCE_MS = 750;
+/** Session activity refetches the threads at most this often (#4663 adds a thread-updated event). */
+const REFETCH_THROTTLE_MS = 1_500;
+/** How often the list is read while a thread is working, whatever its sessions report. */
+const WORKING_POLL_MS = 15_000;
 
 type ListState =
   | { kind: "loading" }
@@ -108,21 +110,41 @@ export function AssistantsView({ threadId, rightPanel }: {
   }, [api, threadId, list.kind, listed]);
 
   // Until #4663's thread-updated event, a thread changes when its sessions do: refetch on their
-  // stream, once per burst.
+  // stream. A backing session's activity counts too, since the assistant launches work in the middle
+  // of a turn without changing its own status. Throttled rather than debounced, so a turn that
+  // streams for minutes still refreshes its thread every few seconds instead of never.
+  const backingIds = useMemo(() => new Set(threads.map((thread) => thread.sessionId)), [threads]);
   const watchedIds = useMemo(() => threads.flatMap((thread) => [thread.sessionId, ...thread.launchedSessionIds]), [threads]);
   const streamKey = useStoreSelector((state) => watchedIds.map((id) => {
     const session = state.sessions.get(id);
-    return session ? `${id}:${session.status}:${session.pendingApproval?.requestId ?? ""}:${session.archived ? 1 : 0}` : id;
+    if (!session) return id;
+    const activity = backingIds.has(id) ? `:${session.messageCount}:${session.lastEventAt ?? session.updatedAt}` : "";
+    return `${id}:${session.status}:${session.pendingApproval?.requestId ?? ""}:${session.archived ? 1 : 0}${activity}`;
   }).join("|"));
   const firstKey = useRef(true);
+  const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (firstKey.current) {
       firstKey.current = false;
       return;
     }
-    const timer = setTimeout(() => void load(), REFETCH_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
+    if (refetchTimer.current !== null) return;
+    refetchTimer.current = setTimeout(() => {
+      refetchTimer.current = null;
+      void load();
+    }, REFETCH_THROTTLE_MS);
   }, [streamKey, load]);
+  // While a thread works, read the list now and then even without session activity: a launch can
+  // land between events.
+  const working = threads.some((thread) => thread.status === "working");
+  useEffect(() => {
+    if (!working) return;
+    const timer = setInterval(() => void load(), WORKING_POLL_MS);
+    return () => clearInterval(timer);
+  }, [working, load]);
+  useEffect(() => () => {
+    if (refetchTimer.current !== null) clearTimeout(refetchTimer.current);
+  }, []);
 
   // The open thread's backing session streams live while it is open.
   const backingSessionId = selected?.sessionId ?? null;
@@ -131,6 +153,8 @@ export function AssistantsView({ threadId, rightPanel }: {
     return () => dispatch({ type: "assistant_thread_session", sessionId: null });
   }, [dispatch, backingSessionId]);
 
+  /** Shows a mutation's result at once, then reads the list again. The read supersedes any read
+   * still in flight, which began before the mutation and would otherwise put the old thread back. */
   const replace = (thread: AssistantThread) => {
     setList((previous) => previous.kind !== "ready" ? previous : {
       kind: "ready",
@@ -138,6 +162,7 @@ export function AssistantsView({ threadId, rightPanel }: {
         ? previous.threads.filter((candidate) => candidate.id !== thread.id)
         : [thread, ...previous.threads.filter((candidate) => candidate.id !== thread.id)]),
     });
+    void load();
   };
 
   const openThread = (id: string) => navigate({ name: "assistants", threadId: id });
