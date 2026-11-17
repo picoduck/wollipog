@@ -45,6 +45,12 @@ type ListState =
   | { kind: "ownerOnly"; message: string }
   | { kind: "failed"; message: string };
 
+/** Whether the store still holds every event after `afterSeq`: none was dropped from the front of
+ * its capped log before this reader could apply it. */
+function replayComplete(kept: readonly { seq: number }[], afterSeq: number): boolean {
+  return kept.length === 0 || kept[0]!.seq <= afterSeq + 1;
+}
+
 /** Why New Thread can't start one here, when the list already knows. */
 function newThreadBlock(list: ListState): { title: string; message: string } | undefined {
   if (list.kind === "unavailable") return { title: "Threads Aren't Available Yet", message: THREADS_UNAVAILABLE_MESSAGE };
@@ -98,6 +104,9 @@ export function AssistantsView({ threadId, rightPanel }: {
         const kept = eventsRef.current ?? [];
         setList({ kind: "ready", threads: applyAssistantThreadEvents(threads, kept, startSeq) });
         appliedSeq.current = Math.max(appliedSeq.current, kept.at(-1)?.seq ?? 0);
+        // More changed during the read than the store kept: what was dropped may be one this read
+        // predates, so read again once this one has landed.
+        if (!replayComplete(kept, startSeq)) rereadQueued.current = true;
       }
     } catch (cause) {
       if (mine !== generation.current) return;
@@ -139,17 +148,24 @@ export function AssistantsView({ threadId, rightPanel }: {
     selected ? assistantThreadTitle(selected) : null,
   );
 
-  // A deep link to a thread the list doesn't carry (an archived one): read that thread alone.
+  // A deep link to a thread the list doesn't carry (an archived one): read that thread alone, and
+  // again whenever the event log can no longer say what changed it (`extraRevision`).
+  const [extraRevision, setExtraRevision] = useState(0);
   useEffect(() => {
     setMissing(false);
     if (threadId === undefined || list.kind !== "ready" || listed) return;
     let current = true;
+    const startSeq = eventsRef.current?.at(-1)?.seq ?? 0;
     void api.assistantThread(threadId).then(({ thread }) => {
       if (!current) return;
-      setExtra(thread);
+      // As for the list: a change published while the read was in flight is newer than the read.
+      const kept = eventsRef.current ?? [];
+      const newer = [...kept].reverse().find((event) => event.seq > startSeq && event.thread.id === thread.id);
+      setExtra(newer ? newer.thread : thread);
+      if (!replayComplete(kept, startSeq)) setExtraRevision((revision) => revision + 1);
     }, () => { if (current) setMissing(true); });
     return () => { current = false; };
-  }, [api, threadId, list.kind, listed]);
+  }, [api, threadId, list.kind, listed, extraRevision]);
 
   // Thread changes arrive as events: status, title, activity and each session the assistant
   // launches. Applied in order to the rows on screen, and to an archived thread open on its own.
@@ -159,9 +175,11 @@ export function AssistantsView({ threadId, rightPanel }: {
     const newest = kept.at(-1)?.seq ?? 0;
     if (newest <= from) return;
     appliedSeq.current = newest;
-    // More changed than the store kept since the last render: the list itself is the answer.
-    if ((kept[0]?.seq ?? 0) > from + 1) {
+    // More changed than the store kept since the last render: the list itself is the answer, and an
+    // archived thread open on its own, which the list leaves out, is read again too.
+    if (!replayComplete(kept, from)) {
       refresh();
+      setExtraRevision((revision) => revision + 1);
       return;
     }
     setList((previous) => previous.kind !== "ready" ? previous

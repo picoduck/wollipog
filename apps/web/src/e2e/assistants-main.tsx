@@ -328,6 +328,35 @@ Object.assign(window, {
     publish(threads.find((candidate) => candidate.id === "thr_triage")!);
   },
   assistantsActivity: backingActivity,
+  /** A thread is renamed elsewhere and the control plane publishes it. */
+  assistantsRenameElsewhere: (threadId: string, title: string) => {
+    threads = threads.map((candidate) => candidate.id === threadId ? { ...candidate, title } : candidate);
+    publish(threads.find((candidate) => candidate.id === threadId)!);
+  },
+  /** `count` more changes to one thread: `spacedMs` apart so the page renders between them, or all
+   * in one task (0) so the page sees them in a single render. Resolves once the last is published. */
+  assistantsFlood: (threadId: string, count: number, spacedMs: number) => new Promise<void>((resolve) => {
+    let sent = 0;
+    const next = () => {
+      const current = threads.find((candidate) => candidate.id === threadId)!;
+      const changed = { ...current, lastActivityAt: current.lastActivityAt + 1 };
+      threads = threads.map((candidate) => candidate.id === threadId ? changed : candidate);
+      publish(changed);
+      sent += 1;
+    };
+    if (spacedMs === 0) {
+      while (sent < count) next();
+      resolve();
+      return;
+    }
+    const timer = window.setInterval(() => {
+      next();
+      if (sent >= count) {
+        window.clearInterval(timer);
+        resolve();
+      }
+    }, spacedMs);
+  }),
   /** A thread's status changes and the control plane publishes it, without any list read. */
   assistantsThreadStatus: (threadId: string, status: AssistantThread["status"]) => {
     threads = threads.map((candidate) => candidate.id === threadId ? { ...candidate, status } : candidate);

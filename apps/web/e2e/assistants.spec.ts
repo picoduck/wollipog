@@ -143,6 +143,51 @@ for (const theme of ["dark", "light"] as const) {
       }
     });
 
+    test("a list read that outlives more changes than the store keeps reads again instead of undoing one", async ({ page }) => {
+      await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
+      await expect(threadsList(page).locator("[data-thread-id]")).toHaveCount(3);
+      type Fixture = {
+        assistantsHoldNextList: () => void;
+        assistantsReleaseList: () => void;
+        assistantsThreadStatus: (id: string, status: string) => void;
+        assistantsFlood: (id: string, count: number, spacedMs: number) => Promise<void>;
+      };
+      // A rename starts a list read; hold it, change the triage thread while it is in flight, then
+      // send more changes to another thread than the store keeps, each in its own render.
+      await page.evaluate(() => (window as unknown as Fixture).assistantsHoldNextList());
+      await page.locator(".assistant-thread-head").getByRole("button", { name: "Thread Actions" }).click();
+      await page.getByRole("menuitem", { name: "Rename" }).click();
+      const rename = page.getByRole("dialog", { name: "Rename Thread" });
+      await rename.getByRole("textbox", { name: "Title" }).fill("Triage Last Night's CI");
+      await rename.getByRole("button", { name: "Rename" }).click();
+      await expect(page.locator("body")).toHaveAttribute("data-list-held", "true", { timeout: 5_000 });
+      await page.evaluate(() => (window as unknown as Fixture).assistantsThreadStatus("thr_triage", "done"));
+      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveText("Done");
+      await page.evaluate(() => (window as unknown as Fixture).assistantsFlood("thr_cleanup", 70, 5));
+      // The held read predates the status change, and the store no longer has it to replay: the
+      // read lands, sees that, and reads again rather than leaving the old status in place.
+      await page.evaluate(() => (window as unknown as Fixture).assistantsReleaseList());
+      await page.waitForTimeout(1_000);
+      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveText("Done");
+    });
+
+    test("an archived thread open on its own follows a change the store could not keep", async ({ page }) => {
+      await open(page, theme, "", "/assistants/~dABoAHIAXwByAGUAdABpAHIAZQBkAA");
+      const head = page.locator(".assistant-thread-head");
+      await expect(head.getByRole("heading", { level: 2, name: "Retire the Old Runner" })).toBeVisible();
+      // Its rename and more changes than the store keeps arrive in one render: the list is read
+      // again, and so is the archived thread, which the list leaves out.
+      await page.evaluate(async () => {
+        const fixture = window as unknown as {
+          assistantsRenameElsewhere: (id: string, title: string) => void;
+          assistantsFlood: (id: string, count: number, spacedMs: number) => Promise<void>;
+        };
+        fixture.assistantsRenameElsewhere("thr_retired", "Runner Retired in November");
+        await fixture.assistantsFlood("thr_cleanup", 70, 0);
+      });
+      await expect(head.getByRole("heading", { level: 2, name: "Runner Retired in November" })).toBeVisible({ timeout: 3_000 });
+    });
+
     test("a link to an archived thread opens it on its own, though the list leaves it out", async ({ page }) => {
       // thr_retired
       await open(page, theme, "", "/assistants/~dABoAHIAXwByAGUAdABpAHIAZQBkAA");
