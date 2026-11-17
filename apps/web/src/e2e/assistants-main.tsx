@@ -30,7 +30,7 @@ import "../styles.css";
  * `?threads=empty` one with no threads yet, and the default three threads, the first of which
  * launched two sessions, one of them waiting on a tool approval. The SPA path rides in `?path=`.
  * `window.assistantsAdvance()` finishes the running launched session, as its stream would.
- * `?confirm=1` gives the first thread an owner confirmation waiting for its owner (#4665).
+ * `?confirm=N` (1–3) gives the first thread N owner confirmations waiting for its owner (#4665).
  */
 const SCOPE = "assistants-e2e";
 const params = new URLSearchParams(location.search);
@@ -111,18 +111,25 @@ const sessions = new Map<string, SessionView>([
 
 const access = { level: "full_access", destructive: "ask" } as const;
 
-/** `?confirm=1` (#4665): the first thread's assistant asked to stop a session it launched, and
- * waits for its owner. Approve Once and Deny settle it and republish the thread. */
-function stopConfirmation(): AssistantOwnerConfirmation {
+/** `?confirm=N` (#4665): the first thread's assistant asked for N destructive commands (1–3) and waits
+ * for its owner: stop a session it launched, archive another, then stop a third. Approve Once and
+ * Deny settle one and republish the thread. */
+function confirmation(index: number): AssistantOwnerConfirmation {
+  const stop = index !== 1;
+  const [sessionId, label, worktree] = [["sess-flaky", "Fix the Flaky Upload Test", "flaky-upload"],
+    ["sess-deps", "Bump the Vite Group", "bump-vite"], ["sess-release", "Ship the Release Notes", "release-notes"]][index]!;
   return {
-    id: "aoc_stop_flaky", threadId: "thr_triage", operation: "session_stop", title: "Stop Session",
-    summary: "Stops the session. Its transcript is kept, but it takes no further messages until it is restarted.",
-    target: { kind: "session", id: "sess-flaky", label: "Fix the Flaky Upload Test" },
-    impact: [{ label: "Status", value: "Running" }, { label: "Worktree Path", value: "/repos/wollipog/.worktrees/flaky-upload" }],
-    arguments: [{ label: "sessionId", value: "sess-flaky" }],
-    status: "pending", createdAt: NOW - minute, expiresAt: NOW + 59 * minute, resolvedAt: null,
+    id: `aoc_${index}_${sessionId}`, threadId: "thr_triage", operation: stop ? "session_stop" : "session_archive",
+    title: stop ? "Stop Session" : "Archive Session",
+    summary: stop ? "Stops the session. Its transcript is kept, but it takes no further messages until it is restarted."
+      : "Stops the session if it is running, then archives it. Its transcript is kept, and it can be unarchived later.",
+    target: { kind: "session", id: sessionId!, label: label! },
+    impact: [{ label: "Status", value: "Running" }, { label: "Worktree Path", value: `/repos/wollipog/.worktrees/${worktree}` }],
+    arguments: [{ label: "sessionId", value: sessionId! }],
+    status: "pending", createdAt: NOW - minute + index, expiresAt: NOW + 59 * minute, resolvedAt: null,
   };
 }
+const confirmationCount = Math.min(3, Math.max(0, Number(params.get("confirm") ?? 0) || 0));
 function thread(id: string, sessionId: string, overrides: Partial<AssistantThread>): AssistantThread {
   const backing = sessions.get(sessionId)!;
   return {
@@ -134,7 +141,7 @@ function thread(id: string, sessionId: string, overrides: Partial<AssistantThrea
 
 let threads: AssistantThread[] = scenario === "some" ? [
   thread("thr_triage", "sess-triage", { status: "needs_you", launchedSessionIds: ["sess-flaky", "sess-deps"], lastActivityAt: NOW - minute,
-    ...(params.get("confirm") === "1" ? { confirmations: [stopConfirmation()] } : {}) }),
+    ...(confirmationCount > 0 ? { confirmations: Array.from({ length: confirmationCount }, (_unused, index) => confirmation(index)) } : {}) }),
   thread("thr_release", "sess-release", { status: "working", harness: "codex", lastActivityAt: NOW - 3 * minute }),
   thread("thr_cleanup", "sess-cleanup", { status: "done" }),
   // Archived: the list leaves it out, and a link to it opens it on its own.

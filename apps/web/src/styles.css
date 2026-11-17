@@ -7434,16 +7434,19 @@ body.shell-dock-dragging * {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-/* A thread's pending requests, in their own list ahead of its work cards (AssistantWorkCards). They
-   keep a readable width and their whole height and never scroll, so an owner's action never sits at
-   a scroll edge; on a phone (below) they stack above the work cards' capped column. */
+/* A thread's pending requests, in their own list ahead of its work cards (AssistantWorkCards). Each
+   keeps a readable width and its whole height. On desktop the list takes at most 60% of the row and
+   scrolls sideways when several are waiting, so the work cards keep the rest. On a phone (below) they
+   stack above the work cards, and the whole area scrolls within a bound. */
 .assistant-work-confirmations {
   display: flex;
-  flex: none;
+  flex: 0 1 auto;
   gap: var(--space-2);
-  max-width: 100%;
+  min-width: min(440px, 100%);
+  max-width: 60%;
   margin: 0;
   padding: 0 0 var(--space-1);
+  overflow-x: auto;
   list-style: none;
 }
 .assistant-work-confirmations > .request-card {
@@ -7456,8 +7459,27 @@ body.shell-dock-dragging * {
   overflow: visible;
 }
 @media (max-width: 760px) {
-  .assistant-work-confirmations { flex-direction: column; padding: 0; }
+  .assistant-work-confirmations {
+    flex: none;
+    flex-direction: column;
+    min-width: 0;
+    max-width: none;
+    padding: 0;
+    overflow: visible;
+  }
   .assistant-work-confirmations > .request-card { width: auto; }
+  /* With requests waiting, the requests and work cards scroll together in one area tall enough to
+     show a whole request and the start of what follows, so every action stays reachable and the
+     transcript and composer keep their room. */
+  .assistant-work:has(> .assistant-work-confirmations) {
+    max-height: 60vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .assistant-work:has(> .assistant-work-confirmations) > .assistant-work-cards {
+    max-height: none;
+    overflow-y: visible;
+  }
 }
 /* The card in a side panel's detail (#2206): flush on the panel, with no wash or frame, a title-sized
    heading, and its footer stuck to the panel's lower edge above a hairline. The detail scrolls as one
