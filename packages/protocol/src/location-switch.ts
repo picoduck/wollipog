@@ -15,8 +15,11 @@ export type LocationSwitchAction = "switch" | "new_session";
 export type LocationSwitchRole = "offer" | "orchestrator" | "report_to_parent";
 
 /** The role split, from the two facts every caller has: the session's role and whether it has a parent. */
-export function locationSwitchRole(session: { role: "normal" | "orchestrator"; parentSessionId?: string | null }): LocationSwitchRole {
+export function locationSwitchRole(session: { role: "normal" | "orchestrator" | "assistant"; parentSessionId?: string | null }): LocationSwitchRole {
   if (session.role === "orchestrator") return "orchestrator";
+  // An Assistant thread's session works across Locations through its thread's tools; it never
+  // moves itself, so it reports the mismatch to its owner like a child reports to its parent.
+  if (session.role === "assistant") return "report_to_parent";
   return session.parentSessionId ? "report_to_parent" : "offer";
 }
 

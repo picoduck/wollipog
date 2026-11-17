@@ -1,0 +1,75 @@
+/** Wollipog Assistant threads (#4663). A thread is the owner's conversation with the built-in
+ * assistant; its transcript and composer are the backing `assistant`-role session's own routes.
+ * These views never carry a credential value or hash. */
+
+/** The harnesses a thread can run on. `codex` selects a runner's Codex agent (App Server when
+ * installed, otherwise the Codex CLI driver). */
+export type AssistantThreadHarness = "claude-code" | "codex";
+export const ASSISTANT_THREAD_HARNESSES: readonly AssistantThreadHarness[] = ["claude-code", "codex"];
+
+/** `needs_you` while the backing session (or, later, a pending owner request bound to the thread)
+ * awaits the owner; `working` while it runs; `done` when idle; `archived` after archive. */
+export type AssistantThreadStatus = "working" | "needs_you" | "done" | "archived";
+
+/** The only assistant today. Outside assistants arrive later as Activity, not threads. */
+export type AssistantThreadAssistant = "wollipog";
+
+export interface AssistantThreadAccess {
+  level: "full_access";
+  /** Destructive Assistant operations require a confirmation the assistant cannot give itself. */
+  destructive: "ask";
+}
+
+export interface AssistantThread {
+  /** `thr_…` */
+  id: string;
+  assistant: AssistantThreadAssistant;
+  title: string;
+  harness: AssistantThreadHarness;
+  /** Backing session, role `assistant`. */
+  sessionId: string;
+  status: AssistantThreadStatus;
+  access: AssistantThreadAccess;
+  /** The thread-scoped Assistant connection, once minted. Null until the runner proxy holds one. */
+  connectionId: string | null;
+  /** Sessions this thread's assistant launched, oldest first. */
+  launchedSessionIds: string[];
+  lastActivityAt: number;
+  createdAt: number;
+  archivedAt: number | null;
+}
+
+export interface AssistantThreadListResponse { threads: AssistantThread[] }
+export interface AssistantThreadResponse { thread: AssistantThread }
+
+export interface CreateAssistantThreadRequest {
+  /** Defaults to the owner's saved Orchestrator Child Harness, else Claude Code. */
+  harness?: AssistantThreadHarness;
+  title?: string;
+  /** Defaults to an online Machine the owner can use that supports the role and harness. */
+  runnerId?: string;
+  /** A Location on `runnerId`; defaults to the Machine's first one the owner can use. */
+  workspaceId?: string;
+}
+
+export interface UpdateAssistantThreadRequest { title: string }
+
+export interface AssistantThreadHarnessOption {
+  id: AssistantThreadHarness;
+  label: string;
+  available: boolean;
+  /** Present when unavailable: what the owner can do about it. */
+  reason?: string;
+}
+
+export interface AssistantThreadDefaultsResponse {
+  harness: AssistantThreadHarness;
+  harnesses: AssistantThreadHarnessOption[];
+}
+
+/** Runner launch marker for an `assistant`-role session. The runner launches it without the
+ * general Wollipog agent-control server and CLI, and refuses the marker on a harness it cannot
+ * launch that way. */
+export interface AssistantLaunchPolicy {
+  threadId: string;
+}

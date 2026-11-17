@@ -282,6 +282,9 @@ export interface SessionMeta {
   /** v276 (#4074): a delegated image evidence reviewer. Every launch of it restricts the harness to
    * the two review tools, and it is never relaunched without this marker. */
   uiEvidenceReviewer?: { reviewId: string };
+  /** v383 (#4663): an Assistant thread's session. Sticky: once set, every relaunch keeps it, so
+   * the session never relaunches as an ordinary one with the general agent-control server. */
+  assistant?: import("@wollipog/protocol").AssistantLaunchPolicy;
   /** A review session (#3368): what it reviews, its runner-owned checkout, the runner process that
    * launched it (a review session is never relaunched by another), and its one outcome. */
   review?: import("@wollipog/protocol").ReviewLaunchPolicy & {

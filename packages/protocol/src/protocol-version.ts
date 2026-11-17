@@ -1499,6 +1499,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 382: pull request merge readiness and the gated enqueue/direct merge action (#604).
   382,
   // v383 slot
+  // 383: Wollipog Assistant threads and the assistant session role (#4663).
+  383,
   // v384 slot
   // v385 slot
   // v386 slot
