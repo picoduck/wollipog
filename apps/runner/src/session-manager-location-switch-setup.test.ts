@@ -4131,8 +4131,12 @@ test("a requested worktree stored before ids came from the whole path keeps its 
     const requesting = h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/stored" });
     await answerTrust(h, "trust");
     const { worktree } = await requesting;
+    // Activation returns before the provider rebind. Finish that launch before selecting back:
+    // otherwise the old provider still has `moved` as its cwd while a launch holds the new id.
+    await waitFor(() => h.providers.at(-1)?.cwd === worktree.path && !h.providers.at(-1)?.disposed && meta().status === "idle",
+      "the requested worktree provider did not launch");
     await h.manager.selectWorktree(h.sessionId, moved);
-    await waitFor(() => meta().worktreePath === moved && h.providers.at(-1)?.cwd === moved && meta().status === "idle",
+    await waitFor(() => meta().worktreePath === moved && h.providers.at(-1)?.cwd === moved && !h.providers.at(-1)?.disposed && meta().status === "idle",
       "the session did not go back to its switch worktree");
 
     // As an earlier runner stored it: under the branch-only slot, with everything keyed by that.
@@ -4156,7 +4160,7 @@ test("a requested worktree stored before ids came from the whole path keeps its 
     assert.deepEqual(allocator.get(`${h.sessionId}\0${oldId}`), block, "and its port block");
     assert.equal(allocator.get(`${h.sessionId}\0${worktree.id}`), undefined, "with none made under a new id");
     await h.manager.selectWorktree(h.sessionId, moved);
-    await waitFor(() => meta().worktreePath === moved && h.providers.at(-1)?.cwd === moved && meta().status === "idle",
+    await waitFor(() => meta().worktreePath === moved && h.providers.at(-1)?.cwd === moved && !h.providers.at(-1)?.disposed && meta().status === "idle",
       "the session did not go back to its switch worktree again");
     await h.manager.discardWorktree(h.sessionId, worktree.path);
     assert.equal(existsSync(worktree.path), false);
