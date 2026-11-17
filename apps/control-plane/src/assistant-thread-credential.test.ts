@@ -41,7 +41,7 @@ async function harness(protocolVersion = PROTOCOL_VERSION) {
   const operations = createAssistantOperations(db);
   registerAssistantSessionOperations(operations, db, svc);
   // Operations a thread may not call; registered here only to reach the gate.
-  for (const name of ["auto_create", "session_role", "session_adopt", "workflow_run"]) {
+  for (const name of ["auto_create", "session_role", "session_adopt", "session_fork", "workflow_run"]) {
     operations.register({ name, description: "fixture", inputSchema: { type: "object" }, metadata: true,
       resolveTarget: () => ({ kind: "fixture", id: name }), ownerCanAccess: () => true, execute: () => ({ done: true }) });
   }
@@ -268,7 +268,7 @@ test("a thread cannot schedule work or start runs that would escape its limits",
     assert.equal(scheduled.result.isError, true);
     assert.match(scheduled.result.content[0].text, /cannot call auto_create/);
     const issued = h.db.assistantConnections.create(h.owner, "Outside Assistant", { operations: "all", projects: "all" });
-    for (const name of ["session_role", "session_adopt", "workflow_run"]) {
+    for (const name of ["session_role", "session_adopt", "session_fork", "workflow_run"]) {
       assert.throws(() => h.operations.authorize(thread.connectionId!, name, { kind: "fixture", id: name }), /Wollipog Assistant thread cannot call/u, name);
       assert.doesNotThrow(() => h.operations.authorize(issued.connection.id, name, { kind: "fixture", id: name }), name);
     }

@@ -58,8 +58,8 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
 
 - The backing session's own cost budget is the thread budget ($25).
 - While a thread's Assistant call executes, every session it creates counts as a launch of that
-  thread. This covers `session_launch`, forks, side chats and campaign launches, all of which
-  pass through session creation inside the call. A launch is refused with a message to the
+  thread. This covers `session_launch`, side chats and every other operation that passes through
+  session creation inside the call. A launch is refused with a message to the
   assistant once the thread has launched 10 sessions, or once the budget is spent or committed.
   The backing session's spend counts, and each launched session counts as the larger of its
   whole tree's spend (with every descendant) and its own cost cap. Each launched session is capped
@@ -68,8 +68,9 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
 - A thread cannot start runs, workflows or Orchestrators, whose children it could not count.
   This holds even when an Orchestrator would come from a saved default. Its connection also
   cannot call `auto_create`, `auto_update`, `auto_enable`, `auto_test`, `workflow_run`,
-  `session_role` or `session_adopt`, since scheduled work, a converted role or an adopted
-  session would run outside these limits. The owner can still do any of these directly.
+  `session_role`, `session_adopt` or `session_fork`, since scheduled work, a converted role, an
+  adopted session or a fork (materialized on the runner without that session creation) would run
+  outside these limits. The owner can still do any of these directly.
 - `usage` on the thread view reports both limits and what the thread has used of them.
   `launchedSessionIds` lists the sessions it launched.
 
