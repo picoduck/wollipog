@@ -290,7 +290,7 @@ import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
 import { registerAssistantRoutes } from "./assistant-routes.js";
 import { registerAssistantThreadRoutes } from "./assistant-thread-routes.js";
-import { createAssistantThreads } from "./assistant-threads.js";
+import { createAssistantOwnerConfirmationService, createAssistantThreads } from "./assistant-threads.js";
 import { registerAssistantConnectionOperations } from "./assistant-connection-operations.js";
 import { createSessionWorktreeManagement } from "./session-worktree-management.js";
 import { OwnerManagement, type OwnerManagementReply } from "./owner-management.js";
@@ -2498,7 +2498,7 @@ const {operations: assistantOperations, ingress: assistantDiscordIngress, receip
 export { assistantOperations };
 const assistantManagementMutations = new ManagementMutations(assistantCommandReceipts, db.instanceId(), assistantRequestDigest,
   id => db.assistantConnections.get(id)!, id => db.assistantConnections.destructiveConfirmation(id),
-  new AssistantCommandConfirmations(db.raw()));
+  new AssistantCommandConfirmations(db.raw(), db.assistantOwnerConfirmations));
 registerAssistantAutomations(assistantOperations, db, automations, assistantManagementMutations);
 registerAssistantTriggerParity(assistantOperations, db, automations, assistantManagementMutations);
 registerAssistantSkills(assistantOperations, {db, hub, requestHuman, requestPrincipal, pushSkillsSync}, assistantManagementMutations);
@@ -2508,7 +2508,8 @@ registerAssistantSkillParity(assistantOperations, extendedSkillsDeps, extendedSk
 registerAssistantConnectionOperations(assistantOperations, {db, outbound: outboundEvents, receipts: assistantCommandReceipts});
 registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });
 const assistantThreads = createAssistantThreads(db, hub, svc);
-registerAssistantThreadRoutes(app, { threads: assistantThreads, requestHuman });
+const assistantOwnerConfirmations = createAssistantOwnerConfirmationService(db, svc, assistantOperations);
+registerAssistantThreadRoutes(app, { threads: assistantThreads, confirmations: assistantOwnerConfirmations, requestHuman });
 registerAssistantWorkOwnerRoutes(app, { db, outboundEvents, requestHuman });
 registerAssistantDiscordIngress(app, { db, ingress: assistantDiscordIngress, requestHuman });
 
@@ -6060,6 +6061,21 @@ const automationTimer = setInterval(() => {
       "automation tick deferred");
   }
 }, 5_000);
+// Assistant thread confirmations (#4665): an approval whose run a restart interrupted finishes
+// once every operation is registered, an unanswered request expires on time, and an outcome its
+// assistant could not be told yet (its runner offline) is retried.
+void assistantOwnerConfirmations.resumeInterrupted().catch((error) => {
+  app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "assistant confirmation recovery deferred");
+});
+const assistantConfirmationTimer = setInterval(() => {
+  try {
+    assistantOwnerConfirmations.expireDue();
+    assistantOwnerConfirmations.deliverNotices();
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "assistant confirmation expiry deferred");
+  }
+}, 15_000);
+assistantConfirmationTimer.unref();
 void outboundEvents.tick().catch((error) => {
   app.log.warn({ error: error instanceof Error ? error.message : String(error) },
     "outbound event recovery deferred");
@@ -6225,6 +6241,7 @@ app.addHook("onClose", async () => {
   mergeClosureWatcher.dispose();
   clearInterval(workflowRecoveryTimer);
   clearInterval(automationTimer);
+  clearInterval(assistantConfirmationTimer);
   clearInterval(outboundEventTimer);
   clearInterval(outboundCheckTimer);
   clearInterval(skillGitAutoUpdateTimer);

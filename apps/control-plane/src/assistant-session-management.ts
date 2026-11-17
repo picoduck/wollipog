@@ -20,7 +20,7 @@ export class AssistantSessionManagement {
   private confirmations: AssistantCommandConfirmations;
   constructor(readonly operations: AssistantOperations, readonly db: ControlPlaneDb, readonly receipts: AssistantCommandReceipts) {
     AssistantCommandConfirmations.install(db.raw());
-    this.confirmations = new AssistantCommandConfirmations(db.raw());
+    this.confirmations = new AssistantCommandConfirmations(db.raw(), db.assistantOwnerConfirmations);
   }
   target = (value: unknown): AssistantTarget => {
     const s = this.db.getSession(sessionArgumentText(sessionArgumentObject(value), "sessionId"));
@@ -76,7 +76,7 @@ export class AssistantSessionManagement {
         const binding = {connectionId: current.id, grantRevision: current.revision, operation: spec.name,
           argumentsDigest, targetDigest: assistantRequestDigest(impact)};
         const confirm = spec.destructive && db.assistantConnections.destructiveConfirmation(current.id) === "confirm";
-        if (confirm && confirmationId === undefined) return {confirmationRequired: true, ...this.confirmations.issue(binding), impact};
+        if (confirm && confirmationId === undefined) return this.confirmations.preview(binding, {commandId, args: request, target: resolved, impact}, {impact});
         const reserved = receipts.reserve(identity, () => {if (confirm) this.confirmations.consume(sessionArgumentText(args, "confirmationId"), binding);});
         if (!reserved.created) return {receipt: reserved.receipt};
         let result: OwnerManagementResult;

@@ -78,6 +78,7 @@ import {
   UiSubscriptionSynchronizer,
   type UiSubscriptionDeliveryState,
 } from "./ui-subscriptions.js";
+import { announceAssistantThread } from "./assistant-confirmations.js";
 
 /** "unauthorized" = the /ui socket was policy-closed (1008): this device needs (re)pairing —
  * the UI offers a paste-a-token card instead of the reconnect banner. */
@@ -2953,6 +2954,7 @@ export function StoreProvider({
         try {
           const msg = JSON.parse(ev.data as string) as ControlPlaneToUi;
           store.receiveFrame(msg, Date.now());
+          if (msg.type === "assistant_thread_upsert") announceAssistantThread(msg.thread);
           const sessions: readonly SessionView[] = msg.type === "snapshot" || msg.type === "session_snapshot_page"
             ? msg.sessions
             : msg.type === "session_upsert"

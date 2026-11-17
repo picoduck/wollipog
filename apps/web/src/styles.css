@@ -7416,6 +7416,24 @@ body.shell-dock-dragging * {
 }
 /* A tertiary option sits at the far left, apart from the rest (§3.2): a sign-in's Dismiss Recovery. */
 .request-card-foot > .request-card-tertiary { margin-right: auto; }
+/* An Assistant thread's owner confirmations (#4665): request cards in a plain list, in the Inbox's
+   notice slot and among a thread's work cards. An argument's whole value wraps rather than hides. */
+.assistant-confirmations { padding: var(--space-3) var(--space-3) 0; }
+.assistant-confirmations-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.assistant-confirmation-summary {
+  margin: 0;
+  font: var(--type-body);
+}
+.assistant-confirmation-arguments code {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 /* The card in a side panel's detail (#2206): flush on the panel, with no wash or frame, a title-sized
    heading, and its footer stuck to the panel's lower edge above a hairline. The detail scrolls as one
    page, so a short panel never squeezes the card's body away. */

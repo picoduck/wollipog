@@ -38,7 +38,7 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
   AssistantCommandReceipts.install(db.raw());
   const receipts = new AssistantCommandReceipts(db.raw());
   AssistantCommandConfirmations.install(db.raw());
-  const confirmations = new AssistantCommandConfirmations(db.raw());
+  const confirmations = new AssistantCommandConfirmations(db.raw(), db.assistantOwnerConfirmations);
   const orchestratorSettings = new OrchestratorSettings(db);
   const workStore = () => (db as ControlPlaneDb & {assistantWork?: AssistantWorkOriginStore}).assistantWork;
   const sessionTarget = (value: unknown): AssistantTarget => {
@@ -102,9 +102,11 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
       const confirmationBinding = {connectionId: current.id, grantRevision: current.revision, operation: name, argumentsDigest,
         targetDigest: assistantRequestDigest(target)};
       if (!receipts.get(current.id, commandId) && confirm && confirmationId === undefined) {
-        return {confirmationRequired: true, ...confirmations.issue(confirmationBinding), operation: name,
-          target: summary(db.getSession(target.id)!),
-          recovery: "Review this exact target, then repeat the same command ID and arguments with confirmationId before expiry. No command was dispatched."};
+        const shown = summary(db.getSession(target.id)!);
+        const {id: _id, title: _title, updatedAt: _updatedAt, ...impact} = shown;
+        return confirmations.preview(confirmationBinding, {commandId, args: requestArgs, target, impact}, {operation: name,
+          target: shown,
+          recovery: "Review this exact target, then repeat the same command ID and arguments with confirmationId before expiry. No command was dispatched."});
       }
       let sessionOrigin: AssistantSessionWorkOrigin | undefined;
       const reserved = receipts.reserve({controlPlaneId: db.instanceId(), connectionId: current.id, operationId: commandId,

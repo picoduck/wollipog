@@ -7,6 +7,7 @@ import {
   runnerSupportsProtocol,
   type AgentDefinition,
   type AgentDriverKind,
+  type AssistantOwnerConfirmation,
   type AssistantThread,
   type AssistantThreadDefaultsResponse,
   type AssistantThreadHarness,
@@ -16,7 +17,9 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
-import type { AssistantConnections } from "./assistant-connections.js";
+import type { AssistantConnections, AssistantOperations } from "./assistant-connections.js";
+import { AssistantCommandReceipts } from "./assistant-command-receipts.js";
+import { AssistantOwnerConfirmationService } from "./assistant-owner-confirmations.js";
 import type { AssistantThreadStore, StoredThreadState, ThreadRow } from "./assistant-thread-store.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -61,9 +64,9 @@ function harnessAgent(runner: RunnerView, harness: AssistantThreadHarness): Agen
 }
 
 /** What a thread's status shows, from its stored state and its backing session. */
-export function assistantThreadStatus(state: StoredThreadState, session: SessionView | null): AssistantThreadStatus {
+export function assistantThreadStatus(state: StoredThreadState, session: SessionView | null, pendingConfirmations = 0): AssistantThreadStatus {
   if (state === "archived" || !session || session.archived) return "archived";
-  if (session.status === "input_required" || session.pendingApproval) return "needs_you";
+  if (session.status === "input_required" || session.pendingApproval || pendingConfirmations > 0) return "needs_you";
   if (session.status === "queued" || session.status === "starting" || session.status === "running") return "working";
   return "done";
 }
@@ -83,6 +86,8 @@ export interface AssistantThreadDeps {
     { ok: boolean; status: number; data?: SessionView; error?: string; [key: string]: unknown };
   archiveBackingSession(sessionId: string): { ok: boolean; status: number; error?: string };
   broadcast(userId: string, thread: AssistantThread): void;
+  /** The thread's owner confirmations waiting for its owner (#4665). */
+  pendingConfirmations?(threadId: string): AssistantOwnerConfirmation[];
   now?(): number;
 }
 
@@ -103,6 +108,7 @@ export class AssistantThreads {
 
   view(row: ThreadRow, session = row.session_id ? this.deps.getSession(row.session_id) : null): AssistantThread {
     const launched = this.store.launchedSessionIds(row.id);
+    const confirmations = row.state === "active" ? this.deps.pendingConfirmations?.(row.id) ?? [] : [];
     return {
       id: row.id,
       assistant: row.assistant,
@@ -110,7 +116,7 @@ export class AssistantThreads {
       title: row.title ?? (session && session.title !== UNTITLED ? session.title : DEFAULT_THREAD_TITLE),
       harness: row.harness,
       sessionId: row.session_id ?? "",
-      status: assistantThreadStatus(row.state, session),
+      status: assistantThreadStatus(row.state, session, confirmations.length),
       access: { level: "full_access", destructive: "ask" },
       connectionId: row.connection_id,
       launchedSessionIds: launched,
@@ -118,6 +124,7 @@ export class AssistantThreads {
         launchedSessions: { used: launched.length, limit: ASSISTANT_THREAD_LIMITS.launchedSessions },
         costUsd: { used: Math.round(this.store.costs(row.id).spentUsd * 10_000) / 10_000, limit: ASSISTANT_THREAD_LIMITS.costUsd },
       },
+      confirmations,
       lastActivityAt: Math.max(row.updated_at, session?.updatedAt ?? 0),
       createdAt: row.created_at,
       archivedAt: row.archived_at,
@@ -307,6 +314,12 @@ export class AssistantThreads {
     return { accepted: true, expiresAt };
   }
 
+  /** Republishes a thread when one of its owner confirmations changes (#4665). */
+  confirmationsChanged(threadId: string): void {
+    const row = this.store.get(threadId);
+    if (row && row.state !== "creating") this.publish(row);
+  }
+
   /** Republishes a thread when its backing session changes (status, title, activity). */
   sessionChanged(session: SessionView): void {
     const row = this.store.forSession(session.id);
@@ -343,8 +356,10 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
     },
     archiveBackingSession: (sessionId) => svc.setArchived(sessionId, true),
     broadcast: (userId, thread) => hub.assistantThreadChanged(userId, thread),
+    pendingConfirmations: (threadId) => db.assistantOwnerConfirmations.pendingForThread(threadId),
   });
   hub.onAssistantSessionUpsert((view) => threads.sessionChanged(view));
+  db.assistantOwnerConfirmations.onChange((threadId) => threads.confirmationsChanged(threadId));
   // Archive, deletion or the owner revoking the connection: the runner forgets the credential and
   // closes the proxy. Any later proxy call is refused by the control plane regardless.
   db.assistantConnections.onChange((connectionId) => {
@@ -356,4 +371,28 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
   });
   svc.onAssistantSessionRetired((sessionId) => threads.sessionRetired(sessionId));
   return threads;
+}
+
+/** The production composition of thread owner confirmations (#4665), shared with tests. Approved
+ * commands run through `operations`, so they take each operation's own receipt path. */
+export function createAssistantOwnerConfirmationService(db: ControlPlaneDb, svc: { prompt(sessionId: string, text: string): { ok: boolean } },
+  operations: Pick<AssistantOperations, "callOwnerApproved">): AssistantOwnerConfirmationService {
+  const receipts = new AssistantCommandReceipts(db.raw());
+  const service = new AssistantOwnerConfirmationService({
+    store: db.assistantOwnerConfirmations,
+    receiptStatus: (connectionId, commandId) => receipts.get(connectionId, commandId)?.status,
+    run: (connectionId, operation, args, id) => operations.callOwnerApproved(connectionId, operation, args, id),
+    // The outcome reaches the assistant as a message in its own conversation, queued if it is
+    // busy. A refused admission (its runner offline, say) is retried until it is admitted.
+    tell: (threadId, text) => {
+      const row = db.assistantThreads.get(threadId);
+      const session = row?.session_id ? db.getSession(row.session_id) : null;
+      if (row?.state !== "active" || !session || session.archived) return "gone";
+      return svc.prompt(session.id, text).ok ? "delivered" : "retry";
+    },
+  });
+  db.assistantConnections.onChange((connectionId) => {
+    if (db.assistantConnections.get(connectionId)?.revoked) service.refuseOpen(connectionId);
+  });
+  return service;
 }

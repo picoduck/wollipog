@@ -1,4 +1,5 @@
 import type { WorkflowEventRetentionView, UpdateWorkflowEventRetentionRequest } from "@wollipog/protocol";
+import type { AssistantOwnerConfirmationResponse, AssistantThreadListResponse } from "@wollipog/protocol";
 import type { AssistantConnectionsView, AssistantConnection, AssistantGrant, AssistantActivity } from "./assistant-connections.js";
 import { assistantThreadRoutes } from "./assistant-threads.js";
 import type { OrchestratorCampaignBehaviorView, UpdateOrchestratorCampaignBehaviorRequest } from "@wollipog/protocol";
@@ -317,6 +318,14 @@ export function createApiClient(transport: ApiTransport) {
     question: string; material: string; createdAt: number; acknowledgedAt: number | null }> }>("/api/campaign-closure-reports"),
   acknowledgeCampaignClosureReport: (occurrenceId: string, kind: string) => req<{ ok: true }>(
     `/api/campaign-closure-reports/${encodeURIComponent(occurrenceId)}/${encodeURIComponent(kind)}/acknowledge`, { method: "POST" }),
+
+  /** The owner's Assistant threads, read for their pending owner confirmations (#4665). */
+  assistantConfirmationThreads: () => req<AssistantThreadListResponse>("/api/assistant-threads"),
+  /** Approve Once: the control plane runs the bound command, then answers with how it ended. */
+  approveAssistantConfirmation: (threadId: string, confirmationId: string) => req<AssistantOwnerConfirmationResponse>(
+    `/api/assistant-threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmationId)}/approve`, { method: "POST" }),
+  denyAssistantConfirmation: (threadId: string, confirmationId: string) => req<AssistantOwnerConfirmationResponse>(
+    `/api/assistant-threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmationId)}/deny`, { method: "POST" }),
 
   usage: (input: {
     days: number;

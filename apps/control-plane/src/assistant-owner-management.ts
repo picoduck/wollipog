@@ -46,7 +46,7 @@ export function registerAssistantOwnerManagement(operations: AssistantOperations
 }) {
   const {db, svc, receipts, projects, runners, worktree} = deps;
   AssistantCommandConfirmations.install(db.raw());
-  const confirmations = new AssistantCommandConfirmations(db.raw());
+  const confirmations = new AssistantCommandConfirmations(db.raw(), db.assistantOwnerConfirmations);
   const sessionTarget = (value: unknown): AssistantTarget => {
     const session = db.getSession(text(object(value), "sessionId"));
     if (!session) throw new AssistantRefusal("Session not found. Refresh session_list.");
@@ -89,8 +89,8 @@ export function registerAssistantOwnerManagement(operations: AssistantOperations
           argumentsDigest: digest, targetDigest: assistantRequestDigest({target: resolved, impact: affected ?? null})};
         const confirm = destructive && db.assistantConnections.destructiveConfirmation(current.id) === "confirm";
         if (confirm && confirmationId === undefined) {
-          return {confirmationRequired: true, ...confirmations.issue(binding), operation: name, target: resolved,
-            impact: affected, recovery: "Review the affected scope; repeat unchanged arguments and commandId with confirmationId before expiry."};
+          return confirmations.preview(binding, {commandId, args: request, target: resolved, impact: affected}, {operation: name, target: resolved,
+            impact: affected, recovery: "Review the affected scope; repeat unchanged arguments and commandId with confirmationId before expiry."});
         }
         const reservation = receipts.reserve(identity, () => {
           if (confirm) confirmations.consume(text(args, "confirmationId"), binding);

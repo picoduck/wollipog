@@ -18,6 +18,8 @@ owner's own threads; another owner gets 404. Responses never carry a credential 
 | `GET /api/assistant-threads/:threadId` | `{ thread }` |
 | `PATCH /api/assistant-threads/:threadId` | Body `{ title }`, result `{ thread }`. |
 | `POST /api/assistant-threads/:threadId/archive` | `{ thread }`. Archives the backing session through the ordinary session archive. |
+| `POST /api/assistant-threads/:threadId/confirmations/:confirmationId/approve` | `{ confirmation, thread }`. Approve Once: runs the bound command, then answers with how it ended. See Owner Confirmations. |
+| `POST /api/assistant-threads/:threadId/confirmations/:confirmationId/deny` | `{ confirmation, thread }`. Refuses the bound command. |
 
 `harness` defaults to the owner's saved Orchestrator Child Harness: Codex when it names a Codex
 driver, otherwise Claude Code. Without `runnerId`, the first online Machine the owner can use that
@@ -28,7 +30,8 @@ never an ordinary session in its place.
 
 Without a `title`, the thread shows "New Thread" until its session is named by the first message.
 
-`status` is `needs_you` while the backing session waits for its owner, `working` while it is
+`status` is `needs_you` while the backing session waits for its owner or one of the thread's owner
+confirmations is pending (listed in `confirmations`), `working` while it is
 queued, starting or running, `done` when it is idle or finished, and `archived` once the thread is
 archived or its session is archived or deleted outside it.
 
@@ -141,3 +144,44 @@ can narrow it or revoke it there, but cannot rotate it, because its proxy owns t
   - Under `provider` isolation nothing hides the runner's data directory from a session. There,
     as for every other runner-held secret, sessions on one runner account are separated only by
     the sandboxed isolation modes.
+
+## Owner Confirmations
+
+An outside Assistant connection with destructive confirmation answers a destructive command with a
+preview and a short-lived `confirmationId`, which the assistant repeats once a person in its chat
+agrees. A thread's assistant could repeat it alone, so a thread's connection never receives one
+(#4665). Its destructive command asks the owner instead:
+
+- **Request.** The command answers `ownerConfirmationRequired` with its preview and nothing runs.
+  Wollipog records an owner confirmation bound to the exact connection, operation, target (with
+  the preview the binding covers), arguments and grant revision, with the arguments it will run
+  with. Asking again for the same command while it waits returns the same request. A thread holds
+  at most 10 pending requests, and each expires after an hour
+  (`ASSISTANT_OWNER_CONFIRMATION_TTL_MS`). The request's id is shown only to the owner.
+- **Where it appears.** The thread's `confirmations` lists its pending requests, and the thread's
+  status is `needs_you` while any is listed. The web app shows each as a card in the thread and in
+  the Inbox, with the action, its exact target, impact and arguments, and **Approve Once** and
+  **Deny**.
+- **Approve Once.** The approval is recorded first. Then the control plane runs the stored command
+  through `AssistantOperations.callOwnerApproved`: authorized live against the thread connection's
+  current grant and owner and audited in its activity, like any call, but without the thread's
+  credential. The operation computes its binding again and spends the request inside its own
+  receipt reservation, so the command runs once through its ordinary receipt path, or not at all.
+  A repeated or concurrent Approve waits for the same run, and an Approve after the command ran
+  returns it unchanged. An approval interrupted by a restart finishes once at startup; one whose
+  reservation had already committed never runs again.
+- **Refused.** A changed target, arguments or grant refuses the approval, as do Deny, expiry, and
+  the thread's connection being revoked (archiving or deleting the thread, or the owner revoking
+  it). Nothing runs.
+- **The assistant hears.** However a request ends, its outcome reaches the thread's conversation as
+  a `[Wollipog Owner Confirmation]` message, queued if the assistant is busy, and the assistant
+  resumes from it. Delivery is recorded per request: a session that cannot admit it now (its
+  runner is offline) is retried every 15 seconds for up to a day, and a restart delivers what it
+  missed, including the outcome of a run that spent its request just before the restart. A
+  thread that ended has nobody to tell.
+- **Nothing the assistant holds confirms.** Only the control plane's run of an approval, marked in
+  `assistantCallContext`, can spend a request. A `confirmationId` from a thread's assistant is
+  refused whatever its value, and a thread connection's `destructiveConfirmation` cannot be set to
+  `none`.
+
+External Assistant connections keep the preview-and-confirm behavior above, unchanged.

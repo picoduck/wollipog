@@ -19,7 +19,7 @@ export class ManagementMutations {
     private readonly digest: (args: unknown) => string,
     private readonly currentConnection: (id: string) => AssistantConnection,
     private readonly confirmationPolicy: (id: string) => "none" | "confirm",
-    private readonly durableConfirmations?: Pick<AssistantCommandConfirmations, "issue" | "consume">) {}
+    private readonly durableConfirmations?: Pick<AssistantCommandConfirmations, "preview" | "consume">) {}
   async run(input: {
     connection: AssistantConnection; operation: string; args: Record<string, unknown>; target: AssistantTarget;
     impact(): unknown; destructive?: boolean; recheck(): Promise<unknown>;
@@ -43,9 +43,11 @@ export class ManagementMutations {
       targetDigest: this.digest({target: input.target, impact})};
     const durableConfirmation = input.destructive && currentPolicy === "confirm" && !!this.durableConfirmations;
     if (durableConfirmation && args.confirmationId === undefined) {
-      return {confirmationRequired: true, ...this.durableConfirmations!.issue(binding), impact};
+      return this.durableConfirmations!.preview(binding, {commandId: args.operationId, args: request, target: input.target, impact}, {impact});
     }
     if (input.destructive && currentPolicy === "confirm" && !durableConfirmation) {
+      // Only the durable store can ask a thread's owner; an in-memory ID would reach its assistant (#4665).
+      if (connection.threadId) throw new AssistantRefusal("Owner confirmation is unavailable on this control plane. Nothing ran. Ask your owner to run this command themselves.");
       const digest = this.digest({connectionId: connection.id, revision: connection.revision, argumentsDigest, impact});
       const confirmation = typeof args.confirmationId === "string" ? this.confirmations.get(args.confirmationId) : undefined;
       if (!confirmation || confirmation.digest !== digest || confirmation.expires <= Date.now()) {
