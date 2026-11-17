@@ -418,3 +418,156 @@ test("round-4 scenario: the owner's $10 ceiling survives two launches, their del
     assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 10, "and the unspent launches' caps come back up to it");
   } finally { await h.close(); }
 });
+
+/** A thread with one launched worker, and agent-created children allowed without an approval card. */
+async function treeHarness(workerConfig: Record<string, unknown>) {
+  const h = await harness();
+  const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+  const env = await h.provision(thread.sessionId);
+  const worker = resultOf((await h.callTools(env, launchWith(71, h.location.id, { config: workerConfig })))[0]).sessionId as string;
+  h.db.updateSessionStatus(worker, "running", Date.now());
+  assert.ok(h.svc.upsertGovernancePolicy({ policyId: "allow-child-spawn", name: "Allow Child Sessions", effect: "allow", priority: 100,
+    enabled: true, scope: { toolName: "wollipog.create_session" } }).ok);
+  const spawn = (parentSessionId: string, config?: Record<string, unknown>) => {
+    const created = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", ...(config ? { config } : {}) },
+      undefined, undefined, false, false, false, { parentSessionId });
+    if (created.ok) h.db.updateSessionStatus(created.data!.id, "running", Date.now());
+    return created;
+  };
+  const cap = (id: string) => h.db.getSession(id)!.costBudgetUsd!;
+  // Every cap in the thread: its backing assistant's and every member of every launched tree's.
+  const capsTotal = () => {
+    const members = h.db.raw().prepare("SELECT session_id FROM assistant_thread_members WHERE thread_id=?").all(thread.id) as Array<{ session_id: string }>;
+    return Math.round((cap(thread.sessionId) + members.reduce((sum, member) => sum + cap(member.session_id), 0)) * 100) / 100;
+  };
+  return { ...h, thread, env, worker, spawn, cap, capsTotal };
+}
+
+test("#4671: a launched worker's children are carved out of its own cap, so the thread's caps total its budget", async () => {
+  // Before #4671: backing $15 + worker $10 + two $5 children = $35 of caps under a $25 thread.
+  const h = await treeHarness({ costBudgetUsd: 10, maxChildSessions: 2 });
+  try {
+    assert.equal(h.cap(h.thread.sessionId), 15);
+    const first = h.spawn(h.worker), second = h.spawn(h.worker);
+    assert.ok(first.ok && second.ok, first.error ?? second.error ?? "");
+    // Each default child takes one share, and the worker keeps one for its own spending.
+    assert.equal(first.data!.costBudgetUsd, 3.33);
+    assert.equal(second.data!.costBudgetUsd, 3.33);
+    assert.equal(h.cap(h.worker), 3.34);
+    assert.equal(h.capsTotal(), ASSISTANT_THREAD_LIMITS.costUsd);
+    assert.equal(h.db.assistantThreads.costs(h.thread.id).launchedHeldUsd, 10, "the tree still holds its whole launched cap");
+
+    // Another launch must not reclaim what the carved worker gave its children.
+    const another = resultOf((await h.callTools(h.env, launchWith(72, h.location.id, { config: { costBudgetUsd: 1 } })))[0]);
+    assert.equal(another.receipt.status, "succeeded", JSON.stringify(another));
+    assert.equal(h.cap(h.thread.sessionId), 14);
+    assert.equal(h.db.assistantThreads.costs(h.thread.id).launchedHeldUsd, 11);
+    assert.equal(h.capsTotal(), ASSISTANT_THREAD_LIMITS.costUsd);
+
+    // Deleting the carved worker while its children run keeps their part held too.
+    assert.equal(h.svc.delete(h.worker).ok, true);
+    assert.equal(h.db.assistantThreads.costs(h.thread.id).launchedHeldUsd, 11);
+    const after = resultOf((await h.callTools(h.env, launchWith(73, h.location.id, {})))[0]);
+    assert.equal(after.receipt.status, "succeeded", JSON.stringify(after));
+    assert.equal(h.cap(after.sessionId), 14, "only the backing assistant's unheld $14 is launched");
+    assert.equal(h.cap(h.thread.sessionId), 0.01);
+  } finally { await h.close(); }
+});
+
+test("#4671: children created anywhere in a thread's tree never take the caps above its budget", async () => {
+  const h = await treeHarness({ costBudgetUsd: 10 });
+  try {
+    // Three generations below the worker, each session creating a default child and a $2 request.
+    const created: string[] = [];
+    let generation = [h.worker];
+    for (let depth = 0; depth < 3; depth++) {
+      const next: string[] = [];
+      for (const parent of generation) {
+        for (const config of [{ maxChildSessions: 2 }, { costBudgetUsd: 2, maxChildSessions: 2 }]) {
+          const child = h.spawn(parent, config);
+          assert.ok(child.ok, child.error ?? "");
+          created.push(child.data!.id);
+          next.push(child.data!.id);
+          assert.ok(h.capsTotal() <= ASSISTANT_THREAD_LIMITS.costUsd + 1e-9, `caps total ${h.capsTotal()} after ${created.length} children`);
+        }
+      }
+      generation = next;
+    }
+    assert.equal(created.length, 14);
+    // Every creation moved cents from its creator to the child, so nothing was lost or added.
+    assert.equal(h.capsTotal(), ASSISTANT_THREAD_LIMITS.costUsd);
+    for (const id of created) assert.ok(h.cap(id) >= 0.01, "every child is capped");
+  } finally { await h.close(); }
+});
+
+test("#4671: a fully reserved creator is refused clearly, and a finished child's unspent cap comes back", async () => {
+  const h = await treeHarness({ costBudgetUsd: 10, maxChildSessions: 2 });
+  try {
+    const child = h.spawn(h.worker, { costBudgetUsd: 3 });
+    assert.ok(child.ok, child.error ?? "");
+    assert.equal(h.cap(h.worker), 7);
+    // The worker spends what it kept: nothing is left to share with another child.
+    h.db.addSessionUsage(h.worker, { costUsd: 7 }, Date.now());
+    const refused = h.spawn(h.worker);
+    assert.equal(refused.status, 409);
+    assert.match(refused.error ?? "", /insufficient remaining budget to create a child: \$0\.00 of its \$10\.00 cost budget/);
+    assert.match(refused.error ?? "", /Wollipog Assistant thread, whose budget its whole session tree shares/);
+    assert.equal(h.capsTotal(), ASSISTANT_THREAD_LIMITS.costUsd, "the refusal reserved nothing");
+
+    // The child finishes having spent $1: its unspent $2 returns to the worker at the next creation.
+    h.db.addSessionUsage(child.data!.id, { costUsd: 1 }, Date.now());
+    h.svc.onSessionStatus(child.data!.id, "completed");
+    const next = h.spawn(h.worker);
+    assert.ok(next.ok, next.error ?? "");
+    assert.equal(next.data!.costBudgetUsd, 0.66, "($10 - $7 spent - $1 charged) shared with the worker");
+    assert.equal(h.cap(h.worker), 8.34, "$10 less the finished child's $1 and the new child's $0.66");
+  } finally { await h.close(); }
+});
+
+test("#4671: restarting a finished child takes its unspent cap back out of its creator's", async () => {
+  const h = await treeHarness({ costBudgetUsd: 10, maxChildSessions: 2 });
+  try {
+    const child = h.spawn(h.worker, { costBudgetUsd: 3 });
+    assert.ok(child.ok, child.error ?? "");
+    h.db.addSessionUsage(child.data!.id, { costUsd: 1 }, Date.now());
+    h.svc.onSessionStatus(child.data!.id, "stopped");
+    // While the worker has spent most of what it kept, it cannot cover the child's unspent $2.
+    h.db.addSessionUsage(h.worker, { costUsd: 7.5 }, Date.now());
+    const refused = h.svc.restart(child.data!.id);
+    assert.equal(refused.status, 409);
+    assert.match(refused.error ?? "", /restarting this child re-reserves \$2\.00/);
+    assert.equal(h.cap(h.worker), 9, "the refusal only settled the finished child's $1");
+
+    const other = await treeHarness({ costBudgetUsd: 10, maxChildSessions: 2 });
+    try {
+      const finished = other.spawn(other.worker, { costBudgetUsd: 3 });
+      assert.ok(finished.ok, finished.error ?? "");
+      other.db.addSessionUsage(finished.data!.id, { costUsd: 1 }, Date.now());
+      other.svc.onSessionStatus(finished.data!.id, "stopped");
+      const restarted = other.svc.restart(finished.data!.id);
+      assert.ok(restarted.ok, restarted.error ?? "");
+      assert.equal(other.cap(other.worker), 7, "the restarted child holds its $3 again");
+      assert.equal(other.capsTotal(), ASSISTANT_THREAD_LIMITS.costUsd);
+    } finally { await other.close(); }
+  } finally { await h.close(); }
+});
+
+test("#4671: the owner's lower cap on a worker is kept, and agents cannot raise a tree member's cap", async () => {
+  const h = await treeHarness({ costBudgetUsd: 10 });
+  try {
+    assert.ok(h.svc.setConfig(h.worker, { costBudgetUsd: 6 }).ok);
+    const child = h.spawn(h.worker, { costBudgetUsd: 1 });
+    assert.ok(child.ok, child.error ?? "");
+    assert.equal(h.cap(h.worker), 6, "$10 - $1 = $9 would exceed the owner's $6");
+    const agent = { kind: "agent" as const, id: h.worker };
+    const raised = h.svc.setConfig(child.data!.id, { costBudgetUsd: 50 }, agent);
+    assert.equal(raised.status, 403);
+    assert.match(raised.error ?? "", /An agent may only lower its cost budget/);
+    assert.equal(h.svc.setConfig(child.data!.id, { costBudgetUsd: 0 }, agent).status, 403, "nor clear it");
+    assert.ok(h.svc.setConfig(child.data!.id, { costBudgetUsd: 0.5 }, agent).ok, "lowering is allowed");
+    // A run from inside the tree would start several sessions at once outside this reservation.
+    const run = h.svc.createRun({ runnerId: "r", workspaceId: "w", agentIds: ["claude"], task: "Fan out" }, { parentSessionId: h.worker });
+    assert.equal(run.status, 409);
+    assert.match(run.error ?? "", /creates child sessions one at a time and cannot start runs or workflows/);
+  } finally { await h.close(); }
+});

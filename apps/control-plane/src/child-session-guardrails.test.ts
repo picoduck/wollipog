@@ -61,3 +61,18 @@ test("exhausted capacity and malformed limits fail closed while finite parents f
   assert.ok("error" in childSessionGuardrails({ ...unlimited, costBudgetUsd: 1, costUsd: 1 }, {}, 1));
   assert.ok("error" in childSessionGuardrails({ ...unlimited, maxToolCalls: 3 }, {}, 4));
 });
+
+test("a thread-tree creator keeps one cost share for itself, in whole cents (#4671)", () => {
+  const share = { creatorKeepsCostShare: true };
+  const parent = { costBudgetUsd: 10, costUsd: 0, maxToolCalls: 90, toolCallCount: 0 };
+  // Cost divides over the open slots and the creator; tool calls keep their ordinary division.
+  assert.deepEqual(childSessionGuardrails(parent, {}, 2, null, share), { config: { costBudgetUsd: 3.33, maxToolCalls: 45 } });
+  assert.deepEqual(childSessionGuardrails(parent, {}, 2), { config: { costBudgetUsd: 5, maxToolCalls: 45 } }, "ordinary trees are unchanged");
+  assert.deepEqual(childSessionGuardrails(parent, { costBudgetUsd: 1.239 }, 2, null, share), { config: { costBudgetUsd: 1.23, maxToolCalls: 45 } });
+  assert.deepEqual(childSessionGuardrails(parent, { costBudgetUsd: 0.001 }, 2, null, share), { config: { costBudgetUsd: 0.01, maxToolCalls: 45 } },
+    "a sub-cent request still gets a cap, never zero");
+  // Less than a cent per share is refused, naming the shared thread budget.
+  const refused = childSessionGuardrails({ ...parent, costUsd: 9.98 }, {}, 2, null, share);
+  assert.ok("error" in refused);
+  assert.match(refused.error, /shared between its own spending and 2 open child slots because it runs in a Wollipog Assistant thread/);
+});

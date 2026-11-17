@@ -19797,8 +19797,8 @@ export class ControlPlaneDb {
       if (reviewUserId) this.reviewSettings.attributeSession(input.id, reviewUserId);
       if (input.reviewPolicyCapture) this.reviewSettings.captureSessionPolicy(input.id, reviewUserId, projectId, input.reviewPolicyCapture);
       if (input.assistantWorkOrigin) this.assistantWork.attachAcceptedOrigin(input.assistantWorkOrigin, input.id);
-      if (input.assistantThreadLaunch) this.assistantThreads.recordLaunch(input.assistantThreadLaunch, input.id, input.now);
-      else if (input.parentSessionId) this.assistantThreads.inheritMembership(input.id, input.parentSessionId);
+      if (input.assistantThreadLaunch) this.assistantThreads.recordLaunch(input.assistantThreadLaunch, input.id, input.now, input.config.costBudgetUsd ?? null);
+      else if (input.parentSessionId) this.assistantThreads.inheritMembership(input.id, input.parentSessionId, input.config.costBudgetUsd ?? null);
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-created:${input.id}`,
         kind: "session.created",

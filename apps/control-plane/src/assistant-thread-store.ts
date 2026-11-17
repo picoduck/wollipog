@@ -22,6 +22,11 @@ export interface ThreadRow {
   archived_at: number | null;
 }
 
+/** What a launched tree's root commits of the thread's budget: the cap it was launched with, which
+ * its own cap and every descendant's are carved out of (#4671), or more if the owner raised its cap. */
+const TREE_COMMITMENT_SQL = (session: string, member: string) => `CASE WHEN ${session}.cost_budget_usd IS NULL
+  THEN ${member}.allowance_usd ELSE MAX(COALESCE(${member}.allowance_usd, 0), ${session}.cost_budget_usd) END`;
+
 /** Persistence for Wollipog Assistant threads (#4663). Owner-scoped: a thread is its owner's
  * conversation, so even another owner of the organization never reads it. */
 export class AssistantThreadStore {
@@ -61,8 +66,10 @@ export class AssistantThreadStore {
       CREATE INDEX IF NOT EXISTS assistant_thread_members_thread ON assistant_thread_members(thread_id, root_session_id);`);
     // The backing session's final cost, if it was deleted: spend is never refunded by deletion.
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN retired_cost_usd REAL NOT NULL DEFAULT 0"); } catch { /* column already present */ }
-    // A membership table an earlier build created lacks the retirement columns.
-    for (const column of ["retired_cost_usd REAL", "retired_cap_usd REAL"]) {
+    // A membership table an earlier build created lacks the retirement columns, and the allowance
+    // columns (#4671): the cost cap a member was given, which it shares with the children it
+    // creates; the own cap the thread last set it to; and the owner's own ceiling, once they set one.
+    for (const column of ["retired_cost_usd REAL", "retired_cap_usd REAL", "allowance_usd REAL", "managed_cap_usd REAL", "owner_cap_usd REAL"]) {
       try { db.exec(`ALTER TABLE assistant_thread_members ADD COLUMN ${column}`); } catch { /* column already present */ }
     }
     // The backing session's cost cap as the thread last set it. A different current cap was set by
@@ -110,22 +117,42 @@ export class AssistantThreadStore {
     return (this.db.prepare("SELECT * FROM assistant_threads WHERE connection_id=?").get(connectionId) as ThreadRow | undefined) ?? null;
   }
 
-  recordLaunch(threadId: string, sessionId: string, now: number): void {
+  /** `capUsd` is the launch's cost cap, its allowance (#4671). */
+  recordLaunch(threadId: string, sessionId: string, now: number, capUsd: number | null = null): void {
     this.db.prepare("INSERT OR IGNORE INTO assistant_thread_launches (session_id, thread_id, created_at) VALUES (?, ?, ?)").run(sessionId, threadId, now);
-    this.db.prepare("INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id) VALUES (?, ?, ?)").run(sessionId, threadId, sessionId);
+    this.db.prepare("INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id, allowance_usd) VALUES (?, ?, ?, ?)")
+      .run(sessionId, threadId, sessionId, capUsd);
   }
 
-  /** A child of a thread member joins the same launched tree. */
-  inheritMembership(sessionId: string, parentSessionId: string): void {
-    this.db.prepare(`INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id)
-      SELECT ?, thread_id, root_session_id FROM assistant_thread_members WHERE session_id=?`).run(sessionId, parentSessionId);
+  /** A child of a thread member joins the same launched tree, with the cap it was created with as
+   * its allowance. */
+  inheritMembership(sessionId: string, parentSessionId: string, capUsd: number | null = null): void {
+    this.db.prepare(`INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id, allowance_usd)
+      SELECT ?, thread_id, root_session_id, ? FROM assistant_thread_members WHERE session_id=?`).run(sessionId, capUsd, parentSessionId);
+  }
+
+  /** A member of a thread's launched trees, with its cost allowance (#4671); null for any other
+   * session. A member recorded before allowances were kept has none until it next creates a child. */
+  member(sessionId: string): { allowanceUsd: number | null; managedCapUsd: number | null; ownerCapUsd: number | null } | null {
+    const row = this.db.prepare("SELECT allowance_usd, managed_cap_usd, owner_cap_usd FROM assistant_thread_members WHERE session_id=?")
+      .get(sessionId) as { allowance_usd: number | null; managed_cap_usd: number | null; owner_cap_usd: number | null } | undefined;
+    return row ? { allowanceUsd: row.allowance_usd, managedCapUsd: row.managed_cap_usd, ownerCapUsd: row.owner_cap_usd } : null;
+  }
+
+  setMemberCap(sessionId: string, allowanceUsd: number, capUsd: number): void {
+    this.db.prepare("UPDATE assistant_thread_members SET allowance_usd=?, managed_cap_usd=? WHERE session_id=?").run(allowanceUsd, capUsd, sessionId);
+  }
+
+  /** Lowers the owner's recorded ceiling for a member to `capUsd`; it only ever goes down. */
+  recordMemberOwnerCap(sessionId: string, capUsd: number): void {
+    this.db.prepare("UPDATE assistant_thread_members SET owner_cap_usd=MIN(COALESCE(owner_cap_usd, ?), ?) WHERE session_id=?").run(capUsd, capUsd, sessionId);
   }
 
   /** Before a session row is deleted: its spend stays its thread's, in its own launched tree. */
   retireSessionCost(sessionId: string): void {
     const cost = "COALESCE((SELECT cost_usd + live_cost_usd FROM sessions WHERE id=?), 0)";
     this.db.prepare(`UPDATE assistant_thread_members SET retired_cost_usd=${cost},
-        retired_cap_usd=(SELECT cost_budget_usd FROM sessions WHERE id=?)
+        retired_cap_usd=(SELECT ${TREE_COMMITMENT_SQL("s", "assistant_thread_members")} FROM sessions s WHERE s.id=?)
       WHERE session_id=? AND retired_cost_usd IS NULL`).run(sessionId, sessionId, sessionId);
     this.db.prepare(`UPDATE assistant_threads SET retired_cost_usd = retired_cost_usd + ${cost} WHERE session_id=?`).run(sessionId, sessionId);
   }
@@ -145,7 +172,7 @@ export class AssistantThreadStore {
    * the in-flight estimate of a running turn. */
   /** What the thread has spent, and what its launched work holds. Spend is settled plus in-flight
    * cost of the backing session and of every member of every launched tree, deleted ones included.
-   * Each tree holds the larger of its spend and its root's cost cap: the part of the budget the
+   * Each tree holds the larger of its spend and its root's commitment: the part of the budget the
    * backing session can no longer use. */
   costs(threadId: string): { spentUsd: number; backingSpentUsd: number; launchedHeldUsd: number } {
     const thread = this.db.prepare(`SELECT thread.retired_cost_usd +
@@ -155,7 +182,8 @@ export class AssistantThreadStore {
     const trees = this.db.prepare(`SELECT member.root_session_id AS root,
         COALESCE(SUM(CASE WHEN session.id IS NULL THEN COALESCE(member.retired_cost_usd, 0)
           ELSE session.cost_usd + session.live_cost_usd END), 0) AS spent,
-        COALESCE((SELECT cost_budget_usd FROM sessions WHERE id=member.root_session_id),
+        COALESCE((SELECT ${TREE_COMMITMENT_SQL("s", "rm")} FROM sessions s JOIN assistant_thread_members rm ON rm.session_id=s.id
+            WHERE s.id=member.root_session_id),
           (SELECT retired_cap_usd FROM assistant_thread_members WHERE session_id=member.root_session_id)) AS cap,
         COUNT(session.id) AS live
       FROM assistant_thread_members member LEFT JOIN sessions session ON session.id=member.session_id
