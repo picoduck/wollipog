@@ -112,7 +112,8 @@ export function formFrom(spec: AutomationSpec): FormState {
     form.prompt = spec.action.kind === "workflow_run" ? spec.action.request.task : (spec.action.request.prompt ?? "");
     if (spec.action.kind === "create_session") {
       form.campaign = spec.action.request.campaign;
-      form.sessionRole = spec.action.request.role;
+      // Automations validate their role as normal or orchestrator; an assistant role never reaches one.
+      form.sessionRole = spec.action.request.role === "assistant" ? undefined : spec.action.request.role;
       form.orchestrator = spec.action.request.orchestrator;
       form.providerAccountId = spec.action.request.providerAccountId;
       form.executionTargetId = spec.action.request.executionTargetId;

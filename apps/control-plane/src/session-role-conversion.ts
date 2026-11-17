@@ -94,6 +94,8 @@ export class SessionRoleConversions {
       currentRole, targetRole, available: false, permissionMode: session.permissionMode,
     };
     const refuse = (reason: string) => ({ ...result, reason });
+    // The thread owns this session's role and its tools; converting it would strand the thread.
+    if (currentRole === "assistant") return refuse("An Assistant thread's session keeps its role. Start a new session for other work.");
     const runner = this.db.getRunner(session.runnerId);
     if (!this.hub.isRunnerOnline(session.runnerId)) return refuse("Connect this session's Machine before changing its role.");
     if (!runnerSupportsProtocol(runner?.protocolVersion, "sessionRoleConversion")) {

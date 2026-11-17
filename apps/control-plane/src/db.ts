@@ -23,6 +23,7 @@ import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 
 import { DatabaseSync } from "node:sqlite";
 import { AssistantConnections } from "./assistant-connections.js";
+import { AssistantThreadStore } from "./assistant-thread-store.js";
 import { AssistantWorkStore } from "./assistant-work.js";
 import { installAssistantOutboundScope } from "./assistant-outbound-schema.js";
 import { runnerRetryConnection } from "./runner-persistence.js";
@@ -3586,6 +3587,8 @@ interface SessionRow {
   parent_control_policy_revision: number;
   orchestrator_policy: string | null;
   session_role: string | null;
+  /** Set only on an Assistant thread's backing session (#4663); its effective role is `assistant`. */
+  assistant_thread_id?: string | null;
   driver: string;
   model: string | null;
   resolved_model: string | null;
@@ -5078,6 +5081,8 @@ export interface NewSessionInput {
   orchestratorPolicy?: OrchestratorCampaignPolicy;
   /** Fixed session role. Omitted callers derive it from the coupled preset or campaign policy. */
   role?: SessionRole;
+  /** Required with role `assistant`: the thread this session backs (#4663). */
+  assistantThreadId?: string;
   /** Ad-hoc browsed directory (when workspaceId is null); lets restart re-launch from it. */
   workspacePath?: string | null;
   acpSessionContext?: AcpSessionContextConfig;
@@ -6084,6 +6089,7 @@ export class OccupiedUnreadLocationError extends Error {
 
 export class ControlPlaneDb {
   readonly assistantConnections: AssistantConnections;
+  readonly assistantThreads: AssistantThreadStore;
   readonly assistantWork: AssistantWorkStore;
   private readonly providerPublications: ProviderProfilePublicationStore;
   readonly campaignBudgets: CampaignBudgetLedger;
@@ -6139,6 +6145,7 @@ export class ControlPlaneDb {
         PRIMARY KEY (occurrence_id, kind)
       )`);
       AssistantConnections.install(db);
+      AssistantThreadStore.install(db);
       installAssistantAutomationAuthority(db);
       installSkillManagementRevisions(db);
       installAssistantOutboundScope(db);
@@ -6153,6 +6160,7 @@ export class ControlPlaneDb {
       ReviewSettingsStore.install(db);
     }
     this.assistantConnections = new AssistantConnections(db);
+    this.assistantThreads = new AssistantThreadStore(db);
     this.assistantWork = new AssistantWorkStore(db, this, this.assistantConnections);
     this.providerPublications = new ProviderProfilePublicationStore(db, controlPlaneInstanceId);
     this.campaignBudgets = new CampaignBudgetLedger(db);
@@ -8279,6 +8287,10 @@ export class ControlPlaneDb {
       "runner_trim_through_seq INTEGER",
       "runner_trim_event_epoch INTEGER",
       "runner_trimmed_at INTEGER",
+      // The Wollipog Assistant thread this session backs (#4663). The session_role CHECK predates
+      // the assistant role, so its row keeps session_role='normal' and this column carries the
+      // role: rebuilding the sessions table to widen the CHECK is not worth its migration risk.
+      "assistant_thread_id TEXT",
     ]) {
       try {
         db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`);
@@ -13866,7 +13878,21 @@ export class ControlPlaneDb {
 
   canAccessSession(principal: AuthPrincipal, sessionId: string): boolean {
     const scope = this.sessionScope(sessionId);
-    return scope ? this.principalCanAccessScope(principal, scope) : false;
+    if (!scope || !this.principalCanAccessScope(principal, scope)) return false;
+    // An Assistant thread's session acts with its owner's Assistant authority (#4663). Only the
+    // thread's own owner reaches it, read from the immutable thread record rather than the
+    // session's scope: organization owners, admins, team members and agents are refused.
+    const thread = this.stmt(`SELECT thread.owner_user_id, thread.organization_id FROM sessions session
+      JOIN assistant_threads thread ON thread.id=session.assistant_thread_id WHERE session.id=?`).get(sessionId) as
+      { owner_user_id: string; organization_id: string } | undefined;
+    if (!thread && !this.isAssistantSession(sessionId)) return true;
+    return Boolean(thread && principal.kind === "human" && principal.userId === thread.owner_user_id &&
+      principal.organizationId === thread.organization_id);
+  }
+
+  /** Whether a session backs a Wollipog Assistant thread (#4663). */
+  isAssistantSession(sessionId: string): boolean {
+    return this.stmt("SELECT 1 FROM sessions WHERE id=? AND assistant_thread_id IS NOT NULL").get(sessionId) !== undefined;
   }
 
   dismissProviderLoginNotice(userId: string, runnerId: string, operationId: string, now = Date.now()): void {
@@ -14082,7 +14108,7 @@ export class ControlPlaneDb {
       provider_home_wait worktree_switch title title_source provider_updated_at background_work_state background_follow_up background_work_tracking
       history_quarantine worktree_recovery queue_hold capacity_wait status board_column run_id
       use_worktree worktree_path archived preview pending_approval parent_control
-      parent_control_policy parent_control_policy_revision orchestrator_policy session_role
+      parent_control_policy parent_control_policy_revision orchestrator_policy session_role assistant_thread_id
       driver model resolved_model effort service_tier permission_mode input_tokens output_tokens
       context_tokens_used context_window cost_usd live_input_tokens live_output_tokens live_cost_usd
       adopted cost_budget_usd parent_session_id
@@ -14385,6 +14411,22 @@ export class ControlPlaneDb {
   }
 
   private sessionAuthorizationSql(principal: AuthPrincipal): { sql: string; params: string[] } {
+    const scope = this.sessionScopeAuthorizationSql(principal);
+    // An Assistant thread's session acts with its owner's Assistant authority, so only that owner
+    // reaches it: never an organization owner or admin, a team member or an agent (#4663).
+    const assistant = principal.kind === "human"
+      ? { sql: `EXISTS (SELECT 1 FROM sessions owned_session JOIN assistant_threads thread ON thread.id=owned_session.assistant_thread_id
+          WHERE owned_session.id=ownership.session_id AND thread.owner_user_id=? AND thread.organization_id=?)`,
+        params: [principal.userId, principal.organizationId] }
+      : { sql: "0", params: [] };
+    return {
+      sql: `(${scope.sql}) AND (NOT EXISTS (SELECT 1 FROM sessions assistant_session
+        WHERE assistant_session.id=ownership.session_id AND assistant_session.assistant_thread_id IS NOT NULL) OR ${assistant.sql})`,
+      params: [...scope.params, ...assistant.params],
+    };
+  }
+
+  private sessionScopeAuthorizationSql(principal: AuthPrincipal): { sql: string; params: string[] } {
     if (principal.kind === "human") {
       if (principal.role === "owner" || principal.role === "admin") {
         return { sql: "ownership.organization_id=?", params: [principal.organizationId] };
@@ -14902,6 +14944,8 @@ export class ControlPlaneDb {
         : input.resource === "project" ? this.projectScope(input.resourceId)
         : input.resource === "session" ? this.sessionScope(input.resourceId) : null;
     if (!currentScope || currentScope.organizationId !== input.scope.organizationId) return false;
+    // An Assistant thread's session belongs to its thread's owner alone (#4663).
+    if (input.resource === "session" && this.isAssistantSession(input.resourceId)) return false;
     const ownerId = input.scope.owner.kind === "organization" ? input.scope.owner.organizationId
       : input.scope.owner.kind === "user" ? input.scope.owner.userId : input.scope.owner.teamId;
     const ownerValid = input.scope.owner.kind === "organization"
@@ -19654,7 +19698,7 @@ export class ControlPlaneDb {
         input.parentControlPolicy ? JSON.stringify(input.parentControlPolicy.decisions) : null,
         input.parentControlPolicy ? 1 : 0,
         input.orchestratorPolicy ? JSON.stringify(input.orchestratorPolicy) : null,
-        input.role ?? (input.orchestratorPolicy
+        input.role === "assistant" ? "normal" : input.role ?? (input.orchestratorPolicy
           ? "orchestrator"
           : sessionRole({ permissionMode: input.config.permissionMode ?? null })),
         input.workspacePath ?? null,
@@ -19663,6 +19707,10 @@ export class ControlPlaneDb {
         input.now,
         input.archived ? input.now : null,
       );
+      if (input.role === "assistant") {
+        if (!input.assistantThreadId) throw new Error("an assistant session requires its thread");
+        this.stmt("UPDATE sessions SET assistant_thread_id=? WHERE id=?").run(input.assistantThreadId, input.id);
+      }
       if (input.providerAccountId) {
         this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=? WHERE id=?")
           .run(input.providerAccountId, input.providerAccountLabel ?? input.providerAccountId, input.id);
@@ -30509,7 +30557,7 @@ export class ControlPlaneDb {
       liveChildCapacity: { limit: row.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT, occupied: row.summary_children,
         remaining: Math.max(0, (row.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT)-row.summary_children) },
       parentControl: row.parent_control === "questions" || row.parent_control === "questions_and_approvals" ? row.parent_control : "off",
-      role: sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }),
+      role: row.assistant_thread_id ? "assistant" : sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }),
       ...this.reviewSessionProjection(row.id),
       orchestratorPolicy: row.orchestrator_policy ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) ?? undefined : undefined,
       campaignRequests: context.campaignRequests.get(row.id),
@@ -30720,7 +30768,7 @@ export class ControlPlaneDb {
           decisions: decisions ?? { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
         };
       })(),
-      role: sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }),
+      role: row.assistant_thread_id ? "assistant" : sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }),
       ...this.reviewSessionProjection(row.id),
       ...(() => {
         const policy = orchestratorCampaignPolicyFromJson(row.orchestrator_policy);

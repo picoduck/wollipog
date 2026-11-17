@@ -255,6 +255,10 @@ export function isAgentControlApiRouteAllowed(method: string, routePath: string,
   imageReviewer = false): boolean {
   if (mediaPurpose) return mediaReviewerApiRouteAllowed(method.toUpperCase(), routePath);
   if (imageReviewer) return delegatedImageReviewerApiRouteAllowed(method.toUpperCase(), routePath);
+  // An Assistant thread's session acts only through its thread's audited Assistant connection
+  // (#4663). Its runner provisions no agent-control credential; this refuses one regardless, so it
+  // can never launch sessions outside the thread's grant and limits.
+  if (role === "assistant") return false;
   if (role === "orchestrator") return ORCHESTRATOR_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
   return AGENT_CONTROL_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
 }
