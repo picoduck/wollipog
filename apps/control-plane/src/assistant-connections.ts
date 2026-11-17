@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { DatabaseSync } from "node:sqlite";
 import { hashToken } from "./auth.js";
 import type { HumanPrincipal } from "./identity.js";
@@ -21,6 +22,16 @@ export interface AssistantOperationReceipt {
   resourceId?: string;
 }
 export class AssistantRefusal extends Error {}
+
+/** The Assistant connection whose operation is executing, for services that apply a thread's
+ * limits to work it starts (#4663). Absent outside an Assistant call. */
+export const assistantCallContext = new AsyncLocalStorage<{ connectionId: string }>();
+
+/** Operations an Assistant thread may not call: each schedules future work, turns a session into
+ * one that starts its own, or (a fork) materializes a session on the runner without the session
+ * creation that counts a thread's launches. Its owner can still use them directly. */
+const THREAD_EXCLUDED_OPERATIONS = new Set(["auto_create", "auto_update", "auto_enable", "auto_test", "workflow_run",
+  "session_role", "session_adopt", "session_fork"]);
 export class AssistantConflict extends AssistantRefusal {}
 export interface AssistantActivityRecord {
   connection_id: string; grant_revision: number; operation: string;
@@ -68,13 +79,21 @@ export class AssistantConnections {
       CREATE INDEX IF NOT EXISTS assistant_activity_connection ON assistant_activity(connection_id, id DESC);
       CREATE TABLE IF NOT EXISTS assistant_installation (singleton INTEGER PRIMARY KEY CHECK(singleton=1), name TEXT NOT NULL);
       INSERT OR IGNORE INTO assistant_installation VALUES (1, 'Wollipog');`);
+    // v384 (#4663): a Wollipog Assistant thread's own connection. Its credential is minted by the
+    // thread's runner proxy and expires unless the proxy registers a fresh one in time.
+    for (const column of ["thread_id TEXT", "expires_at INTEGER"]) {
+      try { db.exec(`ALTER TABLE assistant_connections ADD COLUMN ${column}`); } catch { /* column already present */ }
+    }
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS assistant_connections_thread ON assistant_connections(thread_id) WHERE thread_id IS NOT NULL");
   }
   constructor(private db: DatabaseSync) {}
   get(id: string): AssistantConnection | null {
-    const row = this.db.prepare(`SELECT id,name,owner_user_id,organization_id,grant_json,revision,revoked FROM assistant_connections WHERE id=?`).get(id) as
-      { id: string; name: string; owner_user_id: string; organization_id: string; grant_json: string; revision: number; revoked: number } | undefined;
+    const row = this.db.prepare(`SELECT id,name,owner_user_id,organization_id,grant_json,revision,revoked,thread_id,expires_at FROM assistant_connections WHERE id=?`).get(id) as
+      { id: string; name: string; owner_user_id: string; organization_id: string; grant_json: string; revision: number; revoked: number;
+        thread_id: string | null; expires_at: number | null } | undefined;
     return row ? { id: row.id, name: row.name, ownerUserId: row.owner_user_id, organizationId: row.organization_id,
-      grant: assistantGrant(JSON.parse(row.grant_json)), revision: row.revision, revoked: !!row.revoked } : null;
+      grant: assistantGrant(JSON.parse(row.grant_json)), revision: row.revision, revoked: !!row.revoked,
+      ...(row.thread_id ? { threadId: row.thread_id, expiresAt: row.expires_at } : {}) } : null;
   }
   list(owner: HumanPrincipal): AssistantConnection[] {
     return (this.db.prepare("SELECT id FROM assistant_connections WHERE owner_user_id=? AND organization_id=?").all(owner.userId, owner.organizationId) as {id: string}[]).map(r => this.get(r.id)!);
@@ -83,8 +102,40 @@ export class AssistantConnections {
     if (owner.kind !== "human" || owner.role !== "owner") throw new AssistantRefusal("Only an organization owner can issue standing Assistant authority.");
     name = displayName(name);
     const id = `asst_${randomUUID()}`, token = secret();
-    this.db.prepare("INSERT INTO assistant_connections VALUES (?,?,?,?,?,1,?,0)").run(id, name.trim(), owner.userId, owner.organizationId, JSON.stringify(assistantGrant(grant)), hashToken(token));
+    this.db.prepare("INSERT INTO assistant_connections (id,name,owner_user_id,organization_id,grant_json,revision,token_hash,revoked) VALUES (?,?,?,?,?,1,?,0)").run(id, name.trim(), owner.userId, owner.organizationId, JSON.stringify(assistantGrant(grant)), hashToken(token));
     return { connection: this.get(id)!, token };
+  }
+  /** A Wollipog Assistant thread's connection (#4663): Full Access with destructive confirmation,
+   * owned by the thread's owner. It authenticates nothing until the thread's runner proxy binds
+   * a credential it minted, and the owner never sees that credential. */
+  createForThread(owner: HumanPrincipal, threadId: string): AssistantConnection {
+    if (owner.kind !== "human" || owner.role !== "owner") throw new AssistantRefusal("Only an organization owner can start a Wollipog Assistant thread.");
+    const id = `asst_${randomUUID()}`;
+    // An unguessable placeholder: no token with this hash is ever revealed, and it has expired.
+    this.db.prepare("INSERT INTO assistant_connections (id,name,owner_user_id,organization_id,grant_json,revision,token_hash,revoked,thread_id,expires_at) VALUES (?,?,?,?,?,1,?,0,?,0)")
+      .run(id, "Wollipog Assistant Thread", owner.userId, owner.organizationId,
+        JSON.stringify(assistantGrant({ operations: "all", projects: "all", destructiveConfirmation: "confirm" })), hashToken(secret()), threadId);
+    return this.get(id)!;
+  }
+  /** Removes a thread connection whose credential was never bound, after its thread's creation
+   * failed. A connection that ever authenticated is only ever revoked, keeping its activity. */
+  deleteUnboundThreadConnection(id: string): void {
+    this.db.prepare("DELETE FROM assistant_connections WHERE id=? AND thread_id IS NOT NULL AND expires_at=0").run(id);
+  }
+  forThread(threadId: string): AssistantConnection | null {
+    const row = this.db.prepare("SELECT id FROM assistant_connections WHERE thread_id=?").get(threadId) as {id: string} | undefined;
+    return row ? this.get(row.id) : null;
+  }
+  /** Binds the thread proxy's newly minted credential, replacing the previous one at once. The
+   * grant is unchanged, so its revision is too. */
+  bindThreadCredential(id: string, tokenHash: string, expiresAt: number): boolean {
+    if (!/^[0-9a-f]{64}$/u.test(tokenHash)) return false;
+    try {
+      return this.db.prepare("UPDATE assistant_connections SET token_hash=?, expires_at=? WHERE id=? AND thread_id IS NOT NULL AND revoked=0")
+        .run(tokenHash, expiresAt, id).changes > 0;
+    } catch {
+      return false; // A hash collision with another connection is refused, never shared.
+    }
   }
   configure(id: string, grant: unknown, name?: unknown, expectedRevision?: number): void {
     const normalized = assistantGrant(grant, this.destructiveConfirmation(id));
@@ -95,6 +146,7 @@ export class AssistantConnections {
     this.changed(id);
   }
   rotate(id: string): string {
+    if (this.get(id)?.threadId) throw new AssistantRefusal("A Wollipog Assistant thread's credential is held by its proxy and rotates on its own. Archive the thread or revoke this connection instead.");
     const token = secret();
     const updated = this.db.prepare("UPDATE assistant_connections SET token_hash=?,revision=revision+1 WHERE id=? AND revoked=0").run(hashToken(token), id);
     if (updated.changes === 0) throw new AssistantRefusal("Assistant connection is missing or revoked. Create a new connection instead.");
@@ -108,12 +160,12 @@ export class AssistantConnections {
   authenticate(token: string | null): AssistantCredential | null {
     if (!token || !/^wollipoga_[A-Za-z0-9_-]{43}$/.test(token)) return null;
     const tokenHash = hashToken(token);
-    const row = this.db.prepare("SELECT id FROM assistant_connections WHERE token_hash=? AND revoked=0").get(tokenHash) as {id: string} | undefined;
+    const row = this.db.prepare("SELECT id FROM assistant_connections WHERE token_hash=? AND revoked=0 AND (expires_at IS NULL OR expires_at > ?)").get(tokenHash, Date.now()) as {id: string} | undefined;
     return row ? { connectionId: row.id, tokenHash } : null;
   }
   current(credential: AssistantCredential): AssistantConnection {
-    const row = this.db.prepare("SELECT id FROM assistant_connections WHERE id=? AND token_hash=? AND revoked=0").get(credential.connectionId, credential.tokenHash);
-    if (!row) throw new AssistantRefusal("Assistant credential was rotated or revoked. The owner must issue a new credential in Assistant Connections.");
+    const row = this.db.prepare("SELECT id FROM assistant_connections WHERE id=? AND token_hash=? AND revoked=0 AND (expires_at IS NULL OR expires_at > ?)").get(credential.connectionId, credential.tokenHash, Date.now());
+    if (!row) throw new AssistantRefusal("Assistant credential was rotated or revoked, or it expired. The owner must issue a new credential in Assistant Connections.");
     return this.get(credential.connectionId)!;
   }
   installationName(): string { return (this.db.prepare("SELECT name FROM assistant_installation WHERE singleton=1").get() as {name: string}).name; }
@@ -171,6 +223,9 @@ export class AssistantOperations {
     const owner = this.ownerPrincipal(connection.ownerUserId, connection.organizationId);
     if (!owner || owner.role !== "owner") throw new AssistantRefusal("The granting owner is no longer an active owner. An active owner must recreate this connection.");
     if (connection.grant.operations !== "all" && !connection.grant.operations.includes(name)) throw new AssistantRefusal(`Operation ${name} is excluded. The owner can allow it in Assistant Connections.`);
+    if (connection.threadId && THREAD_EXCLUDED_OPERATIONS.has(name)) {
+      throw new AssistantRefusal(`A Wollipog Assistant thread cannot call ${name}: it schedules work outside the thread's limits. Ask your owner to do it.`);
+    }
     if (!operation.metadata && connection.grant.projects !== "all" && (!target.projectId || !connection.grant.projects.includes(target.projectId))) throw new AssistantRefusal("The target project is excluded by this connection. The owner can select it or grant all projects in Assistant Connections.");
     if (!operation.ownerCanAccess(owner, target)) throw new AssistantRefusal("The granting owner cannot access this target. Restore the owner's resource access or use another connection.");
     return owner;
@@ -189,7 +244,8 @@ export class AssistantOperations {
         return this.authorize(connection.id, name, target);
       };
       const owner = await recheck();
-      const result = await operation.execute(args, { owner, connection, recheck });
+      const result = await assistantCallContext.run({ connectionId: connection.id },
+        () => operation.execute(args, { owner, connection, recheck }));
       // A delivered RPC can still report a refused service command or uncertain dispatch.
       // Registered services return receipts/status, never a private error in the activity row.
       const response = result && typeof result === "object" ? result as {status?: unknown; receipt?: {status?: unknown}} : undefined;

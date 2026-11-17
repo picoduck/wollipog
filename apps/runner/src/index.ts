@@ -216,6 +216,9 @@ import {
 } from "./drivers/claude-code.js";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
 import { SessionStore, isAdoptedSession, type SessionMeta } from "./session-store.js";
+import { AssistantProxies } from "./assistant-proxy.js";
+import { assistantMcpConfigPath } from "./assistant-launch.js";
+import { refuseSignalInspector } from "./runner-process-hardening.js";
 import {
   DESCENDANT_BOUNDARY_TERMINATION_BUDGET_MS,
   terminateDescendantBoundariesAfterPendingKills,
@@ -519,6 +522,20 @@ const claudeHookHost = {
 };
 const agentControlHost = defaultAgentControlHost(config.dataDir);
 const agentControlRelays = new AgentControlRelaySockets(relayAgentControlRequest);
+/** Assistant thread proxies (#4663): each holds its thread credential in this process only. */
+const assistantProxies = new AssistantProxies({
+  // Kept in the hook state directory, which every sandboxed launch hides from other sessions.
+  configDir: claudeHookHost.configDir,
+  register: (sessionId, tokenHash) => {
+    if (ws && ws.readyState === WebSocket.OPEN && registered) sendUp({ type: "assistant_credential", sessionId, tokenHash });
+  },
+});
+const resendAssistantRegistrations = () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !registered) return;
+  for (const { sessionId, tokenHash } of assistantProxies.pendingRegistrations()) {
+    sendUp({ type: "assistant_credential", sessionId, tokenHash });
+  }
+};
 // The same relay through FIFOs, for a CLI inside a provider sandbox that refuses every socket
 // (#3270). Measured only against Codex's Linux sandbox, so other hosts keep the loopback relay.
 const agentControlFifoRelays = process.platform === "linux"
@@ -1244,6 +1261,8 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
         executionIsolationMode: config.executionIsolation.mode,
         ...await providerAgentControlRelay(meta),
         orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
+        assistantProxy: assistantProxies,
+        assistantConfigDir: claudeHookHost.configDir,
       },
       log,
       agentControlHost,
@@ -1460,6 +1479,8 @@ sessions.setGuardStateSandbox({
         ...(launched && launched !== settings ? [launched] : []),
         claudeHookGuardPath(settings),
         managedWorktreeGuardSocketDirectory(claudeHookHost.configDir, meta.sessionId),
+        // An Assistant thread's proxy server entry (#4663): only its own session may read its relay key.
+        ...(meta.assistant ? [assistantMcpConfigPath(claudeHookHost.configDir, meta.sessionId)] : []),
       ],
       socket: managedWorktreeGuardSocketPath(claudeHookHost.configDir, meta.sessionId),
       ...(managerHook
@@ -1595,6 +1616,7 @@ function sendUp(msg: RunnerToControlPlane): void {
     removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
     void agentControlRelays.close(msg.sessionId);
     void agentControlFifoRelays?.close(msg.sessionId);
+    void assistantProxies.revoke(msg.sessionId);
     for (const [key, pending] of pendingAgentControlRegistrations) {
       if (!key.startsWith(`${msg.sessionId}\0`)) continue;
       clearTimeout(pending.timer);
@@ -2380,6 +2402,7 @@ sessionCommandRecoveryTimer.unref?.();
 // transport stays unavailable.
 const credentialRegistrationRetryTimer = setInterval(() => {
   resendAgentControlRegistrations(CREDENTIAL_REGISTRATION_RETRY_MS);
+  resendAssistantRegistrations();
   resendPolicyHookRegistrations(CREDENTIAL_REGISTRATION_RETRY_MS);
 }, CREDENTIAL_REGISTRATION_RETRY_MS);
 credentialRegistrationRetryTimer.unref?.();
@@ -2498,6 +2521,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       flushOutbox();
       // Whatever registration the previous socket lost, this control plane has not seen (#1841).
       resendAgentControlRegistrations(0);
+      resendAssistantRegistrations();
       resendPolicyHookRegistrations(0);
       policyHookRegistrationGeneration++;
       // Registration snapshots are sent before the control plane's protocol version is known, so
@@ -2754,6 +2778,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }));
       break;
     }
+    case "assistant_credential_registered":
+      assistantProxies.acknowledge(msg.sessionId, msg.tokenHash, msg.accepted, msg.expiresAt, msg.error);
+      break;
+    case "assistant_credential_revoked":
+      // The thread was archived or its connection revoked: forget the credential, stop the proxy.
+      void assistantProxies.revoke(msg.sessionId);
+      break;
     case "agent_control_credential_registered":
       try {
         const pendingKey = agentControlRegistrationKey(msg.sessionId, msg.tokenHash);
@@ -3074,6 +3105,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
       void agentControlRelays.close(msg.sessionId);
       void agentControlFifoRelays?.close(msg.sessionId);
+      void assistantProxies.revoke(msg.sessionId);
       break;
     case "resolve_permission":
       sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId, msg.resolvedByParentSessionId, msg.resolvedBy,
@@ -3891,6 +3923,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               executionIsolationMode: config.executionIsolation.mode,
               ...await providerAgentControlRelay(prepared),
               orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
+              assistantProxy: assistantProxies,
+              assistantConfigDir: claudeHookHost.configDir,
             }, log, agentControlHost);
           },
           // A Codex TUI denies the runner's hook state directory through its own sandbox (#1336).
@@ -4635,6 +4669,7 @@ function shutdown(exitCode = 0): void {
   // The FIFO channels close synchronously: their directories are unlistable, so one left behind
   // would block an ordinary recursive delete of the data directory until the next startup sweep.
   bestEffort("close Agent Control relays", () => { void agentControlRelays.closeAll(); agentControlFifoRelays?.closeAllNow(); });
+  bestEffort("close Assistant thread proxies", () => { void assistantProxies.closeAll(); });
   // Providers that exited normally may have intentional background descendants retained under
   // their session boundary. Runner shutdown is the final owner and must drain every such scope.
   bestEffort("register retained descendant cleanup", () => terminateDescendantBoundariesAfterPendingKills());
@@ -4689,6 +4724,8 @@ function shutdown(exitCode = 0): void {
 
 // Wrapped so the signal name Node passes as the listener's first argument is never mistaken for
 // shutdown()'s exitCode.
+// The runner holds credentials in memory; a same-user agent must not open its inspector (#4663).
+refuseSignalInspector(process, log);
 process.on("SIGINT", () => shutdown());
 process.on("SIGTERM", () => shutdown());
 process.on("SIGHUP", () => shutdown());

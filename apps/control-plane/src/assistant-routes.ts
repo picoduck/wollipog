@@ -5,6 +5,7 @@ import type { ControlPlaneDb } from "./db.js";
 import { assistantGrant, AssistantOperations, AssistantRefusal, AssistantConflict } from "./assistant-connections.js";
 import { AssistantConnectionManagement } from "./assistant-connection-management.js";
 import {ManagementUncertainOutcome} from "./assistant-management-command.js";
+import { WOLLIPOG_ASSISTANT_SKILL } from "./assistant-skill.js";
 export { assistantActivityTargetLabel } from "./assistant-connection-management.js";
 
 export function createAssistantOperations(db: ControlPlaneDb): AssistantOperations {
@@ -18,6 +19,8 @@ export function createAssistantOperations(db: ControlPlaneDb): AssistantOperatio
       connection: context.connection,
       operations: operations.list(context.connection).map(({name, description, inputSchema}) => ({name, description, inputSchema})),
       transport: { endpoint: "/assistant/mcp", protocolVersion: "2025-06-18", authentication: "Bearer" },
+      // The guide every Wollipog Assistant thread follows, shared with outside assistants.
+      skill: WOLLIPOG_ASSISTANT_SKILL,
     }),
   });
   return operations;

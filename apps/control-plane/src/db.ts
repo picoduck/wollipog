@@ -5083,6 +5083,8 @@ export interface NewSessionInput {
   role?: SessionRole;
   /** Required with role `assistant`: the thread this session backs (#4663). */
   assistantThreadId?: string;
+  /** The Assistant thread whose assistant launched this session, counted against its limit. */
+  assistantThreadLaunch?: string;
   /** Ad-hoc browsed directory (when workspaceId is null); lets restart re-launch from it. */
   workspacePath?: string | null;
   acpSessionContext?: AcpSessionContextConfig;
@@ -15885,6 +15887,7 @@ export class ControlPlaneDb {
       }
       this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(row.runner_id);
       this.campaignBudgets.noteUnpriced(); // before the usage rows the deletion cascades away (#2940)
+      this.assistantThreads.retireRunnerSessionCosts(row.runner_id); // spend is never refunded (#4663)
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(row.runner_id); // cascades session_events
       this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(row.runner_id); // cascades members
       this.stmt("DELETE FROM boxes WHERE box_id=?").run(boxId);
@@ -15945,6 +15948,7 @@ export class ControlPlaneDb {
       }
       this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(runnerId);
       this.campaignBudgets.noteUnpriced(); // before the usage rows the deletion cascades away (#2940)
+      this.assistantThreads.retireRunnerSessionCosts(runnerId); // spend is never refunded (#4663)
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(runnerId); // cascades session_events
       this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(runnerId); // cascades members
       this.stmt("DELETE FROM boxes WHERE runner_id=?").run(runnerId); // if it was a box
@@ -19793,6 +19797,8 @@ export class ControlPlaneDb {
       if (reviewUserId) this.reviewSettings.attributeSession(input.id, reviewUserId);
       if (input.reviewPolicyCapture) this.reviewSettings.captureSessionPolicy(input.id, reviewUserId, projectId, input.reviewPolicyCapture);
       if (input.assistantWorkOrigin) this.assistantWork.attachAcceptedOrigin(input.assistantWorkOrigin, input.id);
+      if (input.assistantThreadLaunch) this.assistantThreads.recordLaunch(input.assistantThreadLaunch, input.id, input.now);
+      else if (input.parentSessionId) this.assistantThreads.inheritMembership(input.id, input.parentSessionId);
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-created:${input.id}`,
         kind: "session.created",
@@ -28243,6 +28249,8 @@ export class ControlPlaneDb {
   }
 
   private deleteSessionRows(id: string): void {
+    // Deleting a session never refunds an Assistant thread's spend (#4663).
+    this.assistantThreads.retireSessionCost(id);
     // multi_agent_run_members has no FK to sessions, so clean its rows up too,
     // otherwise a run keeps a dangling member id. Same for the FTS index (virtual
     // tables have no FKs — stale hits would surface deleted sessions in search).

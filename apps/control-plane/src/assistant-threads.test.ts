@@ -69,17 +69,19 @@ test("a new thread launches an assistant-role session whose every launch carries
     assert.equal(created.status, 200, created.raw);
     const thread = created.body.thread as AssistantThread;
     assert.match(thread.id, /^thr_/);
-    assert.deepEqual({ ...thread, id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined }, {
-      id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined,
+    assert.match(thread.connectionId ?? "", /^asst_/);
+    assert.deepEqual({ ...thread, id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined }, {
+      id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined,
       assistant: "wollipog", title: "Weekly Cleanup", harness: "claude-code", status: "working",
-      access: { level: "full_access", destructive: "ask" }, connectionId: null, launchedSessionIds: [], archivedAt: null,
+      access: { level: "full_access", destructive: "ask" }, launchedSessionIds: [], archivedAt: null,
+      usage: { launchedSessions: { used: 0, limit: 10 }, costUsd: { used: 0, limit: 25 } },
     });
     const session = h.db.getSession(thread.sessionId)!;
     assert.equal(session.role, "assistant");
     assert.equal(session.agentId, "claude");
     assert.equal(session.parentSessionId ?? null, null);
     assert.equal(h.sent.length, 1);
-    assert.deepEqual(h.sent[0]!.spec.assistant, { threadId: thread.id });
+    assert.equal(h.sent[0]!.spec.assistant?.threadId, thread.id);
     assert.equal(h.sent[0]!.spec.orchestrator, undefined);
     assert.ok(h.dashboard.threads().some((published) => published.id === thread.id));
     assert.deepEqual(h.stranger.threads(), []);
@@ -94,7 +96,7 @@ test("a new thread launches an assistant-role session whose every launch carries
     h.db.updateSessionStatus(thread.sessionId, "completed", Date.now());
     const restarted = h.svc.restart(thread.sessionId, {});
     assert.equal(restarted.ok, true, restarted.error ?? "");
-    assert.deepEqual(h.sent.at(-1)!.spec.assistant, { threadId: thread.id });
+    assert.equal(h.sent.at(-1)!.spec.assistant?.threadId, thread.id);
 
     const listed = await h.call("GET", "/api/assistant-threads");
     assert.deepEqual(listed.body.threads.map((t: AssistantThread) => t.id), [thread.id]);
@@ -301,4 +303,18 @@ test("a thread's status follows its backing session and the thread republishes w
     assert.equal(assistantThreadStatus("active", null), "archived");
     assert.equal(assistantThreadStatus("archived", { ...session, status: "running" }), "archived");
   } finally { await h.close(); }
+});
+
+test("install adds the retirement columns to a membership table an earlier build created", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { AssistantThreadStore } = await import("./assistant-thread-store.js");
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT);
+      CREATE TABLE assistant_thread_members (session_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, root_session_id TEXT NOT NULL)`);
+    AssistantThreadStore.install(db);
+    AssistantThreadStore.install(db);
+    const columns = (db.prepare("PRAGMA table_info(assistant_thread_members)").all() as Array<{ name: string }>).map((column) => column.name);
+    assert.ok(columns.includes("retired_cost_usd") && columns.includes("retired_cap_usd"), columns.join(", "));
+  } finally { db.close(); }
 });

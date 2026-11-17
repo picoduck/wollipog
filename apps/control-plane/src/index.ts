@@ -1630,6 +1630,14 @@ app.register(async (instance) => {
           app.log.warn(`runner ${runnerId} sent an unsolicited workflow action reconciliation receipt`);
         }
         break;
+      case "assistant_credential":
+        {
+          // Only a hash crosses the wire; the runner proxy holds the credential itself (#4663).
+          const result = assistantThreads.registerCredential(runnerId!, msg.sessionId, msg.tokenHash);
+          send(socket, { type: "assistant_credential_registered", sessionId: msg.sessionId, tokenHash: msg.tokenHash, ...result });
+          if (!result.accepted) app.log.warn(`runner ${runnerId} sent a refused Assistant thread credential for ${msg.sessionId}`);
+        }
+        break;
       case "agent_control_credential":
         {
           const diagnose = reconcilingInventory && credentialDiagnostics++ < 4;
