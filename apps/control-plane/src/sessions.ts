@@ -4288,11 +4288,14 @@ export class SessionsService {
     if (!launch.backingSessionId) return { ok: true };
     const backing = this.db.getSession(launch.backingSessionId);
     if (!backing) return { ok: true };
-    const target = Math.max(0.01, Math.floor((ASSISTANT_THREAD_LIMITS.costUsd - heldUsd) * 100) / 100);
     const managed = this.db.assistantThreads.backingCap(launch.threadId) ?? ASSISTANT_THREAD_LIMITS.costUsd;
     const current = backing.costBudgetUsd ?? null;
-    const ownedByThread = current !== null && Math.abs(current - managed) < 0.005;
-    if (current !== null && (ownedByThread ? Math.abs(current - target) < 0.005 : current <= target)) return { ok: true };
+    // A cap other than the one the thread last set is the owner's: remember it as a ceiling the
+    // thread never raises the cap above, even after lowering it further itself.
+    if (current !== null && Math.abs(current - managed) >= 0.005) this.db.assistantThreads.recordBackingOwnerCap(launch.threadId, current);
+    const ownerCap = this.db.assistantThreads.backingOwnerCap(launch.threadId);
+    const target = Math.max(0.01, Math.floor(Math.min(ASSISTANT_THREAD_LIMITS.costUsd - heldUsd, ownerCap ?? Number.POSITIVE_INFINITY) * 100) / 100);
+    if (current !== null && Math.abs(current - target) < 0.005) return { ok: true };
     const updated = this.setConfig(backing.id, { costBudgetUsd: target });
     if (!updated.ok) return fail(`The thread's budget could not be reserved for this launch: ${updated.error ?? "unknown error"}.`, 409);
     this.db.assistantThreads.setBackingCap(launch.threadId, target);

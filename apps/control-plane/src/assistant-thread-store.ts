@@ -55,13 +55,17 @@ export class AssistantThreadStore {
         session_id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL,
         root_session_id TEXT NOT NULL,
-        retired_cost_usd REAL);
+        retired_cost_usd REAL,
+        -- A deleted root's cap, still held while any member of its tree lives.
+        retired_cap_usd REAL);
       CREATE INDEX IF NOT EXISTS assistant_thread_members_thread ON assistant_thread_members(thread_id, root_session_id);`);
     // The backing session's final cost, if it was deleted: spend is never refunded by deletion.
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN retired_cost_usd REAL NOT NULL DEFAULT 0"); } catch { /* column already present */ }
     // The backing session's cost cap as the thread last set it. A different current cap was set by
     // the owner, and the thread then only ever lowers it.
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN backing_cap_usd REAL"); } catch { /* column already present */ }
+    // The owner's own ceiling for the backing session, once the owner set one: never exceeded.
+    try { db.exec("ALTER TABLE assistant_threads ADD COLUMN backing_owner_cap_usd REAL"); } catch { /* column already present */ }
     // Every launch is a member, with every existing descendant in its tree. Idempotent.
     db.exec(`INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id)
         SELECT session_id, thread_id, session_id FROM assistant_thread_launches;
@@ -116,7 +120,9 @@ export class AssistantThreadStore {
   /** Before a session row is deleted: its spend stays its thread's, in its own launched tree. */
   retireSessionCost(sessionId: string): void {
     const cost = "COALESCE((SELECT cost_usd + live_cost_usd FROM sessions WHERE id=?), 0)";
-    this.db.prepare(`UPDATE assistant_thread_members SET retired_cost_usd=${cost} WHERE session_id=? AND retired_cost_usd IS NULL`).run(sessionId, sessionId);
+    this.db.prepare(`UPDATE assistant_thread_members SET retired_cost_usd=${cost},
+        retired_cap_usd=(SELECT cost_budget_usd FROM sessions WHERE id=?)
+      WHERE session_id=? AND retired_cost_usd IS NULL`).run(sessionId, sessionId, sessionId);
     this.db.prepare(`UPDATE assistant_threads SET retired_cost_usd = retired_cost_usd + ${cost} WHERE session_id=?`).run(sessionId, sessionId);
   }
 
@@ -145,14 +151,17 @@ export class AssistantThreadStore {
     const trees = this.db.prepare(`SELECT member.root_session_id AS root,
         COALESCE(SUM(CASE WHEN session.id IS NULL THEN COALESCE(member.retired_cost_usd, 0)
           ELSE session.cost_usd + session.live_cost_usd END), 0) AS spent,
-        (SELECT cost_budget_usd FROM sessions WHERE id=member.root_session_id) AS budget
+        COALESCE((SELECT cost_budget_usd FROM sessions WHERE id=member.root_session_id),
+          (SELECT retired_cap_usd FROM assistant_thread_members WHERE session_id=member.root_session_id)) AS cap,
+        COUNT(session.id) AS live
       FROM assistant_thread_members member LEFT JOIN sessions session ON session.id=member.session_id
-      WHERE member.thread_id=? GROUP BY member.root_session_id`).all(threadId) as Array<{ spent: number; budget: number | null }>;
+      WHERE member.thread_id=? GROUP BY member.root_session_id`).all(threadId) as Array<{ spent: number; cap: number | null; live: number }>;
     const backingSpentUsd = thread?.backing ?? 0;
     let spentUsd = backingSpentUsd, launchedHeldUsd = 0;
     for (const tree of trees) {
       spentUsd += tree.spent;
-      launchedHeldUsd += Math.max(tree.spent, tree.budget ?? 0);
+      // A tree keeps its root's cap while any member lives, even after the root itself is deleted.
+      launchedHeldUsd += tree.live > 0 ? Math.max(tree.spent, tree.cap ?? 0) : tree.spent;
     }
     return { spentUsd, backingSpentUsd, launchedHeldUsd };
   }
@@ -163,6 +172,15 @@ export class AssistantThreadStore {
 
   setBackingCap(threadId: string, capUsd: number): void {
     this.db.prepare("UPDATE assistant_threads SET backing_cap_usd=? WHERE id=?").run(capUsd, threadId);
+  }
+
+  backingOwnerCap(threadId: string): number | null {
+    return (this.db.prepare("SELECT backing_owner_cap_usd FROM assistant_threads WHERE id=?").get(threadId) as { backing_owner_cap_usd: number | null } | undefined)?.backing_owner_cap_usd ?? null;
+  }
+
+  /** Lowers the owner's recorded ceiling to `capUsd`; it only ever goes down. */
+  recordBackingOwnerCap(threadId: string, capUsd: number): void {
+    this.db.prepare("UPDATE assistant_threads SET backing_owner_cap_usd=MIN(COALESCE(backing_owner_cap_usd, ?), ?) WHERE id=?").run(capUsd, capUsd, threadId);
   }
 
   setConnection(id: string, connectionId: string): void {

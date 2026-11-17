@@ -375,3 +375,28 @@ test("removing a worker's Machine keeps the thread's spend", async () => {
     assert.equal(h.db.assistantThreads.costs(thread.id).spentUsd, 7);
   } finally { await h.close(); }
 });
+
+test("a deleted root keeps its cap held while its tree lives, and the owner's ceiling is never raised", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const env = await h.provision(thread.sessionId);
+    const worker = resultOf((await h.callTools(env, launchWith(51, h.location.id, { config: { costBudgetUsd: 10 } })))[0]);
+    h.db.createSession({ id: "s_live_child", parentSessionId: worker.sessionId, runnerId: "r", workspaceId: "w", agentId: "claude",
+      title: "Child", driver: "claude-code", useWorktree: false, config: {}, now: Date.now() });
+    assert.equal(h.svc.delete(worker.sessionId).ok, true);
+    assert.equal(h.db.assistantThreads.costs(thread.id).launchedHeldUsd, 10, "the child still runs under the deleted root's cap");
+    assert.equal(h.svc.delete("s_live_child").ok, true);
+    assert.equal(h.db.assistantThreads.costs(thread.id).launchedHeldUsd, 0, "with no member left, only spend is held");
+
+    // The owner sets their own lower ceiling; the thread lowers below it but never raises above it.
+    assert.equal(h.svc.setConfig(thread.sessionId, { costBudgetUsd: 12 }).ok, true);
+    const small = resultOf((await h.callTools(env, launchWith(52, h.location.id, { config: { costBudgetUsd: 5 } })))[0]);
+    assert.equal(h.db.getSession(small.sessionId)!.costBudgetUsd, 5);
+    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 12, "25 - 5 = 20 would exceed the owner's 12");
+    assert.equal(h.svc.delete(small.sessionId).ok, true);
+    const next = resultOf((await h.callTools(env, launchWith(53, h.location.id, { config: { costBudgetUsd: 1 } })))[0]);
+    assert.equal(next.receipt.status, "succeeded");
+    assert.ok(h.db.getSession(thread.sessionId)!.costBudgetUsd! <= 12, "the owner's ceiling still holds after rebalancing");
+  } finally { await h.close(); }
+});
