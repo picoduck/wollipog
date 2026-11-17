@@ -52,6 +52,8 @@ test("an assistant launch refuses another harness and any second role, never lau
     }
     const orchestrator = { ...assistantSpec("claude-code"), orchestrator: { strictProjectIsolation: false } } as SessionLaunchSpec;
     assert.throws(() => provisionAgentControl(orchestrator, config, () => {}, host), /no other role/);
+    const wsl: SessionLaunchSpec = { ...assistantSpec("claude-code"), context: { kind: "wsl", distro: "Ubuntu" } };
+    assert.throws(() => provisionAgentControl(wsl, config, () => {}, host), /native Claude Code or Codex/);
   });
 });
 

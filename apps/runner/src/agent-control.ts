@@ -516,6 +516,9 @@ export function provisionAgentControl(
   // only through its thread's audited Assistant connection, under the thread's grant and limits.
   if (spec.assistant) {
     if (isOrchestratorLaunch(spec) || spec.uiEvidenceReviewer) throw new Error("an Assistant thread's session has no other role");
+    if ((spec.context?.kind ?? "native") !== "native" || (spec.executionTarget && spec.executionTarget.adapter !== "host")) {
+      throw new Error("Wollipog Assistant threads run only on a Machine's native Claude Code or Codex");
+    }
     spec.args = assistantLaunchArgs(spec.driver, spec.args);
     return;
   }

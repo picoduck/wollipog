@@ -4237,11 +4237,14 @@ export class SessionsService {
    * mutating cached state. `protocolVersion == null` is intentionally unsupported: the runner did
    * not prove its capability because protocol metadata itself arrived in v15. */
   /** Why an `assistant`-role session cannot launch here (#4663), or null when it can. */
-  private assistantLaunchRefusal(runnerId: string, driver: AgentDriverKind): ServiceResult<never> | null {
+  private assistantLaunchRefusal(runnerId: string, driver: AgentDriverKind, context: AgentContext | undefined): ServiceResult<never> | null {
     const unsupported = this.capabilityFailure(runnerId, "assistantRole", "Wollipog assistant threads");
     if (unsupported) return unsupported;
     if (driver !== "claude-code" && driver !== "codex" && driver !== "codex-app-server") {
       return fail("Wollipog Assistant threads run on Claude Code or Codex. Choose one of them for this thread.", 409);
+    }
+    if ((context?.kind ?? "native") !== "native") {
+      return fail("Wollipog Assistant threads run on a Machine's native Claude Code or Codex, not inside WSL. Install it natively, or start a new thread.", 409);
     }
     return null;
   }
@@ -5044,7 +5047,7 @@ export class SessionsService {
     if (assistantThread) {
       // Never an ordinary session in its place: an older runner would inject the general
       // agent-control server, and other harnesses cannot carry the assistant launch.
-      const refusal = this.assistantLaunchRefusal(req.runnerId, launch.driver);
+      const refusal = this.assistantLaunchRefusal(req.runnerId, launch.driver, launch.context);
       if (refusal) return refusal;
     }
     if (campaignController?.orchestratorPolicy?.control?.mode === "full_control") {
@@ -9776,7 +9779,8 @@ export class SessionsService {
     const assistantThreadId = session.role === "assistant" ? this.db.assistantThreads.forSession(sessionId)?.id : undefined;
     if (session.role === "assistant") {
       if (!assistantThreadId) return fail("This Assistant thread's record is missing; start a new thread.", 409);
-      const refusal = this.assistantLaunchRefusal(session.runnerId, launch.driver);
+      // The agent can be redefined under the same id; recheck what the restart would launch now.
+      const refusal = this.assistantLaunchRefusal(session.runnerId, launch.driver, launch.context);
       if (refusal) return refusal;
     }
     const now = Date.now();

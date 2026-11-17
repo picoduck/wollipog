@@ -83,6 +83,10 @@ test("a new thread launches an assistant-role session whose every launch carries
     assert.equal(h.sent[0]!.spec.orchestrator, undefined);
     assert.ok(h.dashboard.threads().some((published) => published.id === thread.id));
     assert.deepEqual(h.stranger.threads(), []);
+    // Another owner of the organization never receives the backing session either.
+    h.hub.sessionChangedById(thread.sessionId);
+    assert.ok(h.dashboard.messages.some((message) => message.type === "session_upsert" && message.session.id === thread.sessionId));
+    assert.ok(!h.stranger.messages.some((message) => message.type === "session_upsert" && message.session.id === thread.sessionId));
     // Thread views never carry a credential value or hash.
     assert.doesNotMatch(created.raw, /wollipoga_|token/i);
 
@@ -146,6 +150,35 @@ test("only the thread's owner reaches its session, which never joins a Project",
     h.db.createSession({ id: "ordinary", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Ordinary", driver: "claude-code",
       useWorktree: false, config: {}, now: Date.now(), scope: { organizationId: h.owner.organizationId, owner: { kind: "user", userId: h.owner.userId } } });
     assert.equal(h.db.canAccessSession({ ...h.owner, userId: "usr_admin", role: "admin" } as HumanPrincipal, "ordinary"), true);
+  } finally { await h.close(); }
+});
+
+test("thread creation launches the Machine's selected harness installation", async () => {
+  const installed = (id: string, installation: string): AgentDefinition => ({ ...claude, id,
+    installation: { id: installation, path: `/opt/${installation}/claude`, via: "path" } });
+  const h = await harness({ agents: [installed("claude-a", "first"), installed("claude-b", "second")] });
+  try {
+    assert.ok(h.db.selectHarnessInstallation("r", "claude-b", "second"));
+    const { status, body, raw } = await h.call("POST", "/api/assistant-threads", {});
+    assert.equal(status, 200, raw);
+    assert.equal(h.db.getSession(body.thread.sessionId)!.agentId, "claude-b");
+  } finally { await h.close(); }
+});
+
+test("a restart refuses an assistant whose agent was redefined to run inside WSL", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.call("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    h.db.updateSessionStatus(thread.sessionId, "completed", Date.now());
+    h.db.registerRunner({ runnerId: "r", hostname: "fixture", os: "windows", version: "fixture",
+      workspaces: [{ id: "w", name: "Home", path: "/fixture/home" }],
+      agents: [{ ...claude, context: { kind: "wsl", distro: "Ubuntu" } }] }, Date.now(), PROTOCOL_VERSION);
+    const sent = h.sent.length;
+    const restarted = h.svc.restart(thread.sessionId, {});
+    assert.equal(restarted.ok, false);
+    assert.equal(restarted.status, 409);
+    assert.match(restarted.error ?? "", /native Claude Code or Codex/);
+    assert.equal(h.sent.length, sent, "nothing is launched");
   } finally { await h.close(); }
 });
 

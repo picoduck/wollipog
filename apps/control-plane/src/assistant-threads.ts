@@ -1,5 +1,6 @@
 import {
   ASSISTANT_THREAD_HARNESSES,
+  resolveAgentHarnessRow,
   runnerCapabilityRequirementError,
   runnerSupportsProtocol,
   type AgentDefinition,
@@ -46,10 +47,11 @@ function harnessOf(value: unknown): AssistantThreadHarness {
   return value as AssistantThreadHarness;
 }
 
+/** The native installation this Machine launches for a harness: its selected installation first,
+ * never one its installation choice excludes, the same rule every other launch uses. */
 function harnessAgent(runner: RunnerView, harness: AssistantThreadHarness): AgentDefinition | undefined {
-  const native = runner.agents.filter((agent) => agent.available !== false && (agent.context?.kind ?? "native") === "native");
   for (const driver of HARNESS_DRIVERS[harness]) {
-    const agent = native.find((candidate) => candidate.driver === driver);
+    const agent = resolveAgentHarnessRow(runner.agents, { agentId: driver, driver, context: { kind: "native" } });
     if (agent) return agent;
   }
   return undefined;
