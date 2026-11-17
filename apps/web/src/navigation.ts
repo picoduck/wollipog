@@ -24,6 +24,8 @@ export type View =
   | { name: "pods" }
   | { name: "automations"; editor?: AutomationEditorRoute; tab?: AutomationsTab }
   | { name: "automation"; id: string }
+  /** The Assistants section (#4664): the Wollipog Assistant's threads, and one open thread. */
+  | { name: "assistants"; threadId?: string }
   | { name: "skills"; id?: string; pane?: SkillsPane }
   | { name: "usage"; tab?: UsageTab }
   /** Archive visit intents are memory-only; viewPath deliberately serializes neither field. */
@@ -193,7 +195,7 @@ export type SkillsPane = "orphans" | "overview";
  */
 export type ProjectsPane = "overview";
 
-export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived" | "skills">;
+export type GlobalViewName = Extract<View["name"], "inbox" | "assistants" | "projects" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived" | "skills">;
 
 export type DestinationGroup = "work" | "oversight" | "records";
 
@@ -235,6 +237,13 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<GlobalViewItem> = [
     id: "projects",
     name: "Projects",
     description: "Group related sessions and choose the folders where they run.",
+    group: "work",
+  },
+  // Last in Work (#4664), so every destination before it keeps the digit it always had.
+  {
+    id: "assistants",
+    name: "Assistants",
+    description: "Ask an assistant to start, watch and steer your sessions.",
     group: "work",
   },
   {
@@ -281,6 +290,7 @@ export const ENTITY_FALLBACK_TITLES = {
   run: "Multi-Agent Run",
   pod: "Pod",
   automation: "Automation",
+  thread: "Thread",
 } as const;
 
 /**
@@ -304,6 +314,11 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
       if (view.editor?.kind === "new") return "New Automation";
       if (view.editor?.kind === "edit") return entityTitle ? `Edit ${entityTitle}` : "Edit Automation";
       return destination(view.name).name;
+    case "assistants":
+      // An open thread is titled by the thread; the list by its destination.
+      return view.threadId !== undefined
+        ? entityTitle || ENTITY_FALLBACK_TITLES.thread
+        : destination(view.name).name;
     case "inbox":
     case "projects":
     case "runs":
@@ -339,6 +354,8 @@ export function viewDescription(view: View): string | undefined {
   switch (view.name) {
     case "automations":
       return view.editor ? undefined : destination(view.name).description;
+    case "assistants":
+      return view.threadId !== undefined ? undefined : destination(view.name).description;
     case "board":
       return destination("inbox").description;
     case "inbox":
@@ -375,6 +392,8 @@ export function viewPageWidth(view: View): "wide" | "full" | "fill" | null {
       return "wide";
     case "inbox":
     case "board":
+    // The threads beside the open thread, whose transcript fills the column like a session's (§6).
+    case "assistants":
       return "fill";
     case "projects":
     case "skills":
@@ -421,6 +440,7 @@ export function viewSubjectName(view: View): string {
   if (view.name === "session" || view.name === "run" || view.name === "pod" || view.name === "automation") {
     return `This ${viewTitle(view)}`;
   }
+  if (view.name === "assistants" && view.threadId !== undefined) return `This ${ENTITY_FALLBACK_TITLES.thread}`;
   return viewTitle(view);
 }
 
@@ -550,6 +570,7 @@ export function viewPath(view: View): string {
       : view.editor?.kind === "edit" ? `/automations/~${encodeResourceId(view.editor.automationId)}/edit`
         : view.tab === "outbound" ? "/automations/outbound" : "/automations";
     case "automation": return `/automations/~${encodeResourceId(view.id)}`;
+    case "assistants": return view.threadId !== undefined ? `/assistants/~${encodeResourceId(view.threadId)}` : "/assistants";
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
     case "usage": return view.tab === "api" ? "/usage/api" : "/usage";
     case "archived": return "/archived";
@@ -673,6 +694,12 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (automationMatch) {
     const id = decodeResourceId(automationMatch[1]!);
     return id === null ? null : { name: "automation", id };
+  }
+  if (path === "/assistants") return { name: "assistants" };
+  const threadMatch = /^\/assistants\/~([^/]+)$/.exec(path);
+  if (threadMatch) {
+    const threadId = decodeResourceId(threadMatch[1]!);
+    return threadId === null ? null : { name: "assistants", threadId };
   }
   if (path === "/skills") return { name: "skills" };
   const skillsPaneMatch = /^\/skills\/(orphans|overview)$/.exec(path);

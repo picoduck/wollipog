@@ -13022,6 +13022,164 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 @media (max-width: 760px) {
   .modal-foot > .runner-setup-reason { flex-basis: 100%; }
 }
+/* Assistants ------------------------------------------------------------ */
+/* AssistantsView.tsx (#4664): the shared master-detail (§6), whose detail is the open thread. The
+   thread pane is not the reading column `.master-detail-detail` draws: its session fills the pane
+   edge to edge and scrolls inside itself, as a session does on the Sessions page. */
+.assistant-thread-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.assistant-thread-pane > .session-detail { flex: 1 1 0; min-height: 0; }
+.assistant-thread-pane-state {
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-5) var(--page-gutter) var(--space-12) var(--space-6);
+}
+.assistant-group {
+  display: grid;
+  gap: var(--space-1);
+}
+.assistant-group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+}
+.assistant-group-icon {
+  display: inline-flex;
+  color: var(--text-dim);
+}
+.assistant-group-title {
+  margin: 0;
+  font: var(--type-body-strong);
+}
+.assistant-threads-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.assistant-thread-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* The thread's header, in the session bar's place: the title row, the facts, then the work cards. */
+.assistant-thread-head {
+  display: grid;
+  flex: none;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--page-gutter) var(--space-3) var(--space-6);
+  border-bottom: 1px solid var(--border);
+}
+.assistant-thread-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.assistant-thread-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font: var(--type-title);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assistant-thread-title-row > :last-child { margin-left: auto; }
+/* Neutral facts (§11.3), as a project's meta line draws them. */
+.assistant-thread-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  padding: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+  list-style: none;
+}
+.assistant-thread-access { color: var(--text); }
+/* AssistantWorkCards.tsx: one scrolling row of cards, so many launches never push the transcript
+   off the pane; each card opens its session, and a waiting approval rides on its card. */
+.assistant-work { min-width: 0; }
+.assistant-work-cards {
+  display: flex;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0 0 var(--space-1);
+  overflow-x: auto;
+  list-style: none;
+}
+.assistant-work-card {
+  display: grid;
+  flex: 0 0 min(280px, 80%);
+  align-content: start;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+}
+.assistant-work-card[data-needs-you] { border-color: var(--border-strong); }
+.assistant-work-open {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.assistant-work-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.assistant-work-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-body-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assistant-work-line > .status { flex: none; }
+.assistant-work-meta {
+  overflow: hidden;
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assistant-work-request {
+  display: grid;
+  gap: var(--space-2);
+}
+.assistant-work-request-title {
+  margin: 0;
+  font: var(--type-small);
+  overflow-wrap: anywhere;
+}
+.assistant-work-request-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+@media (max-width: 760px) {
+  .assistant-thread-head { padding: var(--space-2) var(--page-gutter); }
+  .assistant-thread-pane-state { padding: var(--space-4) var(--page-gutter) var(--space-12); }
+  .master-detail.assistants-md:not([data-detail-open]) > .assistant-thread-pane { display: none; }
+  .master-detail.assistants-md[data-detail-open] > .master-detail-list { display: none; }
+}
 /* Project management --------------------------------------------------- */
 /* ProjectList.tsx (#2957): the shared master-detail list pane (§6), its head the search field over
    the full-width Sessions Tabs filter (§8.4, §10.2). */

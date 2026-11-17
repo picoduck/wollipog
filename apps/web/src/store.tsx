@@ -418,6 +418,9 @@ export interface State {
   /** In-memory origin for Escape from Settings. Browser history remains an independent push stack. */
   settingsReturnView: View | null;
   inbox: InboxState;
+  /** The open assistant thread's backing session (#4664): its stream is the thread view's to keep.
+   * Absent or null while no thread is open. */
+  assistantSessionId?: string | null;
   filters: Filters;
 }
 
@@ -485,6 +488,7 @@ type Action =
   | { type: "pod_context_loaded"; podId: string; entries: PodContextEntry[] }
   | { type: "navigate"; view: View }
   | { type: "inbox_selection"; sessionId: string | null; splitKey: string | null; persist?: boolean; repair?: boolean }
+  | { type: "assistant_thread_session"; sessionId: string | null }
   | { type: "inbox_split"; splitKey: string | null; persist?: boolean }
   | { type: "inbox_ratio"; ratio: number }
   | { type: "filters"; filters: Partial<Filters> };
@@ -595,7 +599,9 @@ function relevantSessions(state: State): Set<string> {
   const keep = new Set<string>();
   if (state.view.name === "inbox" && state.inbox.selectedSessionId) keep.add(state.inbox.selectedSessionId);
   else if (state.view.name === "session") keep.add(state.view.id);
-  else if (state.view.name === "run") {
+  else if (state.view.name === "assistants" && state.view.threadId !== undefined && state.assistantSessionId) {
+    keep.add(state.assistantSessionId);
+  } else if (state.view.name === "run") {
     state.runs.get(state.view.id)?.sessionIds.forEach((id) => keep.add(id));
   } else if (state.view.name === "pod") {
     state.pods.get(state.view.id)?.members.forEach((member) => keep.add(member.sessionId));
@@ -856,6 +862,10 @@ function reducer(state: State, action: Action): State {
         },
       };
       return withLegacyRecovery(pruneViewStreams(next));
+    }
+    case "assistant_thread_session": {
+      if ((state.assistantSessionId ?? null) === action.sessionId) return state;
+      return withLegacyRecovery(pruneViewStreams({ ...state, assistantSessionId: action.sessionId }));
     }
     case "inbox_split": {
       if (state.inbox.splitKey === action.splitKey) return state;
