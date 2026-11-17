@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AssistantOwnerConfirmation, AssistantOwnerConfirmationResponse, AssistantThread } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
@@ -166,26 +166,40 @@ export function AssistantConfirmationsNotice() {
   const online = useStoreSelector((state) => state.conn === "online");
   const [threads, setThreads] = useState<ReadonlyMap<string, AssistantThread>>(new Map());
   const [now, setNow] = useState(() => Date.now());
-  useEffect(() => onAssistantThreadUpsert((thread) => setThreads((current) => withAssistantThread(current, thread))), []);
+  // Thread changes that arrived while a read was in flight; null when no read is.
+  const arrived = useRef<Map<string, AssistantThread> | null>(null);
+  const receive = useCallback((thread: AssistantThread) => {
+    arrived.current?.set(thread.id, thread);
+    setThreads((current) => withAssistantThread(current, thread));
+  }, []);
+  useEffect(() => onAssistantThreadUpsert(receive), [receive]);
   useEffect(() => {
     if (!online) return;
     let active = true;
-    void api.assistantConfirmationThreads().then(
-      ({ threads: listed }) => {
-        if (active) setThreads(new Map(listed.map((thread) => [thread.id, thread] as const)));
-      },
-      () => { /* Older control planes have no Thread API; the Inbox stays as it was. */ },
-    );
-    return () => { active = false; };
+    const read = async () => {
+      // A change that arrives during a read may be newer than the list or older than it, so it
+      // is kept over the list and the list is read again, until one read sees no change arrive.
+      for (let attempt = 0; attempt < 3 && active; attempt += 1) {
+        arrived.current = new Map();
+        const { threads: listed } = await api.assistantConfirmationThreads();
+        if (!active) return;
+        const during = arrived.current;
+        arrived.current = null;
+        setThreads(new Map([...listed.map((thread) => [thread.id, thread] as const), ...during]));
+        if (during.size === 0) return;
+      }
+    };
+    void read().catch(() => {
+      arrived.current = null; /* Older control planes have no Thread API; the Inbox stays as it was. */
+    });
+    return () => { active = false; arrived.current = null; };
   }, [api, online]);
   useEffect(() => {
     // An unanswered request leaves the list when it expires, even without another event.
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
-  const answered = useCallback((response: AssistantOwnerConfirmationResponse) => {
-    setThreads((current) => withAssistantThread(current, response.thread));
-  }, []);
+  const answered = useCallback((response: AssistantOwnerConfirmationResponse) => receive(response.thread), [receive]);
   const pending = useMemo(() => pendingAssistantConfirmations(threads.values(), now), [threads, now]);
   if (!pending.length) return null;
   return (

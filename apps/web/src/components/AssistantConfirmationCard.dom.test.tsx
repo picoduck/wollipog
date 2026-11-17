@@ -72,7 +72,14 @@ async function flush() {
 test("approvals follow thread events and are read again when the connection returns", async () => {
   let listed = [thread([request("aoc_1", "Archive Session")])];
   let reads = 0;
-  const client = { ...api, assistantConfirmationThreads: async () => { reads += 1; return { threads: listed }; } } as unknown as ApiClient;
+  // While `hold` is set, a read answers with the list as it was when it started, once released.
+  let hold = false;
+  const releases: Array<() => void> = [];
+  const client = { ...api, assistantConfirmationThreads: () => {
+    reads += 1;
+    const snapshot = { threads: listed };
+    return hold ? new Promise((resolve) => releases.push(() => resolve(snapshot))) : Promise.resolve(snapshot);
+  } } as unknown as ApiClient;
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = { instanceId: "confirmations", runtimeKey: "confirmations:1", createSocket: () => socket, close() {} };
   const navigation: ViewNavigation = { current: () => ({ name: "session", id: "s_thread" }), push() {}, listen: () => () => {} };
@@ -108,5 +115,21 @@ test("approvals follow thread events and are read again when the connection retu
   await flush();
   assert.equal(reads, 2);
   assert.deepEqual(titles(), ["Close Shell"]);
+
+  // A change that arrives while a read is in flight is kept over the older list, and the list is
+  // read again so the dashboard ends on what the control plane holds now.
+  hold = true;
+  await act(async () => actions!.dispatch({ type: "conn", conn: "offline" }));
+  await act(async () => actions!.dispatch({ type: "conn", conn: "online" }));
+  await flush();
+  assert.equal(reads, 3);
+  const live = thread([request("aoc_3", "Close Shell"), request("aoc_4", "Delete Automation")]);
+  await act(async () => socket.push({ type: "assistant_thread_upsert", userId: "u", thread: live }));
+  listed = [live];
+  hold = false;
+  await act(async () => releases.shift()!());
+  await flush();
+  assert.deepEqual(titles(), ["Close Shell", "Delete Automation"]);
+  assert.equal(reads, 4);
   await act(async () => root.unmount());
 });
