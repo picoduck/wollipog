@@ -116,6 +116,31 @@ test("an assistant session takes no agent-control routes and keeps its role", as
   } finally { await h.close(); }
 });
 
+test("only the thread's owner reaches its session, which never joins a Project", async () => {
+  const h = await harness();
+  try {
+    // The Location belongs to a Project; an ordinary session there would join it.
+    const project = h.db.createProject({ name: "Shared" });
+    h.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w" });
+    const thread = (await h.call("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const session = h.db.getSession(thread.sessionId)!;
+    assert.equal(session.projectId ?? null, null);
+    assert.deepEqual(h.db.sessionScope(thread.sessionId), { organizationId: h.owner.organizationId, owner: { kind: "user", userId: h.owner.userId } });
+    assert.equal(h.db.canAccessSession(h.owner, thread.sessionId), true);
+    assert.ok(h.db.listSessionSummaries(h.owner).some((listed) => listed.id === thread.sessionId));
+    // Organization owners and admins reach every other user's sessions, but not this one.
+    for (const other of [{ ...h.owner, userId: "usr_other_owner" }, { ...h.owner, userId: "usr_admin", role: "admin" }] as HumanPrincipal[]) {
+      assert.equal(h.db.canAccessSession(other, thread.sessionId), false, other.role);
+      assert.ok(!h.db.listSessionSummaries(other).some((listed) => listed.id === thread.sessionId), other.role);
+      assert.ok(!h.db.listSessionsForPrincipal(other).some((listed) => listed.id === thread.sessionId), other.role);
+    }
+    // An ordinary user-owned session stays visible to an admin, as before.
+    h.db.createSession({ id: "ordinary", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Ordinary", driver: "claude-code",
+      useWorktree: false, config: {}, now: Date.now(), scope: { organizationId: h.owner.organizationId, owner: { kind: "user", userId: h.owner.userId } } });
+    assert.equal(h.db.canAccessSession({ ...h.owner, userId: "usr_admin", role: "admin" } as HumanPrincipal, "ordinary"), true);
+  } finally { await h.close(); }
+});
+
 test("request JSON can never create an assistant-role session", async () => {
   const h = await harness();
   try {

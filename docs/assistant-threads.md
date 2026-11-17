@@ -45,5 +45,9 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
   launch or steer sessions outside its thread's grant and limits. The runner keeps the marker on
   every relaunch and refuses it for any harness other than Claude Code and Codex.
 - The control plane refuses every agent-control route for an `assistant`-role session regardless.
+- The session is owned by the thread's owner alone and never joins a Project, even when its
+  Location belongs to one. Only that owner can read, list, prompt or steer it: organization owners
+  and admins, who otherwise reach every session in the organization, and agents are refused, since
+  the session acts with its owner's Assistant authority.
 - The `sessions.session_role` column keeps `normal` for these sessions; `assistant_thread_id`
   carries the role, because widening that column's CHECK would mean rebuilding the sessions table.

@@ -6087,6 +6087,13 @@ export class OccupiedUnreadLocationError extends Error {
   }
 }
 
+/** Only the thread's own owner reaches an Assistant thread's session: its scope is always that
+ * user's, and the person must be that user. Organization owners, admins and agents are refused. */
+function assistantSessionOwnerMatches(principal: AuthPrincipal, scope: ResourceScope): boolean {
+  return principal.kind === "human" && principal.organizationId === scope.organizationId &&
+    scope.owner.kind === "user" && scope.owner.userId === principal.userId;
+}
+
 export class ControlPlaneDb {
   readonly assistantConnections: AssistantConnections;
   readonly assistantThreads: AssistantThreadStore;
@@ -13878,7 +13885,13 @@ export class ControlPlaneDb {
 
   canAccessSession(principal: AuthPrincipal, sessionId: string): boolean {
     const scope = this.sessionScope(sessionId);
-    return scope ? this.principalCanAccessScope(principal, scope) : false;
+    if (!scope || !this.principalCanAccessScope(principal, scope)) return false;
+    return !this.isAssistantSession(sessionId) || assistantSessionOwnerMatches(principal, scope);
+  }
+
+  /** Whether a session backs a Wollipog Assistant thread (#4663). */
+  isAssistantSession(sessionId: string): boolean {
+    return this.stmt("SELECT 1 FROM sessions WHERE id=? AND assistant_thread_id IS NOT NULL").get(sessionId) !== undefined;
   }
 
   dismissProviderLoginNotice(userId: string, runnerId: string, operationId: string, now = Date.now()): void {
@@ -14397,6 +14410,20 @@ export class ControlPlaneDb {
   }
 
   private sessionAuthorizationSql(principal: AuthPrincipal): { sql: string; params: string[] } {
+    const scope = this.sessionScopeAuthorizationSql(principal);
+    // An Assistant thread's session acts with its owner's Assistant authority, so only that owner
+    // reaches it: never an organization owner or admin, a team member or an agent (#4663).
+    const assistant = principal.kind === "human"
+      ? { sql: "(ownership.owner_kind='user' AND ownership.owner_id=?)", params: [principal.userId] }
+      : { sql: "0", params: [] };
+    return {
+      sql: `(${scope.sql}) AND (NOT EXISTS (SELECT 1 FROM sessions assistant_session
+        WHERE assistant_session.id=ownership.session_id AND assistant_session.assistant_thread_id IS NOT NULL) OR ${assistant.sql})`,
+      params: [...scope.params, ...assistant.params],
+    };
+  }
+
+  private sessionScopeAuthorizationSql(principal: AuthPrincipal): { sql: string; params: string[] } {
     if (principal.kind === "human") {
       if (principal.role === "owner" || principal.role === "admin") {
         return { sql: "ownership.organization_id=?", params: [principal.organizationId] };

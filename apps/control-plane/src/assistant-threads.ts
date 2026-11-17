@@ -17,7 +17,6 @@ import type { AssistantThreadStore, StoredThreadState, ThreadRow } from "./assis
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import { UNTITLED, type SessionsService } from "./sessions.js";
-import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 import { failureBody } from "./capability-refusal.js";
 
 const DEFAULT_THREAD_TITLE = "New Thread";
@@ -265,10 +264,10 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
     // Absent saved settings mean the system default, whose Child Harness is Automatic.
     savedChildHarnessDriver: (owner) => db.getOrchestratorDefaults(owner.userId)?.defaults.behavior.childHarness?.driver ?? null,
     createBackingSession: (owner, request, threadId) => {
-      // The same ownership resolution and launch path as an owner's New Session.
-      const ownership = resolveSessionCreationOwnership(db, owner, request);
-      if (!ownership.ok) return { ok: false, status: ownership.status, error: ownership.error };
-      const created = svc.createSession(ownership.body, undefined, ownership.scope, false, false, false,
+      // The owner's New Session launch path, but never in a Project or a shared scope: the session
+      // acts with the owner's Assistant authority, so it belongs to the owner alone.
+      const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+      const created = svc.createSession({ ...request, projectId: null, projectLocationId: null }, undefined, scope, false, false, false,
         { defaultOwnerUserId: owner.userId, assistantThread: { threadId } });
       return created.ok ? { ok: true, status: created.status, data: created.data } : { ...failureBody(created), ok: false, status: created.status };
     },
