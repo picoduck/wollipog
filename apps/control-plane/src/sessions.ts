@@ -2213,6 +2213,9 @@ function assistantLaunchPolicy(threadId: string): import("@wollipog/protocol").A
   return { threadId, guide: WOLLIPOG_ASSISTANT_SKILL.content };
 }
 
+const ASSISTANT_THREAD_BUDGET_REFUSAL = "This Wollipog Assistant thread has spent or committed its whole " +
+  `$${ASSISTANT_THREAD_LIMITS.costUsd} budget, so it cannot launch another session. Tell your owner; they can continue in a new thread.`;
+
 /** An Orchestrator's children would run outside the thread's launch count. */
 const ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL = "A Wollipog Assistant thread cannot start an Orchestrator. " +
   "Launch an ordinary session instead, or ask your owner to start the campaign.";
@@ -4254,7 +4257,7 @@ export class SessionsService {
    * not prove its capability because protocol metadata itself arrived in v15. */
   /** The Assistant thread whose call is launching work, with what it may still spend, or why it may
    * launch nothing more (#4663). Null outside a thread's Assistant call. */
-  private assistantThreadLaunch(): { threadId: string; remainingUsd: number } | { refusal: string } | null {
+  private assistantThreadLaunch(): { threadId: string; backingSessionId: string | null; launchedHeldUsd: number; remainingUsd: number } | { refusal: string } | null {
     const call = assistantCallContext.getStore();
     const thread = call ? this.db.assistantThreads.forConnection(call.connectionId) : null;
     if (!thread) return null;
@@ -4264,14 +4267,27 @@ export class SessionsService {
       return { refusal: `This Wollipog Assistant thread has launched ${launched} of the ${limits.launchedSessions} sessions it may launch, ` +
         "so it cannot launch another. Tell your owner; they can continue in a new thread." };
     }
-    const { committedUsd } = this.db.assistantThreads.costs(thread.id);
-    // Whole cents only, rounded down, so the caps never add up to more than the budget.
-    const remainingUsd = Math.floor((limits.costUsd - committedUsd) * 100) / 100;
-    if (remainingUsd < 0.01) {
-      return { refusal: `This Wollipog Assistant thread has spent or committed $${Math.min(committedUsd, limits.costUsd).toFixed(2)} ` +
-        `of its $${limits.costUsd} budget, so it cannot launch another session. Tell your owner; they can continue in a new thread.` };
-    }
-    return { threadId: thread.id, remainingUsd };
+    const { backingSpentUsd, launchedHeldUsd } = this.db.assistantThreads.costs(thread.id);
+    // A launch takes from what the backing assistant has not spent and launched work does not
+    // hold, and never more than the backing session's own remaining cap. Whole cents, rounded down.
+    const backingCap = thread.session_id ? this.db.getSession(thread.session_id)?.costBudgetUsd ?? null : null;
+    const unheld = limits.costUsd - launchedHeldUsd - backingSpentUsd;
+    const remainingUsd = Math.floor(Math.min(unheld, backingCap === null ? unheld : backingCap - backingSpentUsd) * 100) / 100;
+    if (remainingUsd < 0.01) return { refusal: ASSISTANT_THREAD_BUDGET_REFUSAL };
+    return { threadId: thread.id, backingSessionId: thread.session_id, launchedHeldUsd, remainingUsd };
+  }
+
+  /** Lowers the backing assistant's cost cap to what the thread's budget leaves it once a launch
+   * holds `capUsd` more, so the assistant and its launched sessions together stay within it. */
+  private reserveAssistantThreadBudget(launch: { backingSessionId: string | null; launchedHeldUsd: number }, capUsd: number): ServiceResult<never> | { ok: true } {
+    if (!launch.backingSessionId) return { ok: true };
+    const backing = this.db.getSession(launch.backingSessionId);
+    if (!backing) return { ok: true };
+    const allowed = Math.floor((ASSISTANT_THREAD_LIMITS.costUsd - launch.launchedHeldUsd - capUsd) * 100) / 100;
+    if (backing.costBudgetUsd != null && backing.costBudgetUsd <= allowed) return { ok: true };
+    const updated = this.setConfig(backing.id, { costBudgetUsd: Math.max(0.01, allowed) });
+    if (!updated.ok) return fail(`The thread's budget could not be reserved for this launch: ${updated.error ?? "unknown error"}.`, 409);
+    return { ok: true };
   }
 
   /** Why an `assistant`-role session cannot launch here (#4663), or null when it can. */
@@ -4941,8 +4957,14 @@ export class SessionsService {
       // An absent, zero or negative request would otherwise mean "no budget": a thread launch is
       // always capped, at most at what the thread has left.
       const requested = req.config?.costBudgetUsd;
-      req = { ...req, config: { ...req.config, costBudgetUsd: typeof requested === "number" && Number.isFinite(requested) && requested > 0
-        ? Math.min(requested, threadLaunch.remainingUsd) : threadLaunch.remainingUsd } };
+      const capUsd = typeof requested === "number" && Number.isFinite(requested) && requested > 0
+        ? Math.floor(Math.min(requested, threadLaunch.remainingUsd) * 100) / 100 : threadLaunch.remainingUsd;
+      if (capUsd < 0.01) return fail(ASSISTANT_THREAD_BUDGET_REFUSAL, 409);
+      // Reserve the cap first: the backing assistant's own cap shrinks by it, so all of the thread's
+      // caps together never exceed its budget. Refuse rather than launch unreserved.
+      const reserved = this.reserveAssistantThreadBudget(threadLaunch, capUsd);
+      if (!reserved.ok) return reserved;
+      req = { ...req, config: { ...req.config, costBudgetUsd: capUsd } };
     }
     // Attribution is supplied only by the authenticated route, never by the request payload.
     const capture = creationContext?.[PREPARED_MEDIA_CAPTURE];

@@ -19796,6 +19796,7 @@ export class ControlPlaneDb {
       if (input.reviewPolicyCapture) this.reviewSettings.captureSessionPolicy(input.id, reviewUserId, projectId, input.reviewPolicyCapture);
       if (input.assistantWorkOrigin) this.assistantWork.attachAcceptedOrigin(input.assistantWorkOrigin, input.id);
       if (input.assistantThreadLaunch) this.assistantThreads.recordLaunch(input.assistantThreadLaunch, input.id, input.now);
+      else if (input.parentSessionId) this.assistantThreads.inheritMembership(input.id, input.parentSessionId);
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-created:${input.id}`,
         kind: "session.created",
@@ -28246,6 +28247,8 @@ export class ControlPlaneDb {
   }
 
   private deleteSessionRows(id: string): void {
+    // Deleting a session never refunds an Assistant thread's spend (#4663).
+    this.assistantThreads.retireSessionCost(id);
     // multi_agent_run_members has no FK to sessions, so clean its rows up too,
     // otherwise a run keeps a dangling member id. Same for the FTS index (virtual
     // tables have no FKs — stale hits would surface deleted sessions in search).

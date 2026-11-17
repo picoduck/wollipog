@@ -60,11 +60,16 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
 - While a thread's Assistant call executes, every session it creates counts as a launch of that
   thread. This covers `session_launch`, side chats and every other operation that passes through
   session creation inside the call. A launch is refused with a message to the
-  assistant once the thread has launched 10 sessions, or once the budget is spent or committed.
-  The backing session's spend counts, and each launched session counts as the larger of its
-  whole tree's spend (with every descendant) and its own cost cap. Each launched session is capped
-  at what the thread has left, rounded down to whole cents. A missing, zero or negative requested
-  budget gets that cap too, never "no budget".
+  assistant once the thread has launched 10 sessions, or once its budget is spent or held.
+  - Each launch is capped at whatever the backing assistant has not spent and launched work does
+    not hold, rounded down to whole cents. A missing, zero or negative requested budget gets that
+    cap too, never "no budget".
+  - The backing session's own cap is lowered by the same amount before the session is created
+    (the launch is refused if it cannot be). All of the thread's caps together therefore never
+    exceed its budget.
+  - Each launched tree holds the larger of its spend and its root's cap. A tree is the launched
+    session and every descendant, recorded when each is created.
+  - Deleting a session never refunds its spend: the thread keeps the deleted session's cost.
 - A thread cannot start runs, workflows or Orchestrators, whose children it could not count.
   This holds even when an Orchestrator would come from a saved default. Its connection also
   cannot call `auto_create`, `auto_update`, `auto_enable`, `auto_test`, `workflow_run`,

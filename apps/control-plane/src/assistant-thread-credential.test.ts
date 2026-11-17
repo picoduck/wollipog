@@ -234,9 +234,11 @@ test("a thread launches sessions within its limits and the assistant hears why i
     zero.params.arguments = { ...zero.params.arguments, config: { costBudgetUsd: 0 } } as typeof zero.params.arguments;
     const capped = resultOf((await h.callTools(spenderEnv, zero))[0]);
     assert.equal(h.db.getSession(capped.sessionId)!.costBudgetUsd, 8);
-    // That cap is committed: nothing is left for another launch even before the first one spends.
+    // The cap is taken from the backing assistant's own allowance, so the two caps sum to the budget.
+    assert.equal(h.db.getSession(spender.sessionId)!.costBudgetUsd, ASSISTANT_THREAD_LIMITS.costUsd - 8);
+    // That cap is held: nothing is left for another launch even before the first one spends.
     const committed = resultOf((await h.callTools(spenderEnv, launch(4, h.location.id)))[0]);
-    assert.match(committed.error, /has spent or committed \$25\.00 of its \$25 budget/);
+    assert.match(committed.error, /has spent or committed its whole \$25 budget/);
     // A launched session's own children count against the thread's spend.
     h.db.createSession({ id: "s_grandchild", parentSessionId: capped.sessionId, runnerId: "r", workspaceId: "w", agentId: "claude",
       title: "Child", driver: "claude-code", useWorktree: false, config: {}, now: Date.now() });
@@ -281,5 +283,35 @@ test("a thread cannot schedule work or start runs that would escape its limits",
     // Outside a thread's call the same request is not refused for this reason.
     const ordinary = h.svc.createRun({ runnerId: "r", workspaceId: "w", agentIds: ["claude"], task: "Fan out" });
     assert.doesNotMatch(ordinary.error ?? "", /cannot start runs or workflows/);
+  } finally { await h.close(); }
+});
+
+test("launched caps come out of the assistant's own allowance, and deleting a session refunds nothing", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const env = await h.provision(thread.sessionId);
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=1 WHERE id=?").run(thread.sessionId);
+    const worker = resultOf((await h.callTools(env, launch(11, h.location.id)))[0]);
+    // $1 spent leaves $24 for the worker, and the assistant may now spend only up to $1 in all.
+    assert.equal(h.db.getSession(worker.sessionId)!.costBudgetUsd, 24);
+    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 1);
+    assert.match(resultOf((await h.callTools(env, launch(12, h.location.id)))[0]).error, /whole \$25 budget/);
+
+    // The worker spends $10 through a child of its own, then both are deleted: the spend stays.
+    h.db.createSession({ id: "s_worker_child", parentSessionId: worker.sessionId, runnerId: "r", workspaceId: "w", agentId: "claude",
+      title: "Child", driver: "claude-code", useWorktree: false, config: {}, now: Date.now() });
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=? WHERE id=?").run(6, worker.sessionId);
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=? WHERE id=?").run(4, "s_worker_child");
+    const spent = () => ((h.db.assistantThreads.costs(thread.id)));
+    assert.equal(spent().spentUsd, 11);
+    assert.equal(h.svc.delete(worker.sessionId).ok, true);
+    assert.equal(spent().spentUsd, 11, "the deleted worker's spend is kept");
+    assert.equal(h.svc.delete("s_worker_child").ok, true);
+    assert.equal(spent().spentUsd, 11, "a deleted descendant's spend is kept, even after its parent was deleted first");
+    const view = (await h.ownerCall("GET", `/api/assistant-threads/${thread.id}`)).body.thread as AssistantThread;
+    assert.deepEqual(view.usage?.costUsd, { used: 11, limit: ASSISTANT_THREAD_LIMITS.costUsd });
+    // Deletion freed none of the budget: what the worker spent is still held.
+    assert.ok(h.db.assistantThreads.costs(thread.id).launchedHeldUsd >= 10);
   } finally { await h.close(); }
 });

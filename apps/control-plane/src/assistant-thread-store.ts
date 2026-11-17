@@ -47,7 +47,16 @@ export class AssistantThreadStore {
         session_id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL,
         created_at INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS assistant_thread_launches_thread ON assistant_thread_launches(thread_id, created_at);`);
+      CREATE INDEX IF NOT EXISTS assistant_thread_launches_thread ON assistant_thread_launches(thread_id, created_at);
+      -- Every session in a launched session's tree, recorded at creation so its cost stays the
+      -- thread's even after a parent between them is deleted.
+      CREATE TABLE IF NOT EXISTS assistant_thread_members (
+        session_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        root_session_id TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS assistant_thread_members_thread ON assistant_thread_members(thread_id, root_session_id);`);
+    // The cost of the thread's sessions that were deleted: spend is never refunded by deletion.
+    try { db.exec("ALTER TABLE assistant_threads ADD COLUMN retired_cost_usd REAL NOT NULL DEFAULT 0"); } catch { /* column already present */ }
   }
 
   constructor(private readonly db: DatabaseSync) {}
@@ -82,6 +91,20 @@ export class AssistantThreadStore {
 
   recordLaunch(threadId: string, sessionId: string, now: number): void {
     this.db.prepare("INSERT OR IGNORE INTO assistant_thread_launches (session_id, thread_id, created_at) VALUES (?, ?, ?)").run(sessionId, threadId, now);
+    this.db.prepare("INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id) VALUES (?, ?, ?)").run(sessionId, threadId, sessionId);
+  }
+
+  /** A child of a thread member joins the same launched tree. */
+  inheritMembership(sessionId: string, parentSessionId: string): void {
+    this.db.prepare(`INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id)
+      SELECT ?, thread_id, root_session_id FROM assistant_thread_members WHERE session_id=?`).run(sessionId, parentSessionId);
+  }
+
+  /** Before a session row is deleted: its spend stays its thread's. */
+  retireSessionCost(sessionId: string): void {
+    this.db.prepare(`UPDATE assistant_threads SET retired_cost_usd = retired_cost_usd +
+        COALESCE((SELECT cost_usd + live_cost_usd FROM sessions WHERE id=?), 0)
+      WHERE id IN (SELECT thread_id FROM assistant_thread_members WHERE session_id=?)`).run(sessionId, sessionId);
   }
 
   launchedSessionIds(threadId: string): string[] {
@@ -91,25 +114,25 @@ export class AssistantThreadStore {
 
   /** The thread's spend so far: its backing session's cost plus every launched session's, including
    * the in-flight estimate of a running turn. */
-  /** What the thread has spent and committed. Spend is settled plus in-flight cost of its backing
-   * session and of every launched session together with all of that session's descendants. A
-   * launched tree commits the larger of its spend and its root's cost budget, so concurrent launches
-   * cannot together exceed the thread's budget. */
-  costs(threadId: string): { spentUsd: number; committedUsd: number } {
-    const backing = this.db.prepare(`SELECT COALESCE(SUM(session.cost_usd + session.live_cost_usd), 0) AS cost FROM sessions session
-      JOIN assistant_threads thread ON thread.session_id=session.id WHERE thread.id=?`).get(threadId) as { cost: number };
-    const trees = this.db.prepare(`WITH RECURSIVE tree(root, id) AS (
-        SELECT session_id, session_id FROM assistant_thread_launches WHERE thread_id=?
-        UNION SELECT tree.root, child.id FROM sessions child JOIN tree ON child.parent_session_id=tree.id)
-      SELECT tree.root AS root, COALESCE(SUM(session.cost_usd + session.live_cost_usd), 0) AS spent,
-        (SELECT cost_budget_usd FROM sessions WHERE id=tree.root) AS budget
-      FROM tree JOIN sessions session ON session.id=tree.id GROUP BY tree.root`).all(threadId) as Array<{ spent: number; budget: number | null }>;
-    let spentUsd = backing.cost, committedUsd = backing.cost;
+  /** What the thread has spent, and what its launched work holds. Spend is settled plus in-flight
+   * cost of the backing session, of every member of every launched tree, and of deleted members.
+   * Launched work holds deleted members' spend plus, per tree, the larger of its spend and its
+   * root's cost cap: that is the part of the budget the backing session can no longer use. */
+  costs(threadId: string): { spentUsd: number; backingSpentUsd: number; launchedHeldUsd: number } {
+    const thread = this.db.prepare(`SELECT thread.retired_cost_usd AS retired,
+        COALESCE((SELECT cost_usd + live_cost_usd FROM sessions WHERE id=thread.session_id), 0) AS backing
+      FROM assistant_threads thread WHERE thread.id=?`).get(threadId) as { retired: number; backing: number } | undefined;
+    const trees = this.db.prepare(`SELECT member.root_session_id AS root, COALESCE(SUM(session.cost_usd + session.live_cost_usd), 0) AS spent,
+        (SELECT cost_budget_usd FROM sessions WHERE id=member.root_session_id) AS budget
+      FROM assistant_thread_members member JOIN sessions session ON session.id=member.session_id
+      WHERE member.thread_id=? GROUP BY member.root_session_id`).all(threadId) as Array<{ spent: number; budget: number | null }>;
+    const retired = thread?.retired ?? 0, backingSpentUsd = thread?.backing ?? 0;
+    let spentUsd = backingSpentUsd + retired, launchedHeldUsd = retired;
     for (const tree of trees) {
       spentUsd += tree.spent;
-      committedUsd += Math.max(tree.spent, tree.budget ?? 0);
+      launchedHeldUsd += Math.max(tree.spent, tree.budget ?? 0);
     }
-    return { spentUsd, committedUsd };
+    return { spentUsd, backingSpentUsd, launchedHeldUsd };
   }
 
   setConnection(id: string, connectionId: string): void {
