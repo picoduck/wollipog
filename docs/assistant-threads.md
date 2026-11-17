@@ -70,8 +70,9 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
   - Each admission first settles the backing cap to what launched work holds. A reservation whose
     launch then failed, or the unspent cap of a deleted launch, goes back to the assistant. A cap
     the owner changed is only ever lowered.
-  - Each launched tree holds the larger of its spend and its root's cap. A tree is the launched
-    session and every descendant, recorded when each is created.
+  - Each launched tree holds the larger of its spend and its root's launch cap (or its current cap,
+    if the owner raised it), even after the root's own cap is carved down for its children. A tree
+    is the launched session and every descendant, recorded when each is created.
   - A child created anywhere in a launched tree is carved out of its creator's own cap (#4671).
     The creator's allowance is the cap it was launched or created with. Its own cap is that
     allowance less what its children hold, settled at each child creation and restart, so a

@@ -440,7 +440,7 @@ async function treeHarness(workerConfig: Record<string, unknown>) {
     const members = h.db.raw().prepare("SELECT session_id FROM assistant_thread_members WHERE thread_id=?").all(thread.id) as Array<{ session_id: string }>;
     return Math.round((cap(thread.sessionId) + members.reduce((sum, member) => sum + cap(member.session_id), 0)) * 100) / 100;
   };
-  return { ...h, thread, worker, spawn, cap, capsTotal };
+  return { ...h, thread, env, worker, spawn, cap, capsTotal };
 }
 
 test("#4671: a launched worker's children are carved out of its own cap, so the thread's caps total its budget", async () => {
@@ -455,7 +455,22 @@ test("#4671: a launched worker's children are carved out of its own cap, so the 
     assert.equal(second.data!.costBudgetUsd, 3.33);
     assert.equal(h.cap(h.worker), 3.34);
     assert.equal(h.capsTotal(), ASSISTANT_THREAD_LIMITS.costUsd);
-    assert.ok(h.db.assistantThreads.costs(h.thread.id).launchedHeldUsd <= 10, "the tree stays inside the cap the thread holds for it");
+    assert.equal(h.db.assistantThreads.costs(h.thread.id).launchedHeldUsd, 10, "the tree still holds its whole launched cap");
+
+    // Another launch must not reclaim what the carved worker gave its children.
+    const another = resultOf((await h.callTools(h.env, launchWith(72, h.location.id, { config: { costBudgetUsd: 1 } })))[0]);
+    assert.equal(another.receipt.status, "succeeded", JSON.stringify(another));
+    assert.equal(h.cap(h.thread.sessionId), 14);
+    assert.equal(h.db.assistantThreads.costs(h.thread.id).launchedHeldUsd, 11);
+    assert.equal(h.capsTotal(), ASSISTANT_THREAD_LIMITS.costUsd);
+
+    // Deleting the carved worker while its children run keeps their part held too.
+    assert.equal(h.svc.delete(h.worker).ok, true);
+    assert.equal(h.db.assistantThreads.costs(h.thread.id).launchedHeldUsd, 11);
+    const after = resultOf((await h.callTools(h.env, launchWith(73, h.location.id, {})))[0]);
+    assert.equal(after.receipt.status, "succeeded", JSON.stringify(after));
+    assert.equal(h.cap(after.sessionId), 14, "only the backing assistant's unheld $14 is launched");
+    assert.equal(h.cap(h.thread.sessionId), 0.01);
   } finally { await h.close(); }
 });
 

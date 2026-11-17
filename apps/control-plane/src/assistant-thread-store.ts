@@ -22,6 +22,11 @@ export interface ThreadRow {
   archived_at: number | null;
 }
 
+/** What a launched tree's root commits of the thread's budget: the cap it was launched with, which
+ * its own cap and every descendant's are carved out of (#4671), or more if the owner raised its cap. */
+const TREE_COMMITMENT_SQL = (session: string, member: string) => `CASE WHEN ${session}.cost_budget_usd IS NULL
+  THEN ${member}.allowance_usd ELSE MAX(COALESCE(${member}.allowance_usd, 0), ${session}.cost_budget_usd) END`;
+
 /** Persistence for Wollipog Assistant threads (#4663). Owner-scoped: a thread is its owner's
  * conversation, so even another owner of the organization never reads it. */
 export class AssistantThreadStore {
@@ -147,7 +152,7 @@ export class AssistantThreadStore {
   retireSessionCost(sessionId: string): void {
     const cost = "COALESCE((SELECT cost_usd + live_cost_usd FROM sessions WHERE id=?), 0)";
     this.db.prepare(`UPDATE assistant_thread_members SET retired_cost_usd=${cost},
-        retired_cap_usd=(SELECT cost_budget_usd FROM sessions WHERE id=?)
+        retired_cap_usd=(SELECT ${TREE_COMMITMENT_SQL("s", "assistant_thread_members")} FROM sessions s WHERE s.id=?)
       WHERE session_id=? AND retired_cost_usd IS NULL`).run(sessionId, sessionId, sessionId);
     this.db.prepare(`UPDATE assistant_threads SET retired_cost_usd = retired_cost_usd + ${cost} WHERE session_id=?`).run(sessionId, sessionId);
   }
@@ -167,7 +172,7 @@ export class AssistantThreadStore {
    * the in-flight estimate of a running turn. */
   /** What the thread has spent, and what its launched work holds. Spend is settled plus in-flight
    * cost of the backing session and of every member of every launched tree, deleted ones included.
-   * Each tree holds the larger of its spend and its root's cost cap: the part of the budget the
+   * Each tree holds the larger of its spend and its root's commitment: the part of the budget the
    * backing session can no longer use. */
   costs(threadId: string): { spentUsd: number; backingSpentUsd: number; launchedHeldUsd: number } {
     const thread = this.db.prepare(`SELECT thread.retired_cost_usd +
@@ -177,7 +182,8 @@ export class AssistantThreadStore {
     const trees = this.db.prepare(`SELECT member.root_session_id AS root,
         COALESCE(SUM(CASE WHEN session.id IS NULL THEN COALESCE(member.retired_cost_usd, 0)
           ELSE session.cost_usd + session.live_cost_usd END), 0) AS spent,
-        COALESCE((SELECT cost_budget_usd FROM sessions WHERE id=member.root_session_id),
+        COALESCE((SELECT ${TREE_COMMITMENT_SQL("s", "rm")} FROM sessions s JOIN assistant_thread_members rm ON rm.session_id=s.id
+            WHERE s.id=member.root_session_id),
           (SELECT retired_cap_usd FROM assistant_thread_members WHERE session_id=member.root_session_id)) AS cap,
         COUNT(session.id) AS live
       FROM assistant_thread_members member LEFT JOIN sessions session ON session.id=member.session_id
