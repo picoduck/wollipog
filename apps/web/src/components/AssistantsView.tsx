@@ -171,7 +171,6 @@ export function AssistantsView({ threadId, rightPanel }: {
     ]),
   ];
 
-  const newThread = { label: "New Thread", onClick: () => setCreating(true) };
   const phoneDetail = isMobile && threadId !== undefined;
 
   return (
@@ -186,7 +185,8 @@ export function AssistantsView({ threadId, rightPanel }: {
           menuLabel="Thread Actions"
         />
       ) : (
-        <PageHeader title={ASSISTANTS.name} description={ASSISTANTS.description} primary={newThread} />
+        // New Thread belongs to the assistant's Threads list, so the page header offers no second one.
+        <PageHeader title={ASSISTANTS.name} description={ASSISTANTS.description} />
       )}
       <div className="master-detail assistants-md" data-detail-open={threadId !== undefined ? "" : undefined}>
         <aside className="master-detail-list" aria-label={ASSISTANTS.name} data-focus-zone="list" tabIndex={-1}>
@@ -203,9 +203,9 @@ export function AssistantsView({ threadId, rightPanel }: {
         <div className="assistant-thread-pane" data-focus-zone="main" tabIndex={-1}>
           {threadId === undefined ? (
             <div className="assistant-thread-pane-state">
-              <State icon={<AssistantsIcon />} title={WOLLIPOG_ASSISTANT} headingLevel={2}
-                actions={<button type="button" className="btn primary" onClick={() => setCreating(true)}>New Thread</button>}>
-                Ask the assistant to start sessions, check on work and handle approvals. Choose a thread, or start one.
+              <State icon={<AssistantsIcon />} title={WOLLIPOG_ASSISTANT} headingLevel={2}>
+                Ask the assistant to start sessions, check on work and handle approvals. Choose a thread, or start one
+                with New Thread.
               </State>
             </div>
           ) : list.kind === "loading" || (!selected && !missing && list.kind === "ready") ? (
@@ -278,7 +278,10 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
       </div>
       <div className="assistant-threads-head">
         <h3 className="group-label">Threads{threads.length > 0 && <span className="count">{threads.length}</span>}</h3>
-        <button type="button" className="btn sm ghost" onClick={onNewThread}><PlusIcon />New Thread</button>
+        {/* With no threads the empty state offers New Thread itself, so the head steps aside (§12.1). */}
+        {!(list.kind !== "loading" && list.kind !== "failed" && threads.length === 0) && (
+          <button type="button" className="btn sm ghost" onClick={onNewThread}><PlusIcon />New Thread</button>
+        )}
       </div>
       {list.kind === "loading" ? (
         <div className="skeleton" role="status">

@@ -25,7 +25,7 @@ const threadRow = (page: Page, title: string) => threadsList(page).getByRole("bu
 
 for (const theme of ["dark", "light"] as const) {
   test.describe(`${theme} at 1440×900`, () => {
-    test.use({ viewport: { width: 1440, height: 900 } });
+    test.use({ viewport: { width: 1440, height: 900 }, colorScheme: theme });
 
     test("the Assistants destination lists the Wollipog Assistant's threads with their status", async ({ page }) => {
       await open(page, theme);
@@ -123,7 +123,7 @@ for (const theme of ["dark", "light"] as const) {
   });
 
   test.describe(`${theme} at 390×844`, () => {
-    test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, colorScheme: theme });
 
     test("a phone lists the threads, then opens one as its own route with Back", async ({ page }) => {
       await open(page, theme);
