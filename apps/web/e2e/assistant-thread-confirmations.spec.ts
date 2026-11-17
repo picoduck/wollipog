@@ -60,17 +60,20 @@ test("at a narrow desktop width the request keeps a readable width and the trans
   await expect(page.locator(".composer")).toBeInViewport();
 });
 
-test("at a narrow desktop width two requests and the work cards all stay reachable", async ({ page }) => {
-  await page.setViewportSize({ width: 1024, height: 900 });
-  await openThread(page, "dark", 2);
-  const cards = await page.locator(".assistant-work-cards").boundingBox();
-  expect(cards!.width, "the work cards keep a share of the row").toBeGreaterThanOrEqual(120);
-  await expectEveryRequestReachable(page, 2);
-  const lastWork = page.locator(".assistant-work-cards > li").last();
-  await lastWork.scrollIntoViewIfNeeded();
-  await expect(lastWork).toBeInViewport();
-  await expect(page.locator(".composer")).toBeInViewport();
-});
+for (const width of [1024, 800]) {
+  test(`at ${width}px two requests and the work cards all stay reachable`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openThread(page, "dark", 2);
+    const cards = await page.locator(".assistant-work-cards").boundingBox();
+    expect(cards!.width, "the work cards keep at least a card's width").toBeGreaterThanOrEqual(270);
+    await expectEveryRequestReachable(page, 2);
+    for (const work of await page.locator(".assistant-work-cards > li").all()) {
+      await work.scrollIntoViewIfNeeded();
+      await expect(work).toBeInViewport();
+    }
+    await expect(page.locator(".composer")).toBeInViewport();
+  });
+}
 
 test("on a phone three requests scroll in a bounded area, and every action and the composer stay reachable", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });

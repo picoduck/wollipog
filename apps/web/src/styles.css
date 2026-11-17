@@ -7435,15 +7435,16 @@ body.shell-dock-dragging * {
   white-space: pre-wrap;
 }
 /* A thread's pending requests, in their own list ahead of its work cards (AssistantWorkCards). Each
-   keeps a readable width and its whole height. On desktop the list takes at most 60% of the row and
-   scrolls sideways when several are waiting, so the work cards keep the rest. On a phone (below) they
-   stack above the work cards, and the whole area scrolls within a bound. */
+   keeps a readable width and its whole height. On desktop the list scrolls sideways when several are
+   waiting, and where the requests and the work cards' own floor (`.assistant-work-cards`) do not both
+   fit, the row wraps and the work cards take a full line below. Neither is ever squeezed to nothing.
+   On a phone (below) they stack above the work cards, and the whole area scrolls within a bound. */
 .assistant-work-confirmations {
   display: flex;
   flex: 0 1 auto;
   gap: var(--space-2);
   min-width: min(440px, 100%);
-  max-width: 60%;
+  max-width: 100%;
   margin: 0;
   padding: 0 0 var(--space-1);
   overflow-x: auto;
@@ -13173,17 +13174,19 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-thread-access { color: var(--text); }
 /* AssistantWorkCards.tsx: one scrolling row of cards, so many launches never push the transcript
    off the pane; each card opens its session, and a waiting approval rides on its card. */
-/* Pending requests (#4665) and the work cards share one row; only the work cards scroll in it. */
+/* Pending requests (#4665) and the work cards share one row when both fit, the work cards keeping at
+   least a card's width; otherwise the row wraps and the work cards take the next line. */
 .assistant-work {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-2);
   min-width: 0;
 }
 .assistant-work-cards {
   display: flex;
-  flex: 1 1 0;
+  flex: 1 1 280px;
   gap: var(--space-2);
-  min-width: 0;
+  min-width: min(280px, 100%);
   margin: 0;
   padding: 0 0 var(--space-1);
   overflow-x: auto;
@@ -13259,7 +13262,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
      buttons show without a sideways scroll nobody would know to try. Many cards scroll in place
      rather than pushing the transcript off the screen. */
   /* Pending requests stack above the cards at their whole height; only the cards' column scrolls. */
-  .assistant-work { flex-direction: column; }
+  .assistant-work {
+    flex-direction: column;
+    flex-wrap: nowrap;
+  }
   .assistant-work-cards {
     flex: none;
     flex-direction: column;
