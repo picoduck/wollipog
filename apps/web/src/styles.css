@@ -7459,6 +7459,14 @@ body.shell-dock-dragging * {
   flex: none;
   overflow: visible;
 }
+/* With requests waiting, the requests and work cards scroll together within a bound at every width,
+   wrapped or not, so the transcript and composer always keep their room. A phone (below) allows
+   more, enough for a whole request. */
+.assistant-work:has(> .assistant-work-confirmations) {
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 @media (max-width: 760px) {
   .assistant-work-confirmations {
     flex: none;
@@ -7469,14 +7477,8 @@ body.shell-dock-dragging * {
     overflow: visible;
   }
   .assistant-work-confirmations > .request-card { width: auto; }
-  /* With requests waiting, the requests and work cards scroll together in one area tall enough to
-     show a whole request and the start of what follows, so every action stays reachable and the
-     transcript and composer keep their room. */
-  .assistant-work:has(> .assistant-work-confirmations) {
-    max-height: 60vh;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-  }
+  /* Tall enough to show a whole request and the start of what follows. */
+  .assistant-work:has(> .assistant-work-confirmations) { max-height: 60vh; }
   .assistant-work:has(> .assistant-work-confirmations) > .assistant-work-cards {
     max-height: none;
     overflow-y: visible;

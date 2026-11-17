@@ -75,6 +75,21 @@ for (const width of [1024, 800]) {
   });
 }
 
+test("on a short desktop window the wrapped requests and work cards stay bounded, and the transcript and composer keep their room", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 650 });
+  await openThread(page, "dark", 2);
+  const area = await page.locator(".assistant-work").boundingBox();
+  expect(area!.height, "the requests and work cards take at most 40% of the window").toBeLessThanOrEqual(650 * 0.4 + 1);
+  const transcript = await page.locator(".detail-scroll").boundingBox();
+  expect(transcript!.height, "the transcript keeps room to read").toBeGreaterThanOrEqual(80);
+  await expect(page.locator(".composer")).toBeInViewport({ ratio: 1 });
+  await expectEveryRequestReachable(page, 2);
+  for (const work of await page.locator(".assistant-work-cards > li").all()) {
+    await work.scrollIntoViewIfNeeded();
+    await expect(work).toBeInViewport();
+  }
+});
+
 test("on a phone three requests scroll in a bounded area, and every action and the composer stay reachable", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openThread(page, "light", 3);
