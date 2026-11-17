@@ -449,7 +449,7 @@ test("#4671: a launched worker's children are carved out of its own cap, so the 
   try {
     assert.equal(h.cap(h.thread.sessionId), 15);
     const first = h.spawn(h.worker), second = h.spawn(h.worker);
-    assert.ok(first.ok && second.ok, first.error ?? second.error);
+    assert.ok(first.ok && second.ok, first.error ?? second.error ?? "");
     // Each default child takes one share, and the worker keeps one for its own spending.
     assert.equal(first.data!.costBudgetUsd, 3.33);
     assert.equal(second.data!.costBudgetUsd, 3.33);
@@ -485,7 +485,7 @@ test("#4671: children created anywhere in a thread's tree never take the caps ab
       for (const parent of generation) {
         for (const config of [{ maxChildSessions: 2 }, { costBudgetUsd: 2, maxChildSessions: 2 }]) {
           const child = h.spawn(parent, config);
-          assert.ok(child.ok, child.error);
+          assert.ok(child.ok, child.error ?? "");
           created.push(child.data!.id);
           next.push(child.data!.id);
           assert.ok(h.capsTotal() <= ASSISTANT_THREAD_LIMITS.costUsd + 1e-9, `caps total ${h.capsTotal()} after ${created.length} children`);
@@ -504,7 +504,7 @@ test("#4671: a fully reserved creator is refused clearly, and a finished child's
   const h = await treeHarness({ costBudgetUsd: 10, maxChildSessions: 2 });
   try {
     const child = h.spawn(h.worker, { costBudgetUsd: 3 });
-    assert.ok(child.ok, child.error);
+    assert.ok(child.ok, child.error ?? "");
     assert.equal(h.cap(h.worker), 7);
     // The worker spends what it kept: nothing is left to share with another child.
     h.db.addSessionUsage(h.worker, { costUsd: 7 }, Date.now());
@@ -518,7 +518,7 @@ test("#4671: a fully reserved creator is refused clearly, and a finished child's
     h.db.addSessionUsage(child.data!.id, { costUsd: 1 }, Date.now());
     h.svc.onSessionStatus(child.data!.id, "completed");
     const next = h.spawn(h.worker);
-    assert.ok(next.ok, next.error);
+    assert.ok(next.ok, next.error ?? "");
     assert.equal(next.data!.costBudgetUsd, 0.66, "($10 - $7 spent - $1 charged) shared with the worker");
     assert.equal(h.cap(h.worker), 8.34, "$10 less the finished child's $1 and the new child's $0.66");
   } finally { await h.close(); }
@@ -528,7 +528,7 @@ test("#4671: restarting a finished child takes its unspent cap back out of its c
   const h = await treeHarness({ costBudgetUsd: 10, maxChildSessions: 2 });
   try {
     const child = h.spawn(h.worker, { costBudgetUsd: 3 });
-    assert.ok(child.ok, child.error);
+    assert.ok(child.ok, child.error ?? "");
     h.db.addSessionUsage(child.data!.id, { costUsd: 1 }, Date.now());
     h.svc.onSessionStatus(child.data!.id, "stopped");
     // While the worker has spent most of what it kept, it cannot cover the child's unspent $2.
@@ -541,11 +541,11 @@ test("#4671: restarting a finished child takes its unspent cap back out of its c
     const other = await treeHarness({ costBudgetUsd: 10, maxChildSessions: 2 });
     try {
       const finished = other.spawn(other.worker, { costBudgetUsd: 3 });
-      assert.ok(finished.ok, finished.error);
+      assert.ok(finished.ok, finished.error ?? "");
       other.db.addSessionUsage(finished.data!.id, { costUsd: 1 }, Date.now());
       other.svc.onSessionStatus(finished.data!.id, "stopped");
       const restarted = other.svc.restart(finished.data!.id);
-      assert.ok(restarted.ok, restarted.error);
+      assert.ok(restarted.ok, restarted.error ?? "");
       assert.equal(other.cap(other.worker), 7, "the restarted child holds its $3 again");
       assert.equal(other.capsTotal(), ASSISTANT_THREAD_LIMITS.costUsd);
     } finally { await other.close(); }
@@ -557,7 +557,7 @@ test("#4671: the owner's lower cap on a worker is kept, and agents cannot raise 
   try {
     assert.ok(h.svc.setConfig(h.worker, { costBudgetUsd: 6 }).ok);
     const child = h.spawn(h.worker, { costBudgetUsd: 1 });
-    assert.ok(child.ok, child.error);
+    assert.ok(child.ok, child.error ?? "");
     assert.equal(h.cap(h.worker), 6, "$10 - $1 = $9 would exceed the owner's $6");
     const agent = { kind: "agent" as const, id: h.worker };
     const raised = h.svc.setConfig(child.data!.id, { costBudgetUsd: 50 }, agent);
