@@ -1,4 +1,5 @@
 export * from "./assistant-connections.js";
+export * from "./assistant-threads.js";
 export * from "./owner-resource-presentation.js";
 export type {OrphanedSkillCopy, OrphanedSkillCopyRef} from "./orphaned-skill-copies.js";
 export * from "./shared-predicates.js";
@@ -342,6 +343,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   requestDiff: 345,
   /** v382 (#604): merge readiness facts and the gated enqueue/direct merge of a session's pull request. */
   pullRequestMerge: 382,
+  /** v383 (#4663): the runner launches an `assistant`-role session (`SessionLaunchSpec.assistant`)
+   * without the general agent-control server and CLI, and refuses it on an unsupported harness. */
+  assistantRole: 383,
   podReconciliation: 52,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
@@ -1930,8 +1934,10 @@ export interface SessionConfig {
 
 /** Whether a session coordinates child sessions. Independent of the
  * provider permission mode: an Orchestrator adds Wollipog's campaign tools, instructions, and
- * scoped credential on top of whatever the harness would otherwise receive. */
-export type SessionRole = "normal" | "orchestrator";
+ * scoped credential on top of whatever the harness would otherwise receive. An `assistant`
+ * session (v383, #4663) backs one Wollipog Assistant thread: only its thread creates it, it gets
+ * no agent-control credential, and it is never converted to another role. */
+export type SessionRole = "normal" | "orchestrator" | "assistant";
 
 export interface SessionRoleConversionReceipt {
   conversionId: string;
@@ -2006,7 +2012,7 @@ export const ORCHESTRATOR_PRESET_PERMISSION_MODE = "orchestrator";
 export function sessionRole(
   session: { role?: SessionRole | null; permissionMode?: string | null },
 ): SessionRole {
-  if (session.role === "orchestrator" || session.role === "normal") return session.role;
+  if (session.role === "orchestrator" || session.role === "normal" || session.role === "assistant") return session.role;
   return session.permissionMode === ORCHESTRATOR_PRESET_PERMISSION_MODE ? "orchestrator" : "normal";
 }
 
@@ -10972,6 +10978,8 @@ export interface SessionLaunchSpec {
   /** v226: present only on a control-plane-created review session (#3368). The runner launches it
    * read-only, outside every sandbox, against its own checkout of the exact pushed head. */
   review?: import("./review-session.js").ReviewLaunchPolicy;
+  /** v383: present only on an `assistant`-role session, sent on every start and restart (#4663). */
+  assistant?: import("./assistant-threads.js").AssistantLaunchPolicy;
   /** ACP-only, additive in protocol v38. Contains references, never resolved secret values. */
   acpSessionContext?: AcpSessionContextConfig;
 }
@@ -13142,6 +13150,13 @@ export interface UiSessionUpsertMessage {
   session: SessionView;
 }
 
+/** v383 (#4663): an Assistant thread changed. Delivered only to the thread's owner. */
+export interface UiAssistantThreadUpsertMessage {
+  type: "assistant_thread_upsert";
+  userId: string;
+  thread: import("./assistant-threads.js").AssistantThread;
+}
+
 export interface UiSessionRemovedMessage {
   type: "session_removed";
   sessionId: string;
@@ -13287,7 +13302,8 @@ export type ControlPlaneToUi =
   | UiPodRemovedMessage
   | UiPodContextEntryMessage
   | UiSessionSubscriptionsAppliedMessage
-  | UiIdentityDirectoryChangedMessage;
+  | UiIdentityDirectoryChangedMessage
+  | UiAssistantThreadUpsertMessage;
 
 /** One dashboard view can display one pod (at most 12 members today) or a larger parallel run.
  * Leave headroom for future run sizes without admitting multi-thousand-query subscription frames. */

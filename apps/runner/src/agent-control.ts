@@ -1,5 +1,6 @@
 /** Runner-local provisioning for the provider-neutral Wollipog CLI and MCP surface. */
 
+import { assistantLaunchArgs } from "./assistant-launch.js";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import {
@@ -481,7 +482,7 @@ function controlPlaneUpdateRequired(
  * socket and are scrubbed from durable session metadata by the existing env policy. */
 export function provisionAgentControl(
   spec: Pick<SessionLaunchSpec, "sessionId" | "driver" | "context" | "executionTarget" | "command" | "args" | "env"> &
-    Partial<Pick<SessionLaunchSpec, "config" | "acpSessionContext" | "workspacePath" | "uiEvidenceReviewer">> &
+    Partial<Pick<SessionLaunchSpec, "config" | "acpSessionContext" | "workspacePath" | "uiEvidenceReviewer" | "assistant">> &
     // Persisted session metadata written before protocol v164 has no `integrationIsolation`, and a
     // resume re-provisions from exactly that metadata. Accept its absence here and resolve it to the
     // conservative value for the shape below, rather than forcing callers to invent one.
@@ -511,6 +512,13 @@ export function provisionAgentControl(
   log: (message: string) => void,
   host: AgentControlHost,
 ): Promise<void> | void {
+  // An Assistant thread's session (#4663) gets no agent-control server, CLI or credential: it acts
+  // only through its thread's audited Assistant connection, under the thread's grant and limits.
+  if (spec.assistant) {
+    if (isOrchestratorLaunch(spec) || spec.uiEvidenceReviewer) throw new Error("an Assistant thread's session has no other role");
+    spec.args = assistantLaunchArgs(spec.driver, spec.args);
+    return;
+  }
   const supported = runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionAgentControl");
   const codexDriver = spec.driver === "codex" || spec.driver === "codex-app-server";
   // A session `wollipog` entry from an earlier launch is re-derived below, never carried over: its

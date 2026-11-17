@@ -76,6 +76,7 @@ import type {
   UiSnapshotMessage,
   SubscriptionUsageRefreshResultMessage,
   SteerSessionResultMessage,
+  AssistantThread,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { AuthPrincipal } from "./identity.js";
@@ -1404,6 +1405,15 @@ export class Hub {
     this.forgetSessionUpsertPacing(view.id);
     this.sessionUpsertPacing.set(view.id, { sent: keys, sentAt: now });
     this.broadcast({ type: "session_upsert", session: view });
+    if (view.role === "assistant") {
+      try { this.assistantSessionListener?.(view); } catch { /* A thread republish never blocks the session's own. */ }
+    }
+  }
+
+  private assistantSessionListener?: (view: SessionView) => void;
+  /** Called with each published view of an Assistant thread's session, so its thread follows. */
+  onAssistantSessionUpsert(listener: (view: SessionView) => void): void {
+    this.assistantSessionListener = listener;
   }
 
   private forgetSessionUpsertPacing(sessionId: string): void {
@@ -1589,6 +1599,10 @@ export class Hub {
     this.broadcast({ type: "session_reminder_removed", userId, sessionId });
   }
 
+  assistantThreadChanged(userId: string, thread: AssistantThread): void {
+    this.broadcast({ type: "assistant_thread_upsert", userId, thread });
+  }
+
   worktreeSetupNoticeDismissed(userId: string, projectId: string): void {
     this.broadcast({ type: "worktree_setup_notice_dismissed", userId, projectId });
   }
@@ -1702,6 +1716,8 @@ export class Hub {
       return this.reminderPrincipalMatches(msg.userId, principal) &&
         (principal === undefined || this.db.canAccessProject(principal, msg.projectId));
     }
+    // A thread is its owner's conversation; even another owner of the organization never sees it.
+    if (msg.type === "assistant_thread_upsert") return this.reminderPrincipalMatches(msg.userId, principal);
     if (principal === undefined) return true;
     switch (msg.type) {
       case "runner_upsert":
@@ -1883,6 +1899,7 @@ export class Hub {
       case "session_reminder_upsert": return `reminder:${msg.reminder.sessionId}`;
       case "session_reminder_removed": return `reminder:${msg.sessionId}`;
       case "worktree_setup_notice_dismissed": return `worktree-setup-notice:${msg.projectId}`;
+      case "assistant_thread_upsert": return `assistant-thread:${msg.thread.id}`;
       case "project_upsert": return `project:${msg.project.id}`;
       case "run_upsert": return `run:${msg.run.id}`;
       case "pod_upsert": return `pod:${msg.pod.id}`;

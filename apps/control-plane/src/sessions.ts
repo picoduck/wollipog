@@ -2203,7 +2203,7 @@ export function launchForRestart(db: ControlPlaneDb, session: SessionView): Agen
 }
 
 /** Placeholder title for a session created without a first prompt (named by its first message). */
-const UNTITLED = "Untitled session";
+export const UNTITLED = "Untitled session";
 
 /** A run's title derived from its task, short enough that each member's " · <role>" still fits in 120. */
 const RUN_TASK_TITLE_MAX = 60;
@@ -4236,6 +4236,16 @@ export class SessionsService {
   /** Reject commands an older/unknown runner would silently ignore, before starting a timeout or
    * mutating cached state. `protocolVersion == null` is intentionally unsupported: the runner did
    * not prove its capability because protocol metadata itself arrived in v15. */
+  /** Why an `assistant`-role session cannot launch here (#4663), or null when it can. */
+  private assistantLaunchRefusal(runnerId: string, driver: AgentDriverKind): ServiceResult<never> | null {
+    const unsupported = this.capabilityFailure(runnerId, "assistantRole", "Wollipog assistant threads");
+    if (unsupported) return unsupported;
+    if (driver !== "claude-code" && driver !== "codex" && driver !== "codex-app-server") {
+      return fail("Wollipog Assistant threads run on Claude Code or Codex. Choose one of them for this thread.", 409);
+    }
+    return null;
+  }
+
   private capabilityFailure(
     runnerId: string,
     capability: RunnerProtocolCapability,
@@ -4872,6 +4882,9 @@ export class SessionsService {
       };
       /** Internal only (#3368): this session is a review of the requester's pull request. */
       review?: { policy: ReviewLaunchPolicy };
+      /** Internal only (#4663): this session backs a Wollipog Assistant thread, so its role is
+       * `assistant`. Only the owner's thread creation passes it; request JSON cannot. */
+      assistantThread?: { threadId: string };
       /** Internal only (#4074): this session is the delegated image reviewer of one decision. */
       [DELEGATED_IMAGE_REVIEW]?: NewDelegatedImageReview;
     },
@@ -4906,6 +4919,12 @@ export class SessionsService {
     }
     if (req.role === "normal" && usesOrchestratorPresetPermissions(req.config)) {
       return fail("the Orchestrator preset permission mode requires the Orchestrator role", 400);
+    }
+    const assistantThread = creationContext?.assistantThread;
+    if (assistantThread && (parentSessionId || delivery || req.role !== "normal" || req.orchestrator !== undefined ||
+        req.parentControl !== undefined || req.parentControlPolicy !== undefined || req.launchSurface === "native_tui" ||
+        req.campaignWorkItemId !== undefined || creationContext?.review || imageReview || capture)) {
+      return fail("an Assistant thread's session is an owner's direct session with no other role or campaign", 400);
     }
     let parentControl = req.parentControl ?? "off";
     let parentControlPolicy = req.parentControlPolicy;
@@ -5022,6 +5041,12 @@ export class SessionsService {
     if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
     const runner = this.db.getRunner(req.runnerId);
     if (!runner) return fail("runner not found", 404);
+    if (assistantThread) {
+      // Never an ordinary session in its place: an older runner would inject the general
+      // agent-control server, and other harnesses cannot carry the assistant launch.
+      const refusal = this.assistantLaunchRefusal(req.runnerId, launch.driver);
+      if (refusal) return refusal;
+    }
     if (campaignController?.orchestratorPolicy?.control?.mode === "full_control") {
       const preflight = campaignAuthorityPreflight(campaignController.orchestratorPolicy.control, launch.driver, runner.protocolVersion,
         this.pacedVideoInstallationContract(req.runnerId, req.agentId));
@@ -5296,7 +5321,8 @@ export class SessionsService {
     const validationConfig = claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver);
     // The role is independent of the provider permission mode. Older clients encode it only as the
     // coupled preset value; a v160 client may pair the role with an ordinary provider mode.
-    const role: SessionRole = req.role ?? sessionRole({ permissionMode: requestedConfig.permissionMode });
+    const role: SessionRole = assistantThread ? "assistant"
+      : req.role ?? sessionRole({ permissionMode: requestedConfig.permissionMode });
     const orchestrator = role === "orchestrator";
     const presetPermissions = usesOrchestratorPresetPermissions(requestedConfig);
     let orchestratorPolicy: OrchestratorCampaignPolicy | undefined;
@@ -5851,6 +5877,7 @@ export class SessionsService {
       } } : {}),
       acpSessionContext,
       ...(creationContext?.review ? { review: creationContext.review.policy } : {}),
+      ...(assistantThread ? { assistant: { threadId: assistantThread.threadId } } : {}),
       ...(imageReview
         ? { uiEvidenceReviewer: { reviewId: imageReview.reviewId } } : {}),
     };
@@ -5935,6 +5962,7 @@ export class SessionsService {
       parentControlPolicy,
       orchestratorPolicy,
       role,
+      ...(assistantThread ? { assistantThreadId: assistantThread.threadId } : {}),
       // Remember the ad-hoc browsed directory so restart re-launches from it (workspaceId is null).
       workspacePath: adHoc || null,
       acpSessionContext,
@@ -9745,6 +9773,12 @@ export class SessionsService {
       if (capabilityFailure) return capabilityFailure;
     }
 
+    const assistantThreadId = session.role === "assistant" ? this.db.assistantThreads.forSession(sessionId)?.id : undefined;
+    if (session.role === "assistant") {
+      if (!assistantThreadId) return fail("This Assistant thread's record is missing; start a new thread.", 409);
+      const refusal = this.assistantLaunchRefusal(session.runnerId, launch.driver);
+      if (refusal) return refusal;
+    }
     const now = Date.now();
     const serviceTier = runnerSupportsProtocol(
       this.db.getRunner(session.runnerId)?.protocolVersion,
@@ -9805,6 +9839,7 @@ export class SessionsService {
           ...this.orderedRunnerControl(sessionId, this.db.getRunner(session.runnerId)?.protocolVersion),
         } }
         : {}),
+      ...(assistantThreadId ? { assistant: { threadId: assistantThreadId } } : {}),
       acpSessionContext: this.db.getAcpSessionContext(sessionId),
     };
     // Persist replacement identity before the ambiguous socket write. A false send leaves the
