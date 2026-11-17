@@ -125,6 +125,8 @@ export interface AssistantOwnerConfirmation {
   operation: string;
   /** Title Case action label, e.g. "Archive Session". */
   title: string;
+  /** What approving it does, as one plain sentence. */
+  summary: string;
   target: { kind: string; id: string; label: string };
   /** What the command affects, as the operation previewed it. */
   impact: AssistantOwnerConfirmationDetail[];

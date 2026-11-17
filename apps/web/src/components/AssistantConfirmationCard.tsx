@@ -48,6 +48,7 @@ function ConfirmationFacts({ confirmation }: { confirmation: AssistantOwnerConfi
   const { target } = confirmation;
   return (
     <>
+      <p className="assistant-confirmation-summary">{confirmation.summary}</p>
       <dl className="facts" aria-label="Impact">
         <div><dt>Target</dt><dd>{target.label === target.id ? target.id : `${target.label} (${target.id})`}</dd></div>
         {confirmation.impact.map((line, index) => <div key={`${line.label}-${index}`}><dt>{line.label}</dt><dd>{line.value}</dd></div>)}
@@ -135,15 +136,14 @@ function AssistantConfirmationRow({ confirmation, threadTitle, onAnswered }: {
     <li className="request-card" aria-labelledby={headingId}>
       <div className="request-card-head">
         <span className="request-card-kind">Approval Needed</span>
-        <span className="request-card-meta">
-          <span>{threadTitle}</span>
-          <span>Expires {formatClock(confirmation.expiresAt)}</span>
-        </span>
+        <span className="request-card-meta"><span>Expires {formatClock(confirmation.expiresAt)}</span></span>
         <span className="request-card-trailing">
           <button type="button" className="btn sm primary" aria-describedby={headingId} onClick={() => setOpen(true)}>Review</button>
         </span>
       </div>
       <p className="request-card-title" id={headingId}>{confirmation.title}</p>
+      {/* The thread on its own line, so a narrow screen never cuts the expiry or Review. */}
+      <p className="request-card-policy">Asked in {threadTitle}</p>
       {open && (
         <Modal title={confirmation.title} description={`Approval Needed · ${threadTitle}`} onClose={() => setOpen(false)}
           tertiary={<OpenTarget confirmation={confirmation} disabled={busy !== null} onOpen={() => setOpen(false)} />}
@@ -179,15 +179,22 @@ export function AssistantConfirmationsNotice() {
   const refresh = useCallback(() => {
     cancelRetry();
     const read = ++latestRead.current;
-    // The latest read is retried, backing off to 30 seconds, until it succeeds or a newer read
-    // starts: a request whose read failed must not stay hidden until it expires. A control plane
-    // without the Thread API answers 404, 405 or 501, and then the Inbox stays as it was.
+    // The invariant: only the most recently started read (`latestRead`) may change what is shown or
+    // schedule more work. A newer read or unmounting advances `latestRead`, which retires every
+    // older answer, failure and retry, whatever order they arrive in.
+    // The latest read is retried, backing off to 30 seconds, until it succeeds or is superseded: a
+    // request whose read failed must not stay hidden until it expires. A control plane without the
+    // Thread API answers 404, 405 or 501, and then the Inbox stays as it was.
+    const current = () => read === latestRead.current;
     const attempt = (delay: number) => void api.assistantConfirmationThreads().then(
-      ({ threads: listed }) => { if (read === latestRead.current) setThreads(listed); },
+      ({ threads: listed }) => { if (current()) setThreads(listed); },
       (error: unknown) => {
-        if (read !== latestRead.current) return;
+        if (!current()) return;
         if (error instanceof ApiError && [404, 405, 501].includes(error.status)) return;
-        retry.current = window.setTimeout(() => { retry.current = null; attempt(Math.min(delay * 2, 30_000)); }, delay);
+        retry.current = window.setTimeout(() => {
+          retry.current = null;
+          if (current()) attempt(Math.min(delay * 2, 30_000));
+        }, delay);
       },
     );
     attempt(2_000);

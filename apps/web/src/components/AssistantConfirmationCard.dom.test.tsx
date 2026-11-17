@@ -48,7 +48,7 @@ class FakeSocket implements UiSocket {
 }
 
 const request = (id: string, title: string): AssistantOwnerConfirmation => ({
-  id, threadId: "thr_1", operation: "session_archive", title, target: { kind: "session", id: "s", label: "Prototype" },
+  id, threadId: "thr_1", operation: "session_archive", title, summary: "Archives it.", target: { kind: "session", id: "s", label: "Prototype" },
   impact: [], arguments: [{ label: "sessionId", value: "s" }], status: "pending", createdAt: 1, expiresAt: Date.now() + 3_600_000, resolvedAt: null,
 });
 const thread = (confirmations: AssistantOwnerConfirmation[]): AssistantThread => ({

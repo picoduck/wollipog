@@ -110,7 +110,7 @@ test("a thread's destructive command waits for its owner, and nothing the assist
     assert.equal(request.title, "Archive Session");
     assert.deepEqual(request.target, { kind: "session", id: "target-1", label: "Prototype target-1" });
     assert.deepEqual(request.arguments, [{ label: "sessionId", value: "target-1" }]);
-    assert.ok(request.impact.some((line) => line.label === "Status" && line.value === "completed"));
+    assert.ok(request.impact.some((line) => line.label === "Status" && line.value === "Completed"));
     assert.ok(!strings(answer).includes(request.id), "the request id never reaches the assistant");
     const view = (await h.ownerCall("GET", `/api/assistant-threads/${h.thread.id}`)).body.thread as AssistantThread;
     assert.equal(view.status, "needs_you");

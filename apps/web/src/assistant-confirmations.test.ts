@@ -4,7 +4,7 @@ import type { AssistantOwnerConfirmation, AssistantThread } from "@wollipog/prot
 import { assistantConfirmationOutcome, assistantThreadPendingKey, pendingAssistantConfirmations } from "./assistant-confirmations.js";
 
 const request = (id: string, createdAt: number, overrides: Partial<AssistantOwnerConfirmation> = {}): AssistantOwnerConfirmation => ({
-  id, threadId: "thr_1", operation: "session_archive", title: "Archive Session", target: { kind: "session", id: "s", label: "S" },
+  id, threadId: "thr_1", operation: "session_archive", title: "Archive Session", summary: "Archives it.", target: { kind: "session", id: "s", label: "S" },
   impact: [], arguments: [], status: "pending", createdAt, expiresAt: 10_000, resolvedAt: null, ...overrides,
 });
 const thread = (id: string, confirmations: AssistantOwnerConfirmation[], status: AssistantThread["status"] = "needs_you"): AssistantThread => ({

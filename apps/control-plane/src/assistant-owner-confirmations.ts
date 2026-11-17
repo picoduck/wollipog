@@ -54,6 +54,29 @@ export function ownerConfirmationTitle(operation: string): string {
   return `${parts.slice(1).map(titleWord).join(" ")} ${noun}`;
 }
 
+/** What approving each destructive operation does, in one plain sentence for its owner. Each states
+ * only what the operation's service does; an operation without one gets the cautious fallback. */
+const SUMMARIES: Record<string, string> = {
+  session_stop: "Stops the session's current work. The session and its transcript are kept, and it can be sent another message.",
+  session_archive: "Stops the session if it is running, then archives it. Its transcript is kept, and it can be unarchived later.",
+  session_delete: "Deletes the session and its side chat, with their transcripts. This cannot be undone.",
+  session_rewind: "Restores the session's files to the checkpoint of an earlier turn. The conversation is kept; file changes made after that turn are lost.",
+  session_reprocess: "Imports the adopted session's transcript again, replacing its current history.",
+  session_git: "Discards the uncommitted changes to a file in the session's worktree. They cannot be recovered.",
+  queue_cancel: "Removes a queued prompt before the session receives it.",
+  shell_close: "Closes the session's terminal and forgets it.",
+  auto_delete: "Deletes the automation, so it does not run again.",
+  skill_remove: "Removes the skill from the Skill Library.",
+  skill_unassign: "Removes the skill's assignment, so it is no longer given to those sessions.",
+  delivery_resume: "Resumes delivery to an existing callback the owner authorized.",
+  campaign_branch_clean: "Deletes the campaign's merged branches whose deletion was already approved.",
+  review_find_set: "Resolves or dismisses the review finding.",
+};
+const SUMMARY_FALLBACK = "Runs this destructive command once, exactly as shown. Its effect may not be reversible.";
+export function ownerConfirmationSummary(operation: string): string {
+  return SUMMARIES[operation] ?? SUMMARY_FALLBACK;
+}
+
 /** `worktreePath` reads "Worktree Path"; established acronyms keep their capitals. */
 const ACRONYMS: Record<string, string> = { id: "ID", ids: "IDs", url: "URL", pr: "PR", sha: "SHA", api: "API" };
 const labelOf = (key: string) => key.replace(/[_-]+/gu, " ").replace(/([a-z0-9])([A-Z])/gu, "$1 $2").split(" ").filter(Boolean)
@@ -62,12 +85,20 @@ const valueOf = (value: unknown): string => {
   const text = typeof value === "string" ? value : value === undefined ? "" : JSON.stringify(value) ?? "";
   return text.length > VALUE_LIMIT ? `${text.slice(0, VALUE_LIMIT - 1)}…` : text;
 };
-/** Bounded display lines for the control plane's own preview of a command's effect. */
+/** A preview value as people read it: a status such as `input_required` reads "Input Required",
+ * and a flag reads Yes or No. */
+const impactValue = (key: string, value: unknown): string => {
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "string" && /status$/iu.test(key) && /^[a-z_]+$/u.test(value)) return value.split("_").map(titleWord).join(" ");
+  return valueOf(value);
+};
+/** Bounded display lines for the control plane's own preview of a command's effect. Empty fields
+ * say nothing and are left out. */
 function impactLines(value: unknown): AssistantOwnerConfirmationDetail[] {
   if (value === undefined || value === null) return [];
   if (typeof value !== "object" || Array.isArray(value)) return [{ label: "Impact", value: valueOf(value) }];
-  const entries = Object.entries(value as Record<string, unknown>).filter(([, item]) => item !== undefined);
-  const lines = entries.slice(0, DETAIL_LIMIT).map(([key, item]) => ({ label: labelOf(key), value: valueOf(item) }));
+  const entries = Object.entries(value as Record<string, unknown>).filter(([, item]) => item !== undefined && item !== null && item !== "");
+  const lines = entries.slice(0, DETAIL_LIMIT).map(([key, item]) => ({ label: labelOf(key), value: impactValue(key, item) }));
   if (entries.length > DETAIL_LIMIT) lines.push({ label: "More", value: `${entries.length - DETAIL_LIMIT} more fields` });
   return lines;
 }
@@ -240,6 +271,7 @@ export class AssistantOwnerConfirmations {
       threadId: row.thread_id,
       operation: row.operation,
       title: ownerConfirmationTitle(row.operation),
+      summary: ownerConfirmationSummary(row.operation),
       target: { kind: target.kind, id: target.id, label: row.target_label },
       impact: impactLines(row.impact_json === null ? undefined : JSON.parse(row.impact_json)),
       arguments: argumentLines(JSON.parse(row.arguments_json) as Record<string, unknown>),

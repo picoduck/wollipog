@@ -14,9 +14,10 @@ function confirmation(overrides: Partial<AssistantOwnerConfirmation> = {}): Assi
     threadId: "thr_fixture",
     operation: "session_archive",
     title: "Archive Session",
+    summary: "Stops the session if it is running, then archives it. Its transcript is kept, and it can be unarchived later.",
     target: { kind: "session", id: "session-alpha", label: "Slack Prototype" },
     impact: [
-      { label: "Status", value: "idle" },
+      { label: "Status", value: "Idle" },
       { label: "Worktree Path", value: "/home/dev/wollipog/.worktrees/slack-prototype" },
       { label: "Runner ID", value: "misko-x399" },
     ],
@@ -72,6 +73,8 @@ test("the Inbox lists a thread's owner confirmation, and Review shows its exact 
   await expect(page.getByRole("region", { name: "Sessions" }).getByText("Secret Session", { exact: true })).toBeVisible();
   const dialog = await review(page);
   await expect(dialog).toContainText("Approval Needed · Ship the Slack Adapter Spike");
+  // What approving it does, in a plain sentence, before the target and its details.
+  await expect(dialog.getByText("Stops the session if it is running, then archives it.", { exact: false })).toBeVisible();
   await expect(dialog.getByRole("definition").filter({ hasText: "Slack Prototype (session-alpha)" })).toBeVisible();
   const args = dialog.locator("dl[aria-label='Arguments']");
   await expect(args).toContainText("sessionId");
@@ -90,6 +93,11 @@ test("Deny refuses the request and removes it", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const served = await serveThreads(page);
   await page.goto("/command-inbox-projects-e2e.html?fullShell=1");
+  // On a phone the expiry and Review stay whole; the thread has its own line.
+  const expiry = row(page).locator(".request-card-meta > span");
+  await expect(expiry).toHaveText(/^Expires /);
+  expect(await expiry.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await expect(row(page).getByText("Asked in Ship the Slack Adapter Spike", { exact: true })).toBeVisible();
   await (await review(page)).getByRole("button", { name: "Deny", exact: true }).click();
   await expect(page.getByText("Archive Session was denied. Nothing ran.", { exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "Assistant Approvals" })).toHaveCount(0);

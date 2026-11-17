@@ -7426,6 +7426,10 @@ body.shell-dock-dragging * {
   padding: 0;
   list-style: none;
 }
+.assistant-confirmation-summary {
+  margin: 0;
+  font: var(--type-body);
+}
 .assistant-confirmation-arguments code {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
