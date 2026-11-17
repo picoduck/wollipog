@@ -7434,6 +7434,15 @@ body.shell-dock-dragging * {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
+/* Among a thread's work cards the request's body never scrolls on its own: in a phone's capped
+   column (below) the column scrolls instead of the body shrinking to a line. */
+.assistant-work-cards > .request-card > .request-card-body {
+  flex: none;
+  overflow: visible;
+}
+@media (max-width: 760px) {
+  .assistant-work-cards > .request-card { flex: none; }
+}
 /* The card in a side panel's detail (#2206): flush on the panel, with no wash or frame, a title-sized
    heading, and its footer stuck to the panel's lower edge above a hairline. The detail scrolls as one
    page, so a short panel never squeezes the card's body away. */

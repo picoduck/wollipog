@@ -17,6 +17,8 @@ import { backLabel, destination } from "../navigation.js";
 import { statusMeta } from "../status-meta.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
+import { pendingAssistantConfirmations } from "../assistant-confirmations.js";
+import { AssistantConfirmationCard } from "./AssistantConfirmationCard.js";
 import { AssistantWorkCards } from "./AssistantWorkCards.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { AssistantsIcon, BotIcon, PlusIcon } from "./Icons.js";
@@ -312,7 +314,7 @@ export function AssistantsView({ threadId, rightPanel }: {
               // The terminal dock belongs to the session page, so a thread opens its session there.
               onOpenTerminal={() => navigate({ name: "session", id: selected.sessionId })}
               onBack={toList}
-              header={<ThreadHeader thread={selected} compact={isMobile} menu={threadMenu(selected)} />}
+              header={<ThreadHeader thread={selected} compact={isMobile} menu={threadMenu(selected)} onConfirmationAnswered={refresh} />}
             />
           )}
         </div>
@@ -431,8 +433,16 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
  * and the sessions it launched as work cards. On a phone the detail bar carries the title and
  * actions, so this keeps only the facts.
  */
-function ThreadHeader({ thread, compact, menu }: { thread: AssistantThread; compact: boolean; menu: PageMenuAction[] }) {
+function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
+  thread: AssistantThread;
+  compact: boolean;
+  menu: PageMenuAction[];
+  onConfirmationAnswered?: () => void;
+}) {
   const meta = statusMeta("assistantThread", thread.status);
+  // Destructive commands this thread's assistant is waiting on the owner for (#4665), drawn ahead
+  // of the work they would unblock.
+  const pending = pendingAssistantConfirmations([thread]);
   return (
     <div className="assistant-thread-head">
       {!compact && (
@@ -447,7 +457,12 @@ function ThreadHeader({ thread, compact, menu }: { thread: AssistantThread; comp
         <li>{assistantThreadHarnessLabel(thread.harness)}</li>
         <li className="assistant-thread-access">{assistantThreadAccessLabel(thread.access)}</li>
       </ul>
-      <AssistantWorkCards sessionIds={thread.launchedSessionIds} />
+      <AssistantWorkCards
+        sessionIds={thread.launchedSessionIds}
+        confirmations={pending.length > 0 ? pending.map(({ confirmation }) => (
+          <AssistantConfirmationCard key={confirmation.id} confirmation={confirmation} onAnswered={onConfirmationAnswered} />
+        )) : undefined}
+      />
     </div>
   );
 }
