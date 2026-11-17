@@ -343,9 +343,11 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   requestDiff: 345,
   /** v382 (#604): merge readiness facts and the gated enqueue/direct merge of a session's pull request. */
   pullRequestMerge: 382,
-  /** v383 (#4663): the runner launches an `assistant`-role session (`SessionLaunchSpec.assistant`)
-   * without the general agent-control server and CLI, and refuses it on an unsupported harness. */
-  assistantRole: 383,
+  /** v384 (#4663): the runner launches an `assistant`-role session (`SessionLaunchSpec.assistant`)
+   * without the general agent-control server and CLI, reaching its thread's Assistant tools only
+   * through a runner-side MCP proxy that holds the thread credential in memory, and refuses it on
+   * an unsupported harness. v383 runners launched the role without the proxy. */
+  assistantRole: 384,
   podReconciliation: 52,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
@@ -10256,6 +10258,31 @@ export interface AgentControlCredentialMessage {
   tokenHash: string;
 }
 
+/** v384 (#4663): the runner minted a fresh thread credential for an Assistant thread's session and
+ * holds it in memory only. Only its SHA-256 crosses the wire; the control plane binds it to the
+ * thread's Assistant connection with a short expiry, replacing any earlier credential at once. */
+export interface AssistantCredentialMessage {
+  type: "assistant_credential";
+  sessionId: string;
+  tokenHash: string;
+}
+
+/** Answer to `assistant_credential`. `expiresAt` is set when accepted. */
+export interface AssistantCredentialRegisteredMessage {
+  type: "assistant_credential_registered";
+  sessionId: string;
+  tokenHash: string;
+  accepted: boolean;
+  expiresAt?: number;
+  error?: string;
+}
+
+/** The thread was archived or its connection revoked: forget the credential and stop the proxy. */
+export interface AssistantCredentialRevokedMessage {
+  type: "assistant_credential_revoked";
+  sessionId: string;
+}
+
 /** Secret-free registration acknowledgement used for operational diagnosis and future fencing. */
 export interface AgentControlCredentialRegisteredMessage {
   type: "agent_control_credential_registered";
@@ -10777,6 +10804,7 @@ export interface RunnerProcessingAckMessage {
 
 export type RunnerToControlPlane =
   | RunnerProcessingBarrierMessage
+  | AssistantCredentialMessage
   | { type: "media_review_stop_acknowledged"; receipt: import("./media-active-stop.js").MediaActiveStopAcknowledgement }
   | { type: "media_review_never_dispatched"; receipt: import("./media-dispatch-fence.js").MediaNeverDispatchedFence;
       /** Outside the fence digest. `host_busy` alone lets the owner requeue a fresh identity. */
@@ -12955,6 +12983,8 @@ export interface GitActionResultMessage {
 
 export type ControlPlaneToRunner =
   | RunnerProcessingAckMessage
+  | AssistantCredentialRegisteredMessage
+  | AssistantCredentialRevokedMessage
   | { type: "media_review_stop"; request: import("./media-active-stop.js").MediaActiveStopRequest }
   | { type: "media_review_dispatch"; dispatch: import("./paced-video-review-windows.js").MediaReviewDispatch }
   | { type: "media_review_readback"; identity: import("./media-active-stop.js").MediaActiveStopIdentity }

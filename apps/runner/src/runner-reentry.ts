@@ -122,7 +122,7 @@ export function cwdIndependentExecArgv(execArgv: readonly string[]): string[] {
 
 export function runnerReentryCommand(
   host: RunnerReentryHost,
-  mode: "--policy-hook" | "--agent-control-mcp" | "--wollipog-cli" | "--managed-worktree-guard",
+  mode: "--policy-hook" | "--agent-control-mcp" | "--assistant-mcp" | "--wollipog-cli" | "--managed-worktree-guard",
 ): { command: string; args: string[] } {
   if (host.isSea) return { command: host.execPath, args: [mode] };
   return {

@@ -20885,6 +20885,7 @@ export class SessionsService {
       this.hub.sessionChanged(restored, refreshProject);
       return ok(restored);
     }
+    if (session.role === "assistant") this.assistantSessionRetired(sessionId);
     if (session.archiveStatus === "stop_failed") {
       this.archiveSessionDependents(sessionId, now, refreshProject);
       return ok(session, 202);
@@ -21264,8 +21265,18 @@ export class SessionsService {
     // register resurrect the session. Tombstone it (covers the offline-runner case — the tombstone
     // re-issues the delete on reconnect) and tell the runner to remove it from the box store.
     if (child) this.deleteMaterializedSession(child);
+    if (session.role === "assistant") this.assistantSessionRetired(sessionId);
     this.deleteMaterializedSession(session);
     return ok({ deleted: true });
+  }
+
+  private assistantRetiredListener?: (sessionId: string) => void;
+  /** Called when an Assistant thread's session is archived or deleted outside its thread, so the
+   * thread ends and its credential is revoked (#4663). */
+  onAssistantSessionRetired(listener: (sessionId: string) => void): void { this.assistantRetiredListener = listener; }
+  private assistantSessionRetired(sessionId: string): void {
+    try { this.assistantRetiredListener?.(sessionId); }
+    catch (error) { this.log.error(`assistant thread retirement failed for ${sessionId}: ${(error as Error).message}`); }
   }
 
   /** The file-based attach path. Session, kind, and encoding are fixed by the caller's route, never

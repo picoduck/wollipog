@@ -69,10 +69,11 @@ test("a new thread launches an assistant-role session whose every launch carries
     assert.equal(created.status, 200, created.raw);
     const thread = created.body.thread as AssistantThread;
     assert.match(thread.id, /^thr_/);
-    assert.deepEqual({ ...thread, id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined }, {
-      id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined,
+    assert.match(thread.connectionId ?? "", /^asst_/);
+    assert.deepEqual({ ...thread, id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined }, {
+      id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined,
       assistant: "wollipog", title: "Weekly Cleanup", harness: "claude-code", status: "working",
-      access: { level: "full_access", destructive: "ask" }, connectionId: null, launchedSessionIds: [], archivedAt: null,
+      access: { level: "full_access", destructive: "ask" }, launchedSessionIds: [], archivedAt: null,
     });
     const session = h.db.getSession(thread.sessionId)!;
     assert.equal(session.role, "assistant");

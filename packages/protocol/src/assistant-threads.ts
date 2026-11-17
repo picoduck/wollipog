@@ -67,6 +67,13 @@ export interface AssistantThreadDefaultsResponse {
   harnesses: AssistantThreadHarnessOption[];
 }
 
+/** A thread credential authenticates for this long after the runner registers it. The runner
+ * proxy registers a fresh one at each launch and before half of this has passed (#4663). */
+export const ASSISTANT_THREAD_CREDENTIAL_TTL_MS = 60 * 60 * 1000;
+
+/** The stable MCP server name under which an Assistant thread's session sees its tools. */
+export const ASSISTANT_MCP_SERVER_NAME = "wollipog_assistant";
+
 /** Runner launch marker for an `assistant`-role session. The runner launches it without the
  * general Wollipog agent-control server and CLI, and refuses the marker on a harness it cannot
  * launch that way. */

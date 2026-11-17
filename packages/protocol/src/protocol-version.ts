@@ -1502,6 +1502,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 383: Wollipog Assistant threads and the assistant session role (#4663).
   383,
   // v384 slot
+  // 384: Assistant thread credentials held by a runner-side MCP proxy; assistantRole floor (#4663).
+  384,
   // v385 slot
   // v386 slot
   // v387 slot

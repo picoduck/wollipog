@@ -1,4 +1,5 @@
 import {
+  ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
   ASSISTANT_THREAD_HARNESSES,
   resolveAgentHarnessRow,
   runnerCapabilityRequirementError,
@@ -14,6 +15,7 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
+import type { AssistantConnections } from "./assistant-connections.js";
 import type { AssistantThreadStore, StoredThreadState, ThreadRow } from "./assistant-thread-store.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -66,6 +68,9 @@ export function assistantThreadStatus(state: StoredThreadState, session: Session
 }
 
 export interface AssistantThreadDeps {
+  connections: AssistantConnections;
+  /** The thread owner as an active owner now, or null; a thread credential never outlives it. */
+  ownerPrincipal(userId: string, organizationId: string): HumanPrincipal | null;
   listRunners(owner: HumanPrincipal): RunnerView[];
   isRunnerOnline(runnerId: string): boolean;
   getSession(sessionId: string): SessionView | null;
@@ -194,6 +199,10 @@ export class AssistantThreads {
 
     const now = this.now();
     const threadId = this.store.reserve(owner, harness, title, now);
+    // The thread's own Assistant connection. It authenticates nothing until the session's runner
+    // proxy binds a credential it minted and keeps in memory.
+    const connection = this.deps.connections.createForThread(owner, threadId);
+    this.store.setConnection(threadId, connection.id);
     let created: ReturnType<AssistantThreadDeps["createBackingSession"]>;
     try {
       created = this.deps.createBackingSession(owner, {
@@ -207,10 +216,12 @@ export class AssistantThreads {
       }, threadId);
     } catch (error) {
       this.store.abandon(threadId);
+      this.deps.connections.deleteUnboundThreadConnection(connection.id);
       throw error;
     }
     if (!created.ok || !created.data) {
       this.store.abandon(threadId);
+      this.deps.connections.deleteUnboundThreadConnection(connection.id);
       const { ok: _ok, status, error, data: _data, ...details } = created;
       throw new AssistantThreadRefusal(error ?? "The thread's session could not be started.", status >= 400 ? status : 409, details);
     }
@@ -230,6 +241,7 @@ export class AssistantThreads {
   archive(owner: HumanPrincipal, id: string): AssistantThread {
     const row = this.owned(owner, id);
     this.store.archive(row.id, this.now());
+    this.revokeCredential(row.id);
     if (row.session_id) {
       const session = this.deps.getSession(row.session_id);
       if (session && !session.archived) {
@@ -242,6 +254,49 @@ export class AssistantThreads {
 
   get(owner: HumanPrincipal, id: string): AssistantThread {
     return this.view(this.owned(owner, id));
+  }
+
+  /** Revokes the thread's connection, which also tells its runner to drop the credential and stop
+   * the proxy (see createAssistantThreads). Idempotent. */
+  revokeCredential(threadId: string): void {
+    const connection = this.deps.connections.forThread(threadId);
+    if (connection && !connection.revoked) this.deps.connections.revoke(connection.id);
+  }
+
+  /** The backing session was archived or deleted outside the thread: the thread ends with it. */
+  sessionRetired(sessionId: string): void {
+    const row = this.store.forSession(sessionId);
+    if (!row || row.state === "creating") return;
+    this.store.archive(row.id, this.now());
+    this.revokeCredential(row.id);
+    this.publish(this.store.get(row.id)!);
+  }
+
+  /** Binds a credential the session's runner proxy minted. Only the runner hosting the live
+   * backing session of an active thread, whose owner is still an active owner, may bind one. */
+  registerCredential(runnerId: string, sessionId: string, tokenHash: string): { accepted: boolean; expiresAt?: number; error?: string } {
+    const session = this.deps.getSession(sessionId);
+    const row = this.store.forSession(sessionId);
+    if (!session || !row || session.runnerId !== runnerId || session.role !== "assistant") {
+      return { accepted: false, error: "this session is not an Assistant thread's session on this runner" };
+    }
+    if (row.state !== "active" || session.archived) return { accepted: false, error: "the Assistant thread is archived" };
+    if (!this.deps.ownerPrincipal(row.owner_user_id, row.organization_id)) {
+      return { accepted: false, error: "the thread's owner is no longer an active owner" };
+    }
+    let connection = this.deps.connections.forThread(row.id);
+    if (!connection) {
+      // A thread created before its connection existed gets one at its first launch.
+      const owner = this.deps.ownerPrincipal(row.owner_user_id, row.organization_id)!;
+      connection = this.deps.connections.createForThread(owner, row.id);
+      this.store.setConnection(row.id, connection.id);
+    }
+    if (connection.revoked) return { accepted: false, error: "the thread's Assistant connection is revoked" };
+    const expiresAt = this.now() + ASSISTANT_THREAD_CREDENTIAL_TTL_MS;
+    if (!this.deps.connections.bindThreadCredential(connection.id, tokenHash, expiresAt)) {
+      return { accepted: false, error: "the thread credential could not be bound" };
+    }
+    return { accepted: true, expiresAt };
   }
 
   /** Republishes a thread when its backing session changes (status, title, activity). */
@@ -260,6 +315,11 @@ export class AssistantThreads {
 /** The production composition, shared with tests. */
 export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: SessionsService): AssistantThreads {
   const threads = new AssistantThreads(db.assistantThreads, {
+    connections: db.assistantConnections,
+    ownerPrincipal: (userId, organizationId) => {
+      const principal = db.operatingHumanPrincipal(userId, organizationId);
+      return principal?.role === "owner" ? principal : null;
+    },
     listRunners: (owner) => db.listRunnersForPrincipal(owner),
     isRunnerOnline: (runnerId) => hub.isRunnerOnline(runnerId),
     getSession: (sessionId) => db.getSession(sessionId),
@@ -277,5 +337,15 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
     broadcast: (userId, thread) => hub.assistantThreadChanged(userId, thread),
   });
   hub.onAssistantSessionUpsert((view) => threads.sessionChanged(view));
+  // Archive, deletion or the owner revoking the connection: the runner forgets the credential and
+  // closes the proxy. Any later proxy call is refused by the control plane regardless.
+  db.assistantConnections.onChange((connectionId) => {
+    const connection = db.assistantConnections.get(connectionId);
+    if (!connection?.threadId || !connection.revoked) return;
+    const sessionId = db.assistantThreads.get(connection.threadId)?.session_id;
+    const session = sessionId ? db.getSession(sessionId) : null;
+    if (session) hub.sendToRunner(session.runnerId, { type: "assistant_credential_revoked", sessionId: session.id });
+  });
+  svc.onAssistantSessionRetired((sessionId) => threads.sessionRetired(sessionId));
   return threads;
 }

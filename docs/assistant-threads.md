@@ -51,3 +51,33 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
   the session acts with its owner's Assistant authority.
 - The `sessions.session_role` column keeps `normal` for these sessions; `assistant_thread_id`
   carries the role, because widening that column's CHECK would mean rebuilding the sessions table.
+
+## Thread Credential and Runner Proxy
+
+Each thread has its own Assistant connection (v384), listed in the owner's Assistant Connections
+with its `threadId`. Its grant is Full Access with destructive confirmation required. The owner
+can narrow it or revoke it there, but cannot rotate it, because its proxy owns the credential.
+
+- **Minting.** At every launch of the backing session, the runner's proxy mints a fresh
+  `wollipoga_…` credential in its own memory and sends only its SHA-256 (`assistant_credential`).
+  The control plane binds it to the thread's connection for one hour
+  (`ASSISTANT_THREAD_CREDENTIAL_TTL_MS`) only when the sender is the runner of the thread's live
+  backing session, the thread is active and its owner is still an active owner. A new credential
+  replaces the old one at once. The proxy registers a fresh one before half its lifetime has
+  passed, and once more if the control plane refuses one as expired.
+- **Where the credential is not.** It is never written to a file, environment variable, process
+  argument, the session's worktree or its transcript. The session's harness launches the stdio
+  adapter `--assistant-mcp` as the `wollipog_assistant` MCP server: Claude Code through a
+  runner-written `--mcp-config` file, Codex through `-c mcp_servers.wollipog_assistant=…`. The
+  adapter holds only a per-session relay endpoint and key. They forward MCP requests for that one
+  session to `/assistant/mcp` and nothing else, and the runner adds the credential.
+- **Authorization.** Every call is authorized live by `/assistant/mcp` against the thread
+  connection's current grant and owner, and recorded in that connection's activity.
+- **Revocation.** Each of these revokes the connection: archiving the thread, archiving or
+  deleting its backing session, or the owner revoking the connection. The control plane then
+  refuses the credential and any new one. It also sends `assistant_credential_revoked`, so the
+  runner forgets the credential and closes the proxy. The runner also closes it when the
+  session's provider ends.
+- **Limit of the boundary.** The proxy runs as the runner's OS user, as the agent does. The
+  credential lives only in the runner's memory, so reading it would take inspecting another
+  process's memory, which the kernel's ptrace restrictions normally refuse.

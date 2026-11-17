@@ -70,6 +70,10 @@ export class AssistantThreadStore {
     this.db.prepare("UPDATE assistant_threads SET session_id=?, state='active', updated_at=? WHERE id=? AND state='creating'").run(sessionId, now, id);
   }
 
+  setConnection(id: string, connectionId: string): void {
+    this.db.prepare("UPDATE assistant_threads SET connection_id=? WHERE id=? AND connection_id IS NULL").run(connectionId, id);
+  }
+
   /** Only an unfinished reservation is removed; a recorded thread is archived instead. */
   abandon(id: string): void {
     this.db.prepare("DELETE FROM assistant_threads WHERE id=? AND state='creating'").run(id);

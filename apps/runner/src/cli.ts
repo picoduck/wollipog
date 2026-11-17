@@ -21,6 +21,9 @@ if (entry.mode === "--state-doctor") {
   void import("./policy-hook.js").then((m) => m.runPolicyHookCli(process.argv, process.env));
 } else if (entry.mode === "--agent-control-mcp") {
   void import("./wollipog-cli.js").then((m) => m.runAgentControlMcp(process.env));
+} else if (entry.mode === "--assistant-mcp") {
+  // A Wollipog Assistant thread's stdio MCP adapter (#4663): relays to the runner, holds no credential.
+  void import("./assistant-mcp.js").then((m) => m.runAssistantMcp(process.env));
 } else if (entry.mode === "--managed-worktree-guard") {
   // Runs before every Claude Bash call; it must never start the daemon or write anything to
   // stdout except its own PreToolUse decision.

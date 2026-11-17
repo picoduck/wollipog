@@ -1,6 +1,7 @@
 /** Runner-local provisioning for the provider-neutral Wollipog CLI and MCP surface. */
 
-import { assistantLaunchArgs } from "./assistant-launch.js";
+import { assistantLaunchArgs, assistantLaunchSupported, assistantMcpConfigPath, writeAssistantMcpConfig } from "./assistant-launch.js";
+import { ASSISTANT_RELAY_ENDPOINT_ENV, ASSISTANT_RELAY_KEY_ENV } from "./assistant-proxy.js";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import {
@@ -508,6 +509,8 @@ export function provisionAgentControl(
     providerRelayFifo?: string;
     /** Operator-configured Project Locations exposed read-only to an Orchestrator. */
     orchestratorProjectPaths?: string[];
+    /** The runner's Assistant thread proxies (#4663). Required to launch an `assistant` session. */
+    assistantProxy?: { provision(sessionId: string, cpUrl: string): Promise<{ endpoint: string; relayKey: string }> };
   },
   log: (message: string) => void,
   host: AgentControlHost,
@@ -519,8 +522,27 @@ export function provisionAgentControl(
     if ((spec.context?.kind ?? "native") !== "native" || (spec.executionTarget && spec.executionTarget.adapter !== "host")) {
       throw new Error("Wollipog Assistant threads run only on a Machine's native Claude Code or Codex");
     }
-    spec.args = assistantLaunchArgs(spec.driver, spec.args);
-    return;
+    // Refuse before any credential exists, never launching without the thread's tools.
+    if (!assistantLaunchSupported(spec.driver)) {
+      throw new Error("Wollipog Assistant threads run only on Claude Code or Codex. Start the thread with one of them.");
+    }
+    if (!runnerSupportsProtocol(config.controlPlaneProtocolVersion, "assistantRole")) {
+      throw new Error("Wollipog Assistant threads need a newer Wollipog control plane. Update Wollipog, then start the thread again.");
+    }
+    const proxy = config.assistantProxy;
+    if (!proxy) throw new Error("this runner cannot proxy Wollipog Assistant tools");
+    const cpUrl = deriveControlPlaneHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport);
+    return (async () => {
+      // The adapter gets only the relay endpoint and key; the credential stays in runner memory.
+      const relay = await proxy.provision(spec.sessionId, cpUrl);
+      const mcp = { ...runnerReentryCommand(host, "--assistant-mcp"),
+        env: { [ASSISTANT_RELAY_ENDPOINT_ENV]: relay.endpoint, [ASSISTANT_RELAY_KEY_ENV]: relay.relayKey } };
+      const configFile = spec.driver === "claude-code" ? assistantMcpConfigPath(host.configDir, spec.sessionId) : undefined;
+      // Claude Code reads them from its private config file; Codex forwards them by name.
+      if (configFile) writeAssistantMcpConfig(configFile, mcp);
+      else Object.assign(spec.env, mcp.env);
+      spec.args = assistantLaunchArgs(spec.driver, spec.args, { ...mcp, configFile });
+    })();
   }
   const supported = runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionAgentControl");
   const codexDriver = spec.driver === "codex" || spec.driver === "codex-app-server";
@@ -1067,6 +1089,7 @@ export function removeAgentControlFiles(sessionId: string, configDir: string): v
     agentControlReadyPath(configDir, sessionId),
     piAgentControlExtensionPath(configDir, sessionId),
     agentControlCliPath(configDir, sessionId),
+    assistantMcpConfigPath(configDir, sessionId),
   ]) {
     try { rmSync(file, { force: true }); } catch { /* Best effort after session deletion. */ }
   }
@@ -1079,7 +1102,7 @@ export function sweepAgentControlFiles(configDir: string): number {
   let removed = sweepAgentControlFifoRelays(agentControlFifoRelayBase(configDir));
   for (const entry of readdirSync(configDir, { withFileTypes: true })) {
     if (!entry.isFile() ||
-        !([".token", ".mcp.json", ".ready", ".cli", PI_AGENT_CONTROL_EXTENSION_SUFFIX].some((suffix) => entry.name.endsWith(suffix)) ||
+        !([".token", ".mcp.json", ".assistant-mcp.json", ".ready", ".cli", PI_AGENT_CONTROL_EXTENSION_SUFFIX].some((suffix) => entry.name.endsWith(suffix)) ||
           STAGED_AGENT_CONTROL_FILE_PATTERN.test(entry.name))) continue;
     rmSync(join(configDir, entry.name), { force: true });
     removed++;
