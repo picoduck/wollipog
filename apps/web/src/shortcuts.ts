@@ -12,6 +12,7 @@ export type ShortcutId =
   | "navigate-connections"
   | "navigate-archived"
   | "navigate-skills"
+  | "navigate-assistants"
   | "toggle-sessions-view"
   | "open-settings"
   | "focus-inbox-search"
@@ -116,6 +117,7 @@ export const RAIL_SHORTCUT_IDS = {
   projects: "navigate-projects",
   archived: "navigate-archived",
   usage: "navigate-usage",
+  assistants: "navigate-assistants",
 } as const satisfies Record<GlobalViewName, ShortcutId>;
 
 export const SHORTCUTS: readonly ShortcutDefinition[] = [
@@ -137,7 +139,8 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     group: "Navigation",
     label: item.name,
     scope: "Global",
-    binding: { key: String(index + 1), bare: true },
+    // The tenth destination takes 0, as `railDigitForIndex` numbers the rail.
+    binding: { key: index === 9 ? "0" : String(index + 1), bare: true },
   })),
   {
     id: "toggle-sessions-view",

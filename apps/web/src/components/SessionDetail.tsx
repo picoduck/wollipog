@@ -640,6 +640,9 @@ export type SessionDetailProps = {
   /** App-shell control cluster (editor, pinned/terminal/panel toggles) rendered in the unified
    * session bar when it replaces the app-level top bar on desktop. */
   topbarControls?: ReactNode;
+  /** Replaces the expanded session bar with the host's own (#4664): an assistant thread shows its
+   * transcript, requests and composer under the thread's header. The host then owns the page title. */
+  header?: ReactNode;
   /** Transport-owned policy seam. Native passthrough commands default to the existing send path. */
   providerCommandAttachmentPolicy?: ProviderComposerCommand["attachmentPolicy"];
   /** Registers preview-only paging ownership and live-follow actions with the Inbox key layer. */
@@ -1161,6 +1164,7 @@ function SessionDetailLoaded({
   onSessionMenu,
   onOpenRequest,
   topbarControls,
+  header,
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
   onPreviewForkReady,
@@ -7243,7 +7247,7 @@ function SessionDetailLoaded({
           {hiddenColumnAnnouncement}
         </span>
       )}
-      {mode === "expanded" ? (
+      {mode === "expanded" && header !== undefined ? header : mode === "expanded" ? (
         <>
         <SessionHeader
           session={session}

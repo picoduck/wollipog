@@ -21,11 +21,14 @@ type SubscriptionView =
   // Settings subscribes to nothing — it reads local preferences — but it is a View like any other,
   // and leaving it out made the whole View union unassignable here.
   | { name: "settings"; section?: string }
+  | { name: "assistants"; threadId?: string }
   | { name: "board" | "runners" | "runs" | "pods" | "automations" | "automation" | "usage" | "projects" | "archived" | "skills"; id?: string };
 
 export interface UiSubscriptionSource {
   view: SubscriptionView;
   inbox?: { selectedSessionId: string | null };
+  /** The open assistant thread's backing session (#4664), whose transcript the thread view shows. */
+  assistantSessionId?: string | null;
   sessions: Map<string, SessionView>;
   runs: Map<string, RunView>;
   pods: Map<string, PodView>;
@@ -56,7 +59,9 @@ export function uiStreamSubscriptions(state: UiSubscriptionSource): { sessionIds
   const podIds = new Set<string>();
   if (state.view.name === "inbox" && state.inbox?.selectedSessionId) required.add(state.inbox.selectedSessionId);
   else if (state.view.name === "session") required.add(state.view.id);
-  else if (state.view.name === "run") state.runs.get(state.view.id)?.sessionIds.forEach((id) => required.add(id));
+  else if (state.view.name === "assistants" && state.view.threadId !== undefined && state.assistantSessionId) {
+    required.add(state.assistantSessionId);
+  } else if (state.view.name === "run") state.runs.get(state.view.id)?.sessionIds.forEach((id) => required.add(id));
   else if (state.view.name === "pod") {
     podIds.add(state.view.id);
     state.pods.get(state.view.id)?.members.forEach((member) => required.add(member.sessionId));
@@ -77,6 +82,7 @@ export function uiStreamSubscriptions(state: UiSubscriptionSource): { sessionIds
 export class UiSubscriptionSynchronizer {
   private view: SubscriptionView | null = null;
   private inboxSessionId: string | null = null;
+  private assistantSessionId: string | null = null;
   private sessions: Map<string, SessionView> | null = null;
   private runs: Map<string, RunView> | null = null;
   private pods: Map<string, PodView> | null = null;
@@ -111,10 +117,13 @@ export class UiSubscriptionSynchronizer {
 
   private desiredFor(state: UiSubscriptionSource): { sessionIds: string[]; podIds: string[]; key: string } {
     const inboxSessionId = state.view.name === "inbox" ? state.inbox?.selectedSessionId ?? null : null;
+    const assistantSessionId = state.view.name === "assistants" ? state.assistantSessionId ?? null : null;
     if (state.view !== this.view || inboxSessionId !== this.inboxSessionId ||
+        assistantSessionId !== this.assistantSessionId ||
         state.sessions !== this.sessions || state.runs !== this.runs || state.pods !== this.pods || !this.desired) {
       this.view = state.view;
       this.inboxSessionId = inboxSessionId;
+      this.assistantSessionId = assistantSessionId;
       this.sessions = state.sessions;
       this.runs = state.runs;
       this.pods = state.pods;

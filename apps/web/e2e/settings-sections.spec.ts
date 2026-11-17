@@ -262,7 +262,7 @@ test.describe("on a touch phone", () => {
     await experimentOff(page, "pods");
     await openSection(page, "dark", "appearance");
     const targets = page.locator(".rail-nav-row").locator("[data-move], [role='switch']");
-    expect(await targets.count(), "two arrows and a switch on each of the nine rows").toBe(27);
+    expect(await targets.count(), "two arrows and a switch on each of the ten rows").toBe(30);
     for (const target of await targets.all()) {
       const name = await target.getAttribute("aria-label");
       await target.evaluate((element) => element.scrollIntoView({ block: "center" }));
@@ -299,7 +299,7 @@ test.describe("on a touch phone", () => {
     await page.setViewportSize({ width: 390, height: 900 });
     for (const theme of THEMES) {
       await openSection(page, theme, "appearance");
-      await expect(page.locator(".rail-nav-row")).toHaveCount(9);
+      await expect(page.locator(".rail-nav-row")).toHaveCount(10);
       await expect(page.locator(".rail-nav-digit")).toHaveCount(0);
       await expect(page.locator(".rail-nav-list kbd")).toHaveCount(0);
       const marked = await page.locator(".rail-nav-row", { has: page.locator(".rail-nav-note", { hasText: /^Tab Bar$/ }) })

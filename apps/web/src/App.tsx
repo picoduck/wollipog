@@ -126,6 +126,7 @@ const NewRunDialog = lazy(() => import("./components/NewRunDialog.js").then((mod
 const NewPodDialog = lazy(() => import("./components/NewPodDialog.js").then((module) => ({ default: module.NewPodDialog })));
 const PodDetail = lazy(() => import("./components/PodsView.js").then((module) => ({ default: module.PodDetail })));
 const PodsView = lazy(() => import("./components/PodsView.js").then((module) => ({ default: module.PodsView })));
+const AssistantsView = lazy(() => import("./components/AssistantsView.js").then((module) => ({ default: module.AssistantsView })));
 const AutomationsView = lazy(() => import("./components/AutomationsView.js").then((module) => ({ default: module.AutomationsView })));
 const AutomationDetail = lazy(() => import("./components/AutomationDetail.js").then((module) => ({ default: module.AutomationDetail })));
 const AutomationEditor = lazy(() => import("./components/AutomationEditor.js").then((module) => ({ default: module.AutomationEditor })));
@@ -912,6 +913,7 @@ export function Shell() {
               {view.name === "pods" ? <PodsView onNewPod={() => setDialog({ kind: "pod" })} /> : <PodDetail podId={view.id} member={view.member} onNewSession={() => setDialog({ kind: "session", preset: { worktree: true } })} />}
             </ExperimentGate>
           )}
+          {view.name === "assistants" && <AssistantsView threadId={view.threadId} rightPanel={rightPanel} />}
           {view.name === "automations" && (view.editor ? <AutomationEditor key={viewPath(view)} route={view.editor} /> : <AutomationsView />)}
           {view.name === "automation" && <AutomationDetail key={view.id} automationId={view.id} />}
           {view.name === "skills" && <SkillsView route={view} />}

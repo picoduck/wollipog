@@ -109,11 +109,11 @@ test("the Navigation group lists every destination on one row shape, with derive
   const { container } = mounted;
   try {
     const list = rows(container);
-    assert.equal(list.length, 9, "every rail destination, and only rail destinations");
+    assert.equal(list.length, 10, "every rail destination, and only rail destinations");
     assert.equal(container.textContent?.includes("Settings"), false,
       "Settings is not a rail destination and must not be configurable (#458)");
     assert.equal(rowTitle(list[0]!), "Sessions");
-    assert.deepEqual(list.map(rowDigit), ["1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+    assert.deepEqual(list.map(rowDigit), ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]);
     for (const candidate of list) {
       // icon, name, digit, moves, switch: the same five cells on every row, so nothing shifts.
       assert.deepEqual([...candidate.children].map((cell) => cell.getAttribute("role") ?? cell.className),
@@ -178,18 +178,18 @@ test("switching off Show Pods in Navigation leaves the rail and renumbers at onc
     assert.ok(pods.classList.contains("is-inactive"));
     assert.deepEqual(rowNotes(pods), [], "the switch says it is hidden; no second word does");
     assert.deepEqual(rows(container).filter((candidate) => rowDigit(candidate) !== null).map(rowDigit),
-      ["1", "2", "3", "4", "5", "6", "7", "8"], "the destinations after it move up a digit");
-    assert.equal(rowDigit(row(container, "Connections")), "5");
+      ["1", "2", "3", "4", "5", "6", "7", "8", "9"], "the destinations after it move up a digit");
+    assert.equal(rowDigit(row(container, "Connections")), "6");
     assert.equal(reset(container).disabled, false, "a customised list can be reset");
 
     await act(async () => { reset(container).click(); });
     assert.deepEqual(rows(container).map(rowTitle), [
-      "Sessions", "Automations", "Projects", "Multi-Agent Runs", "Pods", "Connections", "Agent Skills",
+      "Sessions", "Automations", "Projects", "Assistants", "Multi-Agent Runs", "Pods", "Connections", "Agent Skills",
       "Archived Sessions", "Usage and Cost",
     ], "the default order");
     assert.equal(control(container, "Show Pods in Navigation").getAttribute("aria-checked"), "true");
     assert.ok(railNames().includes("Pods"));
-    assert.deepEqual(rows(container).map(rowDigit), ["1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+    assert.deepEqual(rows(container).map(rowDigit), ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]);
     assert.equal(reset(container).disabled, true);
   } finally {
     await unmount(mounted);
@@ -208,14 +208,14 @@ test("a Move button keeps focus through the move, handing it to its sibling when
 
     control(container, "Move Usage and Cost Up").focus();
     await act(async () => { control(container, "Move Usage and Cost Up").click(); });
-    assert.equal(rows(container).indexOf(usage()), 7);
+    assert.equal(rows(container).indexOf(usage()), 8);
     assert.equal(domWindow.document.activeElement, control(container, "Move Usage and Cost Up") as never,
       "focus stays on the button that was pressed");
     assert.ok(usage().classList.contains("is-moved"), "the moved row is lit");
 
     control(container, "Move Usage and Cost Down").focus();
     await act(async () => { control(container, "Move Usage and Cost Down").click(); });
-    assert.equal(rows(container).indexOf(usage()), 8, "Usage and Cost is last again");
+    assert.equal(rows(container).indexOf(usage()), 9, "Usage and Cost is last again");
     assert.equal(control(container, "Move Usage and Cost Down").disabled, true);
     assert.equal(domWindow.document.activeElement, control(container, "Move Usage and Cost Up") as never,
       "focus moves to Move Up once Move Down is disabled");
@@ -240,7 +240,7 @@ test("an experiment that is off shows Off in Experimental, a disabled switch and
     assert.equal(toggle.disabled, true);
     assert.equal(toggle.getAttribute("aria-describedby"), pods.querySelector(".rail-nav-note")!.id);
     assert.equal(rowDigit(pods), null);
-    assert.equal(rowDigit(row(container, "Connections")), "5", "an experiment that is off takes no digit");
+    assert.equal(rowDigit(row(container, "Connections")), "6", "an experiment that is off takes no digit");
     // It still moves, so its place is kept for when the experiment comes back.
     assert.equal(control(container, "Move Pods Up").disabled, false);
     assert.equal(reset(container).disabled, true, "an experiment is not a navigation preference");
@@ -260,7 +260,7 @@ test("a phone shows no digits and no Show Labels in Rail, and marks exactly the 
   try {
     assertNoDomNode(container.querySelector(".setting-row"));
     assert.equal(container.textContent?.includes("Show Labels in Rail"), false);
-    assert.equal(rows(container).length, 9, "every destination is still listed");
+    assert.equal(rows(container).length, 10, "every destination is still listed");
     assertNoDomNode(container.querySelector(".rail-nav-digit"));
     assertNoDomNode(container.querySelector(".rail-nav-list kbd"));
     assert.ok(container.querySelector(".rail-nav-list.no-digits"));

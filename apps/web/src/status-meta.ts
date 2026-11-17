@@ -395,6 +395,13 @@ const VOCABULARY = {
     running: info("Running", { pulse: true }),
     stopped: neutral("Stopped"),
   },
+  /** A Wollipog Assistant thread (#4664). Needs You is a confirmation or approval waiting in it. */
+  assistantThread: {
+    working: info("Working", { pulse: true }),
+    needs_you: warning("Needs You"),
+    done: success("Done"),
+    archived: neutral("Archived"),
+  },
   /** One merge of a member's committed work into another's, in a pod's Recent Merges (#2980). */
   podMerge: {
     running: info("Running", { pulse: true }),

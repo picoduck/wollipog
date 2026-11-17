@@ -3,6 +3,7 @@ import type { View } from "../navigation.js";
 import { GLOBAL_VIEW_ITEMS, viewPath, type DestinationGroup, type GlobalViewItem, type GlobalViewName } from "../navigation.js";
 import {
   ArchiveIcon,
+  AssistantsIcon,
   AutomationsIcon,
   CloseIcon,
   ConnectionsIcon,
@@ -42,6 +43,7 @@ import { useToastChrome } from "./useToastChrome.js";
 /** Shared with Settings → Appearance → Navigation, whose rows show the same glyphs (#385). */
 export const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; className?: string }) => ReactNode> = {
   inbox: InboxIcon,
+  assistants: AssistantsIcon,
   projects: ProjectsIcon,
   runs: RunsIcon,
   pods: PodsIcon,

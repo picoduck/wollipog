@@ -271,12 +271,13 @@ test("PR4 rail, search, create, and focus-zone shortcuts replace the retired sid
     ["navigate-inbox", "1"],
     ["navigate-automations", "2"],
     ["navigate-projects", "3"],
-    ["navigate-runs", "4"],
-    ["navigate-pods", "5"],
-    ["navigate-connections", "6"],
-    ["navigate-skills", "7"],
-    ["navigate-archived", "8"],
-    ["navigate-usage", "9"],
+    ["navigate-assistants", "4"],
+    ["navigate-runs", "5"],
+    ["navigate-pods", "6"],
+    ["navigate-connections", "7"],
+    ["navigate-skills", "8"],
+    ["navigate-archived", "9"],
+    ["navigate-usage", "0"],
     ["toggle-sessions-view", "b"],
     ["focus-inbox-search", "/"],
     ["new-session", "c"],
@@ -299,14 +300,16 @@ test("global rail numbering stays aligned with its navigation shortcuts", () => 
     runners: "navigate-connections",
     archived: "navigate-archived",
     skills: "navigate-skills",
+    assistants: "navigate-assistants",
   } as const;
   for (const [index, item] of GLOBAL_VIEW_ITEMS.entries()) {
     const id = shortcutIdByView[item.id];
     if (id === null) {
-      assert.ok(index >= 9, `${item.name} has no digit shortcut, so it must sit past the numbered nine`);
+      assert.ok(index >= 10, `${item.name} has no digit shortcut, so it must sit past the numbered ten`);
       continue;
     }
-    assert.equal(shortcut(id).binding.key, String(index + 1), item.name);
+    // The tenth destination answers 0, as the rail numbers it (`railDigitForIndex`).
+    assert.equal(shortcut(id).binding.key, index === 9 ? "0" : String(index + 1), item.name);
     // The shortcut reference labels each destination with the name the rail and page use.
     assert.equal(shortcut(id).label, item.name);
   }

@@ -61,7 +61,7 @@ test("with no saved preferences the rail follows the Work, Oversight and Records
   // docs/design-system.md §4.1. Projects is daily work, so it answers 3.
   const preferences = getRailPreferences();
   assert.deepEqual([...preferences.order],
-    ["inbox", "automations", "projects", "runs", "pods", "runners", "skills", "archived", "usage"]);
+    ["inbox", "automations", "projects", "assistants", "runs", "pods", "runners", "skills", "archived", "usage"]);
   assert.deepEqual(
     [...new Set(GLOBAL_VIEW_ITEMS.map((item) => item.group))],
     ["work", "oversight", "records"],
@@ -82,14 +82,16 @@ test("a version-1 rail preference saved before the regrouping keeps its order, h
   );
   resetRailPreferencesForTest();
   const preferences = getRailPreferences();
-  assert.deepEqual([...preferences.order], previousDefault, "a saved order is never re-sorted into the new default");
+  // Assistants (#4664) is newer than the save, so it joins beside its canonical predecessor.
+  assert.deepEqual([...preferences.order], [...previousDefault.slice(0, 7), "assistants", ...previousDefault.slice(7)],
+    "a saved order is never re-sorted into the new default");
   assert.deepEqual([...preferences.hidden], ["archived"]);
   assert.equal(railPreferencesAreDefault(preferences), false);
   const flags = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true, pods: true };
   const digits = railDigits(visibleRailViews(preferences, flags));
   assert.deepEqual(
     [...digits],
-    [["inbox", "1"], ["automations", "2"], ["runs", "3"], ["pods", "4"], ["runners", "5"], ["skills", "6"], ["projects", "7"], ["usage", "8"]],
+    [["inbox", "1"], ["automations", "2"], ["runs", "3"], ["pods", "4"], ["runners", "5"], ["skills", "6"], ["projects", "7"], ["assistants", "8"], ["usage", "9"]],
   );
 });
 
@@ -145,13 +147,13 @@ test("digits derive solely from the visible order and skip hidden or gated desti
   const preferences: RailPreferences = { order: CANONICAL, hidden: new Set(["automations"]), labels: false };
   const flags = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: false, pods: false };
   const visible = visibleRailViews(preferences, flags);
-  assert.deepEqual(visible, ["inbox", "projects", "runners", "skills", "archived", "usage"]);
+  assert.deepEqual(visible, ["inbox", "projects", "assistants", "runners", "skills", "archived", "usage"]);
   const digits = railDigits(visible);
   assert.equal(digits.get("inbox"), "1");
   assert.equal(digits.get("projects"), "2", "a hidden destination consumes no slot");
-  assert.equal(digits.get("usage"), "6");
+  assert.equal(digits.get("usage"), "7");
   assert.equal(railViewForDigit(visible, "2"), "projects");
-  assert.equal(railViewForDigit(visible, "7"), null, "a digit past the visible list is inert");
+  assert.equal(railViewForDigit(visible, "8"), null, "a digit past the visible list is inert");
 });
 
 test("the tenth visible destination gets 0 and later ones get nothing", () => {
@@ -197,7 +199,7 @@ test("the default phone bar is Sessions, Projects, Connections and Automations w
 
 test("a hidden default tab is filled in place by the next visible non-experimental destination", () => {
   const hideProjects: RailPreferences = { order: CANONICAL, hidden: new Set(["projects"]), labels: false };
-  assert.deepEqual(phoneBarViews(hideProjects, ALL_ON), ["inbox", "skills", "runners", "automations"],
+  assert.deepEqual(phoneBarViews(hideProjects, ALL_ON), ["inbox", "assistants", "runners", "automations"],
     "Multi-Agent Runs and Pods come first in rail order, but never fill a slot");
   // The filler follows the user's rail order, not the canonical one.
   const usageFirst: RailPreferences = {
@@ -209,7 +211,7 @@ test("a hidden default tab is filled in place by the next visible non-experiment
   // Hide enough and the bar shrinks rather than taking an experiment.
   const sparse: RailPreferences = {
     order: CANONICAL,
-    hidden: new Set(["projects", "runners", "automations", "skills", "archived", "usage"]),
+    hidden: new Set(["projects", "assistants", "runners", "automations", "skills", "archived", "usage"]),
     labels: false,
   };
   assert.deepEqual(phoneBarViews(sparse, ALL_ON), ["inbox"]);

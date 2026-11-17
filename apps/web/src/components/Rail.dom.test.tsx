@@ -96,22 +96,22 @@ test("rail exposes every destination, nested active states, live badges, and per
 
   await render({ name: "session", id: "session-1" });
   const links = [...container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")];
-  assert.equal(links.length, 9);
+  assert.equal(links.length, 10);
   // Work, Oversight, Records (§4.1).
   assert.deepEqual(links.map((link) => link.getAttribute("href")), [
-    "/", "/automations", "/projects", "/runs", "/pods", "/connections/machines", "/skills", "/archived", "/usage",
+    "/", "/automations", "/projects", "/assistants", "/runs", "/pods", "/connections/machines", "/skills", "/archived", "/usage",
   ]);
-  // With Board folded into Sessions (#499), all nine destinations carry a digit, which is exposed
+  // With Board folded into Sessions (#499), all ten destinations carry a digit, which is exposed
   // as aria-keyshortcuts and shown in the tooltip rather than as a superscript (#1958).
   assert.deepEqual(links.map((link) => link.getAttribute("aria-keyshortcuts")),
-    ["1", "2", "3", "4", "5", "6", "7", "8", "9"], "the Records group ends at Usage and Cost with the ninth digit");
+    ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"], "the Records group ends at Usage and Cost with the tenth digit, 0");
   assertNoDomNode(container.querySelector(".rail-number"));
   // One name per destination: the accessible name IS the name the tooltip shows, and there is no
   // browser title to show a second, delayed one.
   for (const [index, item] of GLOBAL_VIEW_ITEMS.entries()) {
     assert.equal(links[index]!.getAttribute("aria-label"), item.name);
     assert.equal(links[index]!.getAttribute("data-rail-tip"), item.name);
-    assert.equal(links[index]!.getAttribute("data-rail-keys"), String(index + 1));
+    assert.equal(links[index]!.getAttribute("data-rail-keys"), index === 9 ? "0" : String(index + 1));
     assert.equal(links[index]!.hasAttribute("title"), false, item.name);
   }
   // The attention is the item's description and the tooltip's second line, not part of its name.
@@ -119,9 +119,9 @@ test("rail exposes every destination, nested active states, live badges, and per
     container.querySelector(`[id="${link.getAttribute("aria-describedby")}"]`)?.textContent;
   assert.equal(described(links[0]!), "2 waiting on you");
   assert.equal(links[0]!.getAttribute("data-rail-note"), "2 waiting on you");
-  assert.equal(described(links[5]!), "1 machine is offline with active sessions");
-  assert.equal(links[5]!.getAttribute("data-rail-note"), "1 machine is offline with active sessions");
-  for (const index of [1, 2, 3, 4, 6, 7, 8]) {
+  assert.equal(described(links[6]!), "1 machine is offline with active sessions");
+  assert.equal(links[6]!.getAttribute("data-rail-note"), "1 machine is offline with active sessions");
+  for (const index of [1, 2, 3, 4, 5, 7, 8, 9]) {
     assert.equal(links[index]!.hasAttribute("aria-describedby"), false, "an item with no attention has no description");
     assert.equal(links[index]!.hasAttribute("data-rail-note"), false);
     assertNoDomNode(links[index]!.querySelector(".count-badge, .rail-attention-dot"));
@@ -135,9 +135,9 @@ test("rail exposes every destination, nested active states, live badges, and per
   assert.equal(sessionBadges[0]!.getAttribute("aria-hidden"), "true");
   assert.equal(sessionBadges[0]!.parentElement?.className, "rail-icon", "the icon's box is the positioned wrapper");
   // Connections carries a dot, never a count.
-  assertNoDomNode(links[5]!.querySelector(".count-badge"));
-  assert.equal(links[5]!.querySelector(".rail-attention-dot")?.className, "rail-attention-dot t-warning on-icon");
-  assert.equal(links[5]!.querySelector(".rail-attention-dot")?.getAttribute("aria-hidden"), "true");
+  assertNoDomNode(links[6]!.querySelector(".count-badge"));
+  assert.equal(links[6]!.querySelector(".rail-attention-dot")?.className, "rail-attention-dot t-warning on-icon");
+  assert.equal(links[6]!.querySelector(".rail-attention-dot")?.getAttribute("aria-hidden"), "true");
   const summary = container.querySelector<HTMLElement>('[role="status"]')!;
   assert.equal(summary.getAttribute("aria-live"), "polite");
   assert.match(summary.textContent ?? "", /Sessions: 2 Blocked/);
@@ -156,9 +156,9 @@ test("rail exposes every destination, nested active states, live badges, and per
     "the polite live region stays");
 
   await render({ name: "run", id: "run-1" });
-  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[3]!.getAttribute("aria-current"), "page");
-  await render({ name: "pod", id: "pod-1" });
   assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[4]!.getAttribute("aria-current"), "page");
+  await render({ name: "pod", id: "pod-1" });
+  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[5]!.getAttribute("aria-current"), "page");
 
   await render({ name: "projects" });
   assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[2]!.getAttribute("aria-current"), "page");
@@ -278,7 +278,7 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
     const sheet = (domWindow.document as unknown as Document).querySelector(MORE_SHEET)!;
     // More holds every other visible destination in rail order, and Settings trails everything.
     assert.deepEqual([...sheet.querySelectorAll(".menu-item")].map((el) => el.querySelector(".menu-text")?.textContent),
-      ["Multi-Agent Runs", "Pods", "Agent Skills", "Archived Sessions", "Usage and Cost",
+      ["Assistants", "Multi-Agent Runs", "Pods", "Agent Skills", "Archived Sessions", "Usage and Cost",
         "Settings"],
       "Settings is the trailing row, after every destination");
     const sep = sheet.querySelector('[role="separator"]')!;
@@ -554,7 +554,7 @@ test("hiding and reordering renumber the surviving destinations", async () => {
     setRailViewHidden("automations", true);
     await render();
     let links = [...container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")];
-    assert.equal(links.length, 8, "a hidden destination leaves the rail");
+    assert.equal(links.length, 9, "a hidden destination leaves the rail");
     assert.equal(links[1]!.getAttribute("href"), "/projects");
     assert.equal(links[1]!.getAttribute("aria-keyshortcuts"), "2", "the survivor inherits the digit; nothing goes dead");
     assert.equal(links[1]!.getAttribute("data-rail-keys"), "2", "and its tooltip shows it");
@@ -563,9 +563,9 @@ test("hiding and reordering renumber the surviving destinations", async () => {
     moveRailView("usage", "up");
     await render();
     links = [...container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")];
-    assert.equal(links[7]!.getAttribute("href"), "/usage");
-    assert.equal(links[7]!.getAttribute("aria-keyshortcuts"), "8");
-    assert.equal(links[8]!.getAttribute("href"), "/archived");
+    assert.equal(links[8]!.getAttribute("href"), "/usage");
+    assert.equal(links[8]!.getAttribute("aria-keyshortcuts"), "9");
+    assert.equal(links[9]!.getAttribute("href"), "/archived");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -761,12 +761,12 @@ test("a hidden default tab is replaced in place by the next non-experimental des
     assert.deepEqual(
       [...rail.container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a.rail-item")]
         .map((item) => item.getAttribute("href")),
-      ["/", "/skills", "/connections/machines", "/automations"],
+      ["/", "/assistants", "/connections/machines", "/automations"],
       "Multi-Agent Runs and Pods come first in rail order, but an experiment never fills a slot");
     await act(async () => { rail.trigger().click(); });
     assert.deepEqual(
       [...rail.sheet()!.querySelectorAll(".menu-item .menu-text")].map((text) => text.textContent),
-      ["Multi-Agent Runs", "Pods", "Archived Sessions", "Usage and Cost", "Settings"],
+      ["Multi-Agent Runs", "Pods", "Agent Skills", "Archived Sessions", "Usage and Cost", "Settings"],
       "the hidden destination is in neither the bar nor the sheet");
   } finally {
     await rail.unmount();
@@ -804,7 +804,7 @@ test("More opens focused on the sheet and hands focus back only after a keyboard
     await press(rail.sheet()!, "Home");
     assert.ok(focused() === doc.querySelector('[aria-label="Close More"]'), "Home reaches the first item");
     await press(rail.sheet()!, "ArrowDown");
-    assert.ok(focused() === row("Multi-Agent Runs"), "ArrowDown moves to the first destination row");
+    assert.ok(focused() === row("Assistants"), "ArrowDown moves to the first destination row");
 
     // A tapped row navigates and leaves focus off More.
     await tap(row("Usage and Cost"));
@@ -974,14 +974,14 @@ test("a hairline separates contiguous groups, and an interleaved order has none"
     assert.ok(before("Archived Sessions"), "and so does Records");
     assert.equal(destinations.querySelector(".rail-separator")!.getAttribute("aria-hidden"), "true");
 
-    // Archived Sessions moved up between Projects and Multi-Agent Runs splits Records in two.
+    // Archived Sessions moved up between Assistants and Multi-Agent Runs splits Records in two.
     for (let step = 0; step < 4; step += 1) moveRailView("archived", "up");
     await rail.render({ name: "inbox" });
     assert.equal(destinations.querySelectorAll(".rail-separator").length, 0, "an interleaved order draws no separators");
     const links = [...destinations.querySelectorAll<HTMLAnchorElement>("a.rail-item")];
     assert.deepEqual(links.map((link) => link.getAttribute("aria-keyshortcuts")),
-      ["1", "2", "3", "4", "5", "6", "7", "8", "9"], "and the digits still follow the visible order");
-    assert.equal(links[3]!.getAttribute("aria-label"), "Archived Sessions");
+      ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"], "and the digits still follow the visible order");
+    assert.equal(links[4]!.getAttribute("aria-label"), "Archived Sessions");
   } finally {
     await rail.dispose();
     resetRailPreferencesForTest();
@@ -1092,7 +1092,7 @@ test("the tooltip names the item and its keys, after a delay for a mouse and at 
       // ...and within the warm window the next item's opens at once.
       await advance(RAIL_TOOLTIP_WARM_MS - RAIL_TOOLTIP_GRACE_MS);
       await pointer("pointerover", item("Pods"));
-      assert.equal(tooltip()?.textContent, "Pods5");
+      assert.equal(tooltip()?.textContent, "Pods6");
       await pointer("pointerout", item("Pods"), "mouse", domWindow.document.body as never);
       await advance(RAIL_TOOLTIP_GRACE_MS);
 
@@ -1118,7 +1118,7 @@ test("the tooltip names the item and its keys, after a delay for a mouse and at 
       });
       assertNoDomNode(tooltip(), "Escape dismisses it without moving focus");
       await act(async () => { item("Connections").focus(); });
-      assert.equal(tooltip()?.textContent, "Connections6");
+      assert.equal(tooltip()?.textContent, "Connections7");
       await act(async () => { item("Connections").blur(); });
       assertNoDomNode(tooltip());
     }
@@ -1129,12 +1129,12 @@ test("an open tooltip follows preference changes and leaves with a hidden item",
   await withTooltipRail(async ({ advance, tooltip, item, pointer, render }) => {
     await pointer("pointerover", item("Connections"));
     await advance(RAIL_TOOLTIP_DELAY_MS);
-    assert.equal(tooltip()?.textContent, "Connections6");
+    assert.equal(tooltip()?.textContent, "Connections7");
 
     // Settings › Navigation renumbers the rail while the pointer rests on Connections.
     setRailViewHidden("automations", true);
     await render({ name: "inbox" });
-    assert.equal(tooltip()?.textContent, "Connections5", "the tooltip shows the item's new digit");
+    assert.equal(tooltip()?.textContent, "Connections6", "the tooltip shows the item's new digit");
 
     setRailViewHidden("runners", true);
     await render({ name: "inbox" });

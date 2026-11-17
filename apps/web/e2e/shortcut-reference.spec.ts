@@ -45,7 +45,12 @@ test.describe("at 1440×900", () => {
       scrollHeight: element.scrollHeight,
       clientHeight: element.clientHeight,
     }));
-    expect(scrollHeight / clientHeight, "the whole reference fits in under two screens").toBeLessThan(2);
+    // Ten destinations (#4664) give Navigation its tenth row, and the reference measures 2.02 screens
+    // here: Navigation heads the left column and Actions the right (the columns' pinned rule), and
+    // with those heads the measured split, 1356px against 1156px, is already the best balance of
+    // these groups. The bound keeps a row and a half of room, so a reference that grows by a group
+    // still fails.
+    expect(scrollHeight / clientHeight, "the whole reference fits in just over two screens").toBeLessThan(2.1);
 
     // Navigation and Actions head the two columns, in view before any scrolling.
     const bodyBox = (await body.boundingBox())!;

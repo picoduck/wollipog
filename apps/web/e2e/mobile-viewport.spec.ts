@@ -413,8 +413,12 @@ const THEMES = ["dark", "light"] as const;
  * four-letter word has about half the ink of "Settings": measured 875-1032 paint / 616-731 legible
  * across both themes and landscape. Its floors keep sheetShortLabel's ratios to the measured
  * minimum (830 / 290), so losing a third of it (875 × 2/3 = 583) still trips the paint floor.
+ *
+ * "Assistants" (#4664) is ten narrow letters with about the ink of "Settings": measured 1747-1753
+ * paint in both themes. It takes sheetShortLabel's floors, and losing a third of it
+ * (1747 × 2/3 = 1165) still trips the 1330 paint floor.
  */
-const SHORT_SHEET_TITLES = new Set(["Settings"]);
+const SHORT_SHEET_TITLES = new Set(["Settings", "Assistants"]);
 const TINY_SHEET_TITLES = new Set(["Pods"]);
 const MARKS = {
   icon: { paint: 1000, legible: 450, illegibleCells: 0, minContrast: CONTRAST.icon },
@@ -943,7 +947,8 @@ test("the bottom rail stays above the keyboard", async ({ page }) => {
   await openMoreSheet(page);
   await expect(page.locator(MORE_SHEET)).toBeVisible();
   await expectEveryDestinationReachable(page, 0);
-  await page.locator(".menu-backdrop").click();
+  // A tap on the scrim above the sheet, which grows past the scrim's centre as destinations join.
+  await page.locator(".menu-backdrop").click({ position: { x: 8, y: 8 } });
   await expect(page.locator(MORE_SHEET)).toHaveCount(0);
 
   await openKeyboard(page);

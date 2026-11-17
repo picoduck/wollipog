@@ -259,7 +259,7 @@ test.describe("the labelled rail at 1440×900 (#1968)", () => {
       clipped: element.scrollWidth > element.clientWidth,
     })));
     expect(labels.map((label) => label.name)).toEqual([
-      "Search", "Sessions", "Automations", "Projects", "Multi-Agent Runs", "Pods", "Connections", "Agent Skills",
+      "Search", "Sessions", "Automations", "Projects", "Assistants", "Multi-Agent Runs", "Pods", "Connections", "Agent Skills",
       "Archived Sessions", "Usage and Cost", "Settings",
     ]);
     expect(labels.filter((label) => label.clipped), "every shipped name fits").toEqual([]);
@@ -281,7 +281,7 @@ test.describe("the labelled rail at 1440×900 (#1968)", () => {
     const runs = rail(page).getByRole("link", { name: "Multi-Agent Runs", exact: true });
     await expect(runs.locator(".rail-item-keys")).toBeHidden();
     await runs.hover();
-    await expect(runs.locator(".rail-item-keys")).toHaveText("4");
+    await expect(runs.locator(".rail-item-keys")).toHaveText("5");
     await page.waitForTimeout(700);
     await expect(tooltip(page), "the labelled rail already shows the name").toBeHidden();
     const hovered = await runs.evaluate((item) => {

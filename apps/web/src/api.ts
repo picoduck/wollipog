@@ -1,5 +1,6 @@
 import type { WorkflowEventRetentionView, UpdateWorkflowEventRetentionRequest } from "@wollipog/protocol";
 import type { AssistantConnectionsView, AssistantConnection, AssistantGrant, AssistantActivity } from "./assistant-connections.js";
+import { assistantThreadRoutes } from "./assistant-threads.js";
 import type { OrchestratorCampaignBehaviorView, UpdateOrchestratorCampaignBehaviorRequest } from "@wollipog/protocol";
 import type {
   CampaignForgeRefreshResponse,
@@ -1795,6 +1796,8 @@ export function createApiClient(transport: ApiTransport) {
 
   /* Paired devices (revocable bearer credentials for dashboards). */
   listDevices: () => req<{ devices: DeviceView[] }>("/api/devices"),
+  /* Wollipog Assistant threads (#4664): every request lives in assistant-threads.ts. */
+  ...assistantThreadRoutes(req),
   assistantConnections: () => req<AssistantConnectionsView>("/api/assistant-connections"),
   createAssistantConnection: (body: {name: string; grant: AssistantGrant}) => req<{connection: AssistantConnection; token: string}>("/api/assistant-connections", {method: "POST", body: JSON.stringify(body)}),
   configureAssistantConnection: (id: string, body: {name: string; grant: AssistantGrant; expectedRevision: number}) => req<{connection: AssistantConnection}>(`/api/assistant-connections/${encodeURIComponent(id)}/configure`, {method: "POST", body: JSON.stringify(body)}),

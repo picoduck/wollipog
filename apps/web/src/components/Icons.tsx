@@ -106,6 +106,7 @@ import {
   MessageSquareCheck as LucideMessageSquareCheck,
   MessageSquareCode as LucideMessageSquareCode,
   MessageSquareDot as LucideMessageSquareDot,
+  MessagesSquare as LucideMessagesSquare,
   Mic as LucideMic,
   Monitor as LucideMonitor,
   MonitorCog as LucideMonitorCog,
@@ -307,6 +308,11 @@ export function CountIcon(props: IconProps) {
 /** An entity's own identifier, such as the Pinned Summary's Session ID (#3897). */
 export function IdentifierIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideFingerprintPattern} {...props} />;
+}
+
+/** The Assistants destination and its threads (#4664). */
+export function AssistantsIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideMessagesSquare} {...props} />;
 }
 
 export function SkillsIcon(props: IconProps) {
