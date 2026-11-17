@@ -61,8 +61,10 @@ export class AssistantThreadStore {
       CREATE INDEX IF NOT EXISTS assistant_thread_members_thread ON assistant_thread_members(thread_id, root_session_id);`);
     // The backing session's final cost, if it was deleted: spend is never refunded by deletion.
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN retired_cost_usd REAL NOT NULL DEFAULT 0"); } catch { /* column already present */ }
-    // A membership table an earlier build created lacks the retirement columns.
-    for (const column of ["retired_cost_usd REAL", "retired_cap_usd REAL"]) {
+    // A membership table an earlier build created lacks the retirement columns, and the allowance
+    // columns (#4671): the cost cap a member was given, which it shares with the children it
+    // creates; the own cap the thread last set it to; and the owner's own ceiling, once they set one.
+    for (const column of ["retired_cost_usd REAL", "retired_cap_usd REAL", "allowance_usd REAL", "managed_cap_usd REAL", "owner_cap_usd REAL"]) {
       try { db.exec(`ALTER TABLE assistant_thread_members ADD COLUMN ${column}`); } catch { /* column already present */ }
     }
     // The backing session's cost cap as the thread last set it. A different current cap was set by
@@ -110,15 +112,35 @@ export class AssistantThreadStore {
     return (this.db.prepare("SELECT * FROM assistant_threads WHERE connection_id=?").get(connectionId) as ThreadRow | undefined) ?? null;
   }
 
-  recordLaunch(threadId: string, sessionId: string, now: number): void {
+  /** `capUsd` is the launch's cost cap, its allowance (#4671). */
+  recordLaunch(threadId: string, sessionId: string, now: number, capUsd: number | null = null): void {
     this.db.prepare("INSERT OR IGNORE INTO assistant_thread_launches (session_id, thread_id, created_at) VALUES (?, ?, ?)").run(sessionId, threadId, now);
-    this.db.prepare("INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id) VALUES (?, ?, ?)").run(sessionId, threadId, sessionId);
+    this.db.prepare("INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id, allowance_usd) VALUES (?, ?, ?, ?)")
+      .run(sessionId, threadId, sessionId, capUsd);
   }
 
-  /** A child of a thread member joins the same launched tree. */
-  inheritMembership(sessionId: string, parentSessionId: string): void {
-    this.db.prepare(`INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id)
-      SELECT ?, thread_id, root_session_id FROM assistant_thread_members WHERE session_id=?`).run(sessionId, parentSessionId);
+  /** A child of a thread member joins the same launched tree, with the cap it was created with as
+   * its allowance. */
+  inheritMembership(sessionId: string, parentSessionId: string, capUsd: number | null = null): void {
+    this.db.prepare(`INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id, allowance_usd)
+      SELECT ?, thread_id, root_session_id, ? FROM assistant_thread_members WHERE session_id=?`).run(sessionId, capUsd, parentSessionId);
+  }
+
+  /** A member of a thread's launched trees, with its cost allowance (#4671); null for any other
+   * session. A member recorded before allowances were kept has none until it next creates a child. */
+  member(sessionId: string): { allowanceUsd: number | null; managedCapUsd: number | null; ownerCapUsd: number | null } | null {
+    const row = this.db.prepare("SELECT allowance_usd, managed_cap_usd, owner_cap_usd FROM assistant_thread_members WHERE session_id=?")
+      .get(sessionId) as { allowance_usd: number | null; managed_cap_usd: number | null; owner_cap_usd: number | null } | undefined;
+    return row ? { allowanceUsd: row.allowance_usd, managedCapUsd: row.managed_cap_usd, ownerCapUsd: row.owner_cap_usd } : null;
+  }
+
+  setMemberCap(sessionId: string, allowanceUsd: number, capUsd: number): void {
+    this.db.prepare("UPDATE assistant_thread_members SET allowance_usd=?, managed_cap_usd=? WHERE session_id=?").run(allowanceUsd, capUsd, sessionId);
+  }
+
+  /** Lowers the owner's recorded ceiling for a member to `capUsd`; it only ever goes down. */
+  recordMemberOwnerCap(sessionId: string, capUsd: number): void {
+    this.db.prepare("UPDATE assistant_thread_members SET owner_cap_usd=MIN(COALESCE(owner_cap_usd, ?), ?) WHERE session_id=?").run(capUsd, capUsd, sessionId);
   }
 
   /** Before a session row is deleted: its spend stays its thread's, in its own launched tree. */

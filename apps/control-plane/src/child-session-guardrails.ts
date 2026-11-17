@@ -64,12 +64,15 @@ export function childRestartAllowanceError(
 }
 
 /** Resolve caller and Project defaults, then divide a finite parent's remaining capacity over
- * live spawn slots as the hard ceiling. Without any of those sources, the dimension is unlimited. */
+ * live spawn slots as the hard ceiling. Without any of those sources, the dimension is unlimited.
+ * `creatorKeepsCostShare` (a member of an Assistant thread's tree, #4671) divides the remaining
+ * cost over one more share, which the parent keeps for its own spending, in whole cents. */
 export function childSessionGuardrails(
   parent: ParentAllowance,
   requested: SessionConfig | undefined,
   remainingSlots: number,
   defaults?: ChildSessionDefaults | null,
+  options: { creatorKeepsCostShare?: boolean } = {},
 ): { config: SessionConfig } | { error: string } {
   if (!Number.isSafeInteger(remainingSlots) || remainingSlots < 1) {
     return { error: "the parent session has 0 remaining live child slots; raise maxChildSessions before creating another child" };
@@ -83,18 +86,23 @@ export function childSessionGuardrails(
   }
   const requestedCost = requested?.costBudgetUsd;
   const requestedTools = requested?.maxToolCalls;
-  const costRemaining = parent.costBudgetUsd == null
+  const keepsShare = options.creatorKeepsCostShare === true;
+  const costShare = parent.costBudgetUsd == null
     ? null
-    : (parent.costBudgetUsd - (parent.costUsd ?? 0)) / remainingSlots;
+    : (parent.costBudgetUsd - (parent.costUsd ?? 0)) / (keepsShare ? remainingSlots + 1 : remainingSlots);
+  const costRemaining = costShare != null && keepsShare ? Math.floor(costShare * 100 + 1e-6) / 100 : costShare;
   const toolsRemaining = parent.maxToolCalls == null
     ? null
     : Math.floor((parent.maxToolCalls - (parent.toolCallCount ?? 0)) / remainingSlots);
   if ((costRemaining != null && (!Number.isFinite(costRemaining) || costRemaining <= 0)) ||
       (toolsRemaining != null && (!Number.isFinite(toolsRemaining) || toolsRemaining < 1))) {
+    const sharing = keepsShare
+      ? `, shared between its own spending and ${remainingSlots} open child slot${remainingSlots === 1 ? "" : "s"} ` +
+        "because it runs in a Wollipog Assistant thread, whose budget its whole session tree shares"
+      : remainingSlots > 1 ? `, shared across ${remainingSlots} open child slots` : "";
     return {
       error: `the parent session has insufficient remaining budget to create a child: ${
-        remainingAllowance(parent)} remain after its own usage and its children's charges${
-        remainingSlots > 1 ? `, shared across ${remainingSlots} open child slots` : ""}`,
+        remainingAllowance(parent)} remain after its own usage and its children's charges${sharing}`,
     };
   }
   if ((costRemaining != null && requestedCost === 0) || (toolsRemaining != null && requestedTools === 0)) {
@@ -102,9 +110,10 @@ export function childSessionGuardrails(
   }
   const preferredCost = requestedCost === 0 ? undefined : requestedCost ?? defaults?.costBudgetUsd;
   const preferredTools = requestedTools === 0 ? undefined : requestedTools ?? defaults?.maxToolCalls;
-  const costBudgetUsd = costRemaining == null
-    ? preferredCost
-    : Math.min(preferredCost ?? costRemaining, costRemaining);
+  const bounded = costRemaining == null ? preferredCost : Math.min(preferredCost ?? costRemaining, costRemaining);
+  // Whole cents, never below one: zero would clear the guardrail, and the share is at least a cent.
+  const costBudgetUsd = keepsShare && bounded !== undefined
+    ? Math.max(0.01, Math.floor(bounded * 100 + 1e-6) / 100) : bounded;
   const maxToolCalls = toolsRemaining == null
     ? preferredTools
     : Math.min(preferredTools ?? toolsRemaining, toolsRemaining);

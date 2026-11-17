@@ -2224,6 +2224,15 @@ const ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL = "A Wollipog Assistant thread canno
 const ASSISTANT_THREAD_RUN_REFUSAL = "A Wollipog Assistant thread launches one session at a time and cannot start runs or workflows. " +
   "Launch a session instead, or ask your owner to start it.";
 
+/** A fan-out from inside a thread's launched tree would start several sessions outside the per-child
+ * reservation that keeps the tree within the thread's budget (#4671). */
+const ASSISTANT_THREAD_TREE_RUN_REFUSAL = "This session runs in a Wollipog Assistant thread, whose budget its whole session tree shares, " +
+  "so it creates child sessions one at a time and cannot start runs or workflows. Create a child session instead.";
+
+/** An agent raising or clearing a thread-tree session's cap would give it budget nobody reserved (#4671). */
+const ASSISTANT_THREAD_TREE_CAP_REFUSAL = "This session runs in a Wollipog Assistant thread, whose budget its whole session tree shares. " +
+  "An agent may only lower its cost budget; ask the owner to raise it.";
+
 /** A run's title derived from its task, short enough that each member's " · <role>" still fits in 120. */
 const RUN_TASK_TITLE_MAX = 60;
 
@@ -4302,6 +4311,35 @@ export class SessionsService {
     return { ok: true };
   }
 
+  /** Sets a member of a thread's launched tree to its allowance less what its children hold, and
+   * less `reservingUsd` about to be reserved for a new or restarted child (#4671), so the member and
+   * every descendant together stay within the cap it was given, and so within the thread's budget.
+   * A finished child's unspent cap comes back here. As with the backing assistant, a cap the owner
+   * changed is only lowered. Returns the member's own cap; null for a session outside every tree. */
+  private rebalanceThreadMember(sessionId: string, reservingUsd = 0): ServiceResult<never> | { ok: true; capUsd: number } | null {
+    const member = this.db.assistantThreads.member(sessionId);
+    const session = member ? this.db.getSession(sessionId) : null;
+    if (!member || !session) return null;
+    const current = session.costBudgetUsd ?? null;
+    // Until the thread first sets it, a member's cap is the one it was created with.
+    const managed = member.managedCapUsd ?? member.allowanceUsd;
+    if (current !== null && managed !== null && Math.abs(current - managed) >= 0.005) {
+      this.db.assistantThreads.recordMemberOwnerCap(sessionId, current);
+    }
+    // A member recorded before allowances were kept shares the cap it has now.
+    const allowance = member.allowanceUsd ?? current;
+    if (allowance === null) return null;
+    const ownerCap = this.db.assistantThreads.member(sessionId)?.ownerCapUsd ?? null;
+    const held = this.db.childSessionAllocations(sessionId).costBudgetUsd + reservingUsd;
+    const target = Math.max(0.01, Math.floor(Math.min(allowance - held, ownerCap ?? Number.POSITIVE_INFINITY) * 100 + 1e-6) / 100);
+    if (current === null || Math.abs(current - target) >= 0.005) {
+      const updated = this.setConfig(sessionId, { costBudgetUsd: target });
+      if (!updated.ok) return fail(`The thread's budget could not be reserved for this child: ${updated.error ?? "unknown error"}.`, 409);
+    }
+    this.db.assistantThreads.setMemberCap(sessionId, allowance, target);
+    return { ok: true, capUsd: target };
+  }
+
   /** Why an `assistant`-role session cannot launch here (#4663), or null when it can. */
   private assistantLaunchRefusal(runnerId: string, driver: AgentDriverKind, context: AgentContext | undefined): ServiceResult<never> | null {
     const unsupported = this.capabilityFailure(runnerId, "assistantRole", "Wollipog assistant threads");
@@ -4655,6 +4693,7 @@ export class SessionsService {
     place?: { runnerId: string; workspaceId: string },
   ): ServiceResult<SessionConfig[]> {
     if (!parentSessionId || configs.length === 0) return ok(configs);
+    if (this.db.assistantThreads.member(parentSessionId)) return fail(ASSISTANT_THREAD_TREE_RUN_REFUSAL, 409);
     const parent = this.db.getSession(parentSessionId);
     if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
       return fail("the creating parent session is no longer active", 409);
@@ -4984,6 +5023,8 @@ export class SessionsService {
     const configInputError = sessionGuardrailConfigError(req.config);
     if (configInputError) return fail(configInputError, 400);
     const parentSessionId = creationContext?.parentSessionId;
+    /** A thread-tree parent, whose own cap gives up this child's just before it exists (#4671). */
+    let threadMemberParentId: string | null = null;
     // Only prepareDescendantImageEvidenceReview holds this module-private symbol. Request JSON
     // cannot opt into the exemption. Keep all cost/tool guards and campaign budget admission.
     if (parentSessionId) {
@@ -5038,17 +5079,24 @@ export class SessionsService {
       parentSession = parent;
       const allocated = this.db.childSessionAllocations(parentSessionId);
       const implementationSlots = (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.liveCount;
+      // A member of a thread's launched tree has its children's caps carved out of its own (#4671):
+      // settle it first, so a finished child's unspent cap is back, then share what it has not spent.
+      const member = imageReview ? null : this.rebalanceThreadMember(parentSessionId);
+      if (member && !("capUsd" in member)) return member;
       const guarded = childSessionGuardrails({
         ...parent,
         ...this.childCeilingsOf(parent),
+        ...(member ? { costBudgetUsd: member.capUsd + allocated.costBudgetUsd } : {}),
         costUsd: (parent.costUsd ?? 0) + allocated.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + allocated.maxToolCalls,
       // The separate reviewer slot shares finite remaining budget with the available implementation
       // slots. Exempt capacity admission without reserving their whole allowance for the reviewer.
       }, req.config, imageReview ? Math.max(1, implementationSlots + 1) : implementationSlots,
-      parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null);
+      parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null,
+      { creatorKeepsCostShare: member !== null });
       if ("error" in guarded) return fail(guarded.error, 409);
       req = { ...req, config: guarded.config };
+      if (member) threadMemberParentId = parentSessionId;
     }
     const campaignAuthority = this.orchestratorCampaignController(parentSession);
     if (campaignAuthority === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
@@ -6067,6 +6115,12 @@ export class SessionsService {
       // its budget. Refuse rather than launch unreserved.
       const reserved = this.rebalanceAssistantBacking(threadLaunch, threadLaunch.launchedHeldUsd + threadLaunchCapUsd);
       if (!reserved.ok) return reserved;
+    }
+    if (threadMemberParentId) {
+      // The same for a child created inside a launched tree (#4671): its creator's own cap gives up
+      // the child's cap before the child exists. Refuse rather than create it unreserved.
+      const reserved = this.rebalanceThreadMember(threadMemberParentId, config.costBudgetUsd ?? 0);
+      if (reserved && !("capUsd" in reserved)) return reserved;
     }
     const insert = () => {
       const policy = creationContext?.review?.policy;
@@ -8335,6 +8389,12 @@ export class SessionsService {
           Object.keys(config).some((key) => key !== "maxChildSessions"))) {
       return fail("an agent may change only its own maxChildSessions", 403);
     }
+    // A thread-tree session's cap was carved out of its creator's (#4671): an agent may lower it, but
+    // raising or clearing it would hand out budget nobody reserved.
+    if (actor.kind === "agent" && config.costBudgetUsd !== undefined && this.db.assistantThreads.member(sessionId) &&
+        !(config.costBudgetUsd > 0 && (session.costBudgetUsd == null || config.costBudgetUsd <= session.costBudgetUsd))) {
+      return fail(ASSISTANT_THREAD_TREE_CAP_REFUSAL, 403);
+    }
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, config);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
     if (config.permissionMode !== undefined && (config.permissionMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
@@ -9729,12 +9789,20 @@ export class SessionsService {
         if (allocated.liveCount >= cap) {
           return fail("the parent session has 0 remaining live child slots; raise maxChildSessions before restarting this child", 409);
         }
+        // A thread-tree parent's own cap already gave up its children's charges (#4671).
+        const member = this.rebalanceThreadMember(parent.id);
+        if (member && !("capUsd" in member)) return member;
+        const reservation = this.db.childSessionRestartReservation(session.id);
         const allowanceError = childRestartAllowanceError(
-          { ...parent, ...this.childCeilingsOf(parent) },
+          { ...parent, ...this.childCeilingsOf(parent), ...(member ? { costBudgetUsd: member.capUsd + allocated.costBudgetUsd } : {}) },
           allocated,
-          this.db.childSessionRestartReservation(session.id),
+          reservation,
         );
         if (allowanceError) return fail(allowanceError, 409);
+        if (member) {
+          const reserved = this.rebalanceThreadMember(parent.id, reservation.costBudgetUsd);
+          if (reserved && !("capUsd" in reserved)) return reserved;
+        }
       }
     }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);

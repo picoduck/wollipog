@@ -72,6 +72,17 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
     the owner changed is only ever lowered.
   - Each launched tree holds the larger of its spend and its root's cap. A tree is the launched
     session and every descendant, recorded when each is created.
+  - A child created anywhere in a launched tree is carved out of its creator's own cap (#4671).
+    The creator's allowance is the cap it was launched or created with. Its own cap is that
+    allowance less what its children hold, settled at each child creation and restart, so a
+    finished child's unspent cap comes back. Every session in the tree together therefore stays
+    within the launched cap, and so within the thread's budget. A cap the owner changed is only
+    ever lowered.
+  - A creator shares what it has not spent across its open child slots plus one share it keeps
+    for itself, in whole cents. Once no share reaches one cent, child creation is refused with a
+    message naming the shared thread budget.
+  - A session in a launched tree cannot start runs or workflows. An agent may lower a tree member's
+    cost budget but never raise or clear it.
   - Deleting a session never refunds its spend, whether one at a time or with its Machine: the
     thread keeps the deleted session's final cost inside its own tree.
 - A thread cannot start runs, workflows or Orchestrators, whose children it could not count.
