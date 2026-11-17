@@ -2213,6 +2213,10 @@ function assistantLaunchPolicy(threadId: string): import("@wollipog/protocol").A
   return { threadId, guide: WOLLIPOG_ASSISTANT_SKILL.content };
 }
 
+/** An Orchestrator's children would run outside the thread's launch count. */
+const ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL = "A Wollipog Assistant thread cannot start an Orchestrator. " +
+  "Launch an ordinary session instead, or ask your owner to start the campaign.";
+
 /** A multi-session run or workflow would start several sessions outside one thread launch. */
 const ASSISTANT_THREAD_RUN_REFUSAL = "A Wollipog Assistant thread launches one session at a time and cannot start runs or workflows. " +
   "Launch a session instead, or ask your owner to start it.";
@@ -4260,12 +4264,14 @@ export class SessionsService {
       return { refusal: `This Wollipog Assistant thread has launched ${launched} of the ${limits.launchedSessions} sessions it may launch, ` +
         "so it cannot launch another. Tell your owner; they can continue in a new thread." };
     }
-    const spent = this.db.assistantThreads.costUsd(thread.id);
-    if (spent >= limits.costUsd) {
-      return { refusal: `This Wollipog Assistant thread has spent $${spent.toFixed(2)} of its $${limits.costUsd} budget, ` +
-        "so it cannot launch another session. Tell your owner; they can continue in a new thread." };
+    const { committedUsd } = this.db.assistantThreads.costs(thread.id);
+    // Whole cents only, rounded down, so the caps never add up to more than the budget.
+    const remainingUsd = Math.floor((limits.costUsd - committedUsd) * 100) / 100;
+    if (remainingUsd < 0.01) {
+      return { refusal: `This Wollipog Assistant thread has spent or committed $${Math.min(committedUsd, limits.costUsd).toFixed(2)} ` +
+        `of its $${limits.costUsd} budget, so it cannot launch another session. Tell your owner; they can continue in a new thread.` };
     }
-    return { threadId: thread.id, remainingUsd: Math.round((limits.costUsd - spent) * 100) / 100 };
+    return { threadId: thread.id, remainingUsd };
   }
 
   /** Why an `assistant`-role session cannot launch here (#4663), or null when it can. */
@@ -4929,8 +4935,14 @@ export class SessionsService {
     const threadLaunch = creationContext?.assistantThread ? null : this.assistantThreadLaunch();
     if (threadLaunch && "refusal" in threadLaunch) return fail(threadLaunch.refusal, 409);
     if (threadLaunch) {
-      req = { ...req, config: { ...req.config,
-        costBudgetUsd: Math.min(req.config?.costBudgetUsd ?? Number.POSITIVE_INFINITY, threadLaunch.remainingUsd) } };
+      if (req.role === "orchestrator" || req.orchestrator !== undefined || usesOrchestratorPresetPermissions(req.config)) {
+        return fail(ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL, 409);
+      }
+      // An absent, zero or negative request would otherwise mean "no budget": a thread launch is
+      // always capped, at most at what the thread has left.
+      const requested = req.config?.costBudgetUsd;
+      req = { ...req, config: { ...req.config, costBudgetUsd: typeof requested === "number" && Number.isFinite(requested) && requested > 0
+        ? Math.min(requested, threadLaunch.remainingUsd) : threadLaunch.remainingUsd } };
     }
     // Attribution is supplied only by the authenticated route, never by the request payload.
     const capture = creationContext?.[PREPARED_MEDIA_CAPTURE];
@@ -5366,6 +5378,9 @@ export class SessionsService {
     // coupled preset value; a v160 client may pair the role with an ordinary provider mode.
     const role: SessionRole = assistantThread ? "assistant"
       : req.role ?? sessionRole({ permissionMode: requestedConfig.permissionMode });
+    // A saved Orchestrator default must not turn a thread's launch into an Orchestrator, whose
+    // children it could not count.
+    if (threadLaunch && role === "orchestrator") return fail(ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL, 409);
     const orchestrator = role === "orchestrator";
     const presetPermissions = usesOrchestratorPresetPermissions(requestedConfig);
     let orchestratorPolicy: OrchestratorCampaignPolicy | undefined;

@@ -14,12 +14,14 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { rmSync } from "node:fs";
 import { ASSISTANT_THREAD_CREDENTIAL_TTL_MS } from "@wollipog/protocol";
 import {
   AgentControlRelaySockets,
   type AgentControlRelayRequest,
   type AgentControlRelayResponse,
 } from "./agent-control-relay.js";
+import { assistantMcpConfigPath } from "./assistant-launch.js";
 
 export const ASSISTANT_RELAY_ENDPOINT_ENV = "WOLLIPOG_ASSISTANT_RELAY_ENDPOINT";
 export const ASSISTANT_RELAY_KEY_ENV = "WOLLIPOG_ASSISTANT_RELAY_KEY";
@@ -43,6 +45,8 @@ interface ProxyState {
 }
 
 export interface AssistantProxyDeps {
+  /** Where launches write Claude Code's proxy server entry; removed when the proxy closes. */
+  configDir?: string;
   /** Sends `assistant_credential` with the hash; the answer arrives through `acknowledge`. */
   register(sessionId: string, tokenHash: string): void;
   fetch?: typeof globalThis.fetch;
@@ -120,6 +124,10 @@ export class AssistantProxies {
     }
     this.states.delete(sessionId);
     await this.relays.close(sessionId);
+    // The key in it is dead with the proxy; the file goes too.
+    if (this.deps.configDir) {
+      try { rmSync(assistantMcpConfigPath(this.deps.configDir, sessionId), { force: true }); } catch { /* best effort */ }
+    }
   }
 
   async closeAll(): Promise<void> {

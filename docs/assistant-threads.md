@@ -60,12 +60,16 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
 - While a thread's Assistant call executes, every session it creates counts as a launch of that
   thread. This covers `session_launch`, forks, side chats and campaign launches, all of which
   pass through session creation inside the call. A launch is refused with a message to the
-  assistant once the thread has launched 10 sessions, or once its backing session plus its
-  launched sessions have spent the budget. Each launched session is capped at what the thread
-  has left to spend.
-- A thread cannot start runs or workflows, and its connection cannot call `auto_create`,
-  `auto_update`, `auto_enable`, `auto_test` or `workflow_run`, since scheduled or multi-session
-  work would run outside these limits. The owner can still do any of these directly.
+  assistant once the thread has launched 10 sessions, or once the budget is spent or committed.
+  The backing session's spend counts, and each launched session counts as the larger of its
+  whole tree's spend (with every descendant) and its own cost cap. Each launched session is capped
+  at what the thread has left, rounded down to whole cents. A missing, zero or negative requested
+  budget gets that cap too, never "no budget".
+- A thread cannot start runs, workflows or Orchestrators, whose children it could not count.
+  This holds even when an Orchestrator would come from a saved default. Its connection also
+  cannot call `auto_create`, `auto_update`, `auto_enable`, `auto_test`, `workflow_run`,
+  `session_role` or `session_adopt`, since scheduled work, a converted role or an adopted
+  session would run outside these limits. The owner can still do any of these directly.
 - `usage` on the thread view reports both limits and what the thread has used of them.
   `launchedSessionIds` lists the sessions it launched.
 
@@ -92,10 +96,14 @@ can narrow it or revoke it there, but cannot rotate it, because its proxy owns t
   passed, and once more if the control plane refuses one as expired.
 - **Where the credential is not.** It is never written to a file, environment variable, process
   argument, the session's worktree or its transcript. The session's harness launches the stdio
-  adapter `--assistant-mcp` as the `wollipog_assistant` MCP server: Claude Code through a
-  runner-written `--mcp-config` file, Codex through `-c mcp_servers.wollipog_assistant=…`. The
-  adapter holds only a per-session relay endpoint and key. They forward MCP requests for that one
-  session to `/assistant/mcp` and nothing else, and the runner adds the credential.
+  adapter `--assistant-mcp` as the `wollipog_assistant` MCP server. The adapter holds only a
+  per-session relay endpoint and key, a new one at every launch. They forward MCP requests for
+  that one session to `/assistant/mcp` and nothing else, and the runner adds the credential.
+  - Claude Code reads them from a runner-written `--mcp-config` file in the runner's hook state
+    directory. Every sandboxed launch hides that directory and gives each session back only its
+    own entries, so one session cannot read another thread's relay key.
+  - Codex reads them by name from its own environment (`env_vars`), never from process arguments.
+  - The file is removed when the proxy closes, and its key dies with the proxy.
 - **Authorization.** Every call is authorized live by `/assistant/mcp` against the thread
   connection's current grant and owner, and recorded in that connection's activity.
 - **Revocation.** Each of these revokes the connection: archiving the thread, archiving or
@@ -104,5 +112,10 @@ can narrow it or revoke it there, but cannot rotate it, because its proxy owns t
   runner forgets the credential and closes the proxy. The runner also closes it when the
   session's provider ends.
 - **Limit of the boundary.** The proxy runs as the runner's OS user, as the agent does. The
-  credential lives only in the runner's memory, so reading it would take inspecting another
-  process's memory, which the kernel's ptrace restrictions normally refuse.
+  credential lives only in the runner's memory.
+  - The runner installs a `SIGUSR1` listener, so a same-user process cannot make Node open its
+    inspector and read that memory. Otherwise only inspecting another process's memory would
+    reach it, which the kernel's ptrace restrictions normally refuse.
+  - Under `provider` isolation nothing hides the runner's data directory from a session. There,
+    as for every other runner-held secret, sessions on one runner account are separated only by
+    the sandboxed isolation modes.

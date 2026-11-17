@@ -511,6 +511,9 @@ export function provisionAgentControl(
     orchestratorProjectPaths?: string[];
     /** The runner's Assistant thread proxies (#4663). Required to launch an `assistant` session. */
     assistantProxy?: { provision(sessionId: string, cpUrl: string): Promise<{ endpoint: string; relayKey: string }> };
+    /** Where Claude Code's proxy server entry is written: the runner's hook state directory, which
+     * every sandboxed launch hides from other sessions. Defaults to the agent-control directory. */
+    assistantConfigDir?: string;
   },
   log: (message: string) => void,
   host: AgentControlHost,
@@ -537,7 +540,7 @@ export function provisionAgentControl(
       const relay = await proxy.provision(spec.sessionId, cpUrl);
       const mcp = { ...runnerReentryCommand(host, "--assistant-mcp"),
         env: { [ASSISTANT_RELAY_ENDPOINT_ENV]: relay.endpoint, [ASSISTANT_RELAY_KEY_ENV]: relay.relayKey } };
-      const configFile = spec.driver === "claude-code" ? assistantMcpConfigPath(host.configDir, spec.sessionId) : undefined;
+      const configFile = spec.driver === "claude-code" ? assistantMcpConfigPath(config.assistantConfigDir ?? host.configDir, spec.sessionId) : undefined;
       // Claude Code reads them from its private config file; Codex forwards them by name.
       if (configFile) writeAssistantMcpConfig(configFile, mcp);
       else Object.assign(spec.env, mcp.env);

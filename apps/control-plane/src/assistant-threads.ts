@@ -116,7 +116,7 @@ export class AssistantThreads {
       launchedSessionIds: launched,
       usage: {
         launchedSessions: { used: launched.length, limit: ASSISTANT_THREAD_LIMITS.launchedSessions },
-        costUsd: { used: Math.round(this.store.costUsd(row.id) * 10_000) / 10_000, limit: ASSISTANT_THREAD_LIMITS.costUsd },
+        costUsd: { used: Math.round(this.store.costs(row.id).spentUsd * 10_000) / 10_000, limit: ASSISTANT_THREAD_LIMITS.costUsd },
       },
       lastActivityAt: Math.max(row.updated_at, session?.updatedAt ?? 0),
       createdAt: row.created_at,

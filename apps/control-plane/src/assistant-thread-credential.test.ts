@@ -40,9 +40,11 @@ async function harness(protocolVersion = PROTOCOL_VERSION) {
   const app = Fastify();
   const operations = createAssistantOperations(db);
   registerAssistantSessionOperations(operations, db, svc);
-  // A scheduling operation a thread may not call; registered here only to reach the gate.
-  operations.register({ name: "auto_create", description: "fixture", inputSchema: { type: "object" }, metadata: true,
-    resolveTarget: () => ({ kind: "automation", id: "new" }), ownerCanAccess: () => true, execute: () => ({ created: true }) });
+  // Operations a thread may not call; registered here only to reach the gate.
+  for (const name of ["auto_create", "session_role", "session_adopt", "workflow_run"]) {
+    operations.register({ name, description: "fixture", inputSchema: { type: "object" }, metadata: true,
+      resolveTarget: () => ({ kind: "fixture", id: name }), ownerCanAccess: () => true, execute: () => ({ done: true }) });
+  }
   const project = db.createProject({ name: "Work" });
   const location = db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w" });
   registerAssistantRoutes(app, { db, operations, requestHuman: (req) => req.headers.authorization === "Bearer owner" ? owner : null });
@@ -80,7 +82,7 @@ async function harness(protocolVersion = PROTOCOL_VERSION) {
     const relay = await proxies.provision(sessionId, "http://control-plane.invalid");
     return { WOLLIPOG_ASSISTANT_RELAY_ENDPOINT: relay.endpoint, WOLLIPOG_ASSISTANT_RELAY_KEY: relay.relayKey };
   };
-  return { db, owner, svc, threads, toRunner, ownerCall, proxies, provision, callTools, location, setRunner: (id: string) => { runnerId = id; },
+  return { db, owner, svc, threads, toRunner, ownerCall, proxies, provision, callTools, location, operations, setRunner: (id: string) => { runnerId = id; },
     close: async () => { await proxies.closeAll(); await app.close(); db.close(); } };
 }
 
@@ -223,17 +225,37 @@ test("a thread launches sessions within its limits and the assistant hears why i
     assert.match(refused.error, /has launched 10 of the 10 sessions it may launch/);
     assert.equal(h.db.listSessions({ includeArchived: true }).length, sessionsBefore);
 
-    // Spending the budget stops launches too.
+    // Spend and committed budgets stop launches too.
     const spender = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
     const spenderEnv = await h.provision(spender.sessionId);
-    h.db.raw().prepare("UPDATE sessions SET cost_usd=? WHERE id=?").run(ASSISTANT_THREAD_LIMITS.costUsd - 5, spender.sessionId);
-    const capped = resultOf((await h.callTools(spenderEnv, launch(3, h.location.id)))[0]);
-    assert.equal(h.db.getSession(capped.sessionId)!.costBudgetUsd, 5);
-    h.db.raw().prepare("UPDATE sessions SET live_cost_usd=? WHERE id=?").run(5, spender.sessionId);
-    const broke = resultOf((await h.callTools(spenderEnv, launch(4, h.location.id)))[0]);
-    assert.match(broke.error, /has spent \$25\.00 of its \$25 budget/);
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=? WHERE id=?").run(ASSISTANT_THREAD_LIMITS.costUsd - 8, spender.sessionId);
+    // A zero or negative requested budget still gets a cap, never "no budget".
+    const zero = { ...launch(3, h.location.id) };
+    zero.params.arguments = { ...zero.params.arguments, config: { costBudgetUsd: 0 } } as typeof zero.params.arguments;
+    const capped = resultOf((await h.callTools(spenderEnv, zero))[0]);
+    assert.equal(h.db.getSession(capped.sessionId)!.costBudgetUsd, 8);
+    // That cap is committed: nothing is left for another launch even before the first one spends.
+    const committed = resultOf((await h.callTools(spenderEnv, launch(4, h.location.id)))[0]);
+    assert.match(committed.error, /has spent or committed \$25\.00 of its \$25 budget/);
+    // A launched session's own children count against the thread's spend.
+    h.db.createSession({ id: "s_grandchild", parentSessionId: capped.sessionId, runnerId: "r", workspaceId: "w", agentId: "claude",
+      title: "Child", driver: "claude-code", useWorktree: false, config: {}, now: Date.now() });
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=? WHERE id=?").run(3, "s_grandchild");
     view = (await h.ownerCall("GET", `/api/assistant-threads/${spender.id}`)).body.thread as AssistantThread;
-    assert.deepEqual(view.usage?.costUsd, { used: 25, limit: ASSISTANT_THREAD_LIMITS.costUsd });
+    assert.deepEqual(view.usage?.costUsd, { used: 20, limit: ASSISTANT_THREAD_LIMITS.costUsd });
+  } finally { await h.close(); }
+});
+
+test("a thread cannot launch or create an Orchestrator, whose children it could not count", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const env = await h.provision(thread.sessionId);
+    const orchestrator = { ...launch(5, h.location.id) };
+    orchestrator.params.arguments = { ...orchestrator.params.arguments, config: { permissionMode: "orchestrator" } } as typeof orchestrator.params.arguments;
+    const refused = resultOf((await h.callTools(env, orchestrator))[0]);
+    assert.match(refused.error, /cannot start an Orchestrator/);
+    assert.deepEqual(((await h.ownerCall("GET", `/api/assistant-threads/${thread.id}`)).body.thread as AssistantThread).launchedSessionIds, []);
   } finally { await h.close(); }
 });
 
@@ -245,8 +267,12 @@ test("a thread cannot schedule work or start runs that would escape its limits",
     const [scheduled] = await h.callTools(env, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "auto_create", arguments: {} } });
     assert.equal(scheduled.result.isError, true);
     assert.match(scheduled.result.content[0].text, /cannot call auto_create/);
-    // The same operation is fine for an owner-issued connection.
     const issued = h.db.assistantConnections.create(h.owner, "Outside Assistant", { operations: "all", projects: "all" });
+    for (const name of ["session_role", "session_adopt", "workflow_run"]) {
+      assert.throws(() => h.operations.authorize(thread.connectionId!, name, { kind: "fixture", id: name }), /Wollipog Assistant thread cannot call/u, name);
+      assert.doesNotThrow(() => h.operations.authorize(issued.connection.id, name, { kind: "fixture", id: name }), name);
+    }
+    // The same operation is fine for an owner-issued connection.
     assert.equal(h.db.assistantConnections.get(issued.connection.id)!.threadId, undefined);
     const run = assistantCallContext.run({ connectionId: thread.connectionId! }, () => h.svc.createRun({
       runnerId: "r", workspaceId: "w", agentIds: ["claude"], task: "Fan out" }));

@@ -91,11 +91,25 @@ export class AssistantThreadStore {
 
   /** The thread's spend so far: its backing session's cost plus every launched session's, including
    * the in-flight estimate of a running turn. */
-  costUsd(threadId: string): number {
-    const row = this.db.prepare(`SELECT COALESCE(SUM(session.cost_usd + session.live_cost_usd), 0) AS cost FROM sessions session
-      WHERE session.id IN (SELECT session_id FROM assistant_threads WHERE id=? AND session_id IS NOT NULL
-        UNION SELECT session_id FROM assistant_thread_launches WHERE thread_id=?)`).get(threadId, threadId) as { cost: number };
-    return row.cost;
+  /** What the thread has spent and committed. Spend is settled plus in-flight cost of its backing
+   * session and of every launched session together with all of that session's descendants. A
+   * launched tree commits the larger of its spend and its root's cost budget, so concurrent launches
+   * cannot together exceed the thread's budget. */
+  costs(threadId: string): { spentUsd: number; committedUsd: number } {
+    const backing = this.db.prepare(`SELECT COALESCE(SUM(session.cost_usd + session.live_cost_usd), 0) AS cost FROM sessions session
+      JOIN assistant_threads thread ON thread.session_id=session.id WHERE thread.id=?`).get(threadId) as { cost: number };
+    const trees = this.db.prepare(`WITH RECURSIVE tree(root, id) AS (
+        SELECT session_id, session_id FROM assistant_thread_launches WHERE thread_id=?
+        UNION SELECT tree.root, child.id FROM sessions child JOIN tree ON child.parent_session_id=tree.id)
+      SELECT tree.root AS root, COALESCE(SUM(session.cost_usd + session.live_cost_usd), 0) AS spent,
+        (SELECT cost_budget_usd FROM sessions WHERE id=tree.root) AS budget
+      FROM tree JOIN sessions session ON session.id=tree.id GROUP BY tree.root`).all(threadId) as Array<{ spent: number; budget: number | null }>;
+    let spentUsd = backing.cost, committedUsd = backing.cost;
+    for (const tree of trees) {
+      spentUsd += tree.spent;
+      committedUsd += Math.max(tree.spent, tree.budget ?? 0);
+    }
+    return { spentUsd, committedUsd };
   }
 
   setConnection(id: string, connectionId: string): void {

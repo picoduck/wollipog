@@ -27,9 +27,11 @@ export class AssistantRefusal extends Error {}
  * limits to work it starts (#4663). Absent outside an Assistant call. */
 export const assistantCallContext = new AsyncLocalStorage<{ connectionId: string }>();
 
-/** Operations an Assistant thread may not call: each schedules future work that would run outside
- * the thread's session-launch and cost limits. Its owner can still use them directly. */
-const THREAD_EXCLUDED_OPERATIONS = new Set(["auto_create", "auto_update", "auto_enable", "auto_test", "workflow_run"]);
+/** Operations an Assistant thread may not call: each schedules future work, or turns a session
+ * into one that starts its own, outside the thread's session-launch and cost limits. Its owner can
+ * still use them directly. */
+const THREAD_EXCLUDED_OPERATIONS = new Set(["auto_create", "auto_update", "auto_enable", "auto_test", "workflow_run",
+  "session_role", "session_adopt"]);
 export class AssistantConflict extends AssistantRefusal {}
 export interface AssistantActivityRecord {
   connection_id: string; grant_revision: number; operation: string;

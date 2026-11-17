@@ -217,6 +217,8 @@ import {
 import { resolveAcpSessionContext } from "./acp-session-context.js";
 import { SessionStore, isAdoptedSession, type SessionMeta } from "./session-store.js";
 import { AssistantProxies } from "./assistant-proxy.js";
+import { assistantMcpConfigPath } from "./assistant-launch.js";
+import { refuseSignalInspector } from "./runner-process-hardening.js";
 import {
   DESCENDANT_BOUNDARY_TERMINATION_BUDGET_MS,
   terminateDescendantBoundariesAfterPendingKills,
@@ -522,6 +524,8 @@ const agentControlHost = defaultAgentControlHost(config.dataDir);
 const agentControlRelays = new AgentControlRelaySockets(relayAgentControlRequest);
 /** Assistant thread proxies (#4663): each holds its thread credential in this process only. */
 const assistantProxies = new AssistantProxies({
+  // Kept in the hook state directory, which every sandboxed launch hides from other sessions.
+  configDir: claudeHookHost.configDir,
   register: (sessionId, tokenHash) => {
     if (ws && ws.readyState === WebSocket.OPEN && registered) sendUp({ type: "assistant_credential", sessionId, tokenHash });
   },
@@ -1258,6 +1262,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
         ...await providerAgentControlRelay(meta),
         orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
         assistantProxy: assistantProxies,
+        assistantConfigDir: claudeHookHost.configDir,
       },
       log,
       agentControlHost,
@@ -1474,6 +1479,8 @@ sessions.setGuardStateSandbox({
         ...(launched && launched !== settings ? [launched] : []),
         claudeHookGuardPath(settings),
         managedWorktreeGuardSocketDirectory(claudeHookHost.configDir, meta.sessionId),
+        // An Assistant thread's proxy server entry (#4663): only its own session may read its relay key.
+        ...(meta.assistant ? [assistantMcpConfigPath(claudeHookHost.configDir, meta.sessionId)] : []),
       ],
       socket: managedWorktreeGuardSocketPath(claudeHookHost.configDir, meta.sessionId),
       ...(managerHook
@@ -3917,6 +3924,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               ...await providerAgentControlRelay(prepared),
               orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
               assistantProxy: assistantProxies,
+              assistantConfigDir: claudeHookHost.configDir,
             }, log, agentControlHost);
           },
           // A Codex TUI denies the runner's hook state directory through its own sandbox (#1336).
@@ -4716,6 +4724,8 @@ function shutdown(exitCode = 0): void {
 
 // Wrapped so the signal name Node passes as the listener's first argument is never mistaken for
 // shutdown()'s exitCode.
+// The runner holds credentials in memory; a same-user agent must not open its inspector (#4663).
+refuseSignalInspector(process, log);
 process.on("SIGINT", () => shutdown());
 process.on("SIGTERM", () => shutdown());
 process.on("SIGHUP", () => shutdown());

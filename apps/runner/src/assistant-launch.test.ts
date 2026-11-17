@@ -11,7 +11,7 @@ import {
   assistantMcpConfigPath,
   stripAssistantLaunchArgs,
 } from "./assistant-launch.js";
-import { ASSISTANT_RELAY_ENDPOINT_ENV, ASSISTANT_RELAY_KEY_ENV } from "./assistant-proxy.js";
+import { ASSISTANT_RELAY_ENDPOINT_ENV, ASSISTANT_RELAY_KEY_ENV, AssistantProxies } from "./assistant-proxy.js";
 
 function assistantSpec(driver: SessionLaunchSpec["driver"], args: string[] = []): SessionLaunchSpec {
   return {
@@ -99,6 +99,23 @@ test("the shared skill follows the role instructions and is replaced, not repeat
     await provisionAgentControl(launch, { ...config, assistantProxy: fakeProxy() }, () => {}, host);
     const prompts = launch.args.filter((_arg, index) => launch.args[index - 1] === "--append-system-prompt");
     assert.deepEqual(prompts, [`${ASSISTANT_INSTRUCTIONS}\n\n## Discover First\n\nCall assistant_discover.`]);
+  });
+});
+
+test("Claude Code's proxy entry goes to the masked hook state directory and leaves with the proxy", async () => {
+  await withHost(async (host, root) => {
+    const hookState = mkdtempSync(join(tmpdir(), "wollipog-assistant-hook-state-"));
+    try {
+      const proxies = new AssistantProxies({ configDir: hookState, register: () => {} });
+      const launch = assistantSpec("claude-code");
+      await provisionAgentControl(launch, { ...config, assistantProxy: proxies, assistantConfigDir: hookState }, () => {}, host);
+      const configFile = assistantMcpConfigPath(hookState, launch.sessionId);
+      assert.ok(launch.args.includes(configFile));
+      assert.deepEqual(readdirSync(root), [], "nothing lands in the agent-control directory other sessions can read");
+      assert.deepEqual(readdirSync(hookState), ["s_assistant.assistant-mcp.json"]);
+      await proxies.revoke(launch.sessionId);
+      assert.deepEqual(readdirSync(hookState), [], "the dead relay key's file is removed");
+    } finally { rmSync(hookState, { recursive: true, force: true }); }
   });
 });
 
