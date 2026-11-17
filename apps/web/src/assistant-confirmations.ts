@@ -4,7 +4,7 @@
  * A thread's destructive command waits for its owner instead of being confirmed by its assistant.
  * Each thread lists its pending requests in `confirmations`; the Inbox shows every thread's, and
  * the thread view draws its own. `assistant_thread_upsert` web events carry each change, which
- * the store announces here so a mounted list can follow it without polling the Thread API.
+ * the store announces here so a mounted list knows when to read the Thread API again.
  */
 import type { AssistantOwnerConfirmation, AssistantThread } from "@wollipog/protocol";
 
@@ -41,11 +41,11 @@ export function pendingAssistantConfirmations(threads: Iterable<AssistantThread>
     (left.confirmation.id < right.confirmation.id ? -1 : 1));
 }
 
-/** Replaces one thread in a list keyed by id, as an announced change arrives. */
-export function withAssistantThread(threads: ReadonlyMap<string, AssistantThread>, thread: AssistantThread): Map<string, AssistantThread> {
-  const next = new Map(threads);
-  next.set(thread.id, thread);
-  return next;
+/** Which requests a thread has waiting, as one comparable value. */
+export function assistantThreadPendingKey(thread: AssistantThread): string {
+  if (thread.status === "archived") return "";
+  return (thread.confirmations ?? []).filter((confirmation) => confirmation.status === "pending")
+    .map((confirmation) => confirmation.id).sort().join("\n");
 }
 
 /** What the card says once the owner answered, for its toast. */

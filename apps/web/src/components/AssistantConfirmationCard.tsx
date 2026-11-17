@@ -3,9 +3,9 @@ import type { AssistantOwnerConfirmation, AssistantOwnerConfirmationResponse, As
 import { useApi } from "../api-context.js";
 import {
   assistantConfirmationOutcome,
+  assistantThreadPendingKey,
   onAssistantThreadUpsert,
   pendingAssistantConfirmations,
-  withAssistantThread,
 } from "../assistant-confirmations.js";
 import { formatClock } from "../format.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
@@ -155,59 +155,46 @@ function AssistantConfirmationRow({ confirmation, threadTitle, onAnswered }: {
 }
 
 /**
- * Every Assistant thread's pending owner confirmations, at the top of the Inbox (#4665). It reads
- * the thread list once, then follows `assistant_thread_upsert` events; a control plane without
- * the Thread API shows nothing.
+ * Every Assistant thread's pending owner confirmations, at the top of the Inbox (#4665).
+ *
+ * The Thread API's list is the only source of what is shown, and only the answer to the most
+ * recently started read is applied. A read starts whenever what is shown may have fallen behind:
+ * the connection comes (back) online, a thread event changes that thread's pending requests, or
+ * the owner answers one here. Each such change therefore has a read that started after it, and
+ * an older read's late answer is discarded, so stale state can never replace newer state. A
+ * control plane without the Thread API shows nothing.
  */
 export function AssistantConfirmationsNotice() {
   const api = useApi();
-  // Events missed while the socket was down are not replayed, so each time the connection comes
-  // (back) online the list is read again; that read replaces what the dashboard held.
   const online = useStoreSelector((state) => state.conn === "online");
-  const [threads, setThreads] = useState<ReadonlyMap<string, AssistantThread>>(new Map());
+  const [threads, setThreads] = useState<readonly AssistantThread[]>([]);
   const [now, setNow] = useState(() => Date.now());
-  // Thread changes that arrived while a read was in flight; null when no read is.
-  const arrived = useRef<Map<string, AssistantThread> | null>(null);
-  const receive = useCallback((thread: AssistantThread) => {
-    arrived.current?.set(thread.id, thread);
-    setThreads((current) => withAssistantThread(current, thread));
-  }, []);
-  useEffect(() => onAssistantThreadUpsert(receive), [receive]);
-  useEffect(() => {
-    if (!online) return;
-    let active = true;
-    // This effect's own buffer. A superseded read never touches a newer read's buffer.
-    let buffer: Map<string, AssistantThread> | null = null;
-    const release = () => {
-      if (buffer && arrived.current === buffer) arrived.current = null;
-      buffer = null;
-    };
-    const read = async () => {
-      // A change that arrives during a read may be newer than the list or older than it, so it
-      // is kept over the list and the list is read again, until one read sees no change arrive.
-      for (let attempt = 0; attempt < 3 && active; attempt += 1) {
-        buffer = new Map();
-        arrived.current = buffer;
-        const { threads: listed } = await api.assistantConfirmationThreads();
-        if (!active) return;
-        const during = buffer;
-        release();
-        setThreads(new Map([...listed.map((thread) => [thread.id, thread] as const), ...during]));
-        if (during.size === 0) return;
-      }
-    };
-    void read().catch(() => {
-      if (active) release(); /* Older control planes have no Thread API; the Inbox stays as it was. */
-    });
-    return () => { active = false; release(); };
-  }, [api, online]);
+  const latestRead = useRef(0);
+  const refresh = useCallback(() => {
+    const read = ++latestRead.current;
+    void api.assistantConfirmationThreads().then(
+      ({ threads: listed }) => { if (read === latestRead.current) setThreads(listed); },
+      () => { /* Older control planes have no Thread API; the Inbox stays as it was. */ },
+    );
+  }, [api]);
+  // Events are not replayed after a disconnect, so the list is read whenever the connection is up.
+  useEffect(() => { if (online) refresh(); }, [online, refresh]);
+  // Thread events arrive in order, so a thread's latest event names its pending requests as of
+  // then. Activity that leaves them unchanged needs no read.
+  const pendingByThread = useRef(new Map<string, string>());
+  useEffect(() => onAssistantThreadUpsert((thread) => {
+    const key = assistantThreadPendingKey(thread);
+    if (pendingByThread.current.get(thread.id) === key) return;
+    pendingByThread.current.set(thread.id, key);
+    refresh();
+  }), [refresh]);
   useEffect(() => {
     // An unanswered request leaves the list when it expires, even without another event.
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
-  const answered = useCallback((response: AssistantOwnerConfirmationResponse) => receive(response.thread), [receive]);
-  const pending = useMemo(() => pendingAssistantConfirmations(threads.values(), now), [threads, now]);
+  const answered = useCallback(() => refresh(), [refresh]);
+  const pending = useMemo(() => pendingAssistantConfirmations(threads, now), [threads, now]);
   if (!pending.length) return null;
   return (
     <section className="assistant-confirmations" aria-label="Assistant Approvals">

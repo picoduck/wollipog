@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AssistantOwnerConfirmation, AssistantThread } from "@wollipog/protocol";
-import { assistantConfirmationOutcome, pendingAssistantConfirmations, withAssistantThread } from "./assistant-confirmations.js";
+import { assistantConfirmationOutcome, assistantThreadPendingKey, pendingAssistantConfirmations } from "./assistant-confirmations.js";
 
 const request = (id: string, createdAt: number, overrides: Partial<AssistantOwnerConfirmation> = {}): AssistantOwnerConfirmation => ({
   id, threadId: "thr_1", operation: "session_archive", title: "Archive Session", target: { kind: "session", id: "s", label: "S" },
@@ -21,11 +21,12 @@ test("pending confirmations come from live threads, oldest first, without expire
   assert.deepEqual(pending.map((item) => [item.confirmation.id, item.threadTitle]), [["aoc_1", "Thread b"], ["aoc_2", "Thread a"]]);
 });
 
-test("an announced thread replaces its earlier copy", () => {
-  const before = new Map([["a", thread("a", [request("aoc_1", 1)])]]);
-  const after = withAssistantThread(before, thread("a", [], "done"));
-  assert.equal(after.get("a")?.confirmations?.length, 0);
-  assert.equal(before.get("a")?.confirmations?.length, 1);
+test("a thread's pending key changes only with its pending requests", () => {
+  const key = assistantThreadPendingKey;
+  assert.equal(key(thread("a", [request("aoc_2", 1), request("aoc_1", 2)])), key(thread("a", [request("aoc_1", 2), request("aoc_2", 1)])));
+  assert.notEqual(key(thread("a", [request("aoc_1", 1)])), key(thread("a", [])));
+  assert.equal(key(thread("a", [request("aoc_1", 1)], "archived")), "");
+  assert.equal(key(thread("a", [request("aoc_1", 1, { status: "denied" })])), "");
 });
 
 test("each outcome reads as what happened", () => {

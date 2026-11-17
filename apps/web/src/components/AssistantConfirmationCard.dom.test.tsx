@@ -106,10 +106,19 @@ test("approvals follow thread events and are read again when the connection retu
   assert.deepEqual(titles(), ["Archive Session"]);
   assert.equal(reads, 1);
 
-  // A live event replaces the thread.
-  await act(async () => socket.push({ type: "assistant_thread_upsert", userId: "u", thread: thread([request("aoc_1", "Archive Session"), request("aoc_2", "Stop Session")]) }));
-  await flush();
+  const event = async (changed: AssistantThread) => {
+    listed = [changed];
+    await act(async () => socket.push({ type: "assistant_thread_upsert", userId: "u", thread: changed }));
+    await flush();
+  };
+
+  // A thread event that changes its pending requests reads the list again.
+  await event(thread([request("aoc_1", "Archive Session"), request("aoc_2", "Stop Session")]));
+  assert.equal(reads, 2);
   assert.deepEqual(titles(), ["Archive Session", "Stop Session"]);
+  // Thread activity that leaves them unchanged does not.
+  await event(thread([request("aoc_2", "Stop Session"), request("aoc_1", "Archive Session")]));
+  assert.equal(reads, 2);
 
   // While disconnected, the owner answers both elsewhere and a new request arrives; no event reaches
   // this dashboard. Reconnecting reads the list again, dropping the stale rows.
@@ -117,43 +126,29 @@ test("approvals follow thread events and are read again when the connection retu
   listed = [thread([request("aoc_3", "Close Shell")])];
   await act(async () => actions!.dispatch({ type: "conn", conn: "online" }));
   await flush();
-  assert.equal(reads, 2);
+  assert.equal(reads, 3);
   assert.deepEqual(titles(), ["Close Shell"]);
 
-  // A change that arrives while a read is in flight is kept over the older list, and the list is
-  // read again so the dashboard ends on what the control plane holds now.
+  // Reads that answer out of order: only the most recently started one is shown, so an older
+  // read's late answer, or its failure, never replaces newer state.
   hold = true;
-  await act(async () => actions!.dispatch({ type: "conn", conn: "offline" }));
-  await act(async () => actions!.dispatch({ type: "conn", conn: "online" }));
-  await flush();
-  assert.equal(reads, 3);
-  const live = thread([request("aoc_3", "Close Shell"), request("aoc_4", "Delete Automation")]);
-  await act(async () => socket.push({ type: "assistant_thread_upsert", userId: "u", thread: live }));
-  listed = [live];
-  hold = false;
-  await act(async () => releases.shift()!());
-  await flush();
-  assert.deepEqual(titles(), ["Close Shell", "Delete Automation"]);
-  assert.equal(reads, 4);
-
-  // A superseded read that fails late does not discard what the current read is collecting.
-  hold = true;
-  releases.length = 0;
-  failures.length = 0;
-  await act(async () => actions!.dispatch({ type: "conn", conn: "offline" }));
-  await act(async () => actions!.dispatch({ type: "conn", conn: "online" }));
-  await act(async () => actions!.dispatch({ type: "conn", conn: "offline" }));
-  await act(async () => actions!.dispatch({ type: "conn", conn: "online" }));
-  await flush();
-  assert.equal(reads, 6);
-  await act(async () => failures[0]!());
-  const latest = thread([request("aoc_5", "Remove Skill")]);
-  await act(async () => socket.push({ type: "assistant_thread_upsert", userId: "u", thread: latest }));
-  listed = [latest];
-  hold = false;
+  await event(thread([request("aoc_3", "Close Shell"), request("aoc_4", "Delete Automation")]));
+  await event(thread([request("aoc_3", "Close Shell")]));
+  assert.equal(reads, 5);
   await act(async () => releases[1]!());
   await flush();
-  assert.deepEqual(titles(), ["Remove Skill"]);
-  assert.equal(reads, 7, "the change seen during the read prompts one more read");
+  assert.deepEqual(titles(), ["Close Shell"]);
+  await act(async () => releases[0]!());
+  await flush();
+  assert.deepEqual(titles(), ["Close Shell"], "the older read's answer is discarded");
+  // A failed read leaves what is shown; the next change reads again.
+  await event(thread([request("aoc_5", "Remove Skill")]));
+  await act(async () => failures[2]!());
+  await flush();
+  assert.deepEqual(titles(), ["Close Shell"]);
+  await event(thread([request("aoc_5", "Remove Skill"), request("aoc_6", "Close Shell")]));
+  await act(async () => releases[3]!());
+  await flush();
+  assert.deepEqual(titles(), ["Remove Skill", "Close Shell"]);
   await act(async () => root.unmount());
 });
