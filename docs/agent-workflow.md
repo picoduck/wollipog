@@ -119,8 +119,14 @@ claim. Before requesting a merge and again before enqueueing, run `pnpm check:pr
 against freshly fetched main. CI runs the same check on the pull request's merge commit and on
 each merge-group commit. If the claim is no longer greater than the commit it lands on, renumber
 to the version the check names. A pull request that claims no version is never affected. A renumber
-changes the pull request's own diff, so its next review round counts against the epoch's budget,
-even when it arrives inside a merge of main. A merge that keeps a claim above main needs no renumber.
+normally changes the pull request's own diff and spends an ordinary review round. The narrow
+exception is a qualifying two-parent base merge directly on the last valid reviewed head: if the
+runner proves that changes outside conflict hunks are only the exact declared protocol renumber,
+it can retain the base-merge round or reviewed-head equivalence treatment. See
+[Review Runs](agent-control.md#review-runs) for the proof requirements, generated-output checks,
+equivalence limits and peer-version requirements. Other commits, mixed edits, unsupported
+declarations and real or unproven changes still use the normal review-round budget and extension
+rules. A merge that keeps a claim above main needs no renumber.
 
 ## Decisions and Delivery
 
@@ -236,13 +242,15 @@ cross-model review, including from an isolated campaign child. Follow the shippe
 skill: provide the brief, let the completion continuation arrive when idle, read the full verdict
 and report, adjudicate findings, and push fixes before delta rounds. A rewritten head starts a new
 review epoch. One plain merge of the moved base branch directly on the last valid head, changing
-nothing outside its conflict blocks, gets a reviewed round that does not use the epoch's budget. If
-that head was upvoted and the merge leaves the pull request's own diff byte-identical, the run records
-an equivalence and no reviewer runs (protocol 277, #4075; the proof is in `docs/agent-control.md`).
-Anything the runner cannot prove counts against the budget: a second merge before the first one's
-review, any commit after the merge, and any edit outside a conflict block, including a protocol
-renumber's changes to the ledger, capability floors, comments or docs. Those change the pull
-request's own diff, so a review has to cover them. Exhausted rounds require the exact
+nothing outside its conflict blocks except a strictly proven protocol renumber, gets a reviewed
+round that does not use the epoch's budget. If that head was upvoted and the merge leaves the pull
+request's own diff unchanged under the runner's equivalence proof (which permits that same proven
+renumber), the run records an equivalence and no reviewer runs (protocol 277, #4075; the renumber
+exception requires runner v354, #4399). See [Review Runs](agent-control.md#review-runs) for the
+proof and compatibility requirements. Anything the runner cannot prove counts against the budget:
+a second merge before the first one's review, any commit after the merge, and edits outside a
+conflict block other than the proven renumber. Real or unproven changes to the ledger, capability
+floors, comments or docs still require ordinary review. Exhausted rounds require the exact
 `review_round_extension` decision; its
 default owner is human. Full Control owns it only within a server-enforced cap per pull request of
 the run's configured round budget once more (the owner approved this change to the #3369 decision);
