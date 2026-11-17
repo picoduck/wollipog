@@ -8,7 +8,7 @@ import {
   withAssistantThread,
 } from "../assistant-confirmations.js";
 import { formatClock } from "../format.js";
-import { useStoreActions } from "../store.js";
+import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { Modal } from "./Modal.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -161,21 +161,28 @@ function AssistantConfirmationRow({ confirmation, threadTitle, onAnswered }: {
  */
 export function AssistantConfirmationsNotice() {
   const api = useApi();
+  // Events missed while the socket was down are not replayed, so each time the connection comes
+  // (back) online the list is read again; that read replaces what the dashboard held.
+  const online = useStoreSelector((state) => state.conn === "online");
   const [threads, setThreads] = useState<ReadonlyMap<string, AssistantThread>>(new Map());
   const [now, setNow] = useState(() => Date.now());
+  useEffect(() => onAssistantThreadUpsert((thread) => setThreads((current) => withAssistantThread(current, thread))), []);
   useEffect(() => {
+    if (!online) return;
     let active = true;
-    const stop = onAssistantThreadUpsert((thread) => setThreads((current) => withAssistantThread(current, thread)));
     void api.assistantConfirmationThreads().then(
       ({ threads: listed }) => {
-        if (active) setThreads((current) => new Map([...listed.map((thread) => [thread.id, thread] as const), ...current]));
+        if (active) setThreads(new Map(listed.map((thread) => [thread.id, thread] as const)));
       },
       () => { /* Older control planes have no Thread API; the Inbox stays as it was. */ },
     );
+    return () => { active = false; };
+  }, [api, online]);
+  useEffect(() => {
     // An unanswered request leaves the list when it expires, even without another event.
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
-    return () => { active = false; stop(); window.clearInterval(timer); };
-  }, [api]);
+    return () => window.clearInterval(timer);
+  }, []);
   const answered = useCallback((response: AssistantOwnerConfirmationResponse) => {
     setThreads((current) => withAssistantThread(current, response.thread));
   }, []);

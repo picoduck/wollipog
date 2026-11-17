@@ -46,10 +46,16 @@ async function harness() {
     if (archiveFault) throw archiveFault;
     return setArchived(sessionId, value, ...rest);
   };
+  // Admitted notices; `admit` false refuses admission, as an offline runner's session does.
   const told: Array<{ sessionId: string; text: string }> = [];
+  let admit = true;
   const confirmations = createAssistantOwnerConfirmationService(db, {
-    prompt: (sessionId: string, text: string) => { told.push({ sessionId, text }); return { ok: true, status: 202 }; },
-  } as unknown as Pick<SessionsService, "prompt">, operations);
+    prompt: (sessionId: string, text: string) => {
+      if (!admit) return { ok: false };
+      told.push({ sessionId, text });
+      return { ok: true };
+    },
+  }, operations);
   let requester: HumanPrincipal = owner;
   const app = Fastify();
   registerAssistantThreadRoutes(app, { threads, confirmations, requestHuman: () => requester });
@@ -76,6 +82,7 @@ async function harness() {
     connectionId: thread.connectionId!,
     setRequester: (principal: HumanPrincipal) => { requester = principal; },
     faultArchive: (error: Error | null) => { archiveFault = error; },
+    admitNotices: (value: boolean) => { admit = value; },
     close: async () => { await app.close(); db.close(); } };
 }
 
@@ -278,6 +285,45 @@ test("an external Assistant connection keeps its preview-and-confirm behavior", 
     assert.deepEqual(h.pending(), []);
     assert.equal((await call({ ...args, confirmationId: preview.confirmationId })).receipt.status, "succeeded");
     assert.deepEqual(h.archived, ["target-1"]);
+  } finally { await h.close(); }
+});
+
+test("an outcome the assistant could not hear yet is delivered once its session admits it, including after a restart", async () => {
+  const h = await harness();
+  try {
+    // The thread's runner is offline: its session refuses the notice, which is kept for later.
+    await h.call("session_archive", { commandId: "archive-1", sessionId: "target-1" });
+    const [denied] = h.pending();
+    h.admitNotices(false);
+    assert.equal((await h.ownerCall("POST", denyUrl(h.thread, denied!))).body.confirmation.status, "denied");
+    h.confirmations.deliverNotices();
+    assert.equal(h.told.length, 0);
+    h.admitNotices(true);
+    h.confirmations.deliverNotices();
+    h.confirmations.deliverNotices();
+    assert.equal(h.told.length, 1);
+    assert.match(h.told[0]!.text, /Your owner denied/);
+
+    // A restart after the run spent its request but before its outcome was recorded: the outcome
+    // comes from the receipt and reaches the assistant, and the command does not run again.
+    await h.call("session_archive", { commandId: "archive-2", sessionId: "target-2" });
+    const [spent] = h.pending();
+    h.db.raw().prepare("UPDATE assistant_owner_confirmations SET status='executed', resolved_at=? WHERE id=?").run(Date.now(), spent!.id);
+    await h.confirmations.resumeInterrupted();
+    assert.equal(h.db.assistantOwnerConfirmations.get(spent!.id)?.status, "executed");
+    assert.equal(h.told.length, 2);
+    assert.match(h.told[1]!.text, /Your owner approved "Archive Session"/);
+    assert.deepEqual(h.archived, []);
+    await h.confirmations.resumeInterrupted();
+    assert.equal(h.told.length, 2);
+
+    // A thread that ended has nobody to tell; its outcome is not retried.
+    await h.call("session_archive", { commandId: "archive-3", sessionId: "target-2" });
+    const [orphan] = h.pending();
+    h.admitNotices(false);
+    assert.equal((await h.ownerCall("POST", `/api/assistant-threads/${h.thread.id}/archive`)).status, 200);
+    assert.equal(h.db.assistantOwnerConfirmations.get(orphan!.id)?.status, "refused");
+    assert.deepEqual(h.db.assistantOwnerConfirmations.unnotified(), []);
   } finally { await h.close(); }
 });
 

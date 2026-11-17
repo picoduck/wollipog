@@ -93,7 +93,8 @@ export class AssistantOwnerConfirmations {
       command_id TEXT NOT NULL, binding_json TEXT NOT NULL, arguments_json TEXT NOT NULL,
       target_json TEXT NOT NULL, target_label TEXT NOT NULL, impact_json TEXT,
       status TEXT NOT NULL CHECK(status IN ('pending','approved','executed','denied','expired','refused')),
-      created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, resolved_at INTEGER, outcome_json TEXT);
+      created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, resolved_at INTEGER, outcome_json TEXT,
+      notified_at INTEGER);
       CREATE INDEX IF NOT EXISTS assistant_owner_confirmations_thread ON assistant_owner_confirmations(thread_id, status);
       CREATE INDEX IF NOT EXISTS assistant_owner_confirmations_status ON assistant_owner_confirmations(status, expires_at);`);
   }
@@ -216,6 +217,22 @@ export class AssistantOwnerConfirmations {
     return (this.db.prepare("SELECT id FROM assistant_owner_confirmations WHERE status='approved'").all() as {id: string}[]).map(row => row.id);
   }
 
+  /** Requests whose run spent them but whose outcome was never recorded (a restart in between). */
+  executedWithoutOutcome(): string[] {
+    return (this.db.prepare("SELECT id FROM assistant_owner_confirmations WHERE status='executed' AND outcome_json IS NULL").all() as {id: string}[]).map(row => row.id);
+  }
+
+  /** Ended requests whose outcome has not reached the assistant yet, oldest first. */
+  unnotified(): Array<{ id: string; resolvedAt: number }> {
+    return (this.db.prepare(`SELECT id, resolved_at FROM assistant_owner_confirmations
+      WHERE status IN ('executed','denied','expired','refused') AND notified_at IS NULL AND outcome_json IS NOT NULL
+      ORDER BY resolved_at, id`).all() as {id: string; resolved_at: number}[]).map(row => ({ id: row.id, resolvedAt: row.resolved_at }));
+  }
+
+  markNotified(id: string, now = Date.now()): void {
+    this.db.prepare("UPDATE assistant_owner_confirmations SET notified_at=? WHERE id=? AND notified_at IS NULL").run(now, id);
+  }
+
   view(row: Row): AssistantOwnerConfirmation {
     const target = JSON.parse(row.target_json) as AssistantTarget;
     return {
@@ -249,12 +266,16 @@ export interface AssistantOwnerConfirmationServiceDeps {
   receiptStatus(connectionId: string, commandId: string): NonNullable<AssistantOwnerConfirmation["outcome"]>["receiptStatus"] | undefined;
   /** `AssistantOperations.callOwnerApproved`. */
   run(connectionId: string, operation: string, args: Record<string, unknown>, ownerConfirmationId: string): Promise<unknown>;
-  /** Tells the thread's assistant how its request ended, as a message in its own conversation. */
-  tell(threadId: string, text: string): void;
+  /** Tells the thread's assistant how its request ended, as a message in its own conversation.
+   * `delivered` once its session admitted it; `retry` when it could not now (its runner is
+   * offline, say); `gone` when the thread or its session ended, so nobody can hear it. */
+  tell(threadId: string, text: string): "delivered" | "retry" | "gone";
   now?(): number;
 }
 
 const NOTICE = "[Wollipog Owner Confirmation]";
+/** An outcome undelivered this long after its request ended is no longer news to the assistant. */
+export const OWNER_CONFIRMATION_NOTICE_RETRY_MS = 24 * 60 * 60 * 1000;
 
 /** The owner's answers to Wollipog Assistant thread confirmations (#4665). Approving runs the
  * exact bound command once through its operation's receipt path; denial, expiry or a revoked
@@ -301,12 +322,35 @@ export class AssistantOwnerConfirmationService {
     for (const id of this.deps.store.openForConnection(connectionId)) {
       if (!this.running.has(id)) this.deps.store.finish(id, "refused", { reason: "The thread's Assistant connection was revoked." }, this.now());
     }
+    this.deliverNotices();
   }
 
   /** After a restart: finishes approved runs that were interrupted. A run whose receipt
-   * reservation already committed spent its request then, so it cannot run again. */
+   * reservation already committed spent its request then, so it cannot run again; only its
+   * outcome is recorded from its receipt. Then delivers every outcome the assistant missed. */
   async resumeInterrupted(): Promise<void> {
     for (const id of this.deps.store.approved()) if (!this.running.has(id)) await this.execute(id);
+    for (const id of this.deps.store.executedWithoutOutcome()) {
+      if (this.running.has(id)) continue;
+      const command = this.deps.store.command(id)!;
+      const receiptStatus = this.deps.receiptStatus(command.connectionId, command.commandId);
+      this.deps.store.finish(id, "executed", receiptStatus ? { receiptStatus } : {}, this.now());
+    }
+    this.deliverNotices();
+  }
+
+  /** Delivers each ended request's outcome to its assistant until its session admits it, so a
+   * runner that was offline, or a restart, never loses one. Called after each outcome and on a
+   * timer. A thread that ended, or an outcome older than a day, is not retried. */
+  deliverNotices(): void {
+    const now = this.now();
+    for (const { id, resolvedAt } of this.deps.store.unnotified()) {
+      const view = this.deps.store.get(id), command = this.deps.store.command(id);
+      if (!view || !command) continue;
+      let delivery: "delivered" | "retry" | "gone";
+      try { delivery = this.deps.tell(view.threadId, this.notice(view, command.commandId)); } catch { delivery = "retry"; }
+      if (delivery !== "retry" || now - resolvedAt >= OWNER_CONFIRMATION_NOTICE_RETRY_MS) this.deps.store.markNotified(id, now);
+    }
   }
 
   private execute(id: string): Promise<AssistantOwnerConfirmation> {
@@ -330,12 +374,12 @@ export class AssistantOwnerConfirmationService {
     if (after.status === "executed") {
       const receiptStatus = this.deps.receiptStatus(command.connectionId, command.commandId);
       const view = this.deps.store.finish(id, "executed", { ...(receiptStatus ? { receiptStatus } : {}), ...(reason ? { reason } : {}) }, this.now()) ?? after;
-      this.tell(view, command.commandId);
+      this.deliverNotices();
       return view;
     }
     if (after.status === "approved") {
       const view = this.deps.store.finish(id, "refused", { reason: reason ?? "The command did not run." }, this.now()) ?? after;
-      this.tell(view, command.commandId);
+      this.deliverNotices();
       return view;
     }
     return after;
@@ -343,13 +387,13 @@ export class AssistantOwnerConfirmationService {
 
   private end(id: string, status: "denied" | "expired"): AssistantOwnerConfirmation | null {
     const view = this.deps.store.finish(id, status, { reason: status === "denied" ? "The owner denied it." : "The owner did not answer in time." }, this.now());
-    if (view) this.tell(view, this.deps.store.command(id)!.commandId);
+    if (view) this.deliverNotices();
     return view;
   }
 
-  private tell(view: AssistantOwnerConfirmation, commandId: string): void {
+  private notice(view: AssistantOwnerConfirmation, commandId: string): string {
     const what = `"${view.title}" (${view.operation}) on ${view.target.kind} ${view.target.label} (${view.target.id}), command ${commandId}`;
-    const text = view.status === "executed"
+    return view.status === "executed"
       ? `${NOTICE} Your owner approved ${what}. Wollipog ran it once; its receipt reads ${view.outcome?.receiptStatus ?? "unknown"}.` +
         `${view.outcome?.reason ? ` ${view.outcome.reason}` : ""} Never send that command again: read its receipt and target, then continue.`
       : view.status === "denied"
@@ -357,6 +401,5 @@ export class AssistantOwnerConfirmationService {
         : view.status === "expired"
           ? `${NOTICE} Your request for ${what} expired before your owner answered. Nothing ran. Ask your owner before requesting it again.`
           : `${NOTICE} Your request for ${what} was refused, so nothing ran: ${view.outcome?.reason ?? "it no longer matched."}`;
-    try { this.deps.tell(view.threadId, text); } catch { /* The thread still shows the outcome. */ }
   }
 }

@@ -6062,13 +6062,15 @@ const automationTimer = setInterval(() => {
   }
 }, 5_000);
 // Assistant thread confirmations (#4665): an approval whose run a restart interrupted finishes
-// once every operation is registered, and an unanswered request expires on time.
+// once every operation is registered, an unanswered request expires on time, and an outcome its
+// assistant could not be told yet (its runner offline) is retried.
 void assistantOwnerConfirmations.resumeInterrupted().catch((error) => {
   app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "assistant confirmation recovery deferred");
 });
 const assistantConfirmationTimer = setInterval(() => {
   try {
     assistantOwnerConfirmations.expireDue();
+    assistantOwnerConfirmations.deliverNotices();
   } catch (error) {
     app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "assistant confirmation expiry deferred");
   }

@@ -163,7 +163,10 @@ agrees. A thread's assistant could repeat it alone, so a thread's connection nev
   it). Nothing runs.
 - **The assistant hears.** However a request ends, its outcome reaches the thread's conversation as
   a `[Wollipog Owner Confirmation]` message, queued if the assistant is busy, and the assistant
-  resumes from it.
+  resumes from it. Delivery is recorded per request: a session that cannot admit it now (its
+  runner is offline) is retried every 15 seconds for up to a day, and a restart delivers what it
+  missed, including the outcome of a run that spent its request just before the restart. A
+  thread that ended has nobody to tell.
 - **Nothing the assistant holds confirms.** Only the control plane's run of an approval, marked in
   `assistantCallContext`, can spend a request. A `confirmationId` from a thread's assistant is
   refused whatever its value, and a thread connection's `destructiveConfirmation` cannot be set to
