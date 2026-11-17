@@ -105,7 +105,7 @@ export function AssistantConfirmationCard({ confirmation, onAnswered }: {
   const { busy, answer } = useConfirmationAnswer(confirmation, onAnswered);
   const headingId = `assistant-confirmation-${confirmation.id}`;
   return (
-    <li className="request-card assistant-confirmation" aria-labelledby={headingId}>
+    <li className="request-card" aria-labelledby={headingId}>
       <div className="request-card-head">
         <span className="request-card-kind">Approval Needed</span>
         <span className="request-card-meta"><span>Expires {formatClock(confirmation.expiresAt)}</span></span>
@@ -131,7 +131,7 @@ function AssistantConfirmationRow({ confirmation, threadTitle, onAnswered }: {
   const { busy, answer } = useConfirmationAnswer(confirmation, (response) => { setOpen(false); onAnswered(response); });
   const headingId = `assistant-confirmation-${confirmation.id}`;
   return (
-    <li className="request-card assistant-confirmation" aria-labelledby={headingId}>
+    <li className="request-card" aria-labelledby={headingId}>
       <div className="request-card-head">
         <span className="request-card-kind">Approval Needed</span>
         <span className="request-card-meta">
