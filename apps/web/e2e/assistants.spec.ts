@@ -20,6 +20,16 @@ async function capture(page: Page, name: string) {
   await page.screenshot({ path: join(evidenceDir, `${name}.png`) });
 }
 
+/** The empty state's column starts where the Threads label's text does. */
+async function expectEmptyStateAligned(page: Page) {
+  const [label, state] = await Promise.all([
+    page.locator(".assistant-threads-head .group-label").evaluate((element) =>
+      element.getBoundingClientRect().left + parseFloat(getComputedStyle(element).paddingLeft)),
+    page.locator(".assistant-group > .state .state-title").evaluate((element) => element.getBoundingClientRect().left),
+  ]);
+  expect(Math.abs(state - label), "the empty state lines up with the Threads label").toBeLessThanOrEqual(1);
+}
+
 const threadsList = (page: Page) => page.getByRole("complementary", { name: "Assistants" });
 const threadRow = (page: Page, title: string) => threadsList(page).getByRole("button", { name: new RegExp(`^${title}`) });
 
@@ -112,6 +122,25 @@ for (const theme of ["dark", "light"] as const) {
       await expect(page.locator(".assistant-thread-head").getByRole("heading", { level: 2 })).toHaveText("Triage Last Night's CI");
     });
 
+    test("the thread's transcript is the backing session's, as the Sessions page shows it", async ({ page }) => {
+      // The same session on its own page: the transcript, its turn footer (finish time, usage, Copy
+      // and the turn menu) and the composer are the shared session surface, not the thread's own.
+      await open(page, theme, "", "/sessions/~cwBlAHMAcwAtAHQAcgBpAGEAZwBlAA");
+      await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
+      await expect(page.locator(".composer")).toBeVisible();
+      await capture(page, `assistants-backing-session-page-${theme}-desktop`);
+    });
+
+    test("work cards share the row's width, so a title is not cut while there is room", async ({ page }) => {
+      await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
+      const titles = page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-title");
+      await expect(titles).toHaveCount(2);
+      for (const title of await titles.all()) {
+        expect(await title.evaluate((element) => element.scrollWidth <= element.clientWidth), await title.textContent() ?? "")
+          .toBe(true);
+      }
+    });
+
     test("work launched while the thread streams appears even when the list answers slower than the stream", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
       const cards = page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-card");
@@ -165,6 +194,9 @@ for (const theme of ["dark", "light"] as const) {
       await expect(threadsList(page).getByText("No Threads Yet", { exact: true })).toBeVisible();
       await expect(threadsList(page)).toContainText("Assistant threads aren't available on this control plane yet.");
       await expect(page.getByRole("alert")).toHaveCount(0);
+      await expectEmptyStateAligned(page);
+      // The pane beside the list offers no thread to choose: the list already says why.
+      await expect(page.locator(".assistant-thread-pane")).toBeEmpty();
       await capture(page, `assistants-unavailable-${theme}-desktop`);
       await page.getByRole("button", { name: "New Thread" }).first().click();
       const dialog = page.getByRole("dialog", { name: "New Thread" });
@@ -202,6 +234,7 @@ for (const theme of ["dark", "light"] as const) {
     test("a phone without threads shows the empty section", async ({ page }) => {
       await open(page, theme, "threads=unavailable");
       await expect(threadsList(page).getByText("No Threads Yet", { exact: true })).toBeVisible();
+      await expectEmptyStateAligned(page);
       await capture(page, `assistants-unavailable-${theme}-mobile`);
     });
   });

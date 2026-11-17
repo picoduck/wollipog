@@ -13043,6 +13043,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: grid;
   gap: var(--space-1);
 }
+/* The empty state's column starts where the Threads label and the rows' titles do. */
+.assistant-group > .state { padding-inline: var(--space-3); }
 .assistant-group-head {
   display: flex;
   align-items: center;
@@ -13115,12 +13117,15 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   overflow-x: auto;
   list-style: none;
 }
+/* Cards share the row's width up to a readable measure, so a title takes the room beside it rather
+   than truncating at the minimum; past the row's width they scroll. */
 .assistant-work-card {
   display: grid;
-  flex: 0 0 min(280px, 80%);
+  flex: 1 1 280px;
   align-content: start;
+  min-width: min(280px, 80%);
+  max-width: 480px;
   gap: var(--space-2);
-  min-width: 0;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);

@@ -246,9 +246,15 @@ export function AssistantsView({ threadId, rightPanel }: {
           </div>
         </aside>
         <div className="assistant-thread-pane" data-focus-zone="main" tabIndex={-1}>
-          {threadId === undefined ? (
+          {threadId === undefined && list.kind === "unavailable" ? (
+            // The list already says threads aren't available here; an invitation to choose one would
+            // contradict it, so the pane stays empty.
+            null
+          ) : threadId === undefined ? (
             <div className="assistant-thread-pane-state">
-              <State icon={<AssistantsIcon />} title={WOLLIPOG_ASSISTANT} headingLevel={2}>
+              {/* The detail pane's placeholder beside a list that offers New Thread itself (§21.4), not
+                  an empty screen: its action is the list's, one step to the left. */}
+              <State compact icon={<AssistantsIcon />} title={WOLLIPOG_ASSISTANT} headingLevel={2}>
                 Ask the assistant to start sessions, check on work and handle approvals. Choose a thread, or start one
                 with New Thread.
               </State>

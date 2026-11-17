@@ -135,12 +135,20 @@ const event = (sessionId: string, ts: number, payload: SessionEvent["payload"]):
   ({ id: ++seq, sessionId, seq, ts, payload }) as SessionEvent;
 const events: Record<string, SessionEvent[]> = {
   "sess-triage": [
+    // One whole turn, as a runner records it: the prompt, its checkpoint, the reply, and the turn's
+    // usage and conversation checkpoint, which give the transcript's turn footer its finish time.
     event("sess-triage", NOW - 30 * minute, { kind: "user_message", text: "Last night's CI had two failures. Find out why and fix what you can.", images: [] }),
+    event("sess-triage", NOW - 30 * minute + 1_000, { kind: "checkpoint", turn: 1 } as SessionEvent["payload"]),
     event("sess-triage", NOW - 29 * minute, {
       kind: "agent_message",
       text: "The upload test times out on slow runners, and the Vite group bump needs a fresh install. I started a session for each; the install is waiting for your approval.",
       final: true,
     }),
+    event("sess-triage", NOW - 28 * minute, {
+      kind: "token_usage", inputTokens: 3_200, cachedInputTokens: 41_000, cacheCreationInputTokens: 1_100, outputTokens: 820,
+      costUsd: 0.21, durationMs: 118_000, model: "claude-opus-5-5",
+    } as SessionEvent["payload"]),
+    event("sess-triage", NOW - 28 * minute, { kind: "conversation_checkpoint", turn: 1 } as SessionEvent["payload"]),
   ],
 };
 
