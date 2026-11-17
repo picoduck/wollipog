@@ -304,3 +304,17 @@ test("a thread's status follows its backing session and the thread republishes w
     assert.equal(assistantThreadStatus("archived", { ...session, status: "running" }), "archived");
   } finally { await h.close(); }
 });
+
+test("install adds the retirement columns to a membership table an earlier build created", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { AssistantThreadStore } = await import("./assistant-thread-store.js");
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT);
+      CREATE TABLE assistant_thread_members (session_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, root_session_id TEXT NOT NULL)`);
+    AssistantThreadStore.install(db);
+    AssistantThreadStore.install(db);
+    const columns = (db.prepare("PRAGMA table_info(assistant_thread_members)").all() as Array<{ name: string }>).map((column) => column.name);
+    assert.ok(columns.includes("retired_cost_usd") && columns.includes("retired_cap_usd"), columns.join(", "));
+  } finally { db.close(); }
+});

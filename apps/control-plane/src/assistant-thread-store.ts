@@ -61,6 +61,10 @@ export class AssistantThreadStore {
       CREATE INDEX IF NOT EXISTS assistant_thread_members_thread ON assistant_thread_members(thread_id, root_session_id);`);
     // The backing session's final cost, if it was deleted: spend is never refunded by deletion.
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN retired_cost_usd REAL NOT NULL DEFAULT 0"); } catch { /* column already present */ }
+    // A membership table an earlier build created lacks the retirement columns.
+    for (const column of ["retired_cost_usd REAL", "retired_cap_usd REAL"]) {
+      try { db.exec(`ALTER TABLE assistant_thread_members ADD COLUMN ${column}`); } catch { /* column already present */ }
+    }
     // The backing session's cost cap as the thread last set it. A different current cap was set by
     // the owner, and the thread then only ever lowers it.
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN backing_cap_usd REAL"); } catch { /* column already present */ }
