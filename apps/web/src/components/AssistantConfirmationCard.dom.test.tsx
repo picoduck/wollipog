@@ -177,3 +177,30 @@ test("a control plane without the Thread API is read once and not retried", asyn
   assert.equal(container.querySelector(".request-card"), null);
   await act(async () => root.unmount());
 });
+
+test("a read still in flight when the Inbox unmounts is never retried", async () => {
+  let reads = 0;
+  let fail: (() => void) | undefined;
+  const client = { ...api, assistantConfirmationThreads: () => {
+    reads += 1;
+    return new Promise((_resolve, reject) => { fail = () => reject(new Error("socket closed")); });
+  } } as unknown as ApiClient;
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = { instanceId: "unmounted", runtimeKey: "unmounted:1", createSocket: () => socket, close() {} };
+  const navigation: ViewNavigation = { current: () => ({ name: "session", id: "s_thread" }), push() {}, listen: () => () => {} };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(
+    <ApiProvider client={client}>
+      <StoreProvider connection={connection} navigation={navigation}><AssistantConfirmationsNotice /></StoreProvider>
+    </ApiProvider>,
+  ));
+  await act(async () => socket.push({ type: "session_removed", sessionId: "none" }));
+  await flush();
+  assert.equal(reads, 1);
+  await act(async () => root.unmount());
+  await act(async () => fail!());
+  await flush(2_100);
+  assert.equal(reads, 1, "nothing retries after unmount");
+});

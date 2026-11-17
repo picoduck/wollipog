@@ -192,7 +192,8 @@ export function AssistantConfirmationsNotice() {
     );
     attempt(2_000);
   }, [api]);
-  useEffect(() => cancelRetry, []);
+  // Unmounting supersedes any read still in flight, so its late answer or failure does nothing.
+  useEffect(() => () => { latestRead.current += 1; cancelRetry(); }, []);
   // Events are not replayed after a disconnect, so the list is read whenever the connection is up.
   useEffect(() => { if (online) refresh(); }, [online, refresh]);
   // Thread events arrive in order, so a thread's latest event names its pending requests as of
