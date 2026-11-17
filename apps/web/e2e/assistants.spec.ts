@@ -112,6 +112,26 @@ for (const theme of ["dark", "light"] as const) {
       await expect(page.locator(".assistant-thread-head").getByRole("heading", { level: 2 })).toHaveText("Triage Last Night's CI");
     });
 
+    test("work launched while the thread streams appears even when the list answers slower than the stream", async ({ page }) => {
+      await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
+      const cards = page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-card");
+      await expect(cards).toHaveCount(2);
+      await page.waitForTimeout(2_500);
+      // Each list read now takes two seconds while the backing session reports activity every 100ms
+      // for ten seconds: refreshes must wait for the read in flight rather than discard it.
+      await page.evaluate(() => {
+        const fixture = window as unknown as {
+          assistantsSlowLists: (ms: number) => void; assistantsLaunch: () => void; assistantsActivity: () => void;
+        };
+        fixture.assistantsSlowLists(2_000);
+        fixture.assistantsLaunch();
+        const timer = window.setInterval(fixture.assistantsActivity, 100);
+        window.setTimeout(() => window.clearInterval(timer), 10_000);
+      });
+      await expect(cards).toHaveCount(3, { timeout: 8_000 });
+      await expect(cards.nth(2)).toContainText("Write the Changelog");
+    });
+
     test("New Thread preselects the Orchestrator harness, and rename and archive act on the thread", async ({ page }) => {
       await open(page, theme);
       await page.getByRole("button", { name: "New Thread" }).first().click();

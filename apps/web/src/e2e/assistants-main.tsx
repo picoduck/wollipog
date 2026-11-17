@@ -206,6 +206,7 @@ function upsert(next: SessionView) {
  * began, but only once `assistantsReleaseList()` lets it, as a slow read would. */
 let holdNextList = false;
 let releaseHeldList: (() => void) | null = null;
+let slowListMs = 0;
 
 const unavailable = () => Promise.reject(new ApiError("Not Found", 404));
 const found = (threadId: string) => {
@@ -219,6 +220,9 @@ const client = {
   assistantThreads: (options: { includeArchived?: boolean } = {}) => {
     if (scenario === "unavailable") return unavailable();
     const read = { threads: structuredClone(threads.filter((candidate) => options.includeArchived || candidate.status !== "archived")) };
+    // `assistantsSlowLists(ms)`: every later read answers after `ms`, with the threads as they were
+    // when it began, as a slow control plane would.
+    if (slowListMs > 0 && !holdNextList) return new Promise((resolve) => window.setTimeout(() => resolve(read), slowListMs));
     if (!holdNextList) return Promise.resolve(read);
     holdNextList = false;
     document.body.dataset.listHeld = "true";
@@ -289,6 +293,7 @@ Object.assign(window, {
   },
   assistantsActivity: backingActivity,
   assistantsHoldNextList: () => { holdNextList = true; },
+  assistantsSlowLists: (ms: number) => { slowListMs = ms; },
   assistantsReleaseList: () => {
     releaseHeldList?.();
     releaseHeldList = null;

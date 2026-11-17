@@ -66,9 +66,14 @@ export function AssistantsView({ threadId, rightPanel }: {
   const [renaming, setRenaming] = useState<AssistantThread | null>(null);
   const [archiving, setArchiving] = useState(false);
   const generation = useRef(0);
+  /** A read is in flight, and whether another was asked for while it was. */
+  const reading = useRef(false);
+  const rereadQueued = useRef(false);
 
+  /** Reads the list, superseding any read still in flight: a mutation's reconciliation and Retry. */
   const load = useCallback(async () => {
     const mine = ++generation.current;
+    reading.current = true;
     try {
       const { threads } = await api.assistantThreads();
       if (mine === generation.current) setList({ kind: "ready", threads: sortAssistantThreads(threads) });
@@ -79,12 +84,27 @@ export function AssistantsView({ threadId, rightPanel }: {
       else setList((previous) => previous.kind === "ready"
         ? previous
         : { kind: "failed", message: cause instanceof Error ? cause.message : String(cause) });
+    } finally {
+      if (mine === generation.current) {
+        reading.current = false;
+        // Activity during the read asked for a newer list: read once more, now that this one landed.
+        if (rereadQueued.current) {
+          rereadQueued.current = false;
+          void load();
+        }
+      }
     }
   }, [api]);
+  /** A background refresh: behind a read in flight it waits its turn rather than discarding it, so a
+   * session that streams faster than the list answers still sees each answer land. */
+  const refresh = useCallback(() => {
+    if (reading.current) rereadQueued.current = true;
+    else void load();
+  }, [load]);
 
   useEffect(() => { void load(); }, [load]);
   // A reconnect may have missed changes.
-  useEffect(() => { if (conn === "online") void load(); }, [conn, load]);
+  useEffect(() => { if (conn === "online") refresh(); }, [conn, refresh]);
 
   const threads = list.kind === "ready" ? list.threads : [];
   const listed = threadId === undefined ? undefined : threads.find((thread) => thread.id === threadId);
@@ -131,17 +151,17 @@ export function AssistantsView({ threadId, rightPanel }: {
     if (refetchTimer.current !== null) return;
     refetchTimer.current = setTimeout(() => {
       refetchTimer.current = null;
-      void load();
+      refresh();
     }, REFETCH_THROTTLE_MS);
-  }, [streamKey, load]);
+  }, [streamKey, refresh]);
   // While a thread works, read the list now and then even without session activity: a launch can
   // land between events.
   const working = threads.some((thread) => thread.status === "working");
   useEffect(() => {
     if (!working) return;
-    const timer = setInterval(() => void load(), WORKING_POLL_MS);
+    const timer = setInterval(refresh, WORKING_POLL_MS);
     return () => clearInterval(timer);
-  }, [working, load]);
+  }, [working, refresh]);
   useEffect(() => () => {
     if (refetchTimer.current !== null) clearTimeout(refetchTimer.current);
   }, []);
