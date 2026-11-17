@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useApi } from "../api-context.js";
 import {
+  applyAssistantThreadEvents,
+  ASSISTANT_THREAD_TITLE_MAX,
   assistantThreadAccessLabel,
   assistantThreadHarnessLabel,
+  assistantThreadsOwnerOnly,
   assistantThreadsUnavailable,
   assistantThreadTitle,
   sortAssistantThreads,
@@ -18,7 +21,7 @@ import { AssistantWorkCards } from "./AssistantWorkCards.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { AssistantsIcon, BotIcon, PlusIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
-import { NewAssistantThreadDialog } from "./NewAssistantThreadDialog.js";
+import { NewAssistantThreadDialog, THREADS_UNAVAILABLE_MESSAGE } from "./NewAssistantThreadDialog.js";
 import { Notice } from "./Notice.js";
 import { ActionsMenu, DetailBar, PageHeader, type PageMenuAction } from "./PageHeader.js";
 import { SessionDetail } from "./SessionDetail.js";
@@ -31,16 +34,23 @@ import { useIsMobile } from "./useIsMobile.js";
 /** The one assistant today; the section lists it first and names its threads under it. */
 const WOLLIPOG_ASSISTANT = "Wollipog Assistant";
 const ASSISTANTS = destination("assistants");
-/** Session activity refetches the threads at most this often (#4663 adds a thread-updated event). */
-const REFETCH_THROTTLE_MS = 1_500;
-/** How often the list is read while a thread is working, whatever its sessions report. */
+/** How often the list is read while a thread is working, as a net under the thread events. */
 const WORKING_POLL_MS = 15_000;
 
 type ListState =
   | { kind: "loading" }
   | { kind: "ready"; threads: AssistantThread[] }
   | { kind: "unavailable" }
+  /** The control plane refuses everyone but an organization owner (403), in its own words. */
+  | { kind: "ownerOnly"; message: string }
   | { kind: "failed"; message: string };
+
+/** Why New Thread can't start one here, when the list already knows. */
+function newThreadBlock(list: ListState): { title: string; message: string } | undefined {
+  if (list.kind === "unavailable") return { title: "Threads Aren't Available Yet", message: THREADS_UNAVAILABLE_MESSAGE };
+  if (list.kind === "ownerOnly") return { title: "Threads Are for Owners", message: list.message };
+  return undefined;
+}
 
 /**
  * The Assistants section (#4664): the Wollipog Assistant first, its threads newest activity first
@@ -69,17 +79,31 @@ export function AssistantsView({ threadId, rightPanel }: {
   /** A read is in flight, and whether another was asked for while it was. */
   const reading = useRef(false);
   const rereadQueued = useRef(false);
+  // The control plane publishes each thread change (`assistant_thread_upsert`); the store keeps the
+  // newest of them, numbered. `appliedSeq` is the newest one the list reflects.
+  const events = useStoreSelector((state) => state.assistantThreadEvents);
+  const eventsRef = useRef(events);
+  eventsRef.current = events;
+  const appliedSeq = useRef(0);
 
   /** Reads the list, superseding any read still in flight: a mutation's reconciliation and Retry. */
   const load = useCallback(async () => {
     const mine = ++generation.current;
     reading.current = true;
+    // Events that land while the read is in flight are newer than what it returns.
+    const startSeq = eventsRef.current?.at(-1)?.seq ?? 0;
     try {
       const { threads } = await api.assistantThreads();
-      if (mine === generation.current) setList({ kind: "ready", threads: sortAssistantThreads(threads) });
+      if (mine === generation.current) {
+        const kept = eventsRef.current ?? [];
+        setList({ kind: "ready", threads: applyAssistantThreadEvents(threads, kept, startSeq) });
+        appliedSeq.current = Math.max(appliedSeq.current, kept.at(-1)?.seq ?? 0);
+      }
     } catch (cause) {
       if (mine !== generation.current) return;
+      const ownerOnly = assistantThreadsOwnerOnly(cause);
       if (assistantThreadsUnavailable(cause)) setList({ kind: "unavailable" });
+      else if (ownerOnly !== null) setList({ kind: "ownerOnly", message: ownerOnly });
       // A failed refresh keeps the rows it has; only a first read fails the list.
       else setList((previous) => previous.kind === "ready"
         ? previous
@@ -115,56 +139,47 @@ export function AssistantsView({ threadId, rightPanel }: {
     selected ? assistantThreadTitle(selected) : null,
   );
 
-  // A deep link to a thread the list doesn't carry: look for it among archived threads once.
+  // A deep link to a thread the list doesn't carry (an archived one): read that thread alone.
   useEffect(() => {
     setMissing(false);
     if (threadId === undefined || list.kind !== "ready" || listed) return;
     let current = true;
-    void api.assistantThreads({ includeArchived: true }).then(({ threads: all }) => {
+    void api.assistantThread(threadId).then(({ thread }) => {
       if (!current) return;
-      const found = all.find((thread) => thread.id === threadId) ?? null;
-      setExtra(found);
-      setMissing(found === null);
+      setExtra(thread);
     }, () => { if (current) setMissing(true); });
     return () => { current = false; };
   }, [api, threadId, list.kind, listed]);
 
-  // Until #4663's thread-updated event, a thread changes when its sessions do: refetch on their
-  // stream. A backing session's activity counts too, since the assistant launches work in the middle
-  // of a turn without changing its own status. Throttled rather than debounced, so a turn that
-  // streams for minutes still refreshes its thread every few seconds instead of never.
-  const backingIds = useMemo(() => new Set(threads.map((thread) => thread.sessionId)), [threads]);
-  const watchedIds = useMemo(() => threads.flatMap((thread) => [thread.sessionId, ...thread.launchedSessionIds]), [threads]);
-  const streamKey = useStoreSelector((state) => watchedIds.map((id) => {
-    const session = state.sessions.get(id);
-    if (!session) return id;
-    const activity = backingIds.has(id) ? `:${session.messageCount}:${session.lastEventAt ?? session.updatedAt}` : "";
-    return `${id}:${session.status}:${session.pendingApproval?.requestId ?? ""}:${session.archived ? 1 : 0}${activity}`;
-  }).join("|"));
-  const firstKey = useRef(true);
-  const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Thread changes arrive as events: status, title, activity and each session the assistant
+  // launches. Applied in order to the rows on screen, and to an archived thread open on its own.
   useEffect(() => {
-    if (firstKey.current) {
-      firstKey.current = false;
+    const kept = events ?? [];
+    const from = appliedSeq.current;
+    const newest = kept.at(-1)?.seq ?? 0;
+    if (newest <= from) return;
+    appliedSeq.current = newest;
+    // More changed than the store kept since the last render: the list itself is the answer.
+    if ((kept[0]?.seq ?? 0) > from + 1) {
+      refresh();
       return;
     }
-    if (refetchTimer.current !== null) return;
-    refetchTimer.current = setTimeout(() => {
-      refetchTimer.current = null;
-      refresh();
-    }, REFETCH_THROTTLE_MS);
-  }, [streamKey, refresh]);
-  // While a thread works, read the list now and then even without session activity: a launch can
-  // land between events.
+    setList((previous) => previous.kind !== "ready" ? previous
+      : { kind: "ready", threads: applyAssistantThreadEvents(previous.threads, kept, from) });
+    setExtra((previous) => {
+      if (!previous) return previous;
+      const latest = [...kept].reverse().find((event) => event.seq > from && event.thread.id === previous.id);
+      return latest ? latest.thread : previous;
+    });
+  }, [events, refresh]);
+  // While a thread works, read the list now and then too: a net under the events, should one be
+  // lost between the control plane and this dashboard.
   const working = threads.some((thread) => thread.status === "working");
   useEffect(() => {
     if (!working) return;
     const timer = setInterval(refresh, WORKING_POLL_MS);
     return () => clearInterval(timer);
   }, [working, refresh]);
-  useEffect(() => () => {
-    if (refetchTimer.current !== null) clearTimeout(refetchTimer.current);
-  }, []);
 
   // The open thread's backing session streams live while it is open.
   const backingSessionId = selected?.sessionId ?? null;
@@ -246,8 +261,8 @@ export function AssistantsView({ threadId, rightPanel }: {
           </div>
         </aside>
         <div className="assistant-thread-pane" data-focus-zone="main" tabIndex={-1}>
-          {threadId === undefined && list.kind === "unavailable" ? (
-            // The list already says threads aren't available here; an invitation to choose one would
+          {threadId === undefined && (list.kind === "unavailable" || list.kind === "ownerOnly") ? (
+            // The list already says why there are no threads here; an invitation to choose one would
             // contradict it, so the pane stays empty.
             null
           ) : threadId === undefined ? (
@@ -265,8 +280,8 @@ export function AssistantsView({ threadId, rightPanel }: {
             <div className="assistant-thread-pane-state">
               <State icon={<AssistantsIcon />} title="Thread Not Found" headingLevel={2}
                 actions={<button type="button" className="btn" onClick={toList}>{backLabel("assistants")}</button>}>
-                {list.kind === "unavailable"
-                  ? "Assistant threads aren't available on this control plane yet."
+                {list.kind === "unavailable" ? "Assistant threads aren't available on this control plane yet."
+                  : list.kind === "ownerOnly" ? list.message
                   : "This thread may have been removed."}
               </State>
             </div>
@@ -286,7 +301,7 @@ export function AssistantsView({ threadId, rightPanel }: {
       </div>
       {creating && (
         <NewAssistantThreadDialog
-          unavailable={list.kind === "unavailable"}
+          blocked={newThreadBlock(list)}
           onClose={() => setCreating(false)}
           onCreated={(thread) => {
             setCreating(false);
@@ -351,6 +366,9 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
           details={<code>{list.message}</code>}>
           Retry to load the threads again.
         </Notice>
+      ) : list.kind === "ownerOnly" ? (
+        // Not an empty list but a person who can't have one: no New Thread to offer.
+        <State compact icon={<AssistantsIcon />} title="Threads Are for Owners">{list.message}</State>
       ) : threads.length === 0 ? (
         <State compact icon={<AssistantsIcon />} title="No Threads Yet"
           actions={<button type="button" className="btn" onClick={onNewThread}>New Thread</button>}>
@@ -455,7 +473,7 @@ function RenameThreadDialog({ thread, onClose, onRenamed }: {
       <form className="form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
         <label className="field">
           <span>Title</span>
-          <input value={title} maxLength={200} autoFocus onChange={(event) => setTitle(event.target.value)} />
+          <input value={title} maxLength={ASSISTANT_THREAD_TITLE_MAX} autoFocus onChange={(event) => setTitle(event.target.value)} />
         </label>
         {failure && <Notice tone="danger" role="alert" details={<code>{failure}</code>}>The thread wasn't renamed. Try again.</Notice>}
       </form>

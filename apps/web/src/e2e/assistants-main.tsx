@@ -24,6 +24,7 @@ import "../styles.css";
  * The Assistants section (#4664) against a stub of the provisional Thread API shared with #4663.
  * This page is the only place the stub lives: the dashboard itself ships no fake threads.
  *
+ * `?threads=owner-only` is a person who isn't an organization owner (every route answers 403),
  * `?threads=unavailable` is a control plane without the Thread API (every route answers 404),
  * `?threads=empty` one with no threads yet, and the default three threads, the first of which
  * launched two sessions, one of them waiting on a tool approval. The SPA path rides in `?path=`.
@@ -120,6 +121,9 @@ let threads: AssistantThread[] = scenario === "some" ? [
   thread("thr_triage", "sess-triage", { status: "needs_you", launchedSessionIds: ["sess-flaky", "sess-deps"], lastActivityAt: NOW - minute }),
   thread("thr_release", "sess-release", { status: "working", harness: "codex", lastActivityAt: NOW - 3 * minute }),
   thread("thr_cleanup", "sess-cleanup", { status: "done" }),
+  // Archived: the list leaves it out, and a link to it opens it on its own.
+  thread("thr_retired", "sess-cleanup", { title: "Retire the Old Runner", status: "archived", archivedAt: NOW - 2 * 24 * 60 * minute,
+    lastActivityAt: NOW - 3 * 24 * 60 * minute }),
 ] : [];
 
 const defaults: AssistantThreadDefaults = {
@@ -216,17 +220,29 @@ let holdNextList = false;
 let releaseHeldList: (() => void) | null = null;
 let slowListMs = 0;
 
-const unavailable = () => Promise.reject(new ApiError("Not Found", 404));
+/** `?threads=unavailable`: the control plane's answer for routes it lacks. */
+const unavailable = () => Promise.reject(new ApiError("not found", 404, undefined, { error: "not found" }));
+/** `?threads=owner-only`: the person is not an organization owner. */
+const OWNER_ONLY = "Only an organization owner can use Wollipog Assistant threads.";
+const ownerOnly = () => Promise.reject(new ApiError(OWNER_ONLY, 403, undefined, { error: OWNER_ONLY }));
+const refused = () => scenario === "unavailable" ? unavailable() : scenario === "owner-only" ? ownerOnly() : null;
 const found = (threadId: string) => {
   const match = threads.find((candidate) => candidate.id === threadId);
-  if (!match) throw new ApiError("Thread not found", 404);
+  const message = "Assistant thread not found for this owner.";
+  if (!match) throw new ApiError(message, 404, undefined, { error: message });
   return match;
 };
+
+/** The control plane publishes every thread change to its owner, as `assistant_thread_upsert`. */
+function publish(changed: AssistantThread) {
+  socket?.push({ type: "assistant_thread_upsert", userId: "usr_owner", thread: structuredClone(changed) } as ControlPlaneToUi);
+}
 
 const client = {
   ...api,
   assistantThreads: (options: { includeArchived?: boolean } = {}) => {
-    if (scenario === "unavailable") return unavailable();
+    const refusal = refused();
+    if (refusal) return refusal;
     const read = { threads: structuredClone(threads.filter((candidate) => options.includeArchived || candidate.status !== "archived")) };
     // `assistantsSlowLists(ms)`: every later read answers after `ms`, with the threads as they were
     // when it began, as a slow control plane would.
@@ -236,9 +252,15 @@ const client = {
     document.body.dataset.listHeld = "true";
     return new Promise((resolve) => { releaseHeldList = () => resolve(read); });
   },
-  assistantThreadDefaults: () => scenario === "unavailable" ? unavailable() : Promise.resolve(structuredClone(defaults)),
+  assistantThread: async (threadId: string) => {
+    const refusal = refused();
+    if (refusal) return refusal;
+    return { thread: structuredClone(found(threadId)) };
+  },
+  assistantThreadDefaults: () => refused() ?? Promise.resolve(structuredClone(defaults)),
   createAssistantThread: async (body: CreateAssistantThreadRequest) => {
-    if (scenario === "unavailable") return unavailable();
+    const refusal = refused();
+    if (refusal) return refusal;
     const id = `thr_new_${threads.length + 1}`;
     const sessionId = `sess-new-${threads.length + 1}`;
     upsert(session(sessionId, body.title ?? "New Thread", { createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0,
@@ -248,16 +270,19 @@ const client = {
       access, connectionId: null, launchedSessionIds: [], lastActivityAt: Date.now(), createdAt: Date.now(), archivedAt: null,
     };
     threads = [created, ...threads];
+    publish(created);
     return { thread: structuredClone(created) };
   },
   renameAssistantThread: async (threadId: string, title: string) => {
     const renamed = { ...found(threadId), title };
     threads = threads.map((candidate) => candidate.id === threadId ? renamed : candidate);
+    publish(renamed);
     return { thread: structuredClone(renamed) };
   },
   archiveAssistantThread: async (threadId: string) => {
     const archived = { ...found(threadId), status: "archived" as const, archivedAt: Date.now() };
     threads = threads.map((candidate) => candidate.id === threadId ? archived : candidate);
+    publish(archived);
     return { thread: structuredClone(archived) };
   },
   session: async (id: string) => ({ session: structuredClone(sessions.get(id)!) }),
@@ -268,6 +293,7 @@ const client = {
     upsert(next);
     // The thread no longer waits on anyone once its only approval is answered.
     threads = threads.map((candidate) => candidate.launchedSessionIds.includes(id) ? { ...candidate, status: "working" } : candidate);
+    for (const changed of threads.filter((candidate) => candidate.launchedSessionIds.includes(id))) publish(changed);
     return structuredClone(next);
   },
   getSessionEventPage: () => new Promise<never>(() => {}),
@@ -292,14 +318,21 @@ function backingActivity() {
 Object.assign(window, {
   /** The running launched session finishes, as its stream would report it. */
   assistantsAdvance: () => upsert({ ...sessions.get("sess-flaky")!, status: "completed", updatedAt: Date.now() }),
-  /** Mid-turn, the assistant launches another session: the thread's status stays as it was. */
+  /** Mid-turn, the assistant launches another session: the thread's status stays as it was, and
+   * the control plane republishes the thread with its new launch. */
   assistantsLaunch: () => {
     threads = threads.map((candidate) => candidate.id === "thr_triage"
-      ? { ...candidate, launchedSessionIds: [...candidate.launchedSessionIds, "sess-changelog"] } : candidate);
+      ? { ...candidate, launchedSessionIds: [...candidate.launchedSessionIds, "sess-changelog"], lastActivityAt: Date.now() } : candidate);
     upsert(session("sess-changelog", "Write the Changelog", { status: "running", updatedAt: Date.now() }));
     backingActivity();
+    publish(threads.find((candidate) => candidate.id === "thr_triage")!);
   },
   assistantsActivity: backingActivity,
+  /** A thread's status changes and the control plane publishes it, without any list read. */
+  assistantsThreadStatus: (threadId: string, status: AssistantThread["status"]) => {
+    threads = threads.map((candidate) => candidate.id === threadId ? { ...candidate, status } : candidate);
+    publish(threads.find((candidate) => candidate.id === threadId)!);
+  },
   assistantsHoldNextList: () => { holdNextList = true; },
   assistantsSlowLists: (ms: number) => { slowListMs = ms; },
   assistantsReleaseList: () => {

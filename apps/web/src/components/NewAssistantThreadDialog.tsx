@@ -3,6 +3,8 @@ import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
 import {
   ASSISTANT_THREAD_HARNESS_LABELS,
+  ASSISTANT_THREAD_TITLE_MAX,
+  assistantThreadsOwnerOnly,
   assistantThreadsUnavailable,
   type AssistantThread,
   type AssistantThreadDefaults,
@@ -21,22 +23,38 @@ export const THREADS_UNAVAILABLE_MESSAGE =
 type DefaultsState =
   | { kind: "loading" }
   | { kind: "ready"; defaults: AssistantThreadDefaults }
-  | { kind: "unavailable" }
+  | { kind: "blocked"; block: NewThreadBlock }
   | { kind: "failed"; message: string };
+
+/** Why no thread can be started here: the control plane has no Thread API, or the person isn't an
+ * organization owner. The dialog then explains and offers only Close. */
+export interface NewThreadBlock {
+  title: string;
+  message: string;
+}
+
+/** The block a Thread API failure means, if it means one. */
+function blockFor(cause: unknown): NewThreadBlock | null {
+  if (assistantThreadsUnavailable(cause)) return { title: "Threads Aren't Available Yet", message: THREADS_UNAVAILABLE_MESSAGE };
+  const ownerOnly = assistantThreadsOwnerOnly(cause);
+  return ownerOnly === null ? null : { title: "Threads Are for Owners", message: ownerOnly };
+}
 
 /**
  * New Thread (#4664): pick Claude Code or Codex, with the saved Orchestrator harness preselected,
  * and optionally name the thread. A harness the control plane can't run says why and can't be
  * chosen; a refusal (409) shows the server's guidance and keeps the dialog open.
  */
-export function NewAssistantThreadDialog({ unavailable, onClose, onCreated }: {
-  /** The thread list already found no Thread API, so the dialog only explains. */
-  unavailable: boolean;
+export function NewAssistantThreadDialog({ blocked, onClose, onCreated }: {
+  /** What the thread list already found keeps any thread from starting, so the dialog only explains. */
+  blocked?: NewThreadBlock;
   onClose: () => void;
   onCreated: (thread: AssistantThread) => void;
 }) {
   const api = useApi();
-  const [state, setState] = useState<DefaultsState>(unavailable ? { kind: "unavailable" } : { kind: "loading" });
+  // Read once, on opening: a block found later comes from the dialog's own reads.
+  const [initialBlock] = useState(blocked);
+  const [state, setState] = useState<DefaultsState>(initialBlock ? { kind: "blocked", block: initialBlock } : { kind: "loading" });
   const [harness, setHarness] = useState<AssistantThreadHarness | null>(null);
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
@@ -44,7 +62,7 @@ export function NewAssistantThreadDialog({ unavailable, onClose, onCreated }: {
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
-    if (unavailable) return;
+    if (initialBlock) return;
     let current = true;
     setState({ kind: "loading" });
     void api.assistantThreadDefaults().then((defaults) => {
@@ -54,12 +72,11 @@ export function NewAssistantThreadDialog({ unavailable, onClose, onCreated }: {
       setHarness(preferred?.id ?? defaults.harnesses.find((option) => option.available)?.id ?? null);
     }, (cause: unknown) => {
       if (!current) return;
-      setState(assistantThreadsUnavailable(cause)
-        ? { kind: "unavailable" }
-        : { kind: "failed", message: cause instanceof Error ? cause.message : String(cause) });
+      const block = blockFor(cause);
+      setState(block ? { kind: "blocked", block } : { kind: "failed", message: cause instanceof Error ? cause.message : String(cause) });
     });
     return () => { current = false; };
-  }, [api, unavailable, attempt]);
+  }, [api, initialBlock, attempt]);
 
   const create = async () => {
     if (!harness || busy) return;
@@ -70,7 +87,8 @@ export function NewAssistantThreadDialog({ unavailable, onClose, onCreated }: {
       const { thread } = await api.createAssistantThread({ harness, ...(trimmed ? { title: trimmed } : {}) });
       onCreated(thread);
     } catch (cause) {
-      if (assistantThreadsUnavailable(cause)) setState({ kind: "unavailable" });
+      const block = blockFor(cause);
+      if (block) setState({ kind: "blocked", block });
       else setFailure(cause instanceof ApiError && cause.status === 409 && cause.message
         ? cause.message
         : `The thread wasn't started. ${cause instanceof Error ? cause.message : String(cause)}`.trim());
@@ -100,8 +118,8 @@ export function NewAssistantThreadDialog({ unavailable, onClose, onCreated }: {
       )}
     >
       {state.kind === "loading" && <Skeleton rows={2} announce="Loading harnesses…" />}
-      {state.kind === "unavailable" && (
-        <Notice tone="neutral" role="status" title="Threads Aren't Available Yet">{THREADS_UNAVAILABLE_MESSAGE}</Notice>
+      {state.kind === "blocked" && (
+        <Notice tone="neutral" role="status" title={state.block.title}>{state.block.message}</Notice>
       )}
       {state.kind === "failed" && (
         <Notice tone="danger" role="alert" title="Couldn't Load Harnesses"
@@ -126,7 +144,7 @@ export function NewAssistantThreadDialog({ unavailable, onClose, onCreated }: {
           />
           <label className="field">
             <span>Title (Optional)</span>
-            <input value={title} maxLength={200} placeholder="New Thread" onChange={(event) => setTitle(event.target.value)} />
+            <input value={title} maxLength={ASSISTANT_THREAD_TITLE_MAX} placeholder="New Thread" onChange={(event) => setTitle(event.target.value)} />
           </label>
           {failure && <Notice tone="danger" role="alert">{failure}</Notice>}
         </div>
