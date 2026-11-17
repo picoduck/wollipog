@@ -7434,8 +7434,14 @@ body.shell-dock-dragging * {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-/* Among a thread's work cards the request's body never scrolls on its own: in a phone's capped
-   column (below) the column scrolls instead of the body shrinking to a line. */
+/* Among a thread's work cards the request keeps a readable width, like the work cards beside it,
+   so a crowded row scrolls sideways instead of squeezing it. Its body never scrolls on its own:
+   in a phone's capped column (below) the column scrolls instead of the body shrinking to a line. */
+.assistant-work-cards > .request-card {
+  flex: 1 1 360px;
+  min-width: min(360px, 90%);
+  max-width: 560px;
+}
 .assistant-work-cards > .request-card > .request-card-body {
   flex: none;
   overflow: visible;

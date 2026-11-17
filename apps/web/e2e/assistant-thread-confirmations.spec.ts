@@ -35,6 +35,15 @@ test("the open thread shows its owner confirmation first, and Approve Once settl
   await expect(page.locator("body")).toHaveAttribute("data-confirmation-answer", "aoc_stop_flaky:approve");
 });
 
+test("at a narrow desktop width the request keeps a readable width and the transcript stays in view", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 900 });
+  await openThread(page, "dark");
+  const box = await card(page).boundingBox();
+  expect(box!.width, "the request is not squeezed by the work cards beside it").toBeGreaterThanOrEqual(300);
+  expect(box!.height, "its facts and actions do not wrap into a tall column").toBeLessThan(450);
+  await expect(page.getByPlaceholder(/Message Claude Code/)).toBeInViewport();
+});
+
 test("Deny refuses it on a phone", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openThread(page, "light");
