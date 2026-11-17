@@ -41,12 +41,19 @@ test("at a narrow desktop width the request keeps a readable width and the trans
   const box = await card(page).boundingBox();
   expect(box!.width, "the request is not squeezed by the work cards beside it").toBeGreaterThanOrEqual(300);
   expect(box!.height, "its facts and actions do not wrap into a tall column").toBeLessThan(450);
+  // The work cards start right after the request, with no empty stretch between them.
+  const cards = await page.locator(".assistant-work-cards").boundingBox();
+  expect(cards!.x - (box!.x + box!.width), "the work cards follow the request").toBeLessThan(24);
   await expect(page.getByPlaceholder(/Message Claude Code/)).toBeInViewport();
 });
 
 test("Deny refuses it on a phone", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openThread(page, "light");
+  // The whole request shows, frame and actions included, above the work cards' scrolling column.
+  await expect(card(page)).toBeInViewport({ ratio: 1 });
+  const [request, cards] = await Promise.all([card(page).boundingBox(), page.locator(".assistant-work-cards").boundingBox()]);
+  expect(request!.y + request!.height, "the request ends before the scrolling work cards begin").toBeLessThanOrEqual(cards!.y);
   await card(page).getByRole("button", { name: "Deny", exact: true }).click();
   await expect(page.getByText("Stop Session was denied. Nothing ran.", { exact: true })).toBeVisible();
   await expect(card(page)).toHaveCount(0);
