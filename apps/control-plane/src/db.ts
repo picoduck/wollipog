@@ -6087,13 +6087,6 @@ export class OccupiedUnreadLocationError extends Error {
   }
 }
 
-/** Only the thread's own owner reaches an Assistant thread's session: its scope is always that
- * user's, and the person must be that user. Organization owners, admins and agents are refused. */
-function assistantSessionOwnerMatches(principal: AuthPrincipal, scope: ResourceScope): boolean {
-  return principal.kind === "human" && principal.organizationId === scope.organizationId &&
-    scope.owner.kind === "user" && scope.owner.userId === principal.userId;
-}
-
 export class ControlPlaneDb {
   readonly assistantConnections: AssistantConnections;
   readonly assistantThreads: AssistantThreadStore;
@@ -13886,7 +13879,15 @@ export class ControlPlaneDb {
   canAccessSession(principal: AuthPrincipal, sessionId: string): boolean {
     const scope = this.sessionScope(sessionId);
     if (!scope || !this.principalCanAccessScope(principal, scope)) return false;
-    return !this.isAssistantSession(sessionId) || assistantSessionOwnerMatches(principal, scope);
+    // An Assistant thread's session acts with its owner's Assistant authority (#4663). Only the
+    // thread's own owner reaches it, read from the immutable thread record rather than the
+    // session's scope: organization owners, admins, team members and agents are refused.
+    const thread = this.stmt(`SELECT thread.owner_user_id, thread.organization_id FROM sessions session
+      JOIN assistant_threads thread ON thread.id=session.assistant_thread_id WHERE session.id=?`).get(sessionId) as
+      { owner_user_id: string; organization_id: string } | undefined;
+    if (!thread && !this.isAssistantSession(sessionId)) return true;
+    return Boolean(thread && principal.kind === "human" && principal.userId === thread.owner_user_id &&
+      principal.organizationId === thread.organization_id);
   }
 
   /** Whether a session backs a Wollipog Assistant thread (#4663). */
@@ -14414,7 +14415,9 @@ export class ControlPlaneDb {
     // An Assistant thread's session acts with its owner's Assistant authority, so only that owner
     // reaches it: never an organization owner or admin, a team member or an agent (#4663).
     const assistant = principal.kind === "human"
-      ? { sql: "(ownership.owner_kind='user' AND ownership.owner_id=?)", params: [principal.userId] }
+      ? { sql: `EXISTS (SELECT 1 FROM sessions owned_session JOIN assistant_threads thread ON thread.id=owned_session.assistant_thread_id
+          WHERE owned_session.id=ownership.session_id AND thread.owner_user_id=? AND thread.organization_id=?)`,
+        params: [principal.userId, principal.organizationId] }
       : { sql: "0", params: [] };
     return {
       sql: `(${scope.sql}) AND (NOT EXISTS (SELECT 1 FROM sessions assistant_session
@@ -14941,6 +14944,8 @@ export class ControlPlaneDb {
         : input.resource === "project" ? this.projectScope(input.resourceId)
         : input.resource === "session" ? this.sessionScope(input.resourceId) : null;
     if (!currentScope || currentScope.organizationId !== input.scope.organizationId) return false;
+    // An Assistant thread's session belongs to its thread's owner alone (#4663).
+    if (input.resource === "session" && this.isAssistantSession(input.resourceId)) return false;
     const ownerId = input.scope.owner.kind === "organization" ? input.scope.owner.organizationId
       : input.scope.owner.kind === "user" ? input.scope.owner.userId : input.scope.owner.teamId;
     const ownerValid = input.scope.owner.kind === "organization"

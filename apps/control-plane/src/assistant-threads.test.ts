@@ -134,6 +134,14 @@ test("only the thread's owner reaches its session, which never joins a Project",
       assert.ok(!h.db.listSessionSummaries(other).some((listed) => listed.id === thread.sessionId), other.role);
       assert.ok(!h.db.listSessionsForPrincipal(other).some((listed) => listed.id === thread.sessionId), other.role);
     }
+    // Access follows the thread record, not the session's mutable scope, which cannot be changed.
+    const admin = { ...h.owner, userId: "usr_admin", role: "admin" } as HumanPrincipal;
+    assert.equal(h.db.setResourceScope({ resource: "session", resourceId: thread.sessionId, now: Date.now(),
+      scope: { organizationId: h.owner.organizationId, owner: { kind: "organization", organizationId: h.owner.organizationId } } }), false);
+    h.db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id=? WHERE session_id=?").run(admin.userId, thread.sessionId);
+    assert.equal(h.db.canAccessSession(admin, thread.sessionId), false);
+    assert.ok(!h.db.listSessionSummaries(admin).some((listed) => listed.id === thread.sessionId));
+    h.db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id=? WHERE session_id=?").run(h.owner.userId, thread.sessionId);
     // An ordinary user-owned session stays visible to an admin, as before.
     h.db.createSession({ id: "ordinary", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Ordinary", driver: "claude-code",
       useWorktree: false, config: {}, now: Date.now(), scope: { organizationId: h.owner.organizationId, owner: { kind: "user", userId: h.owner.userId } } });
