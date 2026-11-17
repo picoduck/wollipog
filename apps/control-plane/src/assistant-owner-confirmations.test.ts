@@ -17,7 +17,7 @@ import { createAssistantOwnerConfirmationService, createAssistantThreads } from 
 import { registerAssistantThreadRoutes } from "./assistant-thread-routes.js";
 import { createAssistantOperations } from "./assistant-routes.js";
 import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
-import { ownerConfirmationTitle } from "./assistant-owner-confirmations.js";
+import { ownerConfirmationSummary, ownerConfirmationTitle } from "./assistant-owner-confirmations.js";
 import type { HumanPrincipal } from "./identity.js";
 
 const claude: AgentDefinition = { id: "claude", name: "Claude", driver: "claude-code", context: { kind: "native" }, command: "claude", args: [], env: {}, available: true,
@@ -353,4 +353,12 @@ test("operation titles read as Title Case actions", () => {
   assert.equal(ownerConfirmationTitle("auto_delete"), "Delete Automation");
   assert.equal(ownerConfirmationTitle("queue_cancel"), "Cancel Queued Prompt");
   assert.equal(ownerConfirmationTitle("session_git"), "Discard File Changes");
+});
+
+test("each summary says what approving does, including what stays out of reach afterwards", () => {
+  // session_stop ends the session (svc.stop leaves it stopped, and prompt() refuses a stopped session).
+  assert.match(ownerConfirmationSummary("session_stop"), /takes no further messages until it is restarted/);
+  assert.match(ownerConfirmationSummary("session_archive"), /can be unarchived later/);
+  assert.match(ownerConfirmationSummary("session_delete"), /cannot be undone/);
+  assert.match(ownerConfirmationSummary("not_a_known_operation"), /may not be reversible/);
 });

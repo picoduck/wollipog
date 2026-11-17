@@ -57,13 +57,13 @@ export function ownerConfirmationTitle(operation: string): string {
 /** What approving each destructive operation does, in one plain sentence for its owner. Each states
  * only what the operation's service does; an operation without one gets the cautious fallback. */
 const SUMMARIES: Record<string, string> = {
-  session_stop: "Stops the session's current work. The session and its transcript are kept, and it can be sent another message.",
+  session_stop: "Stops the session. Its transcript is kept, but it takes no further messages until it is restarted.",
   session_archive: "Stops the session if it is running, then archives it. Its transcript is kept, and it can be unarchived later.",
   session_delete: "Deletes the session and its side chat, with their transcripts. This cannot be undone.",
   session_rewind: "Restores the session's files to the checkpoint of an earlier turn. The conversation is kept; file changes made after that turn are lost.",
   session_reprocess: "Imports the adopted session's transcript again, replacing its current history.",
   session_git: "Discards the uncommitted changes to a file in the session's worktree. They cannot be recovered.",
-  queue_cancel: "Removes a queued prompt before the session receives it.",
+  queue_cancel: "Asks to remove a queued prompt before the session receives it. If the session has already taken it, it is not removed.",
   shell_close: "Closes the session's terminal and forgets it.",
   auto_delete: "Deletes the automation, so it does not run again.",
   skill_remove: "Removes the skill from the Skill Library.",
