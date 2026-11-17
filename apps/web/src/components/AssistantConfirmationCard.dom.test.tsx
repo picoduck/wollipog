@@ -10,6 +10,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { AssistantConfirmationsNotice } from "./AssistantConfirmationCard.js";
 
 /** The Inbox's Assistant Approvals follow thread events, and read the list again on reconnect (#4665). */
@@ -174,7 +175,7 @@ test("a control plane without the Thread API is read once and not retried", asyn
   await act(async () => socket.push({ type: "session_removed", sessionId: "none" }));
   await flush(2_100);
   assert.equal(reads, 1);
-  assert.equal(container.querySelector(".request-card"), null);
+  assertNoDomNode(container.querySelector(".request-card"), "no approval is shown");
   await act(async () => root.unmount());
 });
 
