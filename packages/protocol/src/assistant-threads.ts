@@ -128,7 +128,8 @@ export interface AssistantOwnerConfirmation {
   target: { kind: string; id: string; label: string };
   /** What the command affects, as the operation previewed it. */
   impact: AssistantOwnerConfirmationDetail[];
-  /** The command's exact arguments, without its command ID. */
+  /** Every argument the approved run uses, without its command ID: `label` is the argument's exact
+   * name and `value` its whole value (JSON for a non-string). Never truncated or relabeled. */
   arguments: AssistantOwnerConfirmationDetail[];
   status: AssistantOwnerConfirmationStatus;
   createdAt: number;

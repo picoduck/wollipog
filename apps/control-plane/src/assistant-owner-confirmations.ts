@@ -27,7 +27,7 @@ export interface OwnerConfirmationRequest {
 
 /** Pending requests one thread may hold at once, so an assistant cannot flood its owner. */
 export const ASSISTANT_OWNER_CONFIRMATION_PENDING_LIMIT = 10;
-const ARGUMENTS_LIMIT = 64 * 1024;
+const ARGUMENTS_LIMIT = 16 * 1024;
 const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const DETAIL_LIMIT = 12;
 const VALUE_LIMIT = 200;
@@ -62,14 +62,22 @@ const valueOf = (value: unknown): string => {
   const text = typeof value === "string" ? value : value === undefined ? "" : JSON.stringify(value) ?? "";
   return text.length > VALUE_LIMIT ? `${text.slice(0, VALUE_LIMIT - 1)}…` : text;
 };
-/** Bounded display lines for an object's top-level fields; anything else is one line. */
-function details(value: unknown, skip: ReadonlySet<string> = new Set()): AssistantOwnerConfirmationDetail[] {
+/** Bounded display lines for the control plane's own preview of a command's effect. */
+function impactLines(value: unknown): AssistantOwnerConfirmationDetail[] {
   if (value === undefined || value === null) return [];
   if (typeof value !== "object" || Array.isArray(value)) return [{ label: "Impact", value: valueOf(value) }];
-  const entries = Object.entries(value as Record<string, unknown>).filter(([key, item]) => !skip.has(key) && item !== undefined);
+  const entries = Object.entries(value as Record<string, unknown>).filter(([, item]) => item !== undefined);
   const lines = entries.slice(0, DETAIL_LIMIT).map(([key, item]) => ({ label: labelOf(key), value: valueOf(item) }));
   if (entries.length > DETAIL_LIMIT) lines.push({ label: "More", value: `${entries.length - DETAIL_LIMIT} more fields` });
   return lines;
+}
+
+/** Every argument the approved run uses, by its exact name and with its whole value: the owner
+ * approves what the assistant sent, so nothing of it is relabeled, merged or cut short. Requests
+ * whose arguments are too large to show are refused when they are recorded. */
+function argumentLines(args: Record<string, unknown>): AssistantOwnerConfirmationDetail[] {
+  return Object.entries(args).filter(([key]) => !COMMAND_KEYS.has(key))
+    .map(([key, item]) => ({ label: key, value: typeof item === "string" ? item : JSON.stringify(item) ?? "null" }));
 }
 
 /** Owner confirmations for Wollipog Assistant threads (#4665). A thread's destructive command is
@@ -216,8 +224,8 @@ export class AssistantOwnerConfirmations {
       operation: row.operation,
       title: ownerConfirmationTitle(row.operation),
       target: { kind: target.kind, id: target.id, label: row.target_label },
-      impact: details(row.impact_json === null ? undefined : JSON.parse(row.impact_json)),
-      arguments: details(JSON.parse(row.arguments_json), COMMAND_KEYS),
+      impact: impactLines(row.impact_json === null ? undefined : JSON.parse(row.impact_json)),
+      arguments: argumentLines(JSON.parse(row.arguments_json) as Record<string, unknown>),
       status: row.status,
       createdAt: row.created_at,
       expiresAt: row.expires_at,

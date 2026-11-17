@@ -102,7 +102,7 @@ test("a thread's destructive command waits for its owner, and nothing the assist
     assert.ok(request);
     assert.equal(request.title, "Archive Session");
     assert.deepEqual(request.target, { kind: "session", id: "target-1", label: "Prototype target-1" });
-    assert.deepEqual(request.arguments, [{ label: "Session ID", value: "target-1" }]);
+    assert.deepEqual(request.arguments, [{ label: "sessionId", value: "target-1" }]);
     assert.ok(request.impact.some((line) => line.label === "Status" && line.value === "completed"));
     assert.ok(!strings(answer).includes(request.id), "the request id never reaches the assistant");
     const view = (await h.ownerCall("GET", `/api/assistant-threads/${h.thread.id}`)).body.thread as AssistantThread;
@@ -278,6 +278,26 @@ test("an external Assistant connection keeps its preview-and-confirm behavior", 
     assert.deepEqual(h.pending(), []);
     assert.equal((await call({ ...args, confirmationId: preview.confirmationId })).receipt.status, "succeeded");
     assert.deepEqual(h.archived, ["target-1"]);
+  } finally { await h.close(); }
+});
+
+test("the owner sees every argument the approved run uses, whole and by its exact name", async () => {
+  const h = await harness();
+  try {
+    // Arguments the operation's schema would refuse still never reach the owner shortened: the
+    // request records exactly what runs, and refuses what it could not show.
+    const binding = { connectionId: h.connectionId, grantRevision: 1, operation: "session_stop", argumentsDigest: "d", targetDigest: "t" };
+    const long = "x".repeat(4_000);
+    const args = { commandId: "c", sessionId: "target-1", session_id: "decoy", note: long, nested: { a: [1, 2] } };
+    const shown = h.db.assistantOwnerConfirmations.request(binding, { commandId: "c", args, target: { kind: "session", id: "target-1" } }, "Prototype");
+    assert.deepEqual(shown.arguments, [
+      { label: "sessionId", value: "target-1" },
+      { label: "session_id", value: "decoy" },
+      { label: "note", value: long },
+      { label: "nested", value: "{\"a\":[1,2]}" },
+    ]);
+    assert.throws(() => h.db.assistantOwnerConfirmations.request({ ...binding, argumentsDigest: "big" },
+      { commandId: "c2", args: { note: "y".repeat(17 * 1024) }, target: { kind: "session", id: "target-1" } }, "Prototype"), /too large to show/);
   } finally { await h.close(); }
 });
 
