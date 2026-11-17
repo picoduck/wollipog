@@ -75,10 +75,14 @@ test("approvals follow thread events and are read again when the connection retu
   // While `hold` is set, a read answers with the list as it was when it started, once released.
   let hold = false;
   const releases: Array<() => void> = [];
+  const failures: Array<() => void> = [];
   const client = { ...api, assistantConfirmationThreads: () => {
     reads += 1;
     const snapshot = { threads: listed };
-    return hold ? new Promise((resolve) => releases.push(() => resolve(snapshot))) : Promise.resolve(snapshot);
+    return hold ? new Promise((resolve, reject) => {
+      releases.push(() => resolve(snapshot));
+      failures.push(() => reject(new Error("socket closed")));
+    }) : Promise.resolve(snapshot);
   } } as unknown as ApiClient;
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = { instanceId: "confirmations", runtimeKey: "confirmations:1", createSocket: () => socket, close() {} };
@@ -131,5 +135,25 @@ test("approvals follow thread events and are read again when the connection retu
   await flush();
   assert.deepEqual(titles(), ["Close Shell", "Delete Automation"]);
   assert.equal(reads, 4);
+
+  // A superseded read that fails late does not discard what the current read is collecting.
+  hold = true;
+  releases.length = 0;
+  failures.length = 0;
+  await act(async () => actions!.dispatch({ type: "conn", conn: "offline" }));
+  await act(async () => actions!.dispatch({ type: "conn", conn: "online" }));
+  await act(async () => actions!.dispatch({ type: "conn", conn: "offline" }));
+  await act(async () => actions!.dispatch({ type: "conn", conn: "online" }));
+  await flush();
+  assert.equal(reads, 6);
+  await act(async () => failures[0]!());
+  const latest = thread([request("aoc_5", "Remove Skill")]);
+  await act(async () => socket.push({ type: "assistant_thread_upsert", userId: "u", thread: latest }));
+  listed = [latest];
+  hold = false;
+  await act(async () => releases[1]!());
+  await flush();
+  assert.deepEqual(titles(), ["Remove Skill"]);
+  assert.equal(reads, 7, "the change seen during the read prompts one more read");
   await act(async () => root.unmount());
 });

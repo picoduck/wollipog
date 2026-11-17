@@ -176,23 +176,30 @@ export function AssistantConfirmationsNotice() {
   useEffect(() => {
     if (!online) return;
     let active = true;
+    // This effect's own buffer. A superseded read never touches a newer read's buffer.
+    let buffer: Map<string, AssistantThread> | null = null;
+    const release = () => {
+      if (buffer && arrived.current === buffer) arrived.current = null;
+      buffer = null;
+    };
     const read = async () => {
       // A change that arrives during a read may be newer than the list or older than it, so it
       // is kept over the list and the list is read again, until one read sees no change arrive.
       for (let attempt = 0; attempt < 3 && active; attempt += 1) {
-        arrived.current = new Map();
+        buffer = new Map();
+        arrived.current = buffer;
         const { threads: listed } = await api.assistantConfirmationThreads();
         if (!active) return;
-        const during = arrived.current;
-        arrived.current = null;
+        const during = buffer;
+        release();
         setThreads(new Map([...listed.map((thread) => [thread.id, thread] as const), ...during]));
         if (during.size === 0) return;
       }
     };
     void read().catch(() => {
-      arrived.current = null; /* Older control planes have no Thread API; the Inbox stays as it was. */
+      if (active) release(); /* Older control planes have no Thread API; the Inbox stays as it was. */
     });
-    return () => { active = false; arrived.current = null; };
+    return () => { active = false; release(); };
   }, [api, online]);
   useEffect(() => {
     // An unanswered request leaves the list when it expires, even without another event.
