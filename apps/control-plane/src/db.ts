@@ -24,6 +24,7 @@ import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 import { DatabaseSync } from "node:sqlite";
 import { AssistantConnections } from "./assistant-connections.js";
 import { AssistantThreadStore } from "./assistant-thread-store.js";
+import { AssistantOwnerConfirmations } from "./assistant-owner-confirmations.js";
 import { AssistantWorkStore } from "./assistant-work.js";
 import { installAssistantOutboundScope } from "./assistant-outbound-schema.js";
 import { runnerRetryConnection } from "./runner-persistence.js";
@@ -6092,6 +6093,7 @@ export class OccupiedUnreadLocationError extends Error {
 export class ControlPlaneDb {
   readonly assistantConnections: AssistantConnections;
   readonly assistantThreads: AssistantThreadStore;
+  readonly assistantOwnerConfirmations: AssistantOwnerConfirmations;
   readonly assistantWork: AssistantWorkStore;
   private readonly providerPublications: ProviderProfilePublicationStore;
   readonly campaignBudgets: CampaignBudgetLedger;
@@ -6148,6 +6150,7 @@ export class ControlPlaneDb {
       )`);
       AssistantConnections.install(db);
       AssistantThreadStore.install(db);
+      AssistantOwnerConfirmations.install(db);
       installAssistantAutomationAuthority(db);
       installSkillManagementRevisions(db);
       installAssistantOutboundScope(db);
@@ -6163,6 +6166,7 @@ export class ControlPlaneDb {
     }
     this.assistantConnections = new AssistantConnections(db);
     this.assistantThreads = new AssistantThreadStore(db);
+    this.assistantOwnerConfirmations = new AssistantOwnerConfirmations(db);
     this.assistantWork = new AssistantWorkStore(db, this, this.assistantConnections);
     this.providerPublications = new ProviderProfilePublicationStore(db, controlPlaneInstanceId);
     this.campaignBudgets = new CampaignBudgetLedger(db);

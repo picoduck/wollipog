@@ -48,6 +48,9 @@ export interface AssistantThread {
   launchedSessionIds: string[];
   /** Additive: the thread's limits and what it has used of them. */
   usage?: AssistantThreadUsage;
+  /** Additive (#4665): destructive commands of this thread's assistant waiting for the owner, oldest
+   * first. While any is listed the thread's status is `needs_you`. */
+  confirmations?: AssistantOwnerConfirmation[];
   lastActivityAt: number;
   createdAt: number;
   archivedAt: number | null;
@@ -97,3 +100,42 @@ export interface AssistantLaunchPolicy {
    * Older runners ignore it and launch with the instructions alone. */
   guide?: string;
 }
+
+/** How long the owner has to answer an Assistant thread's owner confirmation (#4665). An
+ * unanswered request then expires and the command does not run. */
+export const ASSISTANT_OWNER_CONFIRMATION_TTL_MS = 60 * 60 * 1000;
+
+/** `pending` until the owner answers. `approved` while the approved command runs, `executed` once
+ * it ran (its receipt holds the result). `denied`, `expired` and `refused` (the bound command,
+ * target or grant changed, or the thread ended) mean it never ran. */
+export type AssistantOwnerConfirmationStatus = "pending" | "approved" | "executed" | "denied" | "expired" | "refused";
+
+/** One line of what an owner confirmation would do, derived by the control plane for display. */
+export interface AssistantOwnerConfirmationDetail { label: string; value: string }
+
+/** A destructive command a Wollipog Assistant thread's assistant asked to run (#4665). Only its
+ * owner can answer it, from the thread or the Inbox. It is bound to the exact connection,
+ * operation, target, arguments and grant revision; approving runs that command once, and its id
+ * is never given to the assistant. */
+export interface AssistantOwnerConfirmation {
+  /** `aoc_…`, owner-facing only. */
+  id: string;
+  threadId: string;
+  /** The Assistant operation, e.g. `session_archive`. */
+  operation: string;
+  /** Title Case action label, e.g. "Archive Session". */
+  title: string;
+  target: { kind: string; id: string; label: string };
+  /** What the command affects, as the operation previewed it. */
+  impact: AssistantOwnerConfirmationDetail[];
+  /** The command's exact arguments, without its command ID. */
+  arguments: AssistantOwnerConfirmationDetail[];
+  status: AssistantOwnerConfirmationStatus;
+  createdAt: number;
+  expiresAt: number;
+  resolvedAt: number | null;
+  /** Present once resolved: the command receipt's status after it ran, or why it did not run. */
+  outcome?: { receiptStatus?: "accepted" | "running" | "succeeded" | "failed" | "uncertain"; reason?: string };
+}
+
+export interface AssistantOwnerConfirmationResponse { confirmation: AssistantOwnerConfirmation; thread: AssistantThread }

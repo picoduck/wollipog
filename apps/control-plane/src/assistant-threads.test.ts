@@ -74,7 +74,7 @@ test("a new thread launches an assistant-role session whose every launch carries
       id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined,
       assistant: "wollipog", title: "Weekly Cleanup", harness: "claude-code", status: "working",
       access: { level: "full_access", destructive: "ask" }, launchedSessionIds: [], archivedAt: null,
-      usage: { launchedSessions: { used: 0, limit: 10 }, costUsd: { used: 0, limit: 25 } },
+      usage: { launchedSessions: { used: 0, limit: 10 }, costUsd: { used: 0, limit: 25 } }, confirmations: [],
     });
     const session = h.db.getSession(thread.sessionId)!;
     assert.equal(session.role, "assistant");

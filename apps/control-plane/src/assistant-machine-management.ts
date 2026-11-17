@@ -60,7 +60,7 @@ const descriptions: Record<typeof ASSISTANT_MACHINE_MANAGEMENT[number][0], strin
 export function registerAssistantMachineManagement(operations: AssistantOperations, db: ControlPlaneDb,
   service: OwnerManagement, receipts: AssistantCommandReceipts) {
   AssistantCommandConfirmations.install(db.raw());
-  const confirmations = new AssistantCommandConfirmations(db.raw());
+  const confirmations = new AssistantCommandConfirmations(db.raw(), db.assistantOwnerConfirmations);
   type Context = Parameters<AssistantOperation["execute"]>[1];
   const publicResult = (result: OwnerManagementResult): OwnerManagementResult => {
     if (result.status < 400) return result;
@@ -172,9 +172,9 @@ export function registerAssistantMachineManagement(operations: AssistantOperatio
         const binding = {connectionId: current.id, grantRevision: current.revision, operation: name,
           argumentsDigest: identity.argumentsDigest, targetDigest: assistantRequestDigest({target: resolved, impact: affected ?? null})};
         const confirm = destructive && db.assistantConnections.destructiveConfirmation(current.id) === "confirm";
-        if (confirm && confirmationId === undefined) return {confirmationRequired: true, ...confirmations.issue(binding),
-          operation: name, target: resolved, impact: affected,
-          recovery: "Review this exact scope, then repeat unchanged arguments and commandId with confirmationId before expiry. Nothing was dispatched."};
+        if (confirm && confirmationId === undefined) return confirmations.preview(binding, {commandId, args: request, target: resolved, impact: affected},
+          {operation: name, target: resolved, impact: affected,
+            recovery: "Review this exact scope, then repeat unchanged arguments and commandId with confirmationId before expiry. Nothing was dispatched."});
         const reservation = receipts.reserve(identity, () => {if (confirm) confirmations.consume(text(args, "confirmationId"), binding);});
         if (!reservation.created) return {receipt: reservation.receipt};
         try {

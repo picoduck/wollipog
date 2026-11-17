@@ -34,7 +34,7 @@ export function registerAssistantConnectionOperations(operations: AssistantOpera
   const {db, outbound, receipts} = deps;
   const management = new AssistantConnectionManagement(db);
   AssistantCommandConfirmations.install(db.raw());
-  const confirmations = new AssistantCommandConfirmations(db.raw());
+  const confirmations = new AssistantCommandConfirmations(db.raw(), db.assistantOwnerConfirmations);
   for (const [name] of ASSISTANT_CONNECTION_OPERATIONS) {
     const mutation = name === "delivery_resume" || name === "install_name";
     const scoped = name !== "connection_list" && name !== "install_name";
@@ -99,8 +99,8 @@ export function registerAssistantConnectionOperations(operations: AssistantOpera
         const binding = {connectionId: current.id, grantRevision: current.revision, operation: name,
           argumentsDigest: identity.argumentsDigest, targetDigest: assistantRequestDigest({target: identity.target, impact})};
         const confirm = name === "delivery_resume" && db.assistantConnections.destructiveConfirmation(current.id) === "confirm";
-        if (confirm && confirmationId === undefined) return {confirmationRequired: true, ...confirmations.issue(binding),
-          operation: name, target: identity.target, impact, recovery: "Review the callback; repeat unchanged arguments and commandId with confirmationId before expiry."};
+        if (confirm && confirmationId === undefined) return confirmations.preview(binding, {commandId, args: request, target: identity.target, impact},
+          {operation: name, target: identity.target, impact, recovery: "Review the callback; repeat unchanged arguments and commandId with confirmationId before expiry."});
         const reservation = receipts.reserve(identity, () => {
           operations.authorize(current.id, name, target(args));
           if (confirm) confirmations.consume(id(args, "confirmationId"), binding);

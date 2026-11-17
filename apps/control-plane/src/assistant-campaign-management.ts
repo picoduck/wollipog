@@ -109,7 +109,7 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
 }): void {
   const {db, receipts} = deps;
   AssistantCommandConfirmations.install(db.raw());
-  const confirmations = new AssistantCommandConfirmations(db.raw());
+  const confirmations = new AssistantCommandConfirmations(db.raw(), db.assistantOwnerConfirmations);
   type Context = Parameters<AssistantOperation["execute"]>[1];
   const target = (value: unknown): AssistantTarget => {
     const args = object(value), session = db.getSession(coordinate(args.sessionId, "sessionId"));
@@ -233,8 +233,8 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
         const binding = {connectionId: ctx.connection.id, grantRevision: revision, operation: name,
           argumentsDigest: identity.argumentsDigest, targetDigest: assistantRequestDigest({target: identity.target, impact: impact ?? null})};
         const confirm = destructive && db.assistantConnections.destructiveConfirmation(ctx.connection.id) === "confirm";
-        if (confirm && confirmationId === undefined) return {confirmationRequired: true, ...confirmations.issue(binding),
-          operation: name, target: identity.target, impact, recovery: "Review the affected scope and repeat unchanged arguments and commandId with confirmationId before expiry."};
+        if (confirm && confirmationId === undefined) return confirmations.preview(binding, {commandId, args: request, target: identity.target, impact},
+          {operation: name, target: identity.target, impact, recovery: "Review the affected scope and repeat unchanged arguments and commandId with confirmationId before expiry."});
         const reservation = receipts.reserve(identity, () => {
           operations.authorize(ctx.connection.id, name, target(args));
           scope(args, ctx, name, owner);

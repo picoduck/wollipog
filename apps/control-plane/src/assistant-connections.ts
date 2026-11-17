@@ -24,8 +24,10 @@ export interface AssistantOperationReceipt {
 export class AssistantRefusal extends Error {}
 
 /** The Assistant connection whose operation is executing, for services that apply a thread's
- * limits to work it starts (#4663). Absent outside an Assistant call. */
-export const assistantCallContext = new AsyncLocalStorage<{ connectionId: string }>();
+ * limits to work it starts (#4663). Absent outside an Assistant call. `ownerConfirmationId` is
+ * set only while the control plane runs a command its owner approved (#4665); nothing an
+ * assistant sends can set it. */
+export const assistantCallContext = new AsyncLocalStorage<{ connectionId: string; ownerConfirmationId?: string }>();
 
 /** Operations an Assistant thread may not call: each schedules future work, turns a session into
  * one that starts its own, or (a fork) materializes a session on the runner without the session
@@ -139,6 +141,10 @@ export class AssistantConnections {
   }
   configure(id: string, grant: unknown, name?: unknown, expectedRevision?: number): void {
     const normalized = assistantGrant(grant, this.destructiveConfirmation(id));
+    // A thread's assistant could otherwise run destructive commands its owner never saw (#4665).
+    if (this.get(id)?.threadId && normalized.destructiveConfirmation !== "confirm") {
+      throw new AssistantRefusal("A Wollipog Assistant thread always asks its owner before a destructive command. Narrow its operations or projects instead, or revoke the connection.");
+    }
     const nextName = name === undefined ? null : displayName(name);
     if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)) throw new AssistantRefusal("Expected revision must be a positive integer. Refresh the connection before saving.");
     const updated = this.db.prepare("UPDATE assistant_connections SET grant_json=?,name=COALESCE(?,name),revision=revision+1 WHERE id=? AND (? IS NULL OR revision=?)").run(JSON.stringify(normalized), nextName, id, expectedRevision ?? null, expectedRevision ?? null);
@@ -231,7 +237,21 @@ export class AssistantOperations {
     return owner;
   }
   async call(credential: AssistantCredential, name: string, args: unknown): Promise<unknown> {
-    let connection = this.connections.current(credential);
+    return this.run(() => this.connections.current(credential), name, args);
+  }
+  /** Runs the exact command a thread's owner approved (#4665), as the thread's connection under
+   * its current grant and owner, authorized live like any call. The thread's credential is not
+   * needed: the approval came from the owner, not the assistant. Only within this run can the
+   * command's receipt reservation spend `ownerConfirmationId`. */
+  async callOwnerApproved(connectionId: string, name: string, args: unknown, ownerConfirmationId: string): Promise<unknown> {
+    return this.run(() => {
+      const connection = this.connections.get(connectionId);
+      if (!connection?.threadId || connection.revoked) throw new AssistantRefusal("The thread's Assistant connection is revoked, so the approved command did not run.");
+      return connection;
+    }, name, args, ownerConfirmationId);
+  }
+  private async run(currentConnection: () => AssistantConnection, name: string, args: unknown, ownerConfirmationId?: string): Promise<unknown> {
+    let connection = currentConnection();
     const operation = this.operations.get(name);
     if (!operation) throw new AssistantRefusal("Operation is not registered on this control plane. Upgrade the control plane or select a registered operation.");
     let target: AssistantTarget = { kind: "operation", id: name };
@@ -240,11 +260,11 @@ export class AssistantOperations {
       const recheck = async () => {
         // A session can move projects while a mutation waits; never reuse its queued placement.
         target = await operation.resolveTarget(args);
-        connection = this.connections.current(credential);
+        connection = currentConnection();
         return this.authorize(connection.id, name, target);
       };
       const owner = await recheck();
-      const result = await assistantCallContext.run({ connectionId: connection.id },
+      const result = await assistantCallContext.run({ connectionId: connection.id, ...(ownerConfirmationId ? { ownerConfirmationId } : {}) },
         () => operation.execute(args, { owner, connection, recheck }));
       // A delivered RPC can still report a refused service command or uncertain dispatch.
       // Registered services return receipts/status, never a private error in the activity row.
