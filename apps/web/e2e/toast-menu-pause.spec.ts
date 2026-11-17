@@ -47,7 +47,8 @@ test("at 390px a toast raised under an open menu outlasts it and then runs out i
   await page.clock.runFor(6_000);
   await expect(page.locator(".toast-region > .toast")).toHaveCount(1);
 
-  await page.locator(".menu-backdrop").click();
+  // A tap on the scrim above the sheet, which grows past the scrim's centre as destinations join.
+  await page.locator(".menu-backdrop").click({ position: { x: 8, y: 8 } });
   await expect(page.locator(MORE_SHEET)).toHaveCount(0);
   await expect(toast).toBeVisible();
 

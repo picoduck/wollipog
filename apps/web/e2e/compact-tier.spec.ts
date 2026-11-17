@@ -314,12 +314,16 @@ test.describe("at 940×600 with a mouse, the desktop app's minimum window", () =
     });
     expect(rail.names[0]).toBe("Search");
     expect(rail.names.at(-1)).toBe("Settings");
-    expect(rail.names).toHaveLength(11);
+    expect(rail.names).toHaveLength(12);
     expect(rail.sizes, "36px items at a short height").toEqual(["36x36"]);
     expect(rail.gap).toBe("2px");
     expect(rail.separatorGaps, "4px either side of a group hairline").toEqual([[4, 4], [4, 4]]);
-    expectGeometry(rail.slack, "room for the instance tile and the labels toggle")
-      .toBeGreaterThanOrEqual(2 * (36 + 2));
+    // This page already draws #1968's labels toggle under Settings, so the slack only has to hold
+    // #1970's instance tile, which the desktop app adds. `desktop-title-bar.spec.ts` checks the
+    // whole desktop rail, tile and toggle included, at this size: with ten destinations (#4664) it
+    // fits with 16px left and does not scroll.
+    expectGeometry(rail.slack, "room for the instance tile")
+      .toBeGreaterThanOrEqual(36 + 2);
   });
 
   test("the labelled rail fits too, and switching labels moves no icon at the short size", async ({ page }) => {

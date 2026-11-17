@@ -80,8 +80,8 @@ for (const viewport of [{ width: 940, height: 600 }, { width: 940, height: 701 }
         expect(rail.underTrafficLights, "nothing but the strip under the traffic lights").toEqual(["strip"]);
         expect(rail.tileTop, "the instance tile sits below the strip").toBeGreaterThanOrEqual(40);
         expect(rail.firstControlTop).toBe(rail.tileTop);
-        // The tile, Search, nine destinations, Settings and the labels toggle.
-        expect(rail.count).toBe(13);
+        // The tile, Search, ten destinations, Settings and the labels toggle.
+        expect(rail.count).toBe(14);
         expect(rail.bottom, "the labels toggle stays in the window").toBeLessThanOrEqual(rail.viewportHeight);
         expect(rail.railScroll, "and the rail does not scroll").toBeLessThanOrEqual(0);
       });
