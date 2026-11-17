@@ -1,69 +1,38 @@
 /**
  * The Wollipog Assistant's Thread API, as the web client sees it (#4664).
  *
- * Every thread request the dashboard makes goes through `assistantThreadRoutes`, and every thread
- * shape it reads is declared here. The types mirror the provisional contract shared with #4663,
- * which builds the control-plane routes; when those routes and their protocol types land, swapping
- * them in touches this module alone.
+ * Every thread request the dashboard makes goes through `assistantThreadRoutes`. The shapes are the
+ * control plane's own (#4663, `packages/protocol/src/assistant-threads.ts`), re-exported here so the
+ * dashboard names them in one place.
  *
  * A control plane without the routes answers 404. That is not an error the person can act on, so
  * `assistantThreadsUnavailable` names it and the Assistants section shows its empty, unavailable
  * state instead of a failure. Nothing here invents a thread: the only threads the dashboard shows
  * are ones the control plane returned.
  */
+import type {
+  AssistantThread,
+  AssistantThreadAccess,
+  AssistantThreadDefaultsResponse,
+  AssistantThreadHarness,
+  AssistantThreadHarnessOption,
+  AssistantThreadListResponse,
+  AssistantThreadResponse,
+  CreateAssistantThreadRequest,
+  UpdateAssistantThreadRequest,
+} from "@wollipog/protocol";
 import { ApiError } from "./api.js";
 
-/** The harnesses a thread can run on. */
-export type AssistantThreadHarness = "claude-code" | "codex";
-
-/** Where a thread stands. `needs_you` means a confirmation or approval in it is waiting for you. */
-export type AssistantThreadStatus = "working" | "needs_you" | "done" | "archived";
-
-/** What the assistant may do in a thread. No credential is ever part of it. */
-export interface AssistantThreadAccess {
-  level: "full_access";
-  destructive: "ask";
-}
-
-export interface AssistantThread {
-  /** `thr_…` */
-  id: string;
-  assistant: "wollipog";
-  title: string;
-  harness: AssistantThreadHarness;
-  /** The backing session (role "assistant"): its transcript and composer are the thread's. */
-  sessionId: string;
-  status: AssistantThreadStatus;
-  access: AssistantThreadAccess;
-  /** The thread-scoped assistant connection, by id only; its credential is never sent here. */
-  connectionId: string | null;
-  /** Sessions the assistant launched from this thread, shown as work cards. */
-  launchedSessionIds: string[];
-  lastActivityAt: number;
-  createdAt: number;
-  archivedAt: number | null;
-}
-
-export interface AssistantThreadHarnessOption {
-  id: AssistantThreadHarness;
-  label: string;
-  available: boolean;
-  /** Why the harness can't be chosen, in the person's words. */
-  reason?: string;
-}
-
-export interface AssistantThreadDefaults {
-  /** The saved Orchestrator harness, which New Thread preselects. */
-  harness: AssistantThreadHarness;
-  harnesses: AssistantThreadHarnessOption[];
-}
-
-export interface CreateAssistantThreadRequest {
-  harness?: AssistantThreadHarness;
-  title?: string;
-  runnerId?: string;
-  workspaceId?: string;
-}
+export type {
+  AssistantThread,
+  AssistantThreadAccess,
+  AssistantThreadHarness,
+  AssistantThreadHarnessOption,
+  AssistantThreadStatus,
+  CreateAssistantThreadRequest,
+} from "@wollipog/protocol";
+/** What New Thread reads: the saved Orchestrator harness it preselects, and each harness's state. */
+export type AssistantThreadDefaults = AssistantThreadDefaultsResponse;
 
 export const ASSISTANT_THREADS_PATH = "/api/assistant-threads";
 
@@ -78,17 +47,20 @@ export function assistantThreadRoutes(req: JsonRequest) {
   return {
     /** Newest activity first. Archived threads come back only when asked for. */
     assistantThreads: (options: { includeArchived?: boolean } = {}) =>
-      req<{ threads: AssistantThread[] }>(
+      req<AssistantThreadListResponse>(
         options.includeArchived ? `${ASSISTANT_THREADS_PATH}?includeArchived=true` : ASSISTANT_THREADS_PATH,
       ),
     assistantThreadDefaults: () => req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults`),
     /** An unsupported runner or harness is refused with 409 and the server's guidance. */
     createAssistantThread: (body: CreateAssistantThreadRequest) =>
-      req<{ thread: AssistantThread }>(ASSISTANT_THREADS_PATH, { method: "POST", body: JSON.stringify(body) }),
+      req<AssistantThreadResponse>(ASSISTANT_THREADS_PATH, { method: "POST", body: JSON.stringify(body) }),
     renameAssistantThread: (threadId: string, title: string) =>
-      req<{ thread: AssistantThread }>(threadPath(threadId), { method: "PATCH", body: JSON.stringify({ title }) }),
+      req<AssistantThreadResponse>(threadPath(threadId), {
+        method: "PATCH",
+        body: JSON.stringify({ title } satisfies UpdateAssistantThreadRequest),
+      }),
     archiveAssistantThread: (threadId: string) =>
-      req<{ thread: AssistantThread }>(`${threadPath(threadId)}/archive`, { method: "POST", body: "{}" }),
+      req<AssistantThreadResponse>(`${threadPath(threadId)}/archive`, { method: "POST", body: "{}" }),
   };
 }
 
