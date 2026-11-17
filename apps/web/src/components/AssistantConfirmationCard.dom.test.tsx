@@ -4,7 +4,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { AssistantOwnerConfirmation, AssistantThread, ControlPlaneToUi } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions } from "../store.js";
@@ -62,9 +62,9 @@ function ActionsProbe({ onActions }: { onActions: (actions: StoreActions) => voi
   return null;
 }
 
-async function flush() {
+async function flush(delay = 0) {
   await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, delay));
     await Promise.resolve();
   });
 }
@@ -141,14 +141,39 @@ test("approvals follow thread events and are read again when the connection retu
   await act(async () => releases[0]!());
   await flush();
   assert.deepEqual(titles(), ["Close Shell"], "the older read's answer is discarded");
-  // A failed read leaves what is shown; the next change reads again.
+  // A read that fails is retried on its own: thread activity that leaves the pending requests
+  // unchanged starts no read, so without the retry the new request would stay hidden.
   await event(thread([request("aoc_5", "Remove Skill")]));
+  const failedAt = reads;
   await act(async () => failures[2]!());
   await flush();
   assert.deepEqual(titles(), ["Close Shell"]);
-  await event(thread([request("aoc_5", "Remove Skill"), request("aoc_6", "Close Shell")]));
-  await act(async () => releases[3]!());
-  await flush();
-  assert.deepEqual(titles(), ["Remove Skill", "Close Shell"]);
+  hold = false;
+  await event(thread([request("aoc_5", "Remove Skill")]));
+  assert.equal(reads, failedAt, "unchanged activity starts no read");
+  await flush(2_100);
+  assert.equal(reads, failedAt + 1);
+  assert.deepEqual(titles(), ["Remove Skill"]);
+  await act(async () => root.unmount());
+});
+
+test("a control plane without the Thread API is read once and not retried", async () => {
+  let reads = 0;
+  const client = { ...api, assistantConfirmationThreads: async () => { reads += 1; throw new ApiError("not found", 404); } } as unknown as ApiClient;
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = { instanceId: "no-threads", runtimeKey: "no-threads:1", createSocket: () => socket, close() {} };
+  const navigation: ViewNavigation = { current: () => ({ name: "session", id: "s_thread" }), push() {}, listen: () => () => {} };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(
+    <ApiProvider client={client}>
+      <StoreProvider connection={connection} navigation={navigation}><AssistantConfirmationsNotice /></StoreProvider>
+    </ApiProvider>,
+  ));
+  await act(async () => socket.push({ type: "session_removed", sessionId: "none" }));
+  await flush(2_100);
+  assert.equal(reads, 1);
+  assert.equal(container.querySelector(".request-card"), null);
   await act(async () => root.unmount());
 });

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AssistantOwnerConfirmation, AssistantOwnerConfirmationResponse, AssistantThread } from "@wollipog/protocol";
+import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import {
   assistantConfirmationOutcome,
@@ -170,13 +171,28 @@ export function AssistantConfirmationsNotice() {
   const [threads, setThreads] = useState<readonly AssistantThread[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const latestRead = useRef(0);
+  const retry = useRef<number | null>(null);
+  const cancelRetry = () => {
+    if (retry.current !== null) window.clearTimeout(retry.current);
+    retry.current = null;
+  };
   const refresh = useCallback(() => {
+    cancelRetry();
     const read = ++latestRead.current;
-    void api.assistantConfirmationThreads().then(
+    // The latest read is retried, backing off to 30 seconds, until it succeeds or a newer read
+    // starts: a request whose read failed must not stay hidden until it expires. A control plane
+    // without the Thread API answers 404, 405 or 501, and then the Inbox stays as it was.
+    const attempt = (delay: number) => void api.assistantConfirmationThreads().then(
       ({ threads: listed }) => { if (read === latestRead.current) setThreads(listed); },
-      () => { /* Older control planes have no Thread API; the Inbox stays as it was. */ },
+      (error: unknown) => {
+        if (read !== latestRead.current) return;
+        if (error instanceof ApiError && [404, 405, 501].includes(error.status)) return;
+        retry.current = window.setTimeout(() => { retry.current = null; attempt(Math.min(delay * 2, 30_000)); }, delay);
+      },
     );
+    attempt(2_000);
   }, [api]);
+  useEffect(() => cancelRetry, []);
   // Events are not replayed after a disconnect, so the list is read whenever the connection is up.
   useEffect(() => { if (online) refresh(); }, [online, refresh]);
   // Thread events arrive in order, so a thread's latest event names its pending requests as of
