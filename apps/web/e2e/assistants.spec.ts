@@ -64,9 +64,12 @@ for (const theme of ["dark", "light"] as const) {
       // Launched sessions are work cards; the waiting one carries its approval inline.
       const cards = page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-card");
       await expect(cards).toHaveCount(2);
-      await expect(cards.nth(0)).toContainText("Fix the Flaky Upload Test");
-      await expect(cards.nth(0).locator(".status")).toHaveText("Running");
-      const waiting = cards.nth(1);
+      // Work waiting on the person comes first.
+      await expect(cards.nth(0)).toContainText("Bump the Vite Group");
+      const flaky = cards.filter({ hasText: "Fix the Flaky Upload Test" });
+      await expect(flaky).toHaveCount(1);
+      await expect(flaky.locator(".status")).toHaveText("Running");
+      const waiting = cards.filter({ hasText: "Bump the Vite Group" });
       await expect(waiting).toContainText("Run pnpm install --frozen-lockfile");
       await expect(waiting.getByRole("button", { name: "Approve Once" })).toBeVisible();
       await expect(waiting.getByRole("button", { name: "Deny" })).toBeVisible();
@@ -75,7 +78,7 @@ for (const theme of ["dark", "light"] as const) {
 
       // Live: the running session finishes and its card follows.
       await page.evaluate(() => (window as unknown as { assistantsAdvance: () => void }).assistantsAdvance());
-      await expect(cards.nth(0).locator(".status")).not.toHaveText("Running");
+      await expect(flaky.locator(".status")).not.toHaveText("Running");
 
       // Approve Once answers the exact request with its once-only option.
       await waiting.getByRole("button", { name: "Approve Once" }).click();
@@ -83,7 +86,7 @@ for (const theme of ["dark", "light"] as const) {
       await expect(waiting.getByRole("button", { name: "Approve Once" })).toHaveCount(0);
 
       // A card opens its session.
-      await cards.nth(0).getByRole("button", { name: /Fix the Flaky Upload Test/ }).click();
+      await flaky.getByRole("button", { name: /Fix the Flaky Upload Test/ }).click();
       await expect(page).toHaveURL(/path=%2Fsessions%2F(~|%7E)/);
     });
 
@@ -94,14 +97,14 @@ for (const theme of ["dark", "light"] as const) {
       await expect(cards).toHaveCount(2);
       // The launched sessions arrive as summaries, without their requests' options: the card reads
       // the detail and still offers the inline approval.
-      await expect(cards.nth(1).getByRole("button", { name: "Approve Once" })).toBeVisible();
+      await expect(cards.filter({ hasText: "Bump the Vite Group" }).getByRole("button", { name: "Approve Once" })).toBeVisible();
 
       // The backing session keeps its status while the assistant launches more work. The page's own
       // first refresh settles first, so only the launch's activity can bring the new card.
       await page.waitForTimeout(2_500);
       await page.evaluate(() => (window as unknown as { assistantsLaunch: () => void }).assistantsLaunch());
       await expect(cards).toHaveCount(3, { timeout: 5_000 });
-      await expect(cards.nth(2)).toContainText("Write the Changelog");
+      await expect(cards.filter({ hasText: "Write the Changelog" })).toHaveCount(1);
 
       // A list read that began before a rename must not put the old title back.
       await page.evaluate(() => {
@@ -158,7 +161,7 @@ for (const theme of ["dark", "light"] as const) {
         window.setTimeout(() => window.clearInterval(timer), 10_000);
       });
       await expect(cards).toHaveCount(3, { timeout: 8_000 });
-      await expect(cards.nth(2)).toContainText("Write the Changelog");
+      await expect(cards.filter({ hasText: "Write the Changelog" })).toHaveCount(1);
     });
 
     test("New Thread preselects the Orchestrator harness, and rename and archive act on the thread", async ({ page }) => {
@@ -223,6 +226,24 @@ for (const theme of ["dark", "light"] as const) {
       await expect(page.getByRole("list", { name: "Thread Details" })).toContainText("Full Access · Ask Before Destructive");
       await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
       await expect(page.getByRole("region", { name: "Launched Work" }).getByRole("button", { name: "Approve Once" })).toBeVisible();
+      // The waiting approval is whole on the screen: its title, its command and all three buttons sit
+      // inside the phone's width, with no sideways scroll to find them.
+      const approval = page.locator(".assistant-work-card", { hasText: "Bump the Vite Group" });
+      const width = page.viewportSize()!.width;
+      for (const part of [
+        approval,
+        approval.locator(".assistant-work-title"),
+        approval.locator(".assistant-work-request-title"),
+        approval.getByRole("button", { name: "Approve Once" }),
+        approval.getByRole("button", { name: "Deny" }),
+        approval.getByRole("button", { name: "Open Session" }),
+      ]) {
+        const box = (await part.boundingBox())!;
+        expect(box.x, "starts on the screen").toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width, "ends on the screen").toBeLessThanOrEqual(width);
+      }
+      expect(await approval.locator(".assistant-work-title").evaluate((element) => element.scrollWidth <= element.clientWidth),
+        "the card's title is not cut").toBe(true);
       // Nothing overflows the phone's width.
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       expect(overflow).toBeLessThanOrEqual(0);

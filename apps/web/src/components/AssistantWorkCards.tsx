@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { relativeTime } from "../format.js";
@@ -25,12 +25,21 @@ export function AssistantWorkCards({ sessionIds, confirmations }: {
   sessionIds: readonly string[];
   confirmations?: ReactNode;
 }) {
+  // Work waiting on the person comes first, so its approval is never the card scrolled out of view.
+  const waiting = useStoreSelector((state) => sessionIds.filter((id) => {
+    const session = state.sessions.get(id);
+    return session !== undefined && !session.archived && prioritizedPendingRequests(session.pendingApproval).length > 0;
+  }).join("\n"));
+  const ordered = useMemo(() => {
+    const first = new Set(waiting ? waiting.split("\n") : []);
+    return [...sessionIds.filter((id) => first.has(id)), ...sessionIds.filter((id) => !first.has(id))];
+  }, [sessionIds, waiting]);
   if (sessionIds.length === 0 && !confirmations) return null;
   return (
     <section className="assistant-work" aria-label="Launched Work">
       <ul className="assistant-work-cards">
         {confirmations}
-        {sessionIds.map((sessionId) => <AssistantWorkCard key={sessionId} sessionId={sessionId} />)}
+        {ordered.map((sessionId) => <AssistantWorkCard key={sessionId} sessionId={sessionId} />)}
       </ul>
     </section>
   );

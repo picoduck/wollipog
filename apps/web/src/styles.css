@@ -13183,6 +13183,21 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .assistant-thread-head { padding: var(--space-2) var(--page-gutter); }
   .assistant-thread-pane-state { padding: var(--space-4) var(--page-gutter) var(--space-12); }
   .master-detail.assistants-md:not([data-detail-open]) > .assistant-thread-pane { display: none; }
+  /* A phone stacks the cards at the column's width, so a waiting approval and all three of its
+     buttons show without a sideways scroll nobody would know to try. Many cards scroll in place
+     rather than pushing the transcript off the screen. */
+  .assistant-work-cards {
+    flex-direction: column;
+    max-height: 40vh;
+    padding: 0;
+    overflow-x: visible;
+    overflow-y: auto;
+  }
+  .assistant-work-card {
+    flex: none;
+    min-width: 0;
+    max-width: none;
+  }
   .master-detail.assistants-md[data-detail-open] > .master-detail-list { display: none; }
 }
 /* Project management --------------------------------------------------- */
