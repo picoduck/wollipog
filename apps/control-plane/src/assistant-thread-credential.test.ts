@@ -315,3 +315,63 @@ test("launched caps come out of the assistant's own allowance, and deleting a se
     assert.ok(h.db.assistantThreads.costs(thread.id).launchedHeldUsd >= 10);
   } finally { await h.close(); }
 });
+
+const launchWith = (id: number, locationId: string, extra: Record<string, unknown>) => {
+  const message = launch(id, locationId);
+  message.params.arguments = { ...message.params.arguments, ...extra } as typeof message.params.arguments;
+  return message;
+};
+
+test("a refused launch reserves nothing, and an unspent deleted launch gives its cap back", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const env = await h.provision(thread.sessionId);
+    const refused = resultOf((await h.callTools(env, launchWith(21, h.location.id, { agentId: "no-such-agent" })))[0]);
+    assert.equal(refused.receipt.status, "failed");
+    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, ASSISTANT_THREAD_LIMITS.costUsd, "the backing allowance is untouched");
+    const worker = resultOf((await h.callTools(env, launchWith(22, h.location.id, { config: { costBudgetUsd: 10 } })))[0]);
+    assert.equal(h.db.getSession(worker.sessionId)!.costBudgetUsd, 10, "the corrected launch gets its full request");
+    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 15);
+    // Deleting the worker before it spent anything releases its cap at the next admission.
+    assert.equal(h.svc.delete(worker.sessionId).ok, true);
+    const next = resultOf((await h.callTools(env, launch(23, h.location.id)))[0]);
+    assert.equal(h.db.getSession(next.sessionId)!.costBudgetUsd, ASSISTANT_THREAD_LIMITS.costUsd);
+    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 0.01, "the new launch holds the rest; the assistant keeps nothing extra");
+  } finally { await h.close(); }
+});
+
+test("a deleted descendant's spend stays inside its tree's commitment", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const env = await h.provision(thread.sessionId);
+    const worker = resultOf((await h.callTools(env, launchWith(31, h.location.id, { config: { costBudgetUsd: 10 } })))[0]);
+    h.db.createSession({ id: "s_tree_child", parentSessionId: worker.sessionId, runnerId: "r", workspaceId: "w", agentId: "claude",
+      title: "Child", driver: "claude-code", useWorktree: false, config: {}, now: Date.now() });
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=5 WHERE id=?").run("s_tree_child");
+    assert.deepEqual(h.db.assistantThreads.costs(thread.id), { spentUsd: 5, backingSpentUsd: 0, launchedHeldUsd: 10 });
+    assert.equal(h.svc.delete("s_tree_child").ok, true);
+    assert.deepEqual(h.db.assistantThreads.costs(thread.id), { spentUsd: 5, backingSpentUsd: 0, launchedHeldUsd: 10 });
+    const other = resultOf((await h.callTools(env, launch(32, h.location.id)))[0]);
+    assert.equal(h.db.getSession(other.sessionId)!.costBudgetUsd, 15, "the other $15 is still available");
+  } finally { await h.close(); }
+});
+
+test("removing a worker's Machine keeps the thread's spend", async () => {
+  const h = await harness();
+  try {
+    h.db.registerRunner({ runnerId: "r2", hostname: "second", os: "linux", version: "fixture",
+      workspaces: [{ id: "w2", name: "Other", path: "/fixture/other" }], agents: [claude] }, Date.now(), PROTOCOL_VERSION);
+    const project = h.db.createProject({ name: "Elsewhere" });
+    const remote = h.db.addProjectLocation(project.id, { runnerId: "r2", workspaceId: "w2" });
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const env = await h.provision(thread.sessionId);
+    const worker = resultOf((await h.callTools(env, launch(41, remote.id)))[0]);
+    assert.equal(h.db.getSession(worker.sessionId)!.runnerId, "r2");
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=7 WHERE id=?").run(worker.sessionId);
+    assert.ok(h.db.deleteRunner("r2"));
+    assert.equal(h.db.getSession(worker.sessionId), null);
+    assert.equal(h.db.assistantThreads.costs(thread.id).spentUsd, 7);
+  } finally { await h.close(); }
+});
