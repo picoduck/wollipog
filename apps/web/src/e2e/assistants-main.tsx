@@ -12,6 +12,7 @@ import { Shell } from "../App.js";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { AssistantThread, AssistantThreadDefaults, CreateAssistantThreadRequest } from "../assistant-threads.js";
+import type { AssistantOwnerConfirmation } from "@wollipog/protocol";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
@@ -29,6 +30,7 @@ import "../styles.css";
  * `?threads=empty` one with no threads yet, and the default three threads, the first of which
  * launched two sessions, one of them waiting on a tool approval. The SPA path rides in `?path=`.
  * `window.assistantsAdvance()` finishes the running launched session, as its stream would.
+ * `?confirm=N` (1–3) gives the first thread N owner confirmations waiting for its owner (#4665).
  */
 const SCOPE = "assistants-e2e";
 const params = new URLSearchParams(location.search);
@@ -108,6 +110,26 @@ const sessions = new Map<string, SessionView>([
 ]);
 
 const access = { level: "full_access", destructive: "ask" } as const;
+
+/** `?confirm=N` (#4665): the first thread's assistant asked for N destructive commands (1–3) and waits
+ * for its owner: stop a session it launched, archive another, then stop a third. Approve Once and
+ * Deny settle one and republish the thread. */
+function confirmation(index: number): AssistantOwnerConfirmation {
+  const stop = index !== 1;
+  const [sessionId, label, worktree] = [["sess-flaky", "Fix the Flaky Upload Test", "flaky-upload"],
+    ["sess-deps", "Bump the Vite Group", "bump-vite"], ["sess-release", "Ship the Release Notes", "release-notes"]][index]!;
+  return {
+    id: `aoc_${index}_${sessionId}`, threadId: "thr_triage", operation: stop ? "session_stop" : "session_archive",
+    title: stop ? "Stop Session" : "Archive Session",
+    summary: stop ? "Stops the session. Its transcript is kept, but it takes no further messages until it is restarted."
+      : "Stops the session if it is running, then archives it. Its transcript is kept, and it can be unarchived later.",
+    target: { kind: "session", id: sessionId!, label: label! },
+    impact: [{ label: "Status", value: "Running" }, { label: "Worktree Path", value: `/repos/wollipog/.worktrees/${worktree}` }],
+    arguments: [{ label: "sessionId", value: sessionId! }],
+    status: "pending", createdAt: NOW - minute + index, expiresAt: NOW + 59 * minute, resolvedAt: null,
+  };
+}
+const confirmationCount = Math.min(3, Math.max(0, Number(params.get("confirm") ?? 0) || 0));
 function thread(id: string, sessionId: string, overrides: Partial<AssistantThread>): AssistantThread {
   const backing = sessions.get(sessionId)!;
   return {
@@ -118,7 +140,8 @@ function thread(id: string, sessionId: string, overrides: Partial<AssistantThrea
 }
 
 let threads: AssistantThread[] = scenario === "some" ? [
-  thread("thr_triage", "sess-triage", { status: "needs_you", launchedSessionIds: ["sess-flaky", "sess-deps"], lastActivityAt: NOW - minute }),
+  thread("thr_triage", "sess-triage", { status: "needs_you", launchedSessionIds: ["sess-flaky", "sess-deps"], lastActivityAt: NOW - minute,
+    ...(confirmationCount > 0 ? { confirmations: Array.from({ length: confirmationCount }, (_unused, index) => confirmation(index)) } : {}) }),
   thread("thr_release", "sess-release", { status: "working", harness: "codex", lastActivityAt: NOW - 3 * minute }),
   thread("thr_cleanup", "sess-cleanup", { status: "done" }),
   // Archived: the list leaves it out, and a link to it opens it on its own.
@@ -233,6 +256,19 @@ const found = (threadId: string) => {
   return match;
 };
 
+function settleConfirmation(threadId: string, confirmationId: string, intent: "approve" | "deny") {
+  const current = found(threadId);
+  const asked = (current.confirmations ?? []).find((candidate) => candidate.id === confirmationId)!;
+  const confirmation: AssistantOwnerConfirmation = intent === "approve"
+    ? { ...asked, status: "executed", resolvedAt: Date.now(), outcome: { receiptStatus: "succeeded" } }
+    : { ...asked, status: "denied", resolvedAt: Date.now(), outcome: { reason: "The owner denied it." } };
+  document.body.dataset.confirmationAnswer = `${confirmationId}:${intent}`;
+  const settled = { ...current, status: "working" as const, confirmations: (current.confirmations ?? []).filter((candidate) => candidate.id !== confirmationId) };
+  threads = threads.map((candidate) => candidate.id === threadId ? settled : candidate);
+  publish(settled);
+  return { confirmation: structuredClone(confirmation), thread: structuredClone(settled) };
+}
+
 /** The control plane publishes every thread change to its owner, as `assistant_thread_upsert`. */
 function publish(changed: AssistantThread) {
   socket?.push({ type: "assistant_thread_upsert", userId: "usr_owner", thread: structuredClone(changed) } as ControlPlaneToUi);
@@ -279,6 +315,10 @@ const client = {
     publish(renamed);
     return { thread: structuredClone(renamed) };
   },
+  // `?confirm=1`: Approve Once runs the bound command once and Deny refuses it; either way the
+  // thread stops listing the request and is republished.
+  approveAssistantConfirmation: async (threadId: string, confirmationId: string) => settleConfirmation(threadId, confirmationId, "approve"),
+  denyAssistantConfirmation: async (threadId: string, confirmationId: string) => settleConfirmation(threadId, confirmationId, "deny"),
   archiveAssistantThread: async (threadId: string) => {
     const archived = { ...found(threadId), status: "archived" as const, archivedAt: Date.now() };
     threads = threads.map((candidate) => candidate.id === threadId ? archived : candidate);

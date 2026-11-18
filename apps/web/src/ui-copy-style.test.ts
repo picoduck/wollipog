@@ -313,6 +313,11 @@ const LABEL_FRAGMENTS: readonly LabelFragment[] = [
     fragment: "s",
     reason: 'the plural suffix of "{hiddenCount} More Hunk{…}", which reads "3 More Hunks"',
   },
+  {
+    file: "e2e/assistants-main.tsx",
+    fragment: "sessionId",
+    reason: "an Assistant command's exact argument name in a fixture owner confirmation, which the card shows verbatim in code (#4665)",
+  },
 ];
 
 /**

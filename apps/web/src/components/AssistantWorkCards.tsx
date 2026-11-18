@@ -19,7 +19,8 @@ import { BusyButton } from "./ui/BusyButton.js";
  * opens on it.
  *
  * `confirmations` is the seam for owner confirmations bound to the thread itself (#4665): they are
- * drawn first, ahead of the work they would unblock.
+ * drawn first, ahead of the work they would unblock, in their own list. Only the work cards scroll,
+ * so an owner's action is never left at a scroll edge.
  */
 export function AssistantWorkCards({ sessionIds, confirmations }: {
   sessionIds: readonly string[];
@@ -37,10 +38,12 @@ export function AssistantWorkCards({ sessionIds, confirmations }: {
   if (sessionIds.length === 0 && !confirmations) return null;
   return (
     <section className="assistant-work" aria-label="Launched Work">
-      <ul className="assistant-work-cards">
-        {confirmations}
-        {ordered.map((sessionId) => <AssistantWorkCard key={sessionId} sessionId={sessionId} />)}
-      </ul>
+      {confirmations && <ul className="assistant-work-confirmations" aria-label="Approvals Needed">{confirmations}</ul>}
+      {ordered.length > 0 && (
+        <ul className="assistant-work-cards">
+          {ordered.map((sessionId) => <AssistantWorkCard key={sessionId} sessionId={sessionId} />)}
+        </ul>
+      )}
     </section>
   );
 }

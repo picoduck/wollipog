@@ -7434,6 +7434,56 @@ body.shell-dock-dragging * {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
+/* A thread's pending requests, in their own list ahead of its work cards (AssistantWorkCards). Each
+   keeps a readable width and its whole height. On desktop the list scrolls sideways when several are
+   waiting, and where the requests and the work cards' own floor (`.assistant-work-cards`) do not both
+   fit, the row wraps and the work cards take a full line below. Neither is ever squeezed to nothing.
+   On a phone (below) they stack above the work cards, and the whole area scrolls within a bound. */
+.assistant-work-confirmations {
+  display: flex;
+  flex: 0 1 auto;
+  gap: var(--space-2);
+  min-width: min(440px, 100%);
+  max-width: 100%;
+  margin: 0;
+  padding: 0 0 var(--space-1);
+  overflow-x: auto;
+  list-style: none;
+}
+.assistant-work-confirmations > .request-card {
+  flex: none;
+  width: 440px;
+  max-width: 100%;
+}
+.assistant-work-confirmations > .request-card > .request-card-body {
+  flex: none;
+  overflow: visible;
+}
+/* With requests waiting, the requests and work cards scroll together within a bound at every width,
+   wrapped or not, so the transcript and composer always keep their room. A phone (below) allows
+   more, enough for a whole request. */
+.assistant-work:has(> .assistant-work-confirmations) {
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+@media (max-width: 760px) {
+  .assistant-work-confirmations {
+    flex: none;
+    flex-direction: column;
+    min-width: 0;
+    max-width: none;
+    padding: 0;
+    overflow: visible;
+  }
+  .assistant-work-confirmations > .request-card { width: auto; }
+  /* Tall enough to show a whole request and the start of what follows. */
+  .assistant-work:has(> .assistant-work-confirmations) { max-height: 60vh; }
+  .assistant-work:has(> .assistant-work-confirmations) > .assistant-work-cards {
+    max-height: none;
+    overflow-y: visible;
+  }
+}
 /* The card in a side panel's detail (#2206): flush on the panel, with no wash or frame, a title-sized
    heading, and its footer stuck to the panel's lower edge above a hairline. The detail scrolls as one
    page, so a short panel never squeezes the card's body away. */
@@ -13126,10 +13176,19 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-thread-access { color: var(--text); }
 /* AssistantWorkCards.tsx: one scrolling row of cards, so many launches never push the transcript
    off the pane; each card opens its session, and a waiting approval rides on its card. */
-.assistant-work { min-width: 0; }
+/* Pending requests (#4665) and the work cards share one row when both fit, the work cards keeping at
+   least a card's width; otherwise the row wraps and the work cards take the next line. */
+.assistant-work {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
 .assistant-work-cards {
   display: flex;
+  flex: 1 1 280px;
   gap: var(--space-2);
+  min-width: min(280px, 100%);
   margin: 0;
   padding: 0 0 var(--space-1);
   overflow-x: auto;
@@ -13204,7 +13263,13 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   /* A phone stacks the cards at the column's width, so a waiting approval and all three of its
      buttons show without a sideways scroll nobody would know to try. Many cards scroll in place
      rather than pushing the transcript off the screen. */
+  /* Pending requests stack above the cards at their whole height; only the cards' column scrolls. */
+  .assistant-work {
+    flex-direction: column;
+    flex-wrap: nowrap;
+  }
   .assistant-work-cards {
+    flex: none;
     flex-direction: column;
     max-height: 40vh;
     padding: 0;
