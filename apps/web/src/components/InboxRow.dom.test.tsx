@@ -573,7 +573,7 @@ test("a verified-complete Full Control root reads Campaign Complete in a success
     result: { revision: "r1", at: NOW, owner: "human" as const }, acknowledgedRevision: null };
   const campaign = (control: unknown) => ({ status: "verified_complete", policyRevision: 3, control }) as unknown as NonNullable<SessionView["orchestratorCampaign"]>;
   await withRow(baseSession({ attention, orchestratorCampaign: campaign({ mode: "full_control", boundary: {} }) }), (container) => {
-    assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Awaiting Prompt", "Campaign Complete"]);
+    assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Campaign Complete"], "in place of Awaiting Prompt (#4369)");
     assert.ok(badges(container)[0]!.classList.contains("t-success"));
     assertNoDomNode(container.querySelector(".status.t-review"));
   });
@@ -589,13 +589,13 @@ test("an active Full Control root reads Campaign Active, then Campaign Complete 
   const campaign = (status: string) => ({ status, policyRevision: 3,
     control: { mode: "full_control", boundary: {} } }) as unknown as NonNullable<SessionView["orchestratorCampaign"]>;
   await withRow(baseSession({ attention, orchestratorCampaign: campaign("active") }), (container) => {
-    assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Awaiting Prompt", "Campaign Active"]);
+    assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Campaign Active"], "in place of Awaiting Prompt (#4369)");
     assert.ok(badges(container)[0]!.classList.contains("t-info"));
     assertNoDomNode(container.querySelector(".status.t-review"));
   });
-  for (const [status, shown] of [["verified_complete", "Campaign Complete"], ["waiting_human", "Ready for Review"]] as const) {
+  for (const [status, shown] of [["verified_complete", ["Campaign Complete"]], ["waiting_human", ["Awaiting Prompt", "Ready for Review"]]] as const) {
     await withRow(baseSession({ attention, orchestratorCampaign: campaign(status) }), (container) => {
-      assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Awaiting Prompt", shown], status);
+      assert.deepEqual(allBadges(container).map((badge) => badge.textContent), shown, status);
     });
   }
 });

@@ -74,8 +74,9 @@ const CAMPAIGN_CLEANUP_DESCRIPTION = "This Full Control campaign finished, and s
 const CAMPAIGN_COMPLETE_DESCRIPTION = "This Full Control campaign finished and the server verified it. Its result is informational.";
 
 /**
- * A session header's status (#2938): `sessionStatusSummary`, plus the campaign state an at-rest
- * Full Control root's row and Board card already show, decided by the same server facts.
+ * A session header's status (#2938): `sessionStatusSummary`, plus the campaign state of an at-rest
+ * Full Control root, decided by the server's facts. Its row and Board card take their lifecycle
+ * from the same projection (#4369), so every surface names the root the same way.
  *
  * - Campaign Active, Campaign Complete and Complete, Needs Cleanup take the place of Awaiting Prompt:
  *   the person owes such a root no prompt. Beside a Completed root they are the secondary.
@@ -86,7 +87,11 @@ const CAMPAIGN_COMPLETE_DESCRIPTION = "This Full Control campaign finished and t
  * Custom campaign or a descendant leaves the summary as it is.
  */
 export function sessionHeaderStatusSummary(session: SessionStatusSource, context: SessionStatusContext = {}): SessionStatusSummary {
-  const summary = sessionStatusSummary(session, context);
+  return withFullControlCampaignState(session, sessionStatusSummary(session, context), context);
+}
+
+function withFullControlCampaignState(session: SessionStatusSource, summary: SessionStatusSummary,
+  context: SessionStatusContext): SessionStatusSummary {
   const { primary } = summary;
   const awaitingPrompt = primary.meta.label === statusMeta("session", "idle").label;
   const completed = primary.meta.label === statusMeta("session", "completed").label;
@@ -200,10 +205,18 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
     secondary = { kind: "lifecycle", meta: statusMeta("session", context.familyProgressing === false ? "children_pending" : "children_working"),
       description: "Child sessions still have unfinished work.", needsYou: false };
   }
-  const lifecycle = { meta: summary.primary.meta, title: summary.primary.description,
-    ariaLabel: `Status: ${conditionName(summary.primary)}` };
+  // #4369: where the header shows an at-rest Full Control root's campaign state in place of Awaiting
+  // Prompt, the row and card do too, from the same projection. Only while the row's own secondary is
+  // that campaign state, or the children's work beside it; a fired reminder, which the header does
+  // not see, or any other secondary keeps the labels the row has always shown.
+  const campaign = reminder?.state === "fired" ? null : withFullControlCampaignState(session, summary, {});
+  const shown = campaign && campaign.primary.kind === "campaign" && (!secondary ||
+    secondary.meta.label === campaign.primary.meta.label || secondary.meta.label === statusMeta("session", "children_working").label ||
+    secondary.meta.label === statusMeta("session", "children_pending").label) ? campaign : summary;
+  const lifecycle = { meta: shown.primary.meta, title: shown.primary.description,
+    ariaLabel: `Status: ${conditionName(shown.primary)}` };
   const badge = secondary && secondary !== summary.primary && secondary.meta.label !== lifecycle.meta.label
     ? { meta: secondary.meta, count: secondary.count, title: secondary.description, ariaLabel: `Status: ${conditionName(secondary)}` } : null;
-  const details = [...new Set([...summary.conditions.map((condition) => condition.meta.label + ": " + condition.description), ...(badge ? [badge.title] : [])])].join("\n");
+  const details = [...new Set([...shown.conditions.map((condition) => condition.meta.label + ": " + condition.description), ...(badge ? [badge.title] : [])])].join("\n");
   return { lifecycle, badge, others, details };
 }
