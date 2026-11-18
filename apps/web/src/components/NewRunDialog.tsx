@@ -495,7 +495,7 @@ function RunMemberAccount({ runner, agentId, projectId, projectsSupported, works
     JSON.stringify([runner.runnerId, agentId, chosen, accounts.map((account) => [account.id, account.label])]),
   );
   if (!needsChoice && !chosen) {
-    return preview && accounts.length > 1 ? <ExpectedProviderAccount runner={runner} preview={preview} providerName={memberName ?? (agent ? agentDisplayName(agent) : undefined)} /> : null;
+    return preview && accounts.length > 1 ? <ExpectedProviderAccount runner={runner} preview={preview} providerName={agent ? agentDisplayName(agent) : undefined} /> : null;
   }
   const label = `Account for ${name}`;
   return (

@@ -6219,10 +6219,9 @@ body.shell-dock-dragging * {
 @media (prefers-reduced-motion: reduce) {
   .browser-load-bar::before { width: 100%; animation: none; }
 }
-.browser-artifact-list,
-/* A two-line artifact row (§5.2), in the Browser and in Run detail: the kind on a 32px tile, the
-   title over the kind (and who saved it, in Run detail) and the time, and the size trailing on one
-   line however narrow the row gets. */
+.browser-artifact-list { margin: 0; padding: 0; list-style: none; }
+/* A two-line artifact row (§5.2): the kind on a 32px tile, the title over the kind and time,
+   and the size trailing on one line however narrow the row gets. */
 .art-kind {
   display: inline-flex;
   flex: none;
