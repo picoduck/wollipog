@@ -324,7 +324,7 @@ import {
 import { registerAuthenticationRecoveryRoutes } from "./authentication-recovery-routes.js";
 import { AutomationsService } from "./automations.js";
 import { buildAuthorizedSessionTranscriptExport, type TranscriptExportFormat } from "./session-exports.js";
-import { principalCanReadArtifact } from "./artifact-exports.js";
+import { artifactReadSession } from "./artifact-exports.js";
 import { registerArtifactExportRoute } from "./artifact-export-route.js";
 import { registerRunnerCredentialRoutes } from "./runner-credential-route.js";
 import { SessionRoleConversions, registerSessionRoleRoutes } from "./session-role-conversion.js";
@@ -801,7 +801,7 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   if (routePath === "/api/artifacts/:artifactId/export") {
     const artifactId = typeof params.artifactId === "string" ? params.artifactId : "";
     const scope = artifactId ? db.artifactScope(artifactId) : null;
-    if (!scope || !principalCanReadArtifact(db, principal, scope)) {
+    if (!scope || !artifactReadSession(db, principal, scope)) {
       return { statusCode: 404, error: "artifact not found" };
     }
   }

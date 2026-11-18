@@ -44,6 +44,7 @@ import {
   type OrchestratorCampaignPolicy,
 } from "@wollipog/protocol";
 import { archiveSessionPage } from "./archive-session-page.js";
+import { artifactReadSession, buildAuthorizedArtifactExport } from "./artifact-exports.js";
 import { artifactBlobFilePath } from "./artifact-blob-store.js";
 import { parseRateTable } from "./usage-pricing.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
@@ -8924,6 +8925,14 @@ test("governance policies persist ordered selectors/conditions and support updat
 test("upgrading populated Pods, workflow runs and comparison runs preserves sessions, artifacts and automations", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-workflow-removal-"));
   const path = join(root, "cp.db");
+  const imageBytes = Buffer.from("/9j/2Q==", "base64");
+  const prompt: SessionEventPayload = {
+    kind: "user_message", text: "Compare this image",
+    images: [{
+      artifactId: "comparison-image", mimeType: "image/jpeg", sizeBytes: imageBytes.length,
+      sha256: createHash("sha256").update(imageBytes).digest("hex"),
+    }],
+  };
   const spec: AutomationSpec = {
     name: "Nightly", cron: "0 2 * * *", timezone: "UTC", enabled: true,
     misfirePolicy: { kind: "skip" }, runnerPolicy: { kind: "wait" }, concurrencyPolicy: "wait",
@@ -8936,8 +8945,10 @@ test("upgrading populated Pods, workflow runs and comparison runs preserves sess
       legacy.registerRunner(meta(), 500);
       legacy.createSession(newSession());
       legacy.createSession(newSession({ id: "sess-compare", title: "Comparison Member", useWorktree: true }));
-      const transcriptEvent = legacy.appendEvent("sess-compare", { kind: "agent_message", text: "Comparison result" }, 700);
       const comparisonImage = createScreenshotArtifact(legacy, { sessionId: "sess-compare" }, "comparison-image");
+      legacy.appendEvent("sess-compare", prompt, 700);
+      const unindexedPrompt = legacy.appendEvent("sess-compare", prompt, 701);
+      legacy.appendEvent("sess-1", prompt, 702);
       createScreenshotArtifact(legacy, { sessionId: "sess-1" }, "workflow-output");
       createScreenshotArtifact(legacy, { sessionId: "sess-1" }, "session-image");
       const compareBlob = comparisonImage.sha256;
@@ -9026,9 +9037,10 @@ test("upgrading populated Pods, workflow runs and comparison runs preserves sess
         UPDATE automation_executions SET action_kind='workflow_run', workflow_instance_id='instance'
         WHERE execution_id='running-execution';
       `);
-      assert.ok(transcriptEvent);
-      raw.prepare("INSERT INTO session_event_artifacts (event_id, artifact_id) VALUES (?, 'comparison-image')")
-        .run(transcriptEvent.seq);
+      assert.equal(raw.prepare("DELETE FROM session_event_artifacts WHERE event_id=? AND artifact_id='comparison-image'")
+        .run(unindexedPrompt.seq).changes, 1);
+      raw.prepare("UPDATE session_events SET payload=json_insert(payload, '$.images[#]', 'invalid legacy image') WHERE id=?")
+        .run(unindexedPrompt.seq);
       assert.equal(raw.prepare("SELECT blob_key FROM artifacts WHERE id='comparison-image'").get()?.blob_key, compareBlob);
       assert.deepEqual(raw.prepare("PRAGMA foreign_key_check").all(), []);
     } finally {
@@ -9056,13 +9068,29 @@ test("upgrading populated Pods, workflow runs and comparison runs preserves sess
         assert.equal(comparison?.useWorktree, true);
         assert.equal(comparison?.role, "normal");
         assert.ok(comparison && !Object.hasOwn(comparison, "runId"));
-        assert.equal(db.listEvents("sess-compare")[0]?.payload.kind, "agent_message");
+        assert.deepEqual(db.listEvents("sess-compare")[0]?.payload, prompt);
         assert.equal(db.getArtifact("session-image")?.sessionId, "sess-1");
         assert.equal(db.getArtifact("workflow-output")?.data, "/9j/2Q==");
         assert.equal(db.getArtifact("comparison-image")?.data, "/9j/2Q==");
         assert.equal(db.getArtifact("comparison-image")?.sessionId, undefined);
         assert.ok(db.sessionEventReferencesArtifact("sess-compare", "comparison-image"));
         assert.ok(!db.sessionEventReferencesArtifact("sess-1", "comparison-image"));
+        assert.equal(raw.prepare("SELECT COUNT(*) AS count FROM session_event_artifacts WHERE artifact_id='comparison-image'")
+          .get()?.count, 2, "the historical prompt is indexed only for a member of the same run");
+        const identity = db.localIdentityContext();
+        const owner: HumanPrincipal = { kind: "human", actorId: identity.userId, ...identity };
+        const outsider: HumanPrincipal = { ...owner, actorId: "outsider", userId: "outsider", organizationId: "other-org" };
+        const scope = db.artifactScope("comparison-image");
+        assert.ok(scope);
+        assert.equal(artifactReadSession(db, owner, scope), "sess-compare");
+        assert.equal(artifactReadSession(db, outsider, scope), undefined);
+        const exported = buildAuthorizedArtifactExport(db, owner, "comparison-image");
+        assert.ok(exported.ok);
+        assert.deepEqual(exported.body, imageBytes);
+        assert.deepEqual(buildAuthorizedArtifactExport(db, outsider, "comparison-image"), {
+          ok: false, status: 404, error: "artifact not found", code: "not_found",
+        });
+        assert.equal(buildAuthorizedArtifactExport(db, owner, "workflow-output").ok, false);
         const artifactIndexes = raw.prepare(
           "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='artifacts' ORDER BY name",
         ).all().map((row) => row.name);

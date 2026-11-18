@@ -680,6 +680,24 @@ function retireWorkflowEngine(db: DatabaseSync): void {
   }
 }
 
+const HISTORICAL_PROMPT_IMAGE = "CASE WHEN image.type='object' THEN image.value ELSE '{}' END";
+const HISTORICAL_PROMPT_IMAGE_ID = `json_extract(${HISTORICAL_PROMPT_IMAGE}, '$.artifactId')`;
+const HISTORICAL_PROMPT_IMAGE_MATCH = /* sql */ `
+  json_type(${HISTORICAL_PROMPT_IMAGE}, '$.artifactId')='text'
+  AND json_type(${HISTORICAL_PROMPT_IMAGE}, '$.mimeType')='text'
+  AND json_type(${HISTORICAL_PROMPT_IMAGE}, '$.sizeBytes')='integer'
+  AND json_type(${HISTORICAL_PROMPT_IMAGE}, '$.sha256')='text'
+  AND (SELECT COUNT(*) FROM json_each(${HISTORICAL_PROMPT_IMAGE}))=4
+  AND NOT EXISTS (
+    SELECT 1 FROM json_each(${HISTORICAL_PROMPT_IMAGE}) member
+     WHERE member.key NOT IN ('artifactId','mimeType','sizeBytes','sha256')
+  )
+  AND a.kind='screenshot' AND a.encoding='base64'
+  AND a.mime_type=json_extract(${HISTORICAL_PROMPT_IMAGE}, '$.mimeType')
+  AND a.size_bytes=json_extract(${HISTORICAL_PROMPT_IMAGE}, '$.sizeBytes')
+  AND a.sha256=json_extract(${HISTORICAL_PROMPT_IMAGE}, '$.sha256')
+`;
+
 /** Keep artifact bytes and associations while removing the legacy run foreign key. */
 function retireMultiAgentRuns(db: DatabaseSync, hasLegacyRunMembership: boolean): void {
   const hasRunArtifacts = db.prepare("PRAGMA table_info(artifacts)").all().some((column) => column.name === "run_id");
@@ -691,6 +709,20 @@ function retireMultiAgentRuns(db: DatabaseSync, hasLegacyRunMembership: boolean)
   db.exec("PRAGMA foreign_keys = OFF");
   try {
     db.exec("BEGIN IMMEDIATE");
+    if (hasLegacyRunMembership && hasRunArtifacts) {
+      // Some historical prompt events predate the reference index. Derive their image links
+      // while the old tables can still prove that the artifact and event belong to the same run.
+      db.exec(`
+        INSERT OR IGNORE INTO session_event_artifacts (event_id, artifact_id)
+        SELECT e.id, a.id
+          FROM artifacts a
+          JOIN sessions session ON session.run_id=a.run_id
+          JOIN session_events e ON e.session_id=session.id AND e.kind='user_message'
+          JOIN json_each(CASE WHEN json_valid(e.payload) THEN e.payload ELSE '{}' END, '$.images') image
+            ON a.id=${HISTORICAL_PROMPT_IMAGE_ID}
+         WHERE a.run_id IS NOT NULL AND a.session_id IS NULL AND ${HISTORICAL_PROMPT_IMAGE_MATCH}
+      `);
+    }
     if (hasRunArtifacts) {
       const columns = "id, session_id, kind, name, mime_type, encoding, data, blob_key, size_bytes, sha256, " +
         "created_by_kind, created_by_id, metadata, created_at";
@@ -708,7 +740,7 @@ function retireMultiAgentRuns(db: DatabaseSync, hasLegacyRunMembership: boolean)
     }
     db.exec("DROP TABLE IF EXISTS multi_agent_run_members; DROP TABLE IF EXISTS multi_agent_runs");
     for (const table of [
-      "session_event_artifacts", "session_steering_attempt_artifacts",
+      "artifacts", "session_event_artifacts", "session_steering_attempt_artifacts",
       "steering_owned_prompt_image_artifacts", "prepared_prompt_image_artifacts",
     ]) {
       if (db.prepare(`PRAGMA foreign_key_check(${table})`).get()) {
@@ -32655,12 +32687,23 @@ export class ControlPlaneDb {
     return this.artifact(row, true) as Artifact;
   }
 
-  artifactScope(artifactId: string): { sessionId?: string } | null {
-    const row = this.stmt("SELECT session_id FROM artifacts WHERE id=?").get(artifactId) as unknown as
-      { session_id: string | null } | undefined;
+  artifactScope(artifactId: string): Pick<Artifact, "artifactId" | "sessionId" | "kind"> | null {
+    const row = this.stmt("SELECT session_id, kind FROM artifacts WHERE id=?").get(artifactId) as unknown as
+      Pick<ArtifactRow, "session_id" | "kind"> | undefined;
     return row ? {
+      artifactId,
+      kind: row.kind,
       ...(row.session_id ? { sessionId: row.session_id } : {}),
     } : null;
+  }
+
+  sessionsReferencingArtifact(artifactId: string): string[] {
+    const rows = this.stmt(
+      `SELECT DISTINCT event.session_id FROM session_event_artifacts ref
+       JOIN session_events event ON event.id=ref.event_id
+       WHERE ref.artifact_id=?`,
+    ).all(artifactId) as { session_id: string }[];
+    return rows.map((row) => row.session_id);
   }
 
   /** Preserve access to images already linked from a session's transcript. */
@@ -32842,25 +32885,11 @@ export class ControlPlaneDb {
     try {
       this.stmt(
         `INSERT OR IGNORE INTO session_event_artifacts (event_id, artifact_id)
-         SELECT e.id, json_extract(image.value, '$.artifactId')
+         SELECT e.id, a.id
            FROM session_events e,
                 json_each(CASE WHEN json_valid(e.payload) THEN e.payload ELSE '{}' END, '$.images') image
-           JOIN artifacts a ON a.id=json_extract(image.value, '$.artifactId')
-          WHERE e.kind='user_message'
-            AND json_type(image.value)='object'
-            AND json_type(image.value, '$.artifactId')='text'
-            AND json_type(image.value, '$.mimeType')='text'
-            AND json_type(image.value, '$.sizeBytes')='integer'
-            AND json_type(image.value, '$.sha256')='text'
-            AND (SELECT COUNT(*) FROM json_each(image.value))=4
-            AND NOT EXISTS (
-              SELECT 1 FROM json_each(image.value) member
-               WHERE member.key NOT IN ('artifactId','mimeType','sizeBytes','sha256')
-            )
-            AND a.kind='screenshot' AND a.encoding='base64'
-            AND a.mime_type=json_extract(image.value, '$.mimeType')
-            AND a.size_bytes=json_extract(image.value, '$.sizeBytes')
-            AND a.sha256=json_extract(image.value, '$.sha256')
+           JOIN artifacts a ON a.id=${HISTORICAL_PROMPT_IMAGE_ID}
+          WHERE e.kind='user_message' AND ${HISTORICAL_PROMPT_IMAGE_MATCH}
             AND (
               a.session_id=e.session_id OR
               (a.session_id IS NOT NULL AND EXISTS (
