@@ -572,6 +572,25 @@ test("an attempt a delivery record ends at once keeps an archived child's verifi
   } finally { h.db.close(); }
 });
 
+test("an empty attempt opened after archived-history pruning keeps the child's report (#4684)", async () => {
+  const h = archivedVerifiedChild();
+  try {
+    // A removable trailing event, which retention prunes before the second item is assigned.
+    const trailing = h.db.appendEvent("child", { kind: "stderr", text: "Trailing diagnostic." }, Date.now()).seq;
+    const input = { cutoff: Number.MAX_SAFE_INTEGER, retentionDays: 1, now: Date.now(), maxEvents: 500,
+      maxPayloadBytes: 2_097_152, maxSearchLength: 65_536 };
+    while (!h.db.pruneArchivedHistoryBatch("child", input).finished) { /* prune to completion */ }
+    assert.equal(h.db.raw().prepare("SELECT 1 FROM session_events WHERE session_id='child' AND seq=?").get(trailing), undefined,
+      "the trailing event is pruned");
+    const report = h.db.durableFinalReportSeq("child");
+    assert.ok(report !== null, "pruning keeps the report");
+    await recordSecondDelivery(h);
+    assert.equal(h.db.durableFinalReportSeq("child"), report);
+    assert.equal(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: report,
+      followUpsAccounted: true }).ok, true);
+  } finally { h.db.close(); }
+});
+
 test("an open later attempt still supersedes an archived child's report (#4684)", () => {
   const h = archivedVerifiedChild();
   try {

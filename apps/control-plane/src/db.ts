@@ -7003,16 +7003,25 @@ export class ControlPlaneDb {
     };
   }
 
+  /** An attempt's boundary seq is the session's seq high water, the seq its next event follows,
+   * so a boundary taken after archived-history pruning still matches the high water that
+   * CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL compares it with (#4684). A session without events or
+   * pruning keeps a null boundary. */
   private campaignAttemptBoundary(sessionId: string): CampaignAttemptBoundary {
     const row = this.stmt(
       `SELECT event_epoch, runner_history_epoch,
-         (SELECT MAX(seq) FROM session_events WHERE session_id=sessions.id) AS seq
+         (SELECT MAX(seq) FROM session_events WHERE session_id=sessions.id) AS seq,
+         history_prune_through_seq
        FROM sessions WHERE id=?`,
-    ).get(sessionId) as { event_epoch: number; runner_history_epoch: number | null; seq: number | null } | undefined;
+    ).get(sessionId) as {
+      event_epoch: number; runner_history_epoch: number | null; seq: number | null; history_prune_through_seq: number | null;
+    } | undefined;
+    const seq = row?.seq == null && row?.history_prune_through_seq == null
+      ? null : Math.max(row?.seq ?? 0, row?.history_prune_through_seq ?? 0);
     return {
       eventEpoch: row?.event_epoch ?? null,
       runnerHistoryEpoch: row?.runner_history_epoch ?? null,
-      seq: row?.seq ?? null,
+      seq,
     };
   }
 
