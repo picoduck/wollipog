@@ -84,8 +84,8 @@ const navigation: ViewNavigation = { current: () => ({ name: "runners", section:
 function snapshot(runners: RunnerView[]): UiSnapshotMessage {
   return {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners, boxes: [], projects: [], sessions: [], runs: [], pods: [],
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    runners, boxes: [], projects: [], sessions: [], runs: [],
   };
 }
 

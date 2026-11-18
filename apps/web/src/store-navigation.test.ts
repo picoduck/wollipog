@@ -24,7 +24,7 @@ test("store navigation pushes only real in-app transitions", () => {
   const store = new Store({ name: "session", id: "s_1" }, (view) => pushed.push(view));
 
   assert.deepEqual(store.getState().view, { name: "session", id: "s_1" });
-  assert.deepEqual(uiStreamSubscriptions(store.getState()), { sessionIds: ["s_1"], podIds: [] },
+  assert.deepEqual(uiStreamSubscriptions(store.getState()), { sessionIds: ["s_1"] },
     "the first socket subscription starts at the deep-linked session, never at Board");
   store.navigate({ name: "session", id: "s_1" });
   assert.deepEqual(pushed, [], "opening the current view must not add duplicate history entries");
@@ -649,7 +649,7 @@ test("Inbox selection owns the retained live stream and changes targeted subscri
   const second = { id: 2, sessionId: "s2", seq: 1, ts: 2, payload: { kind: "agent_message", text: "two" } } as SessionEvent;
 
   store.setInboxSelection("s1");
-  assert.deepEqual(uiStreamSubscriptions(store.getState()), { sessionIds: ["s1"], podIds: [] });
+  assert.deepEqual(uiStreamSubscriptions(store.getState()), { sessionIds: ["s1"] });
   store.dispatch({ type: "msg", msg: { type: "session_event", event: first } });
   assert.equal(store.getState().events.get("s1")?.length, 1);
   const retained = store.getState().events.get("s1");
@@ -659,7 +659,7 @@ test("Inbox selection owns the retained live stream and changes targeted subscri
     "expand and collapse retain the selected preview timeline identity");
 
   store.setInboxSelection("s2");
-  assert.deepEqual(uiStreamSubscriptions(store.getState()), { sessionIds: ["s2"], podIds: [] });
+  assert.deepEqual(uiStreamSubscriptions(store.getState()), { sessionIds: ["s2"] });
   assert.equal(store.getState().events.has("s1"), false, "the prior preview stream is released");
   store.dispatch({ type: "msg", msg: { type: "session_event", event: second } });
   assert.equal(store.getState().events.get("s2")?.length, 1);
@@ -674,10 +674,10 @@ test("dot-segment resource ids serialize without browser path collapse", () => {
   }
 });
 
-test("the first snapshot makes missing run and pod routes authoritative", () => {
+test("the first snapshot makes missing run routes authoritative", () => {
   const store = new Store({ name: "run", id: "missing" });
   assert.equal(store.getState().snapshotLoaded, false);
-  store.dispatch({ type: "msg", msg: { type: "snapshot", runners: [], sessions: [], runs: [], pods: [] } });
+  store.dispatch({ type: "msg", msg: { type: "snapshot", runners: [], sessions: [], runs: [] } });
   assert.equal(store.getState().snapshotLoaded, true);
   assert.deepEqual(store.getState().view, { name: "run", id: "missing" });
 });
@@ -686,7 +686,7 @@ test("an exact authorized lookup can hydrate an archived session omitted from sn
   const store = new Store({ name: "session", id: "archived.txt" });
   store.loadSession({ id: "archived.txt", archived: true, eventEpoch: 0 } as SessionView);
   assert.equal(store.getState().sessions.get("archived.txt")?.archived, true);
-  assert.deepEqual(uiStreamSubscriptions(store.getState()), { sessionIds: ["archived.txt"], podIds: [] });
+  assert.deepEqual(uiStreamSubscriptions(store.getState()), { sessionIds: ["archived.txt"] });
 });
 
 test("a targeted reconnect keeps the routed archived timeline mounted until exact revalidation", () => {
@@ -703,8 +703,8 @@ test("a targeted reconnect keeps the routed archived timeline mounted until exac
   store.dispatch({
     type: "msg",
     msg: {
-      type: "snapshot", runners: [], sessions: [], runs: [], pods: [],
-      capabilities: { sessionSubscriptions: true },
+      type: "snapshot", runners: [], sessions: [], runs: [],
+      capabilities: { sessionSubscriptionsV2: true },
     },
   });
   assert.equal(store.getState().snapshotRevision, 1);
@@ -719,8 +719,8 @@ test("a targeted reconnect keeps the routed archived timeline mounted until exac
   store.dispatch({
     type: "msg",
     msg: {
-      type: "snapshot", runners: [], sessions: [], runs: [], pods: [],
-      capabilities: { sessionSubscriptions: true },
+      type: "snapshot", runners: [], sessions: [], runs: [],
+      capabilities: { sessionSubscriptionsV2: true },
     },
   });
   assert.equal(store.getState().sessions.has(archived.id), false);

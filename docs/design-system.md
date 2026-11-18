@@ -328,7 +328,7 @@ elevation with `1px solid var(--border-strong)` in both themes. The modal backdr
 | `--title-bar-h` | 40px | The macOS desktop app's strip at the top of the rail, which the traffic lights sit in (§4.1). |
 | `--bar-h` | 48px | Every bar: desktop session bar, detail bar, phone app bar, compact page header. §4.4. |
 | `--page-gutter` | 24px (16px phone) | Left and right padding of the page container. |
-| `--page-max` | 960px | List pages: Automations, Connections, Multi-Agent Runs, Pods, Archived Sessions. Left-aligned. |
+| `--page-max` | 960px | List pages: Automations, Connections, Multi-Agent Runs, Archived Sessions. Left-aligned. |
 | `--page-max-wide` | 1200px | Tables, charts and card grids: Usage and Cost. Left-aligned. |
 | `--page-max-form` | 760px | Settings content, single-form pages. |
 | `--measure` | 68ch | Prose. |
@@ -630,7 +630,7 @@ Rules
 - **Rail (desktop).** 64px, `--bg-elev`, hairline right edge. Square items at `--control-h-lg` (40px;
   48px on touch tablets), 20px outline icons,
   4px gap, 12px gap plus a hairline between groups: *Work* (Sessions, Automations, Projects),
-  *Oversight* (Multi-Agent Runs, Pods, Connections, Agent Skills), *Records* (Archived Sessions,
+  *Oversight* (Multi-Agent Runs, Connections, Agent Skills), *Records* (Archived Sessions,
   Usage and Cost). That is also the default rail order and digit order; a saved order is kept. Settings is pinned
   at the bottom. Active: `--accent` icon, 3px `--accent` bar on the left edge, `--surface-selected`
   fill. Hover: `--bg-elev-2`. Digit hints appear only in the tooltip ("Automations  2"), not as
@@ -694,11 +694,11 @@ Rules
   follows the operating system, and on Linux, where tao reads none as light, the desktop portal's
   theme is then read back and named). The browser build is unchanged. #1979.
 - **Window title.** Every route sets `document.title` to "<Page> – Wollipog", with the page title
-  from `viewTitle` ("Agent Skills – Wollipog"; a Session, Multi-Agent Run or Pod by its own title),
+  from `viewTitle` ("Agent Skills – Wollipog"; a Session or Multi-Agent Run by its own title),
   and the desktop app copies it to the native window for the taskbar and window switcher.
 - **One name per destination**, used for the rail tooltip, `aria-label`, page title, phone app bar,
   More sheet, palette, shortcut reference and Settings › Appearance › Navigation: Sessions,
-  Automations, Projects, Multi-Agent Runs, Pods, Connections, Agent Skills, Archived Sessions, Usage
+  Automations, Projects, Multi-Agent Runs, Connections, Agent Skills, Archived Sessions, Usage
   and Cost, Settings. Each `GLOBAL_VIEW_ITEMS` entry carries that one `name`, its page `description`
   (§4.2) and its `group`; back controls read "Back to <name>". "Inbox" is retired from all copy.
 - **Search.** A rail item "Search" (Ctrl/Cmd+K) at the top of the Work group and a search icon in the
@@ -764,7 +764,7 @@ tab (`PageHeaderActions`), so each tab brings its own primary to the one header.
 
 ### 4.3 Detail Bar (Entity Pages and the Session)
 
-Every entity view (Session, Run, Pod, Project, a Skill or Automation on phone) uses the same bar,
+Every entity view (Session, Run, Project, a Skill or Automation on phone) uses the same bar,
 extending the settled one-bar session chrome app-wide.
 
 ```
@@ -778,7 +778,7 @@ extending the settled one-bar session chrome app-wide.
 - One status badge (§11), placed right after the title.
 - Actions per §3.3. Destructive actions only in ⋯.
 - Background `--bg`, bottom hairline. No gradient.
-- The generic "Run" / "Pod" top bar title and the separate `.detail-head` with a `←` glyph are
+- The generic "Run" top bar title and the separate `.detail-head` with a `←` glyph are
   deleted. Project detail gets the same back control.
 - Session specifics follow the settled session designs: the one-bar desktop session chrome with a
   docked Pinned Summary, and the phone session header.
@@ -1375,7 +1375,7 @@ Rules
 ### 5.3 Cards (Grid)
 
 Use cards only when items are browsed visually side by side and each item is one object with a few
-facts (automation templates). Machines, instances, runs and pods are **lists** by
+facts (automation templates). Machines, instances and runs are **lists** by
 default (converge on the People & Devices anatomy).
 
 **Connections › Instances (#3002)** is the instance list: a `.page` under the shared Connections
@@ -2455,8 +2455,6 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Multi-Agent Run (`run`, `runStatus()`, #2974: the Runs list row) | Awaiting Decision (a workflow node waits at a gate), Approval Required (a member needs the person): warning · Running: info (pulse) · Failed (the workflow failed): danger. In that order; none while every member is idle. |
 | Run follow-up (`followUp`, #2976: each member's send in the run's Follow Up dialog) | Delivered: success (inline) · Failed: danger (inline, with the reason beside it) |
 | Request decision (`requestDecision`: the outcome of every Decision Record and of the settled question row, #2204) | Allowed, Answered, Answered by Policy, Answered by Parent, Rechecked Automatically: success · Rejected, Dismissed, Dismissed by Parent, Ended Early, Replaced, Expired, Resolved by Provider, Another Account Selected, Escalated, Resolved: neutral · Blocked (by a policy, or fail-closed by Wollipog): danger · Timed Out: warning. Always past tense, never a provider's option id. |
-| Pod (`podBadgeStatus()`, #2981: the pod page's bar) | Active (open, nothing running): info · Running (automatic turns or any member's turn): info (pulse) · Closed: neutral |
-| Pods list row (`podRowStatus()`, #2979) | Closed: neutral · Conflicted (the newest merge conflicted): warning · Failed (the newest merge failed): danger · Running (automatic turns or any member's turn): info (pulse). In that order; none for an idle open pod. |
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
 | Provider account | Signed In: success (inline) · Sign-In Required: warning · Signing In: info (pulse) · Signed Out, Status Unknown: neutral · Not Added: neutral (hollow dot; a new account's sign-in ended because the account is already on the machine, #2996) |
 | Usage (provider availability) | Available: success · Approaching Limit: warning · Temporarily Unavailable: danger |
@@ -2856,8 +2854,8 @@ One `State` component with variants; the states are **mutually exclusive** in th
   hold. A danger notice (§12.4) is centered as a block and keeps its own anatomy. Content a page
   shows under the state (Skills' "How Skills Work" steps, Machines' method rows at the form
   measure) is a centered block whose rows keep their own alignment. This covers every empty list
-  page (Sessions, Skills, Projects, Machines, Pods, Multi-Agent Runs, Automations, Outbound Events,
-  an empty Archive), a turned-off experiment, the app crash state, a missing session, run, pod or
+  page (Sessions, Skills, Projects, Machines, Multi-Agent Runs, Automations, Outbound Events,
+  an empty Archive), a turned-off experiment, the app crash state, a missing session, run or
   automation, and the shared transcript page. Where the area takes keyboard focus (Sessions), its
   inline padding keeps the content clear of the focus ring.
 - **Every other state is left-aligned** at its surface's padding: compact states in list columns and
@@ -2931,7 +2929,7 @@ the same notice with Reload and Copy Error Details; a page-level error is center
   destination's description on a destination route as for a crashed view, so the feature mounts
   without the header moving. Below it is an empty-style `State` with a flask icon, "{Name} Are Turned
   Off", a sentence on why it is hidden and what turning it on adds, **Turn On {Name}** ("Turn On
-  Multi-Agent Runs", "Turn On Pods"; primary, the same switch as Settings › Experimental; the feature
+  Multi-Agent Runs"; primary, the same switch as Settings › Experimental; the feature
   mounts in place) and Open Experimental Settings.
 - Below 760px the actions of all three stack at full width and are 44px tall.
 
@@ -2950,13 +2948,13 @@ the same notice with Reload and Copy Error Details; a page-level error is center
   rows stay, wrapped in `StaleContent` under a neutral `.inbox-list-status` "Reconnecting…" line, and
   the wrapper stays mounted, so reconnecting keeps the grid, its scroll and its focus.
 
-**An entity page before its entity loads** (Session, Run, Pod; `detailPlaceholder()`, #2202) shows one
+**An entity page before its entity loads** (Session, Run; `detailPlaceholder()`, #2202) shows one
 state with a next step, in the person's terms (never "control plane"):
 
 | State | Title | Sentence and actions |
 | --- | --- | --- |
 | Loading | Loading Session… | Transcript skeleton rows after 300ms; no sentence. |
-| Not found | Session Not Found | "It may have been deleted, or you may not have access." **Back to Sessions**, **Search Sessions** (opens the palette; a Run or Pod offers Back only). |
+| Not found | Session Not Found | "It may have been deleted, or you may not have access." **Back to Sessions**, **Search Sessions** (opens the palette; a Run offers Back only). |
 | Offline | Waiting to Reconnect | "Wollipog opens this session when the connection comes back." The offline banner has Retry Now. |
 | Not paired | Pair to Load Session | "This device needs to be paired before it can open sessions." The pairing banner is the next step. |
 | Load error | Couldn't Load Session | One sentence, **Retry**, and the raw error behind Show Details. |
@@ -3580,7 +3578,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   (Metric, the Range menu button, Group By and About These Numbers) on one line (#3010).
 - Session and detail bars: the status badge collapses to a dot + label only if it fits, else a dot
   with the label in its tooltip, keeping the session bar's `+N`; the project crumb is dropped;
-  text buttons become icon buttons with tooltips. `DetailBar` (Run, Pod, Project) does this now. Its
+  text buttons become icon buttons with tooltips. `DetailBar` (Run, Project) does this now. Its
   badge becomes a dot, with the label in the tooltip, when keeping the full badge would leave the
   truncated title under 200px (`DETAIL_TITLE_READABLE_PX`). A `primary` or `secondary` that carries
   an `icon` becomes a square icon button whose label is its tooltip and accessible name. The session
@@ -3759,8 +3757,8 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | Current | New |
 | --- | --- |
 | `.topbar` (title-only), `.view-heading`, `.skills-heading`, `.automation-heading`, `.projects-intro`, in-page `h2` | `PageHeader` → `.page-header` (`.page-title`, `.page-desc`, `.page-actions`, `.page-tabs`) |
-| `.topbar-create` (Runs `btn.sm`, Pods `icon-btn +`) | Page header primary `.btn.primary` with `+` icon |
-| `.detail-head` + `←` glyph (Run, Pod), session `.detail-head` | `.detail-bar` |
+| `.topbar-create` (Runs `btn.sm`) | Page header primary `.btn.primary` with `+` icon |
+| `.detail-head` + `←` glyph (Run), session `.detail-head` | `.detail-bar` |
 | `.btn` (padding-sized, 34px) | `.btn` (`--control-h`, secondary look) |
 | `.btn.sm` (26px) | `.btn.sm` (28px) |
 | `.btn.primary` gradient | `.btn.primary` flat |
@@ -3772,7 +3770,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | `.plus-section`, `.menu-label` (uppercase) | `.menu-label` (Title Case, `--type-label`) |
 | `.modal-head h2` 15px, `.modal-body` 18px pad, `.modal-foot` 14/18 pad | `.modal-head .modal-title` (`--type-title`), `.modal-body` (20), `.modal-foot` (16/20) |
 | `ConfirmationDialog` sentence-case question titles, default "Continue" | Title Case action titles, verb-matched confirm label; `.modal.sm` |
-| `.status-badge`, `.inbox-status-pill`, `.background-work-badge`, `.automation-state`, `.pod-status`, `.pod-orchestration-status`, `.workflow-status`, `.connection-status`, `.subscription-state`, `.loc-kind`, `.project-availability`, `.access-role-badge`, tool-row uppercase pills, receipt rectangles | `.status` (`.sm`/`.md`, `.inline`, tone classes `.t-info/.t-success/.t-warning/.t-danger/.t-neutral`) |
+| `.status-badge`, `.inbox-status-pill`, `.background-work-badge`, `.automation-state`, `.workflow-status`, `.connection-status`, `.subscription-state`, `.loc-kind`, `.project-availability`, `.access-role-badge`, tool-row uppercase pills, receipt rectangles | `.status` (`.sm`/`.md`, `.inline`, tone classes `.t-info/.t-success/.t-warning/.t-danger/.t-neutral`) |
 | `.tag`, `.tag-machine`, `.tag-agent`, `.tag-wt`, `.atag`, `.os-badge`, `.cctx-chip` | plain meta (`.meta-item`) or `.chip` (neutral) |
 | `.tab-count`, `.group-count` | `.count` (plain) or `.count-badge` (attention) |
 | rail `.rail-badge`, More sheet `.rail-more-count` (removed, #1967) | `CountBadge`, or `.rail-attention-dot` for Connections (§11.4) |
@@ -3787,7 +3785,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | `.inbox-tab`, `.connections-tabs > button`, `.settings-nav` on phone | `.tabs` / `.tab` |
 | `.ui-select-trigger` (160px min, content width), native `<select>` | `.select-trigger` (full width in `.field`, list min 280px) |
 | `ui/ChoiceControls` `Checkbox` (native 13px) | `.checkbox` + `.switch` |
-| `ChoiceCards` (`.ui-choice-cards`, `.ui-choice-card*`, trailing `.ui-choice-mark`), `.workflow-preset`, `.agent-pick`, `.pod-member-pick`, `.access-choice`, the People member checklist | `ChoiceRows` (`.choice-row`, leading `.radio-mark` / `.checkbox-mark`) or `ChoiceList` (`.choice-list`) (#1952) |
+| `ChoiceCards` (`.ui-choice-cards`, `.ui-choice-card*`, trailing `.ui-choice-mark`), `.workflow-preset`, `.agent-pick`, `.access-choice`, the People member checklist | `ChoiceRows` (`.choice-row`, leading `.radio-mark` / `.checkbox-mark`) or `ChoiceList` (`.choice-list`) (#1952) |
 | `.field` / `.access-form` (two systems) | `.field` (label, control, helper/error) |
 | `.ui-row`, `.ui-row-choice`, `.orchestrator-number-row`, `.orchestrator-policy-control`, `.rail-order-row`, `.agent-defaults-editor` grids | `.setting-row` (the row components moved with #2947 and Settings' hand-built rows with #3019; `.agent-defaults-editor` moves with #3024, and New Session's `.orchestrator-policy-control` with its own unit). `.rail-order-row` became the Navigation editor's fixed-column `.rail-nav-row` (#3021, §8.2) |
 | `.usage-table`, `.skills-table`, assignment matrix | `.table` (fixed layout) with phone row fallback |
@@ -3840,7 +3838,7 @@ document) rather than appending to the area where it was first needed. The timel
 over four regions of the stylesheet today, which is how one component drifts into several recipes.
 
 Two engineering fixes are not visual but cause visual bugs: key detail views by
-entity id (`RunDetail`, `PodDetail`) so drafts and errors do not carry across resources, and guard list
+entity id (`RunDetail`) so drafts and errors do not carry across resources, and guard list
 views on snapshot load and connection state so they render Loading or Reconnecting instead of a
 "No … Yet" empty state (§12.5).
 
@@ -3956,7 +3954,7 @@ with the Instances cards, #3002.)
 | Literal spacing, radius drift, no nesting rule | §2.4, §2.5 |
 | No page header; duplicate titles; inverted type scale; ragged action rows | §4.2, §3.2, §3.3 |
 | No page container; six left edges | §4.5 |
-| Three back patterns; triple chrome on Run and Pod | §4.3 |
+| Three back patterns; triple chrome on Run | §4.3 |
 | Buttons stretch to full-width bars; buttons wrap to 2 lines | §3.1 rules |
 | Accent overload; focus ring on page title, dialogs, panes | §2.2, §16.1 |
 | Tracked all-caps labels; `text-transform` Title Case shims | §2.3, §17.1 |

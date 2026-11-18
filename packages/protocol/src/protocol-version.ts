@@ -1505,6 +1505,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 384: Assistant thread credentials held by a runner-side MCP proxy; assistantRole floor (#4663).
   384,
   // v385 slot
+  // 385: Remove Pods and reserve the retired runner capability at protocol 52.
+  385,
   // v386 slot
   // v387 slot
   // v388 slot

@@ -507,7 +507,7 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
       }
       assert.ok(sessionId, `session was never created (runner never registered)\n${runnerOutput}`);
 
-      ui.send(JSON.stringify({ type: "session_subscriptions", revision: 1, sessionIds: [sessionId], podIds: [] }));
+      ui.send(JSON.stringify({ type: "session_subscriptions", revision: 1, sessionIds: [sessionId] }));
       await uiInbox.take(
         (m) => m.type === "session_subscriptions_applied" && (m.revision as number) === 1,
       );

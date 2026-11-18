@@ -6,7 +6,6 @@ export type ShortcutId =
   | "navigate-inbox"
   | "navigate-projects"
   | "navigate-runs"
-  | "navigate-pods"
   | "navigate-automations"
   | "navigate-usage"
   | "navigate-connections"
@@ -81,7 +80,7 @@ export type ShortcutId =
   | "stop-turn"
   | "exit-terminal";
 
-export type ShortcutScope = "Global" | "Sessions" | "Sessions List" | "Session" | "Session Reading" | "Run dialog" | "Follow Up dialog" | "Pod detail";
+export type ShortcutScope = "Global" | "Sessions" | "Sessions List" | "Session" | "Session Reading" | "Run dialog" | "Follow Up dialog";
 
 export type ShortcutGroup = "Navigation" | "Sessions List" | "Session Reading" | "Session" | "Actions" | "Help";
 
@@ -111,7 +110,6 @@ export const RAIL_SHORTCUT_IDS = {
   inbox: "navigate-inbox",
   automations: "navigate-automations",
   runs: "navigate-runs",
-  pods: "navigate-pods",
   runners: "navigate-connections",
   skills: "navigate-skills",
   projects: "navigate-projects",
@@ -279,13 +277,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     group: "Actions",
     label: "Start Multi-Agent Run",
     scope: "Run dialog",
-    binding: { key: "Enter", primary: true },
-  },
-  {
-    id: "relay-pod-note",
-    group: "Actions",
-    label: "Relay Note",
-    scope: "Pod detail",
     binding: { key: "Enter", primary: true },
   },
   {
@@ -770,8 +761,6 @@ export function advanceShortcutSequence(
 const EXPERIMENT_SHORTCUT_IDS: Partial<Record<ShortcutId, ExperimentId>> = {
   "navigate-runs": "multiAgent",
   "submit-run": "multiAgent",
-  "navigate-pods": "pods",
-  "relay-pod-note": "pods",
   "send-run-follow-up": "multiAgent",
 };
 

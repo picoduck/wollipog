@@ -207,7 +207,7 @@ function snapshot(sessions: SessionView[]): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: {
-      sessionSubscriptions: false,
+      sessionSubscriptionsV2: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
       projects: false,
@@ -216,7 +216,6 @@ function snapshot(sessions: SessionView[]): UiSnapshotMessage {
     boxes: [],
     sessions,
     runs: [],
-    pods: [],
   };
 }
 
@@ -397,7 +396,7 @@ test("InboxView preserves the server-authoritative Project count when reminders 
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false,
+        sessionSubscriptionsV2: false,
         boundedDelivery: false,
         paginatedSessionHistory: false,
         projects: true,
@@ -409,7 +408,6 @@ test("InboxView preserves the server-authoritative Project count when reminders 
       projects: [project],
       reminders: [],
       runs: [],
-      pods: [],
     });
   });
   const projectTab = [...container.querySelectorAll<HTMLElement>(".tabs-bar .tab")]
@@ -462,7 +460,7 @@ test("Active and Snoozed badges follow the selected Project split and live remin
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false,
+        sessionSubscriptionsV2: false,
         boundedDelivery: false,
         paginatedSessionHistory: false,
         projects: true,
@@ -474,7 +472,6 @@ test("Active and Snoozed badges follow the selected Project split and live remin
       projects: [alpha, beta],
       reminders: [reminder(alphaSnoozed.id), reminder(betaSnoozed.id)],
       runs: [],
-      pods: [],
     });
   });
   assert.equal(selectedTabCount(container), "3");
@@ -550,7 +547,7 @@ test("the Sessions header's New Session uses the active tab's preset, and ⋯ ex
   };
   await act(async () => {
     socket.push({ ...snapshot([session("project-session", 10, { projectId: project.id })]), projects: [project],
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true } });
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true } });
   });
 
   const header = container.querySelector(".page-header")!;
@@ -637,7 +634,7 @@ test("group tabs draw blocked and stalled counts as aria-hidden badges and name 
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false,
+        sessionSubscriptionsV2: false,
         boundedDelivery: false,
         paginatedSessionHistory: false,
         projects: true,
@@ -654,7 +651,6 @@ test("group tabs draw blocked and stalled counts as aria-hidden badges and name 
       ],
       projects: [alpha, beta],
       runs: [],
-      pods: [],
     });
   });
   const tab = (name: string) => [...container.querySelectorAll<HTMLElement>(".tabs-bar .tab")]
@@ -724,7 +720,7 @@ test("two groups with one name each name their machine in the tab, All Groups an
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
       runners: [runner("runner-a", "Studio Mac"), runner("runner-b", "Build Server 02")],
       boxes: [],
       sessions: [
@@ -734,7 +730,6 @@ test("two groups with one name each name their machine in the tab, All Groups an
       ],
       projects: [project("docs-a", "Docs Site", "runner-a"), project("docs-b", "Docs Site", "runner-b"), project("api", "API", "runner-a")],
       runs: [],
-      pods: [],
     });
   });
 
@@ -806,7 +801,7 @@ test("a Project's archive confirmation lists its sessions from Active and Snooze
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false,
+        sessionSubscriptionsV2: false,
         boundedDelivery: false,
         paginatedSessionHistory: false,
         projects: true,
@@ -818,7 +813,6 @@ test("a Project's archive confirmation lists its sessions from Active and Snooze
       projects: [alpha],
       reminders: [reminder(snoozed.id)],
       runs: [],
-      pods: [],
     });
   });
   const alphaTab = [...container.querySelectorAll<HTMLButtonElement>(".tabs-bar .tab")]
@@ -882,13 +876,12 @@ test("the tab the URL names survives widening from a phone to a desktop that rem
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
       runners: [],
       boxes: [],
       sessions: [session("alpha-one", 20, { projectId: "alpha" }), session("beta-one", 10, { projectId: "beta" })],
       projects: [project("alpha", "Alpha"), project("beta", "Beta")],
       runs: [],
-      pods: [],
     });
   });
   const tab = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".tabs-bar .tab")]
@@ -966,7 +959,7 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false,
+        sessionSubscriptionsV2: false,
         boundedDelivery: false,
         paginatedSessionHistory: false,
         projects: false,
@@ -977,7 +970,6 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
       sessions: [omitted, ordinary, orphaned, watchdog, failed, input, unsnoozed],
       reminders: pending,
       runs: [],
-      pods: [],
     });
   });
 
@@ -1273,7 +1265,7 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false,
+        sessionSubscriptionsV2: false,
         boundedDelivery: false,
         paginatedSessionHistory: false,
         projects: false,
@@ -1284,7 +1276,6 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
       sessions: [session("session-reminder", 10, { status: "input_required" })],
       reminders: [original],
       runs: [],
-      pods: [],
     });
   });
 
@@ -1394,7 +1385,7 @@ test("a 409 reconciles the open Snooze dialog without WebSocket delivery", async
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false,
+        sessionSubscriptionsV2: false,
         boundedDelivery: false,
         paginatedSessionHistory: false,
         projects: false,
@@ -1405,7 +1396,6 @@ test("a 409 reconciles the open Snooze dialog without WebSocket delivery", async
       sessions: [session("session-reminder", 10, { status: "input_required" })],
       reminders: [original],
       runs: [],
-      pods: [],
     });
   });
   await act(async () => { snoozedToggle(container).click(); });
@@ -2884,7 +2874,7 @@ test("the setup suggestion is one notice above an eligible Project's list, never
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
+        sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
         worktreeSetupConfig: true,
       },
       runners: [{
@@ -2901,7 +2891,6 @@ test("the setup suggestion is one notice above an eligible Project's list, never
       projects: [project("payments", "Payments Service"), project("docs", "Docs Site")],
       worktreeSetupNoticeDismissals: [],
       runs: [],
-      pods: [],
     });
   });
   const setupNotices = () => [...container.querySelectorAll('[aria-label^="Set Up"]')];
@@ -2981,7 +2970,7 @@ test("the list holds one notice: a machine sign-in first, then the Project's set
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
+        sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
         worktreeSetupConfig: true,
       },
       runners: [runner([pendingLogin])],
@@ -2994,7 +2983,6 @@ test("the list holds one notice: a machine sign-in first, then the Project's set
       projects: [project],
       worktreeSetupNoticeDismissals: [],
       runs: [],
-      pods: [],
     });
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
@@ -3088,7 +3076,7 @@ function capabilitySnapshot(sessions: SessionView[]): UiSnapshotMessage {
   return {
     ...snapshot(sessions),
     capabilities: {
-      sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false,
+      sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false,
       sessionReminders: true, stopBeforeArchive: true,
     },
     runners: [{
@@ -3406,7 +3394,7 @@ async function mountPhoneBar(name: string, options: {
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, sessionReminders: true },
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, sessionReminders: true },
       runners: [],
       boxes: [],
       sessions: [
@@ -3419,7 +3407,6 @@ async function mountPhoneBar(name: string, options: {
       projects: [project("alpha", "Alpha", 3), project("beta", "Beta", 2)],
       reminders: [reminder("beta-snoozed")],
       runs: [],
-      pods: [],
     });
   });
   const body = domWindow.document.body as unknown as HTMLElement;

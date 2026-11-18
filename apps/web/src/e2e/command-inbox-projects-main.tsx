@@ -19,7 +19,6 @@ import {
   type GitStatusInfo,
   type GitSummaryInfo,
   type InvokeSessionCommandRequest,
-  type PodView,
   type PromptImageInput,
   type ProjectLocationView,
   type ProjectView,
@@ -63,7 +62,6 @@ import { FeedbackProvider, useFeedback, type ToastOptions } from "../components/
 import { CommandLineIcon, InfoIcon, PanelRightIcon } from "../components/Icons.js";
 import { InboxView } from "../components/InboxView.js";
 import { NewSessionDialog, type NewSessionPreset } from "../components/NewSessionDialog.js";
-import { PodDetail } from "../components/PodsView.js";
 import { ProjectsView } from "../components/ProjectsView.js";
 import { RunDetail } from "../components/RunsView.js";
 import type { WorkflowInstanceDetail } from "@wollipog/protocol";
@@ -1610,70 +1608,20 @@ if (SCENARIO === "conversation-handoff") runner.agents.push({
     supportsImages: true, supportsApprovals: true, slashCommands: [] },
 });
 
-/**
- * `?pod=members` (#2980): the pod has a lead, a worker and a reviewer on one machine and folder, and
- * Recent Merges holding a conflict and a merge. `&podTurns=running` runs automatic turns at turn 3 of
- * 12 with the worker up; `&podTurns=stopped` stopped them at the turn limit. Off by default, so the
- * other cases see the empty pod they always have.
- */
-const POD_FIXTURE = FIXTURE_QUERY.get("pod") === "members";
-const POD_TURNS = FIXTURE_QUERY.get("podTurns");
+// Sample session used to verify a link to a former member still opens the session.
+const formerPodMember: SessionView[] = FIXTURE_QUERY.get("pod") === "members" ? [{
+  ...session("pod-worker", "Worker: migrate call sites", "alpha", "alpha-workspace"),
+  agentId: "codex",
+  agentName: "Codex",
+  driver: "codex-app-server",
+  useWorktree: true,
+  worktreePath: "/worktrees/pod-worker",
+}] : [];
 
-function podMemberSession(id: string, title: string, agentName: string, driver: SessionView["driver"]): SessionView {
-  return {
-    ...session(id, title, "alpha", "alpha-workspace"),
-    agentId: agentName.toLowerCase().replaceAll(" ", "-"),
-    agentName,
-    driver,
-    useWorktree: true,
-    worktreePath: `/worktrees/${id}`,
-  };
-}
-
-const podMemberSessions: SessionView[] = POD_FIXTURE ? [
-  podMemberSession("pod-lead", "Lead: plan the call-site migration", "Claude Code", "claude-code"),
-  podMemberSession("pod-worker", "Worker: migrate call sites", "Codex", "codex-app-server"),
-  podMemberSession("pod-reviewer", "Reviewer: check the migrated sites", "Claude Code", "claude-code"),
-] : [];
-
-const podNow = Date.now();
-const activePod: PodView = {
-  id: "pod-active",
-  title: "Active Collaboration Pod",
-  objective: "Migrate the API client's call sites to the shared retry helper.",
-  status: "active",
-  members: podMemberSessions.map((member, index) => ({
-    sessionId: member.id,
-    joinedAt: 1,
-    role: (["lead", "worker", "reviewer"] as const)[index]!,
-    contextTokenBudget: null,
-    lastContextSeq: 0,
-  })),
-  ...(POD_FIXTURE ? {
-    orchestration: {
-      policy: { mode: POD_TURNS ? "round_robin" : "manual", contextTokenBudget: 8_192, summaryTokenBudget: 512, maxTurns: 12, maxRepeatedOutputs: 2 },
-      state: POD_TURNS === "running"
-        ? { status: "running", runId: "pod-run-1", turnsUsed: 3, currentSessionId: "pod-worker", startedAt: podNow - 300_000, updatedAt: podNow - 20_000 }
-        : POD_TURNS === "stopped"
-          ? { status: "stopped", runId: "pod-run-1", turnsUsed: 12, stopReason: "max_turns", updatedAt: podNow - 60_000 }
-          : { status: "idle", turnsUsed: 0, updatedAt: 1 },
-    },
-    reconciliations: [
-      {
-        reconciliationId: "merge-2", podId: "pod-active", sourceSessionId: "pod-worker", targetSessionId: "pod-lead", actorId: "local",
-        status: "conflicted", sourceHead: "4f9c2a7e1b3d5c6a", targetHead: "9b81d0c4e2f7a3b5", mergeBase: "1a2b3c4d5e6f7a8b",
-        conflictPaths: ["src/api/client.ts", "src/api/retry.ts"], createdAt: podNow - 180_000, completedAt: podNow - 175_000,
-      },
-      {
-        reconciliationId: "merge-1", podId: "pod-active", sourceSessionId: "pod-reviewer", targetSessionId: "pod-lead", actorId: "local",
-        status: "applied", sourceHead: "c0ffee1234567890", targetHead: "deadbeef12345678", mergeBase: "1a2b3c4d5e6f7a8b",
-        resultHead: "5eed5eed5eed5eed", createdAt: podNow - 3_600_000, completedAt: podNow - 3_590_000,
-      },
-    ],
-  } : {}),
-  createdAt: 1,
-  updatedAt: 1,
-};
+const runStatusSession: SessionView[] = FIXTURE_QUERY.get("runStatus") === "running" ? [{
+  ...session("run-status-member", "Running Comparison Member", "alpha", "alpha-workspace"),
+  status: "running",
+}] : [];
 
 const activeRun: RunView = {
   id: "run-active",
@@ -1683,7 +1631,7 @@ const activeRun: RunView = {
   workspaceName: "Alpha",
   createdAt: 1,
   updatedAt: 1,
-  sessionIds: [],
+  sessionIds: runStatusSession.map(({ id }) => id),
 };
 
 /**
@@ -1784,7 +1732,7 @@ function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: {
-      sessionSubscriptions: TARGETED_READER_STREAMS,
+      sessionSubscriptionsV2: TARGETED_READER_STREAMS,
       boundedDelivery: TARGETED_READER_STREAMS,
       paginatedSessionHistory: TARGETED_READER_STREAMS,
       projects: !LEGACY_WORKSPACES && SHELL_PROJECTS_MODE !== "unsupported",
@@ -1809,10 +1757,9 @@ function snapshot(): UiSnapshotMessage {
       lastError: null, createdAt: 1,
     }] : [],
     ...(LEGACY_WORKSPACES || SHELL_PROJECTS_MODE === "unsupported" ? {} : { projects: structuredClone(model.projects) }),
-    sessions: structuredClone([...model.sessions.filter((candidate) => !candidate.archived), ...podMemberSessions]),
+    sessions: structuredClone([...model.sessions.filter((candidate) => !candidate.archived), ...formerPodMember, ...runStatusSession]),
     ...(ROW_COLUMNS ? { reminders: [rowColumnsReminder()] } : {}),
     runs: [structuredClone(activeRun)],
-    pods: [structuredClone(activePod)],
   };
 }
 
@@ -1850,7 +1797,7 @@ class FixtureSocket implements UiSocket {
     if (message.type !== "session_subscriptions") return;
     this.sessionIds = new Set(message.sessionIds);
     this.push({ type: "session_subscriptions_applied", revision: message.revision,
-      sessionIds: message.sessionIds, podIds: message.podIds });
+      sessionIds: message.sessionIds });
   }
   close() {}
   push(message: ControlPlaneToUi): void {
@@ -1913,7 +1860,6 @@ const connection: UiConnectionRuntime = {
 const navigation: ViewNavigation = {
   current: () => {
     const fixtureView = new URLSearchParams(window.location.search).get("view");
-    if (fixtureView === "pod") return { name: "pod", id: activePod.id };
     if (fixtureView === "run") return { name: "run", id: activeRun.id };
     // `?fullShell=1&path=/skills` opens any destination in the real Shell.
     const fixturePath = new URLSearchParams(window.location.search).get("path");
@@ -3352,7 +3298,6 @@ const client = {
       cacheComplete: !(SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("partialTail")),
     };
   },
-  podContext: async () => ({ entries: [] }),
   archiveProjectSessions: async (projectId: string) => {
     const owningProject = model.projects.find((candidate) => candidate.id === projectId);
     if (!owningProject) throw new Error("project not found");
@@ -4368,7 +4313,6 @@ function FixtureSurface() {
       </>
     );
   }
-  if (view.name === "pod") return <PodDetail podId={view.id} />;
   if (view.name === "run") return <RunDetail runId={view.id} />;
   if (view.name !== "inbox" && view.name !== "session") return <div>Fixture View: {view.name}</div>;
   return (

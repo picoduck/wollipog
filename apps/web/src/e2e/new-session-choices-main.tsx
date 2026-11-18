@@ -390,7 +390,7 @@ if (accountSetup) {
 const snapshot: UiSnapshotMessage = {
   type: "snapshot",
   capabilities: {
-    sessionSubscriptions: false,
+    sessionSubscriptionsV2: false,
     boundedDelivery: false,
     paginatedSessionHistory: false,
     projects: true,
@@ -403,7 +403,6 @@ const snapshot: UiSnapshotMessage = {
   projects: [project, ...runProjects],
   sessions: [],
   runs: [],
-  pods: [],
 };
 
 class FakeSocket implements UiSocket {

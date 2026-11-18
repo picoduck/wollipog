@@ -222,7 +222,6 @@ const snapshotDb = {
   listProjects: () => [],
   listProjectsForPrincipal: () => [],
   listRuns: () => [],
-  listPods: () => [],
   listSessionReminders: () => [],
   worktreeSetupNoticeDismissals: () => [],
 } as unknown as ControlPlaneDb;
@@ -942,33 +941,6 @@ test("a directory change refreshes its organization in place; a member's own acc
   assert.deepEqual(refreshed, ["lin"], "closed sockets are dropped from the fan-out");
 });
 
-test("pod context entries fan out as one attributed websocket delta", () => {
-  const hub = new Hub(snapshotDb);
-  const sent: string[] = [];
-  hub.addUiClient({ send: (data) => sent.push(data) });
-  sent.length = 0;
-  hub.podContextEntry({
-    id: "ctx-1",
-    podId: "pod-1",
-    seq: 1,
-    ts: 100,
-    source: { kind: "session", sessionId: "s1", sessionTitle: "Builder", agentLabel: "Claude", fromSeq: 2, toSeq: 4 },
-    content: "done",
-  });
-  assert.equal(sent.length, 1);
-  assert.deepEqual(JSON.parse(sent[0]!), {
-    type: "pod_context_entry",
-    entry: {
-      id: "ctx-1",
-      podId: "pod-1",
-      seq: 1,
-      ts: 100,
-      source: { kind: "session", sessionId: "s1", sessionTitle: "Builder", agentLabel: "Claude", fromSeq: 2, toSeq: 4 },
-      content: "done",
-    },
-  });
-});
-
 function sessionEvent(sessionId: string, id = 1): SessionEvent {
   return { id, sessionId, seq: id, ts: id, payload: { kind: "agent_message", text: `event-${id}` } };
 }
@@ -984,8 +956,8 @@ test("explicit UI subscriptions narrow only high-volume session streams", () => 
   hub.addUiClient(legacySocket);
   hub.addUiClient(selectedSocket);
   hub.addUiClient(metadataSocket);
-  assert.equal(hub.setUiSessionSubscriptions(selectedSocket, 1, ["session-a"], ["pod-a"]).ok, true);
-  assert.equal(hub.setUiSessionSubscriptions(metadataSocket, 1, [], []).ok, true);
+  assert.equal(hub.setUiSessionSubscriptions(selectedSocket, 1, ["session-a"]).ok, true);
+  assert.equal(hub.setUiSessionSubscriptions(metadataSocket, 1, []).ok, true);
   legacy.length = selected.length = metadataOnly.length = 0;
 
   hub.sessionEvent(sessionEvent("session-a", 1));
@@ -993,24 +965,14 @@ test("explicit UI subscriptions narrow only high-volume session streams", () => 
   hub.sessionEventsReset("session-b", [sessionEvent("session-b", 3)]);
   hub.shellOutput("session-a", "shell-1", "stdout", "hello");
   hub.shellExit("session-b", "shell-2", 0);
-  hub.podContextEntry({
-    id: "ctx-a", podId: "pod-a", seq: 1, ts: 1,
-    source: { kind: "session", sessionId: "session-a", sessionTitle: "A", agentLabel: "Agent", fromSeq: 1, toSeq: 1 },
-    content: "selected",
-  });
-  hub.podContextEntry({
-    id: "ctx-b", podId: "pod-b", seq: 1, ts: 1,
-    source: { kind: "session", sessionId: "session-b", sessionTitle: "B", agentLabel: "Agent", fromSeq: 1, toSeq: 1 },
-    content: "not selected",
-  });
   hub.boxRemoved("box-1");
 
   assert.deepEqual(legacy.map((data) => JSON.parse(data).type), [
     "session_event", "session_event", "session_events_reset", "shell_output", "shell_exit",
-    "pod_context_entry", "pod_context_entry", "box_removed",
+    "box_removed",
   ], "an old dashboard that never subscribes retains rolling-upgrade behavior");
   assert.deepEqual(selected.map((data) => JSON.parse(data).type), [
-    "session_event", "shell_output", "pod_context_entry", "box_removed",
+    "session_event", "shell_output", "box_removed",
   ]);
   assert.deepEqual(metadataOnly.map((data) => JSON.parse(data).type), ["box_removed"]);
 });
@@ -1020,8 +982,8 @@ test("an authorized archived subscription receives deletion even though it was a
   const sent: string[] = [];
   const socket: Socket = { send: (data) => sent.push(data) };
   hub.addUiClient(socket);
-  assert.deepEqual(hub.setUiSessionSubscriptions(socket, 1, ["archived.txt"], []), {
-    ok: true, sessionIds: ["archived.txt"], podIds: [],
+  assert.deepEqual(hub.setUiSessionSubscriptions(socket, 1, ["archived.txt"]), {
+    ok: true, sessionIds: ["archived.txt"],
   });
   sent.length = 0;
 
@@ -1038,13 +1000,13 @@ test("subscription replacement is acknowledged in writer order and revisions are
   hub.addUiClient(socket);
   sent.length = 0;
 
-  assert.deepEqual(hub.setUiSessionSubscriptions(socket, 7, ["s2", "s1"], ["p1"], 100), {
-    ok: true, sessionIds: ["s1", "s2"], podIds: ["p1"],
+  assert.deepEqual(hub.setUiSessionSubscriptions(socket, 7, ["s2", "s1"], 100), {
+    ok: true, sessionIds: ["s1", "s2"],
   });
   assert.deepEqual(JSON.parse(sent[0]!), {
-    type: "session_subscriptions_applied", revision: 7, sessionIds: ["s1", "s2"], podIds: ["p1"],
+    type: "session_subscriptions_applied", revision: 7, sessionIds: ["s1", "s2"],
   });
-  assert.deepEqual(hub.setUiSessionSubscriptions(socket, 7, [], [], 101), {
+  assert.deepEqual(hub.setUiSessionSubscriptions(socket, 7, [], 101), {
     ok: false, reason: "stale_revision",
   });
   assert.equal(sent.length, 1, "a stale replacement is never acknowledged");
@@ -1055,17 +1017,16 @@ test("subscription admission bounds repeated authorization work per caller", () 
   const socket: Socket = { send: () => {} };
   hub.addUiClient(socket);
   for (let i = 1; i <= MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW; i++) {
-    assert.equal(hub.setUiSessionSubscriptions(socket, i, [], [], 1_000).ok, true);
+    assert.equal(hub.setUiSessionSubscriptions(socket, i, [], 1_000).ok, true);
   }
   assert.deepEqual(
-    hub.setUiSessionSubscriptions(socket, MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW + 1, [], [], 1_000),
+    hub.setUiSessionSubscriptions(socket, MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW + 1, [], 1_000),
     { ok: false, reason: "rate_limited" },
   );
   assert.equal(
     hub.setUiSessionSubscriptions(
       socket,
       MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW + 2,
-      [],
       [],
       1_000 + UI_SUBSCRIPTION_RATE_WINDOW_MS,
     ).ok,
@@ -1076,7 +1037,7 @@ test("subscription admission bounds repeated authorization work per caller", () 
 
 function consumeSubscriptionAllowance(hub: Hub, socket: Socket, now: number): void {
   for (let revision = 1; revision <= MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW; revision++) {
-    assert.equal(hub.setUiSessionSubscriptions(socket, revision, [], [], now).ok, true);
+    assert.equal(hub.setUiSessionSubscriptions(socket, revision, [], now).ok, true);
   }
 }
 
@@ -1093,7 +1054,7 @@ test("subscription admission survives a paired-device reconnect", () => {
   hub.removeUiClient(first);
 
   const replacement = addDeviceClient(hub, "dev-reconnect");
-  assert.deepEqual(hub.setUiSessionSubscriptions(replacement, 1, [], [], 1_001), {
+  assert.deepEqual(hub.setUiSessionSubscriptions(replacement, 1, [], 1_001), {
     ok: false, reason: "rate_limited",
   });
 });
@@ -1117,11 +1078,11 @@ test("concurrent sockets share a stable principal admission window", () => {
   hub.addUiClient(second, { deviceId: null, principal, close: () => {} });
 
   for (let revision = 1; revision <= MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW / 2; revision++) {
-    assert.equal(hub.setUiSessionSubscriptions(first, revision, [], [], 2_000).ok, true);
-    assert.equal(hub.setUiSessionSubscriptions(second, revision, [], [], 2_000).ok, true);
+    assert.equal(hub.setUiSessionSubscriptions(first, revision, [], 2_000).ok, true);
+    assert.equal(hub.setUiSessionSubscriptions(second, revision, [], 2_000).ok, true);
   }
   assert.deepEqual(
-    hub.setUiSessionSubscriptions(first, MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW / 2 + 1, [], [], 2_000),
+    hub.setUiSessionSubscriptions(first, MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW / 2 + 1, [], 2_000),
     { ok: false, reason: "rate_limited" },
   );
 });
@@ -1131,7 +1092,7 @@ test("paired devices have independent subscription admission keys", () => {
   const first = addDeviceClient(hub, "dev-one");
   const second = addDeviceClient(hub, "dev-two");
   consumeSubscriptionAllowance(hub, first, 3_000);
-  assert.equal(hub.setUiSessionSubscriptions(second, 1, [], [], 3_000).ok, true);
+  assert.equal(hub.setUiSessionSubscriptions(second, 1, [], 3_000).ok, true);
 });
 
 test("legacy clients without identity share the safe fallback admission key", () => {
@@ -1141,7 +1102,7 @@ test("legacy clients without identity share the safe fallback admission key", ()
   hub.addUiClient(first);
   hub.addUiClient(second);
   consumeSubscriptionAllowance(hub, first, 4_000);
-  assert.deepEqual(hub.setUiSessionSubscriptions(second, 1, [], [], 4_000), {
+  assert.deepEqual(hub.setUiSessionSubscriptions(second, 1, [], 4_000), {
     ok: false, reason: "rate_limited",
   });
 });
@@ -1154,7 +1115,7 @@ test("idle subscription admission entries expire deterministically", () => {
 
   const replacement = addDeviceClient(hub, "dev-expiring");
   assert.equal(
-    hub.setUiSessionSubscriptions(replacement, 1, [], [], 5_000 + UI_SUBSCRIPTION_ADMISSION_TTL_MS).ok,
+    hub.setUiSessionSubscriptions(replacement, 1, [], 5_000 + UI_SUBSCRIPTION_ADMISSION_TTL_MS).ok,
     true,
   );
 });
@@ -1165,15 +1126,15 @@ test("subscription admission uses deterministic LRU eviction at its hard key cei
   const oldest = addDeviceClient(hub, "dev-lru-oldest");
   consumeSubscriptionAllowance(hub, first, 6_000);
   consumeSubscriptionAllowance(hub, oldest, 6_001);
-  assert.deepEqual(hub.setUiSessionSubscriptions(first, MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW + 1, [], [], 6_002), {
+  assert.deepEqual(hub.setUiSessionSubscriptions(first, MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW + 1, [], 6_002), {
     ok: false, reason: "rate_limited",
   }, "a rejected access still makes the active caller most recently used");
 
   const newcomer = addDeviceClient(hub, "dev-lru-new");
-  assert.equal(hub.setUiSessionSubscriptions(newcomer, 1, [], [], 6_003).ok, true);
+  assert.equal(hub.setUiSessionSubscriptions(newcomer, 1, [], 6_003).ok, true);
   const oldestReplacement = addDeviceClient(hub, "dev-lru-oldest");
   assert.equal(
-    hub.setUiSessionSubscriptions(oldestReplacement, 1, [], [], 6_004).ok,
+    hub.setUiSessionSubscriptions(oldestReplacement, 1, [], 6_004).ok,
     true,
     "the least recently used key was evicted and receives a fresh bounded window",
   );
@@ -1374,7 +1335,6 @@ test("unsubscribed high-volume events skip authorization database reads", () => 
     listProjectsForPrincipal: () => [],
     listBoxes: () => [],
     listRuns: () => [],
-    listPods: () => [],
     listSessionReminders: () => [],
     worktreeSetupNoticeDismissals: () => [],
     canAccessSession: () => { authorizationReads++; return true; },
@@ -1390,7 +1350,7 @@ test("unsubscribed high-volume events skip authorization database reads", () => 
     },
     close: () => {},
   });
-  assert.equal(hub.setUiSessionSubscriptions(socket, 1, [], [], 1).ok, true);
+  assert.equal(hub.setUiSessionSubscriptions(socket, 1, [], 1).ok, true);
   hub.sessionEvent(sessionEvent("not-selected", 1));
   assert.equal(authorizationReads, 0);
 });
@@ -1417,7 +1377,7 @@ test("a slow UI client is evicted at a bounded queued-byte ceiling and cannot re
   bufferedAmount = 0;
   hub.boxRemoved("box-after-eviction");
   assert.equal(sent.length, 0, "eviction removes the socket from future fan-out");
-  assert.deepEqual(hub.setUiSessionSubscriptions(socket, 1, ["session-a"], []), {
+  assert.deepEqual(hub.setUiSessionSubscriptions(socket, 1, ["session-a"]), {
     ok: false, reason: "client_missing",
   });
 });

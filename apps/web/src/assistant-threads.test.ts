@@ -137,7 +137,7 @@ test("the Assistants section and an open thread have their own addresses", () =>
 });
 
 test("an open thread streams its backing session, and only while it is open", () => {
-  const base = { sessions: new Map(), runs: new Map(), pods: new Map(), assistantSessionId: "sess_backing" };
+  const base = { sessions: new Map(), runs: new Map(), assistantSessionId: "sess_backing" };
   assert.deepEqual(uiStreamSubscriptions({ ...base, view: { name: "assistants", threadId: "thr_1" } }).sessionIds, ["sess_backing"]);
   assert.deepEqual(uiStreamSubscriptions({ ...base, view: { name: "assistants" } }).sessionIds, []);
   assert.deepEqual(uiStreamSubscriptions({ ...base, view: { name: "automations" } }).sessionIds, []);

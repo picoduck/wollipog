@@ -223,7 +223,7 @@ test("a dashboard that reconnects mid-stream receives pending upserts only behin
   h.hub.removeUiClient(first);
   const reconnected = new Dashboard();
   assert.ok(h.hub.addUiClient(reconnected));
-  assert.equal(h.hub.setUiSessionSubscriptions(reconnected, 1, [id], []).ok, true);
+  assert.equal(h.hub.setUiSessionSubscriptions(reconnected, 1, [id]).ok, true);
 
   stream(t, h, id, 30);
   t.mock.timers.tick(SESSION_STREAMING_UPSERT_INTERVAL_MS);
@@ -269,7 +269,7 @@ test("a dashboard not viewing a streaming session pays a bounded rate, not a per
   const h = harness(t);
   const elsewhere = new Dashboard();
   h.hub.addUiClient(elsewhere);
-  assert.equal(h.hub.setUiSessionSubscriptions(elsewhere, 1, [], []).ok, true);
+  assert.equal(h.hub.setUiSessionSubscriptions(elsewhere, 1, []).ok, true);
   const id = startSession(h);
   const before = elsewhere.frames.length;
 
@@ -287,7 +287,7 @@ test("a dashboard not viewing a streaming session pays a bounded rate, not a per
 test("an upsert whose only change is a nested timestamp is a transition, not a streaming update", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 5_000 });
   const db = { listRunners: () => [], listSessions: () => [], listProjects: () => [], listBoxes: () => [],
-    listRuns: () => [], listPods: () => [], listSessionReminders: () => [], worktreeSetupNoticeDismissals: () => [],
+    listRuns: () => [], listSessionReminders: () => [], worktreeSetupNoticeDismissals: () => [],
     getSession: () => null } as unknown as ControlPlaneDb;
   const hub = new Hub(db);
   const dashboard = new Dashboard();

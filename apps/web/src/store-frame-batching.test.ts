@@ -49,7 +49,7 @@ function liveStore() {
   const store = new Store({ name: "session", id: "s1" });
   store.dispatch({
     type: "msg",
-    msg: { type: "snapshot", runners: [], boxes: [], sessions: [session("s1"), session("s2")], runs: [], pods: [] },
+    msg: { type: "snapshot", runners: [], boxes: [], sessions: [session("s1"), session("s2")], runs: [] },
   });
   const clock = frames();
   store.setPublishScheduler(clock.scheduler);
@@ -148,7 +148,7 @@ test("snapshots, history resets and epoch changes publish at once, with the fram
 
   store.receiveFrame({ type: "session_event", event: event("s1", 2) });
   store.receiveFrame({
-    type: "snapshot", runners: [], boxes: [], sessions: [session("s1"), session("s2")], runs: [], pods: [],
+    type: "snapshot", runners: [], boxes: [], sessions: [session("s1"), session("s2")], runs: [],
   });
   assert.equal(notified(), 3, "a snapshot is published at once");
   assert.equal(clock.waiting, 0);
@@ -161,7 +161,7 @@ test("frames waiting for their animation frame never change the activity already
   const busy = { ...session("busy"), archived: false, updatedAt: 0, lastEventAt: 0 } as SessionView;
   store.dispatch({
     type: "msg", now: 0,
-    msg: { type: "snapshot", runners: [], boxes: [], sessions: [busy], runs: [], pods: [] },
+    msg: { type: "snapshot", runners: [], boxes: [], sessions: [busy], runs: [] },
   });
   store.tickActivity(600_000);
   const published = store.getState();
@@ -197,7 +197,7 @@ test("without a frame scheduler, as in a hidden tab, every frame publishes at on
   const store = new Store({ name: "session", id: "s1" });
   let notified = 0;
   store.subscribe(() => { notified += 1; });
-  store.receiveFrame({ type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
+  store.receiveFrame({ type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [] });
   store.receiveFrame({ type: "session_event", event: event("s1", 1) });
   store.receiveFrame({ type: "session_event", event: event("s1", 2) });
   assert.equal(notified, 3);

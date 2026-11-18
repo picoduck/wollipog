@@ -81,13 +81,12 @@ const session = {
 
 const snapshotMessage = {
   type: "snapshot",
-  capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+  capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
   runners: [runner],
   boxes: [],
   projects: [],
   sessions: [session],
   runs: [],
-  pods: [],
 } as ControlPlaneToUi;
 
 class FixtureSocket implements UiSocket {

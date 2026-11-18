@@ -409,17 +409,11 @@ const THEMES = ["dark", "light"] as const;
  * itself, which is the mutation these floors exist for. The ratio to the measured minimum is the
  * same as sheetLabel's.
  *
- * "Pods" moved into the sheet when the default order put Projects third (#1945), and one
- * four-letter word has about half the ink of "Settings": measured 875-1032 paint / 616-731 legible
- * across both themes and landscape. Its floors keep sheetShortLabel's ratios to the measured
- * minimum (830 / 290), so losing a third of it (875 × 2/3 = 583) still trips the paint floor.
- *
  * "Assistants" (#4664) is ten narrow letters with about the ink of "Settings": measured 1747-1753
  * paint in both themes. It takes sheetShortLabel's floors, and losing a third of it
  * (1747 × 2/3 = 1165) still trips the 1330 paint floor.
  */
 const SHORT_SHEET_TITLES = new Set(["Settings", "Assistants"]);
-const TINY_SHEET_TITLES = new Set(["Pods"]);
 const MARKS = {
   icon: { paint: 1000, legible: 450, illegibleCells: 0, minContrast: CONTRAST.icon },
   /* The Automations bolt joined the primary bar when Board became a mode of Sessions (#499).
@@ -432,7 +426,6 @@ const MARKS = {
   sheetIcon: { paint: 390, legible: 150, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetLabel: { paint: 1850, legible: 650, illegibleCells: 0, minContrast: CONTRAST.label },
   sheetShortLabel: { paint: 1330, legible: 490, illegibleCells: 0, minContrast: CONTRAST.label },
-  sheetTinyLabel: { paint: 830, legible: 290, illegibleCells: 0, minContrast: CONTRAST.label },
 } as const satisfies Record<string, Mark>;
 
 /**
@@ -773,18 +766,18 @@ test("no two destinations render the same glyph", async ({ page }) => {
  *
  * Selecting Inbox always meant `.rail-more-trigger.active` and `.rail-more-item.active` never
  * existed here, so `.rail-more-trigger.active > svg, .rail-more-item.active > svg { opacity: 0 }`
- * matched nothing — while in production, standing on Runs, Pods, Automations or Usage gives a blank
+ * matched nothing — while in production, standing on Runs, Automations or Usage gives a blank
  * active More control and an erased current row inside the sheet.
  */
 // The harness enables every experiment, so the overflow set is every destination off the default
 // phone bar, which experiments never change (#1959).
-const MOBILE_PRIMARY_DEFAULTS = phoneBarViews(defaultRailPreferences(), { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true, pods: true });
+const MOBILE_PRIMARY_DEFAULTS = phoneBarViews(defaultRailPreferences(), { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true });
 for (const current of GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_DEFAULTS.includes(item.id))) {
   test(`the More control reads as current on ${current.name}`, async ({ page }) => {
     await useHarness(page, { view: current.id });
     await openKeyboard(page);
     // Every overflow destination, not just one: `overflowSelected = selected === "usage"` left the
-    // single-case version green while a user on Runs, Pods or Automations saw a bar with nothing
+    // single-case version green while a user on Runs or Automations saw a bar with nothing
     // marked current at all.
     await expect(page.locator(".rail-more-trigger.active")).toHaveCount(1);
     await expect(page.locator(".rail-more-trigger")).toHaveAttribute("aria-current", "page");
@@ -1120,8 +1113,7 @@ async function expectEveryDestinationReachable(page: Page, occluded: number) {
     await expectPainted(page, item.locator("svg"), `${label} icon`, MARKS.sheetIcon);
     await expectPlainText(item.locator(".menu-text"), `${label} label`);
     await expectPainted(page, item.locator(".menu-text"), `${label} label`,
-      TINY_SHEET_TITLES.has(label) ? MARKS.sheetTinyLabel
-        : SHORT_SHEET_TITLES.has(label) ? MARKS.sheetShortLabel : MARKS.sheetLabel);
+      SHORT_SHEET_TITLES.has(label) ? MARKS.sheetShortLabel : MARKS.sheetLabel);
   }
 }
 

@@ -99,8 +99,8 @@ async function profileActions(viewer: IdentityAdministrationView): Promise<strin
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [runner], boxes: [], projects: [], sessions: [], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+      runners: [runner], boxes: [], projects: [], sessions: [], runs: [],
     });
   });
   await act(async () => { for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setTimeout(resolve, 0)); });

@@ -213,13 +213,12 @@ async function mount(
   });
   const snapshot: UiSnapshotMessage = {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: data.projectsSupported ?? true },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: data.projectsSupported ?? true },
     runners: data.runners ?? [runner()],
     boxes: [],
     ...(data.projects ? { projects: data.projects } : {}),
     sessions: data.sessions ?? [],
     runs: [],
-    pods: [],
   };
   await act(async () => {
     socket.push(snapshot);

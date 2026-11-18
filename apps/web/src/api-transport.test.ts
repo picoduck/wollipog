@@ -230,7 +230,6 @@ test("routes the server bounds past the default get that bound plus a margin, or
     ["POST", "/api/sessions/s_1/worktrees/generate-setup", 150_000],
     ["GET", "/api/projects/p_1/locations/l_1/worktree-setup", 150_000],
     ["POST", "/api/projects/p_1/locations/l_1/worktree-setup", 150_000],
-    ["POST", "/api/pods/pod_1/reconcile", 120_000],
     ["POST", "/api/skill-git/preview", 90_000],
   ] as const) {
     const deadline = apiRequestDeadlineMs(method, path);

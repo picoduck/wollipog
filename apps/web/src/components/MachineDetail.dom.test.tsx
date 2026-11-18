@@ -74,8 +74,8 @@ const buildBox: BoxView = {
 function snapshot(runners: RunnerView[], boxes: BoxView[] = []): UiSnapshotMessage {
   return {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners, boxes, projects: [], sessions: [], runs: [], pods: [],
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    runners, boxes, projects: [], sessions: [], runs: [],
   };
 }
 

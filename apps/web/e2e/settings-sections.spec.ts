@@ -181,7 +181,7 @@ test("every Settings group is one surface with hairlines between its rows, and a
 });
 
 /** Turns an experiment off for the harness's instance before the page reads its flags. */
-async function experimentOff(page: Page, id: "pods" | "multiAgent") {
+async function experimentOff(page: Page, id: "multiAgent") {
   await page.addInitScript(([key, value]) => window.localStorage.setItem(key, value), [
     instanceStorageKey(EXPERIMENTS_STORAGE_KEY),
     JSON.stringify({ v: 2, [id]: false }),
@@ -200,14 +200,14 @@ function navRow(page: Page, name: string): Locator {
 for (const theme of THEMES) {
   test(`at 1440px the Navigation editor's digit, arrows and switch sit at one x on every kind of row in ${theme}`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await experimentOff(page, "pods");
+    await experimentOff(page, "multiAgent");
     await openSection(page, theme, "appearance");
     await page.getByRole("switch", { name: "Show Automations in Navigation" }).click();
     await expect(page.getByRole("switch", { name: "Show Automations in Navigation" })).toHaveAttribute("aria-checked", "false");
-    await expect(navRow(page, "Pods").locator(".rail-nav-note")).toHaveText("Off in Experimental");
+    await expect(navRow(page, "Multi-Agent Runs").locator(".rail-nav-note")).toHaveText("Off in Experimental");
     await expect(navRow(page, "Sessions").locator(".rail-nav-note")).toHaveText("Always Shown");
 
-    const kinds = { normal: "Projects", hidden: "Automations", required: "Sessions", experimentOff: "Pods" };
+    const kinds = { normal: "Projects", hidden: "Automations", required: "Sessions", experimentOff: "Multi-Agent Runs" };
     const measured: Record<string, Record<string, number>> = {};
     for (const [kind, name] of Object.entries(kinds)) {
       measured[kind] = await navRow(page, name).evaluate((row) => {
@@ -228,7 +228,7 @@ for (const theme of THEMES) {
     // The digit is the keycap on a shown row and a dash on a hidden or turned-off one.
     await expect(navRow(page, "Projects").locator(".rail-nav-digit kbd")).toHaveText("2");
     await expect(navRow(page, "Automations").locator(".rail-nav-digit")).toHaveText("–");
-    await expect(navRow(page, "Pods").locator(".rail-nav-digit")).toHaveText("–");
+    await expect(navRow(page, "Multi-Agent Runs").locator(".rail-nav-digit")).toHaveText("–");
   });
 }
 
@@ -259,10 +259,10 @@ test.describe("on a touch phone", () => {
 
   test("at 390px every Navigation arrow and switch is a 44×44 target", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 900 });
-    await experimentOff(page, "pods");
+    await experimentOff(page, "multiAgent");
     await openSection(page, "dark", "appearance");
     const targets = page.locator(".rail-nav-row").locator("[data-move], [role='switch']");
-    expect(await targets.count(), "two arrows and a switch on each of the ten rows").toBe(30);
+    expect(await targets.count(), "two arrows and a switch on each of the nine rows").toBe(27);
     for (const target of await targets.all()) {
       const name = await target.getAttribute("aria-label");
       await target.evaluate((element) => element.scrollIntoView({ block: "center" }));
@@ -299,7 +299,7 @@ test.describe("on a touch phone", () => {
     await page.setViewportSize({ width: 390, height: 900 });
     for (const theme of THEMES) {
       await openSection(page, theme, "appearance");
-      await expect(page.locator(".rail-nav-row")).toHaveCount(10);
+      await expect(page.locator(".rail-nav-row")).toHaveCount(9);
       await expect(page.locator(".rail-nav-digit")).toHaveCount(0);
       await expect(page.locator(".rail-nav-list kbd")).toHaveCount(0);
       const marked = await page.locator(".rail-nav-row", { has: page.locator(".rail-nav-note", { hasText: /^Tab Bar$/ }) })

@@ -23,14 +23,14 @@ const events = (id: string, first = 100, count = 101): SessionEvent[] =>
   }));
 function snapshot(store: Store, sessions: SessionView[], targeted = true) {
   store.dispatch({ type: "msg", msg: {
-    type: "snapshot", runners: [], boxes: [], sessions, runs: [], pods: [],
-    capabilities: { sessionSubscriptions: targeted },
+    type: "snapshot", runners: [], boxes: [], sessions, runs: [],
+    capabilities: { sessionSubscriptionsV2: targeted },
   } });
 }
 function acknowledge(store: Store, id: string, revision: number) {
   store.prepareSubscriptionRecovery(revision, [id]);
   store.dispatch({ type: "msg", msg: {
-    type: "session_subscriptions_applied", revision, sessionIds: [id], podIds: [],
+    type: "session_subscriptions_applied", revision, sessionIds: [id],
   } });
   store.beginEventHistoryLoad(id, store.eventEpoch(id), revision);
 }

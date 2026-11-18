@@ -651,24 +651,6 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   const credential = await credentialResponse.json() as { token: string };
   assert.match(credential.token, /^wollipogr_[A-Za-z0-9_-]{43}$/u);
 
-  const { socket: credentialRunner, inbox: credentialRunnerInbox } = await openSocketWithInbox(`${wsBase}/runner`);
-  sockets.add(credentialRunner);
-  credentialRunner.send(JSON.stringify({
-    type: "register",
-    token: credential.token,
-    protocolVersion: PROTOCOL_VERSION,
-    runner: {
-      runnerId: "runner-credential-route-fixture",
-      hostname: "credential-route-host",
-      os: "linux",
-      version: "integration",
-      workspaces: [],
-      agents: [],
-    },
-    sessionSnapshots: [],
-  }));
-  await credentialRunnerInbox.take((message) => message.type === "registered");
-
   const { socket: runner, inbox: runnerInbox } = await openSocketWithInbox(`${wsBase}/runner`);
   sockets.add(runner);
   runner.send(JSON.stringify({
@@ -1461,7 +1443,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "runner and UI routes share one HTTP upgrade handler",
   );
   assert.deepEqual(snapshot.capabilities, {
-    sessionSubscriptions: true,
+    sessionSubscriptionsV2: true,
     boundedDelivery: true,
     paginatedSessionHistory: true,
     currentTurnOpening: true,
@@ -1897,7 +1879,6 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     type: "session_subscriptions",
     revision: 7,
     sessionIds: ["session-target"],
-    podIds: [],
   }));
   assert.deepEqual(
     await uiInbox.take((message) => message.type === "session_subscriptions_applied"),
@@ -1905,7 +1886,6 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
       type: "session_subscriptions_applied",
       revision: 7,
       sessionIds: ["session-target"],
-      podIds: [],
     },
   );
 
@@ -2782,6 +2762,36 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.equal(refusedStarts, 0);
   runner.removeEventListener("message", rejectUnexpectedLogin);
 
+
+  await t.test("a runner from before Pods removal can still register and hydrate a session", async () => {
+    // v384 runners still advertise support for capability 52 through their protocol version.
+    const { socket: credentialRunner, inbox: credentialRunnerInbox } = await openSocketWithInbox(`${wsBase}/runner`);
+    sockets.add(credentialRunner);
+    credentialRunner.send(JSON.stringify({
+      type: "register",
+      token: credential.token,
+      protocolVersion: 384,
+      runner: {
+        runnerId: "runner-credential-route-fixture",
+        hostname: "credential-route-host",
+        os: "linux",
+        version: "integration",
+        workspaces: [{ id: "workspace-1", name: "Workspace", path: "/workspace" }],
+        agents: [],
+      },
+      sessionSnapshots: [sessionSnapshot("session-older-runner")],
+    }));
+    await credentialRunnerInbox.take((message) => message.type === "registered");
+    const resp = await fetch(`${httpBase}/api/sessions/session-older-runner`, {
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    assert.equal(resp.status, 200, await resp.clone().text());
+    const { session } = await resp.json() as { session: { id: string; runnerId: string } };
+    assert.equal(session.id, "session-older-runner");
+    assert.equal(session.runnerId, "runner-credential-route-fixture");
+  });
+  assert.equal((await ownerFetch("/api/pods")).status, 404);
+  assert.equal((await ownerFetch("/api/pods/pod-1")).status, 404);
 });
 
 test("legacy workspace rename cannot bypass durable Project management authority", { timeout: 30_000 }, async (t) => {

@@ -283,13 +283,12 @@ const events: SessionEvent[] = [
 
 const snapshotMessage: ControlPlaneToUi = {
   type: "snapshot",
-  capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+  capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
   runners: [runner],
   boxes: [],
   projects: [],
   sessions: [session],
   runs: [],
-  pods: [],
 };
 
 let socket: FixtureSocket | null = null;

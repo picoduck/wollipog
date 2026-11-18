@@ -66,7 +66,7 @@ for (const mode of ["list", "board", "empty"] as const) {
     await page.setViewportSize({ width: 390, height: 400 });
     await installInboxFixture(page);
     if (mode === "empty") await page.routeWebSocket("**/ui**", socket => socket.send(JSON.stringify({
-      type: "snapshot", runners: [], sessions: [], boxes: [], runs: [], pods: [],
+      type: "snapshot", runners: [], sessions: [], boxes: [], runs: [],
     })));
     await page.route("**/api/skills", route => route.fulfill({ json: { skills: ["orchestrate-issues", "using-wollipog"].map(name => ({
       id: name, name, builtIn: { release: "synthetic", heldUpdate: null }, recommendation: { dismissed: false }, assignmentCount: 0,

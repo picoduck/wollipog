@@ -228,7 +228,6 @@ test("a route's error title reads as its destination, and a detail route as This
   assert.equal(viewSubjectName({ name: "session", id: "s1" }), "This Session");
   // A run is a Multi-Agent Run before it loads (#1945), so it is never the bare "Run".
   assert.equal(viewSubjectName({ name: "run", id: "r1" }), "This Multi-Agent Run");
-  assert.equal(viewSubjectName({ name: "pod", id: "p1" }), "This Pod");
 });
 
 test("a crashed route keeps its own container width, so the header's hairline does not move", async () => {
@@ -253,7 +252,7 @@ test("a crashed route keeps its own container width, so the header's hairline do
   assert.equal(viewPageWidth({ name: "runners" }), "fill", "Connections opens on Machines, a master-detail");
   assert.equal(viewPageWidth({ name: "runners", section: "machines", machineId: "m1" }), "fill");
   assert.equal(viewPageWidth({ name: "runners", section: "people" }), null);
-  for (const name of ["archived", "automations", "runs", "pods"] as const) {
+  for (const name of ["archived", "automations", "runs"] as const) {
     assert.equal(viewPageWidth({ name }), null, `${name} is a list page`);
   }
 });
@@ -274,7 +273,6 @@ test("a crashed route's description is the one its working header draws", () => 
   for (const view of [
     { name: "session", id: "s1" },
     { name: "run", id: "r1" },
-    { name: "pod", id: "p1" },
     { name: "automation", id: "a1" },
   ] as const) {
     assert.equal(viewDescription(view), undefined, `${view.name} keeps its own header`);
@@ -323,7 +321,7 @@ test("a crashed route reserves a tab row exactly where its working header draws 
     assert.equal(viewHasHeaderTabs({ name: "automations", editor: { kind: "new" } }, layout), false, "the editor has no tabs");
     assert.equal(viewHasHeaderTabs({ name: "usage", tab: "api" }, layout), true);
     assert.equal(viewHasHeaderTabs({ name: "runners", section: "people" }, layout), true);
-    for (const name of ["projects", "runs", "pods", "skills", "archived"] as const) {
+    for (const name of ["projects", "runs", "skills", "archived"] as const) {
       assert.equal(viewHasHeaderTabs({ name }, layout), false, `${name} has no tabs`);
     }
   }

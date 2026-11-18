@@ -160,8 +160,8 @@ async function mount(options: {
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [], boxes: [], projects: [], sessions: SESSIONS, runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+      runners: [], boxes: [], projects: [], sessions: SESSIONS, runs: [],
     } as unknown as UiSnapshotMessage);
   });
   cleanup(async () => {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { pendingRequests, type ChildSessionAttentionOwner,
-  type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type PendingApproval, type PodView, type RunView, type SessionView,
+  type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type PendingApproval, type RunView, type SessionView,
   type WorkflowInstanceView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
@@ -445,22 +445,19 @@ export function groupWorkerRows(rows: readonly WorkerRow[], limit: number): { gr
 
 /**
  * The facts the roster knows about this session's member sessions: the heading each sits under (its
- * run's title, or its pod's; "Workflow" while a workflow's run is not loaded), the run title its own
+ * run's title; "Workflow" while a workflow's run is not loaded), the run title its own
  * title repeats, and its workflow phase.
  */
 export function memberMetadata(
   session: Pick<SessionView, "runId">,
   run: Pick<RunView, "title" | "sessionIds"> | undefined,
-  pod: Pick<PodView, "id" | "title" | "members"> | undefined,
   workflows: readonly Pick<WorkflowInstanceView, "nodeStates">[],
 ): Map<string, WorkerMemberMetadata> {
   const metadata = new Map<string, WorkerMemberMetadata>();
-  // A member sits under its run's title, or its pod's; a workflow member's run may not be loaded.
+  // A member sits under its run's title; a workflow member's run may not be loaded.
   const runGroup: WorkerGroup | undefined = session.runId
     ? { id: `run:${session.runId}`, name: run?.title ?? "Workflow" } : undefined;
   const runFacts = runGroup ? { group: runGroup, ...(run?.title ? { runTitle: run.title } : {}) } : {};
-  for (const member of pod?.members ?? []) metadata.set(member.sessionId, { role: member.role,
-    group: { id: `pod:${pod!.id}`, name: pod!.title } });
   for (const id of run?.sessionIds ?? []) metadata.set(id, { ...metadata.get(id), ...runFacts });
   for (const workflow of workflows) for (const node of workflow.nodeStates) {
     if (node.sessionId) metadata.set(node.sessionId, {
@@ -515,7 +512,6 @@ export function AgentsPanel(props: Props) {
   const sessions = useStoreSelector((state) => state.sessions);
   const runs = useStoreSelector((state) => state.runs);
   const runners = useStoreSelector((state) => state.runners);
-  const pods = useStoreSelector((state) => state.pods);
   const [workflows, setWorkflows] = useState<WorkflowInstanceView[]>([]);
   const [workflowError, setWorkflowError] = useState(false);
   useEffect(() => {
@@ -743,10 +739,9 @@ export function AgentsPanel(props: Props) {
     [session.runnerId, runnerOnline, runners]);
   const { members, metadata } = useMemo(() => {
     const run = session.runId ? runs.get(session.runId) : undefined;
-    const pod = [...pods.values()].find((value) => value.members.some((member) => member.sessionId === session.id));
-    const metadata = memberMetadata(session, run, pod, workflows);
-    return { members: memberSessions(session, runs, pods, sessions, metadata.keys()), metadata };
-  }, [session, runs, sessions, pods, workflows]);
+    const metadata = memberMetadata(session, run, workflows);
+    return { members: memberSessions(session, runs, sessions, metadata.keys()), metadata };
+  }, [session, runs, sessions, workflows]);
   const rows = useMemo(() => {
     const unambiguousAgents = agents.map((agent) => projection.ambiguousIds.has(agent.id)
       ? { ...agent, lifecycle: "unknown" as const, availability: "recorded" as const } : agent);
@@ -877,7 +872,7 @@ export function AgentsPanel(props: Props) {
     return name ? `${name}, a subagent` : "A subagent";
   })();
   // Who needs the person (#2861): the session for its own requests, each subagent for its most
-  // urgent, then each member session (a pod's, a run's) whose row reads an attention word.
+  // urgent, then each member session of a run whose row reads an attention word.
   const askers: AttentionAsker[] = [
     ...attentionAskers(session.pendingApproval, (ownerId, request) =>
       (!projection.ambiguousIds.has(ownerId) ? agents.find((agent) => agent.id === ownerId)?.title : undefined) ??

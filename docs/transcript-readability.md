@@ -61,7 +61,7 @@ Recovery cursors stay contiguous *within* the loaded window. The events below it
 deliberately absent, so contiguity is measured from the window base; measuring from zero would
 collapse the published cursor and send the next recovery back to the start of the log.
 
-A bounded window belongs to the session reader alone. Run and Pod comparison columns render whole
+A bounded window belongs to the session reader alone. Run comparison columns render whole
 histories and offer no reach-back control, so entering one drops any partial cache rather than
 letting fleet recovery page only above the cursor that window published. Derived state follows the
 same rule. A partial load does not rebuild the heartbeat ring, whose buckets can predate it. The

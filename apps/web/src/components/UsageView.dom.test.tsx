@@ -1286,8 +1286,8 @@ async function renderWithFleet(client: ApiClient, runners: readonly RunnerView[]
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false },
-      runners, boxes: [], sessions: [], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
+      runners, boxes: [], sessions: [], runs: [],
     } as unknown as UiSnapshotMessage);
   });
   await act(async () => { await settleLoad(); await Promise.resolve(); });
@@ -2000,8 +2000,8 @@ test("while disconnected the last figures stay, dimmed, under Reconnecting…, a
     view.socket.onopen?.();
     view.socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false },
-      runners: fleet, boxes: [], sessions: [], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
+      runners: fleet, boxes: [], sessions: [], runs: [],
     } as unknown as UiSnapshotMessage);
     await drain();
   });

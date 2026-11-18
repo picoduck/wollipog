@@ -1225,7 +1225,7 @@ function InsertReplyButton({ item, onInsert }: { item: AgentReplyItem; onInsert:
   );
 }
 /** What an agent row needs to read the same worker word as the Agents roster (#2857). A transcript
- * shown outside its session (a run, a pod, Side Chat) assumes a live runner and no requests. */
+ * shown outside its session (a run, Side Chat) assumes a live runner and no requests. */
 const DEFAULT_SUBAGENT_STATUS: SubagentStatusContextValue = { sessionStatus: "running", runnerOnline: true, attention: new Map() };
 const SubagentStatusContext = createContext<SubagentStatusContextValue>(DEFAULT_SUBAGENT_STATUS);
 

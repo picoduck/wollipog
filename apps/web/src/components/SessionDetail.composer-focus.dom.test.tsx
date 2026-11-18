@@ -422,7 +422,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false,
+        sessionSubscriptionsV2: false,
         boundedDelivery: false,
         paginatedSessionHistory: false,
         projects: true,
@@ -432,7 +432,6 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
       projects: [],
       sessions: [currentSession, alternateSession],
       runs: [],
-      pods: [],
     });
   });
   const composer = container.querySelector(".composer-input") as HTMLTextAreaElement | null;

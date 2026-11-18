@@ -36,7 +36,6 @@ const routes: Array<[View, string]> = [
   [{ name: "runners", section: "people" }, "/connections/people"],
   [{ name: "runners", section: "machines", machineId: "runner / ✅" }, `/connections/machines/~${encodeResourceId("runner / ✅")}`],
   [{ name: "runs" }, "/runs"],
-  [{ name: "pods" }, "/pods"],
   [{ name: "automations" }, "/automations"],
   [{ name: "automations", tab: "outbound" }, "/automations/outbound"],
   [{ name: "automations", editor: { kind: "new" } }, "/automations/new"],
@@ -55,7 +54,6 @@ const routes: Array<[View, string]> = [
     (id): [View, string] => [{ name: "session", id }, `/sessions/~${encodeResourceId(id)}`],
   ),
   [{ name: "run", id: "run_abc" }, `/runs/~${encodeResourceId("run_abc")}`],
-  [{ name: "pod", id: "pod_abc" }, `/pods/~${encodeResourceId("pod_abc")}`],
 ];
 
 test("Usage opens on Subscriptions, and a link saved from when it had its own path still lands there", () => {
@@ -123,27 +121,6 @@ test("a run's phone member is in its URL, so a reload and a shared link keep it 
   }
 });
 
-test("a pod's phone tab is in its URL, so a reload and a shared link keep it (#2981)", () => {
-  const path = `/pods/~${encodeResourceId("pod_abc")}`;
-  for (const view of [
-    { name: "pod", id: "pod_abc", tab: "huddle" },
-    { name: "pod", id: "pod_abc", member: "s_codex" },
-    { name: "pod", id: "pod_abc", member: "member / ✅ &?#" },
-  ] satisfies View[]) {
-    const url = new URL(viewPath(view), "http://localhost");
-    assert.equal(url.pathname, path);
-    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
-  }
-  assert.equal(viewPath({ name: "pod", id: "pod_abc", tab: "huddle" }), `${path}?tab=huddle`);
-  assert.equal(viewPath({ name: "pod", id: "pod_abc", member: "s_codex" }), `${path}?member=s_codex`);
-  assert.equal(viewPath({ name: "pod", id: "pod_abc" }), path);
-  assert.equal(sameView({ name: "pod", id: "pod_abc", member: "a" }, { name: "pod", id: "pod_abc", tab: "huddle" }), false);
-  // A query that names no tab keeps the pod open on its default tab.
-  for (const query of ["", "?tab=", "?tab=members", "?tab=huddle&member=a", "?member=", "?member=a&member=b", `?member=${"x".repeat(5000)}`]) {
-    assert.deepEqual(viewFromPath(path, query), { name: "pod", id: "pod_abc" }, query);
-  }
-});
-
 test("Agent Skills panes have their own routes, and a skill id wins over a pane", () => {
   // Existing links keep their meaning (#1947): the bare route and a skill deep link.
   assert.deepEqual(viewFromPath("/skills"), { name: "skills" });
@@ -204,7 +181,6 @@ test("every destination has one name, in the §4.1 order", () => {
     ["projects", "Projects", "work"],
     ["assistants", "Assistants", "work"],
     ["runs", "Multi-Agent Runs", "oversight"],
-    ["pods", "Pods", "oversight"],
     ["runners", "Connections", "oversight"],
     ["skills", "Agent Skills", "oversight"],
     ["archived", "Archived Sessions", "records"],
@@ -217,7 +193,6 @@ test("every destination has one name, in the §4.1 order", () => {
     assert.doesNotMatch(item.name, /runner|inbox/i, item.id);
     assert.equal(item.name, titleCaseLabel(item.name), `${item.name} is Title Case`);
   }
-  assert.equal(destination("pods").name, "Pods");
   assert.equal(backLabel("runs"), "Back to Multi-Agent Runs");
   assert.equal(backLabel("inbox"), "Back to Sessions");
 });
@@ -245,7 +220,6 @@ test("page descriptions use short sentence-case copy in user terms", () => {
       projects: "Group related sessions and choose the folders where they run.",
       assistants: "Ask an assistant to start, watch and steer your sessions.",
       runs: "Give one task to several agents and compare what each one does.",
-      pods: "Agents that share notes and a worktree while they work toward one objective.",
       runners: undefined,
       skills: "Write a skill once, then choose which machines and agents get it.",
       archived: "Archived sessions keep their transcripts. Restore one to keep working.",
@@ -267,11 +241,8 @@ test("page descriptions use short sentence-case copy in user terms", () => {
 
 test("an entity page is titled by its entity once it has loaded", () => {
   assert.equal(viewTitle({ name: "run", id: "run-1" }, "Compare Retry Strategies"), "Compare Retry Strategies");
-  assert.equal(viewTitle({ name: "pod", id: "pod-1" }, "Release Train"), "Release Train");
   // The generic noun is only the loading fallback.
   assert.equal(viewTitle({ name: "run", id: "run-1" }), "Multi-Agent Run");
-  assert.equal(viewTitle({ name: "pod", id: "pod-1" }), "Pod");
-  assert.equal(viewTitle({ name: "pod", id: "pod-1" }, ""), "Pod");
   assert.equal(viewTitle({ name: "session", id: "s-1" }), "Session");
   // The Automation editor is titled by what it edits (#2967).
   assert.equal(viewTitle({ name: "automations", editor: { kind: "new" } }), "New Automation");
@@ -406,7 +377,7 @@ test("every surface that names a destination reads the registry's one name", () 
     ["./components/CommandPalette.tsx", [/label: item\.name,/]],
     ["./components/SettingsView.tsx", [/const item = destination\(name\);/, /\{item\.name\}/]],
     ["./shortcuts.ts", [/label: item\.name,/]],
-    ["./experiments.ts", [/const multiAgentName = destination\("runs"\)\.name;/, /const podsName = destination\("pods"\)\.name;/]],
+    ["./experiments.ts", [/const multiAgentName = destination\("runs"\)\.name;/]],
   ];
   for (const [path, patterns] of consumers) {
     const text = source(path);
@@ -418,7 +389,6 @@ test("every surface that names a destination reads the registry's one name", () 
     ["./components/AutomationsView.tsx", "automations"],
     ["./components/ProjectsView.tsx", "projects"],
     ["./components/RunsView.tsx", "runs"],
-    ["./components/PodsView.tsx", "pods"],
     ["./components/RunnersView.tsx", "runners"],
     ["./components/SkillsView.tsx", "skills"],
     ["./components/ArchivedSessionsView.tsx", "archived"],
@@ -454,7 +424,6 @@ test("empty states that name a destination read its name", () => {
     ["./components/ArchivedSessionsView.tsx", /`No \$\{destination\("archived"\)\.name\}`/],
     ["./components/ProjectsView.tsx", /title=\{`No \$\{PROJECTS\.name\} Yet`\}/],
     ["./components/RunsView.tsx", /title=\{`No \$\{runsDestination\.name\} Yet`\}/],
-    ["./components/PodsView.tsx", /title=\{`No \$\{podsDestination\.name\} Yet`\}/],
     ["./detail-placeholder.ts", /const resource = destination\(list\)\.name;/],
   ];
   for (const [path, pattern] of empties) assert.match(source(path), pattern, path);
@@ -670,10 +639,10 @@ test("browser history canonicalizes once, preserves state, and never pushes duri
 
   const seen: View[] = [];
   const stop = navigation.listen((view) => seen.push(view));
-  location.pathname = `/pods/~${encodeResourceId("pod_1")}`;
+  location.pathname = `/runs/~${encodeResourceId("run_1")}`;
   location.search = "";
   for (const listener of listeners) listener();
-  assert.deepEqual(seen, [{ name: "pod", id: "pod_1" }]);
+  assert.deepEqual(seen, [{ name: "run", id: "run_1" }]);
   assert.equal(writes.length, 4, "popstate parsing does not push a new entry");
   stop();
   assert.equal(listeners.size, 0);

@@ -117,7 +117,7 @@ function snapshot(runnerView: RunnerView = runner, boxes: BoxView[] = []): UiSna
   return {
     type: "snapshot",
     capabilities: {
-      sessionSubscriptions: false,
+      sessionSubscriptionsV2: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
       projects: true,
@@ -127,7 +127,6 @@ function snapshot(runnerView: RunnerView = runner, boxes: BoxView[] = []): UiSna
     projects: [],
     sessions: [session],
     runs: [],
-    pods: [],
   };
 }
 

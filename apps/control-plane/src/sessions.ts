@@ -181,9 +181,6 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type DescendantRequestResolution,
   type DescendantRequestView,
   type DescendantRequestsView,
-  type AddPodMemberRequest,
-  type AppendPodContextRequest,
-  type CreatePodRequest,
   type CreateRunRequest,
   type CreateWorkflowRunRequest,
   type CreateWorkflowRunResult,
@@ -255,13 +252,6 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type GitLabMergeClosuresResultMessage,
   type PullRequestClosingReferenceCheck,
   type ReconcileWorkflowActionMessage,
-  type PodContextEntry,
-  type PodMemberRole,
-  type PodOrchestrationActionResult,
-  type PodOrchestrationPolicy,
-  type PodOrchestrationStep,
-  type PodReconciliationActionResult,
-  type PodView,
   type OS,
   type SessionFileEntry,
   type WorkspaceReference,
@@ -274,11 +264,8 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type PromptImageReference,
   type SteeringAttemptState,
   type QueuedPromptView,
-  type RelayPodRequest,
   type ResolveSteeringAttemptMessage,
   type ResolveSteeringAttemptResultMessage,
-  type RelayPodResult,
-  type ReconcilePodRequest,
   type RunView,
   type ReviewFinding,
   type ReviewDecisionApprovalReviewReceipt,
@@ -302,9 +289,6 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type SteerSessionMessage,
   type SteerSessionResultMessage,
   type SteeringAttemptView,
-  type StartPodOrchestrationRequest,
-  type UpdatePodMemberRequest,
-  type UpdatePodOrchestrationRequest,
   type WorkflowArtifact,
   type WorkflowArtifactPage,
   type WorkflowArtifactView,
@@ -453,10 +437,6 @@ import {
   parseCreateReviewFinding,
   parseUpdateReviewFinding,
 } from "./review-findings.js";
-import {
-  composePodOrchestrationPrompt,
-  normalizePodOutput,
-} from "./pod-orchestration.js";
 import {
   boundedSessionTitleContext,
   isLessSpecificSessionTitle,
@@ -1960,36 +1940,6 @@ function shortId(prefix: string): string {
   return prefix + randomUUID().replace(/-/g, "").slice(0, 12);
 }
 
-const POD_MEMBER_ROLES = new Set<PodMemberRole>(["lead", "worker", "reviewer"]);
-const POD_ARBITRATION_MODES = new Set<PodOrchestrationPolicy["mode"]>([
-  "manual",
-  "round_robin",
-  "lead_driven",
-  "event_triggered",
-]);
-
-function validPodContextBudget(value: unknown): value is number {
-  return Number.isSafeInteger(value) && Number(value) >= 4_096 && Number(value) <= 32_768;
-}
-
-function podOrchestrationPolicyError(policy: PodOrchestrationPolicy): string | null {
-  if (!POD_ARBITRATION_MODES.has(policy.mode)) return "unsupported pod arbitration mode";
-  if (!validPodContextBudget(policy.contextTokenBudget)) return "contextTokenBudget must be an integer from 4096 to 32768";
-  if (!Number.isSafeInteger(policy.summaryTokenBudget) || policy.summaryTokenBudget < 128 || policy.summaryTokenBudget > 4_096) {
-    return "summaryTokenBudget must be an integer from 128 to 4096";
-  }
-  if (policy.summaryTokenBudget > Math.floor(policy.contextTokenBudget / 2)) {
-    return "summaryTokenBudget cannot exceed half of contextTokenBudget";
-  }
-  if (!Number.isSafeInteger(policy.maxTurns) || policy.maxTurns < 1 || policy.maxTurns > 100) {
-    return "maxTurns must be an integer from 1 to 100";
-  }
-  if (!Number.isSafeInteger(policy.maxRepeatedOutputs) || policy.maxRepeatedOutputs < 2 || policy.maxRepeatedOutputs > 5) {
-    return "maxRepeatedOutputs must be an integer from 2 to 5";
-  }
-  return null;
-}
-
 function nonEmpty<T>(images: T[] | undefined): T[] | undefined {
   return images && images.length ? images : undefined;
 }
@@ -2614,8 +2564,6 @@ export class SessionsService {
     // A restart can happen after a prompt reached a runner but before the delivery marker was
     // committed. Automatic retry would risk a duplicate turn, so recovery pauses every such cycle
     // for an explicit human restart and marks the uncertain step failed.
-    this.db.pauseInterruptedPodOrchestrations(Date.now());
-    this.db.failInterruptedPodReconciliations(Date.now());
     this.db.settleInterruptedSteeringAttempts(Date.now());
     this.recoverFirstMessageDeliveries(Date.now());
     this.db.compactSteeringAttempts(Date.now());
@@ -7177,7 +7125,7 @@ export class SessionsService {
    * agent sees it at its next tool boundary instead.
    *
    * Steering is strictly best-effort and never the only chance: every refusal it can produce — a
-   * pending guardrail decision, workflow/automation/pod ownership, a provider without verified
+   * pending guardrail decision, workflow/automation ownership, a provider without verified
    * steering, an unsupported runner, or the turn ending underneath us — falls through to the
    * ordinary queue, which behaves exactly as before. Attempting to steer can therefore delay a
    * message by one round trip but can never lose it. */
@@ -7360,8 +7308,6 @@ export class SessionsService {
     if (incomingMode !== undefined && (incomingMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
       return fail("the Orchestrator preset permission mode is fixed at session creation; start a new session to change it", 409);
     }
-    const reconciliationBlock = this.podReconciliationMutationError(sessionId);
-    if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (isTerminal(session.status) && !(pausedCampaign && this.db.campaignPause(sessionId)?.stoppedSessionIds.includes(sessionId))) return fail(`session is ${session.status}`, 409);
     if (session.historyQuarantine) return fail(QUARANTINED_CONVERSATION_ERROR, 409);
     if (session.worktreeRecovery) {
@@ -8253,8 +8199,6 @@ export class SessionsService {
         (incomingMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
       return fail("the Orchestrator preset permission mode is fixed at session creation; start a new session to change it", 409);
     }
-    const reconciliationBlock = this.podReconciliationMutationError(sessionId);
-    if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
     if (session.historyQuarantine) return fail(QUARANTINED_CONVERSATION_ERROR, 409);
     if (session.pendingApproval?.kind === "cost_budget") {
@@ -8608,8 +8552,6 @@ export class SessionsService {
       }
       return ok(existing);
     }
-    const reconciliationBlock = this.podReconciliationMutationError(sessionId);
-    if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
     // `/compact` arrives through this lane; compaction is inference over the same stored history.
     if (session.historyQuarantine) return fail(QUARANTINED_CONVERSATION_ERROR, 409);
@@ -8650,10 +8592,6 @@ export class SessionsService {
     if (this.db.activeWorkflowAttemptsForSession(sessionId).length > 0 ||
         this.db.hasActiveAutomationCommandForSession(sessionId)) {
       return fail("workflow- and automation-owned sessions cannot accept manual provider commands", 409);
-    }
-    const pod = this.db.activePodForSession(sessionId);
-    if (pod?.orchestration?.state.status === "running" && pod.orchestration.state.currentSessionId === sessionId) {
-      return fail("pod-orchestrated sessions cannot accept manual provider commands", 409);
     }
 
     const now = Date.now();
@@ -8928,12 +8866,6 @@ export class SessionsService {
     if (this.db.hasActiveAutomationCommandForSession(sessionId)) {
       return fail("automation-owned sessions cannot be steered", 409);
     }
-    const pod = this.db.activePodForSession(sessionId);
-    if (pod?.orchestration?.state.status === "running" && pod.orchestration.state.currentSessionId === sessionId) {
-      return fail("pod-orchestrated sessions cannot be steered", 409);
-    }
-    const reconciliationBlock = this.podReconciliationMutationError(sessionId);
-    if (reconciliationBlock) return fail(reconciliationBlock, 409);
     const unsupported = this.capabilityFailure(session.runnerId, "conversationSteering", "conversation steering");
     if (unsupported) return unsupported;
     const agentCapabilities = mergeSessionCapabilities(
@@ -9603,10 +9535,6 @@ export class SessionsService {
     if (this.db.activeWorkflowAttemptsForSession(sessionId).length > 0) {
       return fail("workflow-owned sessions must be stopped through workflow lifecycle controls", 409);
     }
-    const pod = this.db.activePodForSession(sessionId);
-    if (pod?.orchestration?.state.status === "running" && pod.orchestration.state.currentSessionId === sessionId) {
-      return fail("pod-orchestrated sessions must be stopped through pod orchestration controls", 409);
-    }
     const unsupported = this.capabilityFailure(session.runnerId, "turnInterruption", "turn interruption");
     if (unsupported) return unsupported;
     if (!sessionBlocksConversationFork(session.status)) return ok(session);
@@ -9805,8 +9733,6 @@ export class SessionsService {
         }
       }
     }
-    const reconciliationBlock = this.podReconciliationMutationError(sessionId);
-    if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (!session.agentId) return fail("session is missing its agent", 400);
     if (isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const launch = launchForRestart(this.db, session);
@@ -19021,7 +18947,7 @@ export class SessionsService {
    * `queued` until the runner starts the turn, rather than `running` for a turn that has not begun
    * (#1651). A child still inside its turn queues the resume behind that turn and stays running.
    * Expiration can defer lifecycle effects: only card/status writes run in its transaction, while
-   * workflow/pod settlement and notifications are recorded as durable post-commit work. */
+   * workflow settlement and notifications are recorded as durable post-commit work. */
   private settleWorkflowDecisionPause(
     sessionId: string,
     occurrenceId: string,
@@ -19045,7 +18971,7 @@ export class SessionsService {
         this.db.listOpenPolicyHookApprovals(sessionId).length === 0) {
       // An admitted resuming turn continues the work the card interrupted, so the child leaves the
       // pause straight into it. Passing through idle would publish a session.idle the turn
-      // contradicts, and replaying that edge would settle pods, workflow attempts, campaign
+      // contradicts, and replaying that edge would settle workflow attempts, campaign
       // readiness, and push-to-wake early; the resumed turn's own idle settles them instead.
       // The running write clears swallowed-idle markers, so an open policy-hook approval, whose
       // marker a refused prompt could not restore, keeps the ordinary idle restoration below.
@@ -21389,7 +21315,6 @@ export class SessionsService {
   private deleteMaterializedSession(session: SessionView): void {
     const campaignBefore = this.campaignAttentionController(session);
     this.cancelTitleGeneration(session.id);
-    const pods = this.db.podsForSession(session.id);
     const now = Date.now();
     this.abortPolicyHookApprovals(session, now, "session-deleted");
     this.db.addTombstone(session.id, session.runnerId, now);
@@ -21402,10 +21327,6 @@ export class SessionsService {
     if (session.parentSessionId && session.parentSessionId !== campaignBefore?.id) {
       this.hub.sessionChangedById(session.parentSessionId);
     }
-    for (const pod of pods) {
-      const updatedPod = this.db.reconcilePodAfterMembershipLoss(pod.id, Date.now());
-      if (updatedPod) this.hub.podChanged(updatedPod);
-    }
   }
 
   delete(sessionId: string): ServiceResult<{ deleted: true }> {
@@ -21416,14 +21337,8 @@ export class SessionsService {
       // contract before registration. Generic Delete cannot remove reconciliation identity/kill.
       return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     }
-    const reconciliationBlock = this.podReconciliationMutationError(sessionId);
-    if (reconciliationBlock) return fail(reconciliationBlock, 409);
     const sideChat = this.db.getSideChat(sessionId);
     const child = sideChat ? this.db.getSession(sideChat.childSessionId) : null;
-    if (child) {
-      const childBlock = this.podReconciliationMutationError(child.id);
-      if (childBlock) return fail(childBlock, 409);
-    }
     // The runner store is the source of truth now, so deleting only the cache row would let the next
     // register resurrect the session. Tombstone it (covers the offline-runner case — the tombstone
     // re-issues the delete on reconnect) and tell the runner to remove it from the box store.
@@ -22148,647 +22063,6 @@ export class SessionsService {
     return ok({ run, sessions, instance }, 201);
   }
 
-  /* ----------------------- Collaboration pods ---------------------------- */
-
-  createPod(req: CreatePodRequest): ServiceResult<{ pod: PodView; sessions: SessionView[] }> {
-    const title = typeof req?.title === "string" ? req.title.trim() : "";
-    const objective = typeof req?.objective === "string" ? req.objective.trim() : "";
-    if (!title) return fail("a pod title is required");
-    if (title.length > 120) return fail("pod title must be at most 120 characters");
-    if (objective.length > 4_000) return fail("pod objective must be at most 4000 characters");
-    if (!Array.isArray(req?.sessionIds)) return fail("pod sessionIds must be an array");
-    const sessionIds = [...new Set(req.sessionIds)];
-    if (sessionIds.length !== req.sessionIds.length) return fail("pod sessionIds must be unique");
-    if (sessionIds.length < 2 || sessionIds.length > 12) return fail("a pod requires 2 to 12 sessions");
-
-    const sessions: SessionView[] = [];
-    for (const sessionId of sessionIds) {
-      if (typeof sessionId !== "string" || !sessionId) return fail("pod sessionIds must be non-empty strings");
-      const session = this.db.getSession(sessionId);
-      if (!session) return fail(`session '${sessionId}' not found`, 404);
-      if (!session.useWorktree) return fail(`session '${sessionId}' is not configured for an isolated worktree`, 409);
-      if (isTerminal(session.status)) return fail(`session '${sessionId}' is ${session.status}`, 409);
-      const existing = this.db.activePodForSession(sessionId);
-      if (existing) return fail(`session '${sessionId}' already belongs to pod '${existing.id}'`, 409);
-      sessions.push(session);
-    }
-
-    const pod = this.db.createPod({
-      id: shortId("p_"),
-      title,
-      objective,
-      sessionIds,
-      now: Date.now(),
-    });
-    if (!pod) return fail("one or more sessions already belongs to an active pod", 409);
-    this.hub.podChanged(pod);
-    this.log.info(`pod created ${pod.id} with ${sessions.length} isolated member(s)`);
-    return ok({ pod, sessions }, 201);
-  }
-
-  addPodMember(podId: string, req: AddPodMemberRequest): ServiceResult<{ pod: PodView; sessions: SessionView[] }> {
-    const pod = this.db.getPod(podId);
-    if (!pod) return fail("pod not found", 404);
-    if (pod.status !== "active") return fail("closed pods cannot accept members", 409);
-    if (pod.orchestration?.state.status === "running") return fail("stop pod orchestration before changing membership", 409);
-    if (pod.reconciliations?.some((entry) => entry.status === "running")) return fail("wait for pod reconciliation before changing membership", 409);
-    if (pod.members.length >= 12) return fail("a pod can have at most 12 sessions", 409);
-    const sessionId = typeof req?.sessionId === "string" ? req.sessionId : "";
-    if (!sessionId) return fail("a sessionId is required");
-    if (pod.members.some((member) => member.sessionId === sessionId)) return fail("session is already a pod member", 409);
-    const session = this.db.getSession(sessionId);
-    if (!session) return fail("session not found", 404);
-    if (!session.useWorktree) return fail("pod members must use isolated worktrees", 409);
-    if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
-    const existing = this.db.activePodForSession(sessionId);
-    if (existing) return fail(`session already belongs to pod '${existing.id}'`, 409);
-    const role = req?.role ?? "worker";
-    if (!POD_MEMBER_ROLES.has(role)) return fail("pod member role must be lead, worker, or reviewer");
-    const contextTokenBudget = req?.contextTokenBudget;
-    if (contextTokenBudget !== undefined && !validPodContextBudget(contextTokenBudget)) {
-      return fail("contextTokenBudget must be an integer from 4096 to 32768");
-    }
-    const updated = this.db.addPodMember(podId, sessionId, Date.now(), role, contextTokenBudget ?? null);
-    if (!updated) return fail("pod member could not be added", 409);
-    this.hub.podChanged(updated);
-    return ok({ pod: updated, sessions: this.podSessions(updated) });
-  }
-
-  removePodMember(podId: string, sessionId: string): ServiceResult<{ pod: PodView; sessions: SessionView[] }> {
-    const pod = this.db.getPod(podId);
-    if (!pod) return fail("pod not found", 404);
-    if (pod.status !== "active") return fail("closed pods cannot change membership", 409);
-    if (pod.orchestration?.state.status === "running") return fail("stop pod orchestration before changing membership", 409);
-    if (pod.reconciliations?.some((entry) => entry.status === "running")) return fail("wait for pod reconciliation before changing membership", 409);
-    if (!pod.members.some((member) => member.sessionId === sessionId)) return fail("session is not a pod member", 404);
-    if (pod.members.length <= 2) return fail("an active pod must retain at least two members; close it instead", 409);
-    const updated = this.db.removePodMember(podId, sessionId, Date.now());
-    if (!updated) return fail("pod member could not be removed", 409);
-    this.hub.podChanged(updated);
-    return ok({ pod: updated, sessions: this.podSessions(updated) });
-  }
-
-  updatePodMember(
-    podId: string,
-    sessionId: string,
-    req: UpdatePodMemberRequest,
-  ): ServiceResult<{ pod: PodView; sessions: SessionView[] }> {
-    const pod = this.db.getPod(podId);
-    if (!pod) return fail("pod not found", 404);
-    if (pod.status !== "active") return fail("closed pods cannot change member roles", 409);
-    if (pod.orchestration?.state.status === "running") return fail("stop pod orchestration before changing roles or budgets", 409);
-    if (pod.reconciliations?.some((entry) => entry.status === "running")) return fail("wait for pod reconciliation before changing roles or budgets", 409);
-    if (!pod.members.some((member) => member.sessionId === sessionId)) return fail("session is not a pod member", 404);
-    if (!req || typeof req !== "object" || Array.isArray(req)) return fail("pod member update is malformed");
-    if (Object.keys(req).some((key) => key !== "role" && key !== "contextTokenBudget")) {
-      return fail("pod member update contains unsupported fields");
-    }
-    if (req.role === undefined && req.contextTokenBudget === undefined) return fail("pod member update is empty");
-    if (req.role !== undefined && !POD_MEMBER_ROLES.has(req.role)) return fail("pod member role must be lead, worker, or reviewer");
-    if (req.contextTokenBudget !== undefined && req.contextTokenBudget !== null && !validPodContextBudget(req.contextTokenBudget)) {
-      return fail("contextTokenBudget must be null or an integer from 4096 to 32768");
-    }
-    const updated = this.db.updatePodMember(podId, sessionId, req, Date.now());
-    if (!updated) return fail("pod member could not be updated", 409);
-    this.hub.podChanged(updated);
-    return ok({ pod: updated, sessions: this.podSessions(updated) });
-  }
-
-  updatePodOrchestration(
-    podId: string,
-    req: UpdatePodOrchestrationRequest,
-  ): ServiceResult<{ pod: PodView }> {
-    const pod = this.db.getPod(podId);
-    if (!pod) return fail("pod not found", 404);
-    if (pod.status !== "active") return fail("closed pods cannot change orchestration policy", 409);
-    if (pod.orchestration?.state.status === "running") return fail("stop the active orchestration cycle before changing policy", 409);
-    if (pod.reconciliations?.some((entry) => entry.status === "running")) return fail("wait for pod reconciliation before changing orchestration policy", 409);
-    if (!req || typeof req !== "object" || Array.isArray(req)) return fail("pod orchestration policy is malformed");
-    const allowed = new Set(["mode", "contextTokenBudget", "summaryTokenBudget", "maxTurns", "maxRepeatedOutputs"]);
-    if (Object.keys(req).some((key) => !allowed.has(key))) return fail("pod orchestration policy contains unsupported fields");
-    const current = pod.orchestration!.policy;
-    const policy: PodOrchestrationPolicy = {
-      mode: req.mode ?? current.mode,
-      contextTokenBudget: req.contextTokenBudget ?? current.contextTokenBudget,
-      summaryTokenBudget: req.summaryTokenBudget ?? current.summaryTokenBudget,
-      maxTurns: req.maxTurns ?? current.maxTurns,
-      maxRepeatedOutputs: req.maxRepeatedOutputs ?? current.maxRepeatedOutputs,
-    };
-    const invalid = podOrchestrationPolicyError(policy);
-    if (invalid) return fail(invalid);
-    if ((policy.mode === "lead_driven" || policy.mode === "event_triggered") &&
-        pod.members.filter((member) => member.role === "lead").length !== 1) {
-      return fail(`${policy.mode} arbitration requires exactly one lead member`, 409);
-    }
-    const updated = this.db.updatePodOrchestrationPolicy(podId, policy, Date.now());
-    if (!updated) return fail("pod orchestration policy could not be updated", 409);
-    this.hub.podChanged(updated);
-    return ok({ pod: updated });
-  }
-
-  startPodOrchestration(
-    podId: string,
-    req: StartPodOrchestrationRequest,
-    actorId = "local",
-  ): ServiceResult<PodOrchestrationActionResult> {
-    let pod = this.db.getPod(podId);
-    if (!pod) return fail("pod not found", 404);
-    if (pod.status !== "active") return fail("closed pods cannot start orchestration", 409);
-    const orchestration = pod.orchestration!;
-    if (orchestration.state.status === "running") return fail("pod orchestration is already running", 409);
-    if (pod.reconciliations?.some((entry) => entry.status === "running")) return fail("wait for pod reconciliation before starting orchestration", 409);
-    if (orchestration.policy.mode === "manual") return fail("choose an automatic arbitration mode before starting", 409);
-    if (!req || typeof req !== "object" || Array.isArray(req)) return fail("orchestration start request is malformed");
-    if (Object.keys(req).some((key) => key !== "instruction" && key !== "firstSessionId")) {
-      return fail("orchestration start request contains unsupported fields");
-    }
-    const instruction = req.instruction === undefined ? "" : typeof req.instruction === "string" ? req.instruction.trim() : null;
-    if (instruction === null) return fail("orchestration instruction must be a string");
-    if (instruction && Buffer.byteLength(instruction, "utf8") > 64 * 1024) return fail("orchestration instruction must be at most 64 KiB");
-    const leads = pod.members.filter((member) => member.role === "lead");
-    if ((orchestration.policy.mode === "lead_driven" || orchestration.policy.mode === "event_triggered") && leads.length !== 1) {
-      return fail(`${orchestration.policy.mode} arbitration requires exactly one lead member`, 409);
-    }
-    let targetSessionId: string;
-    if (orchestration.policy.mode === "lead_driven") {
-      targetSessionId = leads[0]!.sessionId;
-    } else if (orchestration.policy.mode === "event_triggered") {
-      if (typeof req.firstSessionId !== "string" || !req.firstSessionId) return fail("event-triggered arbitration requires a firstSessionId");
-      if (req.firstSessionId === leads[0]!.sessionId) return fail("event-triggered arbitration must start with a non-lead member");
-      targetSessionId = req.firstSessionId;
-    } else {
-      targetSessionId = typeof req.firstSessionId === "string" && req.firstSessionId
-        ? req.firstSessionId
-        : pod.members[0]!.sessionId;
-    }
-    if (!pod.members.some((member) => member.sessionId === targetSessionId)) return fail("firstSessionId is not a pod member", 409);
-    const targetError = this.podAutomaticTargetError(targetSessionId);
-    if (targetError) return fail(targetError, 409);
-
-    const now = Date.now();
-    const runId = shortId("po_");
-    pod = this.db.startPodOrchestration(podId, runId, now);
-    if (!pod) return fail("pod orchestration could not be started", 409);
-    let appendedEntry: PodContextEntry | undefined;
-    if (instruction) {
-      const appended = this.appendPodContext(podId, { kind: "note", text: instruction }, actorId);
-      if (!appended.ok) {
-        const stopped = this.db.stopPodOrchestration(podId, appended.error ?? "seed note failed", Date.now()) ?? pod;
-        this.hub.podChanged(stopped);
-        return failAs(appended, "orchestration seed note could not be appended");
-      }
-      appendedEntry = appended.data!.entry;
-    }
-    const dispatched = this.dispatchPodOrchestration(podId, runId, targetSessionId);
-    if (!dispatched.ok) return dispatched;
-    return ok({ ...dispatched.data!, ...(appendedEntry ? { appendedEntry } : {}) }, 201);
-  }
-
-  stopPodOrchestration(podId: string): ServiceResult<{ pod: PodView }> {
-    const pod = this.db.getPod(podId);
-    if (!pod) return fail("pod not found", 404);
-    const updated = this.db.stopPodOrchestration(podId, "stopped_by_human", Date.now());
-    if (!updated) return fail("pod orchestration could not be stopped", 409);
-    this.hub.podChanged(updated);
-    return ok({ pod: updated });
-  }
-
-  /** Human-triggered, same-runner merge/reconcile between two isolated pod worktrees. The DB row
-   * is durable before delivery and any uncertain timeout/restart is terminally failed, never replayed. */
-  async reconcilePod(
-    podId: string,
-    req: ReconcilePodRequest,
-    actorId = "local",
-  ): Promise<ServiceResult<PodReconciliationActionResult>> {
-    const pod = this.db.getPod(podId);
-    if (!pod) return fail("pod not found", 404);
-    if (pod.status !== "active") return fail("closed pods cannot reconcile worktrees", 409);
-    if (pod.orchestration?.state.status === "running") return fail("stop pod orchestration before reconciling worktrees", 409);
-    if (pod.reconciliations?.some((entry) => entry.status === "running")) return fail("pod reconciliation is already running", 409);
-    if (!req || typeof req !== "object" || Array.isArray(req)) return fail("pod reconciliation request is malformed");
-    if (Object.keys(req).some((key) => key !== "sourceSessionId" && key !== "targetSessionId")) {
-      return fail("pod reconciliation request contains unsupported fields");
-    }
-    const sourceSessionId = typeof req.sourceSessionId === "string" ? req.sourceSessionId : "";
-    const targetSessionId = typeof req.targetSessionId === "string" ? req.targetSessionId : "";
-    if (!sourceSessionId || !targetSessionId) return fail("sourceSessionId and targetSessionId are required");
-    if (sourceSessionId === targetSessionId) return fail("source and target members must be different", 409);
-    if (!pod.members.some((member) => member.sessionId === sourceSessionId) ||
-        !pod.members.some((member) => member.sessionId === targetSessionId)) {
-      return fail("source and target must both belong to this pod", 409);
-    }
-    const source = this.db.getSession(sourceSessionId);
-    const target = this.db.getSession(targetSessionId);
-    if (!source || !target) return fail("source or target member no longer exists", 409);
-    if (source.runnerId !== target.runnerId) return fail("pod reconciliation currently requires members on the same runner", 409);
-    if (!source.workspaceId || source.workspaceId !== target.workspaceId) {
-      return fail("pod reconciliation requires members in the same configured workspace", 409);
-    }
-    if (!source.useWorktree || !source.worktreePath || !target.useWorktree || !target.worktreePath) {
-      return fail("pod reconciliation requires two active isolated worktrees", 409);
-    }
-    if (source.worktreePath === target.worktreePath) return fail("source and target must have distinct isolated worktrees", 409);
-    if (source.status !== "idle" || target.status !== "idle") return fail("source and target members must both be idle", 409);
-    if (source.pendingApproval || target.pendingApproval) return fail("resolve member approvals before reconciling worktrees", 409);
-    if (!this.hub.isRunnerOnline(source.runnerId)) return fail("runner is offline", 409);
-    const unsupported = this.capabilityFailure(source.runnerId, "podReconciliation", "pod worktree reconciliation");
-    if (unsupported) return unsupported;
-    if (typeof actorId !== "string" || !actorId || actorId.length > 256) return fail("invalid reconciliation actor");
-
-    const now = Date.now();
-    const reconciliationId = shortId("prc_");
-    const begun = this.db.beginPodReconciliation({
-      reconciliationId,
-      podId,
-      sourceSessionId,
-      targetSessionId,
-      actorId,
-      now,
-    });
-    if (!begun) return fail("pod reconciliation could not be started", 409);
-    this.hub.podChanged(this.db.getPod(podId)!);
-    const requestId = randomUUID();
-    try {
-      const result = await this.hub.requestFromRunner(
-        target.runnerId,
-        requestId,
-        {
-          type: "git_action",
-          requestId,
-          sessionId: target.id,
-          worktreePath: target.worktreePath,
-          action: {
-            kind: "pod_reconcile",
-            sourceSessionId: source.id,
-            message: `Merge pod member ${source.id} into ${target.id}`,
-          },
-          timeoutMs: 120_000,
-        },
-        120_000,
-      );
-      const data = result.type === "git_result" && result.ok ? result.data?.podReconciliation : undefined;
-      const sha = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{40,64}$/.test(value);
-      const terminalShapeValid = data?.status === "applied"
-        ? sha(data.resultHead) && data.resultHead !== data.targetHead && !data.conflictPaths
-        : data?.status === "already_applied"
-          ? sha(data.resultHead) && data.resultHead === data.targetHead && !data.conflictPaths
-          : data?.status === "conflicted"
-            ? data.resultHead === undefined && Array.isArray(data.conflictPaths) && data.conflictPaths.length > 0 &&
-              data.conflictPaths.length <= 100 && data.conflictPaths.every((path) =>
-                typeof path === "string" && path.length > 0 && path.length <= 512)
-            : false;
-      if (!data || !terminalShapeValid || !sha(data.sourceHead) || !sha(data.targetHead) || !sha(data.mergeBase)) {
-        const error = result.type === "git_result" && !result.ok
-          ? result.error ?? "runner reconciliation failed"
-          : "runner returned malformed reconciliation provenance";
-        const failed = this.db.settlePodReconciliation(reconciliationId, { status: "failed", error }, Date.now())!;
-        const updated = this.db.getPod(podId)!;
-        this.hub.podChanged(updated);
-        return fail(failed.error ?? error, 409);
-      }
-      const settled = this.db.settlePodReconciliation(reconciliationId, {
-        status: data.status,
-        sourceHead: data.sourceHead,
-        targetHead: data.targetHead,
-        mergeBase: data.mergeBase,
-        ...(data.resultHead ? { resultHead: data.resultHead } : {}),
-        ...(data.conflictPaths ? { conflictPaths: data.conflictPaths } : {}),
-      }, Date.now());
-      if (!settled) return fail("reconciliation result arrived after its durable lease ended", 409);
-      const updated = this.db.getPod(podId)!;
-      this.hub.podChanged(updated);
-      return ok({ pod: updated, reconciliation: settled }, data.status === "applied" ? 201 : 200);
-    } catch (error) {
-      const failed = this.db.settlePodReconciliation(reconciliationId, {
-        status: "failed",
-        error: (error as Error).message,
-      }, Date.now());
-      const updated = this.db.getPod(podId)!;
-      this.hub.podChanged(updated);
-      return fail(failed?.error ?? "pod reconciliation delivery failed", 504);
-    }
-  }
-
-  podReconciliationMutationError(sessionId: string): string | null {
-    const active = this.db.activePodReconciliationForSession(sessionId);
-    return active
-      ? `session is locked by pod reconciliation '${active.reconciliationId}' until the merge attempt settles`
-      : null;
-  }
-
-  closePod(podId: string): ServiceResult<{ pod: PodView; sessions: SessionView[] }> {
-    const pod = this.db.getPod(podId);
-    if (!pod) return fail("pod not found", 404);
-    if (pod.status === "closed") return ok({ pod, sessions: this.podSessions(pod) });
-    if (pod.reconciliations?.some((entry) => entry.status === "running")) return fail("wait for pod reconciliation before closing the pod", 409);
-    const updated = this.db.closePod(podId, Date.now());
-    if (!updated) return fail("pod could not be closed", 409);
-    this.hub.podChanged(updated);
-    return ok({ pod: updated, sessions: this.podSessions(updated) });
-  }
-
-  relayPod(podId: string, req: RelayPodRequest, actorId = "local"): ServiceResult<RelayPodResult> {
-    const pod = this.db.getPod(podId);
-    if (!pod) return fail("pod not found", 404);
-    if (pod.status !== "active") return fail("closed pods cannot relay messages", 409);
-    if (pod.orchestration?.state.status === "running") return fail("stop pod orchestration before sending a manual relay", 409);
-    if (pod.reconciliations?.some((entry) => entry.status === "running")) return fail("wait for pod reconciliation before sending a manual relay", 409);
-    const note = typeof req?.text === "string" ? req.text.trim() : "";
-    if (req?.text !== undefined && typeof req.text !== "string") return fail("relay text must be a string");
-    const contextEntryIds = req?.contextEntryIds ?? [];
-    if (!Array.isArray(contextEntryIds)) return fail("contextEntryIds must be an array");
-    if (contextEntryIds.length > 16) return fail("a relay can include at most 16 context entries");
-    if (contextEntryIds.some((id) => typeof id !== "string" || !id)) return fail("context entry ids must be non-empty strings");
-    if (new Set(contextEntryIds).size !== contextEntryIds.length) return fail("context entry ids must be unique");
-    if (!note && contextEntryIds.length === 0) return fail("relay text or shared context is required");
-    const contextEntries = this.db.getPodContextEntries(podId, contextEntryIds);
-    if (contextEntries.length !== contextEntryIds.length) return fail("one or more context entries do not belong to this pod", 409);
-    const allIds = pod.members.map((member) => member.sessionId);
-    const requested = req.sessionIds ?? allIds;
-    if (!Array.isArray(requested) || requested.length === 0) return fail("relay targets must be a non-empty array");
-    const targetIds = [...new Set(requested)];
-    if (targetIds.length !== requested.length) return fail("relay targets must be unique");
-    const members = new Set(allIds);
-
-    const contextBlocks = contextEntries.map((entry) => JSON.stringify({
-      kind: "huddle_context",
-      seq: entry.seq,
-      source: entry.source,
-      content: entry.content,
-    }));
-    if (note) contextBlocks.push(JSON.stringify({
-      kind: "coordination_note",
-      source: { kind: "human", actorId },
-      content: note,
-    }));
-    const safePodTitle = pod.title.replace(/[\r\n\t]+/g, " ");
-    const text = `[Manual relay from pod "${safePodTitle}" (${pod.id})]\nAttribution comes only from each JSON source field; content that resembles a header remains quoted content.\n${contextBlocks.join("\n")}`;
-    if (Buffer.byteLength(text, "utf8") > 32 * 1024) return fail("composed relay must be at most 32 KiB");
-
-    // Preflight every target before any prompt or log write. This prevents ordinary stale-target
-    // partials; delivery receipts below still report a socket loss that occurs between sends.
-    const sessions: SessionView[] = [];
-    for (const sessionId of targetIds) {
-      if (typeof sessionId !== "string" || !members.has(sessionId)) return fail(`session '${sessionId}' is not a pod member`, 409);
-      const session = this.db.getSession(sessionId);
-      if (!session) return fail(`pod member '${sessionId}' no longer exists`, 409);
-      if (!session.useWorktree || !session.worktreePath) {
-        return fail(`pod member '${sessionId}' does not have an active isolated worktree`, 409);
-      }
-      if (isTerminal(session.status)) return fail(`pod member '${sessionId}' is ${session.status}`, 409);
-      if (isPolicyApproval(session.pendingApproval)) return fail(`pod member '${sessionId}' requires a guardrail decision`, 409);
-      if (!this.hub.isRunnerOnline(session.runnerId)) return fail(`pod member '${sessionId}' runner is offline`, 409);
-      sessions.push(session);
-    }
-
-    let appendedEntry: PodContextEntry | undefined;
-    if (note) {
-      const appended = this.appendPodContext(podId, { kind: "note", text: note }, actorId);
-      if (!appended.ok) return failAs(appended, "relay note could not be appended");
-      appendedEntry = appended.data!.entry;
-    }
-    const delivered: SessionView[] = [];
-    const receipts: RelayPodResult["receipts"] = [];
-    for (const session of sessions) {
-      const result = this.prompt(session.id, text);
-      if (result.ok) {
-        delivered.push(result.data!);
-        receipts.push({ sessionId: session.id, status: "delivered" });
-      } else {
-        receipts.push({ sessionId: session.id, status: "failed", error: result.error ?? "unknown error" });
-      }
-    }
-    const updated = this.db.touchPod(podId, Date.now()) ?? pod;
-    this.hub.podChanged(updated);
-    this.log.info(`pod relay ${podId} delivered to ${delivered.length}/${sessions.length} member(s)`);
-    return ok({ pod: updated, sessions: delivered, receipts, ...(appendedEntry ? { appendedEntry } : {}) });
-  }
-
-  appendPodContext(
-    podId: string,
-    req: AppendPodContextRequest,
-    actorId: string,
-  ): ServiceResult<{ entry: PodContextEntry; created: boolean; pod: PodView }> {
-    const pod = this.db.getPod(podId);
-    if (!pod) return fail("pod not found", 404);
-    if (pod.status !== "active") return fail("closed pods cannot change shared context", 409);
-    let source: PodContextEntry["source"];
-    let content: string;
-
-    if (req?.kind === "note") {
-      content = typeof req.text === "string" ? req.text.trim() : "";
-      if (!content) return fail("context note text is required");
-      if (typeof actorId !== "string" || !actorId || actorId.length > 256) return fail("invalid context actor");
-      source = { kind: "human", actorId };
-    } else if (req?.kind === "member_output") {
-      const sessionId = typeof req.sessionId === "string" ? req.sessionId : "";
-      if (!sessionId) return fail("a source sessionId is required");
-      if (!pod.members.some((member) => member.sessionId === sessionId)) return fail("source session is not a pod member", 409);
-      const session = this.db.getSession(sessionId);
-      if (!session) return fail("source session no longer exists", 409);
-      if (session.status === "starting" || session.status === "running") {
-        return fail("wait for the member turn to settle before sharing its output", 409);
-      }
-      const events = this.db.listEvents(sessionId);
-      let lastUserIndex = -1;
-      for (let index = events.length - 1; index >= 0; index -= 1) {
-        if (events[index]!.payload.kind === "user_message") {
-          lastUserIndex = index;
-          break;
-        }
-      }
-      const messages = events.slice(lastUserIndex + 1).filter((event) =>
-        event.payload.kind === "agent_message" && !event.payload.parentToolUseId && Boolean(event.payload.text),
-      );
-      if (messages.length === 0) return fail("the member has no completed top-level output to share", 409);
-      content = "";
-      for (const event of messages) {
-        const payload = event.payload as Extract<SessionEventPayload, { kind: "agent_message" }>;
-        if (payload.final && content) content += "\n\n";
-        content += payload.text;
-      }
-      source = {
-        kind: "session",
-        sessionId,
-        sessionTitle: session.title || "Untitled",
-        agentLabel: session.agentName || session.agentId || session.driver,
-        fromSeq: messages[0]!.seq,
-        toSeq: messages.at(-1)!.seq,
-      };
-    } else {
-      return fail("context kind must be note or member_output");
-    }
-
-    if (Buffer.byteLength(content, "utf8") > 64 * 1024) return fail("context entry must be at most 64 KiB");
-    const appended = this.db.appendPodContextEntry({
-      id: shortId("pc_"), podId, ts: Date.now(), source, content,
-    });
-    const updated = this.db.getPod(podId)!;
-    if (appended.created) this.hub.podContextEntry(appended.entry);
-    this.hub.podChanged(updated);
-    return ok({ entry: appended.entry, created: appended.created, pod: updated }, appended.created ? 201 : 200);
-  }
-
-  private dispatchPodOrchestration(
-    podId: string,
-    runId: string,
-    targetSessionId: string,
-    triggerSessionId?: string,
-  ): ServiceResult<PodOrchestrationActionResult> {
-    let pod = this.db.getPod(podId);
-    if (!pod || pod.status !== "active") return fail("pod is no longer active", 409);
-    const orchestration = pod.orchestration!;
-    if (orchestration.state.status !== "running" || orchestration.state.runId !== runId) {
-      return fail("pod orchestration cycle is no longer running", 409);
-    }
-    const target = pod.members.find((member) => member.sessionId === targetSessionId);
-    if (!target) return this.stopPodDispatch(podId, "selected orchestration target is no longer a pod member");
-    const targetError = this.podAutomaticTargetError(targetSessionId);
-    if (targetError) return this.stopPodDispatch(podId, targetError);
-    const context = this.db.podContextSelectionWindow(podId, target.lastContextSeq, 500);
-    let composed: ReturnType<typeof composePodOrchestrationPrompt>;
-    try {
-      composed = composePodOrchestrationPrompt({
-        pod,
-        target,
-        policy: orchestration.policy,
-        context,
-        ...(triggerSessionId ? { triggerSessionId } : {}),
-      });
-    } catch (cause) {
-      return this.stopPodDispatch(podId, (cause as Error).message);
-    }
-    const now = Date.now();
-    const step = this.db.beginPodOrchestrationStep({
-      stepId: shortId("pos_"),
-      podId,
-      runId,
-      targetSessionId,
-      ...(triggerSessionId ? { triggerSessionId } : {}),
-      selectedEntryIds: composed.selectedEntryIds,
-      ...(composed.summarizedFromSeq === undefined ? {} : { summarizedFromSeq: composed.summarizedFromSeq }),
-      ...(composed.summarizedToSeq === undefined ? {} : { summarizedToSeq: composed.summarizedToSeq }),
-      estimatedTokens: composed.estimatedTokens,
-      now,
-    });
-    if (!step) return this.stopPodDispatch(podId, "orchestration turn cap reached before dispatch");
-    const prompted = this.prompt(targetSessionId, composed.text);
-    if (!prompted.ok) return this.stopPodDispatch(podId, prompted.error ?? "automatic prompt delivery failed");
-    if (!this.db.markPodOrchestrationStepRunning(step.stepId, podId, targetSessionId, composed.maxContextSeq, Date.now())) {
-      // The prompt may already have reached the runner. Pause, never retry automatically.
-      const paused = this.db.stopPodOrchestration(podId, "delivery marker could not be committed", Date.now(), "paused");
-      if (paused) this.hub.podChanged(paused);
-      return fail("automatic prompt delivery is uncertain; orchestration paused", 409);
-    }
-    pod = this.db.getPod(podId)!;
-    this.hub.podChanged(pod);
-    this.log.info(`pod orchestration ${runId} dispatched turn ${step.turn} to ${targetSessionId}`);
-    return ok({ pod, session: prompted.data, step: { ...step, status: "running" } });
-  }
-
-  private stopPodDispatch(podId: string, reason: string): ServiceResult<PodOrchestrationActionResult> {
-    const stopped = this.db.stopPodOrchestration(podId, reason, Date.now());
-    if (stopped) this.hub.podChanged(stopped);
-    return fail(reason, 409);
-  }
-
-  private podAutomaticTargetError(sessionId: string): string | null {
-    const session = this.db.getSession(sessionId);
-    if (!session) return `pod member '${sessionId}' no longer exists`;
-    if (!session.useWorktree || !session.worktreePath) return `pod member '${sessionId}' does not have an active isolated worktree`;
-    if (session.status !== "idle") return `pod member '${sessionId}' is ${session.status}; automatic turns require idle members`;
-    if (session.pendingApproval) return `pod member '${sessionId}' requires a human decision`;
-    if (!this.hub.isRunnerOnline(session.runnerId)) return `pod member '${sessionId}' runner is offline`;
-    return null;
-  }
-
-  private nextPodOrchestrationTarget(pod: PodView, completedSessionId: string): string | null {
-    const orchestration = pod.orchestration!;
-    const members = pod.members;
-    if (orchestration.policy.mode === "round_robin") {
-      const index = members.findIndex((member) => member.sessionId === completedSessionId);
-      return members[(index + 1 + members.length) % members.length]?.sessionId ?? null;
-    }
-    const lead = members.find((member) => member.role === "lead");
-    if (!lead) return null;
-    if (orchestration.policy.mode === "event_triggered") {
-      return completedSessionId === lead.sessionId ? null : lead.sessionId;
-    }
-    if (orchestration.policy.mode === "lead_driven") {
-      if (completedSessionId !== lead.sessionId) return lead.sessionId;
-      const others = members.filter((member) => member.sessionId !== lead.sessionId);
-      if (others.length === 0) return null;
-      const runId = orchestration.state.runId!;
-      const steps = this.db.podOrchestrationSteps(pod.id, runId, 100);
-      const lastOther = [...steps].reverse().find((step) => step.targetSessionId !== lead.sessionId);
-      if (!lastOther) return others[0]!.sessionId;
-      const index = others.findIndex((member) => member.sessionId === lastOther.targetSessionId);
-      return others[(index + 1 + others.length) % others.length]!.sessionId;
-    }
-    return null;
-  }
-
-  private handlePodOrchestrationSettle(sessionId: string, status: SessionStatus): void {
-    const pod = this.db.activePodForSession(sessionId);
-    if (!pod || pod.orchestration?.state.status !== "running" || pod.orchestration.state.currentSessionId !== sessionId) return;
-    if (status !== "idle") {
-      const stopped = this.db.stopPodOrchestration(pod.id, `member_${status}`, Date.now());
-      if (stopped) this.hub.podChanged(stopped);
-      return;
-    }
-    const fresh = this.db.getSession(sessionId);
-    if (!fresh || fresh.status === "starting" || fresh.status === "running") {
-      const stopped = this.db.stopPodOrchestration(pod.id, "member_requires_human_decision", Date.now(), "paused");
-      if (stopped) this.hub.podChanged(stopped);
-      return;
-    }
-    const requiresHumanDecision = Boolean(fresh.pendingApproval) || fresh.status === "input_required";
-    const appended = this.appendPodContext(pod.id, { kind: "member_output", sessionId }, "pod-orchestration");
-    if (!appended.ok) {
-      const stopped = this.db.stopPodOrchestration(pod.id, appended.error ?? "member output could not be captured", Date.now(), "paused");
-      if (stopped) this.hub.podChanged(stopped);
-      return;
-    }
-    const output = appended.data!.entry;
-    const outputHash = createHash("sha256").update(normalizePodOutput(output.content), "utf8").digest("hex");
-    const settled = this.db.settlePodOrchestrationStep(pod.id, sessionId, output.id, outputHash, Date.now());
-    if (!settled) return; // duplicate/stale idle frame after the step was already consumed
-    let updated = this.db.getPod(pod.id)!;
-    const state = updated.orchestration!.state;
-    const policy = updated.orchestration!.policy;
-    if (requiresHumanDecision) {
-      updated = this.db.stopPodOrchestration(pod.id, "member_requires_human_decision", Date.now(), "paused")!;
-      this.hub.podChanged(updated);
-      return;
-    }
-    const repeats = this.db.countPodOrchestrationOutputHash(pod.id, state.runId!, outputHash);
-    if (repeats >= policy.maxRepeatedOutputs) {
-      updated = this.db.stopPodOrchestration(pod.id, `repeated_output:${outputHash.slice(0, 12)}`, Date.now())!;
-      this.hub.podChanged(updated);
-      return;
-    }
-    if (state.turnsUsed >= policy.maxTurns) {
-      updated = this.db.stopPodOrchestration(pod.id, "max_turns", Date.now())!;
-      this.hub.podChanged(updated);
-      return;
-    }
-    const next = this.nextPodOrchestrationTarget(updated, sessionId);
-    if (!next) {
-      const reason = policy.mode === "event_triggered" ? "lead_turn_complete" : "no_eligible_next_member";
-      updated = this.db.stopPodOrchestration(pod.id, reason, Date.now(), "paused")!;
-      this.hub.podChanged(updated);
-      return;
-    }
-    const dispatched = this.dispatchPodOrchestration(pod.id, state.runId!, next, sessionId);
-    if (!dispatched.ok) this.log.warn(`pod orchestration ${state.runId} stopped: ${dispatched.error}`);
-  }
-
-  private podSessions(pod: PodView): SessionView[] {
-    return pod.members
-      .map((member) => this.db.getSession(member.sessionId))
-      .filter((session): session is SessionView => Boolean(session));
-  }
-
   /** One run or workflow member's account: what it names, else the Machine's policy. A refusal of a named
    * account says whose it was, since a launch has several members and none of them started. */
   private namedMemberProviderAccount(
@@ -23451,7 +22725,6 @@ export class SessionsService {
       const ev = this.db.appendEvent(sessionId, { kind: "error", message: detail }, Date.now());
       this.hub.sessionEvent(ev);
     }
-    if (status === "idle" || isTerminal(status)) this.handlePodOrchestrationSettle(sessionId, status);
     // Push-to-wake: `session` still holds the pre-mutation view (read at entry). If
     // gateOnPolicy just re-parked the trailing idle, the fresh view says input_required and
     // the notification carries the ask instead of a misleading "ready".
@@ -23810,7 +23083,6 @@ export class SessionsService {
   private replayRestoredPolicyIdle(previous: SessionView, sessionId: string, now: number): void {
     this.gateOnPolicy(sessionId, now);
     this.reconcileWorkflowSessionStatus(sessionId, "idle", now);
-    this.handlePodOrchestrationSettle(sessionId, "idle");
     this.clearSettledPolicyResumeStatus(sessionId);
     // The visible CP state was input_required, but the swallowed provider transition was
     // running -> idle. Replay that underlying edge so push-to-wake matches a live idle frame.

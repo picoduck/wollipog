@@ -67,10 +67,6 @@ export function createSessionGitManagement(deps: {
   // capture a partial snapshot and can race the post-turn diff capture.
   const gate = gitActionAllowed(action, session.status);
   if (!gate.ok) return reply.code(409).send({ error: gate.error });
-  if (!["status", "summary", "diff", "request_diff", "github_review_sync", "forge_review_sync"].includes(action.kind)) {
-    const reconciliationBlock = svc.podReconciliationMutationError(id);
-    if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
-  }
 
   const requestId = randomUUID();
   // Pushing + calling gh takes longer than a quick status read.
@@ -80,17 +76,13 @@ export function createSessionGitManagement(deps: {
     : 30_000;
   if (req.recheck) {
     await req.recheck();
-    // Rechecking authority yields: a new turn or reconciliation may have started meanwhile.
+    // Rechecking authority yields: a new turn may have started meanwhile.
     const current = db.getSession(id);
     if (!current || current.runnerId !== session.runnerId || current.worktreePath !== session.worktreePath) {
       return reply.code(409).send({error: "the Git target changed; inspect the current worktree"});
     }
     const currentGate = gitActionAllowed(action, current.status);
     if (!currentGate.ok) return reply.code(409).send({error: currentGate.error});
-    if (!["status", "summary", "diff", "request_diff", "github_review_sync", "forge_review_sync"].includes(action.kind)) {
-      const blocked = svc.podReconciliationMutationError(id);
-      if (blocked) return reply.code(409).send({error: blocked});
-    }
   }
   if (!["status", "summary", "diff", "request_diff", "github_review_sync", "forge_review_sync"].includes(action.kind)) req.beforeEffect?.();
   try {

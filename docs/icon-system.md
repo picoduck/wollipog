@@ -49,7 +49,6 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ConnectionsIcon` | Lucide | `MonitorCog` | Runner connection management. |
 | `RunsIcon` | Lucide | `Workflow` | Generic workflow runs, and a workflow run's row in Multi-Agent Runs (#2974); an automation row's workflow target (#2969). |
 | `CompareIcon` | Lucide | `Columns2` | A comparison run's row in Multi-Agent Runs: several agents side by side on one task (#2974). `Columns3` is the Board. |
-| `PodsIcon` | Lucide | `UsersRound` | Collaboration group. |
 | `AutomationsIcon` | Lucide | `Zap` | Automation action. |
 | `ServiceTierIcon` | Lucide | `Gauge` | Fast service-tier setting; distinct from the Automations bolt. |
 | `CostIcon` | Lucide | `DollarSign` | A dollar amount inside a field, such as the Guardrails cost thresholds; the Request Card's Budget kind. |

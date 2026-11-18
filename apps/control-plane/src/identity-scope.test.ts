@@ -545,8 +545,8 @@ test("scoped websocket clients receive only authorized snapshots and deltas", ()
   assert.deepEqual(operatorRunnerDelta?.type === "runner_upsert" ? operatorRunnerDelta.runner.agents[0]?.env : null, {});
   assert.equal(operatorRunnerDelta?.type === "runner_upsert" ? operatorRunnerDelta.runner.runtime : null, undefined);
   assert.equal(operatorRunnerDelta?.type === "runner_upsert" ? operatorRunnerDelta.runner.providerLogins : null, undefined);
-  hub.setUiSessionSubscriptions(operator.socket, 1, ["s_private"], []);
-  hub.setUiSessionSubscriptions(viewer.socket, 1, ["s_private"], []);
+  hub.setUiSessionSubscriptions(operator.socket, 1, ["s_private"]);
+  hub.setUiSessionSubscriptions(viewer.socket, 1, ["s_private"]);
   const operatorAck = operatorMessages.findLast((message) => message.type === "session_subscriptions_applied");
   const viewerAck = viewerMessages.findLast((message) => message.type === "session_subscriptions_applied");
   assert.deepEqual(operatorAck?.type === "session_subscriptions_applied" ? operatorAck.sessionIds : null, ["s_private"]);

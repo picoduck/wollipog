@@ -164,7 +164,7 @@ function snapshot(runnerViews = runners): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: {
-      sessionSubscriptions: false,
+      sessionSubscriptionsV2: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
       projects: false,
@@ -173,7 +173,6 @@ function snapshot(runnerViews = runners): UiSnapshotMessage {
     boxes: [],
     sessions: snapshotSessions,
     runs: [],
-    pods: [],
   };
 }
 

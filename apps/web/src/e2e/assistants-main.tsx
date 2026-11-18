@@ -203,13 +203,12 @@ function summary(full: SessionView): SessionView {
 function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
     runners: [structuredClone(runner)],
     boxes: [],
     // The launched sessions arrive as summaries; the backing sessions in full.
     sessions: [...sessions.values()].map((entry) => launched(entry.id) ? summary(entry) : structuredClone(entry)),
     runs: [],
-    pods: [],
   } as UiSnapshotMessage;
 }
 

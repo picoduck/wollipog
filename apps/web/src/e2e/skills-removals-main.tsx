@@ -115,7 +115,7 @@ const runner: RunnerView = {
 const snapshot: ControlPlaneToUi = {
   type: "snapshot",
   capabilities: {
-    sessionSubscriptions: false,
+    sessionSubscriptionsV2: false,
     boundedDelivery: false,
     paginatedSessionHistory: false,
     projects: false,
@@ -131,7 +131,6 @@ const snapshot: ControlPlaneToUi = {
   boxes: [],
   sessions: [],
   runs: [],
-  pods: [],
 };
 
 class FixtureSocket implements UiSocket {

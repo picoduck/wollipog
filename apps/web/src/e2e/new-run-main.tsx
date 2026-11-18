@@ -117,9 +117,9 @@ const workflow: WorkflowDefinition = {
 
 const snapshot: ControlPlaneToUi = {
   type: "snapshot",
-  capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+  capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
   runners: scenario === "offline" ? runners.map((runner) => ({ ...runner, status: "offline" })) : runners,
-  boxes: [], projects, sessions: [], runs: [], pods: [],
+  boxes: [], projects, sessions: [], runs: [],
 };
 
 class FixtureSocket implements UiSocket {

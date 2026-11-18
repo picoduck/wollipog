@@ -31,13 +31,13 @@ test("detail hydration preserves legacy live state and rejects stale responses",
 
 test("paged snapshots retain the routed history until its row arrives and reconcile inventory at completion", () => {
   const store=new Store({ name: "session",id: "active" });
-  store.dispatch({ type: "msg",msg: { type: "snapshot",capabilities: { sessionSubscriptions: true },
+  store.dispatch({ type: "msg",msg: { type: "snapshot",capabilities: { sessionSubscriptionsV2: true },
     runners: [],boxes: [],sessions: [session("active"),session("removed")],runs: [] } });
   store.dispatch({ type: "msg",msg: { type: "session_event",event: {
     id: 1,sessionId: "active",seq: 1,ts: 1,payload: { kind: "agent_message",text: "Retained" },
   } } });
   store.dispatch({ type: "msg",msg: { type: "snapshot",sessionsComplete: false,
-    capabilities: { sessionSubscriptions: true },runners: [],boxes: [],sessions: [],runs: [] } });
+    capabilities: { sessionSubscriptionsV2: true },runners: [],boxes: [],sessions: [],runs: [] } });
   assert.equal(store.getState().snapshotLoaded,false);
   assert.equal(store.getState().sessions.has("removed"),true,"keep the inventory during a reconnect");
   assert.equal(store.getState().events.get("active")?.[0]?.seq,1);
@@ -53,7 +53,7 @@ test("paged snapshots retain the routed history until its row arrives and reconc
 
 test("a page invalidates a replaced timeline and final absence removes a stale routed session", () => {
   const store=new Store({ name: "session",id: "active" });
-  const header={ type: "snapshot" as const,capabilities: { sessionSubscriptions: true },runners: [],boxes: [],sessions: [session("active")],runs: [] };
+  const header={ type: "snapshot" as const,capabilities: { sessionSubscriptionsV2: true },runners: [],boxes: [],sessions: [session("active")],runs: [] };
   store.dispatch({ type: "msg",msg: header });
   store.dispatch({ type: "msg",msg: { type: "session_event",event: {
     id: 1,sessionId: "active",seq: 1,ts: 1,payload: { kind: "agent_message",text: "Old" },
@@ -72,7 +72,7 @@ test("a page invalidates a replaced timeline and final absence removes a stale r
 test("paged summary hydration preserves a current-turn opening and its unread range", () => {
   const store=new Store({ name: "session",id: "active" });
   store.dispatch({ type: "msg",msg: { type: "snapshot",sessionsComplete: false,
-    capabilities: { sessionSubscriptions: true,currentTurnOpening: true },
+    capabilities: { sessionSubscriptionsV2: true,currentTurnOpening: true },
     runners: [],boxes: [],sessions: [],runs: [] } });
   assert.equal(store.getState().snapshotLoaded,false);
   assert.equal(store.getState().currentTurnOpeningSupported,true);

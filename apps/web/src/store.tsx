@@ -14,8 +14,6 @@ import type {
   AssistantThread,
   BoxView,
   ControlPlaneToUi,
-  PodContextEntry,
-  PodView,
   ProjectView,
   RunnerView,
   RunView,
@@ -399,8 +397,6 @@ export interface State {
   reminders: Map<string, SessionReminderView>;
   worktreeSetupNoticeDismissals: Set<string>;
   runs: Map<string, RunView>;
-  pods: Map<string, PodView>;
-  podContext: Map<string, PodContextEntry[]>;
   events: Map<string, SessionEvent[]>;
   /** Fixed-size per-session heartbeat rings. Unlike full timelines, these survive view changes.
    * Updated in place; a batch of socket frames waiting to be published works on its own copy. */
@@ -498,7 +494,6 @@ type Action =
     }
   | { type: "shell_output_removed"; shellId: string }
   | { type: "activity_tick"; now: number }
-  | { type: "pod_context_loaded"; podId: string; entries: PodContextEntry[] }
   | { type: "navigate"; view: View }
   | { type: "inbox_selection"; sessionId: string | null; splitKey: string | null; persist?: boolean; repair?: boolean }
   | { type: "assistant_thread_session"; sessionId: string | null }
@@ -595,13 +590,6 @@ function appendEvent(existing: SessionEvent[] | undefined, e: SessionEvent): Ses
   return mergeEvents(arr, [e]);
 }
 
-function mergePodContext(existing: PodContextEntry[] | undefined, incoming: PodContextEntry[]): PodContextEntry[] {
-  const byId = new Map<string, PodContextEntry>();
-  for (const entry of existing ?? []) byId.set(entry.id, entry);
-  for (const entry of incoming) byId.set(entry.id, entry);
-  return [...byId.values()].sort((a, b) => a.seq - b.seq);
-}
-
 function emptyScrollback(sessionId: string): ShellScrollback {
   return { sessionId, text: "", total: 0, exited: false, exitCode: null, chunks: [], revision: 0 };
 }
@@ -616,8 +604,6 @@ function relevantSessions(state: State): Set<string> {
     keep.add(state.assistantSessionId);
   } else if (state.view.name === "run") {
     state.runs.get(state.view.id)?.sessionIds.forEach((id) => keep.add(id));
-  } else if (state.view.name === "pod") {
-    state.pods.get(state.view.id)?.members.forEach((member) => keep.add(member.sessionId));
   }
   return keep;
 }
@@ -735,12 +721,12 @@ function withLegacyRecovery(state: State): State {
   return { ...state, streamRecoveryCursors: captureRecoveryCursors(state, relevantSessions(state)) };
 }
 
-/** Run and Pod comparison columns render whole histories and offer no reach-back control, so a
+/** Run comparison columns render whole histories and offer no reach-back control, so a
  * bounded window carried in from the session reader would silently truncate a member forever: fleet
  * recovery only pages ABOVE the cursor that window published. Entering those views drops the
  * partial caches so their own recovery refetches the full history, exactly as before windowing. */
 function dropBoundedWindowsForView(state: State): State {
-  if (state.view.name !== "run" && state.view.name !== "pod") return state;
+  if (state.view.name !== "run") return state;
   // Any window that is not the whole history, including a budget-expired prefix that reports no
   // older rows: a fleet column recovers only ABOVE the cursor it published.
   const partial = [...state.eventWindows]
@@ -846,12 +832,6 @@ function reducer(state: State, action: Action): State {
       next.eventHistory = pruned.eventHistory;
       next.eventWindows = pruned.eventWindows;
       next.shellOutput = pruned.shellOutput;
-      if (action.view.name === "pod") {
-        const podId = action.view.id;
-        next.podContext = new Map([...state.podContext].filter(([id]) => id === podId));
-      } else {
-        next.podContext = new Map();
-      }
       return withLegacyRecovery(next);
     }
     case "inbox_selection": {
@@ -1112,19 +1092,12 @@ function reducer(state: State, action: Action): State {
       shellOutput.delete(action.shellId);
       return { ...state, shellOutput };
     }
-    case "pod_context_loaded": {
-      if (state.view.name !== "pod" || state.view.id !== action.podId) return state;
-      const podContext = new Map(state.podContext);
-      podContext.set(action.podId, mergePodContext(podContext.get(action.podId), action.entries));
-      return { ...state, podContext };
-    }
     case "msg": {
       const msg = action.msg;
       switch (msg.type) {
         case "snapshot": {
           const messageNow = Number.isSafeInteger(action.now) && action.now! >= 0 ? action.now! : state.activityNow;
-          const targeted = msg.capabilities?.sessionSubscriptions === true;
-          const pods = new Map((msg.pods ?? []).map((pod) => [pod.id, pod]));
+          const targeted = msg.capabilities?.sessionSubscriptionsV2 === true;
           const sessions = msg.sessionsComplete === false ? new Map(state.sessions)
             : new Map<string, SessionView>();
           for (const session of msg.sessions) sessions.set(session.id,session);
@@ -1194,7 +1167,6 @@ function reducer(state: State, action: Action): State {
               requestedRevision: 0,
               appliedRevision: 0,
               sessionIds: [],
-              podIds: [],
             },
             activityNow: messageNow,
             // Legacy delivery is already global and the snapshot's lastEventAt is authoritative;
@@ -1229,15 +1201,11 @@ function reducer(state: State, action: Action): State {
             reminders: new Map((msg.reminders ?? []).map((reminder) => [reminder.sessionId, reminder])),
             worktreeSetupNoticeDismissals: new Set(msg.worktreeSetupNoticeDismissals ?? []),
             runs: new Map(msg.runs.map((r) => [r.id, r])),
-            pods,
             events,
             activity,
             eventEpochs,
             eventHistory,
             eventWindows,
-            // A missed pod_removed during an outage must not retain a potentially large context
-            // cache after the reconnect snapshot proves that pod no longer exists.
-            podContext: new Map([...state.podContext].filter(([podId]) => pods.has(podId))),
           });
           return withLegacyRecovery(next);
         }
@@ -1254,7 +1222,6 @@ function reducer(state: State, action: Action): State {
               requestedRevision: msg.revision,
               appliedRevision: msg.revision,
               sessionIds: msg.sessionIds,
-              podIds: msg.podIds,
             },
             streamRecoveryCursors: new Map([...pending.cursors].filter(([sessionId]) => accepted.has(sessionId))),
             pendingStreamRecovery: null,
@@ -1626,27 +1593,6 @@ function reducer(state: State, action: Action): State {
           const next = { ...state, runs };
           return state.view.name === "run" && state.view.id === msg.runId ? pruneViewStreams(next) : next;
         }
-        case "pod_upsert": {
-          const pods = new Map(state.pods);
-          pods.set(msg.pod.id, msg.pod);
-          const next = { ...state, pods };
-          const pruned = state.view.name === "pod" && state.view.id === msg.pod.id ? pruneViewStreams(next) : next;
-          return withLegacyRecovery(pruned);
-        }
-        case "pod_removed": {
-          const pods = new Map(state.pods);
-          pods.delete(msg.podId);
-          const podContext = new Map(state.podContext);
-          podContext.delete(msg.podId);
-          const next = { ...state, pods, podContext };
-          return state.view.name === "pod" && state.view.id === msg.podId ? pruneViewStreams(next) : next;
-        }
-        case "pod_context_entry": {
-          if (state.view.name !== "pod" || state.view.id !== msg.entry.podId) return state;
-          const podContext = new Map(state.podContext);
-          podContext.set(msg.entry.podId, mergePodContext(podContext.get(msg.entry.podId), [msg.entry]));
-          return { ...state, podContext };
-        }
         case "identity_directory_changed":
           return { ...state, identityDirectoryRevision: state.identityDirectoryRevision + 1 };
       }
@@ -1689,8 +1635,6 @@ function initialState(
     reminders: new Map(),
     worktreeSetupNoticeDismissals: new Set(),
     runs: new Map(),
-    pods: new Map(),
-    podContext: new Map(),
     events: new Map(),
     activity: new Map(),
     activityNow: Date.now(),
@@ -1761,7 +1705,6 @@ interface StoreValue extends State {
   loadLaterEvents: Store["loadLaterEvents"];
   failLaterEventsLoad: Store["failLaterEventsLoad"];
   promoteDeferredEventTail: Store["promoteDeferredEventTail"];
-  loadPodContext: (podId: string, entries: PodContextEntry[]) => void;
   eventHighWater: (sessionId: string) => number;
   recoveryAfter: (sessionId: string) => number;
   recoveryReadAfter: (sessionId: string, eventEpoch: number, recoveryGeneration: number) => number;
@@ -1789,7 +1732,7 @@ interface StoreValue extends State {
  * frame (a snapshot, a history reset, removals, subscription acknowledgements) is published at once,
  * together with whatever earlier frames are still waiting. */
 const STREAM_FRAME_TYPES: ReadonlySet<ControlPlaneToUi["type"]> = new Set([
-  "session_event", "session_upsert", "shell_output", "pod_context_entry",
+  "session_event", "session_upsert", "shell_output",
 ]);
 
 /** Whether a frame, now reduced from `before` to `after`, may wait for the next animation frame. A
@@ -2164,7 +2107,7 @@ export class Store {
       const cached = this.readerCache.get(sessionId);
       this.dropReaderCache(sessionId);
       // Fleet columns have no Load Earlier Activity control and must recover whole histories.
-      const fleet = next.view.name === "run" || next.view.name === "pod";
+      const fleet = next.view.name === "run";
       if (!cached || (fleet && isPartialHistory(cached.window))) {
         expireFollowTailAnchor(this.instanceScope, sessionId);
         continue;
@@ -2753,8 +2696,6 @@ export class Store {
     return true;
   };
 
-  loadPodContext = (podId: string, entries: PodContextEntry[]): void =>
-    this.dispatch({ type: "pod_context_loaded", podId, entries });
   eventHighWater = (sessionId: string): number => eventHighWater(this.state.events.get(sessionId));
   recoveryAfter = (sessionId: string): number => this.state.streamRecoveryCursors.get(sessionId) ?? 0;
   /** A completed provisional REST window can precede its subscription acknowledgement. It already
@@ -3127,7 +3068,7 @@ export function useHasStore(): boolean {
 }
 
 /** Stable action handles (never cause re-renders). */
-export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadTurnStartWindow" | "loadHistoryPreviewHandoff" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "beginSessionDetailLoad" | "getSession" | "beginSessionsBackfill" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "isEventGapRecoveryCurrent" | "beginEventGapRecovery" | "cancelEventGapRecovery" | "finishEventGapRecovery" | "loadEventGapWindow" | "deferEventTail" | "beginLaterEventsLoad" | "loadLaterEvents" | "failLaterEventsLoad" | "promoteDeferredEventTail" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
+export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadTurnStartWindow" | "loadHistoryPreviewHandoff" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "beginSessionDetailLoad" | "getSession" | "beginSessionsBackfill" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "isEventGapRecoveryCurrent" | "beginEventGapRecovery" | "cancelEventGapRecovery" | "finishEventGapRecovery" | "loadEventGapWindow" | "deferEventTail" | "beginLaterEventsLoad" | "loadLaterEvents" | "failLaterEventsLoad" | "promoteDeferredEventTail" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
   return useStoreHandle();
 }
 
@@ -3275,7 +3216,6 @@ export function useStore(): StoreValue {
     loadLaterEvents: store.loadLaterEvents,
     failLaterEventsLoad: store.failLaterEventsLoad,
     promoteDeferredEventTail: store.promoteDeferredEventTail,
-    loadPodContext: store.loadPodContext,
     eventHighWater: store.eventHighWater,
     recoveryAfter: store.recoveryAfter,
     recoveryReadAfter: store.recoveryReadAfter,

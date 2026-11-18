@@ -164,7 +164,7 @@ export function isSpaNavigation(method: string, pathname: string): boolean {
   // to an asset-looking name. Nested asset-looking misses still 404 instead of returning HTML.
   // The browser route codec uses a `~` marker plus alphabet-only UTF-16LE base64url, so normalization
   // cannot expose a slash or dot segment from inside the opaque id.
-  if (/^\/(?:sessions|runs|pods)\/~[A-Za-z0-9_-]+\/?$/.test(p)) return true;
+  if (/^\/(?:sessions|runs)\/~[A-Za-z0-9_-]+\/?$/.test(p)) return true;
   return !/\.[a-zA-Z0-9]+$/.test(p);
 }
 

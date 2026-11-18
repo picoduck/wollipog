@@ -185,14 +185,13 @@ const session = {
 
 const snapshotMessage: ControlPlaneToUi = {
   type: "snapshot",
-  capabilities: { sessionSubscriptions: emptyOpeningRace, boundedDelivery: emptyOpeningRace, paginatedSessionHistory: emptyOpeningRace, projects: true,
+  capabilities: { sessionSubscriptionsV2: emptyOpeningRace, boundedDelivery: emptyOpeningRace, paginatedSessionHistory: emptyOpeningRace, projects: true,
     currentTurnOpening: emptyOpeningRace || oneTurnOpening },
   runners: [runner],
   boxes: [],
   projects: [project],
   sessions: [session],
   runs: [],
-  pods: [],
 };
 
 class FixtureSocket implements UiSocket {
@@ -213,7 +212,7 @@ class FixtureSocket implements UiSocket {
     if (message.type !== "session_subscriptions") return;
     setTimeout(() => {
       this.onmessage?.({ data: JSON.stringify({ type: "session_subscriptions_applied", revision: message.revision,
-        sessionIds: message.sessionIds, podIds: message.podIds }) });
+        sessionIds: message.sessionIds }) });
       document.body.dataset.subscriptionApplied = "true";
     }, 0);
   }

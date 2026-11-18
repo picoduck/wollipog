@@ -77,7 +77,7 @@ const session: SessionView = {
 const snapshot: UiSnapshotMessage = {
   type: "snapshot",
   capabilities: {
-    sessionSubscriptions: false,
+    sessionSubscriptionsV2: false,
     boundedDelivery: false,
     paginatedSessionHistory: false,
     projects: true,
@@ -87,7 +87,6 @@ const snapshot: UiSnapshotMessage = {
   projects: [],
   sessions: [session],
   runs: [],
-  pods: [],
 };
 
 class FakeSocket implements UiSocket {

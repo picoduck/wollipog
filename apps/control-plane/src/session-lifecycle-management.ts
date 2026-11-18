@@ -89,8 +89,6 @@ export function createSessionLifecycleManagement(deps: {
     if (!Number.isInteger(turn) || turn < 1) return reply.code(400).send({ error: "turn must be a positive integer" });
     const session = db.getSession(id);
     if (!session) return reply.code(404).send({ error: "session not found" });
-    const reconciliationBlock = svc.podReconciliationMutationError(id);
-    if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
     if (!session.worktreePath) return reply.code(409).send({ error: "rewind requires a worktree session" });
     if (session.status === "running" || session.status === "starting") {
       return reply.code(409).send({ error: "a turn is running — stop or wait before rewinding" });
@@ -120,8 +118,6 @@ export function createSessionLifecycleManagement(deps: {
 
   const reviewRefusal = svc.reviewSessionRefusal(sourceId, "cannot be forked");
   if (reviewRefusal) return reply.code(409).send({ error: reviewRefusal });
-  const reconciliationBlock = svc.podReconciliationMutationError(sourceId);
-  if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   const turn = Number((input as { turn?: number })?.turn);
   if (!Number.isInteger(turn) || turn < 1) return reply.code(400).send({ error: "turn must be a positive integer" });
   const forkingHuman = (requester?.kind === "human" ? requester : null);

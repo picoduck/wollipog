@@ -110,13 +110,12 @@ const devices: DeviceView[] = [{
 function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, createProjectLocations: true },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, createProjectLocations: true },
     runners: [],
     boxes: [],
     projects: [],
     sessions: [],
     runs: [],
-    pods: [],
   };
 }
 

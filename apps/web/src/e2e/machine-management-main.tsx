@@ -423,7 +423,7 @@ function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: {
-      sessionSubscriptions: false,
+      sessionSubscriptionsV2: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
       projects: true,
@@ -441,7 +441,6 @@ function snapshot(): UiSnapshotMessage {
     projects: [],
     sessions: [],
     runs: [],
-    pods: [],
   };
 }
 

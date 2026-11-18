@@ -3200,130 +3200,6 @@ export function resolveGitActionExecution(
   };
 }
 
-export interface PodReconciliationSessionMeta {
-  workspaceId: string | null;
-  worktreePath: string | null;
-  context?: AgentContext;
-}
-
-/** Resolve the two runner-owned worktree paths and execution boundary before any git command.
- * This is deliberately independent of control-plane claims: the box store is authoritative. */
-export function validatePodReconciliationMetadata(
-  requestedTargetPath: string,
-  target: PodReconciliationSessionMeta | null,
-  source: PodReconciliationSessionMeta | null,
-): { sourceWorktreePath: string; context: AgentContext } {
-  if (!target?.worktreePath || cleanGitPath(target.worktreePath) !== cleanGitPath(requestedTargetPath)) {
-    throw new Error("target reconciliation path does not match runner-owned session metadata");
-  }
-  if (!source?.worktreePath) throw new Error("source reconciliation session has no runner-owned worktree");
-  if (cleanGitPath(source.worktreePath) === cleanGitPath(target.worktreePath)) {
-    throw new Error("pod reconciliation requires distinct source and target worktrees");
-  }
-  if (!target.workspaceId || source.workspaceId !== target.workspaceId) {
-    throw new Error("pod reconciliation requires source and target sessions in the same workspace");
-  }
-  const targetContext = target.context ?? { kind: "native" };
-  const sourceContext = source.context ?? { kind: "native" };
-  if (targetContext.kind !== sourceContext.kind ||
-      (targetContext.kind === "wsl" && sourceContext.kind === "wsl" && targetContext.distro !== sourceContext.distro)) {
-    throw new Error("pod reconciliation requires source and target sessions in the same execution context");
-  }
-  return { sourceWorktreePath: source.worktreePath, context: targetContext };
-}
-
-async function restoreReconciliationTarget(cwd: string, targetHead: string): Promise<void> {
-  const mergeHead = (await gitSoft(cwd, ["rev-parse", "-q", "--verify", "MERGE_HEAD"])).trim();
-  if (mergeHead) {
-    try {
-      await git(cwd, ["merge", "--abort"], { timeoutMs: 120_000 });
-    } catch {
-      // Fall through to the exact immutable target reset below.
-    }
-  }
-  let restoredHead = (await git(cwd, ["rev-parse", "HEAD"])).trim();
-  let restoredStatus = await git(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-  if (restoredHead !== targetHead || restoredStatus) {
-    await git(cwd, ["reset", "--hard", targetHead], { timeoutMs: 120_000 });
-    await git(cwd, ["clean", "-fd"], { timeoutMs: 120_000 });
-    restoredHead = (await git(cwd, ["rev-parse", "HEAD"])).trim();
-    restoredStatus = await git(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-  }
-  if (restoredHead !== targetHead || restoredStatus) {
-    throw new Error("reconciliation failed and the target worktree could not be proven restored to its original clean head");
-  }
-}
-
-/** Merge one runner-owned session worktree into another without ever sharing a writable
- * filesystem. Both worktrees must be clean and backed by the same git common directory. A
- * conflict is fully aborted and verified back at the exact target head before it is reported. */
-export async function runPodReconcile(
-  targetCwd: string,
-  sourceCwd: string,
-  action: Extract<GitAction, { kind: "pod_reconcile" }>,
-): Promise<NonNullable<GitActionData["podReconciliation"]>> {
-  await Promise.all([assertWorktree(targetCwd), assertWorktree(sourceCwd)]);
-  if (cleanGitPath(targetCwd) === cleanGitPath(sourceCwd)) {
-    throw new Error("pod reconciliation requires distinct source and target worktrees");
-  }
-  const [targetDirty, sourceDirty, targetCommon, sourceCommon, targetHead, sourceHead] = await Promise.all([
-    git(targetCwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
-    git(sourceCwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
-    git(targetCwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
-    git(sourceCwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
-    git(targetCwd, ["rev-parse", "HEAD"]),
-    git(sourceCwd, ["rev-parse", "HEAD"]),
-  ]);
-  if (targetDirty) throw new Error("target member worktree must be clean before reconciliation");
-  if (sourceDirty) throw new Error("source member worktree must be clean and committed before reconciliation");
-  if (cleanGitPath(targetCommon) !== cleanGitPath(sourceCommon)) {
-    throw new Error("pod reconciliation requires source and target worktrees from the same git repository");
-  }
-  const target = targetHead.trim();
-  const source = sourceHead.trim();
-  if (!/^[0-9a-f]{40,64}$/.test(target) || !/^[0-9a-f]{40,64}$/.test(source)) {
-    throw new Error("pod reconciliation could not resolve immutable source and target heads");
-  }
-  const mergeBase = (await git(targetCwd, ["merge-base", target, source])).trim();
-  try {
-    await git(targetCwd, ["merge-base", "--is-ancestor", source, target]);
-    return { status: "already_applied", sourceHead: source, targetHead: target, mergeBase, resultHead: target };
-  } catch {
-    // Non-zero means source is not already contained. Both commits and their common repository
-    // were proven above, so continue to the guarded merge.
-  }
-
-  try {
-    await git(
-      targetCwd,
-      [
-        "-c", "user.name=Wollipog",
-        "-c", "user.email=wollipog@localhost",
-        "merge", "--no-ff", "--no-edit", "--no-verify", "-m", action.message.slice(0, 240), source,
-      ],
-      { timeoutMs: 120_000 },
-    );
-  } catch (error) {
-    const conflicts = (await gitSoft(targetCwd, ["diff", "--name-only", "--diff-filter=U", "-z"]))
-      .split("\0").filter(Boolean).slice(0, 100);
-    await restoreReconciliationTarget(targetCwd, target);
-    if (conflicts.length > 0) {
-      return { status: "conflicted", sourceHead: source, targetHead: target, mergeBase, conflictPaths: conflicts };
-    }
-    throw error;
-  }
-
-  const resultHead = (await git(targetCwd, ["rev-parse", "HEAD"])).trim();
-  const [firstParent, secondParent] = (await git(targetCwd, ["rev-parse", "HEAD^1", "HEAD^2"]))
-    .trim().split(/\s+/);
-  const finalStatus = await git(targetCwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-  if (firstParent !== target || secondParent !== source || finalStatus) {
-    await restoreReconciliationTarget(targetCwd, target);
-    throw new Error("reconciliation merge did not produce the expected clean two-parent commit");
-  }
-  return { status: "applied", sourceHead: source, targetHead: target, mergeBase, resultHead };
-}
-
 /** Run a git action and return its typed result. `ctx` carries the session kind (worktree
  * assertion + branch-relative scopes) and the last-turn snapshot tree from the box store. */
 export async function runGitAction(cwd: string, action: GitAction, ctx: GitActionContext): Promise<GitActionData> {
@@ -3371,8 +3247,6 @@ export async function runGitAction(cwd: string, action: GitAction, ctx: GitActio
       return await stageLines(cwd, action, ctx);
     case "discard_file":
       return await discardFile(cwd, action, ctx);
-    case "pod_reconcile":
-      throw new Error("pod reconciliation requires runner-owned source session metadata");
     case "merge_readiness": {
       const branch = await branchPullRequest(cwd);
       if ("unavailable" in branch) return { mergeReadiness: { facts: null, unavailable: branch.unavailable } };

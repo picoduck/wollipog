@@ -1595,7 +1595,6 @@ mod tests {
                 "/api/projects/p_1/locations/l_1/worktree-setup",
                 150,
             ),
-            (Method::POST, "/api/pods/pod_1/reconcile", 120),
             (Method::POST, "/api/skill-git/preview", 90),
         ] {
             let budget = budget(method.clone(), path);

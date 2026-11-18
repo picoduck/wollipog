@@ -34,6 +34,6 @@ revocation and cleanup rules. Only the Stop issued to preserve an idle pause mem
 queued notices for resume; a later ordinary Stop supersedes that preservation intent. Owner
 resolutions during pause keep their notification owed, including on older runners. Other internal
 notices opt in to durable retention without restarting the provider. Human/agent prompts, Send
-Findings, pod relays and workflow dispatch refuse admission during pause, so a work timeout cannot
+Findings and workflow dispatch refuse admission during pause, so a work timeout cannot
 run while its prompt waits for resume. Shared viewers can inspect the pause, but receive no pause/resume controls unless their
 principal-specific command permissions establish ownership.
