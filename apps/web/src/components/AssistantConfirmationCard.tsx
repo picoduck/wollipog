@@ -6,12 +6,12 @@ import {
   assistantConfirmationOutcome,
   assistantThreadPendingKey,
   onAssistantThreadUpsert,
-  pendingAssistantConfirmations,
+  pendingAssistantConfirmationsByThread,
 } from "../assistant-confirmations.js";
+import { assistantThreadTitle } from "../assistant-threads.js";
 import { formatClock } from "../format.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { Modal } from "./Modal.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
 type Answered = (response: AssistantOwnerConfirmationResponse) => void;
@@ -65,12 +65,12 @@ function ConfirmationFacts({ confirmation }: { confirmation: AssistantOwnerConfi
 }
 
 /** Opens the target session, when the request has one. */
-function OpenTarget({ confirmation, disabled, onOpen }: { confirmation: AssistantOwnerConfirmation; disabled: boolean; onOpen?: () => void }) {
+function OpenTarget({ confirmation, disabled }: { confirmation: AssistantOwnerConfirmation; disabled: boolean }) {
   const { navigate } = useStoreActions();
   if (confirmation.target.kind !== "session") return null;
   return (
     <button type="button" className="btn sm request-card-tertiary" disabled={disabled}
-      onClick={() => { onOpen?.(); navigate({ name: "session", id: confirmation.target.id }); }}>
+      onClick={() => navigate({ name: "session", id: confirmation.target.id })}>
       Open Session
     </button>
   );
@@ -122,51 +122,25 @@ export function AssistantConfirmationCard({ confirmation, onAnswered }: {
   );
 }
 
-/** The Inbox's compact row for one request: what it is and where it came from, with Review to
- * read it whole and answer it in a dialog. The list under it keeps its room. */
-function AssistantConfirmationRow({ confirmation, threadTitle, onAnswered }: {
-  confirmation: AssistantOwnerConfirmation;
-  threadTitle: string;
-  onAnswered: Answered;
-}) {
-  const [open, setOpen] = useState(false);
-  const { busy, answer } = useConfirmationAnswer(confirmation, (response) => { setOpen(false); onAnswered(response); });
-  const headingId = `assistant-confirmation-${confirmation.id}`;
-  return (
-    <li className="request-card" aria-labelledby={headingId}>
-      <div className="request-card-head">
-        <span className="request-card-kind">Approval Needed</span>
-        <span className="request-card-meta"><span>Expires {formatClock(confirmation.expiresAt)}</span></span>
-        <span className="request-card-trailing">
-          <button type="button" className="btn sm primary" aria-describedby={headingId} onClick={() => setOpen(true)}>Review</button>
-        </span>
-      </div>
-      <p className="request-card-title" id={headingId}>{confirmation.title}</p>
-      {/* The thread on its own line, so a narrow screen never cuts the expiry or Review. */}
-      <p className="request-card-policy">Asked in {threadTitle}</p>
-      {open && (
-        <Modal title={confirmation.title} description={`Approval Needed · ${threadTitle}`} onClose={() => setOpen(false)}
-          tertiary={<OpenTarget confirmation={confirmation} disabled={busy !== null} onOpen={() => setOpen(false)} />}
-          footer={<ConfirmationActions busy={busy} answer={answer} />}>
-          <ConfirmationFacts confirmation={confirmation} />
-        </Modal>
-      )}
-    </li>
-  );
-}
+/** How many threads the Inbox names; the rest wait behind "+N More", in the Assistants section. */
+const NOTICE_THREADS = 3;
 
 /**
- * Every Assistant thread's pending owner confirmations, at the top of the Inbox (#4665).
+ * Every Assistant thread's pending owner confirmations, summed up at the top of the Inbox (#4665):
+ * one line for each of at most three threads, with how many requests it has waiting, when the first
+ * expires, and Review, which opens the thread, where each request is drawn whole to be answered.
+ * However many requests wait, the block keeps the same small bound, so the sessions keep their room.
  *
  * The Thread API's list is the only source of what is shown, and only the answer to the most
  * recently started read is applied. A read starts whenever what is shown may have fallen behind:
- * the connection comes (back) online, a thread event changes that thread's pending requests, or
- * the owner answers one here. Each such change therefore has a read that started after it, and
- * an older read's late answer is discarded, so stale state can never replace newer state. A
- * control plane without the Thread API shows nothing.
+ * the connection comes (back) online, or a thread event changes that thread's pending requests (an
+ * answer in the thread view publishes one). Each such change therefore has a read that started
+ * after it, and an older read's late answer is discarded, so stale state can never replace newer
+ * state. A control plane without the Thread API shows nothing.
  */
 export function AssistantConfirmationsNotice() {
   const api = useApi();
+  const { navigate } = useStoreActions();
   const online = useStoreSelector((state) => state.conn === "online");
   const [threads, setThreads] = useState<readonly AssistantThread[]>([]);
   const [now, setNow] = useState(() => Date.now());
@@ -217,16 +191,35 @@ export function AssistantConfirmationsNotice() {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
-  const answered = useCallback(() => refresh(), [refresh]);
-  const pending = useMemo(() => pendingAssistantConfirmations(threads, now), [threads, now]);
-  if (!pending.length) return null;
+  const waiting = useMemo(() => pendingAssistantConfirmationsByThread(threads, now), [threads, now]);
+  if (!waiting.length) return null;
+  const more = waiting.length - NOTICE_THREADS;
   return (
-    <section className="assistant-confirmations" aria-label="Assistant Approvals">
-      <ul className="assistant-confirmations-list">
-        {pending.map(({ confirmation, threadTitle }) => (
-          <AssistantConfirmationRow key={confirmation.id} confirmation={confirmation} threadTitle={threadTitle} onAnswered={answered} />
-        ))}
+    <section className="request-card assistant-approvals" aria-label="Assistant Approvals">
+      <ul className="assistant-approvals-list">
+        {waiting.slice(0, NOTICE_THREADS).map((thread) => {
+          const title = assistantThreadTitle({ title: thread.threadTitle });
+          const titleId = `assistant-approvals-${thread.threadId}`;
+          return (
+            <li key={thread.threadId} className="assistant-approvals-row" aria-labelledby={titleId}>
+              <span className="assistant-approvals-title" id={titleId} title={title}>{title}</span>
+              <span className="assistant-approvals-meta">
+                <span className="request-card-kind">{thread.confirmations.length} {thread.confirmations.length === 1 ? "Approval" : "Approvals"}</span>
+                <span className="assistant-approvals-expiry">Expires {formatClock(thread.expiresAt)}</span>
+                <button type="button" className="btn sm primary" aria-describedby={titleId}
+                  onClick={() => navigate({ name: "assistants", threadId: thread.threadId })}>
+                  Review
+                </button>
+              </span>
+            </li>
+          );
+        })}
       </ul>
+      {more > 0 && (
+        <button type="button" className="btn sm ghost assistant-approvals-more" onClick={() => navigate({ name: "assistants" })}>
+          +{more} More
+        </button>
+      )}
     </section>
   );
 }

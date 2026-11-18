@@ -2,8 +2,8 @@
  * Owner confirmations of Wollipog Assistant threads (#4665), as the web client reads them.
  *
  * A thread's destructive command waits for its owner instead of being confirmed by its assistant.
- * Each thread lists its pending requests in `confirmations`; the Inbox shows every thread's, and
- * the thread view draws its own. `assistant_thread_upsert` web events carry each change, which
+ * Each thread lists its pending requests in `confirmations`; the Inbox sums them up by thread, and
+ * the thread view draws its own to be answered. `assistant_thread_upsert` web events carry each change, which
  * the store announces here so a mounted list knows when to read the Thread API again.
  */
 import type { AssistantOwnerConfirmation, AssistantThread } from "@wollipog/protocol";
@@ -25,6 +25,7 @@ export function onAssistantThreadUpsert(listener: (thread: AssistantThread) => v
 
 export interface PendingAssistantConfirmation {
   confirmation: AssistantOwnerConfirmation;
+  threadId: string;
   threadTitle: string;
 }
 
@@ -34,11 +35,36 @@ export function pendingAssistantConfirmations(threads: Iterable<AssistantThread>
   for (const thread of threads) {
     if (thread.status === "archived") continue;
     for (const confirmation of thread.confirmations ?? []) {
-      if (confirmation.status === "pending" && confirmation.expiresAt > now) pending.push({ confirmation, threadTitle: thread.title });
+      if (confirmation.status === "pending" && confirmation.expiresAt > now) pending.push({ confirmation, threadId: thread.id, threadTitle: thread.title });
     }
   }
   return pending.sort((left, right) => left.confirmation.createdAt - right.confirmation.createdAt ||
     (left.confirmation.id < right.confirmation.id ? -1 : 1));
+}
+
+export interface AssistantThreadConfirmations {
+  threadId: string;
+  threadTitle: string;
+  /** The thread's pending requests, oldest first; never empty. */
+  confirmations: AssistantOwnerConfirmation[];
+  /** When the first of them expires. */
+  expiresAt: number;
+}
+
+/** Every thread's pending owner confirmations, one entry per thread that has any: the thread whose
+ * oldest request is oldest first, as `pendingAssistantConfirmations` orders the requests. */
+export function pendingAssistantConfirmationsByThread(threads: Iterable<AssistantThread>, now = Date.now()): AssistantThreadConfirmations[] {
+  const byThread = new Map<string, AssistantThreadConfirmations>();
+  for (const { confirmation, threadId, threadTitle } of pendingAssistantConfirmations(threads, now)) {
+    const group = byThread.get(threadId);
+    if (group) {
+      group.confirmations.push(confirmation);
+      group.expiresAt = Math.min(group.expiresAt, confirmation.expiresAt);
+    } else {
+      byThread.set(threadId, { threadId, threadTitle, confirmations: [confirmation], expiresAt: confirmation.expiresAt });
+    }
+  }
+  return [...byThread.values()];
 }
 
 /** Which requests a thread has waiting, as one comparable value. */
