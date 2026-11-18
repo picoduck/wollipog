@@ -208,12 +208,15 @@ export interface AssistantOperation {
   execute(args: unknown, context: { owner: HumanPrincipal; connection: AssistantConnection; recheck(): Promise<HumanPrincipal> }): unknown | Promise<unknown>;
 }
 
+/** Every registered operation's name: also bounds the names a discovery request may echo back. */
+export const ASSISTANT_OPERATION_NAME = /^[a-z][a-z0-9_]{0,31}$/;
+
 /** Single inventory for every Assistant transport. Full Access includes future registrations. */
 export class AssistantOperations {
   private operations = new Map<string, AssistantOperation>();
   constructor(readonly connections: AssistantConnections, private ownerPrincipal: (userId: string, organizationId: string) => HumanPrincipal | null) {}
   register(operation: AssistantOperation): void {
-    if (!/^[a-z][a-z0-9_]{0,31}$/.test(operation.name) || this.operations.has(operation.name)) throw new Error("Invalid or duplicate Assistant operation");
+    if (!ASSISTANT_OPERATION_NAME.test(operation.name) || this.operations.has(operation.name)) throw new Error("Invalid or duplicate Assistant operation");
     this.operations.set(operation.name, operation);
   }
   list(connection: AssistantConnection): AssistantOperation[] {

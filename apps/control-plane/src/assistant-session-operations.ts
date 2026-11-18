@@ -1,4 +1,4 @@
-import type { CreateSessionRequest, SessionView } from "@wollipog/protocol";
+import type { CreateSessionRequest, SessionConfig, SessionView } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { SessionsService, ServiceResult } from "./sessions.js";
 import { AssistantOperations, AssistantRefusal, type AssistantOperation, type AssistantTarget } from "./assistant-connections.js";
@@ -19,7 +19,25 @@ function text(args: Record<string, unknown>, key: string): string {
 }
 const schema = (properties: Record<string, unknown>, required: string[] = []) => ({type: "object", properties, required, additionalProperties: false});
 const string = {type: "string"};
-const commandProperties = {sessionId: string, workOriginId: {...string, description: "Optional preauthorized work-origin binding; requires the work tracking extension."},
+/** The JSON Schema a `SessionConfig` field of type `T` needs. */
+type SessionConfigFieldSchema<T> = T extends readonly number[] ? {type: "array"; items: {type: "number"}; description: string}
+  : T extends number ? {type: "number" | "integer"; description: string}
+  : T extends string ? {type: "string"; description: string} : never;
+/** `session_launch`'s `config` (#4679). Typed against the protocol's `SessionConfig`, so a field
+ * added, removed or retyped there fails the typecheck until this schema lists it the same way. */
+export const SESSION_LAUNCH_CONFIG_FIELDS: {[K in keyof SessionConfig]-?: SessionConfigFieldSchema<NonNullable<SessionConfig[K]>>} = {
+  model: {type: "string", description: "Model id the agent offers. Omit to use the agent's default."},
+  effort: {type: "string", description: "Reasoning effort level the model offers."},
+  serviceTier: {type: "string", description: "Codex service tier id the model offers; `default` is standard speed."},
+  permissionMode: {type: "string", description: "Provider permission mode the agent offers."},
+  costBudgetUsd: {type: "number", description: "Hard accumulated-cost limit in USD. The session stops at the first crossing."},
+  maxToolCalls: {type: "number", description: "Hard limit on distinct tool calls. Omit for unlimited."},
+  costCheckpointsUsd: {type: "array", items: {type: "number"}, description: "Ascending USD amounts below the hard budget at which the session pauses once for the owner to continue or stop."},
+  maxChildSessions: {type: "integer", description: "Concurrent live child-session cap, 0 to 64."},
+};
+const sessionLaunchConfig = {type: "object", properties: SESSION_LAUNCH_CONFIG_FIELDS, additionalProperties: false,
+  description: "Optional session settings. Each is validated against the selected agent and model."};
+const commandProperties = {sessionId: string, workOriginId:{...string, description: "Optional preauthorized work-origin binding; requires the work tracking extension."},
   commandId: {...string, description: "Stable caller command ID. Reconcile before retrying a lost response."}};
 
 export interface AssistantSessionCommandHooks {
@@ -156,7 +174,7 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
     return {kind: "project", id: location.projectId, projectId: location.projectId};
   };
   mutation("session_launch", "Launch work in an authorized project/location using its local or SSH runner. Reconcile commandId before retrying.",
-    schema({commandId: commandProperties.commandId, workOriginId: commandProperties.workOriginId, locationId: string, agentId: string, providerAccountId: string, prompt: string, title: string, useWorktree: {type: "boolean"}, config: {type: "object"}}, ["commandId", "locationId", "agentId"]), launchTarget,
+    schema({commandId: commandProperties.commandId, workOriginId: commandProperties.workOriginId, locationId: string, agentId: string, providerAccountId: string, prompt: string, title: string, useWorktree: {type: "boolean"}, config: sessionLaunchConfig}, ["commandId", "locationId", "agentId"]), launchTarget,
     (args, owner, assistantWorkOrigin) => {
       const location = db.getProjectLocation(text(args, "locationId"))!;
       if (!db.canAccessRunner(owner, location.runnerId) || !db.canAccessWorkspace(owner, location.runnerId, location.workspaceId)) throw new AssistantRefusal("The owner cannot access this Location's runner/workspace. Restore access in Project and Machine settings.");

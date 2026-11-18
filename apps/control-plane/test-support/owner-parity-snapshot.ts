@@ -135,6 +135,58 @@ if (process.argv.includes("--verify-runtime-identity") || process.argv.includes(
     process.exitCode = 1;
   } finally {fixture.close();}
 }
+if (process.argv.includes("--verify-discovery-size")) {
+  // Page a Full Access connection's discovery of the production inventory through real MCP and
+  // report each result's size (#4679). Same brand-new fixture DB; never hosting state.
+  const {ControlPlaneDb} = await import("../src/db.js");
+  const fixture = ControlPlaneDb.open(join(root, "fixture.db"));
+  try {
+    const local = fixture.localIdentityContext(), owner = fixture.operatingHumanPrincipal(local.userId, local.organizationId)!;
+    const issued = fixture.assistantConnections.create(owner, "Discovery Size Fixture", {operations: "all", projects: "all"});
+    const discover = async (args: Record<string, unknown>) => {
+      for (let attempt = 0; attempt < 500; attempt++) {
+        const response = await app.inject({method: "POST", url: "/assistant/mcp", headers: {authorization: `Bearer ${issued.token}`},
+          payload: {jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "assistant_discover", arguments: args}}});
+        if (response.statusCode === 503) { await new Promise(resolve => setTimeout(resolve, 10)); continue; }
+        const result = response.json().result;
+        assert.equal(result.isError, undefined, "Discovery must succeed");
+        const text = result.content[0].text as string;
+        return {bytes: Buffer.byteLength(text), body: JSON.parse(text)};
+      }
+      throw new Error("Control plane never became ready");
+    };
+    const listPages: number[] = [], names: string[] = [];
+    let page = await discover({});
+    for (;;) {
+      listPages.push(page.bytes);
+      names.push(...page.body.operations.map((operation: {name: string}) => operation.name));
+      if (!page.body.nextCursor) break;
+      page = await discover({cursor: page.body.nextCursor});
+    }
+    const expected = new Map(assistantOperations.list(issued.connection).map(operation => [operation.name, operation.inputSchema]));
+    assert.deepEqual(names, [...expected.keys()], "Paged discovery must list every granted operation once");
+    // Every schema alone, then the whole inventory in requests of the most names one call takes.
+    const single = [];
+    for (const name of names) {
+      const result = await discover({operations: [name]});
+      assert.deepEqual(result.body.operations[0].inputSchema, expected.get(name));
+      single.push(result.bytes);
+    }
+    const schemaPages: number[] = [], received: string[] = [];
+    let pending = [...names];
+    while (pending.length) {
+      const result = await discover({operations: pending.slice(0, 64)});
+      schemaPages.push(result.bytes);
+      received.push(...result.body.operations.map((operation: {name: string}) => operation.name));
+      pending = [...(result.body.remaining ?? []), ...pending.slice(64)];
+    }
+    assert.deepEqual(received, names, "Schema requests must return every granted operation");
+    console.log("ASSISTANT_DISCOVERY_SIZE " + JSON.stringify({operations: names.length, listPages, largestSchema: Math.max(...single), schemaPages}));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "Assistant discovery size verification failed.");
+    process.exitCode = 1;
+  } finally {fixture.close();}
+}
 if (process.argv.includes("--require-complete")) {
   const manifest = JSON.parse(readFileSync(new URL("../../../docs/assistant-owner-capabilities.json", import.meta.url), "utf8"));
   const coverage = Object.fromEntries(Object.entries(manifest).filter(([, entry]) => {

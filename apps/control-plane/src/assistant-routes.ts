@@ -2,26 +2,94 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { extractBearer } from "./auth.js";
 import { PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
-import { assistantGrant, AssistantOperations, AssistantRefusal, AssistantConflict } from "./assistant-connections.js";
+import { assistantGrant, AssistantOperations, AssistantRefusal, AssistantConflict, ASSISTANT_OPERATION_NAME } from "./assistant-connections.js";
 import { AssistantConnectionManagement } from "./assistant-connection-management.js";
 import {ManagementUncertainOutcome} from "./assistant-management-command.js";
 import { WOLLIPOG_ASSISTANT_SKILL } from "./assistant-skill.js";
 export { assistantActivityTargetLabel } from "./assistant-connection-management.js";
 
+/** Most UTF-8 bytes one `assistant_discover` result may serialize to (#4679). Claude Code saves an
+ * MCP text result over 50,000 characters to a file and warns past 10,000 tokens; Codex keeps
+ * 10,000 tokens (about 40,000 bytes) of a tool result for its catalog models. This stays under all
+ * three with room for the MCP envelope. */
+export const ASSISTANT_DISCOVERY_MAX_BYTES = 24_000;
+/** Most operation names one schema request may name. */
+export const ASSISTANT_DISCOVERY_MAX_SCHEMA_NAMES = 64;
+const SCHEMA_HINT = "Call assistant_discover with {\"operations\": [\"<name>\", ...]} for those operations' full input schemas.";
+const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+
+/** Appends items to `base[key]` while the whole result stays within the bound, always at least one.
+ * Returns how many were taken. `reserve` holds room for a field the caller adds afterwards. */
+function fill<T>(base: Record<string, unknown>, key: string, items: readonly T[], reserve: number): number {
+  const list: T[] = [];
+  base[key] = list;
+  let size = bytes(base) + reserve;
+  for (const item of items) {
+    const next = bytes(item) + (list.length ? 1 : 0);
+    if (list.length && size + next > ASSISTANT_DISCOVERY_MAX_BYTES) break;
+    list.push(item);
+    size += next;
+  }
+  return list.length;
+}
+
+function discoveryArguments(args: unknown): {operations?: string[]; cursor?: string} {
+  if (args === undefined || args === null) return {};
+  if (typeof args !== "object" || Array.isArray(args)) throw new AssistantRefusal("Supply an object of tool arguments.");
+  const {operations: names, cursor, ...rest} = args as Record<string, unknown>;
+  if (Object.keys(rest).length) throw new AssistantRefusal("assistant_discover accepts only operations or cursor.");
+  if (names !== undefined && cursor !== undefined) throw new AssistantRefusal("Send operations or cursor, not both.");
+  if (cursor !== undefined && (typeof cursor !== "string" || !ASSISTANT_OPERATION_NAME.test(cursor))) throw new AssistantRefusal("cursor must be the nextCursor of an earlier result.");
+  // Names are echoed in `unavailable`, so each must have a registered name's bounded shape.
+  if (names !== undefined && (!Array.isArray(names) || !names.length || names.length > ASSISTANT_DISCOVERY_MAX_SCHEMA_NAMES ||
+    names.some(name => typeof name !== "string" || !ASSISTANT_OPERATION_NAME.test(name)))) {
+    throw new AssistantRefusal(`operations must list 1 to ${ASSISTANT_DISCOVERY_MAX_SCHEMA_NAMES} operation names, each lowercase letters, digits and underscores, at most 32 characters.`);
+  }
+  return {...(names ? {operations: [...new Set(names as string[])]} : {}), ...(cursor ? {cursor: cursor as string} : {})};
+}
+
 export function createAssistantOperations(db: ControlPlaneDb): AssistantOperations {
   const operations = new AssistantOperations(db.assistantConnections, (user, organization) => db.operatingHumanPrincipal(user, organization));
   operations.register({
-    name: "assistant_discover", description: "Read this installation's identity, connection restrictions and granted operation inventory.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false }, metadata: true,
+    name: "assistant_discover",
+    description: "Read this installation's identity, connection grant and operation names; name operations for their full input schemas.",
+    inputSchema: { type: "object", properties: {
+      operations: {type: "array", items: {type: "string", pattern: ASSISTANT_OPERATION_NAME.source}, minItems: 1, maxItems: ASSISTANT_DISCOVERY_MAX_SCHEMA_NAMES,
+        description: "Granted operation names whose full input schemas to return. Request any listed in `remaining` again."},
+      cursor: {type: "string", description: "An earlier result's nextCursor, to read the rest of the operation list."},
+    }, additionalProperties: false }, metadata: true,
     resolveTarget: () => ({ kind: "control_plane", id: db.instanceId() }), ownerCanAccess: () => true,
-    execute: (_args, context) => ({
-      controlPlane: { id: db.instanceId(), name: db.assistantConnections.installationName() },
-      connection: context.connection,
-      operations: operations.list(context.connection).map(({name, description, inputSchema}) => ({name, description, inputSchema})),
-      transport: { endpoint: "/assistant/mcp", protocolVersion: "2025-06-18", authentication: "Bearer" },
-      // The guide every Wollipog Assistant thread follows, shared with outside assistants.
-      skill: WOLLIPOG_ASSISTANT_SKILL,
-    }),
+    // Every form lists only what the connection's grant allows; it is shaped to fit one tool result.
+    execute: (args, context) => {
+      const request = discoveryArguments(args);
+      const granted = operations.list(context.connection);
+      if (request.operations) {
+        const byName = new Map(granted.map(operation => [operation.name, operation]));
+        const found = request.operations.filter(name => byName.has(name));
+        const unavailable = request.operations.filter(name => !byName.has(name));
+        const result: Record<string, unknown> = unavailable.length ? {unavailable} : {};
+        const schemas = found.map(name => { const {description, inputSchema} = byName.get(name)!; return {name, description, inputSchema}; });
+        const remaining = found.slice(fill(result, "operations", schemas, bytes({remaining: found})));
+        return remaining.length ? {...result, remaining} : result;
+      }
+      let start = 0;
+      if (request.cursor) {
+        start = granted.findIndex(operation => operation.name === request.cursor);
+        if (start < 0) throw new AssistantRefusal("The cursor no longer names a granted operation. Call assistant_discover again without a cursor.");
+      }
+      const result: Record<string, unknown> = request.cursor ? {} : {
+        controlPlane: { id: db.instanceId(), name: db.assistantConnections.installationName() },
+        connection: context.connection,
+        transport: { endpoint: "/assistant/mcp", protocolVersion: "2025-06-18", authentication: "Bearer" },
+        // The guide every Wollipog Assistant thread follows, shared with outside assistants.
+        skill: WOLLIPOG_ASSISTANT_SKILL,
+      };
+      result.inputSchemas = SCHEMA_HINT;
+      const rest = granted.slice(start).map(({name, description}) => ({name, description}));
+      const longestName = Math.max(0, ...rest.map(operation => operation.name.length));
+      const taken = fill(result, "operations", rest, bytes({nextCursor: "x".repeat(longestName)}));
+      return taken < rest.length ? {...result, nextCursor: rest[taken]!.name} : result;
+    },
   });
   return operations;
 }
