@@ -488,6 +488,88 @@ test("delivery from merged pull requests is checked against the forge now, never
   } finally { h.db.close(); }
 });
 
+/** The #4684 reproduction through the verification: `child` delivers both items in one merged pull
+ * request, is verified against its final report on the first item, then stopped and archived by
+ * Stop and Archive. `other` is verified too, so `child` is the only child the campaign could wait on. */
+function archivedVerifiedChild() {
+  const h = fixture("stop_and_archive");
+  const pullRequests = [{ repository: "picoduck/wollipog", number: 4088 }];
+  h.svc.campaignForgeReadNow = async (_campaignId, asked) => asked.map((ref) => ({ ref, observation: merged() }));
+  for (const workItemId of [h.delivery, h.advisory]) {
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId, stage: { stage: "merged", pullRequests } }).ok);
+  }
+  assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "child" }).ok);
+  const report = h.report("child", "Delivered both items through PR 4088.");
+  for (const id of ["child", "other"]) {
+    h.db.updateSessionStatus(id, "idle", Date.now());
+    const verified = h.svc.verifyCampaignChild("root", { childSessionId: id, followUpsAccounted: true,
+      reportEventSeq: id === "child" ? report : h.report(id),
+      ...(id === "child" ? { workItem: { id: h.delivery, outcome: "delivered" as const } } : {}) });
+    assert.ok(verified.ok, verified.error ?? "verification refused");
+    h.svc.onSessionStatus(id, "stopped", undefined, undefined, "r");
+    assert.equal(h.db.getSession(id)!.archived, true, "the runner's stop completes Stop and Archive");
+  }
+  assert.equal(h.db.getSession("child")!.status, "stopped");
+  assert.equal(h.db.durableFinalReportSeq("child"), report);
+  return { ...h, pullRequests, report };
+}
+
+/** The second item's delivery recorded the way the reproduction does: an attempt on `child`, ended
+ * at once by the delivery record. */
+async function recordSecondDelivery(h: ReturnType<typeof archivedVerifiedChild>, whileOpen: () => void = () => {}) {
+  const assigned = h.svc.assignCampaignWorkItem("root", { workItemId: h.advisory, childSessionId: "child" });
+  assert.ok(assigned.ok, assigned.error ?? "assignment refused");
+  whileOpen();
+  const recorded = await h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.advisory, pullRequests: h.pullRequests });
+  assert.ok(recorded.ok, recorded.error ?? "delivery refused");
+  assert.deepEqual(recorded.data!.item.attempts.map((attempt) => attempt.endReason), ["superseded"]);
+}
+
+test("an attempt a delivery record ends at once keeps an archived child's verified report (#4684)", async () => {
+  const h = archivedVerifiedChild();
+  try {
+    await recordSecondDelivery(h);
+    assert.equal(h.db.durableFinalReportSeq("child"), h.report, "nothing reached the child after its report");
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), true);
+    const again = h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: h.report, followUpsAccounted: true });
+    assert.ok(again.ok, again.error ?? "verification refused");
+    h.db.updateSessionStatus("root", "idle", Date.now());
+    const projection = h.db.campaignProjection("root")!;
+    assert.ok(["verified_complete", "complete_needs_cleanup"].includes(projection.status), projection.status);
+    assert.equal(projection.children.blocked, 0);
+    assert.equal(projection.stuck, undefined, "no stuck leftover");
+    // The report also survives a service restart's legacy capture, which re-checks it the same way.
+    h.db.raw().prepare("UPDATE orchestrator_campaign_child_reports SET report_digest=NULL, report_event_epoch=NULL WHERE child_session_id='child'").run();
+    h.db.raw().prepare("UPDATE sessions SET event_epoch=0 WHERE id='child'").run();
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), false, "a legacy row needs its capture");
+    (h.db as unknown as { captureUnresetLegacyCampaignReports(id?: string): void }).captureUnresetLegacyCampaignReports("child");
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), true, "the legacy verification is captured");
+  } finally { h.db.close(); }
+});
+
+for (const later of ["open", "prompt", "notice"] as const) test(`a later attempt that is open or reached the child still supersedes its report: ${later} (#4684)`, async () => {
+  const h = archivedVerifiedChild();
+  try {
+    if (later === "open") {
+      assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.advisory, childSessionId: "child" }).ok);
+    } else {
+      await recordSecondDelivery(h, () => {
+        if (later === "notice") {
+          // Even an informational notice reaching the child inside the attempt keeps it superseding.
+          h.db.stageRestartNotice({ occurrenceIds: [], command: { commandId: "notice", sessionId: "child", runnerId: "r",
+            payloadJson: "{}", payloadSha256: "test", now: Date.now(), expiresAt: Date.now() + 1000 } });
+        }
+        h.db.appendEvent("child", { kind: "user_message", text: "Take the second item.",
+          ...(later === "notice" ? { commandId: "notice" } : {}) }, Date.now());
+      });
+    }
+    assert.equal(h.db.durableFinalReportSeq("child"), null);
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
+    const again = h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: h.report, followUpsAccounted: true });
+    assert.equal(again.status, 409, again.error ?? "verification accepted");
+  } finally { h.db.close(); }
+});
+
 test("a delivery with an open attempt closes it, and another session still working refuses it", async () => {
   const h = fixture();
   try {
