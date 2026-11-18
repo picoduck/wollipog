@@ -2500,6 +2500,7 @@ const listNoticeSkills = ["orchestrate-issues", "using-wollipog"].map((name) => 
 }));
 const client = {
   ...api,
+  ...(formerPodMember.length ? { governanceAudit: async () => ({ entries: [], hasMore: false }) } : {}),
   ...(SCENARIO === "question-classification" ? {
     campaignDecisions: async () => ({ canClassify: true, campaignSessionId: "session-alpha", decisions: [],
       usage: { calls: 1, unpricedCalls: 0, inputTokens: 180, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0.001 } }),

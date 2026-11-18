@@ -47,6 +47,7 @@ for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
     for (const path of ["/pods", "/pods/~cABvAGQAXwBhAGIAYwA"]) {
       await openDestination(page, path, "Page Not Found");
+      await expect(page.getByText("This page is no longer available.", { exact: true })).toBeVisible();
       await expect(page.getByRole("navigation", { name: "Primary Navigation" }).getByRole("link", { name: "Pods" })).toHaveCount(0);
       if (width === 1440) {
         const header = page.locator(".page > .page-header", { has: page.getByRole("heading", { name: "Page Not Found" }) });
@@ -55,6 +56,8 @@ for (const width of [1440, 390]) {
         expect(box!.x - main!.x).toBeGreaterThanOrEqual(24);
         expect(box!.x + box!.width).toBeLessThan(main!.x + main!.width);
       }
+      await page.getByRole("button", { name: "Back to Sessions", exact: true }).click();
+      await expect(page.getByRole("navigation", { name: "Primary Navigation" }).getByRole("link", { name: "Sessions", exact: true })).toHaveAttribute("aria-current", "page");
     }
   });
 }

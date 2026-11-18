@@ -906,7 +906,10 @@ export function Shell() {
           )}
           {view.name === "not-found" && (
             <div className="page">
-              <PageHeader title={viewTitle(view)} description="This page is no longer available." />
+              <PageHeader title={viewTitle(view)} />
+              <State actions={<button type="button" className="btn" onClick={() => navigate(sessionsDestination(instanceScope))}>Back to Sessions</button>}>
+                This page is no longer available.
+              </State>
             </div>
           )}
           {view.name === "assistants" && <AssistantsView threadId={view.threadId} rightPanel={rightPanel} />}
