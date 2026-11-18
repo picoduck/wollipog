@@ -9189,14 +9189,19 @@ test("upgrading populated workflow tables preserves sessions, artifacts and work
     const legacy = ControlPlaneDb.open(path);
     try {
       legacy.registerRunner(meta(), 500);
-      legacy.createSession(newSession());
       legacy.createRun({ id: "run-legacy", runnerId: "runner-1", workspaceId: "ws-1", title: "Legacy", prompt: "Build", now: 500 });
+      legacy.createSession(newSession({ runId: "run-legacy" }));
       legacy.addRunMember("run-legacy", "sess-1", "acp-agent");
+      legacy.createRun({ id: "run-compare", runnerId: "runner-1", workspaceId: "ws-1", title: "Compare", prompt: "Compare", now: 600 });
+      legacy.createSession(newSession({ id: "sess-compare", runId: "run-compare" }));
+      legacy.addRunMember("run-compare", "sess-compare", "acp-agent");
       createScreenshotArtifact(legacy, { runId: "run-legacy" }, "workflow-output");
       createScreenshotArtifact(legacy, { sessionId: "sess-1" }, "session-image");
       for (const automationId of ["still-working", "old-workflow"]) {
         legacy.createAutomation({ automationId, spec, nextFireAt: 2000, actor: { kind: "human", id: "owner" }, now: 1000 });
       }
+      legacy.createAutomation({ automationId: "build-review", spec: { ...spec, name: "Build and Review the Main Branch", cron: "0 9 * * 1" },
+        nextFireAt: 3000, actor: { kind: "human", id: "owner" }, now: 1000 });
       assert.ok(legacy.claimAutomationExecution({
         automationId: "old-workflow", executionId: "running-execution", expectedNextFireAt: 2000, scheduledFor: 2000,
         nextFireAt: 3000, actionKind: "create_session", status: "dispatching", actor: { kind: "system" }, now: 2000,
@@ -9247,6 +9252,9 @@ test("upgrading populated workflow tables preserves sessions, artifacts and work
         INSERT INTO workflow_event_retention_runs VALUES (2000);
         UPDATE automations SET action_json='{"kind":"workflow_run","request":{"workflowId":"builtin:build-review"}}'
         WHERE automation_id='old-workflow';
+        UPDATE automations SET action_json='{"kind":"workflow_run","request":{"runnerId":"runner-1","workspaceId":"workspace-1","workflowId":"build-review","task":"Build and review main."}}'
+        WHERE automation_id='build-review';
+        UPDATE artifacts SET run_id='run-legacy' WHERE id='session-image';
         ALTER TABLE automation_executions ADD COLUMN run_id TEXT;
         ALTER TABLE automation_executions ADD COLUMN workflow_instance_id TEXT;
         UPDATE automation_executions SET action_kind='workflow_run', workflow_instance_id='instance'
@@ -9265,17 +9273,24 @@ test("upgrading populated workflow tables preserves sessions, artifacts and work
         const tables = raw.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name GLOB 'workflow_*' ORDER BY name").all();
         assert.deepEqual(tables.map((table) => table.name), ["workflow_decision_action_receipts", "workflow_decisions"]);
         assert.equal(raw.prepare("PRAGMA table_info(automation_executions)").all().some((column) => column.name === "workflow_instance_id"), false);
-        assert.deepEqual(db.getRun("run-legacy")?.sessionIds, ["sess-1"]);
+        assert.equal(db.getRun("run-legacy"), null);
+        assert.deepEqual(raw.prepare("SELECT session_id FROM multi_agent_run_members WHERE run_id='run-legacy'").all(), []);
         assert.equal(db.getSession("sess-1")?.title, "My session");
+        assert.equal(db.getSession("sess-1")?.runId, null);
+        assert.deepEqual(db.getRun("run-compare")?.sessionIds, ["sess-compare"]);
+        assert.equal(db.getSession("sess-compare")?.runId, "run-compare");
         assert.equal(db.getArtifact("workflow-output"), null);
         assert.equal(db.getArtifact("session-image")?.sessionId, "sess-1");
+        assert.equal(db.getArtifact("session-image")?.runId, undefined);
         assert.deepEqual(db.getAutomation("still-working")?.action, spec.action);
         assert.equal(db.getAutomation("still-working")?.nextFireAt, 2000);
-        const paused = db.getAutomation("old-workflow")!;
-        assert.equal(paused.enabled, false);
-        assert.equal(paused.nextFireAt, undefined);
-        assert.equal(paused.revision, 2);
-        assert.deepEqual(paused.action, { kind: "retired", reason: "workflow_removed" });
+        for (const automationId of ["old-workflow", "build-review"]) {
+          const paused = db.getAutomation(automationId)!;
+          assert.equal(paused.enabled, false);
+          assert.equal(paused.nextFireAt, undefined);
+          assert.equal(paused.revision, 2);
+          assert.deepEqual(paused.action, { kind: "retired", reason: "workflow_removed" });
+        }
         const execution = db.getAutomationExecution("running-execution")!;
         assert.equal(execution.status, "failed");
         assert.equal(execution.commands?.[0]?.state, "rejected");

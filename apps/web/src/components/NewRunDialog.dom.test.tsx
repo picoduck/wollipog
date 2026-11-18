@@ -298,7 +298,7 @@ test("Task is the first field and focused, Title (Optional) is the last, and not
   }
 });
 
-test("with five available agents across three drivers and one signed out, three start chosen, distinct drivers first", async () => {
+test("a filled comparison enables and submits three available agents from distinct drivers", async () => {
   const agents: AgentDefinition[] = [
     claude,
     { ...claude, id: "claude-wsl", context: { kind: "wsl", distro: "Ubuntu" } },
@@ -321,8 +321,20 @@ test("with five available agents across three drivers and one signed out, three 
     assert.equal(rows.find((row) => row.title === "Gemini")?.second, "Build Server");
     assert.ok(dialog(fixture.container).querySelector(".surface.new-run-agents"), "the agents are one surface");
     await enterTask(fixture.container);
+    assert.equal(footerReason(fixture.container), null);
     await clickPrimary(fixture.container, "Run 3 Agents");
-    assert.deepEqual(fixture.parallelRequests[0]?.agentIds, ["claude", "codex", "gemini"]);
+    assert.deepEqual(fixture.parallelRequests, [{
+      runnerId: runner.runnerId,
+      workspaceId: "workspace-1",
+      projectId: project.id,
+      projectLocationId: "location-1",
+      agentIds: ["claude", "codex", "gemini"],
+      task: "Implement the Project flow",
+      title: undefined,
+      useWorktree: true,
+    }]);
+    assert.deepEqual(fixture.pushed, [{ name: "run", id: "parallel-run" }]);
+    assert.equal(fixture.closed(), 1);
   } finally {
     await unmountFixture(fixture);
   }

@@ -201,10 +201,11 @@ if (offlineRunner) items[0]!.runnerPolicy = { kind: "alternate", targets: [{
   runnerId: "runner-offline", workspaceId: "workspace-backup", agentId: "agent-backup",
 }], expireAfterMinutes: 30 };
 
+const retiredAction = { kind: "retired", reason: "workflow_removed" } as const;
 if (params.has("retired-workflow")) {
   items[0] = {
     ...items[0]!,
-    action: { kind: "retired", reason: "workflow_removed" },
+    action: retiredAction,
     enabled: false,
     nextFireAt: undefined,
   };
@@ -340,14 +341,13 @@ if (params.has("list")) {
   const agent = (agentId: string, prompt: string): AutomationSchedule["action"] => ({
     kind: "create_session", request: { runnerId: "runner-1", workspaceId: "workspace-1", agentId, prompt, useWorktree: true },
   });
-  items[0] = { ...items[0]!, timezone: viewerZone, nextFireAt: nextLocal(0, [2]) };
+  items[0] = { ...items[0]!, timezone: viewerZone, nextFireAt: items[0]!.enabled ? nextLocal(0, [2]) : undefined };
   items.push(
     local("automation-morning-triage", "Morning Issue Triage", "0 9 * * 1-5", true,
       agent("codex", "Triage new issues."), nextLocal(0, [9], { weekdays: [1, 2, 3, 4, 5] })),
     local("automation-health-check", "Hourly Health Check", "0 * * * *", true,
       agent("claude", "Check the build."), nextLocal(0, [])),
-    local("automation-build-review", "Build and Review the Main Branch", "0 9 * * 1", true,
-      agent("claude", "Build and review main."), nextLocal(0, [9], { weekdays: [1] })),
+    local("automation-build-review", "Build and Review the Main Branch", "0 9 * * 1", false, retiredAction),
     local("automation-release-notes", "Release Notes Follow-Up", "0 10 1 * *", false,
       { kind: "prompt_session", sessionId: "s_release_notes", request: { text: "Update the release notes." } }),
   );

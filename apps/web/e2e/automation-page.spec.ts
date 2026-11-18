@@ -131,6 +131,9 @@ for (const { label, viewport } of [
       await expect(page.getByText(/Orchestrator session role/)).toBeVisible();
       await expect(page.getByRole("button", { name: "Resume", exact: true })).toHaveCount(0);
       await expect(page.getByRole("button", { name: "Edit", exact: true })).toHaveCount(0);
+      const notice = await page.locator(".automation-detail > .notice").boundingBox();
+      const previous = await page.locator(phone ? ".automation-status" : ".detail-bar").boundingBox();
+      expect(notice!.y - (previous!.y + previous!.height)).toBeGreaterThanOrEqual(16);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
       await capture(page, `retired-workflow-${label}-${theme}`);
       await page.getByRole("button", { name: "New Automation", exact: true }).click();

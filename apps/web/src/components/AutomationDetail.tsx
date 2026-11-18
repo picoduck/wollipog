@@ -424,7 +424,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
       {/* On a phone the bar is the app bar, so the badge sits under it (§15.1). */}
       {phone && <div className="automation-status">{statusBadge}</div>}
       {retired && (
-        <Notice tone="warning" title="Workflow Runs Removed" actions={
+        <Notice className="automation-notice-slot" tone="warning" title="Workflow Runs Removed" actions={
           <button type="button" className="btn sm" onClick={() => navigate({ name: "automations", editor: { kind: "new" } })}>
             New Automation
           </button>

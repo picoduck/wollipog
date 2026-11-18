@@ -26,7 +26,7 @@ document.documentElement.setAttribute("data-theme", params.get("theme") === "lig
 const NOW = Date.now();
 const MINUTE = 60_000;
 
-function member(id: string, agentId: string, agentName: string, driver: SessionView["driver"], status: SessionView["status"], runId: string): SessionView {
+function member(id: string, agentId: string, agentName: string, driver: SessionView["driver"], status: SessionView["status"], runId: string | null): SessionView {
   return {
     id, runnerId: "runner-1", workspaceId: "ws-wollipog", workspaceName: "Wollipog", projectId: null, agentId, agentName,
     title: agentName, status, column: "review", runId, useWorktree: true, worktreePath: null, archived: false,
@@ -37,11 +37,6 @@ function member(id: string, agentId: string, agentName: string, driver: SessionV
 }
 
 const runs: RunView[] = [
-  {
-    id: "run-review", title: "Build and review the settings export screen", prompt: "Build the export screen.",
-    workspaceId: "ws-wollipog", workspaceName: "Wollipog", createdAt: NOW - 2 * MINUTE, updatedAt: NOW,
-    sessionIds: ["s-builder", "s-reviewer"],
-  },
   {
     id: "run-search", title: "Compare three approaches to indexing session search across machines and projects",
     prompt: "Index session search.", workspaceId: "ws-wollipog", workspaceName: "Wollipog", createdAt: NOW - 6 * MINUTE,
@@ -60,8 +55,9 @@ const runs: RunView[] = [
 ];
 
 const sessions: SessionView[] = [
-  member("s-builder", "claude", "Claude Code", "claude-code", "idle", "run-review"),
-  member("s-reviewer", "codex", "Codex", "codex-app-server", "idle", "run-review"),
+  // The upgrade removes the workflow's grouping but leaves its two sessions.
+  member("s-builder", "claude", "Claude Code", "claude-code", "idle", null),
+  member("s-reviewer", "codex", "Codex", "codex-app-server", "idle", null),
   member("s-search-claude", "claude", "Claude Code", "claude-code", "running", "run-search"),
   member("s-search-codex", "codex", "Codex", "codex-app-server", "idle", "run-search"),
   member("s-search-opencode", "opencode", "OpenCode", "acp", "idle", "run-search"),

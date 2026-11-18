@@ -640,15 +640,13 @@ function retireWorkflowEngine(db: DatabaseSync): void {
   const reason = "Workflow runs were removed.";
   db.exec("BEGIN IMMEDIATE");
   try {
-    // Drop referencing tables first. The artifacts and run membership tables are shared.
+    // Drop referencing tables before removing any artifacts or workflow instances.
     db.exec(`
       DROP TABLE IF EXISTS workflow_attempt_artifacts;
       DROP TABLE IF EXISTS workflow_attempts;
       DROP TABLE IF EXISTS workflow_node_states;
       DROP TABLE IF EXISTS workflow_events;
       DROP TABLE IF EXISTS workflow_event_prunes;
-      DROP TABLE IF EXISTS workflow_instances;
-      DROP TABLE IF EXISTS workflow_definitions;
       DROP TABLE IF EXISTS workflow_event_retention_policy;
       DROP TABLE IF EXISTS workflow_event_retention_runs;
       DELETE FROM control_plane_metadata WHERE key='workflow_event_environment_policy';
@@ -659,6 +657,17 @@ function retireWorkflowEngine(db: DatabaseSync): void {
         UPDATE artifacts SET run_id=NULL WHERE run_id IS NOT NULL;
       `);
     }
+    if (db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='workflow_instances'").get()) {
+      // The grouping belongs to the workflow. Retain the sessions as ordinary sessions.
+      db.exec(`
+        UPDATE sessions SET run_id=NULL WHERE run_id IN (SELECT run_id FROM workflow_instances);
+        DELETE FROM multi_agent_runs WHERE id IN (SELECT run_id FROM workflow_instances);
+      `);
+    }
+    db.exec(`
+      DROP TABLE IF EXISTS workflow_instances;
+      DROP TABLE IF EXISTS workflow_definitions;
+    `);
     db.prepare(`
       UPDATE automation_commands
       SET state=CASE WHEN state IN ('staged','pending') AND last_sent_at IS NULL THEN 'rejected' ELSE 'uncertain' END,
