@@ -74,5 +74,13 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build Linux Release Packages
         run: pnpm --filter @wollipog/desktop tauri build --target ${{ matrix.target }}
+      # RPM filenames retain SemVer; query the header to expose the RPM-safe version.
+      - name: Report RPM Package Metadata
+        shell: bash
+        run: |
+          shopt -s failglob
+          for package in apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/rpm/*.rpm; do
+            rpm --query --package --queryformat '%{NAME} %{VERSION}-%{RELEASE} %{ARCH}\n' "$package"
+          done
       - name: Verify Linux Release Baseline
         run: bash scripts/verify-linux-release-baseline.sh "${{ matrix.target }}"
