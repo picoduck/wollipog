@@ -3464,6 +3464,9 @@ textarea {
   padding: 0;
   overflow: hidden;
 }
+.board-wrap.is-phone > .state {
+  padding-inline: var(--page-gutter);
+}
 .board.board-phone {
   flex-direction: column;
   gap: 0;
