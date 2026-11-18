@@ -14,7 +14,6 @@ function s(over: Partial<SessionView>): SessionView {
     title: "t",
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,

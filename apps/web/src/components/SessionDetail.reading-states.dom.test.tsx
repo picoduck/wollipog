@@ -150,7 +150,7 @@ async function mountSession({
   const session = {
     id, runnerId: runner.runnerId, workspaceId: null, workspaceName: "wollipog", projectId: project.id,
     projectName: project.name, agentId: "claude", agentName: "Claude Code", title: "Reading States",
-    status, column: "review", runId: null, useWorktree: false, worktreePath: null, archived,
+    status, column: "review", useWorktree: false, worktreePath: null, archived,
     createdAt: 1, updatedAt: 1, lastEventAt: null, messageCount, eventEpoch: 0, preview: null,
     pendingApproval, driver: "claude-code", model: null, effort: null, permissionMode: null,
     tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
@@ -198,7 +198,6 @@ async function mountSession({
       boxes: [],
       projects: [project],
       sessions: [session],
-      runs: [],
     });
   });
   await flushAsyncWork();

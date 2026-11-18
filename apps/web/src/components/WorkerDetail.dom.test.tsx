@@ -51,7 +51,7 @@ const connection: UiConnectionRuntime = {
 const now = Date.now();
 const session = {
   id: "lead", runnerId: "runner", workspaceId: null, agentId: null, title: "Lead", status: "running",
-  driver: "claude-code", runId: null, archived: false, createdAt: now - 60_000, updatedAt: now, lastEventAt: now,
+  driver: "claude-code", archived: false, createdAt: now - 60_000, updatedAt: now, lastEventAt: now,
   messageCount: 10, eventEpoch: 0, pendingApproval: null, worktreePath: "/work/repo",
 } as unknown as SessionView;
 const agent = (id: string, index: number, extra: Partial<Extract<TimelineItem, { kind: "tool_call" }>> = {}): TimelineItem => ({

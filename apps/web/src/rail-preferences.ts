@@ -1,4 +1,3 @@
-import { experimentForViewName, type ExperimentFlags } from "./experiments.js";
 import {
   LOCAL_INSTANCE_SCOPE,
   loadInstanceStorageValue,
@@ -12,7 +11,7 @@ import { GLOBAL_VIEW_ITEMS, type GlobalViewName } from "./navigation.js";
  * The visible order is the SOLE source of the bare-digit shortcuts: the first nine visible
  * destinations get `1`–`9`, a tenth gets `0`, later ones get none, and digits are never
  * assignable directly — reordering or hiding is the only way to move one. Hidden and
- * experiment-disabled destinations consume no slot. Settings is deliberately not part of this
+ * hidden destinations consume no slot. Settings is deliberately not part of this
  * vocabulary at all: on a phone it is the only Settings entry point (pinned trailing row of the
  * More sheet), so a preference must never be able to strand it (#458).
  *
@@ -38,7 +37,7 @@ export const PHONE_BAR_SLOTS = 4;
 /**
  * The phone bar when the user has not chosen one: the places a phone is most often opened for, and
  * whether this machine is online. Deliberately not the first four of the rail order, which let the
- * desktop's ordering, and experiments, decide the phone's most valuable slots.
+ * desktop's ordering, decide the phone's most valuable slots.
  */
 export const DEFAULT_PHONE_BAR: readonly GlobalViewName[] = ["inbox", "assistants", "projects", "runners"];
 
@@ -136,13 +135,9 @@ export function parseRailPreferences(raw: string | null): RailPreferences {
   }
 }
 
-/** The effective rail: configured order, minus hidden, minus experiment-disabled surfaces. */
-export function visibleRailViews(preferences: RailPreferences, flags: ExperimentFlags): GlobalViewName[] {
-  return preferences.order.filter((name) => {
-    if (preferences.hidden.has(name)) return false;
-    const experiment = experimentForViewName(name);
-    return experiment === null || flags[experiment];
-  });
+/** The configured order, excluding hidden destinations. */
+export function visibleRailViews(preferences: RailPreferences): GlobalViewName[] {
+  return preferences.order.filter((name) => !preferences.hidden.has(name));
 }
 
 /** `1`–`9` for the first nine visible destinations, `0` for the tenth, none past that. */
@@ -172,16 +167,15 @@ export function railViewForDigit(visible: readonly GlobalViewName[], digit: stri
  * The phone tab bar's destinations, in bar order: the one source for the bar, and for the Settings
  * editor that marks them (#1959).
  *
- * A chosen or default slot whose destination is hidden or turned off is filled, in place, by the
- * next visible destination in rail order that is not already on the bar. An experimental
- * destination never fills a slot: it reaches the bar only when the user put it there. Everything
+ * A chosen or default slot whose destination is hidden is filled, in place, by the
+ * next visible destination in rail order that is not already on the bar. Everything
  * visible and not returned here belongs to More, in rail order.
  */
-export function phoneBarViews(preferences: RailPreferences, flags: ExperimentFlags): GlobalViewName[] {
-  const visible = visibleRailViews(preferences, flags);
+export function phoneBarViews(preferences: RailPreferences): GlobalViewName[] {
+  const visible = visibleRailViews(preferences);
   const chosen = (preferences.phoneBar ?? DEFAULT_PHONE_BAR).slice(0, PHONE_BAR_SLOTS);
   const slots = chosen.map((name) => visible.includes(name) ? name : null);
-  const fillers = visible.filter((name) => experimentForViewName(name) === null && !slots.includes(name));
+  const fillers = visible.filter((name) => !slots.includes(name));
   // A chosen list shorter than the bar tops up the same way as a skipped slot.
   while (slots.length < PHONE_BAR_SLOTS) slots.push(null);
   const bar: GlobalViewName[] = [];

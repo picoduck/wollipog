@@ -1380,7 +1380,7 @@ test("Delete Machine… waits for an online native runner to stop, saying so, th
   await deleteMachine.click();
 
   const confirmation = page.getByRole("dialog", { name: "Delete Machine" });
-  await expect(confirmation).toContainText("Design Workstation, its sessions and its multi-agent runs are deleted from Wollipog. Files on the machine stay where they are.");
+  await expect(confirmation).toContainText("Design Workstation, its sessions are deleted from Wollipog. Files on the machine stay where they are.");
   await confirmation.getByRole("button", { name: "Delete Machine" }).click();
   await expect(page.getByText("No Machines Yet")).toBeVisible();
   // The empty tab owns the create actions, so the header no longer offers Add Machine (#2984).

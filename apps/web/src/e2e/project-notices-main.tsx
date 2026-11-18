@@ -105,7 +105,6 @@ function session(
     title,
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: true,
     worktreePath,
     worktrees: [{
@@ -170,7 +169,6 @@ function snapshot(): UiSnapshotMessage {
     boxes: [],
     projects: structuredClone(projects),
     sessions: structuredClone(sessions),
-    runs: [],
     worktreeSetupNoticeDismissals: [],
   } as UiSnapshotMessage;
 }

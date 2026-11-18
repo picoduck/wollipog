@@ -94,7 +94,6 @@ function session(id: string): SessionView {
     title: "Durable Dismissal Fixture",
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -257,7 +256,6 @@ async function mountFixture(options: {
       boxes: [],
       projects: [],
       sessions: [currentSession],
-      runs: [],
     });
   });
   return {

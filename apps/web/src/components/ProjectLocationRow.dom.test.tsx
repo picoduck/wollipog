@@ -192,7 +192,7 @@ async function render(projects: ProjectView[], options: {
         renameProjectLocations: options.renameCapability ?? false,
       },
       runners: options.runners ?? [runner, offlineRunner],
-      boxes: [], sessions: [], runs: [], projects,
+      boxes: [], sessions: [], projects,
     } as UiSnapshotMessage);
   });
   await settle();

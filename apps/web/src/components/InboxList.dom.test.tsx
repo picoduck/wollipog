@@ -60,7 +60,6 @@ function session(id: string, title: string): SessionView {
     title,
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,

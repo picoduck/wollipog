@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  memberProviderAccountsError,
   runnerViewForAgent,
   agentAvailableForRunnerDefault,
   parseProviderAccountPolicyWrite,
@@ -278,15 +277,4 @@ test("an agent's view of a Machine holds no account id, and keeps what its tools
   const narrowed = runnerViewForAgent(runner);
   assert.ok(!JSON.stringify(narrowed).includes("person"), JSON.stringify(narrowed));
   assert.deepEqual(narrowed, { runnerId: "r1", agents: [{ id: "claude", available: true, authStatus: "authenticated", capabilities: { models: [] } }] });
-});
-
-test("named member accounts refuse a stranger instead of dropping it (#4353)", () => {
-  assert.equal(memberProviderAccountsError(undefined, ["a"], "field"), null);
-  assert.equal(memberProviderAccountsError({}, ["a"], "field"), null);
-  assert.equal(memberProviderAccountsError({ a: "work" }, ["a"], "field"), null);
-  assert.equal(memberProviderAccountsError({ a: "acct:0123456789abcdef" }, ["a"], "field"), null);
-  assert.match(memberProviderAccountsError({ b: "work" }, ["a"], "field") ?? "", /names 'b'/u);
-  for (const bad of [[], null, "work", { a: "" }, { a: 7 }, { a: "acct:short" }, { a: "../work" }]) {
-    assert.equal(memberProviderAccountsError(bad, ["a"], "field"), "field is invalid", JSON.stringify(bad));
-  }
 });

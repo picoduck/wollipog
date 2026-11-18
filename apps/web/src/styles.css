@@ -1207,27 +1207,6 @@ kbd {
   margin-bottom: 6px;
   font-size: 12px;
 }
-.sdot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: var(--text-faint);
-}
-.sdot-running,
-.sdot-queued,
-.sdot-starting {
-  background: var(--green);
-}
-.sdot-input_required {
-  background: var(--amber);
-}
-.sdot-idle {
-  background: var(--blue);
-}
-.sdot-failed {
-  background: var(--red);
-}
 /* `.settings-dialog*` and `.settings-option*` were deleted with the dialog. They survived a full
    round after the route landed because the Playwright fixture still rendered a Modal, so the rules
    still matched something — a fixture that reproduces a screen which no longer exists keeps its
@@ -1461,8 +1440,6 @@ kbd {
   white-space: nowrap;
 }
 /* A detail page's content sits in the gutter under its full-width bar. */
-.run-detail > :not(.detail-bar) { margin-right: var(--page-gutter); margin-left: var(--page-gutter); }
-.run-detail { padding-bottom: var(--space-6); }
 .detail-summary {
   margin-top: var(--space-3);
   margin-bottom: 0;
@@ -2288,7 +2265,7 @@ button.status { cursor: pointer; }
    like a sheet's footer (§7.5).
    The height comes from the tokens, as in `.worktree-missing-sheet`, never a per-button patch. */
 @media (max-width: 760px) {
-  :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions, .inbox-state .state .actions) {
+  :is(.notice.view-error .notice-actions, .app-crash .state .actions, .inbox-state .state .actions) {
     --control-h: 44px;
     --control-h-sm: 44px;
     --control-h-lg: 44px;
@@ -2297,12 +2274,12 @@ button.status { cursor: pointer; }
     justify-self: stretch;
   }
   /* The phone exception to "buttons never stretch" (§3.1), as in the session notice slot. */
-  :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions, .inbox-state .state .actions) > .btn {
+  :is(.notice.view-error .notice-actions, .app-crash .state .actions, .inbox-state .state .actions) > .btn {
     max-width: none;
   }
   /* A page-level state caps the stack at its measure (§12.1): a stretched item with a max-width
      would sit at the start of a wider area, so it takes the full width and centers instead. */
-  :is(.state.experiment-off, .app-crash .state, .inbox-state .state).page-level > .actions {
+  :is(.app-crash .state, .inbox-state .state).page-level > .actions {
     justify-self: center;
     width: 100%;
   }
@@ -3694,8 +3671,7 @@ textarea {
 .decision-pair .notice-actions > .btn.sm[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-2); }
 
 /* ---------------------------- Session detail ---------------------------- */
-.session-detail,
-.run-detail {
+.session-detail {
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -7877,23 +7853,20 @@ body.shell-dock-dragging * {
    its form can fix: "Choose an online location to continue." Add Location (#2966) says what its one
    Add Location waits for: "Choose a location or a folder." or "Match the access levels to continue."
    New Project (#2965) says why Create Project is off: a Viewer's refusal, or access levels loading.
-   A run's Follow Up (#2976) says what Send waits for: "Write a message to send." or a chosen agent.
    New Subscription (#2973) counts the events it will send: "2 events selected".
-   New Multi-Agent Run (#2978) says what its primary waits for, in the order the fields read:
-   "Enter a task to continue.", "Choose a project to continue." or "Choose at least one agent."
    Budget and History (#3015) counts the fields still to fix, desktop only: "Fix 2 fields to save." */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-run-reason, .budget-history-reason) {
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .outbound-subscription-dialog-count, .budget-history-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
   color: var(--text-dim);
   font: var(--type-small);
 }
-/* Snooze's footer also holds Remove Reminder, and Orchestrator Policy's holds Reset to Defaults, and New Multi-Agent Run's reason can name a long role, so the reason takes the room left
+/* Snooze's footer also holds Remove Reminder, and Orchestrator Policy's holds Reset to Defaults, so the reason takes the room left
    beside the buttons and wraps there, rather than pushing the primary onto a second row. */
-.modal-foot > :is(.snooze-blocked-reason, .orchestrator-policy-reason, .new-run-reason) { flex: 1 1 0; }
+.modal-foot > :is(.snooze-blocked-reason, .orchestrator-policy-reason) { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-run-reason, .budget-history-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .outbound-subscription-dialog-count, .budget-history-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
@@ -11531,220 +11504,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .machine-settings-delete-note { text-align: center; }
 }
 
-/* --------------------------- Multi-Agent Runs ------------------------------ */
-/* The entity list row recipe of Multi-Agent Runs (#2974): two-line rows in one
-   Surface (§5.2). Line 1 is the title and at most one badge, line 2 the meta, 12px apart with no
-   middle dots (§11.3); a time trails. */
 .list-reconnecting { margin-bottom: var(--space-3); }
-.list-row-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-content: center;
-  align-items: center;
-}
-.list-row-body > .row-title { grid-area: 1 / 1; }
-.list-row-status {
-  grid-area: 1 / 2;
-  margin-left: var(--space-2);
-}
-/* Line 2 is one clipped line that wraps: an item that does not fit drops whole onto the hidden next
-   line, so the items left in view sit 12px apart with no dead space and none shows a lone initial.
-   A leading item (a run's type) only truncates when it alone is wider than the line; plain items
-   (a run's project) show whole or not at all; the filling item (a run's agents) keeps at least
-   a readable word before it folds. */
-.list-row-meta {
-  display: flex;
-  flex-wrap: wrap;
-  grid-area: 2 / 1 / 3 / 3;
-  align-items: center;
-  column-gap: var(--space-3);
-  row-gap: 0;
-  height: 16px;
-  overflow: hidden;
-}
-.list-row-meta > span {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: var(--space-1);
-  max-width: 100%;
-}
-.list-row-meta > span > svg { flex: none; }
-:is(.list-row-meta > .list-row-lead, .list-row-meta > span > span) {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.list-row-meta > .list-row-lead {
-  display: block;
-  flex: 0 1 auto;
-}
-.list-row-meta > .list-row-fill {
-  flex: 1 1 0;
-  min-width: 6em;
-  max-width: max-content;
-}
-/* Phones: the badge leads line 2, so a long title keeps the whole first line (§15.1). */
-@media (max-width: 760px) {
-  .list-row-body { grid-template-columns: auto minmax(0, 1fr); }
-  .list-row-body > .row-title { grid-area: 1 / 1 / 2 / 3; }
-  .list-row-status {
-    grid-area: 2 / 1;
-    margin-right: var(--space-2);
-    margin-left: 0;
-  }
-  .list-row-meta { grid-area: 2 / 2; }
-}
-/* A run's task strip (#2975): the task clamped to two lines (Show Full Task in ⋯ opens the rest),
-   then its meta 12px apart. */
-.run-task {
-  flex: none;
-  display: grid;
-  gap: var(--space-1);
-  margin-top: var(--space-3);
-}
-.run-task-prompt {
-  display: -webkit-box;
-  margin: 0;
-  overflow: hidden;
-  font: var(--type-body);
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-.run-task-meta {
-  display: flex;
-  flex-wrap: wrap;
-  column-gap: var(--space-3);
-  margin: 0;
-  color: var(--text-dim);
-  font: var(--type-small);
-}
-.run-task-meta > span {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  white-space: nowrap;
-}
-/* Phones (§15.1): the strip is two lines, the task's first and one line of meta. A meta item that
-   does not fit drops whole onto the hidden next line. */
-@media (max-width: 760px) {
-  .run-task-prompt { -webkit-line-clamp: 1; }
-  .run-task-meta {
-    height: 16px;
-    overflow: hidden;
-  }
-}
-.run-task-full {
-  margin: 0;
-  font: var(--type-body);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-/* The comparison (#2975, component-local per §19.4): flush member columns separated by hairlines
-   that fill the page's height. Each column is at least 320px and they share the rest; when they do
-   not fit the row scrolls sideways and fades its right edge while columns lie beyond it. */
-.run-detail:has(> .compare, > .compare-phone) { padding-bottom: 0; }
-.compare {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-auto-columns: minmax(320px, 1fr);
-  grid-auto-flow: column;
-  margin-top: var(--space-3);
-  border-top: 1px solid var(--border);
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-.run-detail > .compare,
-.run-detail > .compare-phone {
-  margin-right: 0;
-  margin-left: 0;
-}
-.compare[data-clip-end] { mask-image: linear-gradient(to left, transparent, #000 var(--space-6)); }
-/* The compact tier shows two columns at a time (§15.2), leaving the fade's width of the next column
-   showing under it, so the fade covers a column rather than the second one's padding. A fixed size:
-   the row already overflows, so a track's minmax() maximum would never be reached. */
-@container app (max-width: 1099px) {
-  .compare:has(> :nth-child(3)) { grid-auto-columns: max(320px, calc(50% - var(--space-6) / 2)); }
-}
-.compare-member {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-}
-.compare-member + .compare-member { border-left: 1px solid var(--border); }
-/* One line: the agent, ending in an ellipsis when the line is short, then its status at its full
-   width; Open Session and ⋯ keep the far end. */
-.compare-member-head {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-2) 0 var(--space-4);
-}
-.compare-member-agent {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  font: var(--type-body-strong);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.compare-member-head > .session-status-indicators { flex: none; }
-.compare-member-head > .session-status-indicators + :is(.icon-btn, .overflow-menu) { margin-left: auto; }
-.compare-member-meta {
-  flex: none;
-  margin: 0;
-  padding: 0 var(--space-4) var(--space-2);
-  overflow: hidden;
-  border-bottom: 1px solid var(--border);
-  color: var(--text-dim);
-  font: var(--type-small);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* Before the history is known the line stays, empty, so every column's body starts level. */
-.compare-member-meta:empty::before { content: "\00a0"; }
-.compare-member-notice {
-  flex: none;
-  padding: var(--space-2) var(--space-4) 0;
-}
-.compare-member-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: var(--space-3) var(--space-4);
-}
-/* Phones (§15.1): one member at a time under the member tabs, its head the member bar. */
-.compare-phone {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  margin-top: var(--space-2);
-}
-.compare-tabs {
-  flex: none;
-  padding-inline: var(--page-gutter);
-  border-bottom: 1px solid var(--border);
-}
-.compare-tab {
-  justify-content: center;
-  min-width: var(--control-h);
-}
-.compare-tab-dot {
-  width: 6px;
-  height: 6px;
-  flex: none;
-  border-radius: var(--radius-pill);
-  background: var(--tone);
-}
-.compare-phone > .compare-member { flex: 1; }
-.compare-phone .compare-member-head { padding-inline: var(--page-gutter) var(--space-2); }
-.compare-phone :is(.compare-member-meta, .compare-member-notice, .compare-member-body) { padding-inline: var(--page-gutter); }
 
 /* ------------------------------- Dialog ---------------------------------- */
 /* One dialog anatomy (docs/design-system.md §7). Every dialog is portalled to <body>: the backdrop
@@ -11875,24 +11635,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   margin: 0;
   padding: 0;
   list-style: none;
-}
-/* A run's Follow Up (#2976): each member's result once a send left one undelivered, as one surface
-   of rows like a confirmation's. */
-.run-follow-up-results {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-/* A failed member's row grows for its reason, which wraps whole: the person reads why before
-   retrying. */
-.run-follow-up-results > .row {
-  height: auto;
-  min-height: var(--row-h);
-  padding-block: var(--space-2);
-}
-.run-follow-up-results .row-sub {
-  white-space: normal;
-  overflow-wrap: anywhere;
 }
 /* A path or an id among the rows (Discard's file, #2848). */
 .confirmation-rows .row-title.mono {
@@ -15939,19 +15681,6 @@ button.review-finding-location {
     min-height: var(--space-12);
   }
 }
-/* New Multi-Agent Run (#2978): the agents are one surface of rows divided by hairlines, as Add
-   Location's list is. */
-.choice-rows.new-run-agents { gap: 0; }
-.new-run-agents > .choice-row { border-radius: unset; }
-.new-run-agents > .choice-row + .choice-row { box-shadow: inset 0 1px 0 var(--border); }
-.new-run-agents > .choice-row:first-child {
-  border-top-left-radius: var(--radius-md);
-  border-top-right-radius: var(--radius-md);
-}
-.new-run-agents > .choice-row:last-child {
-  border-bottom-left-radius: var(--radius-md);
-  border-bottom-right-radius: var(--radius-md);
-}
 /* The diff answers to the side panel's width, not the window's (§2.10; #2843): a 400px panel on a
    desktop gets the narrow layout. Finding rows are single-column at every width (#2850); the
    finding cards in the diff leave the code column's indent (#2851). */
@@ -19398,8 +19127,7 @@ a.tab { text-decoration: none; }
    text edge, as setting rows do.
 
    Every row is ONE fixed grid — icon, name, digit, moves, switch — and every cell but the name is a
-   fixed size, so the arrows, the digit and the switch sit at one x on a normal, hidden, required and
-   experiment-off row alike. What differs between them (Always Shown, Off in Experimental, Tab Bar) is
+   fixed size, so the arrows, the digit and the switch sit at one x on a normal, hidden and required rows. What differs between them (Always Shown, Tab Bar) is
    a note in the name cell, which wraps there rather than pushing a control. The vertical padding is
    what is left of --row-h around a control, so a row is --row-h tall on any pointer. */
 .rail-nav-list {

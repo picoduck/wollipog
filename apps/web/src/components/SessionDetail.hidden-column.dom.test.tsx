@@ -76,7 +76,7 @@ function sessionView(overrides: Partial<SessionView> = {}): SessionView {
   return {
     id: `hidden-column-${fixtureSequence}`, runnerId: runner.runnerId, workspaceId: null, workspaceName: null,
     projectId: null, agentId: "codex", agentName: "Codex", title: "Hidden Column Fixture", status: "running",
-    column: "review", runId: null, useWorktree: true, worktreePath: "/repos/demo/wt",
+    column: "review", useWorktree: true, worktreePath: "/repos/demo/wt",
     archived: false, createdAt: 1, updatedAt: 1, lastEventAt: null, messageCount: 0,
     eventEpoch: 0, preview: null, pendingApproval: null, driver: "codex-app-server",
     model: "gpt-5.6-sol", effort: "high", permissionMode: null, tokensIn: 0, tokensOut: 0,
@@ -173,7 +173,7 @@ async function mount(initial: SessionView, { phone = false, open = true }: { pho
   await act(async () => socket.push({
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [runner], boxes: [], projects: [], sessions: [initial], runs: [],
+    runners: [runner], boxes: [], projects: [], sessions: [initial]
   }));
   await flush();
   let current = initial;

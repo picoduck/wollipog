@@ -142,8 +142,6 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "POST /api/sessions/:id/worktrees/select",
   "POST /api/sessions/:id/worktrees/discard",
   "POST /api/sessions/:id/temporary-branches",
-  "GET /api/runs",
-  "POST /api/runs",
   "GET /api/governance/policies",
   "PUT /api/governance/policies/:policyId",
   "DELETE /api/governance/policies/:policyId",

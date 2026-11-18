@@ -256,7 +256,7 @@ async function mount({
     const snapshot = {
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
-      runners: [], boxes: [], projects: [], sessions, runs: [],
+      runners: [], boxes: [], projects: [], sessions
     } as unknown as UiSnapshotMessage;
     if (summarySnapshot) {
       socket.push({ ...snapshot, sessions: [], sessionsComplete: false });
@@ -714,7 +714,7 @@ test("a member hydrates a summary root and refreshes retained campaign detail af
     assert.equal(rootReads, 1, "holding a summary does not suppress the authorized detail read");
     currentRoot = { ...rootSession, orchestratorCampaign: campaign(workSummary({ counts: { ...workSummary().counts, delivered: 2 } })) };
     await act(async () => {
-      panel.socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [], runs: [], sessionsComplete: false });
+      panel.socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [], sessionsComplete: false });
       panel.socket.push({ type: "session_snapshot_page", sessions: [compact, childSession], complete: true });
     });
     await settle();

@@ -70,7 +70,6 @@ function session(
     title: id,
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,

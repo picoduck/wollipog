@@ -4,7 +4,7 @@ import { installInboxFixture } from "./inbox-production-fixture.js";
 async function openDelayedDismissal(page: Page, empty = false, partialFailure = false) {
   const fixture = await installInboxFixture(page);
   if (empty) await page.routeWebSocket("**/ui**", socket => socket.send(JSON.stringify({
-    type: "snapshot", runners: [], sessions: [], boxes: [], runs: [],
+    type: "snapshot", runners: [], sessions: [], boxes: [],
   })));
   await page.route("**/api/skills", route => route.fulfill({ json: { skills: ["using-wollipog", "orchestrate-issues"].map(name => ({
     id: name, name, builtIn: { release: "synthetic", heldUpdate: null },

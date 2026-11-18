@@ -12,7 +12,6 @@ import {
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   ProjectsIcon,
-  RunsIcon,
   SearchIcon,
   SettingsIcon,
   SkillsIcon,
@@ -23,7 +22,6 @@ import { shortcutAriaKeys, shortcutDisplay } from "../shortcuts.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuSeparator, MenuSurface } from "./Menu.js";
 import { useIsMobile, useIsShortViewport } from "./useIsMobile.js";
-import { useExperiments } from "../use-experiments.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { sessionsDestination } from "../sessions-view-mode.js";
 import { phoneBarViews, railDigits, setRailLabels, visibleRailViews } from "../rail-preferences.js";
@@ -44,7 +42,6 @@ export const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; classNa
   inbox: InboxIcon,
   assistants: AssistantsIcon,
   projects: ProjectsIcon,
-  runs: RunsIcon,
   automations: AutomationsIcon,
   usage: UsageIcon,
   runners: ConnectionsIcon,
@@ -144,7 +141,6 @@ export const RAIL_DISABLED_NOTE = "Open an instance first.";
 function selectedRailView(view: View): GlobalViewName | null {
   // Board mode and an expanded session are both the Sessions destination.
   if (view.name === "session" || view.name === "board") return "inbox";
-  if (view.name === "run") return "runs";
   if (view.name === "automation") return "automations";
   return GLOBAL_VIEW_ITEMS.some((item) => item.id === view.name) ? view.name as GlobalViewName : null;
 }
@@ -248,19 +244,18 @@ export function Rail({
     });
   }, [isMobile, moreOpen, more, settingsSelected]);
 
-  // The user's configured order, minus hidden and experiment-disabled destinations, IS the rail
+  // The user's configured order, minus hidden destinations, IS the rail
   // (#385): digits, keycaps and the More sheet's order all derive from this one list, so hiding a
   // destination renumbers the survivors — position is the binding. The phone bar is chosen
-  // separately (phoneBarViews), so the desktop order and experiments never decide its four slots.
-  const { flags } = useExperiments();
+  // separately (phoneBarViews), so the desktop order never decides its four slots.
   const preferences = useRailPreferences();
   // Desktop only: a stored preference never widens the phone tab bar (#1968).
   // Disabled, it is the 64px rail whatever the preference says, and its switch is not offered.
   const labelled = !isMobile && !disabled && preferences.labels;
-  const visibleNames = visibleRailViews(preferences, flags);
+  const visibleNames = visibleRailViews(preferences);
   const digits = railDigits(visibleNames);
   const itemFor = (name: GlobalViewName) => GLOBAL_VIEW_ITEMS.find((item) => item.id === name)!;
-  const barNames = isMobile ? phoneBarViews(preferences, flags) : visibleNames;
+  const barNames = isMobile ? phoneBarViews(preferences) : visibleNames;
   const visibleItems = barNames.map(itemFor);
   const overflowItems = isMobile ? visibleNames.filter((name) => !barNames.includes(name)).map(itemFor) : [];
   // A destination hidden behind More still has to read as current, or the bar looks like nothing
@@ -286,7 +281,7 @@ export function Rail({
   const tooltip = useRailTooltip(!isMobile && !labelled);
   const toastChromeRef = useToastChrome();
   // The sheet is rendered for the whole phone breakpoint rather than only when a destination
-  // overflows: Settings always lives there, so hiding every optional destination by experiment
+  // overflows: Settings always lives there, so hiding every optional destination
   // must not strand it.
   const showMore = isMobile && !disabled;
 

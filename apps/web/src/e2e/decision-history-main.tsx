@@ -132,7 +132,7 @@ const policyNames = {
 const session = {
   id: SESSION_ID, runnerId: "runner-1", workspaceId: null, agentId: "claude-native", driver: "claude-code",
   title: "Refactor the Governance Audit Reader", status: "idle", adopted: false, eventEpoch: 1, archived: false,
-  runId: null, parentSessionId: null, pendingApproval: null, createdAt: NOW - 2 * DAY, updatedAt: NOW,
+  parentSessionId: null, pendingApproval: null, createdAt: NOW - 2 * DAY, updatedAt: NOW,
   lastEventAt: NOW, messageCount: 40, tokensIn: 0, tokensOut: 0, costUsd: 0, costBudgetUsd: null, maxToolCalls: null,
 } as SessionView;
 

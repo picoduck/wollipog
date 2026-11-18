@@ -1511,6 +1511,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 386: Workflow runs and workflow automation actions are retired (Refs #4692).
   386,
   // v387 slot
+  // 387: Multi-agent runs are retired and their sessions become standalone (Refs #4693).
+  387,
   // v388 slot
   // v389 slot
   // v390 slot

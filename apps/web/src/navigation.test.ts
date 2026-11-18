@@ -35,7 +35,6 @@ const routes: Array<[View, string]> = [
   [{ name: "runners", section: "instances" }, "/connections/instances"],
   [{ name: "runners", section: "people" }, "/connections/people"],
   [{ name: "runners", section: "machines", machineId: "runner / ✅" }, `/connections/machines/~${encodeResourceId("runner / ✅")}`],
-  [{ name: "runs" }, "/runs"],
   [{ name: "automations" }, "/automations"],
   [{ name: "automations", tab: "outbound" }, "/automations/outbound"],
   [{ name: "automations", editor: { kind: "new" } }, "/automations/new"],
@@ -53,7 +52,6 @@ const routes: Array<[View, string]> = [
   ...["space / unicode ✅ %?#", ".", "..", "foo.txt", "a/../foo.txt", "~already-marked"].map(
     (id): [View, string] => [{ name: "session", id }, `/sessions/~${encodeResourceId(id)}`],
   ),
-  [{ name: "run", id: "run_abc" }, `/runs/~${encodeResourceId("run_abc")}`],
 ];
 
 test("Usage opens on Subscriptions, and a link saved from when it had its own path still lands there", () => {
@@ -105,19 +103,11 @@ test("a campaign link preserves its root and opens Campaign Status", () => {
   assert.equal(viewFromPath("/sessions/~!/campaign"), null);
 });
 
-test("a run's phone member is in its URL, so a reload and a shared link keep it (#2975)", () => {
-  const path = `/runs/~${encodeResourceId("run_abc")}`;
-  for (const member of ["s_claude", "member / ✅ &?#"]) {
-    const view: View = { name: "run", id: "run_abc", member };
-    const url = new URL(viewPath(view), "http://localhost");
-    assert.equal(url.pathname, path);
-    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
-  }
-  assert.equal(viewPath({ name: "run", id: "run_abc", member: "s_claude" }), `${path}?member=s_claude`);
-  assert.equal(sameView({ name: "run", id: "run_abc", member: "a" }, { name: "run", id: "run_abc", member: "b" }), false);
-  // A query that is not one member keeps the run open, without a member.
-  for (const query of ["", "?member=", "?member=%20", "?member=a&member=b", "?member=a&tab=b", "?tab=a", `?member=${"x".repeat(5000)}`]) {
-    assert.deepEqual(viewFromPath(path, query), { name: "run", id: "run_abc" }, query);
+test("bookmarked Runs links reach Page Not Found", () => {
+  for (const path of ["/runs", "/runs/", "/runs/~" + encodeResourceId("run_abc")]) {
+    const view = viewFromPath(path, "?member=s_claude");
+    assert.deepEqual(view, { name: "not-found" });
+    assert.equal(viewPath(view!), "/not-found");
   }
 });
 
@@ -180,7 +170,6 @@ test("every destination has one name, in the §4.1 order", () => {
     ["assistants", "Assistants", "work"],
     ["automations", "Automations", "work"],
     ["projects", "Projects", "work"],
-    ["runs", "Multi-Agent Runs", "oversight"],
     ["runners", "Connections", "oversight"],
     ["skills", "Agent Skills", "oversight"],
     ["archived", "Archived Sessions", "records"],
@@ -193,7 +182,6 @@ test("every destination has one name, in the §4.1 order", () => {
     assert.doesNotMatch(item.name, /runner|inbox/i, item.id);
     assert.equal(item.name, titleCaseLabel(item.name), `${item.name} is Title Case`);
   }
-  assert.equal(backLabel("runs"), "Back to Multi-Agent Runs");
   assert.equal(backLabel("inbox"), "Back to Sessions");
 });
 
@@ -219,7 +207,6 @@ test("page descriptions use short sentence-case copy in user terms", () => {
       automations: "Run a prompt on a schedule, from a webhook, or from a chat message.",
       projects: "Group related sessions and choose the folders where they run.",
       assistants: "Ask an assistant to start, watch and steer your sessions.",
-      runs: "Give one task to several agents and compare what each one does.",
       runners: undefined,
       skills: "Write a skill once, then choose which machines and agents get it.",
       archived: "Archived sessions keep their transcripts. Restore one to keep working.",
@@ -240,9 +227,8 @@ test("page descriptions use short sentence-case copy in user terms", () => {
 });
 
 test("an entity page is titled by its entity once it has loaded", () => {
-  assert.equal(viewTitle({ name: "run", id: "run-1" }, "Compare Retry Strategies"), "Compare Retry Strategies");
+  assert.equal(viewTitle({ name: "session", id: "s-1" }, "Inspect Retries"), "Inspect Retries");
   // The generic noun is only the loading fallback.
-  assert.equal(viewTitle({ name: "run", id: "run-1" }), "Multi-Agent Run");
   assert.equal(viewTitle({ name: "session", id: "s-1" }), "Session");
   // The Automation editor is titled by what it edits (#2967).
   assert.equal(viewTitle({ name: "automations", editor: { kind: "new" } }), "New Automation");
@@ -366,7 +352,7 @@ test("the composer's refusals, action errors and queued rows never say control p
 test("every surface that names a destination reads the registry's one name", () => {
   // The rail's accessible name and tooltip, its More sheet, the palette, the shortcut reference
   // and the Settings › Navigation rows each render `name`. A second field would let them drift
-  // apart again, which is what put "Multi-Agent" in the rail and "Multi-Agent Runs" in the title.
+  // apart.
   const consumers: ReadonlyArray<[string, RegExp[]]> = [
     ["./components/Rail.tsx", [
       /aria-label=\{item\.name\}\s*aria-describedby=\{attention \? descriptionId : undefined\}\s*aria-keyshortcuts/,
@@ -377,7 +363,6 @@ test("every surface that names a destination reads the registry's one name", () 
     ["./components/CommandPalette.tsx", [/label: item\.name,/]],
     ["./components/SettingsView.tsx", [/const item = destination\(name\);/, /\{item\.name\}/]],
     ["./shortcuts.ts", [/label: item\.name,/]],
-    ["./experiments.ts", [/const multiAgentName = destination\("runs"\)\.name;/]],
   ];
   for (const [path, patterns] of consumers) {
     const text = source(path);
@@ -388,7 +373,6 @@ test("every surface that names a destination reads the registry's one name", () 
   const headers: ReadonlyArray<[string, string]> = [
     ["./components/AutomationsView.tsx", "automations"],
     ["./components/ProjectsView.tsx", "projects"],
-    ["./components/RunsView.tsx", "runs"],
     ["./components/RunnersView.tsx", "runners"],
     ["./components/SkillsView.tsx", "skills"],
     ["./components/ArchivedSessionsView.tsx", "archived"],
@@ -423,8 +407,6 @@ test("empty states that name a destination read its name", () => {
     ["./components/Board.tsx", /title=\{`No \$\{destination\("inbox"\)\.name\} Yet`\}/],
     ["./components/ArchivedSessionsView.tsx", /`No \$\{destination\("archived"\)\.name\}`/],
     ["./components/ProjectsView.tsx", /title=\{`No \$\{PROJECTS\.name\} Yet`\}/],
-    ["./components/RunsView.tsx", /title=\{`No \$\{runsDestination\.name\} Yet`\}/],
-    ["./detail-placeholder.ts", /const resource = destination\(list\)\.name;/],
   ];
   for (const [path, pattern] of empties) assert.match(source(path), pattern, path);
 });
@@ -514,7 +496,6 @@ test("view comparison includes resource identity", () => {
     { name: "session", id: "s1", location: { path: "a.ts", line: 1 } },
     { name: "session", id: "s1", location: { path: "a.ts", line: 1 } },
   ), true);
-  assert.equal(sameView({ name: "runs" }, { name: "run", id: "r1" }), false);
 });
 
 test("legacy push fragments migrate only known bounded destinations", () => {
@@ -639,10 +620,10 @@ test("browser history canonicalizes once, preserves state, and never pushes duri
 
   const seen: View[] = [];
   const stop = navigation.listen((view) => seen.push(view));
-  location.pathname = `/runs/~${encodeResourceId("run_1")}`;
+  location.pathname = `/sessions/~${encodeResourceId("s_2")}`;
   location.search = "";
   for (const listener of listeners) listener();
-  assert.deepEqual(seen, [{ name: "run", id: "run_1" }]);
+  assert.deepEqual(seen, [{ name: "session", id: "s_2" }]);
   assert.equal(writes.length, 4, "popstate parsing does not push a new entry");
   stop();
   assert.equal(listeners.size, 0);
@@ -651,7 +632,7 @@ test("browser history canonicalizes once, preserves state, and never pushes duri
 test("Keyboard folds into Behavior: /settings/keyboard replaces itself and lands on Keyboard Shortcuts (#3023)", () => {
   assert.equal(SETTINGS_SECTIONS.some((section) => section.id === ("keyboard" as never)), false);
   assert.deepEqual(SETTINGS_SECTIONS.map((section) => section.title),
-    ["Appearance", "Notifications", "Behavior", "Approvals", "Reviews", "Orchestrator", "Network", "Storage", "Experimental", "About"]);
+    ["Appearance", "Notifications", "Behavior", "Approvals", "Reviews", "Orchestrator", "Network", "Storage", "About"]);
   const view = viewFromPath("/settings/keyboard");
   assert.deepEqual(view, { name: "settings", section: "behavior", focus: { target: "keyboard-shortcuts" } });
   assert.equal(viewPath(view!), "/settings/behavior", "the focus target is not part of the address");

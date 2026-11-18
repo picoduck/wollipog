@@ -3532,16 +3532,8 @@ function SessionDetailLoaded({
   // The ambiguous tool-call ids as one string, so the transcript's status context moves only when they
   // do, not on every projection of a streamed event (#2872).
   const ambiguousSubagentKey = [...headerSubagents.ambiguousIds].sort().join("\n");
-  // Only the count of current workers is read here, and a worker's state reads no streaming field (#2872).
-  const rosterSessions = useStoreSelector((state) => state.sessions, sessionsEqualIgnoringStreaming);
-  const rosterRuns = useStoreSelector((state) => state.runs);
-  const rosterRunners = useStoreSelector((state) => state.runners);
-  const activeWorkerCount = useMemo(() => workerRoster(session, activeSubagents,
-    (session.runId ? rosterRuns.get(session.runId)?.sessionIds ?? [] : []).flatMap((id) => {
-      const member = rosterSessions.get(id);
-      return member ? [member] : [];
-    }), (id) => rosterRunners.get(id)?.status === "online").filter(isLiveWorker).length,
-  [session, activeSubagents, rosterSessions, rosterRuns, rosterRunners]);
+  const activeWorkerCount = useMemo(() => workerRoster(session, activeSubagents, runnerOnline)
+    .filter(isLiveWorker).length, [session, activeSubagents, runnerOnline]);
   // The turns that started background jobs, numbered as their footers number them (#2858). Only a
   // session with background history pays for the pass over its items.
   const backgroundHistoryShown = (session.backgroundJobs?.length ?? 0) > 0 || (session.backgroundDeliveries?.length ?? 0) > 0;

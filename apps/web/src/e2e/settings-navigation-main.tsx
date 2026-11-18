@@ -22,7 +22,7 @@ function fixtureView(): View {
   if (entry === "settings") {
     const section = params.get("section");
     if (section === "appearance" || section === "notifications" ||
-        section === "behavior" || section === "network" || section === "experimental" || section === "about") {
+        section === "behavior" || section === "network" || section === "about") {
       return { name: "settings", section };
     }
     return { name: "settings", section: "behavior" };
@@ -67,7 +67,6 @@ class FixtureSocket implements UiSocket {
         runners: [],
         boxes: [],
         sessions: [],
-        runs: [],
       };
       this.onmessage?.({ data: JSON.stringify(snapshot) });
     }, 0);

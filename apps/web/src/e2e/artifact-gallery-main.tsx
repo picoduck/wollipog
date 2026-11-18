@@ -28,7 +28,7 @@ const SESSION_ID = "artifact-gallery-e2e";
 const session: SessionView = {
   id: SESSION_ID, runnerId: "runner-1", workspaceId: "workspace-1", workspaceName: "Wollipog",
   projectId: null, agentId: "claude", agentName: "Claude", title: "Capture the Responsive States", status: "idle",
-  column: "review", runId: null, useWorktree: true, worktreePath: "/workspace/wollipog",
+  column: "review", useWorktree: true, worktreePath: "/workspace/wollipog",
   archived: false, createdAt: 1, updatedAt: 1, lastEventAt: 1, messageCount: 1, eventEpoch: 0,
   preview: null, pendingApproval: null, driver: "claude-code", model: null, effort: null,
   permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
@@ -154,7 +154,7 @@ class FixtureSocket implements UiSocket {
           sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
           projects: true, createProjectLocations: true,
         },
-        runners: [], boxes: [], projects: [], sessions: [], runs: [],
+        runners: [], boxes: [], projects: [], sessions: [],
       };
       this.onmessage?.({ data: JSON.stringify(snapshot) });
     }, 0);

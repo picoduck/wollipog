@@ -763,18 +763,17 @@ test("no two destinations render the same glyph", async ({ page }) => {
  *
  * Selecting Inbox always meant `.rail-more-trigger.active` and `.rail-more-item.active` never
  * existed here, so `.rail-more-trigger.active > svg, .rail-more-item.active > svg { opacity: 0 }`
- * matched nothing — while in production, standing on Runs, Automations or Usage gives a blank
+ * matched nothing — while in production, standing on Automations or Usage gives a blank
  * active More control and an erased current row inside the sheet.
  */
-// The harness enables every experiment, so the overflow set is every destination off the default
-// phone bar, which experiments never change (#1959).
-const MOBILE_PRIMARY_DEFAULTS = phoneBarViews(defaultRailPreferences(), { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true });
+// The overflow set is every destination off the default phone bar (#1959).
+const MOBILE_PRIMARY_DEFAULTS = phoneBarViews(defaultRailPreferences());
 for (const current of GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_DEFAULTS.includes(item.id))) {
   test(`the More control reads as current on ${current.name}`, async ({ page }) => {
     await useHarness(page, { view: current.id });
     await openKeyboard(page);
     // Every overflow destination, not just one: `overflowSelected = selected === "usage"` left the
-    // single-case version green while a user on Runs or Automations saw a bar with nothing
+    // single-case version green while a user on Automations saw a bar with nothing
     // marked current at all.
     await expect(page.locator(".rail-more-trigger.active")).toHaveCount(1);
     await expect(page.locator(".rail-more-trigger")).toHaveAttribute("aria-current", "page");

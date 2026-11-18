@@ -44,7 +44,6 @@ function snapshot(projects?: ProjectView[]): UiSnapshotMessage {
     runners: [],
     boxes: [],
     sessions: [],
-    runs: [],
   };
 }
 

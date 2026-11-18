@@ -22,7 +22,6 @@ import { useAccessibleMenu, useLongPress } from "./interactions.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
-import { useExperiments } from "../use-experiments.js";
 import { activeBoardFilterCount, filterBoardSessions } from "./BoardFilters.js";
 import { showsActivityStrip } from "../activity.js";
 import { boardCardDecisions, boardCardRequestCode, boardCardSignInItems, type BoardCardSignInItem } from "../board-card.js";
@@ -92,10 +91,7 @@ export function Board({ sessions: scoped, reminders = new Map(), pinnedSessionId
 }) {
   const api = useApi();
   const { setFilters, navigate } = useStoreActions();
-  // The empty state's hint names Multi-Agent Run; with the experiment off that destination has
-  // been removed everywhere else, and a hint pointing at a control that does not exist teaches
   // the reader the app is broken rather than configured.
-  const multiAgentEnabled = useExperiments().flags.multiAgent;
   const allSessions = useStoreSelector((s) => s.sessions);
   const snapshot = useSnapshotState();
   const runners = useStoreSelector((s) => s.runners);
@@ -324,9 +320,7 @@ export function Board({ sessions: scoped, reminders = new Map(), pinnedSessionId
               onNewSession();
             }}>New Session</button>}
           >
-            {multiAgentEnabled
-              ? <>Click “New Session” to start an agent, or “Multi-Agent Run” to compare several.</>
-              : <>Click “New Session” to start an agent.</>}
+            Click “New Session” to start an agent.
           </State>
         )
       ) : phone ? (

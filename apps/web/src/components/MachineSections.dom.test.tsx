@@ -115,7 +115,7 @@ const snapshot = (runners: RunnerView[], accessScopeManagement = false): UiSnaps
     sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
     ...(accessScopeManagement ? { accessScopeManagement: true } : {}),
   },
-  runners, boxes: [], projects: [], sessions: [], runs: [],
+  runners, boxes: [], projects: [], sessions: []
 });
 const navigation = (view: View): ViewNavigation => ({ current: () => view, push() {}, replace() {}, listen: () => () => {} });
 const settle = () => act(async () => { for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setTimeout(resolve, 0)); });

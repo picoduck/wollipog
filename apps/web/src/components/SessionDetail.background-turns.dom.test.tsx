@@ -119,7 +119,6 @@ async function mountBackgroundTurns(sessionId: string, cold = false, openingStar
     title: "Background Turns",
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -227,7 +226,6 @@ async function mountBackgroundTurns(sessionId: string, cold = false, openingStar
     boxes: [],
     projects: [],
     sessions: [session],
-    runs: [],
   } as unknown as ControlPlaneToUi));
   await flushAsyncWork();
   const headings = () => [...container.querySelectorAll(".background-work-turn-head h3")].map((heading) => heading.textContent);

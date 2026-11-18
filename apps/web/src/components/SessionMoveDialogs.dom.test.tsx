@@ -64,7 +64,6 @@ function session(overrides: Partial<SessionView> = {}): SessionView {
     title: "Session",
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -218,7 +217,6 @@ async function mount(
     boxes: [],
     ...(data.projects ? { projects: data.projects } : {}),
     sessions: data.sessions ?? [],
-    runs: [],
   };
   await act(async () => {
     socket.push(snapshot);

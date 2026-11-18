@@ -55,7 +55,6 @@ function session(overrides: Partial<SessionView> = {}): SessionView {
     title: "Session",
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -154,7 +153,7 @@ test("Project assignment responses cannot erase or resurrect live turn projectio
     runnerOnline: true,
     runnerProtocolVersion: 72,
   });
-  dispatch({ type: "snapshot", runners: [], boxes: [], sessions: [base], runs: [] });
+  dispatch({ type: "snapshot", runners: [], boxes: [], sessions: [base] });
 
   let resolveResponse!: (value: unknown) => void;
   const response = new Promise<unknown>((resolve) => { resolveResponse = resolve; });

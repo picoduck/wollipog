@@ -69,8 +69,8 @@ export function primaryProjectLocation(project: ProjectView): ProjectLocationVie
 /**
  * Where each project that shares its name runs, said no more precisely than its same-named projects
  * need: the machine, then the machine and folder, then a longer path, then the whole path, and the
- * project's id when nothing else differs. Projects with a unique name get no entry. New Session and
- * New Multi-Agent Run both label projects with it, so two projects never read alike in either.
+ * project's id when nothing else differs. Projects with a unique name get no entry. New Session
+ * uses it to distinguish projects with the same name.
  */
 export function projectNameQualifiers(
   projects: readonly ProjectView[],
@@ -182,4 +182,9 @@ export function projectSessionPlacement(
     projectId: project.id,
     projectLocationId: location.id,
   };
+}
+
+/** The folder's name as shown in the Location picker. */
+export function folderName(path: string): string {
+  return path.split(/[\\/]+/u).filter(Boolean).at(-1) ?? path;
 }

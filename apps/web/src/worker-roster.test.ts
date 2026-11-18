@@ -6,8 +6,6 @@ import {
   backgroundWorkerState,
   isCurrentWorker,
   isLiveWorker,
-  memberName,
-  memberWorkerStatus,
   stepActivity,
   subagentWorkerStatus,
   workerElapsed,
@@ -63,22 +61,6 @@ test("the job domain no longer carries Working, Waiting or Input Required", () =
   for (const retired of ["working", "waiting", "input_required"]) assert.equal(values.includes(retired), false, retired);
 });
 
-test("every member status maps to exactly one word, on the session vocabulary", () => {
-  const expected: Record<SessionStatus, string> = {
-    queued: "Queued", starting: "Running", running: "Running", input_required: "Needs Your Input",
-    idle: "Awaiting Prompt", completed: "Completed", failed: "Failed", stopped: "Stopped",
-  };
-  for (const [status, label] of Object.entries(expected) as [SessionStatus, string][]) {
-    assert.equal(workerStatusMeta(memberWorkerStatus({ status, pendingApproval: null }, true)).label, label, status);
-  }
-  const asking = memberWorkerStatus({ status: "input_required",
-    pendingApproval: { requestId: "q", title: "Pick", kind: "question", options: [], questions: [] } }, true);
-  assert.equal(workerStatusMeta(asking).label, "Answer Required");
-  assert.equal(memberWorkerStatus({ status: "running", pendingApproval: null }, false).state, "unverified");
-  assert.equal(memberWorkerStatus({ status: "idle", pendingApproval: null }, true, "completed").state, "completed",
-    "a workflow node that finished retires its idle member");
-});
-
 test("every subagent lifecycle maps to one worker state, the same for the roster and the transcript", () => {
   const expected: Record<SubagentLifecycle, [live: WorkerState, recorded: WorkerState]> = {
     starting: ["running", "unverified"], running: ["running", "unverified"], waiting: ["running", "unverified"],
@@ -97,15 +79,11 @@ test("every subagent lifecycle maps to one worker state, the same for the roster
 
 test("roster rows carry a group, an activity sentence and a parent, and keep the page's facts", () => {
   const parent: SubagentDescriptor = { ...child, id: "lead", title: "Lead", depth: 0, childIds: ["child"], latestTool: undefined };
-  const reviewer = { ...session, id: "reviewer", title: "Review", createdAt: 1, updatedAt: 2, preview: "Reading the **diff**.",
-    pendingApproval: null, model: "review-model", effort: "high", tokensIn: 5, tokensOut: 7, status: "running" } as unknown as SessionView;
-  const pod = { id: "pod:p", name: "Parser Pod" };
-  const rows = workerRoster(session, [parent, { ...child, parentId: "lead" }], [session, reviewer, reviewer], () => true,
-    new Map([["reviewer", { group: pod, role: "reviewer", phase: "independent-review", activations: 2 }]]));
-  assert.equal(rows.length, 4);
-  const [lead, inspect, monitor, review] = rows as [typeof rows[0], typeof rows[0], typeof rows[0], typeof rows[0]];
-  assert.deepEqual([lead.group.name, inspect.group.name, monitor.group.name, review.group.name],
-    ["Subagents", "Subagents", "Background Jobs", "Parser Pod"]);
+  const rows = workerRoster(session, [parent, { ...child, parentId: "lead" }], true);
+  assert.equal(rows.length, 3);
+  const [lead, inspect, monitor] = rows as [typeof rows[0], typeof rows[0], typeof rows[0]];
+  assert.deepEqual([lead.group.name, inspect.group.name, monitor.group.name],
+    ["Subagents", "Subagents", "Background Jobs"]);
   assert.equal(inspect.parentId, "subagent:lead");
   assert.deepEqual([inspect.state, inspect.attention], ["attention", "approval_required"]);
   assert.equal(inspect.activity, "Waiting to edit src/auth/parser.ts");
@@ -115,12 +93,9 @@ test("roster rows carry a group, an activity sentence and a parent, and keep the
   // The row sets the job's id apart; the whole name stays for titles and sentences (§4.10).
   assert.equal(monitor.name, "Monitor Job 3e0219");
   assert.deepEqual(monitor.nameParts, { kind: "Monitor Job", id: "3e0219" });
-  assert.equal(review.nameParts, undefined);
-  assert.equal(review.activity, "Reading the diff.");
   assert.equal(inspect.tokens, 5);
   assert.equal(inspect.inclusiveTokens, 12);
-  assert.equal(review.activations, 2);
-  assert.equal(rows.filter(isCurrentWorker).length, 4);
+  assert.equal(rows.filter(isCurrentWorker).length, 3);
 });
 
 test("subagent roster token totals distinguish reported zero from unavailable usage", () => {
@@ -136,7 +111,7 @@ test("subagent roster token totals distinguish reported zero from unavailable us
   ];
   for (const [usage, expected] of cases) {
     for (const field of ["directUsage", "inclusiveUsage"] as const) {
-      const row = workerRoster(session, [{ ...child, [field]: usage }], [], () => true)[0]!;
+      const row = workerRoster(session, [{ ...child, [field]: usage }], true)[0]!;
       const tokenField = field === "directUsage" ? "tokens" : "inclusiveTokens";
       assert.equal(row[tokenField], expected, `${field}: ${JSON.stringify(usage)}`);
       assert.equal(Object.hasOwn(row, tokenField), expected !== undefined,
@@ -147,16 +122,11 @@ test("subagent roster token totals distinguish reported zero from unavailable us
 
 test("a worker's tokens say whether its provider counts cached input (#3086)", () => {
   const claudeParent = { ...session, driver: "claude-code" } as SessionView;
-  const codexMember = { ...session, id: "codex", title: "Codex", driver: "codex-app-server", pendingApproval: null,
-    backgroundJobs: [], tokensIn: 5, tokensOut: 7, createdAt: 1, updatedAt: 2 } as unknown as SessionView;
-  const piMember = { ...codexMember, id: "pi", title: "Pi", driver: "pi" } as unknown as SessionView;
-  const rows = workerRoster(claudeParent, [child], [codexMember, piMember], () => true);
+  const rows = workerRoster(claudeParent, [child], true);
   const basis = Object.fromEntries(rows.map((row) => [row.id, row.inputBasis]));
   assert.deepEqual(basis, {
     "subagent:child": "excludesCached",
     "background:monitor": undefined,
-    "session:codex": "includesCached",
-    "session:pi": undefined,
   });
 });
 
@@ -195,13 +165,13 @@ test("a worker page's notice says what the worker wants and what it waits for (#
 });
 
 test("offline workers stay current as Unverified; settled ones move to History", () => {
-  const offline = workerRoster(session, [{ ...child, availability: "recorded" }], [], () => false);
+  const offline = workerRoster(session, [{ ...child, availability: "recorded" }], false);
   assert.deepEqual(offline.map((row) => row.state), ["unverified", "unverified"]);
   assert.equal(offline.filter(isCurrentWorker).length, 2);
   assert.equal(offline[0]!.activity, "Last seen running npm test", "an unverified step is never reported as done");
   assert.equal(offline.filter(isLiveWorker).length, 0, "the session header counts only verifiably live workers");
   assert.equal(isLiveWorker({ state: "attention" }), true, "a worker waiting on the user is still in flight");
-  const completed = workerRoster(session, [{ ...child, lifecycle: "completed", latestTool: { title: "$ npm test", active: false } }], [], () => true)[0]!;
+  const completed = workerRoster(session, [{ ...child, lifecycle: "completed", latestTool: { title: "$ npm test", active: false } }], true)[0]!;
   assert.equal(completed.state, "completed");
   assert.equal(completed.activity, "Ran npm test");
   assert.equal(isCurrentWorker(completed), false);
@@ -209,31 +179,12 @@ test("offline workers stay current as Unverified; settled ones move to History",
   assert.equal(backgroundWorkerState({ ...session.backgroundJobs![0]!, terminalStatus: "killed" }, session, true), "stopped");
   assert.equal(backgroundWorkerState(session.backgroundJobs![0]!, { ...session, backgroundWorkState: "resumed" }, true), "unverified");
   assert.equal(backgroundWorkerState({ ...session.backgroundJobs![0]!, sourcePresent: false }, session, true), "unverified");
-  assert.equal(workerRoster(session, [{ ...child, availability: "recorded" }], [], () => true)[0]!.latestTool?.active, false,
+  assert.equal(workerRoster(session, [{ ...child, availability: "recorded" }], true)[0]!.latestTool?.active, false,
     "recorded history never labels an unfinished tool as current activity");
 });
 
 test("legacy empty evidence has no fabricated workers and unknown ownership is not assigned", () => {
   const legacy = { ...session, backgroundJobs: undefined, pendingApproval: { requestId: "ask", title: "Choose", options: [] } } as SessionView;
-  assert.deepEqual(workerRoster(legacy, [], [], () => true), []);
-  assert.equal(workerRoster(legacy, [child], [], () => true)[0]!.state, "running");
-});
-
-test("terminal workflow evidence retires idle members without hiding new running work", () => {
-  const member = { ...session, id: "member", status: "idle", pendingApproval: null } as SessionView;
-  const metadata = new Map([["member", { terminalState: "completed" as const, completedAt: 50 }]]);
-  const completed = workerRoster(session, [], [member], () => true, metadata).at(-1)!;
-  assert.equal(completed.state, "completed");
-  assert.equal(completed.completedAt, 50);
-  assert.equal(isCurrentWorker(completed), false);
-  const restarted = workerRoster(session, [], [{ ...member, status: "running" }], () => true, metadata).at(-1)!;
-  assert.equal(restarted.state, "running");
-  assert.equal(restarted.completedAt, undefined, "stale workflow completion must not freeze a new activation's duration");
-});
-
-test("a run member leads with its agent under the run's heading", () => {
-  assert.equal(memberName({ title: "Release Audit · Claude Code", agentName: "Claude Code" }, "Release Audit"), "Claude Code");
-  assert.equal(memberName({ title: "Fix Parser", agentName: "Codex" }, "Release Audit"), "Codex · Fix Parser");
-  assert.equal(memberName({ title: "Release Audit", agentName: "Codex" }, "Release Audit"), "Codex");
-  assert.equal(memberName({ title: "Pod Member", agentName: "Codex" }), "Pod Member", "a pod member keeps its title");
+  assert.deepEqual(workerRoster(legacy, [], true), []);
+  assert.equal(workerRoster(legacy, [child], true)[0]!.state, "running");
 });

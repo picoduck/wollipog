@@ -40,7 +40,6 @@ import {
   CloudOff as LucideCloudOff,
   Code as LucideCode,
   CodeXml as LucideCodeXml,
-  Columns2 as LucideColumns2,
   Columns3 as LucideColumns3,
   Copy as LucideCopy,
   DollarSign as LucideDollarSign,
@@ -63,7 +62,6 @@ import {
   Film as LucideFilm,
   Fence as LucideFence,
   FingerprintPattern as LucideFingerprintPattern,
-  FlaskConical as LucideFlaskConical,
   Folder as LucideFolder,
   FolderInput as LucideFolderInput,
   FolderOpen as LucideFolderOpen,
@@ -158,7 +156,6 @@ import {
   Waypoints as LucideWaypoints,
   Wifi as LucideWifi,
   WifiOff as LucideWifiOff,
-  Workflow as LucideWorkflow,
   Wrench as LucideWrench,
   WrapText as LucideWrapText,
   X as LucideX,
@@ -273,15 +270,6 @@ export function DismissReminderIcon(props: IconProps) {
 
 export function ConnectionsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideMonitorCog} {...props} />;
-}
-
-export function RunsIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideWorkflow} {...props} />;
-}
-
-/** A comparison run: several agents side by side on one task (#2974). */
-export function CompareIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideColumns2} {...props} />;
 }
 
 export function AutomationsIcon(props: IconProps) {
@@ -974,10 +962,6 @@ export function WrenchIcon(props: IconProps) {
 
 export function HeldIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideCirclePause} {...props} />;
-}
-
-export function ExperimentIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideFlaskConical} {...props} />;
 }
 
 export function AppearanceIcon(props: IconProps) {

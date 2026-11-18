@@ -85,7 +85,6 @@ function session(id: string, title: string, column: BoardColumn, overrides: Part
     title,
     status: "idle",
     column,
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -491,7 +490,6 @@ function snapshot(): UiSnapshotMessage {
     boxes: [],
     sessions: structuredClone(entryHydrated ? sessions : sessions.filter((value) => value.id !== "s-approval")),
     reminders: structuredClone(reminders),
-    runs: [],
   };
 }
 

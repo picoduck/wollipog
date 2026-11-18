@@ -147,7 +147,6 @@ const session: SessionView = {
   title: "Session Usage Fixture",
   status: activeUsage ? "running" : "idle",
   column: "review",
-  runId: null,
   useWorktree: true,
   worktreePath: "/tmp/recovery-e2e-worktree",
   archived: false,
@@ -642,7 +641,6 @@ const snapshotMessage: ControlPlaneToUi = {
   boxes: [],
   projects: [],
   sessions: [session],
-  runs: [],
 };
 
 function usageAmount(input: number, output: number, costUsd: number, processed: number, costSource: "providerReported" | "modelPriced" | "unpriced" = "providerReported") {

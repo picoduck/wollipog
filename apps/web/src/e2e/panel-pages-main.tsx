@@ -33,7 +33,7 @@ const MINUTE = 60_000;
 const session = {
   id: "s_panel_pages", runnerId: "runner-1", workspaceId: null, agentId: "claude-native", driver: "claude-code",
   title: "Split the Billing Service Into Read and Write Paths", status: "running", adopted: false, eventEpoch: 1,
-  archived: false, runId: null, parentSessionId: null, pendingApproval: null, createdAt: NOW - 60 * MINUTE,
+  archived: false, parentSessionId: null, pendingApproval: null, createdAt: NOW - 60 * MINUTE,
   updatedAt: NOW, lastEventAt: NOW, messageCount: 80, tokensIn: 0, tokensOut: 0, costUsd: 0,
 } as SessionView;
 // `request=1`: the last worker asks to run a command, answered on its page (#2860).

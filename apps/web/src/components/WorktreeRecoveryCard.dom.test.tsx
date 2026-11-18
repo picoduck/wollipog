@@ -36,7 +36,7 @@ function recoverySession(expectedBranch = "fix/missing"): SessionView {
   return {
     id: `recovery-session-${++sessionCount}`, runnerId: "runner-1", workspaceId: "workspace-1", workspaceName: "Demo",
     projectId: null, agentId: "codex", agentName: "Codex", title: "Recovery", status: "input_required",
-    column: "input_required", runId: null, useWorktree: true, worktreePath: "/repo/missing",
+    column: "input_required", useWorktree: true, worktreePath: "/repo/missing",
     archived: false, createdAt: 1, updatedAt: 2, lastEventAt: 2, messageCount: 1, eventEpoch: 0,
     preview: null, pendingApproval: null, driver: "codex-app-server", model: null, effort: null,
     permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,

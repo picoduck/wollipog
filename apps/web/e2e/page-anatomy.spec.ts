@@ -1,6 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { EXPERIMENTS_STORAGE_KEY } from "../src/experiments.js";
-import { instanceStorageKey } from "../src/instance-storage.js";
+import { encodeResourceId } from "../src/navigation.js";
 
 /**
  * Page anatomy (#1801; docs/design-system.md §4.2 page header, §4.3 detail bar, §4.5 page
@@ -14,7 +13,6 @@ const DESTINATIONS = [
   // Automations puts Automations and Outbound Events in the header's tab slot (#2969).
   { path: "/automations", title: "Automations", description: true, tabs: true, max: 960 },
   { path: "/projects", title: "Projects", description: true },
-  { path: "/runs", title: "Multi-Agent Runs", description: true, max: 960 },
   // Connections puts its tabs in the header's tab slot (#1803); its Machines tab is a full-width
   // master-detail (#2985).
   { path: "/connections", title: "Connections", tabs: true },
@@ -25,17 +23,6 @@ const DESTINATIONS = [
   { path: "/settings", title: "Settings", description: true },
 ] as const;
 
-/** Multi-Agent Runs off on this device, as Settings › Experimental would store it in the shell
- * harness's instance scope. */
-async function turnExperimentsOff(page: Page) {
-  await page.addInitScript((key) => {
-    // Once per tab, so Turn On is not undone by the next navigation.
-    if (sessionStorage.getItem("e2e-experiments-off")) return;
-    sessionStorage.setItem("e2e-experiments-off", "1");
-    localStorage.setItem(key, JSON.stringify({ multiAgent: false }));
-  }, instanceStorageKey(EXPERIMENTS_STORAGE_KEY, "project-inbox-e2e"));
-}
-
 async function openDestination(page: Page, path: string, title: string) {
   await page.goto(shell(path));
   await expect(page.getByRole("heading", { level: 1, name: title, exact: true })).toBeVisible();
@@ -43,12 +30,19 @@ async function openDestination(page: Page, path: string, title: string) {
 }
 
 for (const width of [1440, 390]) {
-  test(`bookmarked Pods pages show Page Not Found at ${width}px`, async ({ page }) => {
+  test(`a former comparison member opens as a standalone session at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    for (const path of ["/pods", "/pods/~cABvAGQAXwBhAGIAYwA"]) {
+    await page.goto(shell(`/sessions/~${encodeResourceId("session-alpha")}`) + "&scenario=former-comparison-member");
+    await expect(page.getByRole("heading", { level: 1, name: "Retry Audit" })).toBeVisible();
+    await expect(page.locator("[data-route-loading], .view-error")).toHaveCount(0);
+  });
+
+  test(`retired Pods and Runs bookmarks show Page Not Found at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    for (const path of ["/pods", "/pods/~cABvAGQAXwBhAGIAYwA", "/runs", "/runs/~cgB1AG4AXwAxAA"]) {
       await openDestination(page, path, "Page Not Found");
       await expect(page.getByText("This page is no longer available.", { exact: true })).toBeVisible();
-      await expect(page.getByRole("navigation", { name: "Primary Navigation" }).getByRole("link", { name: "Pods" })).toHaveCount(0);
+      await expect(page.getByRole("navigation", { name: "Primary Navigation" }).getByRole("link", { name: /^(Pods|Multi-Agent Runs)$/ })).toHaveCount(0);
       if (width === 1440) {
         const header = page.locator(".page > .page-header", { has: page.getByRole("heading", { name: "Page Not Found" }) });
         const main = await page.locator(".main-body").boundingBox();
@@ -117,52 +111,17 @@ test.describe("at 1440×900", () => {
     });
   }
 
-  test("Multi-Agent Runs create from a 32px primary with a plus icon", async ({ page }) => {
-    for (const [path, title, label] of [
-      ["/runs", "Multi-Agent Runs", "New Run"],
-    ] as const) {
-      await openDestination(page, path, title);
-      const primary = page.locator(".page-header").getByRole("button", { name: label, exact: true });
-      await expect(primary).toBeVisible();
-      await expect(primary).toHaveClass(/\bbtn\b.*\bprimary\b/);
-      await expect(primary.locator("svg")).toHaveCount(1);
-      const box = await primary.boundingBox();
-      expect(box!.height, `${label} is one line at the control height`).toBe(32);
-    }
-    // One verb per action (§17.2): the Runs primary opens a dialog of the same name.
-    await page.locator(".page-header").getByRole("button", { name: "New Run", exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "New Run", exact: true })).toBeVisible();
-  });
-
   test("the destination descriptions show at 1440px and at 900px", async ({ page }) => {
     for (const width of [1440, 900]) {
       await page.setViewportSize({ width, height: 900 });
       for (const [path, title, description] of [
         ["/automations", "Automations", "Run a prompt on a schedule, from a webhook, or from a chat message."],
-        ["/runs", "Multi-Agent Runs", "Give one task to several agents and compare what each one does."],
         ["/usage", "Usage and Cost", "What your sessions would cost at API rates and what's left on each subscription."],
       ] as const) {
         await openDestination(page, path, title);
         await expect(page.locator(".page-header .page-desc"), `${title} at ${width}px`).toHaveText(description);
         await expect(page.locator(".page-header .page-desc")).toBeVisible();
       }
-    }
-  });
-
-  test("a turned-off experiment keeps the working page's header, and Turn On does not move it", async ({ page }) => {
-    await turnExperimentsOff(page);
-    for (const [path, title, description] of [
-      ["/runs", "Multi-Agent Runs", "Give one task to several agents and compare what each one does."],
-    ] as const) {
-      await openDestination(page, path, title);
-      const header = page.locator(".page-header");
-      await expect(header.locator(".page-desc"), title).toHaveText(description);
-      const off = await header.boundingBox();
-      expect(off!.height, `${title} turned off is as tall as its working header`).toBe(88);
-      await page.getByRole("button", { name: `Turn On ${title}`, exact: true }).click();
-      await expect(page.locator(".experiment-off")).toHaveCount(0);
-      await expect(header.locator(".page-desc")).toHaveText(description);
-      expect(await header.boundingBox(), `${title}'s header stays put when it is turned on`).toEqual(off);
     }
   });
 
@@ -440,20 +399,12 @@ test.describe("page header actions follow the width tiers", () => {
 
     test("no destination shows its description", async ({ page }) => {
       for (const [path, title] of [
-        ["/automations", "Automations"], ["/runs", "Multi-Agent Runs"], ["/usage", "Usage and Cost"],
+        ["/automations", "Automations"], ["/usage", "Usage and Cost"],
       ] as const) {
         await openDestination(page, path, title);
         await expect(page.locator(".page-header .page-desc"), title).toBeHidden();
       }
     });
 
-    test("a turned-off experiment shows no description either", async ({ page }) => {
-      await turnExperimentsOff(page);
-      for (const [path, title] of [["/runs", "Multi-Agent Runs"]] as const) {
-        await openDestination(page, path, title);
-        await expect(page.getByRole("button", { name: `Turn On ${title}`, exact: true })).toBeVisible();
-        await expect(page.locator(".page-header .page-desc"), title).toBeHidden();
-      }
-    });
   });
 });

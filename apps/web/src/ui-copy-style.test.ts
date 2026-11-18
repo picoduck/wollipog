@@ -46,7 +46,7 @@ import { QUESTION_CARD_COPY, questionStepLabel } from "./components/requests/Que
 import { SIGN_IN_COPY } from "./components/AuthenticationRecoveryPanel.js";
 import { REQUEST_PANEL_COPY, requestPanelPositionLabel } from "./components/SessionRequestPanel.js";
 import { childRequestsLabel } from "./status-meta.js";
-import { AGENTS_NOTICE_COPY, AGENTS_ROSTER_COPY, opensSessionLabel, workerListFootLabel } from "./components/AgentsPanel.js";
+import { AGENTS_NOTICE_COPY, AGENTS_ROSTER_COPY, workerListFootLabel } from "./components/AgentsPanel.js";
 import { attentionSentence, attentionTitle, offlineAttentionSentence, type AttentionAsker } from "./worker-attention.js";
 import { BACKGROUND_GROUP, SUBAGENT_GROUP, stepActivity, workerStatusMeta, type WorkerState } from "./worker-roster.js";
 
@@ -1250,7 +1250,6 @@ test("the Agents roster's labels, headings and badges are Title Case; its lines 
     assert.ok(isSentenceCase(line) && !isTitleCase(line), JSON.stringify(line));
   }
   // A tooltip is a sentence (§9.3) that names the session as its title is written.
-  assert.equal(opensSessionLabel("Fix the Parser"), "Opens Fix the Parser");
 });
 
 test("the Agents notices' titles and buttons are Title Case; their sentences are sentence case (#2861)", () => {

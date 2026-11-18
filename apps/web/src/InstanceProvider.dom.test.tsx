@@ -840,7 +840,7 @@ test("Back to another instance's entry asks the open instance's editor before cl
     return null;
   }
   const remote = profiles[1]!.id;
-  const remotePath = instanceViewPath(remote, { name: "runs" });
+  const remotePath = instanceViewPath(remote, { name: "skills" });
   const localPath = instanceViewPath("local", { name: "settings", section: "orchestrator" });
   // Two recorded entries: the remote instance's, then the local one's editor.
   domWindow.history.replaceState({ wollipogEntry: { run: "run-3218", index: 0 } }, "", remotePath);

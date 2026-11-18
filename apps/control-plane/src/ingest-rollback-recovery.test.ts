@@ -64,7 +64,7 @@ function reconnectDashboard(store: DashboardStore, db: ControlPlaneDb, revision:
   store.dispatch({ type: "msg", msg: {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], runs: [],
+    runners: [], boxes: [],
     sessions: [{ id: "sess-1", eventEpoch: eventEpoch(db) } as SessionView],
   } });
   store.prepareSubscriptionRecovery(revision, ["sess-1"]);
@@ -128,7 +128,7 @@ async function streamThenCrash(root: string, campaign = false): Promise<{
   store.dispatch({ type: "msg", msg: {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], runs: [],
+    runners: [], boxes: [],
     sessions: [{ id: "sess-1", eventEpoch: eventEpoch(db) } as SessionView],
   } });
   store.navigate({ name: "session", id: "sess-1" });

@@ -3872,13 +3872,6 @@ test("Full Control children run in any boundary repository's Location, and each 
     f.db.updateSessionStatus(api.data!.id, "running", Date.now());
     const ownRepository = "This session works for its parent in other/repo, so it must use a Location of other/repo, not owner/repo.";
     assert.equal(child(api.data!.id, { workspaceId: "b" }).error, ownRepository);
-    // Runs follow the same placement rule as one child.
-    const run = (parentSessionId: string, workspaceId: string, runnerId = "r2") => f.sessions.createRun({ runnerId, workspaceId, agentIds: ["claude"],
-      task: "Deliver the work", config: { model: "claude-opus-5-5" } }, { parentSessionId });
-    assert.equal(run(api.data!.id, "b").error, ownRepository, "a run in another repository's Location");
-    assert.equal(run(rootId, f.db.getProjectLocation(p.plain.id)!.workspaceId, "r").error, refusal, "a run in a Project Location outside the boundary");
-    const sameRepository = run(api.data!.id, "a");
-    assert.equal(sameRepository.ok, true, sameRepository.error ?? "created");
     const worker = child(api.data!.id, {});
     assert.equal(worker.ok, true, worker.error ?? "created");
     // The campaign allowance covers the child and the worker it serves, both in its repository's Location.

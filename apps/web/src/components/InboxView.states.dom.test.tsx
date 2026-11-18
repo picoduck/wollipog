@@ -139,7 +139,6 @@ function session(id: string, overrides: Partial<SessionView> = {}): SessionView 
     title: `Session ${id}`,
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -200,7 +199,6 @@ function snapshot(options: { sessions?: SessionView[]; projects?: ProjectView[];
     sessions: options.sessions ?? [],
     projects: options.projects ?? [],
     reminders: options.reminders ?? [],
-    runs: [],
   };
 }
 

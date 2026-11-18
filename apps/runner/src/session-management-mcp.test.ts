@@ -220,7 +220,7 @@ test("orchestrator MCP lists only management tools and leaves self-worktree poli
     "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
     "resolve_descendant_approval", "resolve_descendant_workflow_decision", "review_descendant_ui_evidence",
   ]) assert.ok(names.includes(name), name);
-  for (const name of ["create_run", "set_session_config", "upsert_governance_policy", "create_workflow"]) {
+  for (const name of ["set_session_config", "upsert_governance_policy", "create_workflow"]) {
     assert.equal(names.includes(name), false);
     assert.equal((await callTool(deps, name)).isError, true);
   }
@@ -991,7 +991,6 @@ test("tools/list returns the curated session and typed decision tools with schem
       "get_review_session",
       "list_review_sessions",
       "cancel_review_session",
-      "list_runs",
       "list_governance_policies",
       "get_governance_policy",
       "upsert_governance_policy",
@@ -1016,7 +1015,6 @@ test("tools/list returns the curated session and typed decision tools with schem
       "archive_session",
       "unarchive_session",
       "set_guardrails",
-      "create_run",
     ],
   );
   for (const t of tools) {
@@ -1331,7 +1329,7 @@ test("mutating tools describe governance instead of promising a now-optional hum
     "upsert_governance_policy", "delete_governance_policy",
     "attach_session_artifact",
     "create_session", "prompt_session", "stop_session", "restart_session",
-    "stop_background_job", "release_queue_hold", "set_guardrails", "create_run", "create_worktree", "attach_worktree", "select_worktree", "discard_worktree",
+    "stop_background_job", "release_queue_hold", "set_guardrails", "create_worktree", "attach_worktree", "select_worktree", "discard_worktree",
   ];
   for (const name of mutations) {
     const tool = TOOLS.find((t) => t.name === name)!;
@@ -1853,7 +1851,7 @@ test("a launch with no eligible account tells the agent what it can do, without 
   const text = resultText(created);
   assert.match(text, /No Claude account/u);
   assert.match(text, /PROVIDER_ACCOUNT_CHOICE_REQUIRED refusal=no_eligible_account actions=choose_account, wait retryAt=2027-/u);
-  assert.match(text, /get_provider_account_selection .*create_session providerAccountId .*--provider-account.*create_run providerAccountIds/u);
+  assert.match(text, /get_provider_account_selection .*create_session providerAccountId .*--provider-account/u);
   assert.ok(!text.includes("person-example-com"), text);
 });
 
@@ -1901,25 +1899,6 @@ test("create_session carries a named account, and refuses it before sending to a
   assert.equal(blank.isError, true);
 });
 
-test("create_run carries named accounts and refuses them before an older control plane (#4353)", async () => {
-  const current = makeDeps(() => ({ status: 200, body: { run: { id: "r_1" }, sessions: [], instance: {} } }));
-  current.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
-  const run = { runnerId: "r1", workspaceId: "ws", agentIds: ["claude"], task: "Do it" };
-  const accepted = await callTool(current.deps, "create_run", { ...run, providerAccountIds: { claude: "acct:aaaaaaaaaaaaaaaa" } });
-  assert.equal(accepted.isError, undefined, resultText(accepted));
-  assert.deepEqual((current.calls[0]?.body as { providerAccountIds?: unknown }).providerAccountIds, { claude: "acct:aaaaaaaaaaaaaaaa" });
-
-  // v337 reads a session's reference, but its run ignores this field, so the choice would silently vanish.
-  const older = makeDeps(() => ({ status: 200, body: {} }));
-  older.deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.memberProviderAccountChoice - 1;
-  const refusedRun = await callTool(older.deps, "create_run", { ...run, providerAccountIds: { claude: "acct:aaaaaaaaaaaaaaaa" } });
-  assert.equal(refusedRun.isError, true);
-  assert.match(resultText(refusedRun), /Choosing a provider account from an agent needs/u);
-  assert.deepEqual(older.calls, [], "it never receives the choice");
-  const plain = await callTool(older.deps, "create_run", run);
-  assert.equal(plain.isError, undefined, "a run naming nothing still reaches it");
-});
-
 test("an agent hears that a plan wasn't checked only when it named a model under a policy (#4353)", async () => {
   const plain = makeDeps(() => ({ status: 200, body: { id: "s_child", status: "queued", runnerId: "r1", providerAccountSelection: { source: "priority" } } }));
   plain.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
@@ -1948,7 +1927,6 @@ test("list_sessions -> GET /api/sessions (+?archived=true), mapped with pendingA
           runnerId: "r1",
           workspaceId: "ws",
           agentId: "claude-code",
-          runId: null,
           maxChildSessions: 7,
           orchestratorPolicy: {
             version: 1,
@@ -2302,16 +2280,6 @@ test("get_session_events pages forward against a control plane without bounded p
   assert.deepEqual(newest.lines.map(seqOf), [18, 19, 20]);
 });
 
-test("list_runs -> GET /api/runs", async () => {
-  const { deps, calls } = makeDeps(() => ({
-    status: 200,
-    body: { runs: [{ id: "r_1", title: "fanout", prompt: "task", workspaceId: "ws", sessionIds: ["s_1", "s_2"], createdAt: 1, updatedAt: 2 }] },
-  }));
-  const result = await callTool(deps, "list_runs");
-  assert.equal(calls[0]!.url, `${CP_URL}/api/runs`);
-  assert.deepEqual(resultJson(result).runs[0].sessionIds, ["s_1", "s_2"]);
-});
-
 test("worktree tools use the canonical routes and default to the calling session", async () => {
   const { deps, calls } = makeDeps(() => ({
     status: 200,
@@ -2622,6 +2590,28 @@ test("create_session applies model and effort in the original create request and
   assert.equal(resultJson(result).session.maxToolCalls, null);
 });
 
+test("two child sessions can compare the same prompt with independent agents, models, efforts and accounts", async () => {
+  const { deps, calls } = makeDeps(() => ({
+    status: 201,
+    body: { id: "s_comparison_child", status: "queued", runnerId: "r1" },
+  }));
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const prompt = "Compare two retry strategies and report your test results.";
+  const candidates = [
+    { agentId: "claude", model: "opus", effort: "high", providerAccountId: "acct:aaaaaaaaaaaaaaaa" },
+    { agentId: "codex", model: "sol", effort: "medium", providerAccountId: "acct:bbbbbbbbbbbbbbbb" },
+  ];
+  for (const candidate of candidates) {
+    const created = await callTool(deps, "create_session", { runnerId: "r1", workspaceId: "ws", prompt, ...candidate });
+    assert.equal(created.isError, undefined, resultText(created));
+  }
+  assert.deepEqual(calls.map(({ method, url, body }) => ({ method, url, body })),
+    candidates.map(({ agentId, model, effort, providerAccountId }) => ({
+      method: "POST", url: `${CP_URL}/api/sessions`,
+      body: { runnerId: "r1", workspaceId: "ws", agentId, prompt, useWorktree: true, providerAccountId, config: { model, effort } },
+    })));
+});
+
 test("create_session fails closed on explicit effort with an older control plane and preserves omitted-effort creation", async () => {
   const older = makeDeps(() => ({
     status: 200,
@@ -2709,7 +2699,6 @@ test("create tools return the control plane's retry instruction when an approval
     "Retry the same request after approval.";
   const cases = [
     { name: "create_session", args: { runnerId: "r1", agentId: "claude-code", workspaceId: "workspace" }, created: { id: "s_child" } },
-    { name: "create_run", args: { runnerId: "r", workspaceId: "w", agentIds: ["a"], task: "Build" }, created: { run: { id: "run" }, sessions: [] } },
   ];
   // Each control plane generation answers the fence probe differently: a newer one publishes the
   // spawn fence it enforces; an older one (or one that cannot be reached) enforces the 30 s hook
@@ -2988,27 +2977,6 @@ test("compact archive and inspection responses retain lifecycle progress without
   }
 });
 
-test("run creation tools keep the exact batch request alive until spawn approval resolves", async () => {
-  for (const name of ["create_run"]) {
-    for (const terminal of [201, 403]) {
-      let remaining = 2;
-      let sleeps = 0;
-      const { deps, calls } = makeDeps((call) => call.method === "GET"
-        ? { status: 200, body: { protocolVersion: 185, spawnApprovalAbandonmentMs: 600_000 } }
-        : remaining-- > 0
-          ? { status: 428, body: { error: "Child approval required" } }
-          : { status: terminal, body: terminal === 201 ? { run: { id: "run" }, sessions: [] } : { error: "Rejected" } });
-      deps.sleep = async (ms) => { assert.equal(ms, 1000); sleeps++; };
-      const result = await callTool(deps, name, { runnerId: "r", workspaceId: "w", agentIds: ["a"], task: "Build" });
-      assert.equal(result.isError === true, terminal === 403);
-      assert.equal(sleeps, 2);
-      const creates = calls.filter((call) => call.method === "POST");
-      assert.equal(creates.length, 3);
-      assert.deepEqual(creates.map((call) => call.body), Array(3).fill(creates[0]!.body));
-    }
-  }
-});
-
 test("set_guardrails -> POST /api/sessions/:id/config with ONLY the given guardrail keys", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { id: "s_2", costBudgetUsd: 3, maxChildSessions: 8 } }));
   const result = await callTool(deps, "set_guardrails", { sessionId: "s_2", costBudgetUsd: 3, maxChildSessions: 8 });
@@ -3037,33 +3005,6 @@ test("restart_session uses the descendant restart route and refuses self", async
   assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/s_2/restart`);
   assert.equal((await callTool(deps, "restart_session", { sessionId: SELF_ID })).isError, true);
   assert.equal(calls.length, 1);
-});
-
-test("create_run -> POST /api/runs with the full body", async () => {
-  const { deps, calls } = makeDeps(() => ({
-    status: 201,
-    body: { run: { id: "r_9", title: "compare", sessionIds: ["s_a", "s_b"] }, sessions: [{ id: "s_a" }, { id: "s_b" }] },
-  }));
-  const result = await callTool(deps, "create_run", {
-    runnerId: "r1",
-    workspaceId: "ws",
-    agentIds: ["claude-code", "codex"],
-    task: "implement X",
-    title: "compare",
-    costBudgetUsd: 2,
-    maxToolCalls: 50,
-  });
-  assert.equal(calls[0]!.url, `${CP_URL}/api/runs`);
-  assert.deepEqual(calls[0]!.body, {
-    runnerId: "r1",
-    workspaceId: "ws",
-    agentIds: ["claude-code", "codex"],
-    task: "implement X",
-    title: "compare",
-    costBudgetUsd: 2,
-    maxToolCalls: 50,
-  });
-  assert.deepEqual(resultJson(result).run.sessionIds, ["s_a", "s_b"]);
 });
 
 test("governance policy inspection and authoring tools preserve exact validated shapes", async () => {
@@ -3157,7 +3098,7 @@ test("every CP round-trip carries an abort timeout signal (no ~300s undici stall
 
 test("the token never appears in any tool result text (success or error)", async () => {
   const { deps } = makeDeps(() => ({ status: 500, body: { error: "boom" } }));
-  for (const tool of ["list_runners", "list_sessions", "list_runs"]) {
+  for (const tool of ["list_runners", "list_sessions"]) {
     const result = await callTool(deps, tool);
     assert.ok(!resultText(result).includes(TOKEN), `${tool} must not leak the token`);
   }
@@ -3288,7 +3229,7 @@ test("a non-JSON error body still surfaces the status (no crash)", async () => {
     text: async () => "<html>Bad Gateway</html>",
   });
   const deps: McpDeps = { fetch: htmlFetch, cpUrl: CP_URL, selfSessionId: SELF_ID, token: "" };
-  const result = await callTool(deps, "list_runs");
+  const result = await callTool(deps, "list_sessions");
   assert.equal(result.isError, true);
   assert.match(resultText(result), /HTTP 502/);
 });

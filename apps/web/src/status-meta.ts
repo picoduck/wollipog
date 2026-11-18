@@ -358,19 +358,6 @@ const VOCABULARY = {
     failed: danger("Failed"),
     stopped: neutral("Stopped"),
   },
-  /** A Multi-Agent Run's one row badge (`runStatus()`, #2974). A run whose members are all idle has
-   * none. */
-  run: {
-    awaiting_decision: warning("Awaiting Decision"),
-    approval_required: warning("Approval Required"),
-    running: info("Running", { pulse: true }),
-    failed: danger("Failed"),
-  },
-  /** One member's answer to a run's Follow Up send (#2976), inline beside its name. */
-  followUp: {
-    delivered: success("Delivered"),
-    failed: danger("Failed"),
-  },
   /** A Wollipog Assistant thread (#4664). Needs You is a confirmation or approval waiting in it. */
   assistantThread: {
     working: info("Working", { pulse: true }),

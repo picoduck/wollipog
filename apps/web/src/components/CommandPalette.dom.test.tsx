@@ -161,7 +161,7 @@ async function mount(options: {
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [], boxes: [], projects: [], sessions: SESSIONS, runs: [],
+      runners: [], boxes: [], projects: [], sessions: SESSIONS
     } as unknown as UiSnapshotMessage);
   });
   cleanup(async () => {

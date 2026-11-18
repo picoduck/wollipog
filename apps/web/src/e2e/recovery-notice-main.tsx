@@ -94,7 +94,6 @@ const session: SessionView = {
   title: worktreeRecoveryFixture ? "Recover Missing Worktree" : "Recovery Notice Geometry Fixture",
   status: worktreeRecoveryFixture ? "input_required" : "idle",
   column: worktreeRecoveryFixture ? "input_required" : "review",
-  runId: null,
   useWorktree: true,
   worktreePath: "/tmp/recovery-e2e-worktree",
   archived: false,
@@ -186,7 +185,6 @@ const snapshotMessage: ControlPlaneToUi = {
   boxes: [],
   projects: [],
   sessions: [session],
-  runs: [],
 };
 
 let fixtureSocket: FixtureSocket | null = null;

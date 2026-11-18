@@ -21,14 +21,13 @@ const FALLBACK_EXTENSION: Record<Exclude<ArtifactKind, "screenshot" | "video">, 
 export function principalCanReadArtifact(
   db: ControlPlaneDb,
   principal: AuthPrincipal,
-  artifact: { runId?: string; sessionId?: string },
+  artifact: { sessionId?: string },
 ): boolean {
   return Boolean(artifact.sessionId && db.canAccessSession(principal, artifact.sessionId));
 }
 
 function storedArtifactRequest(artifact: Artifact) {
   return {
-    ...(artifact.runId ? { runId: artifact.runId } : {}),
     ...(artifact.sessionId ? { sessionId: artifact.sessionId } : {}),
     kind: artifact.kind,
     name: artifact.name,

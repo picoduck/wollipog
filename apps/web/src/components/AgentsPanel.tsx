@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { pendingRequests, type ChildSessionAttentionOwner,
-  type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type PendingApproval, type RunView, type SessionView } from "@wollipog/protocol";
+  type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { deriveSubagentLifecycle, IncrementalSubagentProjector, type SubagentDescriptor } from "../subagents.js";
@@ -8,8 +8,8 @@ import { useLiveSession, useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import type { TimelineItem } from "../timeline.js";
 import { isCurrentWorker, pendingRequestsByOwner, subagentStatusContext, workerRoster, type WorkerGroup,
-  type WorkerMemberMetadata, type WorkerRow } from "../worker-roster.js";
-import { attentionAskers, attentionSentence, attentionTitle, memberAttentionAskers, memberSessions, offlineAttentionSentence,
+  type WorkerRow } from "../worker-roster.js";
+import { attentionAskers, attentionSentence, attentionTitle, offlineAttentionSentence,
   type AttentionAsker } from "../worker-attention.js";
 import { runnerDisplay } from "../runners.js";
 import { WorkerDetail } from "./WorkerDetail.js";
@@ -392,7 +392,6 @@ export function workerListFootLabel(shown: number, total: number, more: boolean)
   return `Showing ${shown} of ${total}${more ? "+" : ""}`;
 }
 
-export { opensSessionLabel } from "./WorkerRowItem.js";
 
 export interface WorkerGroupView {
   group: WorkerGroup;
@@ -442,22 +441,6 @@ export function groupWorkerRows(rows: readonly WorkerRow[], limit: number): { gr
   return { groups, shown: Math.min(limit, rows.length) };
 }
 
-/**
- * The facts the roster knows about this session's member sessions: the heading each sits under (its
- * run's title) and the run title its own title repeats.
- */
-export function memberMetadata(
-  session: Pick<SessionView, "runId">,
-  run: Pick<RunView, "title" | "sessionIds"> | undefined,
-): Map<string, WorkerMemberMetadata> {
-  const metadata = new Map<string, WorkerMemberMetadata>();
-  const runGroup: WorkerGroup | undefined = session.runId
-    ? { id: `run:${session.runId}`, name: run?.title ?? "Multi-Agent Run" } : undefined;
-  const runFacts = runGroup ? { group: runGroup, ...(run?.title ? { runTitle: run.title } : {}) } : {};
-  for (const id of run?.sessionIds ?? []) metadata.set(id, { ...metadata.get(id), ...runFacts });
-  return metadata;
-}
-
 type Props = Pick<BackgroundWorkPanelProps,
   "runnerProtocolVersion" | "parentTurns" | "onViewTurn" | "inventoryError" | "onRetryInventory"> & {
     session: SessionView;
@@ -496,10 +479,8 @@ export function AgentsPanel(props: Props) {
   // The registry refreshes as the session's message count and activity move, which the session view
   // does not render for (#2872).
   const session = useLiveSession(props.session);
-  const sessions = useStoreSelector((state) => state.sessions);
-  const runs = useStoreSelector((state) => state.runs);
   const runners = useStoreSelector((state) => state.runners);
-  const { navigate, loadSession } = useStoreActions();
+  const { loadSession } = useStoreActions();
   const projector = useRef(new IncrementalSubagentProjector());
   const projection = useMemo(() => projector.current.project(items, {
     sessionStatus: session.status, runnerOnline,
@@ -699,18 +680,11 @@ export function AgentsPanel(props: Props) {
     if (!registry) return projection.descriptors.filter((agent) => !unresolvedOwnerIds.has(agent.id));
     return mergeDurableAgents(durableAgents, projection.descriptors, unresolvedOwnerIds);
   }, [durableAgents, projection.descriptors, registry, unresolvedOwnerIds]);
-  const machineOnline = useCallback((id: string) => id === session.runnerId ? runnerOnline : runners.get(id)?.status === "online",
-    [session.runnerId, runnerOnline, runners]);
-  const { members, metadata } = useMemo(() => {
-    const run = session.runId ? runs.get(session.runId) : undefined;
-    const metadata = memberMetadata(session, run);
-    return { members: memberSessions(session, runs, sessions, metadata.keys()), metadata };
-  }, [session, runs, sessions]);
   const rows = useMemo(() => {
     const unambiguousAgents = agents.map((agent) => projection.ambiguousIds.has(agent.id)
       ? { ...agent, lifecycle: "unknown" as const, availability: "recorded" as const } : agent);
-    return workerRoster(session, unambiguousAgents, members, machineOnline, metadata);
-  }, [session, agents, projection.ambiguousIds, members, metadata, machineOnline]);
+    return workerRoster(session, unambiguousAgents, runnerOnline);
+  }, [session, agents, projection.ambiguousIds, runnerOnline]);
   // Workers the transcript holds that the registry has not listed yet (past its first page): not
   // roster rows until Show More, but their own pages show them and their parents' pages list them,
   // read from the transcript as their rows will be.
@@ -720,7 +694,7 @@ export function AgentsPanel(props: Props) {
       !projection.ambiguousIds.has(agent.id) && !unresolvedOwnerIds.has(agent.id));
     if (unlisted.length === 0) return [];
     const ids = new Set(unlisted.map((agent) => subagentPageKey(agent.id)));
-    return workerRoster(session, [...agents, ...unlisted], [], () => runnerOnline).filter((row) => ids.has(row.id));
+    return workerRoster(session, [...agents, ...unlisted], runnerOnline).filter((row) => ids.has(row.id));
   }, [session, agents, projection, unresolvedOwnerIds, runnerOnline]);
   const [filter, setFilter] = useState<"active" | "history" | "all">("active");
   const [limit, setLimit] = useState(PAGE_SIZE);
@@ -835,24 +809,10 @@ export function AgentsPanel(props: Props) {
       compactAttentionOwners.find((value) => value.requestId === selectedRequest.requestId && value.toolCallId === ownerId)?.name;
     return name ? `${name}, a subagent` : "A subagent";
   })();
-  // Who needs the person (#2861): the session for its own requests, each subagent for its most
-  // urgent, then each member session of a run whose row reads an attention word.
-  const askers: AttentionAsker[] = [
-    ...attentionAskers(session.pendingApproval, (ownerId, request) =>
-      (!projection.ambiguousIds.has(ownerId) ? agents.find((agent) => agent.id === ownerId)?.title : undefined) ??
-        compactAttentionOwners.find((value) => value.requestId === request.requestId && value.toolCallId === ownerId)?.name),
-    ...memberAttentionAskers(members, machineOnline,
-      (member) => rows.find((row) => row.id === `session:${member.id}`)?.name ?? member.title),
-  ];
-  // Review in Session opens what the notice is about: the request an attention link chose, else this
-  // session's top request by the request dock's priority rule, else a waiting member's session whose
-  // machine is connected.
-  const reviewTarget: { request: PendingApproval } | { sessionId: string } | undefined = selectedRequest
-    ? { request: selectedRequest } : askers.find((asker) => asker.request) ?? askers.find((asker) => asker.online);
-  const review = (target: { request?: PendingApproval; sessionId?: string }) => {
-    if (target.request) reviewRequest(target.request);
-    else if (target.sessionId) navigate({ name: "session", id: target.sessionId });
-  };
+  const askers = attentionAskers(session.pendingApproval, (ownerId, request) =>
+    (!projection.ambiguousIds.has(ownerId) ? agents.find((agent) => agent.id === ownerId)?.title : undefined) ??
+      compactAttentionOwners.find((value) => value.requestId === request.requestId && value.toolCallId === ownerId)?.name);
+  const reviewTarget = selectedRequest ?? askers[0]?.request;
   const reviewRequest = (request: PendingApproval) => {
     const pageOwner = requestPageOwner(request);
     if (pageOwner) {
@@ -905,11 +865,9 @@ export function AgentsPanel(props: Props) {
     title: runnerOnline ? attentionTitle(askers) : AGENTS_NOTICE_COPY.offlineAttention,
     render: ({ trailing }) => <Notice tone="warning" trailing={trailing}
       actions={runnerOnline && reviewTarget && <button type="button" className="btn sm"
-        onClick={() => review(reviewTarget)}>{AGENTS_NOTICE_COPY.review}</button>}>
+        onClick={() => reviewRequest(reviewTarget)}>{AGENTS_NOTICE_COPY.review}</button>}>
       {runnerOnline ? attentionSentence(askers)
-        : offlineAttentionSentence(requests.length + askers.reduce((total, asker) => total + (asker.sessionId
-          ? Math.max(1, pendingRequests(members.find((member) => member.id === asker.sessionId)?.pendingApproval).length) : 0), 0),
-        machine)}
+        : offlineAttentionSentence(requests.length, machine)}
     </Notice>,
   });
   if (session.backgroundJobsAvailable && !session.backgroundJobs && props.inventoryError) notices.push({
@@ -963,12 +921,9 @@ export function AgentsPanel(props: Props) {
     props.onSelect(id);
     pages.push(subagentPageKey(id));
   };
-  // A row, in the roster or a page's Nested Workers: a subagent or a job opens its page here, and a
-  // member session opens in its own place.
   const openRow = (row: WorkerRow) => {
     setChosen(row.id);
     if (row.target.kind === "subagent") openSubagentPage(row.target.id);
-    else if (row.target.kind === "session") navigate({ name: "session", id: row.target.id });
     else {
       props.onSelect("");
       pages.push(row.id);
@@ -1071,7 +1026,7 @@ export function AgentsPanel(props: Props) {
             <div role="list" aria-label={group.name}>
               {groupRows.map(({ row, nested, lastNested }) => (
                 <WorkerRowItem key={row.id} row={row} now={now} selected={selected?.id === row.id} nested={nested}
-                  lastNested={lastNested} sessionTitle={row.target.kind === "session" ? sessions.get(row.target.id)?.title : undefined}
+                  lastNested={lastNested}
                   onOpen={openRow} />
               ))}
             </div>

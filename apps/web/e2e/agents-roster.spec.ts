@@ -15,19 +15,6 @@ const shot = (page: Page, name: string) => page.locator(".agents-roster-fixture-
 test.describe("fine pointer", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("a run member's rows lead with the agent, untruncated in a 380px panel, under the run's title", async ({ page }) => {
-    await open(page, "run");
-    // One member has finished, so All shows both.
-    await page.getByRole("radio", { name: "All, 3", exact: true }).click();
-    await expect(page.locator(".group-label")).toHaveText(["Subagents1", "Release Audit for Wollipog 2026.102"]);
-    const titles = page.locator(".worker-row[title] .row-title");
-    await expect(titles).toHaveText(["Codex", "Gemini CLI"]);
-    for (const title of await titles.all()) {
-      expect(await title.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-    }
-    await expect(page.locator(".worker-row", { hasText: "Codex" })).toHaveAttribute("title", "Opens Release Audit for Wollipog 2026.10 · Codex");
-  });
-
   test("nested workers indent once under a spine, and the one asking says what it waits to do", async ({ page }) => {
     await open(page, "nested");
     const items = page.locator(".agents-list [role=listitem]");

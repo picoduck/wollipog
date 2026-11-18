@@ -14,7 +14,7 @@ import type { TimelineItem } from "../timeline.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { subagentStatusContext, type WorkerRow } from "../worker-roster.js";
-import { AgentsPanel, groupWorkerRows, memberMetadata } from "./AgentsPanel.js";
+import { AgentsPanel, groupWorkerRows } from "./AgentsPanel.js";
 import { subagentStatusMeta } from "./EventTimeline.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -55,7 +55,7 @@ const client: ApiClient = { ...api, childSessions: async () => { throw new Error
 const now = Date.now();
 const session = {
   id: "lead", runnerId: "runner", workspaceId: null, agentId: null, title: "Lead", status: "running",
-  runId: null, archived: false, createdAt: now - 60_000, updatedAt: now, lastEventAt: now, messageCount: 10,
+  archived: false, createdAt: now - 60_000, updatedAt: now, lastEventAt: now, messageCount: 10,
   eventEpoch: 0, pendingApproval: null,
 } as unknown as SessionView;
 const agent = (id: string, index: number, extra: Partial<Extract<TimelineItem, { kind: "tool_call" }>> = {}): TimelineItem => ({
@@ -231,11 +231,6 @@ test("a request is never attributed to an owner that is unresolved or ambiguous"
   const reused = { kind: "tool_call", id: 1, toolCallId: "reused", title: "Agent: Reused", text: "", toolKind: "agent",
     status: "in_progress" } as Extract<TimelineItem, { kind: "tool_call" }>;
   assert.equal(subagentStatusMeta(reused, subagentStatusContext(asking, true)).label, "Running");
-});
-
-test("members sit under their run's title", () => {
-  const run = memberMetadata({ runId: "r1" }, { title: "Release Audit", sessionIds: ["a", "b"] });
-  assert.deepEqual(run.get("a"), { group: { id: "run:r1", name: "Release Audit" }, runTitle: "Release Audit" });
 });
 
 test("groups keep their first row's order, count every filtered row, and page across groups", () => {

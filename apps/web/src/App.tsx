@@ -1,5 +1,4 @@
 import { RemoteAccessProvider } from "./remote-access-context.js";
-import { ExperimentGate } from "./components/ExperimentGate.js";
 import {
   lazy,
   Suspense,
@@ -103,7 +102,6 @@ import { InstanceRecoveryShell } from "./components/InstanceRecoveryShell.js";
 import { useNewSessionShortcut } from "./useNewSessionShortcut.js";
 import { useSessionsViewToggleKey } from "./useSessionsViewToggleKey.js";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
-import { useExperiments } from "./use-experiments.js";
 import {
   isTauriRuntime,
   readTailnetAccess,
@@ -118,11 +116,8 @@ import { State } from "./components/State.js";
 
 const ApprovalsPanel = lazy(() => import("./components/ApprovalsPanel.js").then((module) => ({ default: module.ApprovalsPanel })));
 const RunnersView = lazy(() => import("./components/RunnersView.js").then((module) => ({ default: module.RunnersView })));
-const RunsView = lazy(() => import("./components/RunsView.js").then((module) => ({ default: module.RunsView })));
-const RunDetail = lazy(() => import("./components/RunsView.js").then((module) => ({ default: module.RunDetail })));
 const ArchivedSessionsView = lazy(() => import("./components/ArchivedSessionsView.js").then((module) => ({ default: module.ArchivedSessionsView })));
 const NewSessionDialog = lazy(() => import("./components/NewSessionDialog.js").then((module) => ({ default: module.NewSessionDialog })));
-const NewRunDialog = lazy(() => import("./components/NewRunDialog.js").then((module) => ({ default: module.NewRunDialog })));
 const AssistantsView = lazy(() => import("./components/AssistantsView.js").then((module) => ({ default: module.AssistantsView })));
 const AutomationsView = lazy(() => import("./components/AutomationsView.js").then((module) => ({ default: module.AutomationsView })));
 const AutomationDetail = lazy(() => import("./components/AutomationDetail.js").then((module) => ({ default: module.AutomationDetail })));
@@ -141,7 +136,6 @@ const AppearancePanel = lazy(() => import("./components/SettingsView.js").then((
 const NavigationRailPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NavigationRailPanel })));
 const BehaviorPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.BehaviorPanel })));
 const AgentDefaultsPanel = lazy(() => import("./components/AgentDefaultsPanel.js").then((module) => ({ default: module.AgentDefaultsPanel })));
-const ExperimentalPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.ExperimentalPanel })));
 const NetworkPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NetworkPanel })));
 const NotificationsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NotificationsPanel })));
 const SettingsView = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.SettingsView })));
@@ -265,13 +259,8 @@ export function Shell() {
   const theme = useTheme();
   const { navigate, reconnectNow } = useStoreActions();
   const view = useStoreSelector((s) => s.view);
-  // A loaded run titles its page by name; the generic noun is only the loading fallback. An
-  // automation is not in the store: its page and its editor report its name (#2968).
-  const storeEntityTitle = useStoreSelector((s) =>
-    s.view.name === "run" ? s.runs.get(s.view.id)?.title
-        : undefined);
   const [reportedEntityTitle, reportEntityTitle] = useEntityTitleState();
-  const entityTitle = storeEntityTitle ?? reportedTitleFor(reportedEntityTitle, view);
+  const entityTitle = reportedTitleFor(reportedEntityTitle, view);
   const viewRef = useRef(view);
   viewRef.current = view;
   const settingsReturnView = useStoreSelector((s) => s.settingsReturnView);
@@ -305,8 +294,6 @@ export function Shell() {
   // The shell shows no live counter or preview, so a streaming-only upsert does not render it (#2763).
   const sessions = useStoreSelector((s) => s.sessions, sessionsEqualIgnoringStreaming);
   const reminders = useStoreSelector((s) => s.reminders);
-  const experiments = useExperiments();
-  const openExperimentalSettings = () => navigate({ name: "settings", section: "experimental" });
   const activeSession = view.name === "session" ? sessions.get(view.id) : undefined;
   // The phone top bar titles a session that is not loaded with its page's placeholder (#2202).
   const routedSessionLookup = useRoutedSessionLookup(view.name === "session" ? view.id : "");
@@ -317,7 +304,7 @@ export function Shell() {
   const filesSupported = runnerSupportsProtocol(activeRunnerProtocol, "sessionFiles");
   const conversationSteeringSupported = runnerSupportsProtocol(activeRunnerProtocol, "conversationSteering");
   const turnInterruptionSupported = runnerSupportsProtocol(activeRunnerProtocol, "turnInterruptionAck");
-  const [dialog, setDialog] = useState<null | { kind: "session"; preset?: NewSessionPreset } | { kind: "run" }>(null);
+  const [dialog, setDialog] = useState<null | { kind: "session"; preset?: NewSessionPreset }>(null);
   const [shortcutReferenceOpen, setShortcutReferenceOpen] = useState(false);
   // What had focus when the reference opened: its focus zone picks the "Current Page" group.
   const [shortcutReferenceOpener, setShortcutReferenceOpener] = useState<HTMLElement | null>(null);
@@ -567,7 +554,7 @@ export function Shell() {
     if (openedSessionId !== null) recordRecentSession(openedSessionId, instanceScope);
   }, [openedSessionId, instanceScope]);
   const railPreferences = useRailPreferences();
-  const visibleRailNames = visibleRailViews(railPreferences, experiments.flags);
+  const visibleRailNames = visibleRailViews(railPreferences);
   const visibleRailNamesRef = useRef(visibleRailNames);
   visibleRailNamesRef.current = visibleRailNames;
 
@@ -654,7 +641,7 @@ export function Shell() {
       if (event.defaultPrevented || shortcutLayerActive(document, false, event) || xtermOwnsKey(event.target)) return;
       const digit = bareDigitPressed(event);
       if (digit !== null) {
-        // Digits derive solely from the visible rail order (#385): a hidden or experiment-off
+        // Digits derive solely from the visible rail order (#385): a hidden
         // destination consumes no slot, and a digit past the visible list does nothing rather
         // than firing an unadvertised binding.
         const destination = railViewForDigit(visibleRailNamesRef.current, digit);
@@ -793,7 +780,6 @@ export function Shell() {
 
   const dialogKey = dialog?.kind ?? (palette !== null ? "search" : shortcutReferenceOpen ? "shortcuts" : "closed");
   const dialogTitle = dialog?.kind === "session" ? "New Session"
-    : dialog?.kind === "run" ? "New Run"
     : palette !== null ? "Search" : "Keyboard Shortcuts";
   const shell = (
     <RemoteAccessProvider><div className={`app${rightPanel.dragging ? " panel-dragging" : ""}`}>
@@ -895,13 +881,6 @@ export function Shell() {
             </div>
           )}
           {view.name === "runners" && <RunnersView />}
-          {/* A route into a feature this device has switched off keeps its page and says so:
-              removing the branch entirely would make a bookmarked /runs a silent Inbox redirect. */}
-          {(view.name === "runs" || view.name === "run") && (
-            <ExperimentGate experiment="multiAgent" pageTitle={viewTitle(view, entityTitle)} pageDescription={viewDescription(view)} onOpenSettings={openExperimentalSettings}>
-              {view.name === "runs" ? <RunsView onNewRun={() => setDialog({ kind: "run" })} /> : <RunDetail runId={view.id} member={view.member} />}
-            </ExperimentGate>
-          )}
           {view.name === "not-found" && (
             <div className="page">
               <PageHeader title={viewTitle(view)} />
@@ -969,12 +948,6 @@ export function Shell() {
                 reviews: <ReviewSettingsPanel />,
                 network: <NetworkPanel tailnet={tailnet} onNavigate={navigate} />,
                 storage: <ArchivedHistoryRetentionPanel />,
-                experimental: (
-                  <ExperimentalPanel
-                    flags={experiments.flags}
-                    onToggle={experiments.setFlag}
-                  />
-                ),
                 about: <AboutPanel update={desktopUpdate} />,
               }}
             />
@@ -1023,7 +996,6 @@ export function Shell() {
           preset={dialog.preset}
         />
       )}
-      {dialog?.kind === "run" && <NewRunDialog onClose={() => setDialog(null)} />}
       {palette !== null && (
         <CommandPalette initialQuery={palette} onClose={() => setPalette(null)} onOpenShortcuts={openShortcutReference} />
       )}

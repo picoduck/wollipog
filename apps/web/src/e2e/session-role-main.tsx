@@ -29,7 +29,7 @@ let pendingPolicy: OrchestratorCampaignPolicy | undefined;
 let session = {
   id: "same-session", title: "Session Role Conversion", runnerId: "machine", workspaceId: "workspace",
   agentId: "codex-app", driver: "codex-app-server", role: "normal", status: "idle", adopted: false,
-  eventEpoch: 1, archived: false, runId: null, parentSessionId: null, pendingApproval: null,
+  eventEpoch: 1, archived: false, parentSessionId: null, pendingApproval: null,
   createdAt: 1, updatedAt: 1, lastEventAt: 1, messageCount: 1, tokensIn: 0, tokensOut: 0, costUsd: 0,
   costBudgetUsd: null, maxToolCalls: null, permissionMode: "auto", model: "gpt-6.1-sol", effort: "high",
   providerAccountId: "same-account", providerAccountLabel: "Personal Account", projectId: "same-project",
@@ -44,7 +44,7 @@ const snapshot = (): ControlPlaneToUi => ({
   type: "snapshot", capabilities: {
     sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
     sessionRoleConversion: roleConversionSupported,
-  }, runners: [], boxes: [], projects: [], sessions: [session], runs: [],
+  }, runners: [], boxes: [], projects: [], sessions: [session],
 });
 class FixtureSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;

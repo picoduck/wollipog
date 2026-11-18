@@ -57,7 +57,6 @@ const session = {
   title: "Ship the Billing Webhook Queue",
   status: "idle",
   column: "idle",
-  runId: null,
   useWorktree: false,
   worktreePath: null,
   archived: false,
@@ -121,7 +120,6 @@ const snapshotMessage: ControlPlaneToUi = {
   boxes: [],
   projects: [],
   sessions: [session],
-  runs: [],
 };
 
 class FixtureSocket implements UiSocket {

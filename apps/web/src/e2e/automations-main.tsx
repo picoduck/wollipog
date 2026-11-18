@@ -548,7 +548,6 @@ class FixtureSocket implements UiSocket {
       runners: fixtureRunners(),
       boxes: [],
       sessions: listSessions,
-      runs: [],
       // A project for Outbound Events' project-scoped subscription to name; only on that tab.
       ...(params.get("route")?.startsWith("/automations/outbound") ? { projects: outboundProjects } : {}),
     });

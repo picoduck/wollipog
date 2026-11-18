@@ -281,7 +281,6 @@ import {
   type ForgeReviewSyncInfo,
   type GitHubReviewReconciliation,
   type GitHubReviewSyncInfo,
-  type RunView,
   type SessionConfig,
   type SessionCommandExecutionMode,
   type SessionCommandInvocationErrorCode,
@@ -562,7 +561,6 @@ function providerLoginFailureCodeField(login: ProviderLoginView): Pick<ProviderL
 const ARTIFACT_TABLE_SCHEMA = /* sql */ `
 CREATE TABLE IF NOT EXISTS artifacts (
   id              TEXT PRIMARY KEY,
-  run_id          TEXT,
   session_id      TEXT,
   kind            TEXT NOT NULL,
   name            TEXT NOT NULL,
@@ -575,13 +573,10 @@ CREATE TABLE IF NOT EXISTS artifacts (
   created_by_kind TEXT NOT NULL,
   created_by_id   TEXT,
   metadata        TEXT,
-  created_at      INTEGER NOT NULL,
-  CHECK (run_id IS NOT NULL OR session_id IS NOT NULL),
-  FOREIGN KEY (run_id) REFERENCES multi_agent_runs(id) ON DELETE CASCADE
+  created_at      INTEGER NOT NULL
 );
 `;
 const ARTIFACT_INDEX_SCHEMA = /* sql */ `
-CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id, created_at, id);
 `;
 const STEERING_OWNED_PROMPT_IMAGE_SCHEMA = /* sql */ `
@@ -627,7 +622,6 @@ END;
 function retireWorkflowEngine(db: DatabaseSync): void {
   if (db.prepare("SELECT 1 FROM control_plane_metadata WHERE key='workflow_engine_retired'").get()) return;
   const oldColumns = db.prepare("PRAGMA table_info(automation_executions)").all();
-  const oldArtifactColumns = db.prepare("PRAGMA table_info(artifacts)").all();
   const now = Date.now();
   const reason = "Workflow runs were removed.";
   db.exec("BEGIN IMMEDIATE");
@@ -643,19 +637,7 @@ function retireWorkflowEngine(db: DatabaseSync): void {
       DROP TABLE IF EXISTS workflow_event_retention_runs;
       DELETE FROM control_plane_metadata WHERE key='workflow_event_environment_policy';
     `);
-    if (oldArtifactColumns.some((column) => column.name === "run_id")) {
-      db.exec(`
-        DELETE FROM artifacts WHERE run_id IS NOT NULL AND session_id IS NULL;
-        UPDATE artifacts SET run_id=NULL WHERE run_id IS NOT NULL;
-      `);
-    }
-    if (db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='workflow_instances'").get()) {
-      // The grouping belongs to the workflow. Retain the sessions as ordinary sessions.
-      db.exec(`
-        UPDATE sessions SET run_id=NULL WHERE run_id IN (SELECT run_id FROM workflow_instances);
-        DELETE FROM multi_agent_runs WHERE id IN (SELECT run_id FROM workflow_instances);
-      `);
-    }
+    // The run retirement migration preserves artifacts from both kinds of grouping.
     db.exec(`
       DROP TABLE IF EXISTS workflow_instances;
       DROP TABLE IF EXISTS workflow_definitions;
@@ -695,6 +677,50 @@ function retireWorkflowEngine(db: DatabaseSync): void {
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
+  }
+}
+
+/** Keep artifact bytes and associations while removing the legacy run foreign key. */
+function retireMultiAgentRuns(db: DatabaseSync, hasLegacyRunMembership: boolean): void {
+  const hasRunArtifacts = db.prepare("PRAGMA table_info(artifacts)").all().some((column) => column.name === "run_id");
+  const hasRunTable = db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='multi_agent_runs'").get();
+  if (!hasLegacyRunMembership && !hasRunArtifacts && !hasRunTable) return;
+
+  // SQLite's table rebuild disables FK actions only around this transaction. Dropping the old
+  // table with them enabled would cascade into the preserved prompt-image and event references.
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    if (hasRunArtifacts) {
+      const columns = "id, session_id, kind, name, mime_type, encoding, data, blob_key, size_bytes, sha256, " +
+        "created_by_kind, created_by_id, metadata, created_at";
+      db.exec(`
+        ${ARTIFACT_TABLE_SCHEMA.replace("IF NOT EXISTS artifacts", "artifacts_without_runs")}
+        INSERT INTO artifacts_without_runs (${columns}) SELECT ${columns} FROM artifacts;
+        DROP TABLE artifacts;
+        ALTER TABLE artifacts_without_runs RENAME TO artifacts;
+        ${ARTIFACT_INDEX_SCHEMA}
+        ${ARTIFACT_BLOB_SCHEMA}
+      `);
+    }
+    if (hasLegacyRunMembership) {
+      db.exec("DROP INDEX IF EXISTS idx_sessions_run; ALTER TABLE sessions DROP COLUMN run_id");
+    }
+    db.exec("DROP TABLE IF EXISTS multi_agent_run_members; DROP TABLE IF EXISTS multi_agent_runs");
+    for (const table of [
+      "session_event_artifacts", "session_steering_attempt_artifacts",
+      "steering_owned_prompt_image_artifacts", "prepared_prompt_image_artifacts",
+    ]) {
+      if (db.prepare(`PRAGMA foreign_key_check(${table})`).get()) {
+        throw new Error(`Invalid artifact reference in ${table} after retiring multi-agent runs`);
+      }
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    if (db.isTransaction) db.exec("ROLLBACK");
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
   }
 }
 
@@ -976,7 +1002,6 @@ CREATE TABLE IF NOT EXISTS sessions (
   capacity_wait TEXT,
   status         TEXT NOT NULL DEFAULT 'queued',
   board_column   TEXT,
-  run_id         TEXT,
   use_worktree   INTEGER NOT NULL DEFAULT 0,
   worktree_path  TEXT,
   worktrees      TEXT,
@@ -1954,26 +1979,6 @@ CREATE TABLE IF NOT EXISTS question_policy_answers (
 -- Reconcile/hydrate/delete paths filter sessions by owner constantly; without this every
 -- runner reconnect pays O(sessions) scans per lookup.
 CREATE INDEX IF NOT EXISTS idx_sessions_runner ON sessions(runner_id);
--- Run detail filters members by run id (partial: most sessions have none).
-CREATE INDEX IF NOT EXISTS idx_sessions_run ON sessions(run_id) WHERE run_id IS NOT NULL;
-CREATE TABLE IF NOT EXISTS multi_agent_runs (
-  id           TEXT PRIMARY KEY,
-  title        TEXT NOT NULL DEFAULT '',
-  prompt       TEXT NOT NULL DEFAULT '',
-  workspace_id TEXT,
-  runner_id    TEXT,
-  created_at   INTEGER NOT NULL,
-  updated_at   INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS multi_agent_run_members (
-  run_id     TEXT NOT NULL,
-  session_id TEXT NOT NULL,
-  agent_id   TEXT,
-  PRIMARY KEY (run_id, session_id),
-  FOREIGN KEY (run_id) REFERENCES multi_agent_runs(id) ON DELETE CASCADE
-);
-
 ${ARTIFACT_TABLE_SCHEMA}
 
 -- Durable schedules are soft-deleted so actor-attributed audit and execution history survives.
@@ -3427,7 +3432,6 @@ interface SessionRow {
   capacity_wait: string | null;
   status: string;
   board_column: string | null;
-  run_id: string | null;
   use_worktree: number;
   worktree_path: string | null;
   worktrees: string | null;
@@ -4250,19 +4254,8 @@ interface ReviewFindingRow {
   anchor_text: string | null;
 }
 
-interface RunRow {
-  id: string;
-  title: string;
-  prompt: string;
-  workspace_id: string | null;
-  runner_id: string | null;
-  created_at: number;
-  updated_at: number;
-}
-
 interface ArtifactRow {
   id: string;
-  run_id: string | null;
   session_id: string | null;
   kind: Artifact["kind"];
   name: string;
@@ -4829,7 +4822,6 @@ export interface NewSessionInput {
   executionHandoffRequest?: ExecutionHandoffRequest;
   /** Internal auxiliary sessions may be hidden from ordinary lists at first publication. */
   archived?: boolean;
-  runId?: string | null;
   driver: AgentDriverKind;
   config: SessionConfig;
   /** Explicit human-owned descendant request delegation. */
@@ -7503,7 +7495,7 @@ export class ControlPlaneDb {
       );
     };
     const artifactColumns = db.prepare("PRAGMA table_info(artifacts)").all() as unknown as Array<{ name: string }>;
-    if (!artifactColumns.some((column) => column.name === "run_id")) {
+    if (artifactColumns.some((column) => column.name === "path")) {
       const legacy = db.prepare("SELECT id, session_id, kind, path, data, created_at FROM artifacts").all() as unknown as Array<{
         id: string;
         session_id: string;
@@ -7518,9 +7510,9 @@ export class ControlPlaneDb {
         db.exec(ARTIFACT_TABLE_SCHEMA);
         const insert = db.prepare(
           `INSERT INTO artifacts
-           (id, run_id, session_id, kind, name, mime_type, encoding, data, size_bytes, sha256,
+           (id, session_id, kind, name, mime_type, encoding, data, size_bytes, sha256,
             created_by_kind, created_by_id, metadata, created_at)
-           VALUES (?, NULL, ?, ?, ?, ?, 'utf8', ?, ?, ?, 'system', 'legacy-migration', NULL, ?)`,
+           VALUES (?, ?, ?, ?, ?, 'utf8', ?, ?, ?, 'system', 'legacy-migration', NULL, ?)`,
         );
         for (const row of legacy) {
           const data = row.data ?? "";
@@ -8049,6 +8041,7 @@ export class ControlPlaneDb {
     if (!(db.prepare("PRAGMA table_info(orchestrator_settings)").all() as Array<{ name: string }>).some((column) => column.name === "review_policy")) {
       db.exec("ALTER TABLE orchestrator_settings ADD COLUMN review_policy TEXT");
     }
+    const hasLegacyRunMembership = db.prepare("PRAGMA table_info(sessions)").all().some((column) => column.name === "run_id");
     if (needsCreationActorBackfill) {
       // Parent attribution is durable CP-owned proof of agent creation. Existing top-level
       // Orchestrators qualify only when their already-persisted campaign snapshot establishes a
@@ -8061,7 +8054,8 @@ export class ControlPlaneDb {
         `SELECT session.id, session.parent_control, session.orchestrator_policy
          FROM sessions session
          WHERE session.creation_actor IS NULL AND session.permission_mode='orchestrator'
-           AND session.parent_session_id IS NULL AND session.adopted=0 AND session.run_id IS NULL
+           AND session.parent_session_id IS NULL AND session.adopted=0
+           ${hasLegacyRunMembership ? "AND session.run_id IS NULL" : ""}
            AND session.orchestrator_policy IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM session_side_chats side_chat WHERE side_chat.child_session_id=session.id)`,
       ).all() as unknown as Array<{
@@ -8090,6 +8084,8 @@ export class ControlPlaneDb {
         if (explicitHumanConfiguration || humanSystemDefault) saveCreationActor.run(row.id);
       }
     }
+
+    retireMultiAgentRuns(db, hasLegacyRunMembership);
 
     // Existing Orchestrator sessions become explicitly inspectable without gaining authority.
     // Their current Parent Control fields are preserved and all typed categories remain fail-closed
@@ -13827,7 +13823,7 @@ export class ControlPlaneDb {
     const columns = `id runner_id workspace_id project_id project_location_id agent_id
       provider_account_id provider_account_label provider_account_automatically_selected provider_account_selection provider_profile_id
       provider_home_wait worktree_switch title title_source provider_updated_at background_work_state background_follow_up background_work_tracking
-      history_quarantine worktree_recovery queue_hold capacity_wait status board_column run_id
+      history_quarantine worktree_recovery queue_hold capacity_wait status board_column
       use_worktree worktree_path archived preview pending_approval parent_control
       parent_control_policy parent_control_policy_revision orchestrator_policy session_role assistant_thread_id
       driver model resolved_model effort service_tier permission_mode input_tokens output_tokens
@@ -15576,7 +15572,7 @@ export class ControlPlaneDb {
    * table has NO foreign key to `runners`, so its rows must be removed explicitly (deleting
    * `sessions`/`runs` cascades their events/members). Returns the runner id + the removed session
    * ids so the caller can broadcast their removal to the UI. */
-  deleteBox(boxId: string): { runnerId: string; sessionIds: string[]; runIds: string[] } | null {
+  deleteBox(boxId: string): { runnerId: string; sessionIds: string[] } | null {
     if (this.boxHasPendingLegacyDataAdoption(boxId)) {
       throw new Error("cannot delete the Machine while its legacy SSH account adoption is pending");
     }
@@ -15587,9 +15583,6 @@ export class ControlPlaneDb {
     const sessionIds = (
       this.stmt("SELECT id FROM sessions WHERE runner_id=?").all(row.runner_id) as unknown as { id: string }[]
     ).map((s) => s.id);
-    const runIds = (
-      this.stmt("SELECT id FROM multi_agent_runs WHERE runner_id=?").all(row.runner_id) as unknown as { id: string }[]
-    ).map((r) => r.id);
     this.db.exec("BEGIN");
     try {
       this.detachRunnerProjectLocations(row.runner_id, Date.now());
@@ -15599,11 +15592,10 @@ export class ControlPlaneDb {
       } else {
         for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
       }
-      this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(row.runner_id);
+      this.stmt("DELETE FROM artifacts WHERE session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(row.runner_id);
       this.campaignBudgets.noteUnpriced(); // before the usage rows the deletion cascades away (#2940)
       this.assistantThreads.retireRunnerSessionCosts(row.runner_id); // spend is never refunded (#4663)
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(row.runner_id); // cascades session_events
-      this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(row.runner_id); // cascades members
       this.stmt("DELETE FROM boxes WHERE box_id=?").run(boxId);
       // No FK ties overrides/extras to runners — clean up explicitly, or a later runner reusing
       // this id would inherit a stale display name / project for a matching workspace id.
@@ -15626,12 +15618,12 @@ export class ControlPlaneDb {
       throw err;
     }
     this.collectArtifactBlobs();
-    return { runnerId: row.runner_id, sessionIds, runIds };
+    return { runnerId: row.runner_id, sessionIds };
   }
 
   /** Delete a runner record and everything tied to it (agents, workspaces, sessions, runs, and its
    * box row if it was one). Used to drop a stale/offline runner from the dashboard. */
-  deleteRunner(runnerId: string): { sessionIds: string[]; runIds: string[] } | null {
+  deleteRunner(runnerId: string): { sessionIds: string[] } | null {
     const exists = this.stmt("SELECT 1 FROM runners WHERE runner_id=?").get(runnerId);
     if (!exists) return null;
     const managedBox = this.stmt("SELECT box_id FROM boxes WHERE runner_id=?").get(runnerId) as
@@ -15643,9 +15635,6 @@ export class ControlPlaneDb {
     const sessionIds = (
       this.stmt("SELECT id FROM sessions WHERE runner_id=?").all(runnerId) as unknown as { id: string }[]
     ).map((s) => s.id);
-    const runIds = (
-      this.stmt("SELECT id FROM multi_agent_runs WHERE runner_id=?").all(runnerId) as unknown as { id: string }[]
-    ).map((r) => r.id);
     this.db.exec("BEGIN");
     try {
       this.detachRunnerProjectLocations(runnerId, Date.now());
@@ -15655,11 +15644,10 @@ export class ControlPlaneDb {
       } else {
         for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
       }
-      this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(runnerId);
+      this.stmt("DELETE FROM artifacts WHERE session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(runnerId);
       this.campaignBudgets.noteUnpriced(); // before the usage rows the deletion cascades away (#2940)
       this.assistantThreads.retireRunnerSessionCosts(runnerId); // spend is never refunded (#4663)
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(runnerId); // cascades session_events
-      this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(runnerId); // cascades members
       this.stmt("DELETE FROM boxes WHERE runner_id=?").run(runnerId); // if it was a box
       // No FK ties overrides/extras to runners — clean up explicitly (see deleteBox).
       this.stmt("DELETE FROM machine_overrides WHERE runner_id=?").run(runnerId);
@@ -15681,7 +15669,7 @@ export class ControlPlaneDb {
       throw err;
     }
     this.collectArtifactBlobs();
-    return { sessionIds, runIds };
+    return { sessionIds };
   }
 
   getBox(boxId: string): BoxView | null {
@@ -19383,11 +19371,11 @@ export class ControlPlaneDb {
       if (budgetRoot && allocation) this.campaignBudgets.admit(budgetRoot, allocation, userLimits);
       this.stmt(
          `INSERT INTO sessions
-           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, run_id, use_worktree, archived, creation_actor,
+           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, use_worktree, archived, creation_actor,
              driver, model, effort, service_tier, permission_mode, parent_control, parent_control_policy,
              parent_control_policy_revision, orchestrator_policy, session_role, workspace_path, acp_session_context, created_at, updated_at,
              archived_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -19398,7 +19386,6 @@ export class ControlPlaneDb {
         input.agentId,
         input.title,
         input.titleSource ?? "generated",
-        input.runId ?? null,
         input.useWorktree ? 1 : 0,
         input.archived ? 1 : 0,
         input.creationActor ?? (input.parentSessionId ? "agent" : null),
@@ -20834,7 +20821,7 @@ export class ControlPlaneDb {
            ORDER BY seq, id`,
       ).all(id) as Array<{ id: number; ts: number }>;
       this.stmt(
-        `DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL
+        `DELETE FROM artifacts WHERE session_id=?
            AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_event_payload'`,
       ).run(id);
       this.recordChildToolCallPeak(id);
@@ -21019,7 +21006,7 @@ export class ControlPlaneDb {
     try {
       this.preserveCampaignReportsBeforeCacheReset(id);
       this.stmt(
-        `DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL
+        `DELETE FROM artifacts WHERE session_id=?
            AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_event_payload'`,
       ).run(id);
       this.recordChildToolCallPeak(id);
@@ -21454,7 +21441,7 @@ export class ControlPlaneDb {
     }
     // Large payloads of the removed events. User prompts, the only events with prompt images, stay.
     const removedArtifacts = Number(this.stmt(
-      `DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL
+      `DELETE FROM artifacts WHERE session_id=?
          AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_event_payload'
          AND NOT EXISTS (SELECT 1 FROM session_event_artifacts ref WHERE ref.artifact_id=artifacts.id)`,
     ).run(sessionId).changes);
@@ -27963,16 +27950,12 @@ export class ControlPlaneDb {
   private deleteSessionRows(id: string): void {
     // Deleting a session never refunds an Assistant thread's spend (#4663).
     this.assistantThreads.retireSessionCost(id);
-    // multi_agent_run_members has no FK to sessions, so clean its rows up too,
-    // otherwise a run keeps a dangling member id. Same for the FTS index (virtual
-    // tables have no FKs — stale hits would surface deleted sessions in search).
-    this.stmt("DELETE FROM multi_agent_run_members WHERE session_id=?").run(id);
     this.stmt("DELETE FROM session_forks WHERE target_session_id=?").run(id);
     this.stmt("DELETE FROM session_side_chats WHERE parent_session_id=? OR child_session_id=?").run(id, id);
     this.deleteShellsForSession(id);
     // Session-only artifacts follow an explicit session deletion. Run-owned artifacts retain the
     // session id as provenance and live until their durable workflow run is deleted.
-    this.stmt("DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL").run(id);
+    this.stmt("DELETE FROM artifacts WHERE session_id=?").run(id);
     this.deleteSessionSearchRows(id);
     // A campaign member's unpriced usage stays known after its usage rows cascade away (#2940).
     const campaignRoot = this.campaignBudgets.root(id);
@@ -28564,7 +28547,7 @@ export class ControlPlaneDb {
       for (const artifactId of new Set(input.ownedArtifactIds ?? [])) {
         const linked = this.stmt(
           `INSERT INTO session_steering_attempt_artifacts (request_id,artifact_id)
-           SELECT ?,id FROM artifacts WHERE id=? AND session_id=? AND run_id IS NULL
+           SELECT ?,id FROM artifacts WHERE id=? AND session_id=?
              AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.purpose') END='prompt_image'`,
         ).run(input.requestId, artifactId, input.sessionId);
         if (Number(linked.changes) !== 1) throw new Error("steering image artifact ownership is invalid");
@@ -29902,7 +29885,7 @@ export class ControlPlaneDb {
       ).run(now, ...requestIds);
       for (const { artifact_id: artifactId } of ownedArtifacts) {
         const deleted = this.stmt(
-          `DELETE FROM artifacts WHERE id=? AND run_id IS NULL
+          `DELETE FROM artifacts WHERE id=? AND session_id IS NOT NULL
              AND EXISTS (
                SELECT 1 FROM steering_owned_prompt_image_artifacts owned WHERE owned.artifact_id=artifacts.id
              )
@@ -30268,7 +30251,7 @@ export class ControlPlaneDb {
       backgroundJobsAvailable: row.summary_jobs === 1,
       status, column: (row.board_column as BoardColumn | null) ?? columnForStatus(status),
       capacityWait: status === "queued" ? parseJson<SessionView["capacityWait"]>(row.capacity_wait) ?? undefined : undefined,
-      runId: row.run_id, parentSessionId: row.parent_session_id ?? null,
+      parentSessionId: row.parent_session_id ?? null,
       roleConversion: row.summary_conversion ? JSON.parse(row.summary_conversion) as SessionView["roleConversion"] : undefined,
       maxChildSessions: row.max_child_sessions ?? undefined,
       liveChildCapacity: { limit: row.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT, occupied: row.summary_children,
@@ -30459,7 +30442,6 @@ export class ControlPlaneDb {
         ? (parseJson<SessionView["capacityWait"]>(row.capacity_wait) ?? undefined)
         : undefined,
       column,
-      runId: row.run_id,
       parentSessionId: row.parent_session_id ?? null,
       ...(() => {
         const conversion = this.sessionRoleConversion(row.id);
@@ -30910,7 +30892,7 @@ export class ControlPlaneDb {
     const insertEventPayload = this.stmt(
       `INSERT INTO session_event_artifacts (event_id, artifact_id)
        SELECT ?, id FROM artifacts
-        WHERE id=? AND run_id IS NULL
+        WHERE id=? AND session_id IS NOT NULL
           AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_event_payload'`,
     );
     for (const artifactId of new Set(eventPayloadArtifactIds)) {
@@ -30919,25 +30901,23 @@ export class ControlPlaneDb {
       }
     }
     const event = this.stmt(
-      `SELECT event.session_id,session.run_id FROM session_events event
-       JOIN sessions session ON session.id=event.session_id WHERE event.id=?`,
-    ).get(eventId) as { session_id: string; run_id: string | null } | undefined;
+      "SELECT session_id FROM session_events WHERE id=?",
+    ).get(eventId) as { session_id: string } | undefined;
     if (!event && promptImages.length) throw new Error("session event disappeared before prompt image linking");
     const insertPromptImage = this.stmt(
       "INSERT OR IGNORE INTO session_event_artifacts (event_id,artifact_id) VALUES (?,?)",
     );
     for (const image of new Map(promptImages.map((item) => [item.artifactId, item])).values()) {
       const artifact = this.stmt(
-        `SELECT id,run_id,session_id,kind,mime_type,encoding,size_bytes,sha256
+        `SELECT id,session_id,kind,mime_type,encoding,size_bytes,sha256
          FROM artifacts WHERE id=?`,
       ).get(image.artifactId) as unknown as {
-        id: string; run_id: string | null; session_id: string | null; kind: string;
+        id: string; session_id: string | null; kind: string;
         mime_type: string; encoding: string; size_bytes: number; sha256: string;
       } | undefined;
       const scopeAllowed = Boolean(event && artifact && (
         artifact.session_id === event.session_id ||
-        (artifact.session_id && this.sessionForkIncludesAncestor(event.session_id, artifact.session_id)) ||
-        (artifact.run_id && artifact.run_id === event.run_id)
+        (artifact.session_id && this.sessionForkIncludesAncestor(event.session_id, artifact.session_id))
       ));
       if (!artifact || artifact.kind !== "screenshot" || artifact.encoding !== "base64" ||
           artifact.mime_type !== image.mimeType || artifact.size_bytes !== image.sizeBytes ||
@@ -32266,66 +32246,6 @@ export class ControlPlaneDb {
     }
   }
 
-  /* ------------------------------- Runs ---------------------------------- */
-
-  createRun(input: {
-    id: string;
-    title: string;
-    prompt: string;
-    workspaceId: string | null;
-    runnerId: string | null;
-    now: number;
-  }): void {
-    this.stmt(
-        `INSERT INTO multi_agent_runs (id, title, prompt, workspace_id, runner_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(input.id, input.title, input.prompt, input.workspaceId, input.runnerId, input.now, input.now);
-  }
-
-  addRunMember(runId: string, sessionId: string, agentId: string | null): void {
-    this.stmt("INSERT OR IGNORE INTO multi_agent_run_members (run_id, session_id, agent_id) VALUES (?, ?, ?)")
-      .run(runId, sessionId, agentId);
-  }
-
-  getRun(id: string): RunView | null {
-    const row = this.stmt("SELECT * FROM multi_agent_runs WHERE id=?").get(id) as unknown as
-      | RunRow
-      | undefined;
-    if (!row) return null;
-    return this.runView(row);
-  }
-
-  listRuns(): RunView[] {
-    const rows = this.stmt("SELECT * FROM multi_agent_runs ORDER BY created_at DESC")
-      .all() as unknown as RunRow[];
-    return rows.map((r) => this.runView(r));
-  }
-
-  private runView(row: RunRow): RunView {
-    const sessionIds = (
-      this.stmt("SELECT session_id FROM multi_agent_run_members WHERE run_id=? ORDER BY rowid")
-        .all(row.id) as unknown as { session_id: string }[]
-    ).map((m) => m.session_id);
-    const workspaceName = row.workspace_id
-      ? (row.runner_id
-        ? this.workspaceDisplayName(row.runner_id, row.workspace_id)
-        : ((this.stmt("SELECT name FROM workspaces WHERE id=? LIMIT 1").get(row.workspace_id) as
-            | { name: string }
-            | undefined)?.name ?? row.workspace_id))
-      : null;
-    return {
-      id: row.id,
-      title: row.title,
-      prompt: row.prompt,
-      workspaceId: row.workspace_id,
-      workspaceName,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      sessionIds,
-    };
-  }
-
   /** True while a durable automation execution owns this session's command lifecycle. Steering
    * around that outbox would bypass its ordering, receipt, and failure semantics. */
   hasActiveAutomationCommandForSession(sessionId: string): boolean {
@@ -32383,17 +32303,11 @@ export class ControlPlaneDb {
             `INSERT INTO prepared_prompt_image_artifacts
              (artifact_id,session_id,mime_type,size_bytes,sha256,expires_at)
              SELECT id,session_id,mime_type,size_bytes,sha256,? FROM artifacts
-             WHERE id=? AND session_id IS NOT NULL AND run_id IS NULL AND kind='screenshot'
+             WHERE id=? AND session_id IS NOT NULL AND kind='screenshot'
                AND encoding='base64'
                AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.purpose') END='prompt_image'`,
           ).run(options.preparedPromptImageExpiresAt, artifact.artifactId);
           if (Number(inserted.changes) !== 1) throw new Error("prompt image preparation artifact is invalid");
-        }
-        if (artifact.runId) {
-          // Always advance the run revision even when creation and artifact write share one millisecond;
-          // the web uses updatedAt as the artifact-list refresh signal.
-          this.stmt("UPDATE multi_agent_runs SET updated_at=MAX(updated_at + 1, ?) WHERE id=?")
-            .run(artifact.createdAt, artifact.runId);
         }
         this.stmt("DELETE FROM artifact_blob_pending WHERE blob_key=?").run(artifact.sha256);
         this.db.exec("COMMIT");
@@ -32411,12 +32325,11 @@ export class ControlPlaneDb {
   private insertArtifactRow(artifact: ArtifactView): void {
     this.stmt(
       `INSERT INTO artifacts
-       (id, run_id, session_id, kind, name, mime_type, encoding, data, blob_key, size_bytes, sha256,
+       (id, session_id, kind, name, mime_type, encoding, data, blob_key, size_bytes, sha256,
         created_by_kind, created_by_id, metadata, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       artifact.artifactId,
-      artifact.runId ?? null,
       artifact.sessionId ?? null,
       artifact.kind,
       artifact.name,
@@ -32468,7 +32381,7 @@ export class ControlPlaneDb {
    * row lets startup recovery remove the blob. */
   createStagedEventPayloadArtifacts(artifacts: readonly ArtifactView[]): void {
     for (const artifact of artifacts) {
-      if (!this.stagingArtifactBlobs.has(artifact.sha256) || artifact.runId ||
+      if (!this.stagingArtifactBlobs.has(artifact.sha256) ||
           artifact.metadata?.purpose !== "session_event_payload" ||
           !Number.isSafeInteger(artifact.sizeBytes) || artifact.sizeBytes < 0 ||
           artifact.sizeBytes > MAX_WORKFLOW_ARTIFACT_BLOB_BYTES) {
@@ -32553,7 +32466,7 @@ export class ControlPlaneDb {
   pruneExpiredSessionAttachments(cutoff: number, limit = 1_000): number {
     const bounded = Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 10_000)) : 1_000;
     const ids = this.stmt(
-      `SELECT id,kind,session_id FROM artifacts WHERE session_id IS NOT NULL AND run_id IS NULL
+      `SELECT id,kind,session_id FROM artifacts WHERE session_id IS NOT NULL
          AND kind IN ('screenshot','video') AND created_at < ?
          AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_attachment'
        ORDER BY created_at,id LIMIT ?`,
@@ -32725,7 +32638,7 @@ export class ControlPlaneDb {
 
   getArtifact(artifactId: string): Artifact | null {
     const row = this.stmt(
-      `SELECT id, run_id, session_id, kind, name, mime_type, encoding, blob_key, size_bytes, sha256,
+      `SELECT id, session_id, kind, name, mime_type, encoding, blob_key, size_bytes, sha256,
               created_by_kind, created_by_id, metadata, created_at,
               LENGTH(CAST(data AS BLOB)) AS stored_data_bytes
        FROM artifacts WHERE id=?`,
@@ -32742,13 +32655,21 @@ export class ControlPlaneDb {
     return this.artifact(row, true) as Artifact;
   }
 
-  artifactScope(artifactId: string): { runId?: string; sessionId?: string } | null {
-    const row = this.stmt("SELECT run_id, session_id FROM artifacts WHERE id=?").get(artifactId) as unknown as
-      { run_id: string | null; session_id: string | null } | undefined;
+  artifactScope(artifactId: string): { sessionId?: string } | null {
+    const row = this.stmt("SELECT session_id FROM artifacts WHERE id=?").get(artifactId) as unknown as
+      { session_id: string | null } | undefined;
     return row ? {
-      ...(row.run_id ? { runId: row.run_id } : {}),
       ...(row.session_id ? { sessionId: row.session_id } : {}),
     } : null;
+  }
+
+  /** Preserve access to images already linked from a session's transcript. */
+  sessionEventReferencesArtifact(sessionId: string, artifactId: string): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM session_event_artifacts ref
+       JOIN session_events event ON event.id=ref.event_id
+       WHERE ref.artifact_id=? AND event.session_id=?`,
+    ).get(artifactId, sessionId));
   }
 
   /** Metadata and materialized-byte size only, so export authorization and corruption bounds run
@@ -32758,7 +32679,7 @@ export class ControlPlaneDb {
     storedDataBytes: number;
   } | null {
     const row = this.stmt(
-      `SELECT id, run_id, session_id, kind, name, mime_type, encoding, blob_key, size_bytes, sha256,
+      `SELECT id, session_id, kind, name, mime_type, encoding, blob_key, size_bytes, sha256,
               created_by_kind, created_by_id, metadata, created_at,
               CASE WHEN blob_key IS NULL THEN LENGTH(CAST(data AS BLOB)) ELSE size_bytes END AS stored_data_bytes
        FROM artifacts WHERE id=?`,
@@ -32774,7 +32695,7 @@ export class ControlPlaneDb {
 
   listSessionArtifacts(sessionId: string, after: { createdAt: number; artifactId: string } | null = null, limit = 51): ArtifactView[] {
     const rows = this.stmt(
-      `SELECT id, run_id, session_id, kind, name, mime_type, encoding, size_bytes, sha256,
+      `SELECT id, session_id, kind, name, mime_type, encoding, size_bytes, sha256,
               created_by_kind, created_by_id, metadata, created_at
        FROM artifacts WHERE session_id=? AND (? IS NULL OR created_at > ? OR (created_at = ? AND id > ?))
        ORDER BY created_at, id LIMIT ?`,
@@ -32785,7 +32706,6 @@ export class ControlPlaneDb {
   private artifact(row: ArtifactRow, includeData: boolean): ArtifactView | Artifact {
     return {
       artifactId: row.id,
-      ...(row.run_id ? { runId: row.run_id } : {}),
       ...(row.session_id ? { sessionId: row.session_id } : {}),
       kind: row.kind,
       name: row.name,
@@ -32902,7 +32822,7 @@ export class ControlPlaneDb {
                     json_each(CASE WHEN json_valid(e.payload) THEN e.payload ELSE '{}' END, ?) ref
                JOIN artifacts a ON a.id=json_extract(ref.value, '$.artifactId')
               WHERE json_type(ref.value, '$.artifactId')='text'
-                AND a.run_id IS NULL
+                AND a.session_id IS NOT NULL
                 AND CASE WHEN json_valid(a.metadata) THEN json_extract(a.metadata, '$.purpose') END='session_event_payload'`,
           ).run(path);
         }
@@ -32926,7 +32846,6 @@ export class ControlPlaneDb {
            FROM session_events e,
                 json_each(CASE WHEN json_valid(e.payload) THEN e.payload ELSE '{}' END, '$.images') image
            JOIN artifacts a ON a.id=json_extract(image.value, '$.artifactId')
-           JOIN sessions session ON session.id=e.session_id
           WHERE e.kind='user_message'
             AND json_type(image.value)='object'
             AND json_type(image.value, '$.artifactId')='text'
@@ -32943,7 +32862,7 @@ export class ControlPlaneDb {
             AND a.size_bytes=json_extract(image.value, '$.sizeBytes')
             AND a.sha256=json_extract(image.value, '$.sha256')
             AND (
-              a.session_id=e.session_id OR (a.run_id IS NOT NULL AND a.run_id=session.run_id) OR
+              a.session_id=e.session_id OR
               (a.session_id IS NOT NULL AND EXISTS (
                 WITH RECURSIVE ancestors(session_id,depth) AS (
                   SELECT source_session_id,1 FROM session_forks WHERE target_session_id=e.session_id
@@ -32971,7 +32890,7 @@ export class ControlPlaneDb {
     const rows = this.stmt(
       `SELECT a.id
          FROM artifacts a
-        WHERE a.run_id IS NULL
+        WHERE a.session_id IS NOT NULL
           AND CASE WHEN json_valid(a.metadata) THEN json_extract(a.metadata, '$.purpose') END='session_event_payload'
           AND NOT EXISTS (SELECT 1 FROM session_event_artifacts ref WHERE ref.artifact_id=a.id)
         ORDER BY a.id LIMIT ?`,

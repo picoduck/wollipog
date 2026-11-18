@@ -167,8 +167,8 @@ test("an artifact link opens its session's Browser on the artifact in the real s
     localStorage.clear();
   });
   // The link Copy Link copies, as the shell parses it on arrival.
-  const link = viewPath({ name: "session", id: "session-alpha", artifacts: { artifactId: "run-art-log" } });
-  const url = `/command-inbox-projects-e2e.html?fullShell=1&runArtifacts=1&path=${encodeURIComponent(link)}`;
+  const link = viewPath({ name: "session", id: "session-alpha", artifacts: { artifactId: "session-art-log" } });
+  const url = `/command-inbox-projects-e2e.html?fullShell=1&sessionArtifactsFixture=1&path=${encodeURIComponent(link)}`;
   const expectOpen = async (target: Page) => {
     const panel = target.locator("#right-panel");
     await expect(panel.locator(".rpanel-page-title")).toHaveText("e2e shard 3 of 5.log");

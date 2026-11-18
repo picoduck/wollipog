@@ -556,7 +556,7 @@ test("a machine-owner-only sign-in shows its reason as text and the button refer
     const snapshot = {
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [runner], boxes: [], sessions: [], runs: [],
+      runners: [runner], boxes: [], sessions: []
     } as unknown as UiSnapshotMessage;
     await act(async () => { socket.push(snapshot); await tick(); });
     const start = [...mountPoint.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
@@ -619,7 +619,7 @@ async function renderWithRunner(element: React.ReactElement, runner: Partial<Run
       runnerId: "runner-1", hostname: "studio", displayName: "Studio", os: "linux", status: "online", agents: [],
       workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: 999, canManage: true, providerLogins: [], ...runner,
     }],
-    boxes: [], sessions: [], runs: [],
+    boxes: [], sessions: []
   } as unknown as UiSnapshotMessage;
   await act(async () => { socket.push(snapshot); await tick(); await tick(); });
   return {

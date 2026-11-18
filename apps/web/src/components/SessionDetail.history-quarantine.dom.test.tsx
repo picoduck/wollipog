@@ -70,7 +70,7 @@ function session(id: string, quarantine: SessionView["historyQuarantine"]): Sess
   return {
     id, runnerId: runner.runnerId, workspaceId: null, workspaceName: null, projectId: null,
     agentId: "codex", agentName: "Codex", title: "Quarantine Fixture", status: "idle",
-    column: "review", runId: null, useWorktree: true, worktreePath: "/repos/demo/wt",
+    column: "review", useWorktree: true, worktreePath: "/repos/demo/wt",
     archived: false, createdAt: 1, updatedAt: 1, lastEventAt: null, messageCount: 0,
     eventEpoch: 0, preview: null, pendingApproval: null, driver: "codex-app-server",
     model: "gpt-5.6-sol", effort: "high", permissionMode: null, tokensIn: 0, tokensOut: 0,
@@ -162,7 +162,7 @@ async function mount(
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [runner], boxes: [], projects: [], sessions: [current], runs: [],
+      runners: [runner], boxes: [], projects: [], sessions: [current]
     });
   });
   await flushAsyncWork();

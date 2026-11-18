@@ -141,7 +141,6 @@ function session(id: string): SessionView {
     title: "Composer Focus Fixture",
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -431,7 +430,6 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
       boxes: [],
       projects: [],
       sessions: [currentSession, alternateSession],
-      runs: [],
     });
   });
   const composer = container.querySelector(".composer-input") as HTMLTextAreaElement | null;

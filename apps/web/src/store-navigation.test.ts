@@ -29,9 +29,9 @@ test("store navigation pushes only real in-app transitions", () => {
   store.navigate({ name: "session", id: "s_1" });
   assert.deepEqual(pushed, [], "opening the current view must not add duplicate history entries");
 
-  store.navigate({ name: "run", id: "run_1" });
-  assert.deepEqual(store.getState().view, { name: "run", id: "run_1" });
-  assert.deepEqual(pushed, [{ name: "run", id: "run_1" }]);
+  store.navigate({ name: "session", id: "s_2" });
+  assert.deepEqual(store.getState().view, { name: "session", id: "s_2" });
+  assert.deepEqual(pushed, [{ name: "session", id: "s_2" }]);
 });
 
 test("archive visits reset directly and restore through history without serializing their intent", () => {
@@ -300,7 +300,7 @@ for (const direction of ["Back", "Forward"] as const) {
 }
 
 test("a Back of several entries is held and completed as the same move (#3218)", () => {
-  const { browser, store } = storeOnHistory("/usage", "/runs", "/settings/orchestrator");
+  const { browser, store } = storeOnHistory("/usage", "/skills", "/settings/orchestrator");
   const asked: Array<() => void> = [];
   const release = registerLeaveGuard((leave) => asked.push(leave));
   try {
@@ -318,7 +318,7 @@ test("a Back of several entries is held and completed as the same move (#3218)",
 });
 
 test("a second Back while the first is undone still returns to the editor's entry (#3218)", () => {
-  const { browser, store } = storeOnHistory("/usage", "/runs", "/settings/orchestrator");
+  const { browser, store } = storeOnHistory("/usage", "/skills", "/settings/orchestrator");
   const asked: Array<() => void> = [];
   const release = registerLeaveGuard((leave) => asked.push(leave));
   try {
@@ -330,14 +330,14 @@ test("a second Back while the first is undone still returns to the editor's entr
     assert.equal(asked.length, 1, "asked once, after the editor's entry is current");
     asked[0]!();
     browser.flush();
-    assert.deepEqual(store.getState().view, { name: "runs" }, "Discard completes the first move");
+    assert.deepEqual(store.getState().view, { name: "skills" }, "Discard completes the first move");
   } finally {
     release();
   }
 });
 
 test("two Backs before the undo lands, with entries beyond the editor, return to it once (#3218 review)", () => {
-  const { browser, store } = storeOnHistory("/usage", "/runs", "/settings/orchestrator", "/settings/appearance", "/settings/behavior");
+  const { browser, store } = storeOnHistory("/usage", "/skills", "/settings/orchestrator", "/settings/appearance", "/settings/behavior");
   browser.traverse(-2);
   assert.deepEqual(store.getState().view, ORCHESTRATOR);
   const asked: Array<() => void> = [];
@@ -353,14 +353,14 @@ test("two Backs before the undo lands, with entries beyond the editor, return to
     assert.equal(browser.entries.length, 5, "no entry is dropped");
     asked[0]!();
     browser.flush();
-    assert.deepEqual(store.getState().view, { name: "runs" }, "Discard completes the first move");
+    assert.deepEqual(store.getState().view, { name: "skills" }, "Discard completes the first move");
   } finally {
     release();
   }
 });
 
 test("a Forward that lands before the return makes the return's move land nowhere, and it still settles (#3218 review)", () => {
-  const { browser, store } = storeOnHistory("/usage", "/runs", "/settings/orchestrator");
+  const { browser, store } = storeOnHistory("/usage", "/skills", "/settings/orchestrator");
   const asked: Array<() => void> = [];
   const release = registerLeaveGuard((leave) => asked.push(leave));
   try {
@@ -383,7 +383,7 @@ test("after a reload the entries ahead are unseen, and a return still waits for 
   const browser = new TestBrowserHistory("/usage");
   const before = new BrowserNavigation(browser.window);
   const first = new Store(before.current(), (view) => before.push(view));
-  for (const path of ["/runs", "/settings/orchestrator", "/settings/appearance", "/settings/behavior"]) first.navigate(viewFromPath(path)!);
+  for (const path of ["/skills", "/settings/orchestrator", "/settings/appearance", "/settings/behavior"]) first.navigate(viewFromPath(path)!);
   browser.traverse(-2);
   // The reloaded page: the same entries and positions, and a new navigation that cannot see past its own.
   const navigation = new BrowserNavigation(browser.window);
@@ -409,7 +409,7 @@ test("after a reload the entries ahead are unseen, and a return still waits for 
 });
 
 test("twelve Backs before the return lands still settle on the editor's entry, asked once (#3218)", () => {
-  const paths = Array.from({ length: 20 }, (_, index) => `/runs/~${encodeResourceId(`run-${index}`)}`);
+  const paths = Array.from({ length: 20 }, (_, index) => `/sessions/~${encodeResourceId(`session-${index}`)}`);
   const { browser, store } = storeOnHistory(...paths, "/settings/orchestrator");
   const asked: Array<() => void> = [];
   const release = registerLeaveGuard((leave) => asked.push(leave));
@@ -427,7 +427,7 @@ test("twelve Backs before the return lands still settle on the editor's entry, a
 });
 
 test("a return that needs more than its bound of corrections stops, keeping the editor and its draft (#3218)", () => {
-  const paths = Array.from({ length: MAX_CORRECTIONS + 10 }, (_, index) => `/runs/~${encodeResourceId(`run-${index}`)}`);
+  const paths = Array.from({ length: MAX_CORRECTIONS + 10 }, (_, index) => `/sessions/~${encodeResourceId(`session-${index}`)}`);
   const { browser, store } = storeOnHistory(...paths, "/settings/orchestrator");
   const release = registerLeaveGuard(() => {});
   try {
@@ -442,7 +442,7 @@ test("a return that needs more than its bound of corrections stops, keeping the 
 
 test("a return's move that lands nowhere is given up after a quiet spell, and the return completes (#3218)", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const { browser, store } = storeOnHistory("/usage", "/runs", "/settings/orchestrator");
+  const { browser, store } = storeOnHistory("/usage", "/skills", "/settings/orchestrator");
   const asked: Array<() => void> = [];
   const release = registerLeaveGuard((leave) => asked.push(leave));
   const go = browser.window.history.go!;
@@ -452,7 +452,7 @@ test("a return's move that lands nowhere is given up after a quiet spell, and th
   try {
     browser.back();
     browser.flush();
-    assert.equal(browser.path, "/runs", "the return's first move landed nowhere");
+    assert.equal(browser.path, "/skills", "the return's first move landed nowhere");
     assert.equal(asked.length, 0);
     assert.deepEqual(store.getState().view, ORCHESTRATOR);
     t.mock.timers.tick(RETURN_QUIET_MS);
@@ -466,7 +466,7 @@ test("a return's move that lands nowhere is given up after a quiet spell, and th
 
 test("a Forward then a Back before the return lands, near the first entry, still settles (#3218)", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const { browser, store } = storeOnHistory("/settings/orchestrator", "/runs", "/usage");
+  const { browser, store } = storeOnHistory("/settings/orchestrator", "/skills", "/usage");
   browser.traverse(-2);
   const asked: Array<() => void> = [];
   const release = registerLeaveGuard((leave) => asked.push(leave));
@@ -674,14 +674,6 @@ test("dot-segment resource ids serialize without browser path collapse", () => {
   }
 });
 
-test("the first snapshot makes missing run routes authoritative", () => {
-  const store = new Store({ name: "run", id: "missing" });
-  assert.equal(store.getState().snapshotLoaded, false);
-  store.dispatch({ type: "msg", msg: { type: "snapshot", runners: [], sessions: [], runs: [] } });
-  assert.equal(store.getState().snapshotLoaded, true);
-  assert.deepEqual(store.getState().view, { name: "run", id: "missing" });
-});
-
 test("an exact authorized lookup can hydrate an archived session omitted from snapshots", () => {
   const store = new Store({ name: "session", id: "archived.txt" });
   store.loadSession({ id: "archived.txt", archived: true, eventEpoch: 0 } as SessionView);
@@ -703,7 +695,7 @@ test("a targeted reconnect keeps the routed archived timeline mounted until exac
   store.dispatch({
     type: "msg",
     msg: {
-      type: "snapshot", runners: [], sessions: [], runs: [],
+      type: "snapshot", runners: [], sessions: [],
       capabilities: { sessionSubscriptionsV2: true },
     },
   });
@@ -719,7 +711,7 @@ test("a targeted reconnect keeps the routed archived timeline mounted until exac
   store.dispatch({
     type: "msg",
     msg: {
-      type: "snapshot", runners: [], sessions: [], runs: [],
+      type: "snapshot", runners: [], sessions: [],
       capabilities: { sessionSubscriptionsV2: true },
     },
   });

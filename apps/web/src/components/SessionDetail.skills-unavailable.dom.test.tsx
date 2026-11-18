@@ -67,7 +67,7 @@ function targetSession({ adapter, setupEligible = false, failedSetup = false }: 
     id: `skills-${adapter}${setupEligible ? "-setup" : ""}`, runnerId: runner.runnerId, workspaceId: null, workspaceName: null,
     projectId: setupEligible ? project.id : null,
     agentId: "codex", agentName: "Codex", title: "Target Session", status: "idle", column: "review",
-    runId: null, useWorktree: setupEligible, worktreePath: setupEligible ? "/worktrees/one" : null,
+    useWorktree: setupEligible, worktreePath: setupEligible ? "/worktrees/one" : null,
     ...(worktrees.length > 0 ? { worktrees } : {}),
     archived: false, createdAt: 1, updatedAt: 1,
     lastEventAt: null, messageCount: 0, eventEpoch: 0, preview: null, pendingApproval: null,
@@ -154,7 +154,7 @@ async function withSession(
         sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
         worktreeSetupConfig: true,
       },
-      runners: [runner], boxes: [], projects: [project], sessions: [current], runs: [],
+      runners: [runner], boxes: [], projects: [project], sessions: [current],
       worktreeSetupNoticeDismissals: [],
     } as ControlPlaneToUi));
     await settle();

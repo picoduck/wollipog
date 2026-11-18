@@ -12,13 +12,11 @@ const ROUTES = [
   { query: "path=%2Finbox", title: "Sessions" },
   { query: "path=%2Fautomations", title: "Automations" },
   { query: "path=%2Fprojects", title: "Projects" },
-  { query: "path=%2Fruns", title: "Multi-Agent Runs" },
   { query: "path=%2Fconnections", title: "Connections" },
   { query: "path=%2Fskills", title: "Agent Skills" },
   { query: "path=%2Farchived", title: "Archived Sessions" },
   { query: "path=%2Fusage", title: "Usage and Cost" },
   { query: "path=%2Fsettings", title: "Settings" },
-  { query: "view=run", title: "Final QA Run" },
 ] as const;
 
 async function open(page: Page, query: string, title: string) {
@@ -312,14 +310,14 @@ test.describe("at 940×600 with a mouse, the desktop app's minimum window", () =
     });
     expect(rail.names[0]).toBe("Search");
     expect(rail.names.at(-1)).toBe("Settings");
-    expect(rail.names).toHaveLength(11);
+    expect(rail.names).toHaveLength(10);
     expect(rail.sizes, "36px items at a short height").toEqual(["36x36"]);
     expect(rail.gap).toBe("2px");
     expect(rail.separatorGaps, "4px either side of a group hairline").toEqual([[4, 4], [4, 4]]);
     // This page already draws #1968's labels toggle under Settings, so the slack only has to hold
     // #1970's instance tile, which the desktop app adds. `desktop-title-bar.spec.ts` checks the
-    // whole desktop rail, tile and toggle included, at this size: with nine destinations it
-    // fits with 16px left and does not scroll.
+    // whole desktop rail, tile and toggle included, at this size: with eight destinations it
+    // fits and does not scroll.
     expectGeometry(rail.slack, "room for the instance tile")
       .toBeGreaterThanOrEqual(36 + 2);
   });
@@ -350,28 +348,6 @@ test.describe("at 940×600 with a mouse, the desktop app's minimum window", () =
     expect(foot.y + foot.height, "the labels toggle is on screen").toBeLessThanOrEqual(600);
   });
 
-  test("a detail bar that would leave its title unreadable shows its status as a dot", async ({ page }) => {
-    await open(page, "view=run&runStatus=running", "Final QA Run");
-    const badge = page.locator(".detail-bar-status");
-    await expect(badge).not.toHaveAttribute("data-dot");
-    await expect(badge).not.toHaveAttribute("title");
-    const full = (await badge.boundingBox())!.width;
-    // Squeeze the heading the way a bar full of actions would: the title's room drops under 200px.
-    await page.addStyleTag({ content: ".detail-bar-heading { flex: 0 0 130px; }" });
-    await expect(badge).toHaveAttribute("data-dot", "");
-    await expect(badge).toHaveAttribute("title", "Running");
-    const dot = (await badge.boundingBox())!.width;
-    expect(dot).toBe(22);
-    expectGeometry(full - dot, "the title gains the label's room").toBeGreaterThan(20);
-    await expect(badge).toHaveText("Running");
-    // The label starts at the clip edge, so none of it shows.
-    const clip = await badge.locator(".status").evaluate((element) => {
-      const range = document.createRange();
-      range.selectNodeContents(element);
-      return range.getBoundingClientRect().left - element.getBoundingClientRect().right;
-    });
-    expectGeometry(clip, "the label begins at or past the badge's clipped edge").toBeGreaterThanOrEqual(-0.39);
-  });
 });
 
 test.describe("at 940×860 with a mouse", () => {
@@ -402,7 +378,7 @@ test.describe("on an 834×1112 coarse-pointer tablet", () => {
       expect(target.height, `${target.name} is tall enough to tap`).toBeGreaterThanOrEqual(44);
       expect(target.width, `${target.name} is wide enough to tap`).toBeGreaterThanOrEqual(44);
     }
-    await open(page, "view=run", "Final QA Run");
+    await open(page, "path=%2Fconnections%2Fmachines", "Connections");
     for (const target of await targets()) {
       expect(target.height, `${target.name} is tall enough to tap`).toBeGreaterThanOrEqual(44);
       expect(target.width, `${target.name} is wide enough to tap`).toBeGreaterThanOrEqual(44);

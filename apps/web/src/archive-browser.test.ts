@@ -26,7 +26,6 @@ function session(overrides: Partial<SessionView> = {}): SessionView {
     title: "Archive browser",
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: true,

@@ -405,7 +405,7 @@ test("dashboard frames are byte bounded, share a principal snapshot, and invalid
     db.raw().prepare("UPDATE sessions SET title='Updated' WHERE id='s-0'").run();
     hub.addUiClient({ send() {} },{ principal: sessionListPrincipal,deviceId: null,uiProtocolVersion: PROTOCOL_VERSION,close() {} });
     assert.equal(reads,2);
-    const huge = { type: "snapshot" as const,runners: [],boxes: [],sessions: [{ ...original()[0]!,title: "x".repeat(MAX_UI_BUFFERED_BYTES) }],runs: [] };
+    const huge = { type: "snapshot" as const,runners: [],boxes: [],sessions: [{ ...original()[0]!,title: "x".repeat(MAX_UI_BUFFERED_BYTES) }] };
     assert.equal(serializeUiSnapshot(huge,true),null);
     assert.equal(serializeUiSnapshot(huge,false),null);
     db.raw().prepare("UPDATE sessions SET title=? WHERE id='s-0'").run("x".repeat(MAX_UI_BUFFERED_BYTES));

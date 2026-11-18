@@ -146,7 +146,7 @@ async function mount() {
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
-      runners: [studio, build], boxes: [], sessions, runs: [],
+      runners: [studio, build], boxes: [], sessions
     } as UiSnapshotMessage);
   });
   return { unmount: async () => { await act(async () => root.unmount()); mountPoint.remove(); } };

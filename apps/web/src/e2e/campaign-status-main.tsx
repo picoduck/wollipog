@@ -372,7 +372,7 @@ const recordedWork = (revision: number) => workSummary(NOW, {
 function baseSession(overrides: Partial<SessionView>): SessionView {
   return {
     id: "s_root", runnerId: "runner-1", workspaceId: null, agentId: "claude-native", driver: "claude-code",
-    title: ROOT_TITLE, status: epicTracking ? "idle" : "running", adopted: false, eventEpoch: 1, archived: false, runId: null,
+    title: ROOT_TITLE, status: epicTracking ? "idle" : "running", adopted: false, eventEpoch: 1, archived: false,
     parentSessionId: null, pendingApproval: null, createdAt: NOW - 3 * HOUR, updatedAt: NOW, lastEventAt: NOW,
     messageCount: 40, tokensIn: 0, tokensOut: 0, costUsd: 0, costBudgetUsd: null, maxToolCalls: null,
     ...overrides,
@@ -1424,7 +1424,7 @@ class FixtureSocket implements UiSocket {
       pushToStore?.({
         type: "snapshot",
         capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
-        runners: [], boxes: [], projects: [], sessions: sessionsFor(revision), runs: [],
+        runners: [], boxes: [], projects: [], sessions: sessionsFor(revision),
       });
     }, 0);
   }

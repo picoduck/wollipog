@@ -170,7 +170,6 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
       runners: [runner],
       boxes: [],
       sessions: [],
-      runs: [],
     });
   });
   await act(settle);
@@ -328,7 +327,7 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners: [runner], boxes: [], sessions: [], runs: [],
+      runners: [runner], boxes: [], sessions: []
     });
   });
   await act(settle);
@@ -469,7 +468,7 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners: [runner], boxes: [], sessions: [], runs: [],
+      runners: [runner], boxes: [], sessions: []
     });
   });
   await act(settle);
@@ -573,7 +572,7 @@ test("SkillsView keeps the orphaned copies entry reachable for a runner that can
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners: [{ ...runner, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift }], boxes: [], sessions: [], runs: [],
+      runners: [{ ...runner, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift }], boxes: [], sessions: []
     });
   });
   await act(settle);
@@ -628,7 +627,7 @@ async function mountSkills(client: ApiClient, instanceId: string, runners: Runne
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners, boxes: [], sessions: [], runs: [],
+      runners, boxes: [], sessions: []
     });
   });
   await act(settle);
@@ -1338,7 +1337,7 @@ test("SkillsView follows the route's selected skill, including back to no select
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners: [runner], boxes: [], sessions: [], runs: [],
+      runners: [runner], boxes: [], sessions: []
     });
   });
   await act(settle);
@@ -1408,7 +1407,7 @@ test("SkillsView keeps following the selection when a mutation finishes after th
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners: [runner], boxes: [], sessions: [], runs: [],
+      runners: [runner], boxes: [], sessions: []
     });
   });
   await act(settle);
@@ -1486,7 +1485,7 @@ async function mountRouted(client: ApiClient, key: string, view: View = { name: 
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners, boxes: [], sessions: [], runs: [],
+      runners, boxes: [], sessions: []
     });
   });
   await act(settle);

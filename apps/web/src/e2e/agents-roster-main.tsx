@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
-import { PROTOCOL_VERSION, type RunView, type RunnerView, type SessionView,
+import { PROTOCOL_VERSION, type RunnerView, type SessionView,
   type UiSnapshotMessage } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -25,7 +25,7 @@ const minutes = (value: number) => now - value * 60_000;
 
 const sessionBase = {
   runnerId: "runner", workspaceId: null, workspaceName: null, agentId: "claude", agentName: "Claude Code",
-  column: "review", runId: null, useWorktree: false, worktreePath: "/repo", archived: false,
+  column: "review", useWorktree: false, worktreePath: "/repo", archived: false,
   createdAt: minutes(42), updatedAt: now, lastEventAt: now, messageCount: 24, preview: null,
   driver: "claude-code", model: "claude-opus", effort: "high", permissionMode: null,
   tokensIn: 41_200, tokensOut: 9_800, costUsd: 0, adopted: false, pendingApproval: null,
@@ -46,7 +46,6 @@ const lead: SessionView = member("lead", "Rewrite the Parser", { status: "runnin
 let session: SessionView = lead;
 let items: TimelineItem[] = [];
 let sessions: SessionView[] = [];
-let runs: RunView[] = [];
 
 if (scene === "workers") {
   sessions = [
@@ -66,17 +65,8 @@ if (scene === "workers") {
   session = { ...lead, backgroundWorkState: "running", backgroundWorkTracking: "managed", backgroundJobsAvailable: true,
     backgroundJobs: [{ id: "job-monitor", parentTurnId: "turn-1", launchType: "monitor", registeredAt: minutes(6),
       lastObservedAt: now, sourcePresent: true }] };
-} else if (scene === "run") {
-  const run = "Release Audit for Wollipog 2026.10";
-  session = member("run-a", `${run} · Claude Code`, { runId: "run-1" });
-  sessions = [
-    member("run-b", `${run} · Codex`, { agentName: "Codex", runId: "run-1", status: "running",
-      preview: "Checking the changelog against merged pull requests." }),
-    member("run-c", `${run} · Gemini CLI`, { agentName: "Gemini CLI", runId: "run-1", status: "completed",
-      preview: "No breaking protocol changes found." }),
-  ];
-  runs = [{ id: "run-1", title: run, prompt: "", workspaceId: null, workspaceName: null, createdAt: minutes(30),
-    updatedAt: now, sessionIds: ["run-a", "run-b", "run-c"] }];
+} else if (scene === "former-members") {
+  session = member("run-a", "Release Audit for Wollipog 2026.10 · Claude Code", {});
   items = [agent("notes", 1, "Draft Release Notes"), step("notes-edit", 2, "notes", "Edit: /repo/CHANGELOG.md")];
 } else if (scene === "nested" || scene === "offline") {
   session = { ...lead, status: "input_required", pendingApproval: {
@@ -110,7 +100,7 @@ class FixtureSocket implements UiSocket {
       this.onopen?.();
       const snapshot: UiSnapshotMessage = { type: "snapshot", runners: [runner(scene !== "offline")], boxes: [],
         // The panel's own session stays out of the store, so the fixture's copy is the one shown.
-        sessions, runs } as unknown as UiSnapshotMessage;
+        sessions } as unknown as UiSnapshotMessage;
       this.onmessage?.({ data: JSON.stringify(snapshot) });
     }, 0);
   }

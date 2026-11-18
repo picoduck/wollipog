@@ -27,7 +27,7 @@ function message(store: Store, msg: ControlPlaneToUi, now?: number): void {
 
 function emptyOpeningRace(rows: SessionEvent[], complete = true) {
   const store = new Store({ name: "session", id: "s1" });
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")] });
   store.beginEventHistoryLoad("s1", 0, -1);
   for (const row of rows) message(store, { type: "session_event", event: row });
   assert.equal(store.loadTurnStartWindow("s1", { events: [], eventEpoch: 0, turnStartSeq: 0,
@@ -38,7 +38,7 @@ function emptyOpeningRace(rows: SessionEvent[], complete = true) {
 
 test("a turn-start prefix keeps its unread remainder and live traffic outside the reader", () => {
   const store = new Store({ name: "session", id: "s1" });
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")] });
   const generation = store.getState().snapshotRevision;
   store.beginEventHistoryLoad("s1", 0, -1, generation);
   assert.equal(store.loadTurnStartWindow("s1", {
@@ -63,7 +63,7 @@ test("a turn-start prefix keeps its unread remainder and live traffic outside th
 
 test("a turn-start remainder becomes complete only after its contiguous final page", () => {
   const store = new Store({ name: "session", id: "s1" });
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")] });
   store.beginEventHistoryLoad("s1", 0, -1);
   assert.equal(store.loadTurnStartWindow("s1", { events: [userEvent("s1", 10), event("s1", 11)],
     eventEpoch: 0, turnStartSeq: 10, nextAfter: 11, tailSeq: 13, hasMoreLater: true,
@@ -80,7 +80,7 @@ test("a turn-start remainder becomes complete only after its contiguous final pa
 
 test("turn-start openings reject stale generations, sparse payloads and foreign sessions", () => {
   const store = new Store({ name: "session", id: "s1" });
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1", 2)], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1", 2)] });
   const generation = store.getState().snapshotRevision;
   store.beginEventHistoryLoad("s1", 2, -1, generation);
   const page = { events: [userEvent("s1", 10), event("s1", 11)], eventEpoch: 2,
@@ -94,7 +94,7 @@ test("turn-start openings reject stale generations, sparse payloads and foreign 
 
 test("jumping from a turn-start opening preserves live rows after the HTTP tail", () => {
   const store = new Store({ name: "session", id: "s1" });
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")] });
   store.beginEventHistoryLoad("s1", 0, -1);
   store.loadTurnStartWindow("s1", { events: [userEvent("s1", 10)], eventEpoch: 0,
     turnStartSeq: 10, nextAfter: 10, tailSeq: 1_000, hasMoreLater: true, hasMoreOlder: true, cacheComplete: true }, -1);
@@ -107,7 +107,7 @@ test("jumping from a turn-start opening preserves live rows after the HTTP tail"
 
 test("an overlapping jump tail completes a short turn without a stale gap", () => {
   const store = new Store({ name: "session", id: "s1" });
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")] });
   store.beginEventHistoryLoad("s1", 0, -1);
   store.loadTurnStartWindow("s1", { events: Array.from({ length: 200 }, (_, i) => event("s1", 10 + i)),
     eventEpoch: 0, turnStartSeq: 10, nextAfter: 209, tailSeq: 309, hasMoreLater: true,
@@ -123,7 +123,7 @@ test("an overlapping jump tail completes a short turn without a stale gap", () =
 
 test("an incomplete turn-start cache needs an authoritative terminal page", () => {
   const store = new Store({ name: "session", id: "s1" });
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")] });
   store.beginEventHistoryLoad("s1", 0, -1);
   store.loadTurnStartWindow("s1", { events: [userEvent("s1", 10)], eventEpoch: 0,
     turnStartSeq: 10, nextAfter: 10, tailSeq: 11, hasMoreLater: true, hasMoreOlder: true,
@@ -142,7 +142,7 @@ test("an incomplete turn-start cache needs an authoritative terminal page", () =
 
 test("an acknowledged opening preserves reader-driven pages and staged live frames", () => {
   const store = new Store({ name: "session", id: "s1" });
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")] });
   store.beginEventHistoryLoad("s1", 0, -1);
   const opening = { events: [userEvent("s1", 10)], eventEpoch: 0, turnStartSeq: 10,
     nextAfter: 10, tailSeq: 12, hasMoreLater: true, hasMoreOlder: true, cacheComplete: true };
@@ -162,7 +162,7 @@ test("an acknowledged opening preserves reader-driven pages and staged live fram
 
 test("reusing an opening preserves explicitly loaded earlier rows and their boundary", () => {
   const store = new Store({ name: "session", id: "s1" });
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")] });
   store.beginEventHistoryLoad("s1", 0, -1);
   const opening = { events: [userEvent("s1", 10)], eventEpoch: 0, turnStartSeq: 10,
     nextAfter: 10, tailSeq: 1_000, hasMoreLater: true, hasMoreOlder: true, cacheComplete: true };
@@ -180,7 +180,7 @@ test("reusing an opening preserves explicitly loaded earlier rows and their boun
 
 test("an empty opening keeps a racing distant live frame behind an explicit gap", () => {
   const store = new Store({ name: "session", id: "s1" });
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")] });
   store.beginEventHistoryLoad("s1", 0, -1);
   message(store, { type: "session_event", event: event("s1", 5) });
   assert.equal(store.loadTurnStartWindow("s1", { events: [], eventEpoch: 0, turnStartSeq: 0,
@@ -252,7 +252,7 @@ for (const invalidation of ["epoch", "generation", "revision", "authorization"] 
     if (invalidation === "epoch") message(store, { type: "session_events_reset", sessionId: "s1", eventEpoch: 1, events: [] });
     else if (invalidation === "revision") store.beginEventHistoryLoad("s1", 0, 1);
     else message(store, { type: "snapshot", runners: [], boxes: [],
-      sessions: invalidation === "authorization" ? [] : [session("s1")], runs: [] });
+      sessions: invalidation === "authorization" ? [] : [session("s1")] });
     const state = store.getState();
     assert.equal(store.promoteDeferredEventTail(fence), false);
     assert.equal(store.deferEventTail(fence, rows, true, false), false);
@@ -277,7 +277,7 @@ test("a recreated reminder replaces a stale higher revision from the prior remin
 test("session upserts retain and clear the projected interruption queue hold", () => {
   const store = new Store();
   message(store, {
-    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")]
   });
   message(store, {
     type: "session_upsert",
@@ -301,7 +301,7 @@ test("a session upsert without command permissions keeps the last ones this clie
     stopBackgroundJob: { allowed: false as const, reason: "Your Viewer role is read-only." },
   };
   message(store, {
-    type: "snapshot", runners: [], boxes: [], sessions: [{ ...session("s1"), commandPermissions: refused }], runs: [],
+    type: "snapshot", runners: [], boxes: [], sessions: [{ ...session("s1"), commandPermissions: refused }]
   });
   // A mutation's response reaches the store as an upsert without the requester's permissions.
   message(store, { type: "session_upsert", session: { ...session("s1"), status: "stopped" } });
@@ -321,7 +321,7 @@ test("unscoped mutations preserve viewer acknowledgments and fresh scoped reads 
   const store = new Store();
   const facts = { version: 1 as const, humanActions: [], meaningfulAt: 1,
     result: { revision: "first", at: 1, owner: "human" as const }, acknowledgedRevision: "first" };
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [{ ...session("s1"), attention: facts }], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [{ ...session("s1"), attention: facts }] });
   const { acknowledgedRevision: _, ...shared } = facts;
   message(store, { type: "session_upsert", session: { ...session("s1"), attention: shared } });
   assert.equal(store.getState().sessions.get("s1")?.attention?.acknowledgedRevision, "first");
@@ -370,7 +370,6 @@ test("authoritative snapshots replace durable steering receipts and queue reserv
       queued: [{ id: "queue-1", text: pending.text, steerable: true, steeringState: "promoting" }],
       steeringAttempts: [pending],
     }],
-    runs: [],
   });
 
   const accepted: SteeringAttemptView = { ...pending, state: "accepted", reason: "accepted", updatedAt: 2 };
@@ -384,7 +383,6 @@ test("authoritative snapshots replace durable steering receipts and queue reserv
     runners: [],
     boxes: [],
     sessions: [{ ...session("s1"), queued: [], steeringAttempts: [accepted] }],
-    runs: [],
   });
   assert.deepEqual(store.getState().sessions.get("s1")?.steeringAttempts, [accepted]);
 
@@ -400,10 +398,10 @@ test("authoritative snapshots replace durable steering receipts and queue reserv
     steeringAttempts: [uncertain],
   };
   message(store, {
-    type: "snapshot", runners: [], boxes: [], sessions: [replacement], runs: [],
+    type: "snapshot", runners: [], boxes: [], sessions: [replacement]
   });
   message(store, {
-    type: "snapshot", runners: [], boxes: [], sessions: [replacement], runs: [],
+    type: "snapshot", runners: [], boxes: [], sessions: [replacement]
   });
 
   assert.deepEqual(store.getState().sessions.get("s1")?.steeringAttempts, [uncertain]);
@@ -419,7 +417,6 @@ test("authoritative snapshots replace durable steering receipts and queue reserv
     runners: [],
     boxes: [],
     sessions: [{ ...replacement, steeringAttempts: [resolutionPending] }],
-    runs: [],
   });
   assert.deepEqual(store.getState().sessions.get("s1")?.steeringAttempts, [resolutionPending]);
 
@@ -433,7 +430,6 @@ test("authoritative snapshots replace durable steering receipts and queue reserv
     runners: [],
     boxes: [],
     sessions: [{ ...replacement, steeringAttempts: [resolutionApplied] }],
-    runs: [],
   });
   assert.deepEqual(store.getState().sessions.get("s1")?.steeringAttempts, [resolutionApplied]);
 
@@ -442,7 +438,6 @@ test("authoritative snapshots replace durable steering receipts and queue reserv
     runners: [],
     boxes: [],
     sessions: [{ ...session("s1"), queued: [] }],
-    runs: [],
   });
   assert.equal(store.getState().sessions.get("s1")?.steeringAttempts, undefined);
 });
@@ -453,7 +448,7 @@ test("subscription capabilities and applied acknowledgement form a reconnect rec
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [], runs: [],
+    runners: [], boxes: [], sessions: []
   });
   assert.equal(store.getState().streamSubscriptions.mode, "targeted");
   assert.equal(store.getState().streamSubscriptions.appliedRevision, 0);
@@ -479,7 +474,7 @@ test("subscription capabilities and applied acknowledgement form a reconnect rec
   });
 
   const legacy = new Store();
-  message(legacy, { type: "snapshot", runners: [], boxes: [], sessions: [], runs: [] });
+  message(legacy, { type: "snapshot", runners: [], boxes: [], sessions: [] });
   assert.deepEqual(legacy.getState().streamSubscriptions, {
     mode: "legacy", requestedRevision: 0, appliedRevision: 0, sessionIds: [],
   }, "an old control plane without capability metadata keeps immediate legacy recovery");
@@ -490,7 +485,7 @@ test("targeted recovery keeps the pre-subscription cursor when a newer live even
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   store.loadEvents("s1", Array.from({ length: 10 }, (_, i) => event("s1", i + 1)));
@@ -515,7 +510,7 @@ test("bounded recovery consumes its frozen cursor only after the final contiguou
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   store.loadEvents("s1", Array.from({ length: 5 }, (_, i) => event("s1", i + 1)));
@@ -537,7 +532,7 @@ test("bounded recovery consumes its frozen cursor only after the final contiguou
 test("REST and WebSocket copies deduplicate by per-session sequence rather than SQLite id", () => {
   const store = new Store();
   message(store, {
-    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const live = { ...event("s1", 1), id: 100 };
@@ -549,12 +544,12 @@ test("REST and WebSocket copies deduplicate by per-session sequence rather than 
 
 test("a legacy reconnect discards its bounded cache because older snapshots cannot signal resets", () => {
   const store = new Store();
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")] });
   store.navigate({ name: "session", id: "s1" });
   const oldGeneration = store.getState().snapshotRevision;
   store.loadEvents("s1", [event("s1", 100)], 0, 0, true, oldGeneration);
 
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")] });
   assert.equal(store.getState().streamSubscriptions.mode, "legacy");
   assert.equal(store.getState().events.has("s1"), false);
   assert.equal(store.getState().eventHistory.has("s1"), false,
@@ -569,11 +564,11 @@ test("a legacy reconnect discards its bounded cache because older snapshots cann
 
 test("a legacy reconnect can preserve a previously authoritative empty transcript while refreshing", () => {
   const store = new Store();
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1", 2)], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1", 2)] });
   store.navigate({ name: "session", id: "s1" });
   store.loadEvents("s1", [], 2, 0, true);
 
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1", 2)], runs: [] });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1", 2)] });
   assert.equal(store.getState().events.has("s1"), false);
   assert.equal(store.getState().eventHistory.get("s1")?.everComplete, true);
   assert.equal(store.getState().eventHistory.get("s1")?.refreshing, true);
@@ -584,7 +579,7 @@ test("a reconnect snapshot invalidates cursors and stale history from an older e
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1", 0)], runs: [],
+    runners: [], boxes: [], sessions: [session("s1", 0)]
   });
   store.navigate({ name: "session", id: "s1" });
   store.loadEvents("s1", [event("s1", 8)], 0);
@@ -592,7 +587,7 @@ test("a reconnect snapshot invalidates cursors and stale history from an older e
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1", 1)], runs: [],
+    runners: [], boxes: [], sessions: [session("s1", 1)]
   });
   assert.equal(store.getState().events.has("s1"), false, "old-generation timeline is dropped");
   store.prepareSubscriptionRecovery(1, ["s1"]);
@@ -612,7 +607,7 @@ test("a mid-connection reset invalidates the frozen recovery cursor from the old
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1", 0)], runs: [],
+    runners: [], boxes: [], sessions: [session("s1", 0)]
   });
   store.navigate({ name: "session", id: "s1" });
   store.loadEvents("s1", [event("s1", 8)], 0);
@@ -651,7 +646,7 @@ test("a reset re-epochs a non-relevant (off-view) session and still drops its fr
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1", 0)], runs: [],
+    runners: [], boxes: [], sessions: [session("s1", 0)]
   });
   store.navigate({ name: "session", id: "s1" });
   store.loadEvents("s1", [event("s1", 8)], 0);
@@ -690,7 +685,7 @@ test("a pending pre-ack recovery cursor is cleared when a reset re-epochs the se
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1", 0)], runs: [],
+    runners: [], boxes: [], sessions: [session("s1", 0)]
   });
   store.navigate({ name: "session", id: "s1" });
   store.loadEvents("s1", [event("s1", 8)], 0);
@@ -710,7 +705,7 @@ test("a session_upsert epoch bump invalidates the frozen recovery cursor", () =>
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1", 0)], runs: [],
+    runners: [], boxes: [], sessions: [session("s1", 0)]
   });
   store.navigate({ name: "session", id: "s1" });
   store.loadEvents("s1", [event("s1", 8)], 0);
@@ -728,7 +723,7 @@ test("a session_upsert epoch bump invalidates the frozen recovery cursor", () =>
 test("a reset carries its epoch even when a coalesced session upsert is delivered later", () => {
   const store = new Store();
   message(store, {
-    type: "snapshot", runners: [], boxes: [], sessions: [session("s1", 0)], runs: [],
+    type: "snapshot", runners: [], boxes: [], sessions: [session("s1", 0)]
   });
   store.navigate({ name: "session", id: "s1" });
   store.loadEvents("s1", [event("s1", 8)], 0);
@@ -744,10 +739,10 @@ test("a reset carries its epoch even when a coalesced session upsert is delivere
     "late metadata for the same generation must retain the replacement timeline");
 });
 
-test("removing active sessions or runs releases their retained streams", () => {
+test("removing the active session releases their retained streams", () => {
   const sessionStore = new Store();
   message(sessionStore, {
-    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")]
   });
   sessionStore.navigate({ name: "session", id: "s1" });
   sessionStore.loadEvents("s1", [event("s1", 1)]);
@@ -758,15 +753,6 @@ test("removing active sessions or runs releases their retained streams", () => {
   assert.equal(sessionStore.getState().events.size, 0);
   assert.equal(sessionStore.getState().shellOutput.size, 0);
 
-  const runStore = new Store();
-  message(runStore, {
-    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")],
-    runs: [{ id: "run-1", sessionIds: ["s1"] } as never],
-  });
-  runStore.navigate({ name: "run", id: "run-1" });
-  runStore.loadEvents("s1", [event("s1", 1)]);
-  message(runStore, { type: "run_removed", runId: "run-1" });
-  assert.equal(runStore.getState().events.size, 0);
 });
 
 test("unselected busy session events update heartbeat activity without retaining transcripts", () => {
@@ -776,7 +762,7 @@ test("unselected busy session events update heartbeat activity without retaining
   } as SessionView;
   message(store, {
     type: "snapshot", capabilities: { sessionSubscriptionsV2: true },
-    runners: [], boxes: [], sessions: [busy], runs: [],
+    runners: [], boxes: [], sessions: [busy]
   });
   const pulse = { ...event("busy", 1), ts: 5 * ACTIVITY_BUCKET_MS };
   message(store, { type: "session_event", event: pulse });
@@ -798,14 +784,14 @@ test("activity lifecycle survives same-epoch snapshots and resets or removes aut
   } as SessionView;
   message(store, {
     type: "snapshot", capabilities: { sessionSubscriptionsV2: true },
-    runners: [], boxes: [], sessions: [busy], runs: [],
+    runners: [], boxes: [], sessions: [busy]
   });
   const seeded = store.getState().activity.get("busy");
   assert.equal(activitySeries(seeded, busy.lastEventAt!).at(-1), 1, "snapshot lastEventAt seeds one pulse");
 
   message(store, {
     type: "snapshot", capabilities: { sessionSubscriptionsV2: true },
-    runners: [], boxes: [], sessions: [busy], runs: [],
+    runners: [], boxes: [], sessions: [busy]
   });
   assert.equal(activitySeries(store.getState().activity.get("busy"), busy.lastEventAt!).at(-1), 1,
     "reconnect metadata does not duplicate an already-observed timestamp");
@@ -833,7 +819,7 @@ test("session-event hot path keeps the activity registry stable and updates only
   } as SessionView));
   message(store, {
     type: "snapshot", capabilities: { sessionSubscriptionsV2: true },
-    runners: [], boxes: [], sessions, runs: [],
+    runners: [], boxes: [], sessions
   }, 0);
   const registry = store.getState().activity;
   const firstBefore = registry.get("s1");
@@ -848,7 +834,7 @@ test("session-event hot path keeps the activity registry stable and updates only
 test("stale async history responses cannot repopulate caches after navigation", () => {
   const store = new Store();
   message(store, {
-    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   store.navigate({ name: "board" });
@@ -860,7 +846,7 @@ test("stale async history responses cannot repopulate caches after navigation", 
 test("authoritative shell reconciliation and explicit close prune dead scrollback", () => {
   const store = new Store();
   message(store, {
-    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   for (const shellId of ["kept", "gone"]) {
@@ -875,7 +861,7 @@ test("authoritative shell reconciliation and explicit close prune dead scrollbac
 test("durable shell history prepends live output without duplicates and inventory triggers refresh", () => {
   const store = new Store();
   message(store, {
-    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   message(store, {
@@ -902,7 +888,7 @@ test("durable shell history prepends live output without duplicates and inventor
 test("late durable shell history cannot repopulate scrollback after navigation", () => {
   const store = new Store();
   message(store, {
-    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    type: "snapshot", runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   store.navigate({ name: "board" });
@@ -918,7 +904,7 @@ test("event-history state distinguishes incomplete, complete, refresh, and failu
   const store = new Store();
   message(store, {
     type: "snapshot", capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1", 2)], runs: [],
+    runners: [], boxes: [], sessions: [session("s1", 2)]
   });
   store.navigate({ name: "session", id: "s1" });
 
@@ -948,7 +934,7 @@ test("event-history state is fenced by epoch and pruned with its timeline", () =
   const store = new Store();
   message(store, {
     type: "snapshot", capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1", 0)], runs: [],
+    runners: [], boxes: [], sessions: [session("s1", 0)]
   });
   store.navigate({ name: "session", id: "s1" });
   store.loadEvents("s1", [], 0, undefined, true);
@@ -967,7 +953,7 @@ test("a superseded recovery revision cannot merge pages or overwrite current loa
   const store = new Store();
   message(store, {
     type: "snapshot", capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1", 0)], runs: [],
+    runners: [], boxes: [], sessions: [session("s1", 0)]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -992,7 +978,7 @@ test("an opening window publishes a cursor contiguous within itself, not from th
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1019,7 +1005,7 @@ test("reader-driven older pages extend the window downward without touching reco
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1088,7 +1074,7 @@ test("a replaced event log drops the window that described the previous sequence
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1111,7 +1097,7 @@ test("forward gap recovery leaves the loaded window boundary untouched", () => {
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1129,7 +1115,7 @@ test("an older page that outlived its window is dropped instead of leaving an un
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1156,34 +1142,12 @@ test("an older page that outlived its window is dropped instead of leaving an un
   assert.equal(store.eventWindowBase("s1"), 849);
 });
 
-test("entering a fleet view drops bounded windows so a member is not truncated forever", () => {
-  const store = new Store();
-  message(store, {
-    type: "snapshot",
-    capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [],
-    sessions: [session("s1")],
-    runs: [{ id: "run-1", sessionIds: ["s1"] } as never],
-  });
-  store.navigate({ name: "session", id: "s1" });
-  const generation = store.getState().snapshotRevision;
-  store.loadEvents("s1", [event("s1", 900), event("s1", 901)], 0, undefined, true, generation, true);
-  assert.equal(store.eventWindowBase("s1"), 900);
-
-  // Run columns page only ABOVE the cursor a window published and offer no reach-back, so
-  // carrying one in would omit everything below seq 900 for as long as the cache survives.
-  store.navigate({ name: "run", id: "run-1" });
-  assert.equal(store.getState().events.get("s1"), undefined);
-  assert.equal(store.getState().eventWindows.get("s1"), undefined);
-  assert.equal(store.recoveryAfter("s1"), 0, "fleet recovery starts from the beginning again");
-});
-
 test("a bounded window preserves activity buckets it cannot account for", () => {
   const store = new Store();
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1205,7 +1169,7 @@ test("an incomplete window stays partial even when it reports no older rows", ()
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1225,7 +1189,7 @@ test("an opening window defines its slice: hydration falls away, live events sur
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1255,7 +1219,7 @@ test("a forward gap fill keeps everything it already had", () => {
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1270,7 +1234,7 @@ test("an empty retry that reaches the tail settles a window left partial", () =>
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1281,31 +1245,12 @@ test("an empty retry that reaches the tail settles a window left partial", () =>
     "an authoritative empty answer is not permanently partial");
 });
 
-test("a fleet view drops an incomplete prefix, not only a window reporting older rows", () => {
-  const store = new Store();
-  message(store, {
-    type: "snapshot",
-    capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [],
-    sessions: [session("s1")],
-    runs: [{ id: "run-1", sessionIds: ["s1"] } as never],
-  });
-  store.navigate({ name: "session", id: "s1" });
-  const generation = store.getState().snapshotRevision;
-  // Budget expired over a short prefix: no older rows reported, but not the whole history either.
-  store.loadEvents("s1", [event("s1", 1), event("s1", 2)], 0, undefined, false, generation, false);
-  store.navigate({ name: "run", id: "run-1" });
-  assert.equal(store.getState().events.get("s1"), undefined,
-    "the column recovers the whole history instead of inheriting a truncated prefix");
-  assert.equal(store.getState().eventWindows.get("s1"), undefined);
-});
-
 test("a hydration frame delayed past the window's apply cannot rebuild the prefix", () => {
   const store = new Store();
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1332,7 +1277,7 @@ test("a forward gap-fill over a partial window preserves the activity ring", () 
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1355,7 +1300,7 @@ test("a replacement window clears older-load state its fence is about to orphan"
   message(store, {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [],
+    runners: [], boxes: [], sessions: [session("s1")]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1385,7 +1330,7 @@ for (const frozen of [0, 200]) {
     const store = new Store();
     message(store, {
       type: "snapshot", capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-      runners: [], boxes: [], sessions: [session("s1", 3)], runs: [],
+      runners: [], boxes: [], sessions: [session("s1", 3)]
     });
     store.navigate({ name: "session", id: "s1" });
     const generation = store.getState().snapshotRevision;
@@ -1431,7 +1376,7 @@ test("a provisional REST window containing a seq gap cannot promote its read cur
   const store = new Store();
   message(store, {
     type: "snapshot", capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1", 3)], runs: [],
+    runners: [], boxes: [], sessions: [session("s1", 3)]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1450,7 +1395,7 @@ test("restoring an inactive reader clears its provisional receipt attribution", 
   const store = new Store();
   message(store, {
     type: "snapshot", capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1", 3)], runs: [],
+    runners: [], boxes: [], sessions: [session("s1", 3)]
   });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;

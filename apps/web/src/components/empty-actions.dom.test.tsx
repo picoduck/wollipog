@@ -127,7 +127,7 @@ function snapshot(overrides: Partial<UiSnapshotMessage> = {}): UiSnapshotMessage
   return {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [runner], boxes: [], projects: [], sessions: [], runs: [],
+    runners: [runner], boxes: [], projects: [], sessions: [],
     ...overrides,
   };
 }

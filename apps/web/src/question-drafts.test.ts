@@ -96,7 +96,7 @@ test("store updates retire resolved and replaced questions even without a mounte
   const key = questionDraftIdentity(request.requestId, questions, request.occurrenceId);
   storeQuestionDrafts("inactive", key, { target: { kind: "choice", labels: ["Staging"] } });
   store.dispatch({ type: "msg", msg: { type: "snapshot", sessionsComplete: false,
-    runners: [], boxes: [], sessions: [], runs: [] } });
+    runners: [], boxes: [], sessions: [] } });
   store.dispatch({ type: "msg", msg: { type: "session_snapshot_page", complete: true,
     sessions: [{ ...session, projection: "summary", pendingApproval: { ...request, questions: undefined } }] } });
   assert.equal(storedQuestionDrafts("inactive", key).target?.kind, "choice");

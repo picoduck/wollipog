@@ -146,7 +146,6 @@ async function render(snapshot: Partial<UiSnapshotMessage> | null, client: ApiCl
         runners: [runner],
         boxes: [],
         sessions: [],
-        runs: [],
         ...snapshot,
       } as UiSnapshotMessage);
     });

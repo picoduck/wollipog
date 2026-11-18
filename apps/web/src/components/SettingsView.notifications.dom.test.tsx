@@ -1,3 +1,4 @@
+import { NotificationsPanel, SettingsView, useNotifySetting } from "./SettingsView.js";
 import "./test-dom-events.js";
 import assert from "node:assert/strict";
 import { after, afterEach, before, test } from "node:test";
@@ -6,8 +7,6 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { PushSetting } from "../push.js";
 import { SETTINGS_SECTIONS, type SettingsSection } from "../navigation.js";
-import { DEFAULT_EXPERIMENT_FLAGS } from "../experiments.js";
-import { ExperimentalPanel, NotificationsPanel, SettingsView, useNotifySetting } from "./SettingsView.js";
 import { notifier } from "../notify.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -245,40 +244,27 @@ test("while push turns off the switch stays on and the row keeps its own descrip
   }
 });
 
-test("every Notifications and Experimental sentence ends with a period, and the old words are gone", async () => {
+test("Notifications copy uses sentence punctuation and one ungrouped surface", async () => {
   stubNotification("default");
-  const notifications = await render(<LiveNotifications setting={push()} />);
-  const experimental = await render(<ExperimentalPanel flags={DEFAULT_EXPERIMENT_FLAGS} onToggle={() => undefined} />);
+  const view = await render(<LiveNotifications setting={push()} />);
   try {
-    const sections = ["notifications", "experimental"].map((id) => SETTINGS_SECTIONS.find((entry) => entry.id === id)!);
-    const sentences = [
-      ...sections.flatMap((entry) => [entry.description, entry.panelDescription!]),
-      ...[notifications, experimental].flatMap((view) =>
-        [...view.container.querySelectorAll(".setting-row-desc")].map((element) => element.textContent ?? "")),
-    ];
-    assert.equal(sentences.length, 7, "two index lines, two panel heads and three row descriptions");
-    for (const sentence of sentences) assert.match(sentence, /\.$/, `"${sentence}" ends with a period`);
-    for (const view of [notifications, experimental]) {
-      assert.doesNotMatch(view.container.textContent ?? "", /Push-to-wake|Untested Features/i);
-      assertNoDomNode(view.container.querySelector(".settings-group-title"), "one ungrouped surface");
+    const section = SETTINGS_SECTIONS.find((entry) => entry.id === "notifications")!;
+    const rows = [...view.container.querySelectorAll(".setting-row-desc")].map((element) => element.textContent);
+    assert.equal(rows.length, 2);
+    for (const sentence of [section.description, section.panelDescription, ...rows]) {
+      assert.match(sentence ?? "", /\.$/u);
     }
-    assert.deepEqual(sections.map((entry) => [entry.panelDescription, entry.scope]), [
-      ["Alerts for approvals and finished turns.", "This Device"],
-      ["Early features. Turning one off hides it from navigation and search.", "This Device"],
-    ]);
-    assert.deepEqual([...experimental.container.querySelectorAll(".setting-row-desc")].map((element) => element.textContent), [
-      "Give the same task to multiple agents and compare their results.",
-    ]);
+    assert.doesNotMatch(view.container.textContent ?? "", /Push-to-wake/i);
+    assertNoDomNode(view.container.querySelector(".settings-group-title"), "one ungrouped surface");
+    assert.deepEqual([section.panelDescription, section.scope], ["Alerts for approvals and finished turns.", "This Device"]);
   } finally {
-    await notifications.unmount();
-    await experimental.unmount();
+    await view.unmount();
   }
 });
 
 test("the panel head says what each section's index line has no room for", async () => {
   for (const [section, expected] of [
     ["notifications", "Alerts for approvals and finished turns."],
-    ["experimental", "Early features. Turning one off hides it from navigation and search."],
     // A section without a longer sentence keeps its index line in the head.
     ["about", "Versions and updates."],
   ] as const) {

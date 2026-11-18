@@ -26,7 +26,7 @@ function session(index: number, title: string, overrides: Partial<SessionView> =
   return {
     id: `archived-${index}`, runnerId: "runner-1", workspaceId: "workspace-1", workspaceName: "wollipog",
     projectId: "project-1", projectName: "Wollipog", projectLocationId: null, agentId: "claude", agentName: "Claude Code",
-    title, status: "completed", column: "done", runId: null, useWorktree: false, worktreePath: null,
+    title, status: "completed", column: "done", useWorktree: false, worktreePath: null,
     archived: true, archivedAt: NOW - (200 - index * 30) * DAY, createdAt: NOW - (210 - index * 30) * DAY,
     updatedAt: NOW - (200 - index * 30) * DAY, lastEventAt: NOW - (200 - index * 30) * DAY, messageCount: 40, eventEpoch: 1,
     preview: null, pendingApproval: null, driver: "claude-code", model: "claude-opus-5-5", effort: null, permissionMode: null,
@@ -59,7 +59,7 @@ class FixtureSocket implements UiSocket {
     const snapshot: ControlPlaneToUi = {
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [], boxes: [], projects: [], sessions: [], runs: [],
+      runners: [], boxes: [], projects: [], sessions: [],
     };
     setTimeout(() => {
       this.onopen?.();

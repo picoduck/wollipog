@@ -53,7 +53,6 @@ const session: SessionView = {
   title: "Destination Fixture",
   status: "idle",
   column: "review",
-  runId: null,
   useWorktree: false,
   worktreePath: null,
   archived: false,
@@ -86,7 +85,6 @@ const snapshot: UiSnapshotMessage = {
   boxes: [],
   projects: [],
   sessions: [session],
-  runs: [],
 };
 
 class FakeSocket implements UiSocket {

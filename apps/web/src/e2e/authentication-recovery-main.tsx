@@ -247,7 +247,6 @@ const session = {
   title: "Refactor Billing Webhooks",
   status: "input_required",
   column: "input_required",
-  runId: null,
   useWorktree: false,
   worktreePath: null,
   archived: false,
@@ -288,7 +287,6 @@ const snapshotMessage: ControlPlaneToUi = {
   boxes: [],
   projects: [],
   sessions: [session],
-  runs: [],
 };
 
 let socket: FixtureSocket | null = null;

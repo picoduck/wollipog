@@ -115,7 +115,6 @@ function snapshot(): UiSnapshotMessage {
     boxes: [],
     projects: [],
     sessions: [],
-    runs: [],
   };
 }
 

@@ -169,7 +169,7 @@ function withRunner(): ControlPlaneDb {
 
 function createScreenshotArtifact(
   db: ControlPlaneDb,
-  owner: { sessionId: string; runId?: never } | { runId: string; sessionId?: never },
+  owner: { sessionId: string },
   artifactId: string,
   metadata: Record<string, unknown> = { purpose: "prompt_image" },
 ): ArtifactView {
@@ -1196,14 +1196,10 @@ test("converted steering retains owned images while queued and releases them aft
 
 test("hydrated history can reuse one prompt image across multiple committed events", () => {
   const db = withRunner();
-  db.createRun({
-    id: "hydrated-image-run", title: "Hydrated Images", prompt: "", workspaceId: "ws-1",
-    runnerId: "runner-1", now: 1,
-  });
-  db.createSession(newSession({ id: "hydrated-image-session", runId: "hydrated-image-run" }));
+  db.createSession(newSession({ id: "hydrated-image-session" }));
   db.createSession(newSession({ id: "hydrated-image-outsider" }));
   const artifact = createScreenshotArtifact(
-    db, { runId: "hydrated-image-run" }, "hydrated-shared-image", { contract: "workflow-screenshot" },
+    db, { sessionId: "hydrated-image-session" }, "hydrated-shared-image", { contract: "workflow-screenshot" },
   );
   const outsiderArtifact = createScreenshotArtifact(
     db, { sessionId: "hydrated-image-outsider" }, "hydrated-outsider-image", { contract: "workflow-screenshot" },
@@ -2168,16 +2164,6 @@ test("createWorkspace: CP-owned project is listed, path-resolvable, and survives
   assert.equal(db.getWorkspacePath("runner-1", ws.id), "C:/code/mine");
   db.createSession(newSession({ id: "created-project-session", workspaceId: ws.id }));
   assert.equal(db.getSession("created-project-session")!.workspaceName, "My Project");
-  db.createRun({
-    id: "created-project-run",
-    title: "Created project run",
-    prompt: "Test the project name",
-    workspaceId: ws.id,
-    runnerId: "runner-1",
-    now: 1_000,
-  });
-  assert.equal(db.getRun("created-project-run")!.workspaceName, "My Project");
-
   // Re-register wipes the runner-reported workspaces but the created project must persist.
   db.registerRunner(meta({ workspaces: [{ id: "ws-9", name: "Only", path: "/only" }] }), 900);
   const after = db.getRunner("runner-1")!.workspaces;
@@ -2188,7 +2174,6 @@ test("createWorkspace: CP-owned project is listed, path-resolvable, and survives
   db.renameWorkspace("runner-1", ws.id, "Renamed");
   assert.equal(db.getRunner("runner-1")!.workspaces.find((w) => w.id === ws.id)!.name, "Renamed");
   assert.equal(db.getSession("created-project-session")!.workspaceName, "Renamed");
-  assert.equal(db.getRun("created-project-run")!.workspaceName, "Renamed");
 });
 
 test("Machine names and Machine-scoped Workspaces survive re-register without creating a Project", () => {
@@ -4449,7 +4434,6 @@ test("createSession with empty config persists nulls", () => {
   assert.equal(view.model, null);
   assert.equal(view.effort, null);
   assert.equal(view.permissionMode, null);
-  assert.equal(view.runId, null);
 });
 
 test("updateSessionStatus updates status and derived column", () => {
@@ -8540,37 +8524,6 @@ test("review finding v106 migration upgrades a table that predates the remote co
   }
 });
 
-test("createRun + run members reflected in runView via getRun/listRuns", () => {
-  const db = withRunner();
-  db.createSession(newSession({ id: "sess-1" }));
-  db.createSession(newSession({ id: "sess-2" }));
-
-  db.createRun({
-    id: "run-1",
-    title: "Parallel",
-    prompt: "do the thing",
-    workspaceId: "ws-1",
-    runnerId: "runner-1",
-    now: 1000,
-  });
-  db.addRunMember("run-1", "sess-1", "acp-agent");
-  db.addRunMember("run-1", "sess-2", "claude-agent");
-  // duplicate ignored
-  db.addRunMember("run-1", "sess-1", "acp-agent");
-
-  const run = db.getRun("run-1")!;
-  assert.equal(run.title, "Parallel");
-  assert.equal(run.prompt, "do the thing");
-  assert.equal(run.workspaceId, "ws-1");
-  assert.equal(run.workspaceName, "Repo One");
-  assert.deepEqual(run.sessionIds, ["sess-1", "sess-2"]);
-
-  assert.equal(db.getRun("nope"), null);
-  const all = db.listRuns();
-  assert.equal(all.length, 1);
-  assert.equal(all[0].id, "run-1");
-});
-
 test("automation schedules claim each occurrence once and retain actor-attributed terminal audit", () => {
   const db = withRunner();
   const spec: AutomationSpec = {
@@ -8840,32 +8793,19 @@ test("prerelease automation tables migrate provenance and nullable delivery dead
 
 /* ----------------------------- Deletion -------------------------------- */
 
-test("deleteSession removes its events and run members (no orphans)", () => {
+test("deleteSession removes its events (no orphans)", () => {
   const db = withRunner();
   db.createSession(newSession({ id: "sess-1" }));
   db.appendEvent("sess-1", { kind: "agent_message", text: "x" }, 100);
   db.appendEvent("sess-1", { kind: "agent_message", text: "y" }, 200);
 
-  db.createRun({
-    id: "run-1",
-    title: "R",
-    prompt: "p",
-    workspaceId: "ws-1",
-    runnerId: "runner-1",
-    now: 1000,
-  });
-  db.addRunMember("run-1", "sess-1", "acp-agent");
-
   assert.equal(db.listEvents("sess-1").length, 2);
-  assert.deepEqual(db.getRun("run-1")!.sessionIds, ["sess-1"]);
 
   db.deleteSession("sess-1");
 
   assert.equal(db.getSession("sess-1"), null);
   // events cascade-deleted (FK) — no orphans
   assert.equal(db.listEvents("sess-1").length, 0);
-  // run member explicitly removed — run keeps no dangling id
-  assert.deepEqual(db.getRun("run-1")!.sessionIds, []);
 });
 
 test("governance audit is query-bounded, retention-bounded, and survives session deletion", () => {
@@ -8981,7 +8921,7 @@ test("governance policies persist ordered selectors/conditions and support updat
   assert.equal(db.deleteGovernancePolicy("workspace-shell"), false);
 });
 
-test("upgrading populated workflow tables preserves sessions, artifacts and working automations", () => {
+test("upgrading populated Pods, workflow runs and comparison runs preserves sessions, artifacts and automations", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-workflow-removal-"));
   const path = join(root, "cp.db");
   const spec: AutomationSpec = {
@@ -8994,14 +8934,13 @@ test("upgrading populated workflow tables preserves sessions, artifacts and work
     const legacy = ControlPlaneDb.open(path);
     try {
       legacy.registerRunner(meta(), 500);
-      legacy.createRun({ id: "run-legacy", runnerId: "runner-1", workspaceId: "ws-1", title: "Legacy", prompt: "Build", now: 500 });
-      legacy.createSession(newSession({ runId: "run-legacy" }));
-      legacy.addRunMember("run-legacy", "sess-1", "acp-agent");
-      legacy.createRun({ id: "run-compare", runnerId: "runner-1", workspaceId: "ws-1", title: "Compare", prompt: "Compare", now: 600 });
-      legacy.createSession(newSession({ id: "sess-compare", runId: "run-compare" }));
-      legacy.addRunMember("run-compare", "sess-compare", "acp-agent");
-      createScreenshotArtifact(legacy, { runId: "run-legacy" }, "workflow-output");
+      legacy.createSession(newSession());
+      legacy.createSession(newSession({ id: "sess-compare", title: "Comparison Member", useWorktree: true }));
+      const transcriptEvent = legacy.appendEvent("sess-compare", { kind: "agent_message", text: "Comparison result" }, 700);
+      const comparisonImage = createScreenshotArtifact(legacy, { sessionId: "sess-compare" }, "comparison-image");
+      createScreenshotArtifact(legacy, { sessionId: "sess-1" }, "workflow-output");
       createScreenshotArtifact(legacy, { sessionId: "sess-1" }, "session-image");
+      const compareBlob = comparisonImage.sha256;
       for (const automationId of ["still-working", "old-workflow"]) {
         legacy.createAutomation({ automationId, spec, nextFireAt: 2000, actor: { kind: "human", id: "owner" }, now: 1000 });
       }
@@ -9023,6 +8962,28 @@ test("upgrading populated workflow tables preserves sessions, artifacts and work
       const raw = legacy.raw();
       assert.equal(raw.prepare("PRAGMA foreign_keys").get()?.foreign_keys, 1);
       raw.exec(`
+        CREATE TABLE pods (id TEXT PRIMARY KEY);
+        CREATE TABLE pod_members (
+          pod_id TEXT REFERENCES pods(id) ON DELETE CASCADE,
+          session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE
+        );
+        INSERT INTO pods VALUES ('pod-legacy');
+        INSERT INTO pod_members VALUES ('pod-legacy', 'sess-compare');
+        CREATE TABLE multi_agent_runs (id TEXT PRIMARY KEY);
+        CREATE TABLE multi_agent_run_members (
+          run_id TEXT REFERENCES multi_agent_runs(id) ON DELETE CASCADE,
+          session_id TEXT NOT NULL, agent_id TEXT, PRIMARY KEY (run_id, session_id)
+        );
+        INSERT INTO multi_agent_runs VALUES ('run-legacy'), ('run-compare');
+        INSERT INTO multi_agent_run_members VALUES
+          ('run-legacy', 'sess-1', 'acp-agent'), ('run-compare', 'sess-compare', 'acp-agent');
+        ALTER TABLE sessions ADD COLUMN run_id TEXT;
+        CREATE INDEX idx_sessions_run ON sessions(run_id) WHERE run_id IS NOT NULL;
+        UPDATE sessions SET run_id=CASE id WHEN 'sess-1' THEN 'run-legacy' ELSE 'run-compare' END;
+        ALTER TABLE artifacts ADD COLUMN run_id TEXT REFERENCES multi_agent_runs(id) ON DELETE CASCADE;
+        CREATE INDEX idx_artifacts_run ON artifacts(run_id, created_at, id);
+        UPDATE artifacts SET run_id='run-compare', session_id=NULL WHERE id='comparison-image';
+        UPDATE artifacts SET run_id='run-legacy', session_id=NULL WHERE id='workflow-output';
         DELETE FROM control_plane_metadata WHERE key='workflow_engine_retired';
         CREATE TABLE workflow_definitions (workflow_id TEXT, version INTEGER, PRIMARY KEY (workflow_id, version));
         CREATE TABLE workflow_instances (
@@ -9065,6 +9026,10 @@ test("upgrading populated workflow tables preserves sessions, artifacts and work
         UPDATE automation_executions SET action_kind='workflow_run', workflow_instance_id='instance'
         WHERE execution_id='running-execution';
       `);
+      assert.ok(transcriptEvent);
+      raw.prepare("INSERT INTO session_event_artifacts (event_id, artifact_id) VALUES (?, 'comparison-image')")
+        .run(transcriptEvent.seq);
+      assert.equal(raw.prepare("SELECT blob_key FROM artifacts WHERE id='comparison-image'").get()?.blob_key, compareBlob);
       assert.deepEqual(raw.prepare("PRAGMA foreign_key_check").all(), []);
     } finally {
       legacy.close();
@@ -9078,15 +9043,30 @@ test("upgrading populated workflow tables preserves sessions, artifacts and work
         const tables = raw.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name GLOB 'workflow_*' ORDER BY name").all();
         assert.deepEqual(tables.map((table) => table.name), ["workflow_decision_action_receipts", "workflow_decisions"]);
         assert.equal(raw.prepare("PRAGMA table_info(automation_executions)").all().some((column) => column.name === "workflow_instance_id"), false);
-        assert.equal(db.getRun("run-legacy"), null);
-        assert.deepEqual(raw.prepare("SELECT session_id FROM multi_agent_run_members WHERE run_id='run-legacy'").all(), []);
+        const retiredTables = raw.prepare(
+          "SELECT name FROM sqlite_schema WHERE type='table' AND (name='pods' OR name GLOB 'pod_*' OR name GLOB 'multi_agent_run*')",
+        ).all();
+        assert.deepEqual(retiredTables, []);
+        for (const table of ["sessions", "artifacts", "automation_executions"]) {
+          assert.ok(!raw.prepare("SELECT 1 FROM pragma_table_info(?) WHERE name='run_id'").get(table));
+        }
         assert.equal(db.getSession("sess-1")?.title, "My session");
-        assert.equal(db.getSession("sess-1")?.runId, null);
-        assert.deepEqual(db.getRun("run-compare")?.sessionIds, ["sess-compare"]);
-        assert.equal(db.getSession("sess-compare")?.runId, "run-compare");
-        assert.equal(db.getArtifact("workflow-output"), null);
+        const comparison = db.getSession("sess-compare");
+        assert.equal(comparison?.title, "Comparison Member");
+        assert.equal(comparison?.useWorktree, true);
+        assert.equal(comparison?.role, "normal");
+        assert.ok(comparison && !Object.hasOwn(comparison, "runId"));
+        assert.equal(db.listEvents("sess-compare")[0]?.payload.kind, "agent_message");
         assert.equal(db.getArtifact("session-image")?.sessionId, "sess-1");
-        assert.equal(db.getArtifact("session-image")?.runId, undefined);
+        assert.equal(db.getArtifact("workflow-output")?.data, "/9j/2Q==");
+        assert.equal(db.getArtifact("comparison-image")?.data, "/9j/2Q==");
+        assert.equal(db.getArtifact("comparison-image")?.sessionId, undefined);
+        assert.ok(db.sessionEventReferencesArtifact("sess-compare", "comparison-image"));
+        assert.ok(!db.sessionEventReferencesArtifact("sess-1", "comparison-image"));
+        const artifactIndexes = raw.prepare(
+          "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='artifacts' ORDER BY name",
+        ).all().map((row) => row.name);
+        assert.deepEqual(artifactIndexes, ["idx_artifacts_blob_key", "idx_artifacts_session", "sqlite_autoindex_artifacts_1"]);
         assert.deepEqual(db.getAutomation("still-working")?.action, spec.action);
         assert.equal(db.getAutomation("still-working")?.nextFireAt, 2000);
         for (const automationId of ["old-workflow", "build-review"]) {
@@ -9113,11 +9093,8 @@ test("upgrading populated workflow tables preserves sessions, artifacts and work
 test("artifacts persist immutable content, provenance, metadata, and session indexes", () => {
   const db = withRunner();
   db.createSession(newSession());
-  db.createRun({ id: "run-artifacts", title: "Artifacts", prompt: "p", workspaceId: "ws-1", runnerId: "runner-1", now: 1000 });
-  db.addRunMember("run-artifacts", "sess-1", "acp-agent");
   const artifact: Artifact = {
     artifactId: "art-1",
-    runId: "run-artifacts",
     sessionId: "sess-1",
     kind: "review_report",
     name: "review.md",
@@ -9135,20 +9112,15 @@ test("artifacts persist immutable content, provenance, metadata, and session ind
     { data: string; blob_key: string };
   assert.deepEqual({ ...stored }, { data: "", blob_key: artifact.sha256 }, "SQLite retains metadata but not artifact bytes");
   assert.deepEqual(db.getArtifact("art-1"), artifact);
-  const runList = db.listSessionArtifacts("sess-1");
-  assert.equal(runList.length, 1);
-  assert.equal("data" in runList[0]!, false, "list endpoints never copy artifact bodies");
-  assert.deepEqual(db.listSessionArtifacts("sess-1"), runList);
-  assert.equal(db.getRun("run-artifacts")!.updatedAt, 2000);
-  db.createArtifact({ ...artifact, artifactId: "art-session-only", runId: undefined, createdAt: 2001 });
+  const artifacts = db.listSessionArtifacts("sess-1");
+  assert.equal(artifacts.length, 1);
+  assert.equal("data" in artifacts[0]!, false, "list endpoints never copy artifact bodies");
+  assert.deepEqual(db.listSessionArtifacts("sess-1"), artifacts);
   db.deleteSession("sess-1");
-  assert.equal(db.getArtifact("art-session-only"), null, "session-only artifact follows explicit session deletion");
-  assert.ok(db.getArtifact("art-1"), "run-owned artifact survives member-session deletion");
-  db.raw().prepare("DELETE FROM multi_agent_runs WHERE id=?").run("run-artifacts");
-  assert.equal(db.getArtifact("art-1"), null, "run-owned artifacts cascade with the run");
+  assert.equal(db.getArtifact("art-1"), null, "the artifact follows explicit session deletion");
 });
 
-test("legacy dead artifact rows migrate content-safely into the workflow artifact schema", () => {
+test("legacy dead artifact rows migrate content-safely into the current artifact schema", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-artifact-migration-"));
   const path = join(root, "cp.db");
   try {

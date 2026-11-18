@@ -30,7 +30,7 @@ test("desktop instance routes keep identical resources unambiguous", () => {
 
 test("desktop navigation wraps legacy routes and ignores another profile's history entry", () => {
   const listeners = new Set<() => void>();
-  const location = { pathname: "/runs", search: "", hash: "" };
+  const location = { pathname: "/skills", search: "", hash: "" };
   const writes: Array<["push" | "replace", string]> = [];
   const write = (kind: "push" | "replace", path: string | URL | null | undefined) => {
     // A replace without a URL records only the entry's position (#3218) and keeps its address.
@@ -55,11 +55,11 @@ test("desktop navigation wraps legacy routes and ignores another profile's histo
   const navigation = new DesktopInstanceNavigation("remote-a", target, (instanceId, view) => {
     activated.push({ instanceId, view });
   });
-  assert.deepEqual(navigation.current(), { name: "runs" });
+  assert.deepEqual(navigation.current(), { name: "skills" });
   assert.equal(writes[0]?.[0], "replace");
   assert.deepEqual(instanceRouteFromPath(location.pathname), {
     instanceId: "remote-a",
-    view: { name: "runs" },
+    view: { name: "skills" },
   });
 
   const seen: unknown[] = [];
@@ -199,7 +199,7 @@ test("a Back to another instance's entry is held by the open instance's editor b
   const browser = new TestBrowserHistory(instanceViewPath("remote-a", { name: "usage" }));
   const first = new DesktopInstanceNavigation("remote-a", browser.window);
   first.current();
-  first.push({ name: "runs" });
+  first.push({ name: "skills" });
   const navigation = new DesktopInstanceNavigation("remote-b", browser.window);
   pushPositionedEntry(browser.window.history, instanceViewPath("remote-b", { name: "settings", section: "orchestrator" }));
   navigation.current();
@@ -227,7 +227,7 @@ test("a Back to another instance's entry is held by the open instance's editor b
     asked[0]!();
     browser.flush();
     assert.deepEqual(opened, ["remote-a"], "Discard opens the other instance's entry once");
-    assert.equal(browser.path, instanceViewPath("remote-a", { name: "runs" }));
+    assert.equal(browser.path, instanceViewPath("remote-a", { name: "skills" }));
   } finally {
     release();
     browser.window.removeEventListener("popstate", onPopState);

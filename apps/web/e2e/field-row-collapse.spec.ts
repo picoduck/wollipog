@@ -11,17 +11,6 @@ import { choosePageAction } from "./page-actions";
 /** `rows` is how many field rows the dialog has; each is measured. */
 const dialogs: Array<{ name: string; rows?: number; open: (page: Page) => Promise<Locator> }> = [
   {
-    name: "New Run",
-    open: async (page) => {
-      await page.goto("/new-session-choices-e2e.html?dialog=run");
-      const dialog = page.getByRole("dialog");
-      // No Project places the run by Machine and Folder, the row measured here (#2978).
-      await dialog.getByRole("button", { name: /^Project:/ }).click();
-      await page.getByRole("option", { name: "No Project" }).click();
-      return dialog;
-    },
-  },
-  {
     name: "Install Manually",
     rows: 2,
     open: async (page) => {

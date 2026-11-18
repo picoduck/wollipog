@@ -35,7 +35,7 @@ const minutesAgo = (minutes: number) => Date.now() - minutes * 60_000;
 const session: SessionView = {
   id: "review-runs-e2e", runnerId: "runner-1", workspaceId: "workspace-1", workspaceName: "Wollipog",
   projectId: null, agentId: "claude", agentName: "Claude", title: "Guard Empty Carts at Checkout", status: "idle",
-  column: "review", runId: null, useWorktree: true, worktreePath: "/workspace/wollipog-checkout",
+  column: "review", useWorktree: true, worktreePath: "/workspace/wollipog-checkout",
   archived: false, createdAt: 1, updatedAt: 1, lastEventAt: 1, messageCount: 1, eventEpoch: 0,
   preview: null, pendingApproval: null, driver: "claude-code", model: null, effort: null,
   permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,

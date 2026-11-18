@@ -49,7 +49,7 @@ test("MP4 validation compares the signature and every supported major brand byte
   }
 });
 
-test("validates and content-addresses each workflow artifact contract", () => {
+test("validates and content-addresses each session artifact contract", () => {
   const cases = [
     { kind: "html_preview", encoding: "utf8", mimeType: "text/html", data: "<!doctype html><title>Preview</title>" },
     { kind: "patch", encoding: "utf8", mimeType: "text/x-diff", data: "--- a\n+++ b\n" },
@@ -60,7 +60,7 @@ test("validates and content-addresses each workflow artifact contract", () => {
     { kind: "video", encoding: "base64", mimeType: "video/mp4", data: mp4.toString("base64") },
   ] as const;
   for (const input of cases) {
-    const result = validateArtifact({ runId: "r1", ...input, name: `${input.kind}.artifact`, metadata: { attempt: 1 } });
+    const result = validateArtifact({ sessionId: "s1", ...input, name: `${input.kind}.artifact`, metadata: { attempt: 1 } });
     assert.equal(result.ok, true, input.kind);
     if (!result.ok) continue;
     assert.match(result.value.sha256, /^[a-f0-9]{64}$/);
@@ -111,7 +111,7 @@ test("patch and test-log artifacts accept one maximum-sized event payload chunk"
 
 test("artifact validation rejects missing ownership, path-like names, unknown fields, and unsafe metadata", () => {
   const valid = { sessionId: "s1", kind: "test_log", name: "tests.log", mimeType: "text/plain", encoding: "utf8", data: "ok" };
-  assert.match((validateArtifact({ ...valid, sessionId: undefined }) as { error: string }).error, /runId or sessionId/);
+  assert.match((validateArtifact({ ...valid, sessionId: undefined }) as { error: string }).error, /bounded sessionId/);
   assert.match((validateArtifact({ ...valid, name: "../tests.log" }) as { error: string }).error, /name/);
   assert.match((validateArtifact({ ...valid, extra: true }) as { error: string }).error, /unsupported/);
   assert.match((validateArtifact({ ...valid, metadata: { bad_key: { nested: true } } }) as { error: string }).error, /metadata/);

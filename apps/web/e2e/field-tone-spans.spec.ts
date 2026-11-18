@@ -4,7 +4,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  * #2365: only a field's label takes label styling. `.field > span` used to dim every direct span of
  * a `.field` at (0,1,1), which out-ranked the single-class tone rules, so a field error read as dim
  * label text instead of red and a muted note took the label's 12px/500 instead of its own look.
- * These read the computed style of the REAL New Session and New Multi-Agent Run dialogs.
+ * These read the computed style of the real New Session dialog.
  */
 
 type Look = { color: string; size: string; weight: string };
@@ -139,22 +139,5 @@ for (const theme of ["dark", "light"] as const) {
       }
     });
 
-    test("New Multi-Agent Run: the Project helper is --text-dim at 400, and every field keeps classed spans' looks", async ({ page }) => {
-      await open(page, `theme=${theme}&dialog=run`, "New Multi-Agent Run");
-      const dim = await token(page, "--text-dim");
-
-      // #2978: the Project's one sentence is the field's helper (§8.1); Location reasons moved into
-      // its options and the footer.
-      await page.getByRole("button", { name: /^Project:/ }).click();
-      await page.getByRole("option", { name: "Two Locations" }).click();
-      const projectNote = field(page, "Project").locator(":scope > .field-helper");
-      await expect(projectNote).toHaveText("Wollipog can't show who can see the agents' sessions.");
-      expect((await look(projectNote)).color).toBe(dim);
-      expect((await look(projectNote)).weight).toBe("400");
-
-      const result = await sweep(page);
-      expect(result.fields, "New Multi-Agent Run renders fields to sweep").toBeGreaterThan(2);
-      expect(result.mismatches, "a classed later span looks the same inside and outside a field").toEqual([]);
-    });
   });
 }

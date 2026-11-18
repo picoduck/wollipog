@@ -14,7 +14,7 @@ export async function installInboxFixture(page: Page) {
   const sessions: SessionView[] = Array.from({ length: 20 }, (_, index) => ({
     id: `synthetic-${index + 1}`, runnerId: runner.runnerId, workspaceId: "synthetic-workspace",
     workspaceName: "Synthetic Project", agentId: "synthetic-agent", agentName: "Synthetic Agent",
-    title: `Synthetic Session ${index + 1}`, status: "idle", column: "review", runId: null,
+    title: `Synthetic Session ${index + 1}`, status: "idle", column: "review",
     useWorktree: false, worktreePath: null, archived: false, createdAt: 1, updatedAt: 1, lastEventAt: 1,
     eventEpoch: 0, messageCount: 0, preview: "A deterministic session preview.", pendingApproval: null,
     driver: "codex-app-server", model: null, effort: null, permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0,

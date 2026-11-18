@@ -64,7 +64,7 @@ function session(overrides: Partial<SessionView> = {}): SessionView {
   return {
     id: "previewed", runnerId: RUNNER_ID, workspaceId: null, workspaceName: "payments-workspace", projectId: project.id,
     projectName: project.name, agentId: "claude", agentName: "Claude Code", title: "Reconcile the Ledger", status: "idle",
-    column: "review", runId: null, useWorktree: false, worktreePath: null, worktrees: [],
+    column: "review", useWorktree: false, worktreePath: null, worktrees: [],
     archived: false, createdAt: 1, updatedAt: 1, lastEventAt: 1, messageCount: 0, eventEpoch: 0, preview: null,
     pendingApproval: null, driver: "claude", model: null, effort: null, permissionMode: null,
     tokensIn: 12_000, tokensOut: 3_400, costUsd: 4.27, adopted: false,
@@ -307,7 +307,7 @@ async function renderPreview(
   await act(async () => socket.push({
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [{ ...runner, status: runnerStatus }], boxes: [], projects: [project], sessions: [value], runs: [],
+    runners: [{ ...runner, status: runnerStatus }], boxes: [], projects: [project], sessions: [value]
   } as ControlPlaneToUi));
   await settle();
   await settle();
@@ -464,7 +464,7 @@ async function renderRowAndBar(
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
     runners: [{ ...runner, status: runnerOnline ? "online" : "offline" }], boxes: [], projects: [project],
-    sessions: [value], runs: [],
+    sessions: [value]
   } as ControlPlaneToUi));
   await settle();
   const badge = (scope: Element | null) => {

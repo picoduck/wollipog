@@ -48,7 +48,6 @@ const session = {
   title: `Skills on a ${adapter === "host" ? "Host" : adapter === "cloud" ? "Cloud" : "Container"} Target`,
   status: "idle",
   column: "review",
-  runId: null,
   useWorktree: true,
   worktreePath: "/tmp/skills-unavailable-e2e",
   archived: false,
@@ -86,7 +85,6 @@ const snapshotMessage = {
   boxes: [],
   projects: [],
   sessions: [session],
-  runs: [],
 } as ControlPlaneToUi;
 
 class FixtureSocket implements UiSocket {

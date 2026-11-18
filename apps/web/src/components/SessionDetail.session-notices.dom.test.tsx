@@ -107,7 +107,7 @@ function sessionView(overrides: Partial<SessionView>): SessionView {
   return {
     id: `notices-${fixtureSequence}`, runnerId: "runner-1", workspaceId: null, workspaceName: null, projectId: null,
     agentId: "codex", agentName: "Codex", title: "Notice Fixture", status: "idle",
-    column: "review", runId: null, useWorktree: true, worktreePath,
+    column: "review", useWorktree: true, worktreePath,
     archived: false, createdAt: 1, updatedAt: 1, lastEventAt: null, messageCount: 0,
     eventEpoch: 0, preview: null, pendingApproval: null, driver: "codex-app-server",
     model: "gpt-5.6-sol", effort: "high", permissionMode: null, tokensIn: 0, tokensOut: 0,
@@ -210,7 +210,7 @@ async function mount(current: SessionView, { online = true, runner: runnerOverri
     capabilities: {
       sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, unarchiveAndRestart,
     },
-    runners: [{ ...runnerView(online), ...runnerOverrides }], boxes: [], projects: [], sessions: [current], runs: [],
+    runners: [{ ...runnerView(online), ...runnerOverrides }], boxes: [], projects: [], sessions: [current]
   }));
   await flush();
   const slot = () => container.querySelector(".session-notice-slot") as HTMLElement | null;

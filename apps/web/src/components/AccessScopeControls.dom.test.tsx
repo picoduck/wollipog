@@ -396,7 +396,7 @@ async function renderProjectsPage(who: IdentityAdministrationView) {
         sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
         accessScopeManagement: true,
       },
-      runners: [runner], boxes: [], sessions: [], runs: [], projects: [project],
+      runners: [runner], boxes: [], sessions: [], projects: [project],
     } as UiSnapshotMessage);
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });

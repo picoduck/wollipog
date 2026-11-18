@@ -47,7 +47,7 @@ test("orchestrator credentials expose only session management and governance rea
   assert.equal(isAgentControlApiRouteAllowed("PUT", "/api/runners/:id/provider-account-policies/:provider", "orchestrator"), false,
     "an agent reads the selection; it never writes the policy");
   for (const [method, route] of [
-    ["POST", "/api/runs"], ["POST", "/api/sessions/:id/approve"],
+    ["POST", "/api/sessions/:id/approve"],
     ["POST", "/api/sessions/:id/parent-control"],
     ["POST", "/api/sessions/:id/parent-control-policy"],
     ["PUT", "/api/governance/policies/:policyId"],
@@ -148,7 +148,6 @@ test("session-management REST access is method- and route-scoped to its publishe
     ["POST", "/api/sessions/:id/worktrees/attach"],
     ["POST", "/api/sessions/:id/worktrees/select"],
     ["POST", "/api/sessions/:id/worktrees/discard"],
-    ["POST", "/api/runs"],
     ["GET", "/api/governance/policies"],
     ["PUT", "/api/governance/policies/:policyId"],
     ["POST", "/api/sessions/:id/artifacts/screenshots"],

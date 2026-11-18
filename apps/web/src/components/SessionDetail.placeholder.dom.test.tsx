@@ -116,7 +116,7 @@ async function mount(lookup: (id: string) => Promise<{ session: SessionView }>, 
   await act(async () => socket.push({
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [], boxes: [], projects: [], sessions: snapshotSessions, runs: [],
+    runners: [], boxes: [], projects: [], sessions: snapshotSessions
   }));
   await flush();
   if (lateStrictMount) {
@@ -145,7 +145,7 @@ function session(): SessionView {
   return {
     id: SESSION_ID, runnerId: "runner-1", workspaceId: null, workspaceName: null, projectId: null,
     agentId: "codex", agentName: "Codex", title: "Archived Fixture", status: "stopped",
-    column: "review", runId: null, useWorktree: false, worktreePath: null,
+    column: "review", useWorktree: false, worktreePath: null,
     archived: true, createdAt: 1, updatedAt: 1, lastEventAt: null, messageCount: 0,
     eventEpoch: 0, preview: null, pendingApproval: null, driver: "codex-app-server",
     model: null, effort: null, permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,

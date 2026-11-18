@@ -20,7 +20,6 @@ export type View =
   | { name: "inbox"; split?: SessionsTab }
   | { name: "board"; split?: SessionsTab }
   | { name: "runners"; section?: ConnectionSection; machineId?: string; accounts?: MachineAccountsIntent }
-  | { name: "runs" }
   | { name: "automations"; editor?: AutomationEditorRoute; tab?: AutomationsTab }
   | { name: "automation"; id: string }
   /** The Assistants section (#4664): the Wollipog Assistant's threads, and one open thread. */
@@ -31,8 +30,6 @@ export type View =
   | { name: "archived"; archiveSearch?: string; browseVisit?: { restore: boolean; activationId: number } }
   | { name: "projects"; id?: string; pane?: ProjectsPane }
   | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget; artifacts?: ArtifactsTarget; campaign?: true; campaignTarget?: CampaignTarget }
-  /** `member`: the comparison member a phone shows (#2975); wider layouts show every member. */
-  | { name: "run"; id: string; member?: string }
   | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
   | { name: "not-found" };
 /**
@@ -43,7 +40,7 @@ export type View =
  * section is deep-linkable, which is what makes "see Settings → Appearance" a thing you can send
  * someone.
  */
-export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "reviews" | "orchestrator" | "network" | "storage" | "experimental" | "about";
+export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "reviews" | "orchestrator" | "network" | "storage" | "about";
 
 /**
  * A control a redirect lands on, so an old link arrives where its setting went (#3023):
@@ -98,12 +95,6 @@ export interface SettingsSectionEntry {
   scope?: SettingsScope;
 }
 
-/**
- * What turning an experiment off does. Experimental's panel head says it, and so does its group on a
- * phone, where the head's description is hidden (#3139).
- */
-export const EXPERIMENT_OFF_EFFECT = "Turning one off hides it from navigation and search.";
-
 /** The Settings page header's one line (§4.2), hidden on phones as every page description is. */
 export const SETTINGS_DESCRIPTION = "Preferences for this device and your account.";
 
@@ -129,13 +120,6 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
     description: "Archived session history.",
     panelDescription: "How long archived sessions keep their full history in this control plane. Capable machines also trim archived session logs.",
     scope: "Your Organization",
-  },
-  {
-    id: "experimental",
-    title: "Experimental",
-    description: "Features that are still being tested.",
-    panelDescription: `Early features. ${EXPERIMENT_OFF_EFFECT}`,
-    scope: "This Device",
   },
   { id: "about", title: "About", description: "Versions and updates." },
 ];
@@ -191,7 +175,7 @@ export type SkillsPane = "orphans" | "overview";
  */
 export type ProjectsPane = "overview";
 
-export type GlobalViewName = Extract<View["name"], "inbox" | "assistants" | "projects" | "runs" | "automations" | "usage" | "runners" | "archived" | "skills">;
+export type GlobalViewName = Extract<View["name"], "inbox" | "assistants" | "projects" | "automations" | "usage" | "runners" | "archived" | "skills">;
 
 export type DestinationGroup = "work" | "oversight" | "records";
 
@@ -243,12 +227,6 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<GlobalViewItem> = [
     description: "Group related sessions and choose the folders where they run.",
     group: "work",
   },
-  {
-    id: "runs",
-    name: "Multi-Agent Runs",
-    description: "Give one task to several agents and compare what each one does.",
-    group: "oversight",
-  },
   { id: "runners", name: "Connections", group: "oversight" },
   {
     id: "skills",
@@ -278,7 +256,6 @@ export function backLabel(id: GlobalViewName): string {
 /** What an entity page is called until its entity has loaded. */
 export const ENTITY_FALLBACK_TITLES = {
   session: "Session",
-  run: "Multi-Agent Run",
   automation: "Automation",
   thread: "Thread",
 } as const;
@@ -291,7 +268,7 @@ export const ENTITY_FALLBACK_TITLES = {
  * one of its six routes. With no default branch, the next view that is added fails to compile
  * until it has a title.
  *
- * An entity page is titled by its entity: pass the loaded session's or run's own title.
+ * An entity page is titled by its entity: pass the loaded entity's own title.
  * The generic noun is only the fallback while it loads.
  */
 export function viewTitle(view: View, entityTitle?: string | null): string {
@@ -311,7 +288,6 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
         : destination(view.name).name;
     case "inbox":
     case "projects":
-    case "runs":
     case "usage":
     case "runners":
     case "archived":
@@ -320,7 +296,6 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
       // apart.
       return destination(view.name).name;
     case "session":
-    case "run":
     case "automation":
       return entityTitle || ENTITY_FALLBACK_TITLES[view.name];
     // The section is the <h2> inside the page; repeating it here would say it twice.
@@ -335,9 +310,8 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
 /**
  * The one-line description under a route's page title (§4.2), or undefined for a route that draws
  * none. A destination's list page reads it from the registry, and Settings, which is not in it,
- * from its own line; an entity page and the Automations editor draw a bar instead. The turned-off
- * and crashed states redraw the header with it, so the header keeps its height and nothing moves
- * when the route recovers (docs/design-system.md §12.4).
+ * from its own line; an entity page and the Automations editor draw a bar instead. A crashed route uses the same header and description to preserve its height
+ * during recovery (docs/design-system.md §12.4).
  */
 export function viewDescription(view: View): string | undefined {
   switch (view.name) {
@@ -349,7 +323,6 @@ export function viewDescription(view: View): string | undefined {
       return destination("inbox").description;
     case "inbox":
     case "projects":
-    case "runs":
     case "usage":
     case "runners":
     case "archived":
@@ -358,7 +331,6 @@ export function viewDescription(view: View): string | undefined {
     case "settings":
       return SETTINGS_DESCRIPTION;
     case "session":
-    case "run":
     case "automation":
     case "not-found":
       return undefined;
@@ -425,7 +397,7 @@ export function viewHasHeaderTabs(view: View, layout: { phone: boolean; compact:
  * names a type rather than the thing on screen.
  */
 export function viewSubjectName(view: View): string {
-  if (view.name === "session" || view.name === "run" || view.name === "automation") {
+  if (view.name === "session" || view.name === "automation") {
     return `This ${viewTitle(view)}`;
   }
   if (view.name === "assistants" && view.threadId !== undefined) return `This ${ENTITY_FALLBACK_TITLES.thread}`;
@@ -552,7 +524,6 @@ export function viewPath(view: View): string {
     case "runners": return view.machineId !== undefined
       ? `/connections/machines/~${encodeResourceId(view.machineId)}`
       : `/connections/${view.section ?? "machines"}`;
-    case "runs": return "/runs";
     case "not-found": return "/not-found";
     case "automations": return view.editor?.kind === "new" ? "/automations/new"
       : view.editor?.kind === "edit" ? `/automations/~${encodeResourceId(view.editor.automationId)}/edit`
@@ -572,7 +543,6 @@ export function viewPath(view: View): string {
       : view.attention
       ? `/sessions/~${encodeResourceId(view.id)}/attention${view.attention.requestId === undefined ? "" : `/~${encodeOpaque(view.attention.requestId)}`}?epoch=${view.attention.eventEpoch}`
       : `/sessions/~${encodeResourceId(view.id)}`;
-    case "run": return `/runs/~${encodeResourceId(view.id)}${runMemberSearch(view.member)}`;
     case "settings": return view.section === "approvals" && view.policyId !== undefined
       ? `/settings/approvals/~${encodeResourceId(view.policyId)}`
       : view.section ? `/settings/${view.section}` : "/settings";
@@ -602,36 +572,13 @@ function locationFromSearch(path: string, search: string): SourceLocation | null
   });
 }
 
-const RUN_MEMBER_PARAM = "member";
-
-function runMemberSearch(member: string | undefined): string {
-  return member === undefined ? "" : `?${new URLSearchParams({ [RUN_MEMBER_PARAM]: member }).toString()}`;
-}
-
-/** The member a run URL names: undefined when it names none or its query is not a member. */
-function runMemberFromSearch(search: string): string | undefined {
-  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
-  const keys = [...params.keys()];
-  if (keys.length !== 1 || keys[0] !== RUN_MEMBER_PARAM) return undefined;
-  const member = params.get(RUN_MEMBER_PARAM) ?? "";
-  return !member.trim() || member.length > MAX_RESOURCE_ID_LENGTH ? undefined : member;
-}
-
-function resourceView(kind: "sessions" | "runs", encodedId: string, search: string): View | null {
-  const id = decodeResourceId(encodedId);
-  if (id === null) return null;
-  if (kind === "sessions") return { name: "session", id };
-  // A query that is not a member keeps the run open rather than failing the route.
-  const member = runMemberFromSearch(search);
-  return member === undefined ? { name: "run", id } : { name: "run", id, member };
-}
-
 /** Parse only the dashboard's explicit route vocabulary. Unknown and malformed paths are not
  * treated as view ids, which keeps typos and encoded slashes from selecting surprising state. */
 export function viewFromPath(pathname: string, search = ""): View | null {
   const path = pathname.length > 1 ? (pathname.replace(/\/+$/, "") || "/") : pathname;
   // Retired bookmarks show the missing-page state.
-  if (path === "/not-found" || path === "/pods" || path.startsWith("/pods/")) return { name: "not-found" };
+  if (path === "/not-found" || path === "/pods" || path.startsWith("/pods/") ||
+      path === "/runs" || path.startsWith("/runs/")) return { name: "not-found" };
   if (path === "/" || path.toLowerCase() === "/index.html" || path === "/inbox") return sessionsView("inbox", search);
   if (path === "/board") return sessionsView("board", search);
   // /runners was the canonical route before the user-facing Connections rename. Keep existing
@@ -646,7 +593,6 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     const machineId = decodeResourceId(machineMatch[1]!);
     return machineId === null ? null : { name: "runners", section: "machines", machineId };
   }
-  if (path === "/runs") return { name: "runs" };
   if (path === "/automations") return { name: "automations" };
   if (path === "/automations/new") return { name: "automations", editor: { kind: "new" } };
   if (path === "/automations/outbound") return { name: "automations", tab: "outbound" };
@@ -681,7 +627,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/settings") return { name: "settings" };
   // Keep old bookmarks useful: a copy, so a caller that annotates the view cannot change the table.
   if (isRouteAlias(path)) return structuredClone(ROUTE_ALIASES[path]!);
-  const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|reviews|orchestrator|network|storage|experimental|about)$/.exec(path);
+  const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|reviews|orchestrator|network|storage|about)$/.exec(path);
   if (settingsMatch) return { name: "settings", section: settingsMatch[1] as SettingsSection };
   const approvalsPolicyMatch = /^\/settings\/approvals\/~([^/]+)$/.exec(path);
   if (approvalsPolicyMatch) {
@@ -736,8 +682,9 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     const location = locationFromSearch(sourcePath, search);
     return location ? { name: "session", id, location } : null;
   }
-  const match = /^\/(sessions|runs)\/~([^/]+)$/.exec(path);
-  return match ? resourceView(match[1] as "sessions" | "runs", match[2]!, search) : null;
+  const match = /^\/sessions\/~([^/]+)$/.exec(path);
+  const id = match ? decodeResourceId(match[1]!) : null;
+  return id === null ? null : { name: "session", id };
 }
 
 /** Compatibility bridge for notification links created by older service workers. */

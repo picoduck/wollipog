@@ -1,7 +1,5 @@
 import { devices, expect, test, type Locator, type Page } from "@playwright/test";
-import { EXPERIMENTS_STORAGE_KEY } from "../src/experiments.js";
-import { instanceStorageKey } from "../src/instance-storage.js";
-import { EXPERIMENT_OFF_EFFECT, SETTINGS_SECTIONS, destination, type SettingsSection } from "../src/navigation.js";
+import { SETTINGS_SECTIONS, destination, type SettingsSection } from "../src/navigation.js";
 import { DEFAULT_PHONE_BAR } from "../src/rail-preferences.js";
 import { pinWidestFace } from "./font-geometry";
 import { expectTextFits } from "./text-fit";
@@ -31,7 +29,6 @@ const SETTLED: Record<SettingsSection, (page: Page) => Locator> = {
   network: (page) => page.getByRole("switch", { name: "Tailnet Access" }),
   // Eligible Now shows once the organization's policy has loaded.
   storage: (page) => page.getByText("128 sessions, about 604,115 events", { exact: true }),
-  experimental: (page) => page.getByRole("switch").first(),
   about: (page) => page.getByText("0.27.0", { exact: true }),
 };
 
@@ -164,7 +161,7 @@ test("every Settings group is one surface with hairlines between its rows, and a
       }));
       expect(groups.length, `${id}: the section renders its groups`).toBeGreaterThan(0);
       // About draws its own head, the identity header (#3028), which does not name its one group in a
-      // browser, so that group keeps its title; every other section's heading names its only group.
+      // browser, so that group keeps its title; every section's heading names its only group.
       if (groups.length === 1 && id !== "about") expect(groups[0]!.title, `${id}: its only group has no heading`).toBeNull();
       for (const group of groups) {
         const name = `${id} › ${group.title ?? "its group"}`;
@@ -180,14 +177,6 @@ test("every Settings group is one surface with hairlines between its rows, and a
   }
 });
 
-/** Turns an experiment off for the harness's instance before the page reads its flags. */
-async function experimentOff(page: Page, id: "multiAgent") {
-  await page.addInitScript(([key, value]) => window.localStorage.setItem(key, value), [
-    instanceStorageKey(EXPERIMENTS_STORAGE_KEY),
-    JSON.stringify({ v: 2, [id]: false }),
-  ] as const);
-}
-
 /** A destination's row in Appearance › Navigation. */
 function navRow(page: Page, name: string): Locator {
   return page.locator(".rail-nav-row", { has: page.locator(".rail-nav-title", { hasText: new RegExp(`^${name}$`) }) });
@@ -195,19 +184,17 @@ function navRow(page: Page, name: string): Locator {
 
 /**
  * Appearance › Navigation's rows are one fixed grid (#3021): what differs between a normal, a hidden,
- * the required and an experiment-off row is a note in the name cell, so nothing after it moves.
+ * the required row is a note in the name cell, so nothing after it moves.
  */
 for (const theme of THEMES) {
   test(`at 1440px the Navigation editor's digit, arrows and switch sit at one x on every kind of row in ${theme}`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await experimentOff(page, "multiAgent");
     await openSection(page, theme, "appearance");
     await page.getByRole("switch", { name: "Show Automations in Navigation" }).click();
     await expect(page.getByRole("switch", { name: "Show Automations in Navigation" })).toHaveAttribute("aria-checked", "false");
-    await expect(navRow(page, "Multi-Agent Runs").locator(".rail-nav-note")).toHaveText("Off in Experimental");
     await expect(navRow(page, "Sessions").locator(".rail-nav-note")).toHaveText("Always Shown");
 
-    const kinds = { normal: "Projects", hidden: "Automations", required: "Sessions", experimentOff: "Multi-Agent Runs" };
+    const kinds = { normal: "Projects", hidden: "Automations", required: "Sessions" };
     const measured: Record<string, Record<string, number>> = {};
     for (const [kind, name] of Object.entries(kinds)) {
       measured[kind] = await navRow(page, name).evaluate((row) => {
@@ -225,10 +212,9 @@ for (const theme of THEMES) {
         expect(Math.abs(x - measured.normal![part]!), `the ${kind} row's ${part} matches the normal row's`).toBeLessThanOrEqual(0.5);
       }
     }
-    // The digit is the keycap on a shown row and a dash on a hidden or turned-off one.
+    // The digit is the keycap on a shown row and a dash on a hidden one.
     await expect(navRow(page, "Projects").locator(".rail-nav-digit kbd")).toHaveText("3");
     await expect(navRow(page, "Automations").locator(".rail-nav-digit")).toHaveText("–");
-    await expect(navRow(page, "Multi-Agent Runs").locator(".rail-nav-digit")).toHaveText("–");
   });
 }
 
@@ -246,7 +232,7 @@ test.describe("on a touch phone", () => {
       await page.setViewportSize({ width, height: 900 });
       await openSection(page, "dark", "appearance");
       const face = await pinWidestFace(page, page.locator("body"));
-      for (const name of ["Automations", "Multi-Agent Runs", "Archived Sessions", "Usage and Cost"]) {
+      for (const name of ["Automations", "Archived Sessions", "Usage and Cost"]) {
         await page.getByRole("switch", { name: `Show ${name} in Navigation` }).click();
       }
       const titles = page.locator(".rail-nav-title");
@@ -259,10 +245,9 @@ test.describe("on a touch phone", () => {
 
   test("at 390px every Navigation arrow and switch is a 44×44 target", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 900 });
-    await experimentOff(page, "multiAgent");
     await openSection(page, "dark", "appearance");
     const targets = page.locator(".rail-nav-row").locator("[data-move], [role='switch']");
-    expect(await targets.count(), "two arrows and a switch on each of the nine rows").toBe(27);
+    expect(await targets.count(), "two arrows and a switch on each of the eight rows").toBe(24);
     for (const target of await targets.all()) {
       const name = await target.getAttribute("aria-label");
       await target.evaluate((element) => element.scrollIntoView({ block: "center" }));
@@ -299,7 +284,7 @@ test.describe("on a touch phone", () => {
     await page.setViewportSize({ width: 390, height: 900 });
     for (const theme of THEMES) {
       await openSection(page, theme, "appearance");
-      await expect(page.locator(".rail-nav-row")).toHaveCount(9);
+      await expect(page.locator(".rail-nav-row")).toHaveCount(8);
       await expect(page.locator(".rail-nav-digit")).toHaveCount(0);
       await expect(page.locator(".rail-nav-list kbd")).toHaveCount(0);
       const marked = await page.locator(".rail-nav-row", { has: page.locator(".rail-nav-note", { hasText: /^Tab Bar$/ }) })
@@ -314,55 +299,26 @@ async function visibleSectionSentences(page: Page): Promise<string[]> {
   return page.locator(".settings-panel :is(.settings-panel-desc, .settings-group-desc)").filter({ visible: true }).allInnerTexts();
 }
 
-/**
- * Experimental's head is the one place that says what turning a feature off does (#3022), and a
- * phone hides the head's description under its detail bar (§4.2), so there the group says it (#3139).
- */
-test.describe("what turning an experiment off does", () => {
-  for (const width of [1440, 900]) {
-    test(`is said once, in the panel head, at ${width}px`, async ({ page }) => {
-      await page.setViewportSize({ width, height: 900 });
-      for (const theme of THEMES) {
-        await openSection(page, theme, "experimental");
-        expect(await visibleSectionSentences(page), `${theme}: only the head says it`)
-          .toEqual([`Early features. ${EXPERIMENT_OFF_EFFECT}`]);
-      }
-    });
-  }
+test.describe("on a touch phone", () => {
+  const phone = devices["Pixel 7"];
+  test.use({ hasTouch: phone.hasTouch, isMobile: phone.isMobile, userAgent: phone.userAgent });
 
-  test.describe("on a touch phone", () => {
-    const phone = devices["Pixel 7"];
-    test.use({ hasTouch: phone.hasTouch, isMobile: phone.isMobile, userAgent: phone.userAgent });
-
-    test("is said once, above the rows, at 390px", async ({ page }) => {
+  // No section gains a sentence on a phone: each shows the same group intros as at 1440px,
+  // and no panel head description. Appearance › Navigation says what its order sets on each: the
+  // number shortcuts on a desktop, the More sheet on a phone (#3021).
+  test("every section shows the same sentences at 390px as its groups do at 1440px", async ({ page }) => {
+    const NAVIGATION_ON_PHONE: Record<string, string> = {
+      "Order sets the number shortcuts. Hidden pages stay reachable from search.":
+        "Order sets the More sheet. Tab Bar marks the four pages in the bar.",
+    };
+    for (const { id } of SETTINGS_SECTIONS) {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await openSection(page, "dark", id);
+      const desktop = await page.locator(".settings-panel .settings-group-desc").filter({ visible: true }).allInnerTexts();
       await page.setViewportSize({ width: 390, height: 900 });
-      for (const theme of THEMES) {
-        await openSection(page, theme, "experimental");
-        expect(await visibleSectionSentences(page), `${theme}: the group says it once`).toEqual([EXPERIMENT_OFF_EFFECT]);
-        const intro = await page.locator(".settings-panel .settings-group-desc").boundingBox();
-        const firstRow = await page.getByRole("switch").first().boundingBox();
-        expect(intro!.y + intro!.height, `${theme}: above the rows`).toBeLessThanOrEqual(firstRow!.y);
-      }
-    });
-
-    // No other section gains a sentence on a phone: each shows the same group intros as at 1440px,
-    // and no panel head description. Appearance › Navigation says what its order sets on each: the
-    // number shortcuts on a desktop, the More sheet on a phone (#3021).
-    test("every other section shows the same sentences at 390px as its groups do at 1440px", async ({ page }) => {
-      const NAVIGATION_ON_PHONE: Record<string, string> = {
-        "Order sets the number shortcuts. Hidden pages stay reachable from search.":
-          "Order sets the More sheet. Tab Bar marks the four pages in the bar.",
-      };
-      for (const { id } of SETTINGS_SECTIONS) {
-        if (id === "experimental") continue;
-        await page.setViewportSize({ width: 1440, height: 900 });
-        await openSection(page, "dark", id);
-        const desktop = await page.locator(".settings-panel .settings-group-desc").filter({ visible: true }).allInnerTexts();
-        await page.setViewportSize({ width: 390, height: 900 });
-        await openSection(page, "dark", id);
-        expect(await visibleSectionSentences(page), `${id}: unchanged on a phone`)
-          .toEqual(desktop.map((sentence) => NAVIGATION_ON_PHONE[sentence] ?? sentence));
-      }
-    });
+      await openSection(page, "dark", id);
+      expect(await visibleSectionSentences(page), `${id}: unchanged on a phone`)
+        .toEqual(desktop.map((sentence) => NAVIGATION_ON_PHONE[sentence] ?? sentence));
+    }
   });
 });

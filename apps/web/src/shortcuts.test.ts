@@ -49,7 +49,6 @@ test("shortcut matching accepts either primary modifier and rejects modifier dri
   assert.equal(matchesShortcut(key("g", { ctrlKey: true }), "open-review"), false);
   assert.equal(matchesShortcut(key("?", { shiftKey: true }), "shortcut-reference"), true);
   assert.equal(matchesShortcut(key("?"), "shortcut-reference"), false);
-  assert.equal(matchesShortcut(key("Enter", { ctrlKey: true }), "submit-run"), true);
   assert.equal(matchesShortcut(key("Escape", { ctrlKey: true }), "exit-terminal"), true);
   assert.equal(matchesShortcut(key("Escape", { metaKey: true }), "exit-terminal"), false,
     "terminal focus exits with literal Control, not Command");
@@ -261,7 +260,6 @@ test("the collision check reports a contextual binding that shadows Search on on
     : definition);
   assert.deepEqual(coActiveCollisions(before, false), ["search / session-reading-previous-session: Ctrl+K"]);
   assert.deepEqual(coActiveCollisions(before, true), []);
-  // Scopes that are never live together may reuse keys: the Run and Follow Up dialogs both submit.
 });
 
 test("PR4 rail, search, create, and focus-zone shortcuts replace the retired sidebar binding", () => {
@@ -270,11 +268,10 @@ test("PR4 rail, search, create, and focus-zone shortcuts replace the retired sid
     ["navigate-assistants", "2"],
     ["navigate-automations", "3"],
     ["navigate-projects", "4"],
-    ["navigate-runs", "5"],
-    ["navigate-connections", "6"],
-    ["navigate-skills", "7"],
-    ["navigate-archived", "8"],
-    ["navigate-usage", "9"],
+    ["navigate-connections", "5"],
+    ["navigate-skills", "6"],
+    ["navigate-archived", "7"],
+    ["navigate-usage", "8"],
     ["toggle-sessions-view", "b"],
     ["focus-inbox-search", "/"],
     ["new-session", "c"],
@@ -290,7 +287,6 @@ test("global rail numbering stays aligned with its navigation shortcuts", () => 
   const shortcutIdByView = {
     inbox: "navigate-inbox",
     projects: "navigate-projects",
-    runs: "navigate-runs",
     automations: "navigate-automations",
     usage: "navigate-usage",
     runners: "navigate-connections",

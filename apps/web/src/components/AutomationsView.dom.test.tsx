@@ -24,7 +24,6 @@ import type {
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { viewPath, type View, type ViewNavigation } from "../navigation.js";
-import { setExperimentFlag } from "../experiments.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 
 type FeedbackContextValue = React.ContextType<typeof FeedbackContext>;
@@ -171,7 +170,6 @@ function snapshot(runnerViews = runners): UiSnapshotMessage {
     runners: runnerViews,
     boxes: [],
     sessions: snapshotSessions,
-    runs: [],
   };
 }
 

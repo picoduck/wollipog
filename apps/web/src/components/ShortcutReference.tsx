@@ -12,7 +12,6 @@ import {
   type ShortcutScope,
 } from "../shortcuts.js";
 import { railDigits, visibleRailViews } from "../rail-preferences.js";
-import { useExperiments } from "../use-experiments.js";
 import { useRailPreferences } from "../use-rail-preferences.js";
 
 function shortcutGroupId(group: string): string {
@@ -90,13 +89,11 @@ export function ShortcutReference({
   const filterRef = useRef<HTMLInputElement>(null);
   const phone = useIsMobile();
   const oneColumn = useIsTabletOrSmaller();
-  // A switched-off experiment's bindings are dead — their handlers live inside the hidden
   // surfaces — so the reference must say so rather than advertise a working key.
-  const { flags: experimentFlags } = useExperiments();
   // Navigation digits derive from the visible rail order (#385); the reference reads the same
   // derived mapping as the rail keycaps and the key handler, so the three cannot disagree.
   const railPreferences = useRailPreferences();
-  const derivedDigits = railDigits(visibleRailViews(railPreferences, experimentFlags));
+  const derivedDigits = railDigits(visibleRailViews(railPreferences));
   const keys = (definition: ShortcutDefinition) => {
     const railView = railViewForShortcut(definition.id);
     return railView === null ? shortcutDisplay(definition.id) : derivedDigits.get(railView) ?? "—";
@@ -109,7 +106,6 @@ export function ShortcutReference({
       filesSupported,
       conversationSteeringSupported,
       turnInterruptionSupported,
-      experimentFlags,
       hiddenRailViews: railPreferences.hidden,
     },
     keys,

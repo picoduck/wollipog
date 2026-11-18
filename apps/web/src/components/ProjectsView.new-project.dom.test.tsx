@@ -168,7 +168,7 @@ async function render(client: Partial<ApiClient>): Promise<{ body: HTMLElement; 
         sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
         createProjectLocations: true, worktreeSetupConfig: true,
       },
-      runners: [runner], boxes: [], sessions: [], runs: [], projects: [alpha],
+      runners: [runner], boxes: [], sessions: [], projects: [alpha],
     } as UiSnapshotMessage);
   });
   await settle();

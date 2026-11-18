@@ -22,7 +22,6 @@ function s(over: Partial<SessionView>): SessionView {
     title: "Fix the login bug",
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,

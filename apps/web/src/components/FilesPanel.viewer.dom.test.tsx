@@ -243,7 +243,7 @@ async function mount(initial?: SourceLocation, editors: EditorInfo[] = []): Prom
   await act(async () => socket.push({
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [runnerWith(editors)], boxes: [], projects: [], sessions: [session], runs: [],
+    runners: [runnerWith(editors)], boxes: [], projects: [], sessions: [session]
   }));
   await settle();
   return {

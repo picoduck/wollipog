@@ -181,7 +181,6 @@ function session(id: string, lastEventAt: number, overrides: Partial<SessionView
     title: `Session ${id}`,
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -215,7 +214,6 @@ function snapshot(sessions: SessionView[]): UiSnapshotMessage {
     runners: [],
     boxes: [],
     sessions,
-    runs: [],
   };
 }
 
@@ -407,7 +405,6 @@ test("InboxView preserves the server-authoritative Project count when reminders 
       sessions: [session("project-session", 10, { projectId: project.id })],
       projects: [project],
       reminders: [],
-      runs: [],
     });
   });
   const projectTab = [...container.querySelectorAll<HTMLElement>(".tabs-bar .tab")]
@@ -471,7 +468,6 @@ test("Active and Snoozed badges follow the selected Project split and live remin
       sessions: [alphaActive, alphaSnoozed, betaOne, betaTwo, betaSnoozed],
       projects: [alpha, beta],
       reminders: [reminder(alphaSnoozed.id), reminder(betaSnoozed.id)],
-      runs: [],
     });
   });
   assert.equal(selectedTabCount(container), "3");
@@ -650,7 +646,6 @@ test("group tabs draw blocked and stalled counts as aria-hidden badges and name 
         session("beta-idle", 10, { projectId: beta.id }),
       ],
       projects: [alpha, beta],
-      runs: [],
     });
   });
   const tab = (name: string) => [...container.querySelectorAll<HTMLElement>(".tabs-bar .tab")]
@@ -729,7 +724,6 @@ test("two groups with one name each name their machine in the tab, All Groups an
         session("api", 1, { projectId: "api", runnerId: "runner-a" }),
       ],
       projects: [project("docs-a", "Docs Site", "runner-a"), project("docs-b", "Docs Site", "runner-b"), project("api", "API", "runner-a")],
-      runs: [],
     });
   });
 
@@ -812,7 +806,6 @@ test("a Project's archive confirmation lists its sessions from Active and Snooze
       sessions: [active, snoozed],
       projects: [alpha],
       reminders: [reminder(snoozed.id)],
-      runs: [],
     });
   });
   const alphaTab = [...container.querySelectorAll<HTMLButtonElement>(".tabs-bar .tab")]
@@ -881,7 +874,6 @@ test("the tab the URL names survives widening from a phone to a desktop that rem
       boxes: [],
       sessions: [session("alpha-one", 20, { projectId: "alpha" }), session("beta-one", 10, { projectId: "beta" })],
       projects: [project("alpha", "Alpha"), project("beta", "Beta")],
-      runs: [],
     });
   });
   const tab = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".tabs-bar .tab")]
@@ -969,7 +961,6 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
       boxes: [],
       sessions: [omitted, ordinary, orphaned, watchdog, failed, input, unsnoozed],
       reminders: pending,
-      runs: [],
     });
   });
 
@@ -1275,7 +1266,6 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
       boxes: [],
       sessions: [session("session-reminder", 10, { status: "input_required" })],
       reminders: [original],
-      runs: [],
     });
   });
 
@@ -1395,7 +1385,6 @@ test("a 409 reconciles the open Snooze dialog without WebSocket delivery", async
       boxes: [],
       sessions: [session("session-reminder", 10, { status: "input_required" })],
       reminders: [original],
-      runs: [],
     });
   });
   await act(async () => { snoozedToggle(container).click(); });
@@ -2890,7 +2879,6 @@ test("the setup suggestion is one notice above an eligible Project's list, never
       ],
       projects: [project("payments", "Payments Service"), project("docs", "Docs Site")],
       worktreeSetupNoticeDismissals: [],
-      runs: [],
     });
   });
   const setupNotices = () => [...container.querySelectorAll('[aria-label^="Set Up"]')];
@@ -2982,7 +2970,6 @@ test("the list holds one notice: a machine sign-in first, then the Project's set
       })],
       projects: [project],
       worktreeSetupNoticeDismissals: [],
-      runs: [],
     });
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
@@ -3406,7 +3393,6 @@ async function mountPhoneBar(name: string, options: {
       ],
       projects: [project("alpha", "Alpha", 3), project("beta", "Beta", 2)],
       reminders: [reminder("beta-snoozed")],
-      runs: [],
     });
   });
   const body = domWindow.document.body as unknown as HTMLElement;

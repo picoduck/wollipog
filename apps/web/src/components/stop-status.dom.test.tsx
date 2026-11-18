@@ -90,7 +90,7 @@ function snapshot(runnerStatus: "online" | "offline" | "absent", candidate: Sess
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
     runners: runnerStatus === "absent" ? [] : [runner(runnerStatus)],
-    boxes: [], projects: [], sessions: [candidate], runs: [],
+    boxes: [], projects: [], sessions: [candidate]
   } as unknown as UiSnapshotMessage;
 }
 

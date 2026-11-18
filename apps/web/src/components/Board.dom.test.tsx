@@ -222,7 +222,7 @@ async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESS
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
-      runners, boxes: [], sessions, runs: [],
+      runners, boxes: [], sessions
     });
   });
   const card = (id: string) => {

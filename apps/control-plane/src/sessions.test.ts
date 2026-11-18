@@ -18,7 +18,6 @@ import type {
   type ForgeDecisionActionResultMessage,
   ResourceScope,
   RunnerMetadata,
-  RunView,
   SessionEvent,
   SessionNamingRunnerErrorCode,
   SessionReminderView,
@@ -439,7 +438,6 @@ class FakeHub {
   suppressedReminderEvents: SessionEvent[] = [];
   sessionEventsResetCalls: { sessionId: string; events: SessionEvent[]; eventEpoch?: number }[] = [];
   sessionRemovedCalls: string[] = [];
-  runChangedCalls: RunView[] = [];
   projectChangedByIdCalls: string[] = [];
   runnerChangedCalls: string[] = [];
   deliveryHandler?: (runnerId: string, msg: ControlPlaneToRunner) => boolean;
@@ -564,11 +562,6 @@ class FakeHub {
   sessionRemoved(sessionId: string): void {
     this.calls.push({ method: "sessionRemoved", args: [sessionId] });
     this.sessionRemovedCalls.push(sessionId);
-  }
-
-  runChanged(run: RunView): void {
-    this.calls.push({ method: "runChanged", args: [run] });
-    this.runChangedCalls.push(run);
   }
 
   projectChanged(_project: ProjectView): void {}
@@ -1216,18 +1209,6 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(wrongHarness.status, 409);
     assert.match(wrongHarness.error ?? "", /child harness is fixed by campaign policy/,
       "the complete fixed harness/model/effort policy is checked before child launch");
-    const wrongRunHarness = svc.createRun({
-      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Bypass through a run",
-    }, { parentSessionId: parent.id });
-    assert.equal(wrongRunHarness.status, 409);
-    assert.match(wrongRunHarness.error ?? "", /child harness is fixed by campaign policy/);
-    const wrongRunPair = svc.createRun({
-      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [CODEX_APP_AGENT_ID],
-      task: "Bypass the fixed pair", config: { model: "image-model", effort: "low" },
-    }, { parentSessionId: parent.id });
-    assert.equal(wrongRunPair.status, 409);
-    assert.match(wrongRunPair.error ?? "", /child model is fixed by campaign policy/);
-    assert.equal(db.listRuns().length, 0, "rejected campaign fan-outs are atomic");
     assert.equal(svc.createSession({
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
       config: { model: "image-model", effort: "low" },
@@ -4047,8 +4028,8 @@ test("session spawn policy parks the exact child request and creates only after 
   }
 });
 
-/** A live parent asking for approval to create one child, or one run fan-out. */
-function pendingSpawnFixture(kind: "session" | "run") {
+/** A live parent asking for approval to create one child. */
+function pendingSpawnFixture() {
   const harness = makeHarness();
   const { db, svc } = harness;
   const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
@@ -4058,52 +4039,44 @@ function pendingSpawnFixture(kind: "session" | "run") {
     enabled: true, scope: { toolName: "wollipog.create_session" },
   }).ok);
   const sessionRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "Requested Child" };
-  const batchRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review", title: "Requested Batch" };
-  const create = (): { ok: boolean; status: number; error?: string } => kind === "session"
-    ? svc.createSession(sessionRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id })
-    : svc.createRun({ ...batchRequest, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id });
+  const create = () => svc.createSession(sessionRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id });
   const asked = create();
   assert.equal(asked.status, 428, asked.error);
   const requestId = db.getSession(parent.id)!.pendingApproval!.requestId;
   const approval = () => db.getPolicyHookApproval(parent.id, requestId)!;
-  return { ...harness, parent, create, requestId, approval, sessionRequest, children: kind === "session" ? 1 : 2 };
+  return { ...harness, parent, create, requestId, approval, sessionRequest };
 }
 
-for (const kind of ["session", "run"] as const) {
-  test(`a pending ${kind} spawn approval survives a 60 s gap between identical calls and creates only on the next one`, () => {
-    const { db, svc, hub, parent, create, requestId, approval, sessionRequest, children } = pendingSpawnFixture(kind);
-    try {
-      if (kind === "session") {
-        assert.equal(requestId, `spawn_${createHash("sha256").update(canonicalAutomationCommandJson({
-          request: sessionRequest,
-          parentSessionId: parent.id,
-          ordinal: 0,
-        })).digest("hex")}`, "the request fingerprint is the canonical form of the request");
-      }
-      const returnedAt = approval().lastPolledAt;
-      assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + 60_000), 0,
-        "sixty seconds of agent turn-around does not abandon a live parent's spawn approval");
-      assert.equal(approval().status, "pending");
-      assert.equal(create().status, 428, "the identical call still finds the approval pending");
-      assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, requestId);
+test(`a pending child spawn approval survives a 60 s gap between identical calls and creates only on the next one`, () => {
+  const { db, svc, hub, parent, create, requestId, approval, sessionRequest } = pendingSpawnFixture();
+  try {
+    assert.equal(requestId, `spawn_${createHash("sha256").update(canonicalAutomationCommandJson({
+      request: sessionRequest,
+      parentSessionId: parent.id,
+      ordinal: 0,
+    })).digest("hex")}`, "the request fingerprint is the canonical form of the request");
+    const returnedAt = approval().lastPolledAt;
+    assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + 60_000), 0,
+      "sixty seconds of agent turn-around does not abandon a live parent's spawn approval");
+    assert.equal(approval().status, "pending");
+    assert.equal(create().status, 428, "the identical call still finds the approval pending");
+    assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, requestId);
 
-      const launched = hub.sentOfType("start_session").length;
-      const refreshedAt = approval().lastPolledAt;
-      assert.ok(svc.approve(parent.id, requestId, "allow").ok);
-      assert.equal(svc.reconcilePolicyHookTimeouts(refreshedAt + 60_000), 0);
-      assert.equal(db.childSessionAllocations(parent.id).count, 0, "approval between calls creates no child");
-      assert.equal(hub.sentOfType("start_session").length, launched);
-      assert.equal(db.listRuns().length, 0);
+    const launched = hub.sentOfType("start_session").length;
+    const refreshedAt = approval().lastPolledAt;
+    assert.ok(svc.approve(parent.id, requestId, "allow").ok);
+    assert.equal(svc.reconcilePolicyHookTimeouts(refreshedAt + 60_000), 0);
+    assert.equal(db.childSessionAllocations(parent.id).count, 0, "approval between calls creates no child");
+    assert.equal(hub.sentOfType("start_session").length, launched);
 
-      const created = create();
-      assert.ok(created.ok, created.error);
-      assert.equal(db.childSessionAllocations(parent.id).count, children, "the identical call creates exactly once");
-      assert.equal(hub.sentOfType("start_session").length, launched + children);
-      assert.equal(create().status, 428, "the approval authorized one creation only");
-      assert.equal(db.childSessionAllocations(parent.id).count, children);
-    } finally { db.close(); }
-  });
-}
+    const created = create();
+    assert.ok(created.ok, created.error);
+    assert.equal(db.childSessionAllocations(parent.id).count, 1, "the identical call creates exactly once");
+    assert.equal(hub.sentOfType("start_session").length, launched + 1);
+    assert.equal(create().status, 428, "the approval authorized one creation only");
+    assert.equal(db.childSessionAllocations(parent.id).count, 1);
+  } finally { db.close(); }
+});
 
 /** One child request as a REST client orders it and as the MCP `create_session` tool orders it,
  * with a nested object whose keys are reordered too. */
@@ -4442,7 +4415,7 @@ function enableOrchestratorFixture(db: ControlPlaneDb): void {
   db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
 }
 
-test("human-created Orchestrators authorize direct and batched children for every ownership audience", () => {
+test("human-created Orchestrators authorize multiple children for every ownership audience", () => {
   for (const audience of ["organization", "user"] as const) {
     const { db, svc } = makeHarness();
     try {
@@ -4464,14 +4437,10 @@ test("human-created Orchestrators authorize direct and batched children for ever
       });
       assert.equal(child.ok, true, child.error);
       assert.equal(child.data!.parentSessionId, parent.id);
-      const run = svc.createRun({
-        runnerId: RUNNER_ID,
-        workspaceId: WORKSPACE_ID,
-        agentIds: [AGENT_ID],
-        task: "Inspect policy consistency",
-      }, { parentSessionId: parent.id });
-      assert.equal(run.ok, true, run.error);
-      assert.equal(run.data!.sessions[0]!.parentSessionId, parent.id);
+      const second = svc.createSession({ ...request, title: "Inspect Policy Consistency" },
+        undefined, undefined, false, false, false, { parentSessionId: parent.id });
+      assert.ok(second.ok, second.error);
+      assert.equal(second.data!.parentSessionId, parent.id);
       const decisions = svc.governanceAudit(parent.id).filter((entry) => entry.stage === "policy_decision");
       assert.equal(decisions.length, 2);
       assert.ok(decisions.every((entry) =>
@@ -5040,152 +5009,6 @@ test("a live owner can raise the concurrent child cap and restarts consume the s
     assert.equal(svc.restart(child.id).status, 409, "restart cannot exceed the parent's live cap");
   } finally { db.close(); }
 });
-
-for (const kind of ["run"] as const) {
-  test(`agent-created ${kind} inherits its parent Project and applies Project defaults`, () => {
-    const { db, svc, hub } = makeHarness();
-    try {
-      const owner = db.localIdentityContext();
-      const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
-      const project = db.createProject({ name: "Parent Allowances", scope });
-      const location = db.addProjectLocation(project.id, { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID });
-      db.updateProject(project.id, { childSessionDefaults: { costBudgetUsd: 2.5, maxToolCalls: 30 } });
-      const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
-        projectId: project.id, projectLocationId: location.id }, undefined, scope).data!;
-      db.updateSessionStatus(parent.id, "running", Date.now());
-      const create = (overrides: { costBudgetUsd?: number; maxToolCalls?: number; config?: { maxChildSessions: number } } = {}) => {
-        const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review", ...overrides };
-        return svc.createRun({ ...request, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id });
-      };
-      const before = hub.sentOfType("start_session").length;
-      hub.online = false;
-      const offline = create();
-      assert.equal(offline.status, 409);
-      assert.match(offline.error ?? "", /runner .* is offline/);
-      hub.online = true;
-      for (const invalid of [{ costBudgetUsd: -1 }, { maxToolCalls: -1 }, { maxToolCalls: 0.5 }, { config: { maxChildSessions: 65 } }]) {
-        assert.equal(create(invalid).ok, false);
-        assert.equal(db.listRuns().length, 0);
-        assert.equal(db.childSessionAllocations(parent.id).count, 0);
-        assert.equal(hub.sentOfType("start_session").length, before);
-      }
-      const created = create();
-      assert.ok(created.ok, created.error);
-      for (const child of created.data!.sessions) {
-        assert.equal(child.costBudgetUsd, 2.5);
-        assert.equal(child.maxToolCalls, 30);
-        assert.equal(child.projectId, project.id);
-        assert.equal(child.projectLocationId, location.id);
-        assert.deepEqual(db.sessionScope(child.id), scope);
-        db.updateSessionStatus(child.id, "completed", Date.now());
-      }
-      const unlimited = create({ costBudgetUsd: 0, maxToolCalls: 0 });
-      assert.ok(unlimited.ok, unlimited.error);
-      for (const child of unlimited.data!.sessions) {
-        assert.equal(child.costBudgetUsd, null, "explicit zero opts out of an unbounded parent's Project default");
-        assert.equal(child.maxToolCalls, null);
-      }
-      db.updateSessionStatus(parent.id, "completed", Date.now());
-      assert.equal(create().status, 409);
-    } finally { db.close(); }
-  });
-
-  test(`agent-created ${kind} preflights the whole batch and reserves each child's allowance`, () => {
-    const { db, svc, hub } = makeHarness();
-    try {
-      const owner = db.localIdentityContext();
-      const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
-        projectId: null, config: { costBudgetUsd: 20, maxToolCalls: 400, maxChildSessions: 3 } }, undefined,
-      { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } }).data!;
-      db.updateSessionStatus(parent.id, "running", Date.now());
-      const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review" };
-      const create = () => svc.createRun({ ...request, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id });
-      const before = hub.sentOfType("start_session").length;
-      const created = create();
-      assert.ok(created.ok, created.error);
-      assert.equal(created.data!.sessions.length, 2);
-      for (const child of created.data!.sessions) {
-        assert.equal(child.parentSessionId, parent.id);
-        assert.ok(child.costBudgetUsd! > 0 && child.costBudgetUsd! <= 20 / 3);
-        assert.equal(child.maxToolCalls, 133);
-        const start = hub.sentOfType("start_session").find((message) => message.spec.sessionId === child.id)!;
-        assert.equal(start.spec.config.costBudgetUsd, child.costBudgetUsd);
-        assert.equal(start.spec.config.maxToolCalls, child.maxToolCalls);
-      }
-      assert.equal(db.childSessionAllocations(parent.id).count, 2);
-      assert.equal(hub.sentOfType("start_session").length, before + 2);
-      const denied = create();
-      assert.equal(denied.status, 409);
-      assert.match(denied.error!, /remaining live child slot/);
-      assert.equal(db.listRuns().length, 1, "a rejected fan-out must not persist an empty or partial run");
-      assert.equal(db.childSessionAllocations(parent.id).count, 2);
-      assert.equal(hub.sentOfType("start_session").length, before + 2);
-    } finally { db.close(); }
-  });
-
-  test(`agent-created ${kind} waits for exact batch approval without launching workers`, () => {
-    const { db, svc, hub } = makeHarness();
-    try {
-      const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
-      db.updateSessionStatus(parent.id, "running", Date.now());
-      assert.ok(svc.upsertGovernancePolicy({ policyId: "ask-batch", name: "Review Child Sessions",
-        effect: "ask", priority: 100, enabled: true, scope: { toolName: "wollipog.create_session" } }).ok);
-      const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review", title: "Requested Batch" };
-      const create = (task = request.task) => svc.createRun({ ...request, task, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id });
-      const before = hub.sentOfType("start_session").length;
-      assert.equal(create().status, 428);
-      const approval = db.getSession(parent.id)!.pendingApproval!;
-      assert.match(approval.title, /2 children: Requested Batch/);
-      assert.equal(create().status, 428);
-      assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, approval.requestId);
-      assert.equal(db.listRuns().length, 0);
-      assert.equal(db.childSessionAllocations(parent.id).count, 0);
-      assert.equal(hub.sentOfType("start_session").length, before);
-      assert.ok(svc.approve(parent.id, approval.requestId, "allow").ok);
-      assert.equal(create("Different task").status, 428, "approval cannot authorize a changed task");
-      const created = create();
-      assert.ok(created.ok, created.error);
-      for (const child of created.data!.sessions) {
-        assert.equal(child.parentSessionId, parent.id);
-        assert.equal(child.costBudgetUsd, null);
-        assert.equal(child.maxToolCalls, null);
-      }
-      assert.equal(db.childSessionAllocations(parent.id).count, 2);
-    } finally { db.close(); }
-  });
-}
-
-for (const kind of ["run"] as const) {
-  test(`agent-created ${kind} releases its whole fan-out from the concurrent child cap`, () => {
-    const { db, svc } = makeHarness();
-    try {
-      const owner = db.localIdentityContext();
-      const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
-      const parent = svc.createSession({
-        runnerId: RUNNER_ID,
-        workspaceId: WORKSPACE_ID,
-        agentId: AGENT_ID,
-        config: { maxChildSessions: 2 },
-      }, undefined, scope).data!;
-      db.updateSessionStatus(parent.id, "running", Date.now());
-      const create = () => svc.createRun({
-            runnerId: RUNNER_ID,
-            workspaceId: WORKSPACE_ID,
-            agentIds: [AGENT_ID, CODEX_APP_AGENT_ID],
-            task: "Build and review",
-          }, { parentSessionId: parent.id });
-      const first = create();
-      assert.ok(first.ok, first.error);
-      assert.equal(db.childSessionAllocations(parent.id).liveCount, 2);
-      assert.match(create().error ?? "", /0 remaining live child slots/);
-      for (const child of first.data!.sessions) db.updateSessionStatus(child.id, "completed", Date.now());
-      const second = create();
-      assert.ok(second.ok, second.error);
-      assert.equal(db.childSessionAllocations(parent.id).liveCount, 2);
-      assert.equal(db.childSessionAllocations(parent.id).count, 4);
-    } finally { db.close(); }
-  });
-}
 
 /** Create a session through the service (runner online) and return its id. */
 function seedSession(
@@ -10952,52 +10775,6 @@ test("a restart keeps the session's account whatever the policy says now (#4353)
   assert.equal(db.getSession(created.data.id)?.providerAccountId, "first-person-example-com");
 });
 
-test("a run's members resolve accounts the way a session does, before anything is created (#4353)", () => {
-  const { db, hub, svc, request, setAccounts, meta } = priorityHarness();
-  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID], task: "Compare" });
-  assert.ok(run.ok && run.data, run.error);
-  const byAgent = new Map(run.data.sessions.map((session) => [session.agentId, session]));
-  assert.equal(byAgent.get(AGENT_ID)?.providerAccountId, "first-person-example-com", "the policy applies to its provider");
-  assert.equal(byAgent.get(AGENT_ID)?.providerAccountSelection?.source, "priority");
-  assert.equal(byAgent.get(CODEX_APP_AGENT_ID)?.providerAccountId, "codex-account", "never across providers");
-  const specs = hub.sentOfType("start_session").slice(-2).map((message) => message.spec.providerAccountId).sort();
-  assert.deepEqual(specs, ["codex-account", "first-person-example-com"]);
-
-  setAccounts(meta.providerAccounts!.map((account) => account.provider === "claude" ? { ...account, billing: "api" } : account));
-  const runsBefore = db.listRuns().length;
-  const refused = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID], task: "Compare" });
-  assert.equal(refused.status, 409);
-  assert.equal(refused.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED, "API credits are never spent automatically");
-  assert.equal(db.listRuns().length, runsBefore, "one member without an account refuses the whole run");
-});
-
-test("a run with no ready ranked account gets the structured refusal, not an unknown agent (#4353)", () => {
-  const { db, svc, meta } = priorityHarness();
-  meta.agents = meta.agents.map((agent) => agent.id === AGENT_ID
-    ? { ...agent, providerAccountReadiness: { defaultAuthStatus: "unauthenticated", readyAccountIds: [] } } : agent);
-  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Compare" });
-  assert.equal(run.status, 409, run.error);
-  assert.equal(run.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
-  assert.equal(db.listRuns().length, 0);
-});
-
-test("a run honors a fixed Default Account, which it used to ignore (#4353)", () => {
-  const { db, hub, svc } = makeHarness();
-  const meta = runnerMeta();
-  meta.providerAccounts = [
-    { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
-    { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
-  ];
-  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-  db.setMachineProviderAccountDefault(RUNNER_ID, "claude", "personal", 0, Date.now());
-  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Check" });
-  assert.ok(run.ok && run.data, run.error);
-  assert.equal(run.data.sessions[0]?.providerAccountId, "personal");
-  assert.equal(run.data.sessions[0]?.providerAccountSelection?.source, "fixed_default");
-  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.providerAccountId, "personal");
-});
-
 test("a child session resolves its account the same way (#4353)", () => {
   const { db, svc, request } = priorityHarness();
   const parent = svc.createSession(request);
@@ -11153,68 +10930,6 @@ test("an agent names an account by reference, and only one it could actually use
   assert.ok(asChild(cooling.accountRef).ok);
 });
 
-test("a run names an account per member, under the same rules as a session (#4353)", () => {
-  const { db, hub, svc, meta, setAccounts } = priorityHarness();
-  const run = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID], task: "Do it" };
-
-  // A named member overrides the policy; the other still follows it, and each records which applied.
-  const named = svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "second" } });
-  assert.ok(named.ok && named.data, named.error);
-  const member = (id: string) => named.data!.sessions.find((session) => session.agentId === id)!;
-  assert.equal(member(AGENT_ID).providerAccountId, "second");
-  assert.equal(member(AGENT_ID).providerAccountSelection?.source, "explicit");
-  assert.equal(member(AGENT_ID).providerAccountSelection?.revalidateAtLaunch, undefined, "a named account is not rechecked as a policy's choice");
-  assert.notEqual(member(CODEX_APP_AGENT_ID).providerAccountSelection?.source, "explicit");
-  const spec = hub.sentOfType("start_session").find((start) => start.spec.sessionId === member(AGENT_ID).id)!.spec;
-  assert.equal(spec.providerAccountId, "second", "the runner receives the named account");
-  assert.equal(db.getSession(member(AGENT_ID).id)?.providerAccountId, "second", "and a retry finds it on the session");
-
-  // Wrong provider, unknown account, a key that is no member, a bad shape: refused, and nothing starts.
-  const before = db.listRuns().length;
-  const wrongProvider = svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "codex-account" } });
-  assert.equal(wrongProvider.status, 409);
-  assert.match(wrongProvider.error ?? "", new RegExp(`^${AGENT_ID}: The chosen provider account is not available`, "u"));
-  assert.equal(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "no-such-account" } }).status, 409);
-  const stranger = svc.createRun({ ...run, providerAccountIds: { stranger: "second" } });
-  assert.equal(stranger.status, 400);
-  assert.match(stranger.error ?? "", /names 'stranger'/u);
-  assert.equal(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "not valid!" } }).status, 400);
-  assert.equal(svc.createRun({ ...run, providerAccountIds: ["second"] as unknown as Record<string, string> }).status, 400);
-  assert.equal(db.listRuns().length, before, "a refused account starts no member");
-
-  // With every ranked account used up the run has no account of its own, and naming one is the way past.
-  setAccounts(meta.providerAccounts!.map((account) => account.provider === "claude" ? { ...account, selectionCooldownUntil: Date.now() + 60_000 } : account));
-  const refused = svc.createRun(run);
-  assert.equal(refused.errorDetails?.code, "PROVIDER_ACCOUNT_CHOICE_REQUIRED", refused.error);
-  assert.equal(refused.providerAccountSelection?.refusal, "no_eligible_account");
-  assert.ok(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "third" } }).ok, "a person's explicit choice overrides a cooldown");
-});
-
-test("an agent names a run member's account by reference, and only one it could use (#4353)", () => {
-  const { db, svc, request, setAccounts, meta } = priorityHarness();
-  const owner = db.localIdentityContext();
-  const parent = svc.createSession(request, undefined, { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } });
-  assert.ok(parent.ok && parent.data, parent.error);
-  db.updateSessionStatus(parent.data.id, "running", Date.now());
-  const context = { parentSessionId: parent.data.id };
-  const run = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Do it" };
-  const refOf = (position: number) => svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, parentSessionId: context.parentSessionId })
-    .data!.choices!.find((choice) => choice.position === position)!.accountRef;
-
-  const named = svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: refOf(2) } }, context);
-  assert.ok(named.ok && named.data, named.error);
-  assert.equal(named.data.sessions[0]?.providerAccountId, "second");
-
-  setAccounts(meta.providerAccounts!.map((account) => account.id === "second" ? { ...account, authStatus: "unauthenticated" } : account));
-  const signedOut = svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: refOf(2) } }, context);
-  assert.equal(signedOut.status, 409);
-  assert.match(signedOut.error ?? "", /needs sign-in, so an agent can't start a session with it/u);
-  assert.ok(!(signedOut.error ?? "").includes("example.com"), signedOut.error);
-  const codexRef = svc.providerAccountSelectionPreview(RUNNER_ID, { provider: "codex" }).data!.choices![0]!.accountRef;
-  assert.match(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: codexRef } }, context).error ?? "", /not available for the selected agent/u);
-  assert.ok(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "second" } }).ok, "a person keeps the sign-in decision");
-});
-
 test("a launch and its preview follow the project a Location infers, not only a chosen one (#4353)", () => {
   const { db, svc, request, meta } = priorityHarness();
   // A registered workspace has one Location, so a session naming no project joins that one.
@@ -11228,9 +10943,6 @@ test("a launch and its preview follow the project a Location infers, not only a 
   assert.equal(inferred.providerAccountSelection?.refusal, "account_memory", inferred.error);
   const preview = svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, workspaceId: WORKSPACE_ID });
   assert.equal(preview.data?.refusal, "account_memory", "the preview says what the launch will say");
-  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Do it" });
-  assert.equal(run.providerAccountSelection?.refusal, "account_memory", run.error);
-
   // No Project is a choice: nothing is inferred on either side.
   const noProject = svc.providerAccountSelectionPreview(RUNNER_ID, { agentId: AGENT_ID, workspaceId: WORKSPACE_ID, projectId: null });
   assert.equal(noProject.data?.status, "selected");
@@ -11657,7 +11369,7 @@ test("createSession fails 404 for an unknown agent", () => {
   assert.equal(res.status, 404);
 });
 
-test("explicitly unavailable agents cannot create sessions or runs", () => {
+test("explicitly unavailable agents cannot create sessions", () => {
   const { db, hub, svc } = makeHarness();
   const unavailable = runnerMeta().agents.map((agent) =>
     agent.id === CODEX_APP_AGENT_ID
@@ -11689,16 +11401,7 @@ test("explicitly unavailable agents cannot create sessions or runs", () => {
   assert.equal(session.ok, false);
   assert.equal(session.status, 404);
 
-  const run = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentIds: [CODEX_APP_AGENT_ID],
-    task: "try the unavailable target",
-  });
-  assert.equal(run.ok, false);
-  assert.equal(run.status, 404);
   assert.equal(db.listSessions({ includeArchived: true }).length, 0);
-  assert.equal(db.listRuns().length, 0);
   assert.equal(hub.sentOfType("start_session").length, 0);
 });
 
@@ -11707,88 +11410,6 @@ test("createSession fails 404 for an unknown workspace", () => {
   const res = svc.createSession({ runnerId: RUNNER_ID, workspaceId: "nope", agentId: AGENT_ID });
   assert.equal(res.ok, false);
   assert.equal(res.status, 404);
-});
-
-test("createRun preserves an exact Project Location for every member and keeps legacy inference", () => {
-  const { svc, db } = makeHarness();
-  const location = db.findProjectLocation(RUNNER_ID, WORKSPACE_ID)!;
-
-  const explicit = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    projectId: location.projectId,
-    projectLocationId: location.id,
-    agentIds: [AGENT_ID, CODEX_APP_AGENT_ID],
-    task: "Build in this Project",
-  });
-  assert.ok(explicit.ok && explicit.data);
-  for (const session of explicit.data!.sessions) {
-    assert.equal(session.projectId, location.projectId);
-    assert.equal(session.projectLocationId, location.id);
-  }
-
-  const legacy = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentIds: [AGENT_ID],
-    task: "Legacy exact-Location inference",
-  });
-  assert.equal(legacy.data!.sessions[0]!.projectId, location.projectId);
-  assert.equal(legacy.data!.sessions[0]!.projectLocationId, location.id);
-});
-
-test("createRun rejects incomplete Project identity before persisting a run", () => {
-  const { svc, db } = makeHarness();
-  const location = db.findProjectLocation(RUNNER_ID, WORKSPACE_ID)!;
-
-  const result = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    projectId: location.projectId,
-    agentIds: [AGENT_ID],
-    task: "Invalid Project assignment",
-  });
-
-  assert.equal(result.status, 400);
-  assert.equal(db.listRuns().length, 0);
-  assert.equal(db.listSessions({ includeArchived: true }).length, 0);
-});
-
-test("createRun adopts a team Project scope on an organization-visible Location", () => {
-  const { svc, db } = makeHarness();
-  const { project, location, scope } = makeTeamOwnedProject(db);
-
-  const result = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    projectId: project.id,
-    projectLocationId: location.id,
-    agentIds: [AGENT_ID, CODEX_APP_AGENT_ID],
-    task: "Build for the Project team",
-  });
-
-  assert.ok(result.ok && result.data);
-  for (const session of result.data!.sessions) {
-    assert.equal(session.projectId, project.id);
-    assert.equal(session.projectLocationId, location.id);
-    assert.deepEqual(db.sessionScope(session.id), scope);
-  }
-});
-
-test("createRun rejects member counts that cannot be represented by the live UI subscription", () => {
-  const { svc, db, hub } = makeHarness();
-  const res = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentIds: Array.from({ length: MAX_UI_SESSION_SUBSCRIPTIONS + 1 }, () => AGENT_ID),
-    task: "too many members",
-  });
-  assert.equal(res.ok, false);
-  assert.equal(res.status, 400);
-  assert.match(res.error ?? "", new RegExp(`at most ${MAX_UI_SESSION_SUBSCRIPTIONS}`));
-  assert.equal(db.listRuns().length, 0);
-  assert.equal(db.listSessions({ includeArchived: true }).length, 0);
-  assert.equal(hub.sentOfType("start_session").length, 0);
 });
 
 test("createSession persists and launches the capability-dependent Claude permission default", () => {
@@ -15587,19 +15208,6 @@ test("createSession persists a supported non-default permission mode", () => {
   });
   assert.ok(res.ok);
   assert.equal(db.getSession(res.data!.id)!.permissionMode, "acceptEdits");
-});
-
-test("createRun persists a supported non-default permission mode on its members", () => {
-  const { db, svc } = makeHarness();
-  const run = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentIds: [AGENT_ID],
-    task: "normal work",
-    config: { permissionMode: "acceptEdits" },
-  });
-  assert.ok(run.ok && run.data);
-  assert.equal(db.getSession(run.data!.sessions[0]!.id)!.permissionMode, "acceptEdits");
 });
 
 /* -------------------------------------------------------------------------- */
@@ -20468,7 +20076,7 @@ test("restart refuses every persisted Codex exec session instead of launching Ap
 });
 
 for (const runnerShape of ["older runner, exec available", "current runner, exec unavailable"] as const) {
-  test(`creating a session or run on a Codex exec agent is refused with the retired reason: ${runnerShape} (#3259)`, () => {
+  test(`creating a session on a Codex exec agent is refused with the retired reason: ${runnerShape} (#3259)`, () => {
     const { db, hub, svc } = makeHarness();
     if (runnerShape === "current runner, exec unavailable") {
       db.updateRunnerAgents(RUNNER_ID, runnerMeta().agents.map((agent) => agent.id === CODEX_AGENT_ID
@@ -20480,12 +20088,6 @@ for (const runnerShape of ["older runner, exec available", "current runner, exec
     assert.equal(created.ok, false);
     assert.equal(created.status, 409);
     assert.equal(created.error, CODEX_EXEC_RETIRED_REASON);
-    const run = svc.createRun({
-      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_AGENT_ID], task: "Fan out",
-    });
-    assert.equal(run.status, 409);
-    assert.equal(run.error, `${CODEX_AGENT_ID}: ${CODEX_EXEC_RETIRED_REASON}`, "never a partial run without the exec member");
-    assert.equal(db.listRuns().length, 0, "nothing was created");
     assert.equal(hub.sentOfType("start_session").length, startsBefore, "nothing reached the runner");
   });
 }
@@ -23063,38 +22665,6 @@ test("setWorkspace never changes restart()'s launch directory (move is view stat
   assert.equal(hub.sentOfType("start_session").at(-1)!.spec.workspacePath, WORKSPACE_PATH);
 });
 
-test("createRun does not append the user_message locally and passes a title to the runner (M6)", () => {
-  const { hub, svc } = makeHarness();
-  const res = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentIds: [AGENT_ID],
-    task: "do the thing",
-  });
-  assert.ok(res.ok);
-  // The runner owns the user_message now — the control plane must not emit a duplicate.
-  assert.equal(hub.sessionEventCalls.filter((e) => e.payload.kind === "user_message").length, 0);
-  const start = hub.sentOfType("start_session")[0];
-  assert.ok(start.spec.title?.includes(AGENT_ID));
-  assert.equal(start.initialPrompt, "do the thing");
-});
-
-test("createRun applies a run-level cost budget to every member session", () => {
-  const { db, svc } = makeHarness();
-  const res = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentIds: [AGENT_ID],
-    task: "do the thing",
-    costBudgetUsd: 3,
-  });
-  assert.ok(res.ok && res.data);
-  assert.ok(res.data!.sessions.length > 0);
-  for (const s of res.data!.sessions) {
-    assert.equal(db.getSession(s.id)!.costBudgetUsd, 3);
-  }
-});
-
 /* -------------------------------------------------------------------------- */
 /* Phase 8: max_tool_calls policy cards + v47 runner re-arm                   */
 /* -------------------------------------------------------------------------- */
@@ -23448,21 +23018,6 @@ test("hydrated/backfilled tool_call events count toward the limit (derived count
   db.updateSessionStatus(id, "running", Date.now());
   svc.onSessionStatus(id, "idle");
   assert.equal(db.getSession(id)!.pendingApproval?.kind, "max_tool_calls");
-});
-
-test("createRun applies a run-level tool-call limit to every member session", () => {
-  const { db, svc } = makeHarness();
-  const res = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentIds: [AGENT_ID],
-    task: "do the thing",
-    maxToolCalls: 7,
-  });
-  assert.ok(res.ok && res.data);
-  for (const s of res.data!.sessions) {
-    assert.equal(db.getSession(s.id)!.maxToolCalls, 7);
-  }
 });
 
 
@@ -23970,22 +23525,6 @@ test("a soft-card Continue that cannot reach the runner leaves the card and the 
   assert.equal("holdFor" in rearm, false, "nothing else trips, so the queue is released");
 });
 
-test("a run for an owner past the daily budget launches no member sessions", () => {
-  const { db, hub, svc } = makeHarness();
-  const seeded = seedSession(svc, hub, { prompt: "spend" });
-  db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?").run(seeded);
-  db.setUsageDailyBudget("org_personal", 1, Date.now());
-  db.appendEvent(seeded, { kind: "token_usage", inputTokens: 1, costUsd: 1.5 }, Date.now(), { accrueUsage: true });
-  // Member sessions inherit the workspace's ownership, so the workspace itself belongs to the user.
-  db.raw().prepare("UPDATE workspace_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE runner_id=? AND workspace_id=?").run(RUNNER_ID, WORKSPACE_ID);
-  hub.sentToRunner.length = 0;
-  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "spend more" });
-  assert.equal(run.ok, false);
-  assert.equal(run.status, 409);
-  assert.match(run.error ?? "", /daily budget reached/);
-  assert.equal(hub.sentOfType("start_session").length, 0, "no member session was launched");
-});
-
 test("a user-owned Project on an organization workspace still meets its owner's daily budget at creation", () => {
   const { db, hub, svc } = makeHarness();
   const local = db.localIdentityContext();
@@ -24076,11 +23615,6 @@ test("a member's daily budget covers the organization-owned sessions they launch
   assert.match(refused.error ?? "", /daily budget reached/);
   assert.ok(launch("usr_other").ok, "another member still launches");
   assert.ok(launch().ok, "a launch with no human attribution keeps today's behavior");
-  const runsBefore = db.listRuns().length;
-  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "spend more" },
-    { launcherUserId: "usr_member" });
-  assert.match(run.error ?? "", /daily budget reached/);
-  assert.equal(db.listRuns().length, runsBefore, "the refused fan-out persisted no run");
   const nativeTui = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, launchSurface: "native_tui" },
     undefined, undefined, false, false, false, { defaultOwnerUserId: "usr_other" });
   assert.equal(nativeTui.status, 409);
@@ -24361,13 +23895,6 @@ test("arming a soft guardrail on an unparked session that already exceeds it par
   assert.ok(svc.setConfig(other, { costBudgetUsd: 5 }).ok);
   assert.equal(db.getSession(other)!.pendingApproval, null, "the runner receives the threshold and cancels at the crossing itself");
   assert.equal(db.getSession(other)!.status, "running");
-});
-
-test("run member sessions persist the run's checkpoints", () => {
-  const { db, hub, svc } = makeHarness();
-  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "go", config: { costCheckpointsUsd: [0.5, 2] } });
-  assert.ok(run.ok && run.data, run.error);
-  assert.deepEqual(db.getSession(run.data!.sessions[0]!.id)!.costCheckpointsUsd, [0.5, 2]);
 });
 
 test("Orchestrator is an additive role independent of the provider permission mode", () => {

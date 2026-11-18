@@ -59,7 +59,6 @@ function snapshot(runners: RunnerView[]): UiSnapshotMessage {
     runners,
     boxes: [],
     sessions: [],
-    runs: [],
   };
 }
 

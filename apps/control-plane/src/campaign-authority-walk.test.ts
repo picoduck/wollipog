@@ -59,9 +59,6 @@ function harness() {
     }
     return result;
   };
-  const run = (parentSessionId: string) => svc.createRun({
-    runnerId: RUNNER_ID, workspaceId: "ws-1", agentIds: ["claude"], task: "Fan out",
-  }, { parentSessionId });
   const internals = svc as unknown as Internals;
   const behaviorError = (sessionId: string) =>
     internals.campaignChildBehaviorError(db.getSession(sessionId)!, { model: "another-model" });
@@ -71,7 +68,7 @@ function harness() {
   };
   const ownsGeneric = (sessionId: string) => internals.orchestratorOwnsGenericRequest(db.getSession(sessionId)!, question);
   const always = () => true;
-  return { db, svc, make, spawn, run, behaviorError, ownsGeneric, always };
+  return { db, svc, make, spawn, behaviorError, ownsGeneric, always };
 }
 
 /** Each malformed shape yields an Orchestrator `actor` (with a running child `worker`) whose
@@ -113,7 +110,7 @@ const MALFORMED_SHAPES: Array<{ name: string; build(h: ReturnType<typeof harness
 for (const shape of MALFORMED_SHAPES) {
   test(`every authority-dependent operation refuses ${shape.name} with a stated reason (#2468)`, () => {
     const h = harness();
-    const { db, svc, spawn, run, behaviorError, ownsGeneric, always } = h;
+    const { db, svc, spawn, behaviorError, ownsGeneric, always } = h;
     try {
       shape.build(h);
       assert.equal(db.campaignAncestryRoot("actor"), "refused", "the shared walk refuses this ancestry");
@@ -121,9 +118,6 @@ for (const shape of MALFORMED_SHAPES) {
       const child = spawn("actor");
       assert.equal(child.status, 409, "child creation and policy inheritance refuse");
       assert.match(child.error ?? "", MALFORMED);
-      const fanOut = run("actor");
-      assert.equal(fanOut.status, 409, "a run's fixed child behavior refuses");
-      assert.match(fanOut.error ?? "", MALFORMED);
 
       assert.match(behaviorError("worker") ?? "", MALFORMED, "a child's model or effort change refuses");
       assert.equal(ownsGeneric("worker"), false, "a generic request stays with the human");
@@ -146,7 +140,7 @@ for (const shape of MALFORMED_SHAPES) {
 }
 
 test("a well-formed nested campaign keeps its authority exactly as before (#2468)", () => {
-  const { db, svc, make, spawn, run, behaviorError, ownsGeneric, always } = harness();
+  const { db, svc, make, spawn, behaviorError, ownsGeneric, always } = harness();
   try {
     make("root", undefined, true);
     make("nested", "root", true);
@@ -155,7 +149,6 @@ test("a well-formed nested campaign keeps its authority exactly as before (#2468
     db.updateSessionParentControl("root", "questions", Date.now());
 
     assert.ok(spawn("nested").ok, "children are still created beneath a nested Orchestrator");
-    assert.doesNotMatch(run("nested").error ?? "", MALFORMED, "a run is never refused as malformed");
     assert.equal(behaviorError("worker"), "child model is fixed by campaign policy at fixed-model",
       "the root campaign's fixed behavior still applies to a nested campaign's children");
     assert.equal(ownsGeneric("worker"), true, "the root's Parent Control still owns eligible requests");

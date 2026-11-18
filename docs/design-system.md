@@ -328,7 +328,7 @@ elevation with `1px solid var(--border-strong)` in both themes. The modal backdr
 | `--title-bar-h` | 40px | The macOS desktop app's strip at the top of the rail, which the traffic lights sit in (§4.1). |
 | `--bar-h` | 48px | Every bar: desktop session bar, detail bar, phone app bar, compact page header. §4.4. |
 | `--page-gutter` | 24px (16px phone) | Left and right padding of the page container. |
-| `--page-max` | 960px | List pages: Automations, Connections, Multi-Agent Runs, Archived Sessions. Left-aligned. |
+| `--page-max` | 960px | List pages: Automations, Connections, Archived Sessions. Left-aligned. |
 | `--page-max-wide` | 1200px | Tables, charts and card grids: Usage and Cost. Left-aligned. |
 | `--page-max-form` | 760px | Settings content, single-form pages. |
 | `--measure` | 68ch | Prose. |
@@ -630,7 +630,7 @@ Rules
 - **Rail (desktop).** 64px, `--bg-elev`, hairline right edge. Square items at `--control-h-lg` (40px;
   48px on touch tablets), 20px outline icons,
   4px gap, 12px gap plus a hairline between groups: *Work* (Sessions, Assistants, Automations, Projects),
-  *Oversight* (Multi-Agent Runs, Connections, Agent Skills), *Records* (Archived Sessions,
+  *Oversight* (Connections, Agent Skills), *Records* (Archived Sessions,
   Usage and Cost). That is also the default rail order and digit order; a saved order is kept. Settings is pinned
   at the bottom. Active: `--accent` icon, 3px `--accent` bar on the left edge, `--surface-selected`
   fill. Hover: `--bg-elev-2`. Digit hints appear only in the tooltip ("Assistants  2"), not as
@@ -694,11 +694,11 @@ Rules
   follows the operating system, and on Linux, where tao reads none as light, the desktop portal's
   theme is then read back and named). The browser build is unchanged. #1979.
 - **Window title.** Every route sets `document.title` to "<Page> – Wollipog", with the page title
-  from `viewTitle` ("Agent Skills – Wollipog"; a Session or Multi-Agent Run by its own title),
+  from `viewTitle` ("Agent Skills – Wollipog"; a Session by its own title),
   and the desktop app copies it to the native window for the taskbar and window switcher.
 - **One name per destination**, used for the rail tooltip, `aria-label`, page title, phone app bar,
   More sheet, palette, shortcut reference and Settings › Appearance › Navigation: Sessions, Assistants,
-  Automations, Projects, Multi-Agent Runs, Connections, Agent Skills, Archived Sessions, Usage
+  Automations, Projects, Connections, Agent Skills, Archived Sessions, Usage
   and Cost, Settings. Each `GLOBAL_VIEW_ITEMS` entry carries that one `name`, its page `description`
   (§4.2) and its `group`; back controls read "Back to <name>". "Inbox" is retired from all copy.
 - **Search.** A rail item "Search" (Ctrl/Cmd+K) at the top of the Work group and a search icon in the
@@ -2067,14 +2067,13 @@ Notifications, #3022).
 group whose rows are a list rather than settings: under Show Labels in Rail (desktop only), one
 `--row-h` row per destination on a fixed grid, `16px minmax(0, 1fr) 24px auto auto` (icon, name,
 digit, moves, switch), so the arrows, the digit and the switch sit at one x on a normal, hidden,
-required and experiment-off row. The digit is a §11.5 `kbd` from `railDigits()`, or "–" for a
-hidden or turned-off destination; a coarse pointer hides both and keeps the column. The moves are two
+and required rows. The digit is a §11.5 `kbd` from `railDigits()`, or "–" for a
+hidden destination; a coarse pointer hides both and keeps the column. The moves are two
 `.icon-btn` arrows, "Move {Name} Up" and "Move {Name} Down", disabled at the ends; after a move focus
 stays on the pressed button, or its sibling once that one is disabled, and the row is lit
 `--bg-elev-2` for 600ms (not under reduced motion). Visibility is a standalone `Switch`, "Show {Name}
 in Navigation". Why a switch cannot be used is a visible note after the name, never a tooltip:
-Sessions is checked and disabled with "Always Shown", and an experiment that is off shows "Off in
-Experimental". Reset to Default is the head action (`.btn.sm.ghost` with `ResetIcon`), disabled while
+Sessions is checked and disabled with "Always Shown". Reset to Default is the head action (`.btn.sm.ghost` with `ResetIcon`), disabled while
 the list is as shipped. The description reads "Order sets the number shortcuts. Hidden pages stay
 reachable from search." A phone binds no digits, so it has no digit column; the destinations
 `phoneBarViews()` puts on the tab bar carry a "Tab Bar" note, and the description reads "Order sets
@@ -2450,7 +2449,6 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Queued message (`queuedMessage`: the composer queue) | Pending, Queued, Canceled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |
 | Message receipt (`messageReceipt`: the one line under a sent message in the transcript — pending prompts, steering, provider commands, the rename) | Sending: a spinner and the word, no badge · Queued, Canceled, Dismissed: neutral · Delivered, Steered the Current Turn: success (inline) · Delivery Uncertain: warning · Delivery Failed, Not Sent, Not Accepted, Rejected, Rename Failed: danger. Rendered as the inline badge. |
 | Workflow gate / run decision | Awaiting Decision: warning · Approved: success (inline) · Rejected: neutral |
-| Multi-Agent Run (`run`, `runStatus()`, #2974: the Runs list row) | Awaiting Decision (a workflow node waits at a gate), Approval Required (a member needs the person): warning · Running: info (pulse) · Failed (the workflow failed): danger. In that order; none while every member is idle. |
 | Run follow-up (`followUp`, #2976: each member's send in the run's Follow Up dialog) | Delivered: success (inline) · Failed: danger (inline, with the reason beside it) |
 | Request decision (`requestDecision`: the outcome of every Decision Record and of the settled question row, #2204) | Allowed, Answered, Answered by Policy, Answered by Parent, Rechecked Automatically: success · Rejected, Dismissed, Dismissed by Parent, Ended Early, Replaced, Expired, Resolved by Provider, Another Account Selected, Escalated, Resolved: neutral · Blocked (by a policy, or fail-closed by Wollipog): danger · Timed Out: warning. Always past tense, never a provider's option id. |
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
@@ -2850,8 +2848,8 @@ One `State` component with variants; the states are **mutually exclusive** in th
   hold. A danger notice (§12.4) is centered as a block and keeps its own anatomy. Content a page
   shows under the state (Skills' "How Skills Work" steps, Machines' method rows at the form
   measure) is a centered block whose rows keep their own alignment. This covers every empty list
-  page (Sessions, Skills, Projects, Machines, Multi-Agent Runs, Automations, Outbound Events,
-  an empty Archive), a turned-off experiment, the app crash state, a missing session, run or
+  page (Sessions, Skills, Projects, Machines, Automations, Outbound Events,
+  an empty Archive), the app crash state, a missing session or
   automation, and the shared transcript page. Where the area takes keyboard focus (Sessions), its
   inline padding keeps the content clear of the focus ring.
 - **Every other state is left-aligned** at its surface's padding: compact states in list columns and
@@ -2921,13 +2919,7 @@ the same notice with Reload and Copy Error Details; a page-level error is center
   Settings and the Session keep their own headers.
 - **A crashed shell** has no header or rail to sit under: a full-window `State`, "Wollipog Couldn't
   Show This Screen", with **Reload Wollipog**, Copy Error Details and the same details.
-- **A turned-off experiment's route** is not an error: it keeps its page header, with the
-  destination's description on a destination route as for a crashed view, so the feature mounts
-  without the header moving. Below it is an empty-style `State` with a flask icon, "{Name} Are Turned
-  Off", a sentence on why it is hidden and what turning it on adds, **Turn On {Name}** ("Turn On
-  Multi-Agent Runs"; primary, the same switch as Settings › Experimental; the feature
-  mounts in place) and Open Experimental Settings.
-- Below 760px the actions of all three stack at full width and are 44px tall.
+- Below 760px the actions of both error states stack at full width and are 44px tall.
 
 ### 12.5 Offline
 
@@ -3541,7 +3533,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 
 | Element | Phone behavior |
 | --- | --- |
-| Rail | Bottom tab bar, 56px + safe area, **labeled** (24px icon + 11px label). Default slots: Sessions, Assistants, Projects, Connections, More. Experimental destinations never take a primary slot by default. Active: accent icon and label plus a tinted pill behind the icon (not a bar below it). `phoneBarViews()` in `rail-preferences.ts` is the one source for the slots: an optional per-instance `phoneBar` list replaces the default, and a hidden or turned-off slot is filled in place by the next visible non-experimental destination in rail order. From 600px the tabs keep a 480px centered measure. |
+| Rail | Bottom tab bar, 56px + safe area, **labeled** (24px icon + 11px label). Default slots: Sessions, Assistants, Projects, Connections, More. Active: accent icon and label plus a tinted pill behind the icon (not a bar below it). `phoneBarViews()` in `rail-preferences.ts` is the one source for the slots: an optional per-instance `phoneBar` list replaces the default, and a hidden slot is filled in place by the next visible destination in rail order. From 600px the tabs keep a 480px centered measure. |
 | More | A real bottom sheet with a scrim and a 48px "More" title row over a 1px `--border` hairline; rows 48px with icons; the title and the rows' content start at the 16px gutter, as in every menu sheet; Settings last after a full-width separator. It holds every other visible destination in rail order. A tap opens it focused on the sheet itself, with no ring; closing it hands focus back to More only from the keyboard (Escape, or Enter on a row). At 420px tall and below the rows form two columns, so every row fits a 568×320 screen. While a destination in the sheet needs the user, the More tab carries one mark for them all (§11.4). |
 | App bar | 48px: ‹ Back (on detail routes) or nothing, title 16/600 (truncates), trailing icons (search, primary `+`, ⋯), in that order to the eye and to Tab. The `+` is an `.icon-btn` like Search, never a filled primary: transparent at rest, `--text-dim`, named and titled by the primary's label. Icons are 36px visual with 44px hit areas, as in the settled phone session header. No page description. |
 | Page header actions | Primary as `+` icon (accessible name "New Skill"), all others in ⋯ sheet. |

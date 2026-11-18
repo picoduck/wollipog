@@ -72,7 +72,7 @@ test("quiet changes render nothing, and the next render for any reason reads the
   const shown = () => container.querySelector("output")?.textContent;
   try {
     await act(async () => root.render(<StoreProvider connection={connection}><Probe /></StoreProvider>));
-    await act(async () => socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [session(0)], runs: [] }));
+    await act(async () => socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [session(0)] }));
     assert.equal(shown(), "0");
     const before = renders;
 
@@ -118,7 +118,7 @@ test("a view that ignores streaming fields keeps showing them live through useLi
   const live = () => container.querySelector("[data-live]")?.textContent;
   try {
     await act(async () => root.render(<StoreProvider connection={connection}><SessionParent /></StoreProvider>));
-    await act(async () => socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [session(0)], runs: [] }));
+    await act(async () => socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [session(0)] }));
     assert.equal(live(), "0");
     const before = parentRenders;
 
@@ -168,7 +168,7 @@ test("useSessionChanges renders its caller for a streaming-only upsert of its se
   try {
     await act(async () => root.render(<StoreProvider connection={connection}><Age sessionId="s1" /></StoreProvider>));
     const other = { ...session(0), id: "s2" };
-    await act(async () => socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [session(0), other], runs: [] }));
+    await act(async () => socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [session(0), other] }));
     const before = ageRenders;
     await act(async () => socket.push({ type: "session_upsert", session: { ...session(0), lastEventAt: 9, updatedAt: 9 } }));
     assert.equal(ageRenders, before + 1, "its session's paced upsert renders it, as it rendered the whole view");

@@ -47,7 +47,7 @@ function session(id: string, title: string, overrides: Partial<SessionView> = {}
   return {
     id, runnerId: runner.runnerId, workspaceId: null, workspaceName: null, projectId: null,
     agentId: "claude", agentName: "Claude", title, status: "idle", column: "review",
-    runId: null, useWorktree: false, worktreePath: null, archived: false, createdAt: 1, updatedAt: 1,
+    useWorktree: false, worktreePath: null, archived: false, createdAt: 1, updatedAt: 1,
     lastEventAt: null, messageCount: 0, eventEpoch: 0, preview: null, pendingApproval: null,
     driver: "claude", model: null, effort: null, permissionMode: null,
     tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
@@ -147,7 +147,7 @@ test("a campaign parent's session detail lists held children from its projection
     await act(async () => socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [runner], boxes: [], projects: [], sessions: [parent, storedChild], runs: [],
+      runners: [runner], boxes: [], projects: [], sessions: [parent, storedChild]
     }));
     await settle();
     await settle();

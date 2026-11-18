@@ -37,7 +37,7 @@ const ANCHORED_LINE = "      return retry(attempt + 1);";
 const session: SessionView = {
   id: "review-anchor-reload-e2e", runnerId: "runner-1", workspaceId: "workspace-1", workspaceName: "Wollipog",
   projectId: null, agentId: "claude", agentName: "Claude", title: "Harden the Retry Path", status: "idle",
-  column: "review", runId: null, useWorktree: true, worktreePath: "/workspace/wollipog",
+  column: "review", useWorktree: true, worktreePath: "/workspace/wollipog",
   archived: false, createdAt: 1, updatedAt: 1, lastEventAt: 1, messageCount: 1, eventEpoch: 0,
   preview: null, pendingApproval: null, driver: "claude-code", model: null, effort: null,
   permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,

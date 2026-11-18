@@ -41,7 +41,7 @@ function failedSession(): SessionView {
   return {
     id: "setup-failed", runnerId: runner.runnerId, workspaceId: null, workspaceName: null, projectId: null,
     agentId: "codex", agentName: "Codex", title: "Setup Failure", status: "failed", column: "review",
-    runId: null, useWorktree: true, worktreePath: path, archived: false, createdAt: 1, updatedAt: 1,
+    useWorktree: true, worktreePath: path, archived: false, createdAt: 1, updatedAt: 1,
     lastEventAt: null, messageCount: 0, eventEpoch: 0, preview: null, pendingApproval: null,
     driver: "codex", model: "gpt-5.6-sol", effort: "high", permissionMode: null,
     tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
@@ -118,7 +118,7 @@ async function clickSetupRetry(
     await act(async () => socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [runner], boxes: [], projects: [], sessions: [current], runs: [],
+      runners: [runner], boxes: [], projects: [], sessions: [current]
     }));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     const banner = container.querySelector('[aria-label="Worktree Setup Failed"]') as HTMLElement | null;

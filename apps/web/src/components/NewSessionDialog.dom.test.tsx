@@ -123,7 +123,6 @@ function snapshot(overrides: Partial<UiSnapshotMessage> = {}): UiSnapshotMessage
     boxes: [],
     projects: [project],
     sessions: [],
-    runs: [],
     ...overrides,
   };
 }

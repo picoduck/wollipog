@@ -94,7 +94,6 @@ function sessionView(id: string, patch: Partial<SessionView> = {}): SessionView 
     title: "Stream Render Fixture",
     status: "running",
     column: "running",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -194,7 +193,7 @@ async function mount() {
   await push({
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [runner], boxes: [], projects: [], sessions: [fixture], runs: [],
+    runners: [runner], boxes: [], projects: [], sessions: [fixture]
   });
   for (const payload of history) await append(payload);
   await act(async () => new Promise((resolve) => setTimeout(resolve, 25)));

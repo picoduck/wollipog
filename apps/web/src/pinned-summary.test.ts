@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { BoxView, GitStatusInfo, GitSummaryInfo, RunView, RunnerView, SessionView } from "@wollipog/protocol";
+import type { BoxView, GitStatusInfo, GitSummaryInfo, RunnerView, SessionView } from "@wollipog/protocol";
 import {
   deriveChanges,
   deriveCommitAction,
@@ -8,7 +8,6 @@ import {
   deriveGitPresentation,
   deriveHost,
   formatRemoteRefsAt,
-  deriveSubagents,
   displayBaseRef,
   fixChecksPrompt,
   formatGitOperation,
@@ -19,7 +18,7 @@ import {
 } from "./pinned-summary.js";
 
 const session = (over: Partial<SessionView>): SessionView =>
-  ({ id: "s1", runnerId: "r1", runId: null, ...over }) as SessionView;
+  ({ id: "s1", runnerId: "r1", ...over }) as SessionView;
 
 const status = (over: Partial<GitStatusInfo>): GitStatusInfo => ({
   branch: "agent/s1",
@@ -188,21 +187,6 @@ test("deriveCommitAction: dirty → commit_or_push, clean+ahead → push, clean 
   assert.equal(deriveCommitAction(status({ hasChanges: true, ahead: 2 })), "commit_or_push");
   assert.equal(deriveCommitAction(status({ hasChanges: false, ahead: 2 })), "push");
   assert.equal(deriveCommitAction(status({ hasChanges: false, ahead: 0 })), "up_to_date");
-});
-
-test("deriveSubagents: siblings of the run, minus self, minus vanished sessions", () => {
-  const runs = new Map<string, RunView>([
-    ["run1", { id: "run1", sessionIds: ["s1", "s2", "s3"] } as RunView],
-  ]);
-  const sessions = new Map<string, SessionView>([
-    ["s1", session({ id: "s1", runId: "run1" })],
-    ["s2", session({ id: "s2", runId: "run1" })],
-    // s3 deleted — must be skipped, not undefined
-  ]);
-  const subs = deriveSubagents(sessions.get("s1")!, runs, sessions);
-  assert.deepEqual(subs.map((s) => s.id), ["s2"]);
-  assert.deepEqual(deriveSubagents(session({ runId: null }), runs, sessions), [], "no run → no section");
-  assert.deepEqual(deriveSubagents(session({ runId: "gone" }), runs, sessions), [], "unknown run id");
 });
 
 test("fixChecksPrompt: singular/plural + names woven in", () => {

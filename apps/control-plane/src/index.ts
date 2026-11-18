@@ -82,7 +82,6 @@ import {
   type ExternalSessionDescriptor,
   type ApproveRequest,
   type ControlPlaneToRunner,
-  type CreateRunRequest,
   type CreateAutomationRequest,
   type CreateAutomationTriggerRequest,
   type CreateOutboundEventSubscriptionRequest,
@@ -3723,7 +3722,6 @@ app.delete("/api/boxes/:id", async (req, reply) => {
   const res = db.deleteBox(id);
   if (!res) return reply.code(404).send({ error: "box not found" });
   for (const sid of res.sessionIds) hub.sessionRemoved(sid, false);
-  for (const rid of res.runIds) hub.runRemoved(rid);
   hub.boxRemoved(id);
   hub.runnerRemoved(res.runnerId);
   for (const projectId of projectIds) hub.projectChangedById(projectId);
@@ -5671,27 +5669,6 @@ registerAssistantStatusOperations(assistantOperations, {db, svc, hub, receipts: 
 app.delete("/api/sessions/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   return sessionLifecycleManagement.remove(id, reply);
-});
-
-app.get("/api/runs", async () => ({ runs: db.listRuns() }));
-
-app.get("/api/runs/:id", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const run = db.getRun(id);
-  if (!run) return reply.code(404).send({ error: "run not found" });
-  const sessions = db.listSessions({ includeArchived: true }).filter((s) => s.runId === id);
-  return { run, sessions };
-});
-
-app.post("/api/runs", async (req, reply) => {
-  const body = req.body as CreateRunRequest;
-  const principal = requestPrincipal(req);
-  if (typeof body?.projectId === "string" && (!principal || !db.canAccessProject(principal, body.projectId))) {
-    return reply.code(404).send({ error: "project not found" });
-  }
-  return respond(reply, svc.createRun(body,
-    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId }
-      : principal?.kind === "human" ? { launcherUserId: principal.userId } : undefined));
 });
 
 app.get("/api/automations", async () => automations.list());

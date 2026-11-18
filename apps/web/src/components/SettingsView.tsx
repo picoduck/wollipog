@@ -13,7 +13,6 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   ChevronRightIcon,
-  ExperimentIcon,
   InfoIcon,
   KeyboardIcon,
   NetworkIcon,
@@ -42,8 +41,6 @@ import { useRailPreferences } from "../use-rail-preferences.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { useIsCompact, useIsMobile, useIsTouchOnly } from "./useIsMobile.js";
-import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
-import { useExperiments } from "../use-experiments.js";
 import { destination, type GlobalViewName } from "../navigation.js";
 import { ActionRow, LinkRow, SAVED_MS, SegmentedRow, SelectRow, SettingRow, SettingsGroup, StaticRow, Switch, SwitchRow, ValueRow } from "./ui/SettingsRows.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
@@ -52,9 +49,8 @@ import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
 import { setTerminalPlacement, useTerminalPlacement, type TerminalPlacement } from "../terminal-placement.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { setShowAgentLogs, useShowAgentLogs } from "../agent-logs.js";
-import { EXPERIMENT_OFF_EFFECT, SETTINGS_DESCRIPTION, SETTINGS_SECTIONS, viewPath, type SettingsFocus, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
+import { SETTINGS_DESCRIPTION, SETTINGS_SECTIONS, viewPath, type SettingsFocus, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
 import { SHOW_SHORTCUTS_ID, shortcutDisplay } from "../shortcuts.js";
-import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 
 /**
  * Settings as a ROUTE, not a dialog.
@@ -115,7 +111,6 @@ const SECTION_ICONS: Record<SettingsSection, (props: { size?: number }) => React
   orchestrator: OrchestratorIcon,
   network: NetworkIcon,
   storage: StorageIcon,
-  experimental: ExperimentIcon,
   about: InfoIcon,
 };
 
@@ -545,7 +540,7 @@ export const RAIL_MOVE_FLASH_MS = 600;
  * alike, with the effect announced by the updated digits. Drag-and-drop (#541) layers onto these rows.
  *
  * Every destination row is one fixed grid — icon, name, digit, moves, switch — so the arrows, the
- * digit and the switch sit at the same x on a normal, hidden, required and experiment-off row. Why a
+ * digit and the switch sit at the same x on a normal, hidden and required row. Why a
  * row's switch cannot be used is visible text in its name cell, never a tooltip.
  *
  * A phone binds no digits (the shortcuts are desktop-only), so it has no digit column; the order
@@ -557,10 +552,9 @@ export const RAIL_MOVE_FLASH_MS = 600;
 export function NavigationRailPanel() {
   const instanceScope = useInstanceScope();
   const preferences = useRailPreferences();
-  const { flags } = useExperiments();
   const isMobile = useIsMobile();
-  const digits = railDigits(visibleRailViews(preferences, flags));
-  const tabBar = isMobile ? new Set(phoneBarViews(preferences, flags)) : null;
+  const digits = railDigits(visibleRailViews(preferences));
+  const tabBar = isMobile ? new Set(phoneBarViews(preferences)) : null;
   const id = useId();
   const listRef = useRef<HTMLUListElement>(null);
   /** The Move button pressed last, to hand focus back to once the list has re-rendered. */
@@ -619,15 +613,13 @@ export function NavigationRailPanel() {
           const Icon = VIEW_ICONS[name];
           const required = REQUIRED_RAIL_VIEWS.has(name);
           const hidden = preferences.hidden.has(name);
-          const experiment = experimentForViewName(name);
-          const experimentOff = experiment !== null && !flags[experiment];
           const digit = digits.get(name);
           // Why the switch cannot be used, said beside the name rather than in a tooltip.
-          const reason = required ? "Always Shown" : experimentOff ? "Off in Experimental" : null;
+          const reason = required ? "Always Shown" : null;
           const noteId = `${id}-${name}-note`;
           return (
             <li
-              className={`rail-nav-row${hidden || experimentOff ? " is-inactive" : ""}${flashed === name ? " is-moved" : ""}`}
+              className={`rail-nav-row${hidden ? " is-inactive" : ""}${flashed === name ? " is-moved" : ""}`}
               key={name}
               data-destination={name}
             >
@@ -773,36 +765,6 @@ export function BehaviorPanel({
       {sessionNaming}
       <ArtifactUploadSettings />
     </>
-  );
-}
-
-/**
- * Early features, each behind its own switch.
- *
- * These gate UI EXPOSURE on this device and this instance, never capability: the control
- * plane keeps serving the underlying APIs, and turning a feature back on restores every
- * surface without a reload. The exception to "never hide a setting that could exist" is
- * deliberate here — hiding is the setting. The section's description says once what turning one
- * off does, so each row says only what its feature is. A phone hides that description under its
- * detail bar (§4.2), so there the group says it instead, above the rows (#3139).
- */
-export function ExperimentalPanel({
-  flags,
-  onToggle,
-}: {
-  flags: ExperimentFlags;
-  onToggle: (id: ExperimentId, enabled: boolean) => void;
-}) {
-  const phone = useIsMobile();
-  return (
-    <SettingsGroup intro={phone ? EXPERIMENT_OFF_EFFECT : undefined}>
-      <SwitchRow
-        title={EXPERIMENT_COPY.multiAgent.name}
-        description="Give the same task to multiple agents and compare their results."
-        checked={flags.multiAgent}
-        onClick={() => onToggle("multiAgent", !flags.multiAgent)}
-      />
-    </SettingsGroup>
   );
 }
 

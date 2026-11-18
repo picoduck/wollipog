@@ -105,7 +105,7 @@ async function mount() {
     root.render(<StoreProvider connection={connection} navigation={navigation}><Probe /></StoreProvider>);
   });
   await act(async () => socket.push({
-    type: "snapshot", runners: [], boxes: [], sessions: [session()], runs: [],
+    type: "snapshot", runners: [], boxes: [], sessions: [session()]
   }));
   return {
     socket,
@@ -241,7 +241,7 @@ test("an effect watching session status sees a transition that the next one foll
   const root = createRoot(container);
   try {
     await act(async () => root.render(<StoreProvider connection={connection}><StatusEffect /></StoreProvider>));
-    await act(async () => socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [session()], runs: [] }));
+    await act(async () => socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [session()] }));
     // A stopped turn settles and the queued prompt starts at once: two transitions inside one frame.
     await act(async () => socket.push({ type: "session_event", event: event(1) }));
     await act(async () => socket.push({ type: "session_upsert", session: session({ status: "idle" }) }));

@@ -18,7 +18,7 @@ async function openBrowser(page: Page, width: number) {
     localStorage.setItem("wollipog.rightpanel.open", "1");
     localStorage.setItem("wollipog.rightpanel.mode", "browser");
   });
-  await page.goto("/command-inbox-projects-e2e.html?fullShell=1&runArtifacts=1");
+  await page.goto("/command-inbox-projects-e2e.html?fullShell=1&sessionArtifactsFixture=1");
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
   await waitForSessionPreview(page);
@@ -164,7 +164,7 @@ for (const [label, width, touch] of [["a 400px panel", 1440, false], ["a 390px p
       await openBrowser(page, width);
       const head = panel(page).locator(".rpanel-head");
       const row = panel(page).locator(".browser-artifact-list .row").filter({ hasText: "Final QA report" });
-      await expect(row).toHaveAttribute("data-panel-page-key", "run-art-report");
+      await expect(row).toHaveAttribute("data-panel-page-key", "session-art-report");
       const title = head.locator(".rpanel-page-title");
 
       await row.click();
