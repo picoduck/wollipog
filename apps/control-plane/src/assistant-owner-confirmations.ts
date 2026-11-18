@@ -74,7 +74,7 @@ const SUMMARIES: Record<string, string> = {
   steering_resolve: "Queues an uncertain steering message again, or dismisses it and erases its text, as the arguments say. Queued again, it may run twice.",
   queue_cancel: "Asks to remove a queued prompt before the session starts it; its text is not kept. If the session has already started it, nothing changes.",
   session_git: "Discards the staged and unstaged changes to one file in the session's worktree, deleting the file if it was newly added. The changes cannot be recovered.",
-  worktree_discard: "Removes the session's worktree folder. Wollipog refuses unless the worktree is clean and its work is already pushed and merged.",
+  worktree_discard: "Removes the session's worktree folder. Wollipog refuses unless the worktree is clean and its commits are pushed or already merged.",
   shell_close: "Closes the session's terminal, ending its processes, and deletes its saved output. If the Machine is offline, the processes end when it reconnects.",
   reminder_set: "Sets your reminder for the session, replacing any reminder you already have on it.",
   reminder_remove: "Deletes your reminder for the session. Setting one again creates a new reminder.",
@@ -113,8 +113,8 @@ const SUMMARIES: Record<string, string> = {
   skill_drift_restore: "Replaces the hand-edited copy of the skill on the Machine with the Library version. The edits are deleted, or set aside if they cannot be removed safely.",
   skill_drift_import: "Saves the Machine's hand-edited copy as a new version of the skill and uses it there. Earlier versions are kept; Machines on the latest version get it.",
   skill_drift_discard: "Discards the review of the edited skill copy. Nothing in the Skill Library or on the Machine changes.",
-  skill_orphan_discard: "Permanently deletes the left-over skill copy from the Machine. The Skill Library is not changed.",
-  skill_orphan_import: "Imports the left-over skill copy into the Skill Library, then deletes it from the Machine unless it is deployed there again. Earlier versions are kept.",
+  skill_orphan_discard: "Deletes the left-over skill copy from the Machine, or sets it aside if it cannot be removed safely. The Skill Library is not changed.",
+  skill_orphan_import: "Imports the left-over skill copy into the Skill Library, then deletes it from the Machine, or sets it aside, unless it is deployed there again.",
   skill_orphan_preview_discard: "Discards the review of the left-over skill copy. Nothing in the Skill Library or on the Machine changes.",
 };
 const SUMMARY_FALLBACK = "Runs this destructive command once, exactly as shown. Its effect may not be reversible.";
