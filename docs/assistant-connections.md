@@ -64,7 +64,13 @@ bearer/grant works locally and remotely. Deployment, DNS and proxy provisioning 
 The endpoint rejects foreign browser Origins. Existing device/session auth is unchanged.
 
 Call `assistant_discover` to obtain `controlPlane.id` (existing database instance ID),
-`controlPlane.name`, `connection.id`, current grant/revision and granted operation schemas.
+`controlPlane.name`, `connection.id`, current grant/revision and the granted operations' names and
+descriptions. Each result fits one harness tool result (at most 24,000 bytes, under Claude Code's
+50,000-character and Codex's 10,000-token limits). When it returns `nextCursor`, call it again with
+`{"cursor": "<nextCursor>"}` for the rest of the list. Call it with
+`{"operations": ["<name>", ...]}` (up to 64 names) for those operations' full input schemas; names
+the grant does not allow come back in `unavailable`, and schemas that did not fit in `remaining`,
+to request again. `tools/list` still returns every granted tool with its full schema.
 IDs, never editable names or tool prefixes, distinguish connections and installations. The initial
 installation display name is Wollipog and is editable through owner management.
 
