@@ -1,5 +1,6 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { join } from "node:path";
+import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizontalOverflow, expectWithinWidth } from "./layout-invariants.js";
 
 /**
  * The Assistants section (#4664) in a real browser, against `assistants-main.tsx`'s stub of the
@@ -313,3 +314,88 @@ for (const theme of ["dark", "light"] as const) {
     });
   });
 }
+
+/** Threads named at the 120-character limit: the list pane never scrolls sideways, each title ends in
+ * an ellipsis inside its row, and New Thread stays whole at the pane's trailing edge, from a desktop
+ * through the compact tier's 280px pane to a phone. The open thread's header keeps its width too. */
+const TRIAGE_PATH = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
+const LONG_TITLE_VIEWPORTS = [
+  { width: 1440, height: 900, phone: false },
+  { width: 1000, height: 800, phone: false },
+  { width: 900, height: 800, phone: false },
+  { width: 390, height: 844, phone: true },
+];
+
+async function expectTitleEllipsized(title: Locator, container: Locator, what: string) {
+  const fit = await title.evaluate((element) => ({
+    cut: element.scrollWidth > element.clientWidth,
+    ellipsis: getComputedStyle(element).textOverflow === "ellipsis",
+  }));
+  expect(fit, `${what} is cut with an ellipsis`).toEqual({ cut: true, ellipsis: true });
+  await expectWithinWidth(title, container, what);
+}
+
+for (const viewport of LONG_TITLE_VIEWPORTS) {
+  test.describe(`long thread titles at ${viewport.width}×${viewport.height}`, () => {
+    test.use({
+      viewport: { width: viewport.width, height: viewport.height },
+      colorScheme: "dark",
+      ...(viewport.phone ? { hasTouch: true, isMobile: true } : {}),
+    });
+
+    test("the list never scrolls sideways, titles end in an ellipsis and New Thread stays whole", async ({ page }) => {
+      await open(page, "dark", "threads=long");
+      const pane = threadsList(page);
+      await expect(pane.locator("[data-thread-id]")).toHaveCount(12);
+      await expectNoHorizontalOverflow(pane, "The Assistants list");
+      const newThread = pane.getByRole("button", { name: "New Thread" });
+      await expectFullyInViewport(newThread, "New Thread");
+      await expectWithinWidth(newThread, pane, "New Thread");
+      for (const row of await pane.locator("[data-thread-id]").all()) {
+        await expectWithinWidth(row, pane, "A thread row");
+        await expectWithinWidth(row.locator(".status"), pane, "A thread's status");
+      }
+      await expectTitleEllipsized(pane.locator(".row-title").first(), pane, "The first thread's title");
+      await expectPageNoHorizontalOverflow(page);
+    });
+
+    test("the open thread's header keeps a long title to its width", async ({ page }) => {
+      await open(page, "dark", "threads=long", TRIAGE_PATH);
+      if (viewport.phone) {
+        // A phone's detail bar carries the title, Back and the thread's actions.
+        const bar = page.locator(".detail-bar");
+        await expect(bar.locator(".detail-bar-title")).toContainText("Triage every open issue");
+        await expectFullyInViewport(page.getByRole("button", { name: "Back to Assistants" }), "Back to Assistants");
+        await expectFullyInViewport(bar.getByRole("button", { name: "Thread Actions" }), "Thread Actions");
+      } else {
+        const head = page.locator(".assistant-thread-head");
+        const title = head.getByRole("heading", { level: 2 });
+        await expect(title).toHaveAttribute("title", /^Triage every open issue/);
+        // The work cards' row scrolls sideways by design; the title row never does.
+        await expectNoHorizontalOverflow(head.locator(".assistant-thread-title-row"), "The thread's title row");
+        await expectTitleEllipsized(title, head, "The thread's title");
+        await expectFullyInViewport(head.getByRole("button", { name: "Thread Actions" }), "Thread Actions");
+        await expectNoHorizontalOverflow(threadsList(page), "The Assistants list");
+      }
+      await expect(page.locator(".composer")).toBeInViewport();
+      await expectPageNoHorizontalOverflow(page);
+    });
+  });
+}
+
+test.describe("long thread titles evidence", () => {
+  test.use({ timezoneId: "UTC", locale: "en-US" });
+
+  for (const [width, height, theme] of [[1000, 800, "dark"], [390, 844, "dark"], [390, 844, "light"]] as const) {
+    test(`captures the list at ${width}px in the ${theme} theme`, async ({ page }) => {
+      test.skip(!process.env.WOLLIPOG_EVIDENCE_DIR, "evidence capture only");
+      await page.emulateMedia({ colorScheme: theme });
+      await page.setViewportSize({ width, height });
+      // A fixed clock, so each row's "5m ago" never changes between runs.
+      await page.clock.setFixedTime(Date.UTC(2026, 10, 17, 17, 0));
+      await open(page, theme, "threads=long");
+      await expect(threadsList(page).locator("[data-thread-id]")).toHaveCount(12);
+      await capture(page, `assistants-list-${width}-${theme}`);
+    });
+  }
+});

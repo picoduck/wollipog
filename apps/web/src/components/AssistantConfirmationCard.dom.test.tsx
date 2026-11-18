@@ -52,8 +52,9 @@ const request = (id: string, title: string): AssistantOwnerConfirmation => ({
   id, threadId: "thr_1", operation: "session_archive", title, summary: "Archives it.", target: { kind: "session", id: "s", label: "Prototype" },
   impact: [], arguments: [{ label: "sessionId", value: "s" }], status: "pending", createdAt: 1, expiresAt: Date.now() + 3_600_000, resolvedAt: null,
 });
+// The thread is named after its requests, so its one line in the Inbox shows which ones a read returned.
 const thread = (confirmations: AssistantOwnerConfirmation[]): AssistantThread => ({
-  id: "thr_1", assistant: "wollipog", title: "Cleanup", harness: "codex", sessionId: "s_thread", status: confirmations.length ? "needs_you" : "done",
+  id: "thr_1", assistant: "wollipog", title: confirmations.map((confirmation) => confirmation.title).join(", "), harness: "codex", sessionId: "s_thread", status: confirmations.length ? "needs_you" : "done",
   access: { level: "full_access", destructive: "ask" }, connectionId: null, launchedSessionIds: [], confirmations, lastActivityAt: 1, createdAt: 1, archivedAt: null,
 });
 
@@ -100,7 +101,7 @@ test("approvals follow thread events and are read again when the connection retu
       </StoreProvider>
     </ApiProvider>,
   ));
-  const titles = () => [...container.querySelectorAll(".request-card-title")].map((node) => node.textContent);
+  const titles = () => [...container.querySelectorAll(".assistant-approvals-title")].map((node) => node.textContent);
   // The first frame brings the connection online, which reads the list.
   await act(async () => socket.push({ type: "session_removed", sessionId: "none" }));
   await flush();
@@ -116,7 +117,8 @@ test("approvals follow thread events and are read again when the connection retu
   // A thread event that changes its pending requests reads the list again.
   await event(thread([request("aoc_1", "Archive Session"), request("aoc_2", "Stop Session")]));
   assert.equal(reads, 2);
-  assert.deepEqual(titles(), ["Archive Session", "Stop Session"]);
+  assert.deepEqual(titles(), ["Archive Session, Stop Session"]);
+  assert.match(container.querySelector(".assistant-approvals-meta")!.textContent!, /^2 Approvals/);
   // Thread activity that leaves them unchanged does not.
   await event(thread([request("aoc_2", "Stop Session"), request("aoc_1", "Archive Session")]));
   assert.equal(reads, 2);
