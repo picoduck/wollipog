@@ -227,6 +227,14 @@ export interface GlobalViewItem {
  * as it was saved (rail-preferences.ts). */
 export const GLOBAL_VIEW_ITEMS: ReadonlyArray<GlobalViewItem> = [
   { id: "inbox", name: "Sessions", group: "work" },
+  // Right after Sessions (#4690): an assistant is a primary way to start, watch and steer
+  // sessions, so it takes digit 2 and every later destination moves down one.
+  {
+    id: "assistants",
+    name: "Assistants",
+    description: "Ask an assistant to start, watch and steer your sessions.",
+    group: "work",
+  },
   {
     id: "automations",
     name: "Automations",
@@ -237,13 +245,6 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<GlobalViewItem> = [
     id: "projects",
     name: "Projects",
     description: "Group related sessions and choose the folders where they run.",
-    group: "work",
-  },
-  // Last in Work (#4664), so every destination before it keeps the digit it always had.
-  {
-    id: "assistants",
-    name: "Assistants",
-    description: "Ask an assistant to start, watch and steer your sessions.",
     group: "work",
   },
   {
