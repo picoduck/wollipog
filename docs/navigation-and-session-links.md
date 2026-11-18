@@ -7,8 +7,6 @@ kept in lockstep without a second router state:
 | --- | --- |
 | Board | `/` |
 | Connections | `/connections` (`/runners` remains a legacy alias) |
-| Multi-Agent runs | `/runs` |
-| Run detail | `/runs/:id` |
 | Automations | `/automations` |
 | Session detail | `/sessions/:id` |
 
@@ -18,6 +16,7 @@ from becoming browser navigation segments. This preserves
 the control plane's existing nonblank 256-character session-id contract, including spaces, Unicode,
 percent signs, query/hash characters, and encoded slashes. Malformed escapes, blank ids, oversized
 ids, extra literal segments, and unknown paths resolve to Board and replace the address with `/`.
+Bookmarks under `/pods` or `/runs` open Page Not Found with a Back to Sessions action.
 
 ## History and direct loads
 
@@ -62,7 +61,7 @@ Archived sessions are omitted from the bounded live snapshot. Session deep links
 one exact, authorized `GET /api/sessions/lookup/by-id?id=...` lookup and upsert that result into the
 same store. Keeping the identifier in a query value prevents URL-path normalization from changing
 ids that contain slashes or dot segments; a guessed or inaccessible id retains the normal uniform
-`404` boundary. Run links wait for the authoritative initial snapshot. None of the detail views
+`404` boundary. None of the detail views
 claims a resource is missing while its authoritative source is still loading.
 
 ## Extending navigation
