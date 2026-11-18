@@ -48,7 +48,7 @@ export function registerAssistantAutomations(operations: AssistantOperations, db
         required: [...(name === "auto_create" || name === "auto_list" ? [] : ["automationId"]),
           ...(mutation ? ["operationId", ...(name === "auto_create" ? [] : ["expectedRevision"]),
             ...(name === "auto_create" || name === "auto_update" ? ["payload"] : [])] : [])]},
-      metadata: name === "auto_list", resolveTarget: target,
+      metadata: name === "auto_list", destructive: name === "auto_delete", resolveTarget: target,
       ownerCanAccess: (owner, t) => name === "auto_list" || name === "auto_create" ||
         (!!db.getAutomation(t.id, name === "auto_delete") && accessible(owner, db.getAutomation(t.id, name === "auto_delete")!)),
       execute: async (value, context) => {

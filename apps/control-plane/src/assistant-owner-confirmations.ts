@@ -54,27 +54,76 @@ export function ownerConfirmationTitle(operation: string): string {
   return `${parts.slice(1).map(titleWord).join(" ")} ${noun}`;
 }
 
-/** What approving each destructive operation does, in one plain sentence for its owner. Each states
- * only what the operation's service does; an operation without one gets the cautious fallback. */
+/** What approving each destructive operation does, in plain sentences for its owner. Each states
+ * only what the operation's service does, including what is kept and what is lost. Every operation
+ * the registry marks destructive has one (#4675); the fallback is for an unregistered name. */
 const SUMMARIES: Record<string, string> = {
-  session_stop: "Stops the session. Its transcript is kept, but it takes no further messages until it is restarted.",
-  session_archive: "Stops the session if it is running, then archives it. Its transcript is kept, and it can be unarchived later.",
-  session_delete: "Deletes the session and its side chat, with their transcripts. This cannot be undone.",
-  session_rewind: "Restores the session's files to the checkpoint of an earlier turn. The conversation is kept; file changes made after that turn are lost.",
-  session_reprocess: "Imports the adopted session's transcript again, replacing its current history.",
-  session_git: "Discards the uncommitted changes to a file in the session's worktree. They cannot be recovered.",
-  queue_cancel: "Asks to remove a queued prompt before the session receives it. If the session has already taken it, it is not removed.",
-  shell_close: "Closes the session's terminal and forgets it.",
-  auto_delete: "Deletes the automation, so it does not run again.",
-  skill_remove: "Removes the skill from the Skill Library.",
-  skill_unassign: "Removes the skill's assignment, so it is no longer given to those sessions.",
-  delivery_resume: "Resumes delivery to an existing callback the owner authorized.",
-  campaign_branch_clean: "Deletes the campaign's merged branches whose deletion was already approved.",
-  review_find_set: "Resolves or dismisses the review finding.",
+  // Sessions
+  session_stop: "Stops the session and cancels its queued prompts and background jobs. Its transcript and worktree are kept, but it takes no further messages until it is restarted.",
+  session_retry_stop: "Sends the session's pending Stop again. It cancels the session's queued prompts and background jobs; its transcript and worktree are kept.",
+  session_archive: "Stops the session if it is running, then archives it and its side chat. Its transcript is kept, and it can be unarchived later.",
+  session_delete: "Deletes the session and its side chat with their transcripts, and removes the worktrees Wollipog created for it, losing uncommitted changes. This cannot be undone.",
+  session_rewind: "Restores the session's files to how they were before the chosen turn. The conversation is kept; file changes made since then, including uncommitted edits, are lost.",
+  session_reprocess: "Imports the adopted session's transcript again, replacing its history in Wollipog. The original transcript file is not changed.",
+  session_role: "Converts the session between a normal session and an Orchestrator on the same conversation. Its permissions and budgets are kept, and it can be converted back.",
+  session_cancel: "Interrupts the session's current turn. The session stays open, and its transcript and queued prompts are kept.",
+  session_invoke: "Runs the provider command shown in the arguments, such as /compact, in the session. What it changes depends on that command.",
+  session_job_stop: "Ends one background job of the session. The session and its other jobs keep running.",
+  session_hold_release: "Ends the background jobs the session's handoff is waiting for, then runs the handoff and its queued prompts. Those jobs cannot be resumed.",
+  session_pending_resolve: "Cancels a prompt that has not reached the session, dismisses a failed one and erases its text, or sends it again, as the arguments say.",
+  steering_resolve: "Queues an uncertain steering message again, or dismisses it and erases its text, as the arguments say. Queued again, it may run twice.",
+  queue_cancel: "Asks to remove a queued prompt before the session starts it; its text is not kept. If the session has already started it, nothing changes.",
+  session_git: "Discards the staged and unstaged changes to one file in the session's worktree, deleting the file if it was newly added. The changes cannot be recovered.",
+  worktree_discard: "Removes the session's worktree folder. Wollipog refuses unless the worktree is clean and its work is already pushed and merged.",
+  shell_close: "Closes the session's terminal, ending its processes, and deletes its saved output. If the Machine is offline, the processes end when it reconnects.",
+  reminder_set: "Sets your reminder for the session, replacing any reminder you already have on it.",
+  reminder_remove: "Deletes your reminder for the session. Setting one again creates a new reminder.",
+  // Results
+  result_ack: "Marks the session's current result as reviewed by you, so it no longer needs your attention. The result is kept, and a newer result asks again.",
+  result_handoff: "Hands the session's current result from its Orchestrator to you for review. Nothing is sent or deleted, and a newer result goes back to the Orchestrator.",
+  result_blocked_ack: "Stops flagging finished background results that wait for another job from the same turn. They are still delivered when that job finishes.",
+  result_missing_ack: "Stops flagging a background delivery that was accepted but never returned a result. Nothing is retried, and a result that arrives later still counts.",
+  result_retry_ack: "Stops flagging a background delivery that ran out of retries. It is not sent again.",
+  // Campaigns and reviews
+  campaign_branch_clean: "Deletes on GitHub the campaign's merged branches whose deletion was already approved, if each still points at its merged head. The merged work is kept.",
+  review_find_set: "Resolves or dismisses the review finding. It can be reopened later; while resolved or dismissed, a required finding no longer blocks merging.",
+  // Projects and Machines
+  project_delete: "Deletes the Project and its Locations. Its sessions are kept but leave the Project, and no files are touched. This cannot be undone.",
+  project_archive_sessions: "Stops and archives every session in the Project, with their side chats. Transcripts and worktrees are kept, and each session can be unarchived.",
+  location_move: "Moves the Location and all its sessions to another Project. No files are touched, and it can be moved back.",
+  location_remove: "Removes the Location from the Project. Its sessions stay in the Project, and the workspace's files are not touched.",
+  runner_remove: "Deletes the offline Machine from Wollipog with all its sessions and their transcripts. Files on the Machine are not touched. This cannot be undone.",
+  workspace_remove: "Unregisters the workspace from its Machine. Its folder, files, sessions and worktrees are not touched.",
+  // Automations and callbacks
+  auto_delete: "Deletes the automation and its triggers, so it does not run again. Its run history and the sessions it started are kept.",
+  auto_trigger_remove: "Removes the trigger and its signing secret, so its URL stops working. The automation and its other triggers are kept.",
+  delivery_resume: "Resumes delivery to this callback, sending the deliveries that were waiting. Events from while it was paused are not sent.",
+  // Skills
+  skill_remove: "Deletes the skill and all its versions from the Skill Library and removes it from every Machine. This cannot be undone.",
+  skill_unassign: "Deletes this assignment of the skill, so the Machines it covered lose the skill unless another assignment gives it. The skill stays in the Library.",
+  skill_group_remove: "Deletes the skill group and its assignments. Its skills stay in the Library, but Machines lose the ones only this group gave them.",
+  skill_group_unassign: "Deletes this assignment of the skill group, so the Machines it covered lose the group's skills unless another assignment gives them.",
+  skill_builtin_apply: "Adds the built-in release as a new version of the skill and has it follow future releases. Earlier versions are kept and can be restored.",
+  skill_git_import: "Imports the previewed skill from Git into the Skill Library, as a new skill or a new version. Earlier versions are kept; Machines on the latest version get it.",
+  skill_git_preview_discard: "Discards the Git import preview. Nothing in the Skill Library or on any Machine changes.",
+  skill_machine_adopt: "Replaces the Machine's own copy of the skill with the Library version. The original folder is kept on the Machine and can be restored.",
+  skill_machine_import: "Imports the skill found on the Machine into the Skill Library, as a new skill or a new version. Earlier versions are kept; the Machine's files are not changed.",
+  skill_machine_discard: "Discards the Machine skill preview. Nothing in the Skill Library or on the Machine changes.",
+  skill_recovery_restore: "Puts the Machine's original skill folder back in place of the adopted Library version. Nothing is deleted.",
+  skill_drift_restore: "Replaces the hand-edited copy of the skill on the Machine with the Library version. The edits are deleted, or set aside if they cannot be removed safely.",
+  skill_drift_import: "Saves the Machine's hand-edited copy as a new version of the skill and uses it there. Earlier versions are kept; Machines on the latest version get it.",
+  skill_drift_discard: "Discards the review of the edited skill copy. Nothing in the Skill Library or on the Machine changes.",
+  skill_orphan_discard: "Permanently deletes the left-over skill copy from the Machine. The Skill Library is not changed.",
+  skill_orphan_import: "Imports the left-over skill copy into the Skill Library, then deletes it from the Machine unless it is deployed there again. Earlier versions are kept.",
+  skill_orphan_preview_discard: "Discards the review of the left-over skill copy. Nothing in the Skill Library or on the Machine changes.",
 };
 const SUMMARY_FALLBACK = "Runs this destructive command once, exactly as shown. Its effect may not be reversible.";
 export function ownerConfirmationSummary(operation: string): string {
-  return SUMMARIES[operation] ?? SUMMARY_FALLBACK;
+  return Object.hasOwn(SUMMARIES, operation) ? SUMMARIES[operation]! : SUMMARY_FALLBACK;
+}
+/** The operations with their own sentence, so a test can hold them to the registry's destructive set. */
+export function ownerConfirmationSummaryOperations(): string[] {
+  return Object.keys(SUMMARIES).sort();
 }
 
 /** `worktreePath` reads "Worktree Path"; established acronyms keep their capitals. */

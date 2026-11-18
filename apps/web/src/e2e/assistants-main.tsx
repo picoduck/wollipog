@@ -121,8 +121,8 @@ function confirmation(index: number): AssistantOwnerConfirmation {
   return {
     id: `aoc_${index}_${sessionId}`, threadId: "thr_triage", operation: stop ? "session_stop" : "session_archive",
     title: stop ? "Stop Session" : "Archive Session",
-    summary: stop ? "Stops the session. Its transcript is kept, but it takes no further messages until it is restarted."
-      : "Stops the session if it is running, then archives it. Its transcript is kept, and it can be unarchived later.",
+    summary: stop ? "Stops the session and cancels its queued prompts and background jobs. Its transcript and worktree are kept, but it takes no further messages until it is restarted."
+      : "Stops the session if it is running, then archives it and its side chat. Its transcript is kept, and it can be unarchived later.",
     target: { kind: "session", id: sessionId!, label: label! },
     impact: [{ label: "Status", value: "Running" }, { label: "Worktree Path", value: `/repos/wollipog/.worktrees/${worktree}` }],
     arguments: [{ label: "sessionId", value: sessionId! }],

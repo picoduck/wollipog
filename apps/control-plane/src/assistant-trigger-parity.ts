@@ -23,7 +23,7 @@ export function registerAssistantTriggerParity(operations: AssistantOperations, 
       inputSchema: {type: "object", additionalProperties: false, properties: {automationId: {type: "string"},
         triggerId: {type: "string"}, commandId: {type: "string"}, confirmationId: {type: "string"}, expectedRevision: {type: "string"}},
         required: name === "auto_triggers" ? ["automationId"] : ["automationId", "triggerId", "commandId", "expectedRevision"]},
-      resolveTarget: target, ownerCanAccess: (owner, t) => {
+      destructive: name === "auto_trigger_remove", resolveTarget: target, ownerCanAccess: (owner, t) => {
         const schedule = db.getAutomation(t.id);
         return !!schedule && ownerCanAccessAutomation(db, owner, schedule);
       },

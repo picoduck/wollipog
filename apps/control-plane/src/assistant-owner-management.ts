@@ -60,7 +60,7 @@ export function registerAssistantOwnerManagement(operations: AssistantOperations
     target: (args: unknown) => AssistantTarget, mutate: boolean, destructive: boolean,
     execute: (args: Record<string, unknown>, ctx: Context) => Promise<OwnerManagementResult> | OwnerManagementResult,
     impact?: (args: Record<string, unknown>, ctx: Context) => unknown) => {
-    operations.register({name, description,
+    operations.register({name, description, destructive,
       inputSchema: {type: "object", additionalProperties: false,
         properties: {...properties, ...(mutate ? {commandId: str, confirmationId: str} : {})},
         required: [...required, ...(mutate ? ["commandId"] : [])]},

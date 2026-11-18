@@ -28,7 +28,7 @@ if (process.argv.includes("--verify-status")) {
 const connection = {id: "inventory-fixture", name: "Fixture", ownerUserId: "fixture", organizationId: "fixture",
   revision: 1, revoked: false, grant: {operations: "all" as const, projects: "all" as const}};
 const tools = assistantOperations.list(connection).map(op => op.name).sort();
-console.log("OWNER_PARITY_SNAPSHOT " + JSON.stringify({routes: ownerManagementInventory.list(), tools}));
+console.log("OWNER_PARITY_SNAPSHOT " + JSON.stringify({routes: ownerManagementInventory.list(), tools, destructive: assistantOperations.destructive()}));
 if (process.argv.includes("--verify-runtime-identity") || process.argv.includes("--verify-campaign-protocol") || process.argv.includes("--verify-residual-management")) {
   // This is the same brand-new fixture DB as the isolated production process, never hosting
   // state. Read back through real HTTP/MCP to prove the owner has access but no session identity.

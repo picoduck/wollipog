@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import Fastify from "fastify";
 import {
   ASSISTANT_OWNER_CONFIRMATION_TTL_MS,
@@ -17,7 +19,7 @@ import { createAssistantOwnerConfirmationService, createAssistantThreads } from 
 import { registerAssistantThreadRoutes } from "./assistant-thread-routes.js";
 import { createAssistantOperations } from "./assistant-routes.js";
 import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
-import { ownerConfirmationSummary, ownerConfirmationTitle } from "./assistant-owner-confirmations.js";
+import { ownerConfirmationSummary, ownerConfirmationSummaryOperations, ownerConfirmationTitle } from "./assistant-owner-confirmations.js";
 import type { HumanPrincipal } from "./identity.js";
 
 const claude: AgentDefinition = { id: "claude", name: "Claude", driver: "claude-code", context: { kind: "native" }, command: "claude", args: [], env: {}, available: true,
@@ -361,4 +363,24 @@ test("each summary says what approving does, including what stays out of reach a
   assert.match(ownerConfirmationSummary("session_archive"), /can be unarchived later/);
   assert.match(ownerConfirmationSummary("session_delete"), /cannot be undone/);
   assert.match(ownerConfirmationSummary("not_a_known_operation"), /may not be reversible/);
+});
+
+test("every destructive operation in the production registry has its own summary sentence", {timeout: 60_000}, () => {
+  // The registry's own destructive flags, read from the real control-plane composition in a
+  // child process with a new fixture database (#4675).
+  const child = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../test-support/owner-parity-snapshot.ts", import.meta.url))],
+    {encoding: "utf8", timeout: 55_000, maxBuffer: 1024 * 1024});
+  assert.equal(child.status, 0, "Production inventory failed; raw logs withheld.");
+  const line = child.stdout.split("\n").find(entry => entry.startsWith("OWNER_PARITY_SNAPSHOT "));
+  assert.ok(line);
+  const {destructive} = JSON.parse(line.slice("OWNER_PARITY_SNAPSHOT ".length)) as {destructive: string[]};
+  assert.ok(destructive.includes("session_stop") && destructive.includes("session_delete"), "the registry reports its destructive operations");
+  const summarized = new Set(ownerConfirmationSummaryOperations());
+  assert.deepEqual(destructive.filter(name => !summarized.has(name)), [], "a destructive operation without a sentence shows the generic fallback");
+  assert.deepEqual([...summarized].filter(name => !destructive.includes(name)), [], "a sentence for an operation that is not destructive is stale");
+  for (const name of destructive) {
+    const summary = ownerConfirmationSummary(name);
+    assert.match(summary, /^[A-Z][^]*\.$/u, `${name}: a sentence-case sentence`);
+    assert.ok(summary.length <= 240, `${name}: short enough to read on a phone`);
+  }
 });

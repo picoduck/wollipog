@@ -70,7 +70,7 @@ export function registerAssistantSkillParity(operations: AssistantOperations, de
     };
     const sourceRunner = (a: Record<string, unknown>) => kind === "runner" ? text(a.runnerId, "runnerId")
       : kind === "preview" ? service.reference(text(a.previewId, "previewId"))?.runnerId : undefined;
-    operations.register({name, description: `${route}. Uses the owner's shared Skill Library service; inspect revision and affected scope before changes.`,
+    operations.register({name, destructive, description: `${route}. Uses the owner's shared Skill Library service; inspect revision and affected scope before changes.`,
       inputSchema: {type: "object", additionalProperties: false, properties: {
         runnerId: {type: "string"}, skillId: {type: "string"}, groupId: {type: "string"}, previewId: {type: "string"},
         assignmentId: {type: "string"}, recoveryId: {type: "string"}, payload: skillParityPayloadSchema(name),

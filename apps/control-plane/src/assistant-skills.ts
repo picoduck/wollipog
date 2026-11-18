@@ -63,7 +63,7 @@ export function registerAssistantSkills(operations: AssistantOperations, deps: S
       return {kind: "skill", id: resolved ?? name};
     };
     const operation: AssistantOperation = {
-      name, description,
+      name, description, destructive: name === "skill_remove" || name === "skill_unassign",
       inputSchema: {type: "object", properties: {skillId: {type: "string"}, assignmentId: {type: "string"},
         runnerId: {type: "string"}, versionId: {type: "string"}, before: {type: "string"},
         operationId: {type: "string"}, confirmationId: {type: "string"}, expectedRevision: {type: "string"},

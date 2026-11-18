@@ -90,14 +90,14 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
     }});
   const mutation = (name: string, description: string, inputSchema: Record<string, unknown>, resolveTarget: (args: unknown) => AssistantTarget,
     run: (args: Record<string, unknown>, owner: Parameters<SessionsService["promptFromHuman"]>[0], origin?: AssistantSessionWorkOrigin) => ServiceResult<SessionView> | Promise<ServiceResult<SessionView>>) => {
-    operations.register({name, description, inputSchema, resolveTarget, ownerCanAccess: canAccess, execute: async (value, context) => {
+    const destructive = name === "session_stop" || name === "session_archive";
+    operations.register({name, description, inputSchema, destructive, resolveTarget, ownerCanAccess: canAccess, execute: async (value, context) => {
       const args = object(value), commandId = text(args, "commandId");
       if (args.workOriginId !== undefined && !hooks.authenticatedOrigin && !hooks.associateCommand) throw new AssistantRefusal("Work-origin tracking is not registered on this control plane. Enable the Assistant work tracking extension before submitting correlated commands.");
       const owner = await context.recheck();
       const current = db.assistantConnections.get(context.connection.id)!;
       const {confirmationId, ...requestArgs} = args;
       const argumentsDigest = assistantRequestDigest(requestArgs), target = resolveTarget(args);
-      const destructive = name === "session_stop" || name === "session_archive";
       const confirm = destructive && db.assistantConnections.destructiveConfirmation(current.id) === "confirm";
       const confirmationBinding = {connectionId: current.id, grantRevision: current.revision, operation: name, argumentsDigest,
         targetDigest: assistantRequestDigest(target)};

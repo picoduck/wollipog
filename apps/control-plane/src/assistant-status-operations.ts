@@ -65,7 +65,7 @@ export function registerAssistantStatusOperations(operations: AssistantOperation
       ...Object.fromEntries(parameters.map(key => [key, string])),
       query: {type: "object", additionalProperties: {type: "string"}, description: "The owner read API's query fields, including exact paging cursors/epochs. Values are strings."},
       ...(mutate ? {commandId: string, confirmationId: string, payload: {type: "object", description: "The owner API's request fields, including exact revision or reminder compare-and-set fields."}} : {})};
-    operations.register({name,
+    operations.register({name, destructive,
       description: `${mutate ? "Manage" : "Read"} ${name.replaceAll("_", " ")}. ${mutate ? "Use a stable commandId; reconcile command_get after a lost response." : "Uses the owner read service; grants no action authority."}`,
       inputSchema: {type: "object", additionalProperties: false, properties,
         required: [...(!inventory ? ["sessionId"] : []), ...parameters, ...(mutate ? ["commandId"] : [])]},
