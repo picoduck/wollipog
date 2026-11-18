@@ -2248,7 +2248,7 @@ button.status { cursor: pointer; }
 .notice.state-error.page-level { margin-right: auto; margin-left: auto; }
 /* A detail page gives the notice its gutter as its own margins: keep at least that much, and center
    it once the page is wider than the measure plus both gutters. */
-:is(.session-detail, .run-detail) > .notice.state-error.page-level {
+:is(.session-detail, .automation-detail) > .notice.state-error.page-level {
   margin-right: max(var(--page-gutter), calc((100% - 480px) / 2));
   margin-left: max(var(--page-gutter), calc((100% - 480px) / 2));
 }
@@ -16885,9 +16885,19 @@ button.review-finding-location {
   }
 }
 /* The automation page (#2968; docs/design-system.md §4.3, §4.5, §5.4, §13.2): the detail bar, the
-   one notice, the glance, then sections 32px apart. Content sits in the gutter (`.run-detail`) and
-   keeps the list pages' measure. */
-.automation-detail > :not(.detail-bar) { max-width: var(--page-max); }
+   one notice, the glance, then sections 32px apart. Content sits in the gutter under the full-width
+   bar and keeps the list pages' measure. */
+.automation-detail {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: var(--space-6);
+}
+.automation-detail > :not(.detail-bar) {
+  max-width: var(--page-max);
+  margin-right: var(--page-gutter);
+  margin-left: var(--page-gutter);
+}
 .automation-detail > .automation-status { margin-top: var(--space-3); }
 .automation-detail > .automation-notice-slot { margin-top: var(--space-4); }
 .automation-sections {
