@@ -547,7 +547,8 @@ test("an attempt a delivery record ends at once keeps an archived child's verifi
   } finally { h.db.close(); }
 });
 
-for (const later of ["open", "prompt", "notice"] as const) test(`a later attempt that is open or reached the child still supersedes its report: ${later} (#4684)`, async () => {
+const supersedingLater = ["open", "prompt", "notice", "recovered_answer", "runner_continuation"] as const;
+for (const later of supersedingLater) test(`a later attempt that is open or reached the child still supersedes its report: ${later} (#4684)`, async () => {
   const h = archivedVerifiedChild();
   try {
     if (later === "open") {
@@ -559,14 +560,36 @@ for (const later of ["open", "prompt", "notice"] as const) test(`a later attempt
           h.db.stageRestartNotice({ occurrenceIds: [], command: { commandId: "notice", sessionId: "child", runnerId: "r",
             payloadJson: "{}", payloadSha256: "test", now: Date.now(), expiresAt: Date.now() + 1000 } });
         }
-        h.db.appendEvent("child", { kind: "user_message", text: "Take the second item.",
-          ...(later === "notice" ? { commandId: "notice" } : {}) }, Date.now());
+        if (later === "prompt" || later === "notice") {
+          h.db.appendEvent("child", { kind: "user_message", text: "Take the second item.",
+            ...(later === "notice" ? { commandId: "notice" } : {}) }, Date.now());
+        }
+        if (later === "recovered_answer") {
+          // A recovered async answer starts a provider turn without a user message; the turn fails
+          // before any newer report, and its durable command ends failed.
+          h.db.stageSessionPromptCommand({ commandId: "answer", sessionId: "child", runnerId: "r",
+            payloadJson: "{}", payloadSha256: "test", now: Date.now(), expiresAt: Date.now() + 1000 });
+          h.db.appendEvent("child", { kind: "question_resolved", requestId: "q", occurrenceId: "q-1", answered: true,
+            startsTurn: true, resolutionReason: "submitted", commandId: "answer" }, Date.now());
+          h.db.raw().prepare("UPDATE session_prompt_commands SET state='failed' WHERE command_id='answer'").run();
+        }
+        if (later === "runner_continuation") {
+          h.db.appendEvent("child", { kind: "stderr", text: "Runner continued after managed background work completed." }, Date.now());
+        }
       });
     }
-    assert.equal(h.db.durableFinalReportSeq("child"), null);
-    assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
-    const again = h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: h.report, followUpsAccounted: true });
-    assert.equal(again.status, 409, again.error ?? "verification accepted");
+    const superseded = () => {
+      assert.equal(h.db.durableFinalReportSeq("child"), null);
+      assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
+      const again = h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: h.report, followUpsAccounted: true });
+      assert.equal(again.status, 409, again.error ?? "verification accepted");
+    };
+    superseded();
+    if (later === "recovered_answer" || later === "runner_continuation") {
+      // Archived-history pruning keeps neither kind; losing the event must not revive the report (#1729).
+      h.db.raw().prepare("DELETE FROM session_events WHERE session_id='child' AND kind IN ('question_resolved','stderr')").run();
+      superseded();
+    }
   } finally { h.db.close(); }
 });
 

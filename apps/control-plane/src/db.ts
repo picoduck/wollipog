@@ -5568,18 +5568,17 @@ type ConfirmedSessionNamingHarnessTargetWrite = SessionNamingHarnessTargetWrite 
 const TERMINAL_STATUS_SQL = "('completed','failed','stopped')";
 
 /** Whether the ledger attempt `assignment`, opened at or after a child's report, still supersedes
- * that report (#4684). An open attempt does: work is pending for the child. So does an ended one
- * whose event window (after its start through its end, in one event epoch) holds a user message
- * of any provenance, or whose end cannot be placed in that epoch. An attempt that opened and
- * ended with nothing delivered to the child, such as one a delivery record closed as superseded
- * at once, does not. Prompts, reports and in-flight commands after the window are the report
- * checks' own clauses, and archived-history pruning keeps every user message, so a pruned
- * history never makes a superseded report count again. */
+ * that report (#4684). An open attempt does: work is pending for the child. An ended attempt
+ * stops superseding it only when the child's history did not move while it was open: it ended at
+ * the seq it started at, in the same event epoch. That covers an attempt a delivery record closed
+ * as superseded at once. Any event inside the window keeps it superseding, because work reaches a
+ * child in more forms than a user message (a recovered question answer, a runner continuation),
+ * and the comparison reads only the attempt's own stored seqs, so archived-history pruning can
+ * never make a superseded report count again (#1729). Prompts, reports and in-flight commands
+ * after the attempt are the report checks' own clauses. */
 const CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL = `(assignment.ended_at IS NULL OR assignment.end_seq IS NULL
   OR assignment.end_event_epoch IS NOT assignment.start_event_epoch
-  OR EXISTS (SELECT 1 FROM session_events reached
-    WHERE reached.session_id=assignment.session_id AND reached.kind='user_message'
-      AND reached.seq>assignment.start_seq AND reached.seq<=assignment.end_seq))`;
+  OR assignment.end_seq IS NOT assignment.start_seq)`;
 
 /** Rows one prune batch tests against HISTORY_PRUNE_KEEP_SQL at most: about 1 ms of JSON reads. */
 const HISTORY_PRUNE_SCAN_ROWS = 1024;
@@ -22825,8 +22824,8 @@ export class ControlPlaneDb {
 
   /** Seq of the session's last top-level report when no later report or assignment superseded it,
    * and null when its last word is not a report. Failed/stopped recovery also requires proof that
-   * active commands and ledger assignments did not supersede it; an assignment that ended with
-   * nothing delivered to the child does not (CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL). Ordinary
+   * active commands and ledger assignments did not supersede it; an assignment that ended before
+   * the child's history moved does not (CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL). Ordinary
    * idle/completed stored attestations retain their established rules until a new turn or user
    * message invalidates them. */
   durableFinalReportSeq(sessionId: string): number | null {
