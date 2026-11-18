@@ -4,7 +4,9 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { PROTOCOL_VERSION, type IdentityAdministrationView, type RunnerView, type UiSnapshotMessage } from "@wollipog/protocol";
+import {
+  PROTOCOL_VERSION, type IdentityAdministrationView, type ResourceOwner, type ResourceScope, type RunnerView, type UiSnapshotMessage,
+} from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -107,18 +109,23 @@ class FakeSocket implements UiSocket {
   push(message: UiSnapshotMessage) { this.onmessage?.({ data: JSON.stringify(message) }); }
 }
 
-const snapshot = (runners: RunnerView[]): UiSnapshotMessage => ({
+const snapshot = (runners: RunnerView[], accessScopeManagement = false): UiSnapshotMessage => ({
   type: "snapshot",
-  capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+  capabilities: {
+    sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
+    ...(accessScopeManagement ? { accessScopeManagement: true } : {}),
+  },
   runners, boxes: [], projects: [], sessions: [], runs: [], pods: [],
 });
 const navigation = (view: View): ViewNavigation => ({ current: () => view, push() {}, replace() {}, listen: () => () => {} });
 const settle = () => act(async () => { for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setTimeout(resolve, 0)); });
 let sequence = 0;
 
-async function mount(machine: RunnerView, { role = "owner", client: overrides = {} }: {
+async function mount(machine: RunnerView, { role = "owner", client: overrides = {}, who }: {
   role?: "owner" | "member" | "viewer";
   client?: Partial<ApiClient>;
+  /** A full identity, which also turns on the server's access-scope management (#4683). */
+  who?: IdentityAdministrationView;
 } = {}) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -131,7 +138,7 @@ async function mount(machine: RunnerView, { role = "owner", client: overrides = 
     createSocket: () => socket,
     close() {},
   };
-  const identity = { context: { role }, organizations: [], memberships: [], teams: [] } as unknown as IdentityAdministrationView;
+  const identity = who ?? { context: { role }, organizations: [], memberships: [], teams: [] } as unknown as IdentityAdministrationView;
   const client = {
     ...api,
     getIdentity: async () => identity,
@@ -152,13 +159,13 @@ async function mount(machine: RunnerView, { role = "owner", client: overrides = 
       </ApiProvider>,
     );
   });
-  await act(async () => { socket.push(snapshot([machine])); });
+  await act(async () => { socket.push(snapshot([machine], who !== undefined)); });
   await settle();
   const body = domWindow.document.body as unknown as HTMLElement;
   return {
     body,
     detail: () => body.querySelector<HTMLElement>("article.machine-detail")!,
-    push: async (next: RunnerView) => { await act(async () => { socket.push(snapshot([next])); }); await settle(); },
+    push: async (next: RunnerView) => { await act(async () => { socket.push(snapshot([next], who !== undefined)); }); await settle(); },
     unmount: async () => { await act(async () => root.unmount()); mountPoint.remove(); },
   };
 }
@@ -478,6 +485,139 @@ test("Remove Workspace names what it removes, Cancel changes nothing, a refusal 
     assert.match(dialogNamed(view.body, "Remove Workspace")?.textContent ?? "", /set in the machine’s runner configuration/u);
   } finally {
     await view.unmount();
+  }
+});
+
+/* Workspace access (#4683): chosen in Add Workspace, shown on each row, changed from the Machine. */
+const ORG = "org-1";
+const scopeOf = (owner: ResourceOwner): ResourceScope => ({ organizationId: ORG, owner });
+const mine = scopeOf({ kind: "user", userId: "user-me" });
+const builders = scopeOf({ kind: "team", teamId: "team-builders" });
+const everyone = scopeOf({ kind: "organization", organizationId: ORG });
+function person(role: "owner" | "admin" | "operator" | "viewer" = "admin"): IdentityAdministrationView {
+  return {
+    context: { userId: "user-me", userName: "Me", organizationId: ORG, organizationName: "Org", role, deviceId: "device", localBootstrap: false },
+    organizations: [{ organizationId: ORG, name: "Org", createdAt: 1 }],
+    memberships: [
+      { organizationId: ORG, organizationName: "Org", userId: "user-me", userName: "Me", userStatus: "active", role, createdAt: 1 },
+      { organizationId: ORG, organizationName: "Org", userId: "user-two", userName: "Two", userStatus: "active", role: "operator", createdAt: 1 },
+    ],
+    teams: [{ teamId: "team-builders", organizationId: ORG, name: "Builders", memberUserIds: ["user-me", "user-two"], createdAt: 1 }],
+  };
+}
+const accessOptions = (body: HTMLElement) => [...body.querySelectorAll<HTMLElement>('[role="option"]')]
+  .map((option) => ({ option, title: option.textContent?.match(/^(Private to Me|Team: Builders|Organization-Wide)/u)?.[0] }));
+
+test("Add Workspace offers Access, Private to Me unless another is picked, within what the machine reaches", async () => {
+  const registered: Array<Record<string, unknown>> = [];
+  const client = {
+    listDirectory: async (_runnerId: string, path: string) => ({ path: path || "/home/ada/site", parent: "/home/ada", entries: [] }),
+    registerMachineWorkspace: async (_runnerId: string, body: Record<string, unknown>) => {
+      registered.push(body);
+      return { workspace: { id: `ws-${registered.length}`, name: String(body.name), path: String(body.path) } };
+    },
+  } as Partial<ApiClient>;
+  const add = async (view: Awaited<ReturnType<typeof mount>>) => {
+    await act(async () => buttonNamed(sectionNamed(view.detail(), "Workspaces")!, "Add Workspace…")!.click());
+    await settle();
+    return dialogNamed(view.body, "Add Workspace")!;
+  };
+  const view = await mount(runner("studio", { scope: everyone }), { who: person(), client });
+  try {
+    let dialog = await add(view);
+    const fields = [...dialog.querySelectorAll<HTMLElement>(".modal-body .field")];
+    assert.deepEqual(fields.map((field) => field.querySelector(":scope > span, .field-head > label")?.textContent),
+      ["Folder", "Workspace Name", "Access"]);
+    const trigger = fields[2]!.querySelector<HTMLButtonElement>(".ui-select-trigger")!;
+    assert.match(trigger.textContent ?? "", /Private to Me/u, "the default is today's");
+    await act(async () => buttonNamed(dialog, "Add Workspace")!.click());
+    await settle();
+    assert.deepEqual(registered.at(-1), { name: "site", path: "/home/ada/site" }, "Private to Me sends no owner");
+
+    dialog = await add(view);
+    const select = dialog.querySelector<HTMLButtonElement>(".ui-select-trigger")!;
+    await act(async () => select.click());
+    assert.deepEqual(accessOptions(view.body).map(({ title }) => title), ["Private to Me", "Team: Builders", "Organization-Wide"]);
+    const organization = accessOptions(view.body).find(({ title }) => title === "Organization-Wide")!.option;
+    await act(async () => organization.click());
+    await act(async () => buttonNamed(dialog, "Add Workspace")!.click());
+    await settle();
+    assert.deepEqual(registered.at(-1), { name: "site", path: "/home/ada/site", owner: { kind: "organization", organizationId: ORG } });
+  } finally {
+    await view.unmount();
+  }
+  // A machine shared only with Builders can't hold a workspace the whole organization reaches.
+  const narrow = await mount(runner("studio", { scope: builders }), { who: person(), client });
+  try {
+    await add(narrow);
+    await act(async () => dialogNamed(narrow.body, "Add Workspace")!.querySelector<HTMLButtonElement>(".ui-select-trigger")!.click());
+    assert.deepEqual(accessOptions(narrow.body).map(({ title }) => title), ["Private to Me", "Team: Builders"]);
+  } finally {
+    await narrow.unmount();
+  }
+});
+
+test("Workspaces shows each one's access, and Change Access… previews, applies, and the row updates", async () => {
+  const previews: ResourceOwner[] = [];
+  const updates: Array<{ workspaceId: string; owner: ResourceOwner; token: string }> = [];
+  const machine = (homeScope: ResourceScope) => runner("studio", {
+    scope: everyone,
+    workspaces: [
+      { id: "home", name: "Home", path: "/home/ada", scope: homeScope, canManage: true, source: "managed" },
+      { id: "shared", name: "Shared", path: "/srv/shared", scope: builders, canManage: false, source: "managed" },
+    ],
+  });
+  const view = await mount(machine(mine), {
+    who: person(),
+    client: {
+      previewWorkspaceAccessScope: async (_runnerId: string, workspaceId: string, owner: ResourceOwner) => {
+        previews.push(owner);
+        return { preview: {
+          resource: "workspace", resourceId: workspaceId, currentScope: mine, targetScope: scopeOf(owner),
+          affectedProjects: [], activeSessionCount: 0, totalSessionCount: 1, sessionsToNarrow: 0, compatible: true,
+          confirmationToken: "a".repeat(64),
+        } };
+      },
+      updateWorkspaceAccessScope: async (_runnerId: string, workspaceId: string, owner: ResourceOwner, token: string) => {
+        updates.push({ workspaceId, owner, token });
+        return { workspace: { id: workspaceId, name: "Home", path: "/home/ada" }, preview: {} as never };
+      },
+    } as Partial<ApiClient>,
+  });
+  try {
+    const rows = () => [...sectionNamed(view.detail(), "Workspaces")!.querySelectorAll<HTMLElement>(".surface > .row")];
+    const access = () => rows().map((row) => row.querySelector(".machine-workspace-access")?.textContent);
+    assert.deepEqual(access(), ["Private to Me", "Team: Builders"]);
+    assert.ok(rows()[0]!.querySelector(".machine-workspace-access svg"), "the access's icon");
+    const change = (row: HTMLElement) => buttonNamed(row, "Change Access…");
+    assertNoDomNode(change(rows()[1]!), "someone who can't manage a workspace sees its access, with no action");
+    await act(async () => change(rows()[0]!)!.click());
+    await settle();
+    const dialog = dialogNamed(view.body, "Change Location Access")!;
+    assert.ok(dialog, "the existing access-scope dialog opens");
+    const organization = [...dialog.querySelectorAll<HTMLInputElement>("input[type=radio]")]
+      .find((input) => input.closest("label")?.textContent?.startsWith("Organization-Wide"))!;
+    await act(async () => { organization.click(); });
+    await settle();
+    assert.deepEqual(previews, [{ kind: "organization", organizationId: ORG }], "the server previews the change");
+    await act(async () => buttonNamed(dialog, "Change Access")!.click());
+    await settle();
+    assert.deepEqual(updates, [{ workspaceId: "home", owner: { kind: "organization", organizationId: ORG }, token: "a".repeat(64) }]);
+    assertNoDomNode(dialogNamed(view.body, "Change Location Access") ?? null, "the dialog closes");
+    await view.push(machine(everyone));
+    assert.deepEqual(access(), ["Organization-Wide", "Team: Builders"], "the row updates with the machine's snapshot");
+  } finally {
+    await view.unmount();
+  }
+  // A Viewer sees each access and no Change Access….
+  const viewer = await mount(machine(mine), { who: person("viewer") });
+  try {
+    const section = sectionNamed(viewer.detail(), "Workspaces")!;
+    assert.deepEqual([...section.querySelectorAll(".machine-workspace-access")].map((item) => item.textContent),
+      ["Private to Me", "Team: Builders"]);
+    assertNoDomNode(buttonNamed(section, "Change Access…"));
+  } finally {
+    await viewer.unmount();
   }
 });
 

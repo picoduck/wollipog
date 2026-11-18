@@ -998,6 +998,43 @@ for (const width of [1440, 390]) {
   });
 }
 
+for (const width of [1440, 390]) {
+  test(`at ${width}px each Workspace shows its access, Change Access… changes it, and Add Workspace starts private (#4683)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`/machine-management-e2e.html?access=1&workspaces=long${width > 760 ? `&${DESIGN_WORKSTATION}` : ""}`);
+    if (width <= 760) await machineRow(page).click();
+    const workspaces = page.getByRole("region", { name: /^Workspaces/ });
+    const rows = workspaces.locator(".surface > .row");
+    await expect(rows.locator(".machine-workspace-access")).toHaveText(["Private to Me", "Team: Builders", "Organization-Wide"]);
+    const heights = await rows.evaluateAll((items) => items.map((item) => item.getBoundingClientRect().height));
+    expect(new Set(heights).size, "every row is one height").toBe(1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+
+    await rows.filter({ hasText: "Home" }).getByRole("button", { name: "Change Access…" }).click();
+    const change = page.getByRole("dialog", { name: "Change Location Access" });
+    await change.getByRole("radio", { name: /Organization-Wide/ }).check();
+    await expect(change.getByRole("button", { name: "Change Access" })).toBeEnabled();
+    await change.getByRole("button", { name: "Change Access" }).click();
+    await expect(change).toHaveCount(0);
+    await expect(rows.filter({ hasText: "Home" }).locator(".machine-workspace-access")).toHaveText("Organization-Wide");
+    expect(await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.changedWorkspaceAccess()))
+      .toEqual([{ workspaceId: "home", owner: { kind: "organization", organizationId: "org_personal" } }]);
+
+    await workspaces.getByRole("button", { name: "Add Workspace…" }).click();
+    const add = page.getByRole("dialog", { name: "Add Workspace" });
+    await add.getByRole("button", { name: "repo" }).click();
+    const access = add.getByRole("button", { name: /^Access/ });
+    await expect(access).toContainText("Private to Me");
+    await access.click();
+    await page.getByRole("option", { name: /Team: Builders/ }).click();
+    await add.getByRole("button", { name: "Add Workspace" }).click();
+    await expect(add).toHaveCount(0);
+    await expect(rows.filter({ hasText: "repo" }).locator(".machine-workspace-access")).toHaveText("Team: Builders");
+    expect(await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.lastRegisteredWorkspace()))
+      .toEqual({ name: "repo", path: "C:\\Users\\misko\\repo", owner: { kind: "team", teamId: "team-builders" } });
+  });
+}
+
 test("inline switching retains terms consent and cancellation, and disabling applies directly", async ({ page }) => {
   const toggle = providerAccounts(page).getByRole("switch", { name: "Switch Accounts at a Usage Limit" });
   await expect(toggle).toHaveAttribute("aria-checked", "false");

@@ -10769,7 +10769,45 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Remove… (#4123) keeps its size at the row's end; Remove Workspace shows the folder in the mono face. */
+/* Its access (#4683): the access icon and label in the dim small face, kept whole after the path. */
+.machine-workspace-access {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-dim);
+  font: var(--type-small);
+  white-space: nowrap;
+}
+.machine-workspace-access > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A phone has no room for all of it on one line. The first keeps what it always had: the name,
+   the path given at least 30%, and Remove…; the access, under the name, and Change Access… make
+   the second. */
+@media (max-width: 760px) {
+  .machine-workspaces > .row:has(> .machine-workspace-access) {
+    display: grid;
+    grid-template-columns: var(--icon) minmax(0, max-content) minmax(30%, 1fr) auto;
+    row-gap: var(--space-1);
+    height: auto;
+    padding-block: var(--space-2);
+  }
+  .machine-workspace-access {
+    grid-row: 2;
+    grid-column: 2 / 4;
+    min-width: 0;
+  }
+  .machine-workspaces > .row > .btn { justify-self: end; }
+  .machine-workspaces > .row > .machine-workspace-change-access {
+    grid-row: 2;
+    grid-column: 4;
+  }
+}
+/* Change Access… and Remove… (#4123) keep their size at the row's end; Remove Workspace shows the
+   folder in the mono face. */
 .machine-workspaces > .row > .btn { flex: none; }
 .remove-workspace-path { font-family: var(--font-mono); }
 /* Skills on This Machine (#1981, #2989): a disclosure sized as the section titles around it. */
