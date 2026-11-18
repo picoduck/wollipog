@@ -62,7 +62,7 @@ Archived sessions are omitted from the bounded live snapshot. Session deep links
 one exact, authorized `GET /api/sessions/lookup/by-id?id=...` lookup and upsert that result into the
 same store. Keeping the identifier in a query value prevents URL-path normalization from changing
 ids that contain slashes or dot segments; a guessed or inaccessible id retains the normal uniform
-`404` boundary. Run/pod links wait for the authoritative initial snapshot. None of the detail views
+`404` boundary. Run links wait for the authoritative initial snapshot. None of the detail views
 claims a resource is missing while its authoritative source is still loading.
 
 ## Extending navigation

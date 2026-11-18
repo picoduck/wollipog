@@ -120,7 +120,7 @@ function Extras() {
     <PanelActionSlotContext.Provider value={slots.actions}>
       <PanelHeaderActions>
         <InfoPopover tool="Agents" facts={[
-          { term: "Shows", value: "Subagents, background jobs and the sessions of this run or pod" },
+          { term: "Shows", value: "Subagents, background jobs and the sessions of this run" },
           { term: "Status", value: "Read from the transcript and the machine's records" },
         ]}>
           Everyone working for this session, current and finished.

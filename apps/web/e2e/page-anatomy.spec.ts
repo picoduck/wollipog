@@ -48,6 +48,13 @@ for (const width of [1440, 390]) {
     for (const path of ["/pods", "/pods/~cABvAGQAXwBhAGIAYwA"]) {
       await openDestination(page, path, "Page Not Found");
       await expect(page.getByRole("navigation", { name: "Primary Navigation" }).getByRole("link", { name: "Pods" })).toHaveCount(0);
+      if (width === 1440) {
+        const header = page.locator(".page > .page-header", { has: page.getByRole("heading", { name: "Page Not Found" }) });
+        const main = await page.locator(".main-body").boundingBox();
+        const box = await header.boundingBox();
+        expect(box!.x - main!.x).toBeGreaterThanOrEqual(24);
+        expect(box!.x + box!.width).toBeLessThan(main!.x + main!.width);
+      }
     }
   });
 }

@@ -905,7 +905,9 @@ export function Shell() {
             </ExperimentGate>
           )}
           {view.name === "not-found" && (
-            <PageHeader title={viewTitle(view)} description="This page is no longer available." />
+            <div className="page">
+              <PageHeader title={viewTitle(view)} description="This page is no longer available." />
+            </div>
           )}
           {view.name === "assistants" && <AssistantsView threadId={view.threadId} rightPanel={rightPanel} />}
           {view.name === "automations" && (view.editor ? <AutomationEditor key={viewPath(view)} route={view.editor} /> : <AutomationsView />)}

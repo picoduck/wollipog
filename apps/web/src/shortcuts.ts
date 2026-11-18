@@ -30,7 +30,6 @@ export type ShortcutId =
   | "toggle-terminal"
   | "toggle-side-panel"
   | "submit-run"
-  | "relay-pod-note"
   | "send-run-follow-up"
   | "shortcut-reference"
   | "inbox-next"
