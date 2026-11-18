@@ -85,7 +85,7 @@
   "devDependencies": {
     "@playwright/test": "1.65.0",
     "@wollipog/test-support": "workspace:*",
-    "concurrently": "^10.0.6",
+    "concurrently": "^10.0.7",
     "fast-check": "^4.10.2",
     "semver": "7.8.6",
     "tsx": "^4.23.15",
