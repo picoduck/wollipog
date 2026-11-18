@@ -49,9 +49,10 @@ test("a verified-complete Full Control root shows an informational Campaign Comp
   const complete = session({ status: "idle", attention, orchestratorCampaign: campaign("verified_complete") });
   const status = sessionRowStatus(complete);
   assert.equal(label(status), "Campaign Complete");
-  assert.equal(status.badge?.meta.tone, "success");
-  assert.equal(status.badge?.ariaLabel, "Status: Campaign Complete");
-  assert.equal(status.badge?.title, "This Full Control campaign finished and the server verified it. Its result is informational.");
+  assert.equal(status.lifecycle.meta.tone, "success");
+  assert.equal(status.lifecycle.ariaLabel, "Status: Campaign Complete");
+  assert.equal(status.lifecycle.title, "This Full Control campaign finished and the server verified it. Its result is informational.");
+  assert.equal(status.badge, null, "the campaign state takes the place of Awaiting Prompt (#4369)");
   // Shown whether or not the result was ever marked reviewed, and in place of Completed.
   assert.equal(label(sessionRowStatus({ ...complete, attention: { ...attention, acknowledgedRevision: "r1" } })), "Campaign Complete");
   assert.equal(label(sessionRowStatus({ ...complete, status: "completed" })), "Campaign Complete");
@@ -85,9 +86,10 @@ test("an idle Full Control root reads Complete, Needs Cleanup or Campaign Stuck,
 
   const cleanup = sessionRowStatus(session({ status: "idle", attention, orchestratorCampaign: campaign("complete_needs_cleanup") }));
   assert.equal(label(cleanup), "Complete, Needs Cleanup");
-  assert.equal(cleanup.badge?.meta.tone, "info", "it reads as complete, with an informational tone");
-  assert.equal(cleanup.badge?.ariaLabel, "Status: Complete, Needs Cleanup");
-  assert.match(cleanup.badge?.title ?? "", /Campaign Status lists each item/u);
+  assert.equal(cleanup.lifecycle.meta.tone, "info", "it reads as complete, with an informational tone");
+  assert.equal(cleanup.lifecycle.ariaLabel, "Status: Complete, Needs Cleanup");
+  assert.match(cleanup.lifecycle.title ?? "", /Campaign Status lists each item/u);
+  assert.equal(cleanup.badge, null, "the campaign state takes the place of Awaiting Prompt (#4369)");
   assert.equal(label(sessionRowStatus(session({ status: "idle", attention: undefined,
     fullControlCampaignStatus: "complete_needs_cleanup", orchestratorPolicy: { control: fullControl } as unknown as SessionView["orchestratorPolicy"] }))),
   "Complete, Needs Cleanup", "a summary row carries the status without a projection");
@@ -124,17 +126,17 @@ test("an at-rest root of an active Full Control campaign shows an informational 
   const active = session({ status: "idle", attention, orchestratorCampaign: campaign("active") });
   const status = sessionRowStatus(active);
   assert.equal(label(status), "Campaign Active");
-  assert.deepEqual([status.badge?.meta.tone, Boolean(status.badge?.meta.pulse)], ["info", false]);
-  assert.equal(status.badge?.ariaLabel, "Status: Campaign Active");
-  assert.equal(status.badge?.title, "This Full Control campaign continues automatically. Its intermediate results are informational.");
+  assert.deepEqual([status.lifecycle.meta.tone, Boolean(status.lifecycle.meta.pulse)], ["info", false]);
+  assert.equal(status.lifecycle.ariaLabel, "Status: Campaign Active");
+  assert.equal(status.lifecycle.title, "This Full Control campaign continues automatically. Its intermediate results are informational.");
   // Readiness the facts don't prove is never claimed (#2940 criterion 8).
   assert.equal(sessionRowStatus(session({ status: "idle", attention, orchestratorCampaign: campaign("active", everyOperation,
-    { ...ready, fullControlHumanRequired: ["human_required_rules"] }) })).badge?.title,
+    { ...ready, fullControlHumanRequired: ["human_required_rules"] }) })).lifecycle.title,
   "This Full Control campaign continues automatically, except the decisions and limits Campaign Status lists under Full Control. Its intermediate results are informational.");
-  assert.equal(sessionRowStatus(session({ status: "idle", attention, orchestratorCampaign: campaign("active", fullControl) })).badge?.title,
+  assert.equal(sessionRowStatus(session({ status: "idle", attention, orchestratorCampaign: campaign("active", fullControl) })).lifecycle.title,
     "This Full Control campaign continues automatically, except the decisions and limits Campaign Status lists under Full Control. Its intermediate results are informational.",
     "decisions the boundary leaves out come to the person");
-  assert.equal(sessionRowStatus(session({ status: "idle", attention, orchestratorCampaign: campaign("active", everyOperation, {}) })).badge?.title,
+  assert.equal(sessionRowStatus(session({ status: "idle", attention, orchestratorCampaign: campaign("active", everyOperation, {}) })).lifecycle.title,
     "This Full Control campaign continues automatically where it can; Campaign Status shows anything it still needs from you. Its intermediate results are informational.",
     "a projection without readiness facts claims none");
   assert.equal(label(sessionRowStatus({ ...active, attention: { ...attention, result: null } })), "Campaign Active",
@@ -374,8 +376,9 @@ test("an active or complete Full Control root's header shows the campaign state 
     // The popover lists the campaign state in place of the lifecycle, so nothing says it waits for a prompt.
     assert.equal(summary.conditions.some((condition) => condition.meta.label === "Awaiting Prompt"), false, status);
     assert.deepEqual(summary.conditions.map((condition) => condition.kind).filter((kind) => kind === "lifecycle" || kind === "campaign"), ["campaign"], status);
-    // The header and the root's row read the same campaign state.
-    assert.equal(sessionRowStatus(root(status)).badge?.meta.label, label, status);
+    // The header and the root's row read the same campaign state, in the same place (#4369).
+    assert.equal(sessionRowStatus(root(status)).lifecycle.meta.label, label, status);
+    assert.equal(sessionRowStatus(root(status)).badge, null, status);
     // A Completed root keeps its lifecycle and shows the campaign state beside it, as its row does.
     assert.deepEqual(header(root(status, { status: "completed" })), ["Completed", label, 0], `${status}, completed`);
     // Each popover row has its own identity: the campaign state is never a second lifecycle row.
@@ -420,4 +423,68 @@ test("an active or complete Full Control root's header shows the campaign state 
   assert.deepEqual(header(session({ status: "idle", attention })), ["Awaiting Prompt", "Ready for Review", 0]);
   assert.deepEqual(header(session({ status: "idle", attention, orchestratorCampaign: undefined })),
     [sessionStatusSummary(session({ status: "idle", attention })).primary.meta.label, "Ready for Review", 0]);
+});
+
+test("an at-rest Full Control root's row and card name its campaign state where the header does (#4369)", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  const fullControl = { mode: "full_control", boundary: { version: 1, revision: 3, issueScopeRevision: 1, repository: "owner/repo",
+    objective: "Deliver", authorizedByUserId: "user", authorizedAt: 1, operations: [], delegatablePolicyIds: [] } };
+  // The shape a list snapshot sends: the server's campaign status and the root's stored control.
+  const root = (status: string | undefined, extra: Partial<SessionView> = {}) => session({ status: "idle", attention,
+    ...(status ? { fullControlCampaignStatus: status } : {}),
+    orchestratorPolicy: { control: fullControl }, ...extra } as unknown as Partial<SessionView>);
+  const row = (value: SessionView, context = {}) => {
+    const status = sessionRowStatus(value, context);
+    return [status.lifecycle.meta.label, status.badge?.meta.label ?? null];
+  };
+
+  for (const [status, label] of [["active", "Campaign Active"], ["verified_complete", "Campaign Complete"],
+    ["complete_needs_cleanup", "Complete, Needs Cleanup"]] as const) {
+    assert.deepEqual(row(root(status)), [label, null], status);
+    assert.equal(row(root(status))[0], sessionHeaderStatusSummary(root(status)).primary.meta.label, `${status}: the header agrees`);
+    const shown = sessionRowStatus(root(status));
+    assert.equal(shown.lifecycle.ariaLabel, `Status: ${label}`, status);
+    assert.doesNotMatch(shown.details, /Awaiting Prompt/u, `${status}: the tooltip never says the agent waits for a prompt`);
+    // A Completed root keeps Completed, with the campaign state beside it.
+    assert.deepEqual(row(root(status, { status: "completed" })), ["Completed", label], `${status}, completed`);
+    // Children still working stay the secondary, beside the campaign state.
+    assert.deepEqual(row(root(status), { familyWorking: true }), [label, "Children Working"], `${status}, children working`);
+    assert.deepEqual(row(root(status), { familyWorking: true, familyProgressing: false }), [label, "Child Work Pending"],
+      `${status}, child work pending`);
+  }
+  // Campaign Stuck needs a person: Awaiting Prompt stays, with Campaign Stuck beside it.
+  assert.deepEqual(row(root("stuck")), ["Awaiting Prompt", "Campaign Stuck"]);
+  assert.deepEqual(row(root("stuck"), { familyWorking: true }), ["Awaiting Prompt", "Children Working"]);
+
+  // Everything else keeps its lifecycle as today: the projection never replaces it.
+  const question = { requestId: "q", kind: "question" as const, title: "Choose", options: [] };
+  const asked = { pendingApproval: question, attention: { ...attention, humanActions: [{ requestId: "q", rank: 3, requestedAt: 1 }] } };
+  for (const status of ["active", "verified_complete", "complete_needs_cleanup"]) {
+    const unchanged: Array<[string, SessionView, { runnerOnline?: boolean; reminder?: SessionReminderView;
+      familyFollowUpLabel?: "Needs Your Input" }]> = [
+      ["a request for the person", root(status, asked), {}],
+      ["a human-owned campaign request", root(status, { campaignRequests: { human: 1, orchestrator: 0, humanRequestTokens: [] } }), {}],
+      ["a pending Stop", root(status, { stopOperation: { status: "stop_pending" } as SessionView["stopOperation"] }), {}],
+      ["a running root", root(status, { status: "running" }), {}],
+      ["background work", root(status, { backgroundWorkState: "running" }), {}],
+      ["a lost machine", root(status), { runnerOnline: false }],
+      ["a fired reminder", root(status), { reminder: reminder({ state: "fired" }) }],
+      ["a family request for the person", root(status), { familyFollowUpLabel: "Needs Your Input" }],
+      ["a descendant", root(status, { parentSessionId: "parent" }), {}],
+      ["a Custom campaign", root(status, { orchestratorPolicy: { control: { mode: "custom" } } as unknown as SessionView["orchestratorPolicy"] }), {}],
+    ];
+    for (const [name, value, context] of unchanged) {
+      const lifecycle = sessionStatusSummary(value, { runnerOnline: context.runnerOnline }).primary.meta.label;
+      assert.equal(row(value, context)[0], lifecycle, `${status}: ${name}`);
+    }
+    assert.equal(row(root(status), { reminder: reminder({ state: "fired" }) })[0], "Awaiting Prompt", `${status}: a fired reminder`);
+    assert.equal(row(root(status), { runnerOnline: false })[0], "Awaiting Prompt", `${status}: a lost machine`);
+  }
+  for (const status of ["waiting_human", "blocked", "complete_with_handoffs"]) {
+    assert.deepEqual(row(root(status)), ["Awaiting Prompt", "Ready for Review"], status);
+  }
+  // A control plane that sends no campaign status reads as it always has.
+  assert.deepEqual(row(root(undefined)), ["Awaiting Prompt", "Ready for Review"]);
+  assert.deepEqual(row(root(undefined), { familyWorking: true }), ["Awaiting Prompt", "Children Working"]);
 });

@@ -4,10 +4,13 @@ import {
   PERSONAL_ORGANIZATION_ID,
   PROTOCOL_VERSION,
   isProviderHomeRecoveryCause,
+  type AccessScopeChangePreview,
   type AddBoxRequest,
   type BoxView,
   type ControlPlaneToUi,
   type ProviderHomeLeaseInspection,
+  type ResourceOwner,
+  type ResourceScope,
   type RunnerView,
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
@@ -340,6 +343,35 @@ if (fixtureParams.get("workspaces") === "removable" && runner) {
     { id: "scratch", name: "Scratch", path: "D:\\scratch", source: "managed" },
   ];
 }
+/**
+ * `access=1` turns on access-scope management (#4683): the machine reaches the whole organization,
+ * Builders is a team, and each workspace has an access the owner may change from the machine.
+ */
+const accessFixture = fixtureParams.get("access") === "1";
+/** `team=long` names Builders with the longest name a team may have, 80 characters. */
+const teamName = fixtureParams.get("team") === "long" ? `Builders ${"W".repeat(71)}` : "Builders";
+const accessScopeOf = (owner: ResourceOwner): ResourceScope => ({ organizationId: PERSONAL_ORGANIZATION_ID, owner });
+const privateToOwner = accessScopeOf({ kind: "user", userId: "owner" });
+if (accessFixture && runner) {
+  runner.scope = accessScopeOf({ kind: "organization", organizationId: PERSONAL_ORGANIZATION_ID });
+  const scopes: Record<string, ResourceScope> = {
+    storefront: accessScopeOf({ kind: "team", teamId: "team-builders" }),
+    notes: accessScopeOf({ kind: "organization", organizationId: PERSONAL_ORGANIZATION_ID }),
+  };
+  runner.workspaces = runner.workspaces.map((workspace) => ({
+    ...workspace, scope: scopes[workspace.id] ?? privateToOwner, canManage: identityRole !== "viewer",
+  }));
+}
+const changedWorkspaceAccess: Array<{ workspaceId: string; owner: ResourceOwner }> = [];
+/** The server's preview of a workspace access change: always allowed, with two sessions. */
+function workspaceAccessPreview(workspaceId: string, owner: ResourceOwner): AccessScopeChangePreview {
+  return {
+    resource: "workspace", resourceId: workspaceId,
+    currentScope: runner?.workspaces.find((workspace) => workspace.id === workspaceId)?.scope ?? privateToOwner,
+    targetScope: accessScopeOf(owner), affectedProjects: [], activeSessionCount: 0, totalSessionCount: 2,
+    sessionsToNarrow: 0, compatible: true, confirmationToken: "c".repeat(64),
+  };
+}
 const removedWorkspaces: string[] = [];
 /**
  * `skills=empty` reports nothing unmanaged and no removals; `skills=fail` fails the first read only, so Retry recovers (#2989).
@@ -382,7 +414,7 @@ const activeSessionsConflict = () => new ApiError("this machine has 2 active ses
   ],
   activeSessionCount: 2,
 });
-let lastRegisteredWorkspace: { name: string; path: string } | null = null;
+let lastRegisteredWorkspace: { name: string; path: string; owner?: ResourceOwner } | null = null;
 let lastAddBoxRequest: AddBoxRequest | null = null;
 /** How Connect via SSH's request answers (#2987): accepted, refused with this message, or held open. */
 let addBoxOutcome: { kind: "accept" } | { kind: "refuse"; message: string; status: number } | { kind: "hold" } = { kind: "accept" };
@@ -396,6 +428,7 @@ function snapshot(): UiSnapshotMessage {
       paginatedSessionHistory: false,
       projects: true,
       createProjectLocations: true,
+      ...(accessFixture ? { accessScopeManagement: true } : {}),
     },
     runners: [
       ...(runner ? [structuredClone(runner)] : []),
@@ -546,8 +579,21 @@ const client = {
       },
       organizations: [{ organizationId: PERSONAL_ORGANIZATION_ID, name: "Organization", createdAt: 1 }],
       memberships: [],
-      teams: [],
+      teams: accessFixture
+        ? [{ teamId: "team-builders", organizationId: PERSONAL_ORGANIZATION_ID, name: teamName, memberUserIds: ["owner", "pat"], createdAt: 1 }]
+        : [],
     };
+  },
+  previewWorkspaceAccessScope: async (_runnerId: string, workspaceId: string, owner: ResourceOwner) =>
+    ({ preview: workspaceAccessPreview(workspaceId, owner) }),
+  updateWorkspaceAccessScope: async (_runnerId: string, workspaceId: string, owner: ResourceOwner) => {
+    if (!runner) throw new Error("runner not found");
+    const preview = workspaceAccessPreview(workspaceId, owner);
+    changedWorkspaceAccess.push({ workspaceId, owner });
+    runner.workspaces = runner.workspaces.map((workspace) =>
+      workspace.id === workspaceId ? { ...workspace, scope: accessScopeOf(owner) } : workspace);
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { workspace: runner.workspaces.find((item) => item.id === workspaceId)!, preview };
   },
   updateMachine: async (_runnerId: string, body: { displayName: string }) => {
     if (!runner) throw new Error("runner not found");
@@ -711,10 +757,12 @@ const client = {
     }
     return { path, parent: "C:\\Users\\misko", entries: [] };
   },
-  registerMachineWorkspace: async (_runnerId: string, body: { name: string; path: string }) => {
+  registerMachineWorkspace: async (_runnerId: string, body: { name: string; path: string; owner?: ResourceOwner }) => {
     if (!runner) throw new Error("runner not found");
     lastRegisteredWorkspace = structuredClone(body);
-    const workspace = { id: "registered-workspace", ...body };
+    const { owner, ...folder } = body;
+    const workspace = { id: "registered-workspace", ...folder,
+      ...(accessFixture ? { scope: owner ? accessScopeOf(owner) : privateToOwner, canManage: true } : {}) };
     runner.workspaces.push(workspace);
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { workspace };
@@ -895,7 +943,9 @@ const client = {
 declare global {
   interface Window {
     __WOLLIPOG_MACHINE_E2E__: {
-      lastRegisteredWorkspace(): { name: string; path: string } | null;
+      lastRegisteredWorkspace(): { name: string; path: string; owner?: ResourceOwner } | null;
+      /** The access changes Change Access applied, in order (#4683). */
+      changedWorkspaceAccess(): Array<{ workspaceId: string; owner: ResourceOwner }>;
       /** The workspaces Remove Workspace removed, in order (#4123). */
       removedWorkspaces(): string[];
       lastAddBoxRequest(): AddBoxRequest | null;
@@ -925,6 +975,7 @@ declare global {
 window.__WOLLIPOG_MACHINE_E2E__ = {
   lastRegisteredWorkspace: () => structuredClone(lastRegisteredWorkspace),
   removedWorkspaces: () => [...removedWorkspaces],
+  changedWorkspaceAccess: () => structuredClone(changedWorkspaceAccess),
   lastAddBoxRequest: () => structuredClone(lastAddBoxRequest),
   reconnectRequests: () => reconnectRequests,
   setAddBoxOutcome: (outcome) => { addBoxOutcome = outcome; },

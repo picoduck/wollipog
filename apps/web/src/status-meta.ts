@@ -79,7 +79,7 @@ const VOCABULARY = {
      * (#4146): it reads as complete, with an informational tone. Campaign Status lists each item. */
     campaign_needs_cleanup: info("Complete, Needs Cleanup"),
     /** An idle campaign with undelivered work and nothing scheduled to wake anyone (#4146). Derived
-     * from facts, unlike the time-based Stalled warning; it needs a person. */
+     * from facts, never from elapsed time; it needs a person. */
     campaign_stuck: warning("Campaign Stuck"),
     campaign_paused: info("Paused"),
     failed: danger("Failed"),

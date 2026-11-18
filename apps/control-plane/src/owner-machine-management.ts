@@ -148,12 +148,30 @@ export function createOwnerMachineManagement(db: ControlPlaneDb, hub: Hub, svc: 
   for (const register of [false, true]) define("POST", `/api/runners/:runnerId/workspaces${register ? "/register" : ""}`, (req, reply) => {
     const {runnerId} = req.params as {runnerId: string};
     if (!db.canManageRunner(req.principal, runnerId)) return reply.code(403).send({error: "Machine owner or organization admin permission is required"});
-    const body = (req.body ?? {}) as {name?: unknown; path?: unknown};
+    const body = (req.body ?? {}) as {name?: unknown; path?: unknown; owner?: unknown};
     const name = typeof body.name === "string" ? body.name.trim() : "", path = typeof body.path === "string" ? body.path.trim() : "";
     if (!name || !path) return reply.code(400).send({error: "name and path are required"});
     if (!db.getRunner(runnerId)) return reply.code(404).send({error: "runner not found"});
+    // Without an owner the new Workspace is private to the person adding it, as before #4683. A
+    // chosen owner passes the access-scope endpoints' own rules, as a change away from that private
+    // default, and a shared one may not reach further than the Machine does. Naming yourself is the
+    // default itself, so it registers exactly as leaving the owner out does.
+    const privateScope: ResourceScope = {organizationId: req.principal.organizationId, owner: {kind: "user", userId: req.principal.userId}};
+    let scope = privateScope;
+    if (body.owner !== undefined) {
+      const requested = requestedAccessScope(db, req.principal, body.owner);
+      if (!requested.ok) return reply.code(requested.status).send({error: requested.error});
+      const transitionError = accessScopeTransitionError(db, req.principal, privateScope, requested.scope);
+      if (transitionError) return reply.code(403).send({error: transitionError});
+      if (requested.scope.owner.kind !== "user") {
+        const runnerScope = db.runnerScope(runnerId);
+        if (!runnerScope || !db.scopeAudienceContainedWithMembership(requested.scope, runnerScope)) {
+          return reply.code(403).send({error: "workspace access must not be broader than its Machine's access"});
+        }
+      }
+      scope = requested.scope;
+    }
     if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({error: "runner is offline"});
-    const scope: ResourceScope = {organizationId: req.principal.organizationId, owner: {kind: "user", userId: req.principal.userId}};
     try {
       const workspace = register ? db.registerMachineWorkspace(runnerId, {name, path}, scope) : db.createWorkspace(runnerId, {name, path}, scope);
       hub.runnerChanged(runnerId);

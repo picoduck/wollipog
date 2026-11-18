@@ -1926,7 +1926,8 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify(body),
     }),
 
-  registerMachineWorkspace: (runnerId: string, body: { name: string; path: string }) =>
+  // The owner is the access it starts with (#4683); without one it is private to the person adding it.
+  registerMachineWorkspace: (runnerId: string, body: { name: string; path: string; owner?: ResourceOwner }) =>
     req<{ workspace: WorkspaceInfo }>(
       `/api/runners/${encodeURIComponent(runnerId)}/workspaces/register`,
       { method: "POST", body: JSON.stringify(body) },

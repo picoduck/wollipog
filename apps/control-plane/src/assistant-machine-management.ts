@@ -139,6 +139,11 @@ export function registerAssistantMachineManagement(operations: AssistantOperatio
         required: [...Object.keys(properties), ...(mutate ? ["commandId"] : [])]},
       resolveTarget: value => target(kind, value), execute: async (value, ctx) => {
         const args = object(value), payload = args.payload === undefined ? {} : object(args.payload);
+        // The owner routes accept a Workspace's access owner (#4683); a thread keeps the private
+        // default, and only the owner widens access, from the Machine's Workspaces.
+        if ((name === "workspace_create" || name === "workspace_register") && payload.owner !== undefined) {
+          throw new AssistantRefusal("A Workspace an Assistant adds is private to its owner; leave out payload.owner. Only the owner can choose or change a Workspace's access, in its Machine settings.");
+        }
         let owner = await ctx.recheck();
         checkScope(kind, args, {...ctx, owner});
         const params = kind === "control_plane" ? {} : kind === "project" ? {id: text(args, "projectId")} : {id: text(args, "runnerId"), runnerId: text(args, "runnerId"),
