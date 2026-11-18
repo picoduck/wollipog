@@ -14,17 +14,17 @@ function fixture(
 ) {
   const store = new Store();
   store.dispatch({ type: "msg", msg: { type: "snapshot",
-    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 0 } as SessionView], runs: [], pods: [],
+    capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 0 } as SessionView], runs: [],
   } });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
   store.prepareSubscriptionRecovery(1, ["s1"]);
-  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [] } });
+  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"] } });
   store.beginEventHistoryLoad("s1", 0, 1, generation);
   store.loadEvents("s1", events(initialWindow.first, initialWindow.last), 0, 1, true, generation, initialWindow.hasOlder);
   store.prepareSubscriptionRecovery(2, ["s1"]);
-  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 2, sessionIds: ["s1"], podIds: [] } });
+  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 2, sessionIds: ["s1"] } });
   store.beginEventHistoryLoad("s1", 0, 2, generation);
   const fence = store.beginEventGapRecovery("s1", 0, 2, generation, shouldDeferLive)!;
   assert.ok(fence);
@@ -98,7 +98,7 @@ test("a distant visible live row prevents staging without clipping a possible sa
   assert.equal(store.getState().events.get("s1"), before);
   assert.equal(store.getState().events.get("s1")!.at(-1)!.seq, 10_020);
   store.prepareSubscriptionRecovery(3, ["s1"]);
-  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 3, sessionIds: ["s1"], podIds: [] } });
+  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 3, sessionIds: ["s1"] } });
   assert.equal(store.recoveryAfter("s1"), 110, "a subscription captures only loaded contiguity, never the distant live maximum");
 });
 
@@ -183,7 +183,7 @@ test("gapped live delivery beyond a staged HTTP tail cannot become promotion or 
   assert.equal(store.promoteDeferredEventTail(fence), false);
   assert.equal(store.recoveryAfter("s1"), 110);
   store.prepareSubscriptionRecovery(3, ["s1"]);
-  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 3, sessionIds: ["s1"], podIds: [] } });
+  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 3, sessionIds: ["s1"] } });
   assert.equal(store.recoveryAfter("s1"), 110);
 });
 
@@ -296,15 +296,15 @@ test("a connected HTTP tail still settles the reading prefix without claiming ga
 test("pre-stage and staged buffers share the byte budget across relevant sessions", () => {
   const store = new Store();
   store.dispatch({ type: "msg", msg: { type: "snapshot",
-    capabilities: { sessionSubscriptions: true, boundedDelivery: true }, runners: [], boxes: [],
+    capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true }, runners: [], boxes: [],
     sessions: ["s1", "s2"].map(id => ({ id, eventEpoch: 0 } as SessionView)),
-    runs: [{ id: "r1", sessionIds: ["s1", "s2"] } as never], pods: [],
+    runs: [{ id: "r1", sessionIds: ["s1", "s2"] } as never],
   } });
   store.navigate({ name: "run", id: "r1" });
   const generation = store.getState().snapshotRevision;
   store.prepareSubscriptionRecovery(1, ["s1", "s2"]);
   store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 1,
-    sessionIds: ["s1", "s2"], podIds: [] } });
+    sessionIds: ["s1", "s2"] } });
   const fences = ["s1", "s2"].map(id => {
     store.beginEventHistoryLoad(id, 0, 1, generation);
     store.loadEvents(id, events(101, 110).map(row => ({ ...row, sessionId: id })), 0, 1, true, generation, true);
@@ -454,19 +454,19 @@ test("finishing dropped live preserves an existing recovery error", () => {
 function emptyThenLiveFixture(firstLiveSeq = 1) {
   const store = new Store();
   store.dispatch({ type: "msg", msg: { type: "snapshot",
-    capabilities: { sessionSubscriptions: true, boundedDelivery: true }, runners: [], boxes: [],
-    sessions: [{ id: "s1", eventEpoch: 0 } as SessionView], runs: [], pods: [],
+    capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true }, runners: [], boxes: [],
+    sessions: [{ id: "s1", eventEpoch: 0 } as SessionView], runs: [],
   } });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
   store.prepareSubscriptionRecovery(1, ["s1"]);
-  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [] } });
+  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"] } });
   store.beginEventHistoryLoad("s1", 0, 1, generation);
   store.loadEvents("s1", [], 0, 1, true, generation, false);
   assert.equal(store.getState().eventWindows.get("s1")!.baseSeq, 0);
   for (const row of events(firstLiveSeq, firstLiveSeq + 9)) store.dispatch({ type: "msg", msg: { type: "session_event", event: row } });
   store.prepareSubscriptionRecovery(2, ["s1"]);
-  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 2, sessionIds: ["s1"], podIds: [] } });
+  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 2, sessionIds: ["s1"] } });
   store.beginEventHistoryLoad("s1", 0, 2, generation);
   return { store, generation };
 }
@@ -626,12 +626,12 @@ for (const obsolete of ["cancelled", "inactive", "epoch", "generation", "revisio
       type: "session_events_reset", sessionId: "s1", eventEpoch: 1, events: [],
     } });
     else if (obsolete === "generation") store.dispatch({ type: "msg", msg: { type: "snapshot",
-      capabilities: { sessionSubscriptions: true, boundedDelivery: true }, runners: [], boxes: [],
-      sessions: [{ id: "s1", eventEpoch: 0 } as SessionView], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true }, runners: [], boxes: [],
+      sessions: [{ id: "s1", eventEpoch: 0 } as SessionView], runs: [],
     } });
     else {
       store.prepareSubscriptionRecovery(3, ["s1"]);
-      store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 3, sessionIds: ["s1"], podIds: [] } });
+      store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 3, sessionIds: ["s1"] } });
       store.beginEventHistoryLoad("s1", 0, 3, generation);
     }
     const before = store.getState();

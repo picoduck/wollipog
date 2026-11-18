@@ -154,13 +154,12 @@ class FixtureSocket implements UiSocket {
       this.onopen?.();
       this.onmessage?.({ data: JSON.stringify({
         type: "snapshot",
-        capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+        capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
         runners: [runner],
         boxes: [],
         projects: [],
         sessions: [session],
         runs: [],
-        pods: [],
       } satisfies ControlPlaneToUi) });
     }, 0);
   }

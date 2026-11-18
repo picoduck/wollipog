@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   MAX_UI_CLIENT_MESSAGE_BYTES,
-  MAX_UI_POD_SUBSCRIPTIONS,
   MAX_UI_SESSION_ID_LENGTH,
   MAX_UI_SESSION_SUBSCRIPTIONS,
   normalizeUiClientRawData,
@@ -10,50 +9,38 @@ import {
 } from "./ui-channel.js";
 
 test("UI subscription messages are strict, unique, and bounded", () => {
-  assert.deepEqual(parseUiClientMessage('{"type":"session_subscriptions","revision":1,"sessionIds":["s1","s2"],"podIds":["p1"]}'), {
+  assert.deepEqual(parseUiClientMessage('{"type":"session_subscriptions","revision":1,"sessionIds":["s1","s2"]}'), {
     type: "session_subscriptions",
     revision: 1,
     sessionIds: ["s1", "s2"],
-    podIds: ["p1"],
   });
-  assert.deepEqual(parseUiClientMessage('{"type":"session_subscriptions","revision":2,"sessionIds":[],"podIds":[]}'), {
+  assert.deepEqual(parseUiClientMessage('{"type":"session_subscriptions","revision":2,"sessionIds":[]}'), {
     type: "session_subscriptions",
     revision: 2,
     sessionIds: [],
-    podIds: [],
   });
   for (const invalid of [
     "not-json",
     "null",
-    '{"type":"unknown","revision":1,"sessionIds":[],"podIds":[]}',
-    '{"type":"session_subscriptions","revision":0,"sessionIds":[],"podIds":[]}',
-    '{"type":"session_subscriptions","revision":1.5,"sessionIds":[],"podIds":[]}',
-    '{"type":"session_subscriptions","revision":1,"sessionIds":"s1","podIds":[]}',
-    '{"type":"session_subscriptions","revision":1,"sessionIds":[],"podIds":"p1"}',
-    '{"type":"session_subscriptions","revision":1,"sessionIds":["s1","s1"],"podIds":[]}',
-    '{"type":"session_subscriptions","revision":1,"sessionIds":[],"podIds":["p1","p1"]}',
-    '{"type":"session_subscriptions","revision":1,"sessionIds":[""],"podIds":[]}',
-    '{"type":"session_subscriptions","revision":1,"sessionIds":["bad\\n"],"podIds":[]}',
-    '{"type":"session_subscriptions","revision":1,"sessionIds":[],"podIds":[],"extra":true}',
+    '{"type":"unknown","revision":1,"sessionIds":[]}',
+    '{"type":"session_subscriptions","revision":0,"sessionIds":[]}',
+    '{"type":"session_subscriptions","revision":1.5,"sessionIds":[]}',
+    '{"type":"session_subscriptions","revision":1,"sessionIds":"s1"}',
+    '{"type":"session_subscriptions","revision":1,"sessionIds":["s1","s1"]}',
+    '{"type":"session_subscriptions","revision":1,"sessionIds":[""]}',
+    '{"type":"session_subscriptions","revision":1,"sessionIds":["bad\\n"]}',
+    '{"type":"session_subscriptions","revision":1,"sessionIds":[],"extra":true}',
   ]) assert.equal(parseUiClientMessage(invalid), null, invalid);
 
   assert.equal(parseUiClientMessage(JSON.stringify({
     type: "session_subscriptions",
     revision: 1,
     sessionIds: Array.from({ length: MAX_UI_SESSION_SUBSCRIPTIONS + 1 }, (_, i) => `s${i}`),
-    podIds: [],
-  })), null);
-  assert.equal(parseUiClientMessage(JSON.stringify({
-    type: "session_subscriptions",
-    revision: 1,
-    sessionIds: [],
-    podIds: Array.from({ length: MAX_UI_POD_SUBSCRIPTIONS + 1 }, (_, i) => `p${i}`),
   })), null);
   assert.equal(parseUiClientMessage(JSON.stringify({
     type: "session_subscriptions",
     revision: 1,
     sessionIds: ["s".repeat(MAX_UI_SESSION_ID_LENGTH + 1)],
-    podIds: [],
   })), null);
   assert.equal(parseUiClientMessage(" ".repeat(MAX_UI_CLIENT_MESSAGE_BYTES + 1)), null);
 });

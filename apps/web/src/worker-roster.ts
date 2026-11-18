@@ -23,7 +23,7 @@ export type WorkerState =
   | "unverified"
   | "lost";
 export type WorkerTarget = { kind: "subagent"; id: string } | { kind: "background"; id: string } | { kind: "session"; id: string };
-/** The heading a row sits under: Subagents, Background Jobs, or the pod's or run's own title. */
+/** The heading a row sits under: Subagents, Background Jobs, or the run's own title. */
 export interface WorkerGroup { id: string; name: string }
 export const SUBAGENT_GROUP: WorkerGroup = { id: "subagents", name: "Subagents" };
 export const BACKGROUND_GROUP: WorkerGroup = { id: "background", name: "Background Jobs" };

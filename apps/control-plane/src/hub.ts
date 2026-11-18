@@ -52,9 +52,7 @@ import type {
   SkillAdoptionRecoveryResultMessage,
   SkillDriftResultMessage,
   SkillKeptAsideResultMessage,
-  PodContextEntry,
   RunView,
-  PodView,
   ProjectView,
   PolicyHookDecisionRecordedMessage,
   ProviderLoginResultMessage,
@@ -289,7 +287,6 @@ interface UiClientInfo {
   visibleRunnerIds?: Set<string>;
   visibleProjectIds?: Set<string>;
   subscribedSessionIds?: Set<string>;
-  subscribedPodIds?: Set<string>;
   close: (code?: number, reason?: string) => void;
   outbound?: OutboundFrame[];
   queuedBytes?: number;
@@ -340,7 +337,7 @@ export interface HubOptions {
 }
 
 export type UiSubscriptionApplyResult =
-  | { ok: true; sessionIds: string[]; podIds: string[] }
+  | { ok: true; sessionIds: string[] }
   | { ok: false; reason: "client_missing" | "stale_revision" | "rate_limited" };
 
 /** Correlated runner replies the hub awaits (all carry `requestId`). A skills_state is only
@@ -938,7 +935,7 @@ export class Hub {
     const snapshot: UiSnapshotMessage = {
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: true,
+        sessionSubscriptionsV2: true,
         boundedDelivery: true,
         paginatedSessionHistory: true,
         currentTurnOpening: true,
@@ -964,7 +961,6 @@ export class Hub {
       reminders,
       worktreeSetupNoticeDismissals,
       runs: globalAdmin ? this.db.listRuns() : [],
-      pods: globalAdmin ? this.db.listPods() : [],
     };
     return snapshot;
   }
@@ -1032,7 +1028,6 @@ export class Hub {
     info.visibleRunnerIds?.clear();
     info.visibleProjectIds?.clear();
     info.subscribedSessionIds?.clear();
-    info.subscribedPodIds?.clear();
     info.observedBackgroundDeliveryKeys?.clear();
     info.hiddenIndefiniteReminderSessionIds?.clear();
   }
@@ -1044,7 +1039,6 @@ export class Hub {
     client: Socket,
     revision: number,
     sessionIds: readonly string[],
-    podIds: readonly string[],
     now = Date.now(),
   ): UiSubscriptionApplyResult {
     const info = this.uiClients.get(client);
@@ -1059,17 +1053,14 @@ export class Hub {
     const acceptedSessionIds = [...new Set(info.principal
       ? sessionIds.filter((sessionId) => this.db.canAccessSession(info.principal!, sessionId))
       : sessionIds)].filter((sessionId) => !info.hiddenIndefiniteReminderSessionIds?.has(sessionId)).sort();
-    const acceptedPodIds = [...new Set(info.principal && !this.isGlobalAdmin(info.principal) ? [] : podIds)].sort();
     info.subscribedSessionIds = new Set(acceptedSessionIds);
-    info.subscribedPodIds = new Set(acceptedPodIds);
     info.lastSubscriptionRevision = revision;
     this.safeSend(client, {
       type: "session_subscriptions_applied",
       revision,
       sessionIds: acceptedSessionIds,
-      podIds: acceptedPodIds,
     });
-    return { ok: true, sessionIds: acceptedSessionIds, podIds: acceptedPodIds };
+    return { ok: true, sessionIds: acceptedSessionIds };
   }
 
   /** Record receipt of a durable continuation projection by this authenticated dashboard. This
@@ -1668,18 +1659,6 @@ export class Hub {
     this.broadcast({ type: "run_removed", runId });
   }
 
-  podChanged(pod: PodView): void {
-    this.broadcast({ type: "pod_upsert", pod });
-  }
-
-  podRemoved(podId: string): void {
-    this.broadcast({ type: "pod_removed", podId });
-  }
-
-  podContextEntry(entry: PodContextEntry): void {
-    this.broadcast({ type: "pod_context_entry", entry });
-  }
-
   private isOrganizationAdmin(principal: AuthPrincipal): boolean {
     return principal.kind === "human" && (principal.role === "owner" || principal.role === "admin");
   }
@@ -1744,9 +1723,6 @@ export class Hub {
       case "box_removed":
       case "run_upsert":
       case "run_removed":
-      case "pod_upsert":
-      case "pod_removed":
-      case "pod_context_entry":
         return this.isGlobalAdmin(principal);
       case "snapshot":
       case "session_snapshot_page":
@@ -1770,8 +1746,6 @@ export class Hub {
         return info.subscribedSessionIds.has(msg.sessionId);
       case "shell_registry_reconciled":
         return msg.sessionIds.some((sessionId) => info.subscribedSessionIds!.has(sessionId));
-      case "pod_context_entry":
-        return info.subscribedPodIds?.has(msg.entry.podId) ?? false;
       default:
         return true;
     }
@@ -1902,7 +1876,6 @@ export class Hub {
       case "assistant_thread_upsert": return `assistant-thread:${msg.thread.id}`;
       case "project_upsert": return `project:${msg.project.id}`;
       case "run_upsert": return `run:${msg.run.id}`;
-      case "pod_upsert": return `pod:${msg.pod.id}`;
       default: return undefined;
     }
   }

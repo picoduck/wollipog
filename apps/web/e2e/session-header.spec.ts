@@ -1260,66 +1260,9 @@ test("legacy unfiled sessions use the Workspace vocabulary in More Actions", asy
     .toHaveText("Move to a Workspace…");
 });
 
-// Run and Pod detail share one 48px detail bar (#1801, docs/design-system.md §4.3): a ChevronLeft
+
 // Back named for the destination, the entity title as the page's only h1, one status badge after
 // it, and destructive actions only in ⋯.
-test("shared Pod headers keep their trailing controls out of the back-button track", async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto("/command-inbox-projects-e2e.html?view=pod");
-  const pod = page.locator(".pod-detail");
-  await expect(pod.getByRole("heading", { level: 1, name: "Active Collaboration Pod" })).toBeVisible();
-  await expect(page.locator("h1")).toHaveCount(1);
-  await expect(pod.locator(".session-bar")).toHaveCount(0);
-
-  const bar = pod.locator(".detail-bar");
-  const back = bar.getByRole("button", { name: "Back to Pods", exact: true });
-  await expect(back).toBeVisible();
-  await expect(back.locator("svg")).toHaveCount(1);
-  await expect(back).toHaveText("");
-  const geometry = async () => bar.evaluate((element) => {
-    const rect = (selector: string) => element.querySelector(selector)!.getBoundingClientRect();
-    const back = rect(".detail-bar-back");
-    const title = rect(".detail-bar-title");
-    const status = rect(".status");
-    const more = rect('[aria-label="More Actions"]');
-    return {
-      display: getComputedStyle(element).display,
-      height: element.getBoundingClientRect().height,
-      backX: back.x,
-      backCenter: back.y + back.height / 2,
-      titleRight: title.right,
-      statusX: status.x,
-      moreCenter: more.y + more.height / 2,
-      moreRight: more.right,
-      barRight: element.getBoundingClientRect().right,
-      badges: element.querySelectorAll(".status").length,
-    };
-  });
-  const desktop = await geometry();
-  expect(desktop.display).toBe("flex");
-  expect(desktop.height).toBe(48);
-  expect(desktop.badges).toBe(1);
-  expect(desktop.statusX).toBeGreaterThan(desktop.titleRight);
-  expect(desktop.statusX - desktop.titleRight).toBeLessThanOrEqual(12);
-  expect(Math.abs(desktop.moreCenter - desktop.backCenter)).toBeLessThanOrEqual(1);
-  expect(desktop.barRight - desktop.moreRight).toBeGreaterThanOrEqual(16);
-
-  // Close Pod is destructive, so it is not a bar button: it is the last ⋯ item, in danger text.
-  await expect(bar.getByRole("button", { name: "Close Pod" })).toHaveCount(0);
-  await bar.getByRole("button", { name: "More Actions" }).click();
-  const close = page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem").last();
-  await expect(close).toHaveText("Close Pod…");
-  await expect(close).toHaveClass(/\bdanger\b/);
-  await page.keyboard.press("Escape");
-
-  await page.setViewportSize({ width: 520, height: 800 });
-  const narrow = await geometry();
-  expect(narrow.display).toBe("flex");
-  expect(narrow.height).toBe(48);
-  expect(narrow.statusX).toBeGreaterThan(narrow.backX);
-  expect(Math.abs(narrow.moreCenter - narrow.backCenter)).toBeLessThanOrEqual(1);
-});
-
 test("shared Run headers retain their desktop geometry in the stacked Session range", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/command-inbox-projects-e2e.html?view=run");

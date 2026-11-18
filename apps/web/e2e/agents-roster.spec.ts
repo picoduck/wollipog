@@ -15,46 +15,6 @@ const shot = (page: Page, name: string) => page.locator(".agents-roster-fixture-
 test.describe("fine pointer", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("a pod lead's workers sit under Subagents, Background Jobs and the pod's title, every row 56px", async ({ page }) => {
-    await open(page, "pod");
-    await expect(page.locator(".group-label")).toHaveText(["Subagents1", "Background Jobs1", "Parser Rewrite Pod3"]);
-    expect(new Set(await rowHeights(page))).toEqual(new Set([56]));
-    const inspect = page.locator(".worker-row", { hasText: "Inspect Parser Entry Points" });
-    await expect(inspect.locator(".status")).toHaveText("Running");
-    await expect(inspect.locator(".row-sub")).toHaveText("Running npm test -- parser");
-    await expect(inspect.locator(".row-icon svg")).toHaveCount(1);
-    await expect(inspect).not.toHaveAttribute("title", /.+/);
-    const reviewer = page.locator(".worker-row", { hasText: "Parser Reviewer" });
-    await expect(reviewer.locator(".status")).toHaveText("Approval Required");
-    await expect(reviewer.locator(".row-sub")).toHaveText("Waiting to run npm run lint -- --fix");
-    await expect(reviewer).toHaveAttribute("title", "Opens Parser Reviewer");
-    await expect(page.locator(".worker-row", { hasText: "Test Writer" }).locator(".status")).toHaveText("Awaiting Prompt");
-    // Past a day the elapsed time reads in days; under it, unchanged (#3037).
-    await expect(page.locator(".worker-row", { hasText: "Test Writer" }).locator(".row-trail")).toHaveText("16d");
-    await expect(page.locator(".worker-row", { hasText: "Grammar Worker" }).locator(".row-trail")).toHaveText("3h 20m");
-    // A background job's suffix is set apart in mono `--text-faint`, as on its Background Work row
-    // (§4.10), and a readable id (`job-monitor`) is hashed rather than cut to "onitor".
-    const job = page.locator(".worker-row", { hasText: "Monitor Job" });
-    await expect(job.locator(".row-title")).toHaveText(/^Monitor Job [0-9a-f]{6}$/);
-    await expect(job.locator(".row-title")).not.toHaveText(/\bonitor\b/);
-    const suffix = await job.locator(".background-job-id").evaluate((id) => {
-      const probe = id.ownerDocument.createElement("span");
-      probe.style.cssText = "color: var(--text-faint); font-family: var(--font-mono)";
-      id.parentElement!.append(probe);
-      const [shown, expected] = [getComputedStyle(id), getComputedStyle(probe)];
-      const result = { color: shown.color === expected.color, mono: shown.fontFamily === expected.fontFamily };
-      probe.remove();
-      return result;
-    });
-    expect(suffix).toEqual({ color: true, mono: true });
-    await expect(page.locator(".agents-list")).not.toContainText(/Tokens|claude-opus|high|Pod Member|Subagent ·/);
-    // The filter fills the panel with three equal options and no "Loaded".
-    const options = await page.locator(".seg.block .seg-option").evaluateAll((items) => items.map((item) => Math.round(item.getBoundingClientRect().width)));
-    expect(options).toHaveLength(3);
-    expect(Math.max(...options) - Math.min(...options)).toBeLessThanOrEqual(1);
-    await expect(page.locator(".seg.block")).not.toContainText("Loaded");
-  });
-
   test("a run member's rows lead with the agent, untruncated in a 380px panel, under the run's title", async ({ page }) => {
     await open(page, "run");
     // One member has finished, so All shows both.
@@ -110,7 +70,7 @@ test.describe("fine pointer", () => {
 test.describe("coarse pointer", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-  for (const scene of ["pod", "nested"]) test(`${scene} rows are 64px on touch, and no filter option wraps at 390px`, async ({ page }) => {
+  for (const scene of ["workers", "nested"]) test(`${scene} rows are 64px on touch, and no filter option wraps at 390px`, async ({ page }) => {
     await open(page, scene);
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
     expect(new Set(await rowHeights(page))).toEqual(new Set([64]));
@@ -127,7 +87,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 834, height: 1112
   test.describe(`evidence at ${viewport.width}px`, () => {
     test.use({ viewport, ...(viewport.width < 1000 ? { hasTouch: true, isMobile: true } : {}) });
     for (const theme of ["dark", "light"]) test(`captures every scene in ${theme}`, async ({ page }) => {
-      for (const scene of ["pod", "run", "nested", "offline", "empty"]) {
+      for (const scene of ["workers", "run", "nested", "offline", "empty"]) {
         await page.goto(`/agents-roster-e2e.html?scene=${scene}&theme=${theme}`);
         // Also matches the roster before #2857, so the same capture runs against the base commit.
         await expect(page.locator(".agents-panel :is([role=listitem], .state, p[role=status])").first()).toBeVisible();

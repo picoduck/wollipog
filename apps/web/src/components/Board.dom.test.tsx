@@ -221,8 +221,8 @@ async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESS
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false },
-      runners, boxes: [], sessions, runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
+      runners, boxes: [], sessions, runs: [],
     });
   });
   const card = (id: string) => {

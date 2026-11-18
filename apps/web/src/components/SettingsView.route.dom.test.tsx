@@ -306,7 +306,9 @@ test("Experimental says what turning a feature off does once at every width: in 
       } else {
         assert.deepEqual(intros, [], `${at}: no group intro repeats the head`);
       }
-      assert.equal(page.querySelectorAll('[role="switch"]').length, 2);
+      const switches = [...page.querySelectorAll('[role="switch"]')];
+      assert.equal(switches.length, 1);
+      assert.match(switches[0]!.textContent ?? "", /Multi-Agent Runs/);
     } finally {
       await view.unmount();
     }

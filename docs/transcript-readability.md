@@ -61,7 +61,7 @@ Recovery cursors stay contiguous *within* the loaded window. The events below it
 deliberately absent, so contiguity is measured from the window base; measuring from zero would
 collapse the published cursor and send the next recovery back to the start of the log.
 
-A bounded window belongs to the session reader alone. Run and Pod comparison columns render whole
+A bounded window belongs to the session reader alone. Run comparison columns render whole
 histories and offer no reach-back control, so entering one drops any partial cache rather than
 letting fleet recovery page only above the cursor that window published. Derived state follows the
 same rule. A partial load does not rebuild the heartbeat ring, whose buckets can predate it. The
@@ -166,7 +166,7 @@ generation, and subscription revision:
 - `refreshing`: initial hydration or reconnect gap recovery is in flight.
 - `error`: the most recent history GET failed.
 
-The state is pruned with event caches on navigation, membership changes, session/run/pod removal, and
+The state is pruned with event caches on navigation, membership changes, session or run removal, and
 generation reset. Stale old-epoch pages and failures are ignored.
 
 Presentation is deterministic:
@@ -185,7 +185,7 @@ a hairline. It holds Load Earlier Activity (with the count of older events when 
 line, or a compact danger notice with Retry. Scrolling to the top still loads automatically; the row
 is the fallback for people who cannot scroll to trigger it.
 
-Run and pod member columns use the same per-session state. Fleet recovery reports each member's start
+Run member columns use the same per-session state. Fleet recovery reports each member's start
 and failure independently, preserves its concurrency ceiling and fair rotation, and retries transient
 history reads without blocking later members.
 

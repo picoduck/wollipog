@@ -8571,135 +8571,6 @@ test("createRun + run members reflected in runView via getRun/listRuns", () => {
   assert.equal(all[0].id, "run-1");
 });
 
-test("pods persist independent membership, lifecycle, and session ownership", () => {
-  const db = withRunner();
-  db.createSession(newSession({ id: "sess-1" }));
-  db.createSession(newSession({ id: "sess-2" }));
-  db.createSession(newSession({ id: "sess-3" }));
-
-  const pod = db.createPod({
-    id: "pod-1",
-    title: "Implementation huddle",
-    objective: "Converge on one patch",
-    sessionIds: ["sess-1", "sess-2"],
-    now: 1_000,
-  })!;
-  assert.equal(pod.status, "active");
-  assert.deepEqual(pod.members.map((member) => member.sessionId), ["sess-1", "sess-2"]);
-  assert.deepEqual(pod.members.map((member) => member.role), ["lead", "worker"]);
-  assert.equal(pod.orchestration?.policy.mode, "manual");
-  assert.equal(db.activePodForSession("sess-1")?.id, "pod-1");
-  assert.equal(db.createPod({
-    id: "pod-overlap",
-    title: "Overlap",
-    objective: "",
-    sessionIds: ["sess-1", "sess-3"],
-    now: 1_500,
-  }), null, "database transaction enforces one active pod per session");
-  assert.equal(db.getPod("pod-overlap"), null, "failed ownership claim rolls back the pod row");
-
-  const expanded = db.addPodMember("pod-1", "sess-3", 2_000)!;
-  assert.deepEqual(expanded.members.map((member) => member.sessionId), ["sess-1", "sess-2", "sess-3"]);
-  assert.equal(expanded.updatedAt, 2_000);
-  const assigned = db.updatePodMember("pod-1", "sess-3", { role: "reviewer", contextTokenBudget: 4_096 }, 2_100)!;
-  assert.deepEqual(assigned.members.at(-1), {
-    sessionId: "sess-3", joinedAt: 2_000, role: "reviewer", contextTokenBudget: 4_096, lastContextSeq: 0,
-  });
-  const configured = db.updatePodOrchestrationPolicy("pod-1", {
-    mode: "round_robin", contextTokenBudget: 4_096, summaryTokenBudget: 512, maxTurns: 3, maxRepeatedOutputs: 2,
-  }, 2_200)!;
-  assert.equal(configured.orchestration?.policy.maxTurns, 3);
-  assert.ok(db.startPodOrchestration("pod-1", "run-1", 2_300));
-  const step = db.beginPodOrchestrationStep({
-    stepId: "step-1", podId: "pod-1", runId: "run-1", targetSessionId: "sess-1",
-    selectedEntryIds: [], estimatedTokens: 80, now: 2_301,
-  })!;
-  assert.equal(step.status, "dispatching");
-  assert.equal(db.markPodOrchestrationStepRunning("step-1", "pod-1", "sess-1", 4, 2_302), true);
-  assert.equal(db.getPod("pod-1")!.members[0]!.lastContextSeq, 4);
-  assert.equal(db.settlePodOrchestrationStep("pod-1", "sess-1", "entry-1", "hash-1", 2_303)?.status, "settled");
-  assert.equal(db.countPodOrchestrationOutputHash("pod-1", "run-1", "hash-1"), 1);
-  assert.equal(db.stopPodOrchestration("pod-1", "test_complete", 2_304)?.orchestration?.state.stopReason, "test_complete");
-
-  const reduced = db.removePodMember("pod-1", "sess-2", 3_000)!;
-  assert.deepEqual(reduced.members.map((member) => member.sessionId), ["sess-1", "sess-3"]);
-  assert.equal(db.activePodForSession("sess-2"), null);
-
-  db.deleteSession("sess-1");
-  assert.deepEqual(db.getPod("pod-1")!.members.map((member) => member.sessionId), ["sess-3"]);
-  assert.equal(db.reconcilePodAfterMembershipLoss("pod-1", 4_000)?.status, "closed");
-  assert.equal(db.addPodMember("pod-1", "sess-2", 4_500), null, "database refuses membership changes on a closed pod");
-  assert.equal(db.listPods()[0]?.id, "pod-1");
-});
-
-test("pod reconciliation receipts are durable, exclusive, attributable, and fail closed on restart", () => {
-  const db = withRunner();
-  db.createSession(newSession({ id: "sess-1" }));
-  db.createSession(newSession({ id: "sess-2" }));
-  db.createPod({ id: "pod-1", title: "Pod", objective: "", sessionIds: ["sess-1", "sess-2"], now: 100 });
-
-  const running = db.beginPodReconciliation({
-    reconciliationId: "reconcile-1",
-    podId: "pod-1",
-    sourceSessionId: "sess-2",
-    targetSessionId: "sess-1",
-    actorId: "device-1",
-    now: 200,
-  });
-  assert.equal(running?.status, "running");
-  assert.equal(running?.actorId, "device-1");
-  assert.equal(db.activePodReconciliationForSession("sess-1")?.reconciliationId, "reconcile-1");
-  assert.equal(db.activePodReconciliationForSession("sess-2")?.reconciliationId, "reconcile-1");
-  assert.equal(db.getPod("pod-1")?.reconciliations?.[0]?.status, "running");
-  assert.equal(db.beginPodReconciliation({
-    reconciliationId: "reconcile-overlap",
-    podId: "pod-1",
-    sourceSessionId: "sess-1",
-    targetSessionId: "sess-2",
-    actorId: "device-2",
-    now: 201,
-  }), null, "only one merge may own a pod at a time");
-
-  const settled = db.settlePodReconciliation("reconcile-1", {
-    status: "applied",
-    sourceHead: "1".repeat(40),
-    targetHead: "2".repeat(40),
-    mergeBase: "3".repeat(40),
-    resultHead: "4".repeat(40),
-  }, 300);
-  assert.equal(settled?.status, "applied");
-  assert.equal(settled?.resultHead, "4".repeat(40));
-  assert.equal(db.activePodReconciliationForSession("sess-1"), null);
-  assert.equal(db.settlePodReconciliation("reconcile-1", { status: "failed", error: "late" }, 301), null,
-    "a terminal receipt cannot be rewritten by a late runner result");
-
-  assert.ok(db.beginPodReconciliation({
-    reconciliationId: "reconcile-2",
-    podId: "pod-1",
-    sourceSessionId: "sess-2",
-    targetSessionId: "sess-1",
-    actorId: "device-1",
-    now: 400,
-  }));
-  db.failInterruptedPodReconciliations(500);
-  const interrupted = db.getPodReconciliation("reconcile-2");
-  assert.equal(interrupted?.status, "failed");
-  assert.match(interrupted?.error ?? "", /restart.*uncertain/);
-  assert.equal(interrupted?.completedAt, 500);
-
-  assert.ok(db.beginPodReconciliation({
-    reconciliationId: "reconcile-0",
-    podId: "pod-1",
-    sourceSessionId: "sess-2",
-    targetSessionId: "sess-1",
-    actorId: "device-1",
-    now: 400,
-  }));
-  assert.ok(db.settlePodReconciliation("reconcile-0", { status: "failed", error: "test" }, 501));
-  assert.deepEqual(db.listPodReconciliations("pod-1", 2).map((receipt) => receipt.reconciliationId),
-    ["reconcile-0", "reconcile-2"], "same-millisecond receipts retain newest-insertion-first ordering");
-});
-
 test("automation schedules claim each occurrence once and retain actor-attributed terminal audit", () => {
   const db = withRunner();
   const spec: AutomationSpec = {
@@ -8964,72 +8835,6 @@ test("prerelease automation tables migrate provenance and nullable delivery dead
     assert.equal(trigger.invocationCount, 2);
     assert.equal(trigger.lastInvokedAt, 20);
     db.close();
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("pod context allocates durable per-pod sequence numbers and paginates without reordering", () => {
-  const db = withRunner();
-  db.createSession(newSession({ id: "sess-1" }));
-  db.createSession(newSession({ id: "sess-2" }));
-  db.createPod({ id: "pod-1", title: "Pod", objective: "", sessionIds: ["sess-1", "sess-2"], now: 100 });
-  for (let index = 1; index <= 4; index += 1) {
-    const result = db.appendPodContextEntry({
-      id: `ctx-${index}`,
-      podId: "pod-1",
-      ts: 100 + index,
-      source: { kind: "human", actorId: "local" },
-      content: `entry ${index}`,
-    });
-    assert.equal(result.entry.seq, index);
-  }
-  assert.deepEqual(db.listPodContextEntries("pod-1", undefined, 2).map((entry) => entry.seq), [3, 4]);
-  assert.deepEqual(db.listPodContextEntries("pod-1", 3, 2).map((entry) => entry.seq), [1, 2]);
-  assert.deepEqual(db.getPodContextEntries("pod-1", ["ctx-4", "ctx-2"]).map((entry) => entry.seq), [4, 2]);
-  assert.deepEqual(db.podContextSelectionWindow("pod-1", 1, 2), {
-    entries: db.listPodContextEntries("pod-1", undefined, 2), totalCount: 3, minSeq: 2, maxSeq: 4,
-  });
-});
-
-test("legacy pod tables migrate roles, cursors, budgets, and orchestration state additively", () => {
-  const root = mkdtempSync(join(tmpdir(), "wollipog-pod-migration-"));
-  const path = join(root, "cp.db");
-  try {
-    const raw = new DatabaseSync(path);
-    raw.exec(`
-      CREATE TABLE pods (
-        id TEXT PRIMARY KEY, title TEXT NOT NULL, objective TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'active', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-      );
-      CREATE TABLE pod_members (
-        pod_id TEXT NOT NULL, session_id TEXT NOT NULL, joined_at INTEGER NOT NULL,
-        PRIMARY KEY (pod_id, session_id)
-      );
-      INSERT INTO pods VALUES ('legacy-pod', 'Legacy', '', 'active', 10, 20);
-      INSERT INTO pod_members VALUES ('legacy-pod', 'second', 12);
-      INSERT INTO pod_members VALUES ('legacy-pod', 'first', 11);
-    `);
-    raw.close();
-
-    const migrated = ControlPlaneDb.open(path);
-    const pod = migrated.getPod("legacy-pod")!;
-    assert.deepEqual(pod.members, [
-      { sessionId: "first", joinedAt: 11, role: "lead", contextTokenBudget: null, lastContextSeq: 0 },
-      { sessionId: "second", joinedAt: 12, role: "worker", contextTokenBudget: null, lastContextSeq: 0 },
-    ]);
-    assert.equal(pod.orchestration?.policy.mode, "manual");
-    assert.equal(pod.orchestration?.state.status, "idle");
-    assert.ok(migrated.updatePodMember("legacy-pod", "first", { role: "worker" }, 30));
-    migrated.close();
-
-    const reopened = ControlPlaneDb.open(path);
-    assert.deepEqual(
-      reopened.getPod("legacy-pod")!.members.map((member) => member.role),
-      ["worker", "worker"],
-      "the one-time legacy backfill must not overwrite an intentional lead-less configuration",
-    );
-    reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -9325,6 +9130,191 @@ test("startup removes crash-window event payload artifacts that no committed eve
 });
 
 /* --------------------------- Misc lifecycle ---------------------------- */
+
+test("upgrading a populated Pods database preserves sessions, worktrees, transcripts, artifacts and automations", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retire-pods-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const path = join(root, "cp.db");
+
+  const before = ControlPlaneDb.open(path);
+  before.registerRunner(meta(), 500);
+  before.createSession(newSession());
+  before.setWorktreePath("sess-1", "/worktrees/sess-1");
+  before.appendEvent("sess-1", { kind: "agent_message", text: "Saved transcript", final: true }, 1_000);
+  const data = "Saved test log";
+  const artifact: WorkflowArtifact = {
+    artifactId: "member-artifact",
+    sessionId: "sess-1",
+    kind: "test_log",
+    name: "log.txt",
+    mimeType: "text/plain",
+    encoding: "utf8",
+    data,
+    sizeBytes: Buffer.byteLength(data),
+    sha256: createHash("sha256").update(data).digest("hex"),
+    createdBy: { kind: "agent", id: "sess-1" },
+    createdAt: 1_000,
+  };
+  before.createWorkflowArtifact(artifact);
+  const automation = before.createAutomation({
+    automationId: "member-automation", nextFireAt: 2_000,
+    actor: { kind: "human", id: "device-1" }, now: 1_000,
+    spec: {
+      name: "Daily Check",
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      enabled: true,
+      misfirePolicy: { kind: "fire_once" },
+      runnerPolicy: { kind: "wait" },
+      concurrencyPolicy: "skip",
+      limits: { maxCostUsd: 2, maxToolCalls: 20 },
+      notifications: { pushEvents: [] },
+      action: {
+        kind: "create_session",
+        request: { runnerId: "runner-1", workspaceId: "ws-1", agentId: "acp-agent", prompt: "Check" },
+      },
+    },
+  });
+  const transcript = before.listEvents("sess-1");
+
+  // The previous schema and a row in every retired table, including the old membership
+  // foreign key to a live session. The production database connection enforces foreign keys.
+  before.raw().exec(`
+    CREATE TABLE pods (
+      id         TEXT PRIMARY KEY,
+      title      TEXT NOT NULL,
+      objective  TEXT NOT NULL DEFAULT '',
+      status     TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'closed')),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE pod_members (
+      pod_id               TEXT NOT NULL,
+      session_id           TEXT NOT NULL,
+      joined_at            INTEGER NOT NULL,
+      role                 TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('lead', 'worker', 'reviewer')),
+      context_token_budget INTEGER,
+      last_context_seq     INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (pod_id, session_id),
+      FOREIGN KEY (pod_id) REFERENCES pods(id) ON DELETE CASCADE,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_pod_members_pod ON pod_members(pod_id, joined_at, session_id);
+
+    CREATE TABLE pod_orchestration (
+      pod_id                 TEXT PRIMARY KEY,
+      mode                   TEXT NOT NULL DEFAULT 'manual' CHECK (mode IN ('manual', 'round_robin', 'lead_driven', 'event_triggered')),
+      context_token_budget   INTEGER NOT NULL DEFAULT 4096,
+      summary_token_budget   INTEGER NOT NULL DEFAULT 512,
+      max_turns              INTEGER NOT NULL DEFAULT 12,
+      max_repeated_outputs   INTEGER NOT NULL DEFAULT 2,
+      status                 TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'running', 'paused', 'stopped')),
+      run_id                 TEXT,
+      turns_used             INTEGER NOT NULL DEFAULT 0,
+      current_session_id     TEXT,
+      last_session_id        TEXT,
+      stop_reason            TEXT,
+      started_at             INTEGER,
+      updated_at             INTEGER NOT NULL,
+      FOREIGN KEY (pod_id) REFERENCES pods(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE pod_orchestration_steps (
+      step_id              TEXT PRIMARY KEY,
+      pod_id               TEXT NOT NULL,
+      run_id               TEXT NOT NULL,
+      turn                 INTEGER NOT NULL,
+      target_session_id    TEXT NOT NULL,
+      trigger_session_id   TEXT,
+      selected_entry_ids   TEXT NOT NULL,
+      summarized_from_seq  INTEGER,
+      summarized_to_seq    INTEGER,
+      estimated_tokens     INTEGER NOT NULL,
+      output_entry_id      TEXT,
+      output_hash          TEXT,
+      status               TEXT NOT NULL CHECK (status IN ('dispatching', 'running', 'settled', 'failed')),
+      error                TEXT,
+      created_at           INTEGER NOT NULL,
+      settled_at           INTEGER,
+      UNIQUE (pod_id, run_id, turn),
+      FOREIGN KEY (pod_id) REFERENCES pods(id) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_pod_orchestration_steps_run
+      ON pod_orchestration_steps(pod_id, run_id, turn DESC);
+
+    CREATE TABLE pod_reconciliations (
+      reconciliation_id TEXT PRIMARY KEY,
+      pod_id             TEXT NOT NULL,
+      source_session_id  TEXT NOT NULL,
+      target_session_id  TEXT NOT NULL,
+      actor_id           TEXT NOT NULL,
+      status             TEXT NOT NULL CHECK (status IN ('running', 'applied', 'already_applied', 'conflicted', 'failed')),
+      source_head        TEXT,
+      target_head        TEXT,
+      merge_base         TEXT,
+      result_head        TEXT,
+      conflict_paths     TEXT,
+      error              TEXT,
+      created_at         INTEGER NOT NULL,
+      completed_at       INTEGER,
+      FOREIGN KEY (pod_id) REFERENCES pods(id) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_pod_reconciliations_pod
+      ON pod_reconciliations(pod_id, created_at DESC, reconciliation_id DESC);
+    CREATE UNIQUE INDEX idx_pod_reconciliations_running
+      ON pod_reconciliations(pod_id) WHERE status='running';
+
+    CREATE TABLE pod_context_entries (
+      id              TEXT PRIMARY KEY,
+      pod_id          TEXT NOT NULL,
+      seq             INTEGER NOT NULL,
+      ts              INTEGER NOT NULL,
+      source_kind     TEXT NOT NULL CHECK (source_kind IN ('human', 'session')),
+      source          TEXT NOT NULL,
+      source_session_id TEXT,
+      source_from_seq INTEGER,
+      source_to_seq   INTEGER,
+      content         TEXT NOT NULL,
+      UNIQUE (pod_id, seq),
+      FOREIGN KEY (pod_id) REFERENCES pods(id) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_pod_context_entries_pod ON pod_context_entries(pod_id, seq DESC);
+    CREATE UNIQUE INDEX idx_pod_context_member_output
+      ON pod_context_entries(pod_id, source_session_id, source_from_seq, source_to_seq)
+      WHERE source_kind='session';
+
+    INSERT INTO pods (id, title, created_at, updated_at) VALUES ('pod-1', 'Old Pod', 700, 800);
+    INSERT INTO pod_members (pod_id, session_id, joined_at) VALUES ('pod-1', 'sess-1', 700);
+    INSERT INTO pod_orchestration (pod_id, status, run_id, updated_at) VALUES ('pod-1', 'running', 'rotation', 800);
+    INSERT INTO pod_orchestration_steps
+      (step_id, pod_id, run_id, turn, target_session_id, selected_entry_ids, estimated_tokens, status, created_at)
+      VALUES ('step', 'pod-1', 'rotation', 1, 'sess-1', '[]', 0, 'running', 800);
+    INSERT INTO pod_reconciliations
+      (reconciliation_id, pod_id, source_session_id, target_session_id, actor_id, status, created_at)
+      VALUES ('reconcile', 'pod-1', 'sess-1', 'other', 'device-1', 'running', 800);
+    INSERT INTO pod_context_entries (id, pod_id, seq, ts, source_kind, source, content)
+      VALUES ('context', 'pod-1', 1, 800, 'human', '{}', 'Old note');
+  `);
+  assert.equal(before.raw().prepare("PRAGMA foreign_keys").get()?.foreign_keys, 1);
+  before.close();
+
+  for (let open = 0; open < 2; open++) {
+    const after = ControlPlaneDb.open(path);
+    try {
+      assert.deepEqual(after.raw().prepare("PRAGMA foreign_key_check").all(), []);
+      assert.deepEqual(after.raw().prepare(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND (name = 'pods' OR name GLOB 'pod_*')",
+      ).all(), []);
+      assert.equal(after.getSession("sess-1")?.worktreePath, "/worktrees/sess-1");
+      assert.deepEqual(after.listEvents("sess-1"), transcript);
+      assert.deepEqual(after.getWorkflowArtifact("member-artifact"), artifact);
+      assert.deepEqual(after.getAutomation("member-automation"), automation);
+    } finally {
+      after.close();
+    }
+  }
+});
 
 test("setWorktreePath persists onto the session view", () => {
   const db = withRunner();

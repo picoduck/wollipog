@@ -50,7 +50,6 @@ test("shortcut matching accepts either primary modifier and rejects modifier dri
   assert.equal(matchesShortcut(key("?", { shiftKey: true }), "shortcut-reference"), true);
   assert.equal(matchesShortcut(key("?"), "shortcut-reference"), false);
   assert.equal(matchesShortcut(key("Enter", { ctrlKey: true }), "submit-run"), true);
-  assert.equal(matchesShortcut(key("Enter", { metaKey: true }), "relay-pod-note"), true);
   assert.equal(matchesShortcut(key("Escape", { ctrlKey: true }), "exit-terminal"), true);
   assert.equal(matchesShortcut(key("Escape", { metaKey: true }), "exit-terminal"), false,
     "terminal focus exits with literal Control, not Command");
@@ -262,8 +261,7 @@ test("the collision check reports a contextual binding that shadows Search on on
     : definition);
   assert.deepEqual(coActiveCollisions(before, false), ["search / session-reading-previous-session: Ctrl+K"]);
   assert.deepEqual(coActiveCollisions(before, true), []);
-  // Scopes that are never live together may reuse keys: the Run dialog and Pod detail both submit.
-  assert.equal(shortcutDisplay("submit-run", false), shortcutDisplay("relay-pod-note", false));
+  // Scopes that are never live together may reuse keys: the Run and Follow Up dialogs both submit.
 });
 
 test("PR4 rail, search, create, and focus-zone shortcuts replace the retired sidebar binding", () => {
@@ -273,11 +271,10 @@ test("PR4 rail, search, create, and focus-zone shortcuts replace the retired sid
     ["navigate-automations", "3"],
     ["navigate-projects", "4"],
     ["navigate-runs", "5"],
-    ["navigate-pods", "6"],
-    ["navigate-connections", "7"],
-    ["navigate-skills", "8"],
-    ["navigate-archived", "9"],
-    ["navigate-usage", "0"],
+    ["navigate-connections", "6"],
+    ["navigate-skills", "7"],
+    ["navigate-archived", "8"],
+    ["navigate-usage", "9"],
     ["toggle-sessions-view", "b"],
     ["focus-inbox-search", "/"],
     ["new-session", "c"],
@@ -294,7 +291,6 @@ test("global rail numbering stays aligned with its navigation shortcuts", () => 
     inbox: "navigate-inbox",
     projects: "navigate-projects",
     runs: "navigate-runs",
-    pods: "navigate-pods",
     automations: "navigate-automations",
     usage: "navigate-usage",
     runners: "navigate-connections",

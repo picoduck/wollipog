@@ -49,7 +49,6 @@ import {
   summarizeCheckRollup,
   summarizeGitLabPipeline,
   synchronizeCheckpointRefs,
-  validatePodReconciliationMetadata,
   withGitExecutionContext,
   type GitRunOpts,
 } from "./git-ops.js";
@@ -150,25 +149,6 @@ test("missing repository classification excludes retryable Git failures", () => 
   assert.equal(isMissingGitRepositoryError(new Error("permission denied")), false);
   assert.equal(isMissingGitRepositoryError(new Error("cannot lock ref; another process holds the lock")), false);
   assert.equal(isMissingGitRepositoryError(new Error("operation timed out")), false);
-});
-
-test("pod reconciliation metadata fails closed across paths, workspaces, and execution contexts", () => {
-  const target = { workspaceId: "ws-1", worktreePath: "C:/repo/target", context: { kind: "wsl" as const, distro: "Ubuntu" } };
-  const source = { workspaceId: "ws-1", worktreePath: "C:/repo/source", context: { kind: "wsl" as const, distro: "Ubuntu" } };
-  assert.deepEqual(validatePodReconciliationMetadata("c:\\repo\\target\\", target, source), {
-    sourceWorktreePath: "C:/repo/source",
-    context: { kind: "wsl", distro: "Ubuntu" },
-  });
-  assert.throws(() => validatePodReconciliationMetadata("C:/repo/other", target, source), /runner-owned session metadata/);
-  assert.throws(() => validatePodReconciliationMetadata("C:/repo/target", target, { ...source, worktreePath: null }), /no runner-owned worktree/);
-  assert.throws(() => validatePodReconciliationMetadata("C:/repo/target", target, { ...source, worktreePath: "c:\\repo\\target" }), /distinct/);
-  assert.throws(() => validatePodReconciliationMetadata("C:/repo/target", target, { ...source, workspaceId: "ws-2" }), /same workspace/);
-  assert.throws(() => validatePodReconciliationMetadata("C:/repo/target", target, {
-    ...source, context: { kind: "wsl", distro: "Debian" },
-  }), /same execution context/);
-  assert.throws(() => validatePodReconciliationMetadata("C:/repo/target", target, {
-    ...source, context: { kind: "native" },
-  }), /same execution context/);
 });
 
 test("parseGitHubReviewPage: preserves remote provenance and falls back to originalLine for outdated threads", () => {

@@ -15,8 +15,7 @@ import { TranscriptEmptyState, TranscriptHistoryNotice, transcriptEmptyKind } fr
 /**
  * The comparison column recipe (#2975, component-local `.compare`, docs/design-system.md §19.4):
  * flush member columns separated by hairlines that fill the page's height, each with a one-line
- * head, one meta line and a body that scrolls on its own. A Run lays its members out with it; a Pod
- * can lay out its members the same way.
+ * head, one meta line and a body that scrolls on its own.
  */
 
 /**
@@ -49,14 +48,12 @@ export function CompareRow({ label, children }: { label: string; children: React
 }
 
 /**
- * A column's head, one row that never wraps: the agent (ending in an ellipsis), with an optional dim
- * sub-line under it, its status at its full width, a visible Open Session when the column offers
+ * A column's head, one row that never wraps: the agent (ending in an ellipsis),
+ * its status at its full width, a visible Open Session when the column offers
  * one, and ⋯. On a phone it is the member bar under the member tabs.
  */
-export function CompareMemberHead({ agent, sub, session, runnerOnline, onOpenSession, menu }: {
+export function CompareMemberHead({ agent, session, runnerOnline, onOpenSession, menu }: {
   agent: string;
-  /** What the member is for, after the agent: a pod member's "<Role> · <task>" (#2983). */
-  sub?: string;
   session: SessionView;
   runnerOnline: boolean;
   /** A visible Open Session button; without it, Open Session is the first item in ⋯. */
@@ -66,14 +63,7 @@ export function CompareMemberHead({ agent, sub, session, runnerOnline, onOpenSes
 }) {
   return (
     <div className="compare-member-head">
-      {sub ? (
-        <span className="compare-member-name">
-          <span className="compare-member-agent" title={agent}>{agent}</span>
-          <span className="compare-member-sub" title={sub}>{sub}</span>
-        </span>
-      ) : (
-        <span className="compare-member-agent" title={agent}>{agent}</span>
-      )}
+      <span className="compare-member-agent" title={agent}>{agent}</span>
       <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
       {onOpenSession && (
         <button type="button" className="icon-btn sm" title="Open Session" aria-label="Open Session" onClick={onOpenSession}>

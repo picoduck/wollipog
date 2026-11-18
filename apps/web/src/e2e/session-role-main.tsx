@@ -42,9 +42,9 @@ let roleConversionSupported = scenario !== "older-control-plane";
 let push: ((message: ControlPlaneToUi) => void) | undefined;
 const snapshot = (): ControlPlaneToUi => ({
   type: "snapshot", capabilities: {
-    sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false,
+    sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
     sessionRoleConversion: roleConversionSupported,
-  }, runners: [], boxes: [], projects: [], sessions: [session], runs: [], pods: [],
+  }, runners: [], boxes: [], projects: [], sessions: [session], runs: [],
 });
 class FixtureSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;

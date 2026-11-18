@@ -284,8 +284,8 @@ test("one ACP agent names the ACP series in the driver list, readout and table, 
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [runner], boxes: [], projects: [], sessions: [], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+      runners: [runner], boxes: [], projects: [], sessions: [], runs: [],
     });
     await Promise.resolve();
   });

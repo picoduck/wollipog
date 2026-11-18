@@ -186,14 +186,14 @@ async function mount(current: SessionView, { client: overrides = {}, events, exp
   await act(async () => render());
   await act(async () => socket.push({
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
     // The machine's agent reports what the session's own capabilities say, as a live runner does.
     runners: [current.agentCapabilities
       ? { ...runner, agents: runner.agents.map((agent) => ({
         ...agent, capabilities: current.agentCapabilities as RunnerView["agents"][number]["capabilities"],
       })) }
       : runner],
-    boxes: [], projects: [], sessions: [current], runs: [], pods: [],
+    boxes: [], projects: [], sessions: [current], runs: [],
   }));
   await flush();
   const slot = () => container.querySelector(".session-notice-slot") as HTMLElement | null;

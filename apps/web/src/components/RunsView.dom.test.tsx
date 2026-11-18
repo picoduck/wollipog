@@ -99,8 +99,8 @@ async function mountRunDetail(client: Partial<ApiClient>): Promise<Fixture> {
   ));
   await act(async () => socket.push({
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [], boxes: [], projects: [], sessions: [], runs: [runA, runB], pods: [],
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    runners: [], boxes: [], projects: [], sessions: [], runs: [runA, runB],
   }));
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   const jumpTo = async (runId: string) => {
@@ -258,8 +258,8 @@ async function renderRunsList(
 
 const snapshotWithRuns = (runs: RunView[], sessions: SessionView[] = []): UiSnapshotMessage => ({
   type: "snapshot",
-  capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-  runners: [], boxes: [], projects: [], sessions, runs, pods: [],
+  capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+  runners: [], boxes: [], projects: [], sessions, runs,
 });
 
 test("before the first snapshot the Runs list is loading, not empty", async () => {
@@ -538,8 +538,8 @@ describe("Run detail's artifacts (#2855)", () => {
     try {
       await act(async () => fixture.socket.push({
         type: "snapshot",
-        capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-        runners: [], boxes: [], projects: [], sessions: [member], runs: [runA, runB], pods: [],
+        capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+        runners: [], boxes: [], projects: [], sessions: [member], runs: [runA, runB],
       }));
       const rows = rowsOf(fixture.container);
       assert.equal(rows.length, 2);

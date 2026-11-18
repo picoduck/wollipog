@@ -112,12 +112,12 @@ const pages = new Map(chosen.members.map((session, index) => [session.id, timeli
 
 const snapshot = {
   type: "snapshot",
-  capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+  capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
   runners: [{
     runnerId: "runner-1", hostname: "studio-mac", displayName: "Studio Mac", os: "macos", version: "1", status: "online", protocolVersion: PROTOCOL_VERSION,
     agents: [], workspaces: [{ id: "ws-wollipog", name: "Wollipog", path: "/repo" }], connectedAt: NOW, lastSeen: NOW,
   }],
-  boxes: [], projects: [], sessions: chosen.members, runs: [run], pods: [],
+  boxes: [], projects: [], sessions: chosen.members, runs: [run],
 } as ControlPlaneToUi;
 
 class FixtureSocket implements UiSocket {

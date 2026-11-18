@@ -100,7 +100,7 @@ export function shouldReloadReservedDraft(
  * tray names the agent instead (#2178). */
 export const STEERING_UNVERIFIED_REASON = "The active provider has not verified conversation steering support.";
 
-/** UI-known direct steering gates. Server-side workflow, automation, and pod ownership remain
+/** UI-known direct steering gates. Server-side workflow and automation ownership remain
  * authoritative because they are deliberately absent from SessionView. */
 export function conversationSteeringAvailability(
   input: ConversationSteeringAvailabilityInput,

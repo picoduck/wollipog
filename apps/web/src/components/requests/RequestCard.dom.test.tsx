@@ -555,8 +555,8 @@ test("a machine-owner-only sign-in shows its reason as text and the button refer
     } as unknown as RunnerView;
     const snapshot = {
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+      runners: [runner], boxes: [], sessions: [], runs: [],
     } as unknown as UiSnapshotMessage;
     await act(async () => { socket.push(snapshot); await tick(); });
     const start = [...mountPoint.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
@@ -614,12 +614,12 @@ async function renderWithRunner(element: React.ReactElement, runner: Partial<Run
   await act(async () => { root.render(draw(element)); await Promise.resolve(); });
   const snapshot = {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
     runners: [{
       runnerId: "runner-1", hostname: "studio", displayName: "Studio", os: "linux", status: "online", agents: [],
       workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: 999, canManage: true, providerLogins: [], ...runner,
     }],
-    boxes: [], sessions: [], runs: [], pods: [],
+    boxes: [], sessions: [], runs: [],
   } as unknown as UiSnapshotMessage;
   await act(async () => { socket.push(snapshot); await tick(); await tick(); });
   return {

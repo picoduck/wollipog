@@ -153,7 +153,7 @@
   --modal-backdrop: rgba(4, 6, 12, 0.62);
   --terminal-bg: #0a0c10;
   --warning: #a8782a;
-  /* Semantic yellow. Was referenced by pod/project/automation state rules but never defined, so
+  /* Semantic yellow. Was referenced by project/automation state rules but never defined, so
      those declarations were invalid and dropped — "paused", "conflicted", and "workspace missing"
      rendered with no colour at all. */
   --yellow: #e3b341;
@@ -263,7 +263,7 @@
   --modal-backdrop: rgba(31, 35, 40, 0.32);
   --terminal-bg: #f7f9fc;
   --warning: #9a6700;
-  /* Darker than --amber on purpose: --yellow is used as TEXT (paused pod status, the automation
+  /* Darker than --amber on purpose: --yellow is used as TEXT (the automation
      signing-secret heading) on --bg-elev-2 (#eef2f6), where #9a6700 measures ~4.33:1 and misses
      AA. Before the token existed those declarations were invalid and dropped, so the elements
      inherited higher-contrast text — defining it naively would have been a contrast regression. */
@@ -7881,11 +7881,10 @@ body.shell-dock-dragging * {
    New Project (#2965) says why Create Project is off: a Viewer's refusal, or access levels loading.
    A run's Follow Up (#2976) says what Send waits for: "Write a message to send." or a chosen agent.
    New Subscription (#2973) counts the events it will send: "2 events selected".
-   New Pod (#2982) says what Create Pod waits for: "Choose at least 2 sessions." or "Enter a name."
    New Multi-Agent Run (#2978) says what its primary waits for, in the order the fields read:
    "Enter a task to continue.", "Choose a project to continue." or "Choose at least one agent."
    Budget and History (#3015) counts the fields still to fix, desktop only: "Fix 2 fields to save." */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-pod-reason, .pod-member-reason, .new-run-reason, .budget-history-reason) {
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-run-reason, .budget-history-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -7896,7 +7895,7 @@ body.shell-dock-dragging * {
    beside the buttons and wraps there, rather than pushing the primary onto a second row. */
 .modal-foot > :is(.snooze-blocked-reason, .orchestrator-policy-reason, .new-run-reason) { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-pod-reason, .pod-member-reason, .new-run-reason, .budget-history-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-run-reason, .budget-history-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
@@ -11534,8 +11533,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .machine-settings-delete-note { text-align: center; }
 }
 
-/* --------------------------- Runs and Pods ------------------------------ */
-/* The entity list row recipe of Multi-Agent Runs (#2974) and Pods (#2979): two-line rows in one
+/* --------------------------- Multi-Agent Runs ------------------------------ */
+/* The entity list row recipe of Multi-Agent Runs (#2974): two-line rows in one
    Surface (§5.2). Line 1 is the title and at most one badge, line 2 the meta, 12px apart with no
    middle dots (§11.3); a time trails. */
 .list-reconnecting { margin-bottom: var(--space-3); }
@@ -11553,8 +11552,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 /* Line 2 is one clipped line that wraps: an item that does not fit drops whole onto the hidden next
    line, so the items left in view sit 12px apart with no dead space and none shows a lone initial.
    A leading item (a run's type) only truncates when it alone is wider than the line; plain items
-   (a run's project, a pod's members and mode) show whole or not at all; the filling item (a run's
-   agents, a pod's objective) keeps at least a readable word before it folds. */
+   (a run's project) show whole or not at all; the filling item (a run's agents) keeps at least
+   a readable word before it folds. */
 .list-row-meta {
   display: flex;
   flex-wrap: wrap;
@@ -11598,12 +11597,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     margin-left: 0;
   }
   .list-row-meta { grid-area: 2 / 2; }
-  /* A pod's line 2 folds by priority: members, the turn while automatic turns run, then the mode
-     and the objective, so the narrow line keeps a running pod's progress (#2979). */
-  .pod-row-meta > :is(.pod-row-mode, .list-row-fill) { order: 1; }
 }
-/* A pod without an objective says so quietly, so it never reads as content (#2979). */
-.pod-row-no-objective { color: var(--text-faint); }
 /* The run's artifacts (#2855): an unboxed section (§4.5) of full-width rows in one surface. */
 .run-artifacts {
   flex: 0 0 auto;
@@ -11714,22 +11708,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* A pod member's name block (#2983): the agent over a dim "<Role> · <task>", each one line with an
-   ellipsis. The block takes the row's free room, so the status and ⋯ keep the far end. */
-.compare-member-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-.compare-member-sub {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-dim);
-  font: var(--type-small);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .compare-member-head > .session-status-indicators { flex: none; }
 .compare-member-head > .session-status-indicators + :is(.icon-btn, .overflow-menu) { margin-left: auto; }
 .compare-member-meta {
@@ -11782,234 +11760,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .compare-phone > .compare-member { flex: 1; }
 .compare-phone .compare-member-head { padding-inline: var(--page-gutter) var(--space-2); }
 .compare-phone :is(.compare-member-meta, .compare-member-notice, .compare-member-body) { padding-inline: var(--page-gutter); }
-
-/* -------------------------- Collaboration pods -------------------------- */
-/* While automatic turns run, or once after they stop, one notice under the detail bar (#2980). */
-.pod-turns-banner { margin-top: var(--space-3); }
-/* Merge Work's Recent Merges (#2980): one row per merge, its heads behind Show Details. */
-.pod-merges { display: grid; gap: var(--space-2); }
-.pod-merges > .section-title { margin: 0; }
-.pod-merge-list { margin: 0; padding: 0; list-style: none; }
-.pod-merge-row { display: grid; gap: var(--space-1); padding: var(--space-2) var(--space-3); }
-.pod-merge-row + .pod-merge-row { box-shadow: inset 0 1px 0 var(--border); }
-.pod-merge-paths { margin: 0; padding: 0; list-style: none; }
-.pod-merge-rule { margin-top: calc(-1 * var(--space-2)); }
-/* New Pod (#2982): the sessions list grows inside the dialog's body, its only scroller. On a phone's
-   full-height sheet the filter stays at the top while the rows scroll under it, on the sheet's
-   colour, and each row is at least 44px. */
-@media (max-width: 760px) {
-  .pod-session-filter {
-    position: sticky;
-    top: calc(-1 * var(--space-5));
-    z-index: var(--z-sticky);
-    margin-top: calc(-1 * var(--space-2));
-    padding: var(--space-2) 0;
-    background: var(--bg-elev);
-  }
-  .pod-session-list > .choice-row { min-height: max(44px, var(--row-h)); }
-}
-/* The pod page (#2981): under the bar and its banner, the objective and the members' flush columns
-   (#2975's `.compare`) beside the Huddle, a 360px aside at full height (320px in the compact tier).
-   The columns always get the remaining height. */
-.pod-detail:has(> .pod-layout, > .pod-phone) { padding-bottom: 0; }
-.run-detail > .pod-layout,
-.run-detail > .pod-phone {
-  margin-right: 0;
-  margin-left: 0;
-}
-.pod-layout {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
-}
-@container app (max-width: 1099px) {
-  .pod-layout { grid-template-columns: minmax(0, 1fr) 320px; }
-}
-.pod-main {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-}
-/* The objective strip: two lines, "No objective" in faint text when the pod has none. */
-.pod-objective {
-  flex: none;
-  display: -webkit-box;
-  margin: var(--space-3) var(--page-gutter) 0;
-  overflow: hidden;
-  font: var(--type-body);
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-.pod-objective.is-empty { color: var(--text-faint); }
-/* The Huddle: its head, the log newest last, and the composer at the bottom. */
-.pod-huddle {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  border-left: 1px solid var(--border);
-}
-.pod-huddle-head {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: var(--control-h-lg);
-  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-4);
-  border-bottom: 1px solid var(--border);
-}
-.pod-huddle-title {
-  margin: 0;
-  font: var(--type-section);
-}
-.pod-huddle-head > .btn { margin-left: auto; }
-/* Newest last, against the composer: a short log sits at the end, so the entries in view stay put
-   when Load Earlier adds older ones above them. */
-.pod-huddle-log {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow-y: auto;
-}
-.pod-huddle-log > .pod-huddle-entries { margin-top: auto; }
-.pod-huddle-notice { margin: var(--space-3) var(--space-4) 0; }
-.pod-huddle-empty {
-  margin: 0;
-  padding: var(--space-4);
-  color: var(--text-dim);
-  font: var(--type-small);
-}
-.pod-huddle-entries {
-  margin: 0;
-  padding: var(--space-1) 0;
-  list-style: none;
-}
-/* Each entry is a selectable row: its box, then who and when, then its text. */
-.pod-huddle-entry {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-4);
-  cursor: pointer;
-}
-@media (hover: hover) { .pod-huddle-entry:hover { background: var(--bg-elev-2); } }
-.pod-huddle-entry.is-selected { background: var(--surface-selected); }
-.pod-huddle-entry > .checkbox-mark { flex: none; }
-.pod-huddle-entry-body {
-  min-width: 0;
-  display: grid;
-  justify-items: start;
-  gap: var(--space-1);
-}
-.pod-huddle-entry-meta {
-  display: flex;
-  flex-wrap: wrap;
-  column-gap: var(--space-2);
-  margin: 0;
-  color: var(--text-dim);
-  font: var(--type-small);
-}
-.pod-huddle-entry-source {
-  color: var(--text);
-  font: var(--type-label);
-}
-.pod-huddle-text {
-  margin: 0;
-  font: var(--type-body);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.pod-huddle-text.is-clamped {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-}
-.pod-huddle-more {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  font: var(--type-small);
-  cursor: pointer;
-}
-.pod-composer {
-  flex: none;
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  border-top: 1px solid var(--border);
-}
-.pod-composer-note {
-  width: 100%;
-  resize: vertical;
-}
-/* Relay To: its label, then one row of member checkboxes that wraps when it must. */
-.pod-recipients {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  column-gap: var(--space-3);
-}
-.pod-recipients-label {
-  flex-basis: 100%;
-  color: var(--text-dim);
-  font: var(--type-label);
-}
-.pod-composer-reason {
-  margin: 0;
-  color: var(--text-dim);
-  font: var(--type-small);
-}
-.pod-composer-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-2);
-}
-/* A relay that missed a member: each member's result on its own line. */
-.pod-results {
-  display: grid;
-  gap: var(--space-1);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.pod-results > li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  column-gap: var(--space-2);
-}
-.pod-result-name { font: var(--type-body-strong); }
-.pod-result-reason {
-  color: var(--text-dim);
-  font: var(--type-small);
-  overflow-wrap: anywhere;
-}
-/* Phones (§15.1): the objective's first line, then the Huddle and member tabs, one at a time. The
-   composer sits above the safe area on the Huddle tab. */
-.pod-phone {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-.pod-phone > .pod-objective {
-  margin-right: var(--page-gutter);
-  margin-left: var(--page-gutter);
-  -webkit-line-clamp: 1;
-}
-.pod-phone > .pod-tabs { margin-top: var(--space-2); }
-.pod-phone > .pod-huddle,
-.pod-phone > .compare-member { flex: 1; }
-.pod-phone > .pod-huddle { border-left: 0; }
-.pod-phone :is(.pod-huddle-head, .pod-huddle-entry, .pod-composer, .pod-huddle-empty) { padding-inline: var(--page-gutter); }
-.pod-phone .pod-composer { padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
-.pod-phone .compare-member-head { padding-inline: var(--page-gutter) var(--space-2); }
-.pod-phone :is(.compare-member-meta, .compare-member-notice, .compare-member-body) { padding-inline: var(--page-gutter); }
 
 /* ------------------------------- Dialog ---------------------------------- */
 /* One dialog anatomy (docs/design-system.md §7). Every dialog is portalled to <body>: the backdrop
@@ -16502,14 +16252,12 @@ button.review-finding-location {
 /* No results (§12.2), inline in the list at the rows' inset: the icon beside its sentence. */
 /* The Projects list's no-match row is the same (#2957). */
 .state:is(.skill-list-no-results, .project-list-no-results, .machine-list-no-results) { padding: var(--space-3) var(--space-3) 0; }
-/* New Pod's sessions list says it the same way (#2982), at the rows' inset, without the drop. */
-.state.pod-session-no-results { padding: 0 var(--space-3); }
-:is(.skill-list-no-results, .project-list-no-results, .machine-list-no-results, .pod-session-no-results) .state-body {
+:is(.skill-list-no-results, .project-list-no-results, .machine-list-no-results) .state-body {
   display: flex;
   align-items: center;
   gap: var(--space-2);
 }
-:is(.skill-list-no-results, .project-list-no-results, .machine-list-no-results, .pod-session-no-results) .state-body > svg { flex: none; }
+:is(.skill-list-no-results, .project-list-no-results, .machine-list-no-results) .state-body > svg { flex: none; }
 /* The foot's Orphaned Copies entry is one line in the foot's --text-dim (§5.6). */
 .list-foot > .skill-list-orphans { color: inherit; }
 .skill-list-orphans > .row-title { font: var(--type-body); }

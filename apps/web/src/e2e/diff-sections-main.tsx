@@ -144,8 +144,8 @@ class FixtureSocket implements UiSocket {
       this.onopen?.();
       this.onmessage?.({ data: JSON.stringify({
         type: "snapshot",
-        capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false },
-        runners: [runner], boxes: [], projects: [], sessions: [session], runs: [], pods: [],
+        capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
+        runners: [runner], boxes: [], projects: [], sessions: [session], runs: [],
       }) });
     }, 0);
   }

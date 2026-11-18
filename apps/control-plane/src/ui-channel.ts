@@ -1,5 +1,4 @@
 import {
-  MAX_UI_POD_SUBSCRIPTIONS,
   MAX_UI_SESSION_SUBSCRIPTIONS,
   type UiToControlPlane,
 } from "@wollipog/protocol";
@@ -7,7 +6,7 @@ import {
 export const MAX_UI_SESSION_ID_LENGTH = 128;
 export const MAX_UI_CLIENT_MESSAGE_BYTES = 64 * 1024;
 
-export { MAX_UI_POD_SUBSCRIPTIONS, MAX_UI_SESSION_SUBSCRIPTIONS };
+export { MAX_UI_SESSION_SUBSCRIPTIONS };
 
 /** Normalize every ws.RawData shape without relying on Array#toString (which inserts commas
  * between Buffer fragments and turns ArrayBuffer into "[object ArrayBuffer]"). */
@@ -45,16 +44,13 @@ export function parseUiClientMessage(text: string): UiToControlPlane | null {
     };
   }
   if (raw.type !== "session_subscriptions" || !Number.isSafeInteger(raw.revision) || Number(raw.revision) < 1 ||
-      !Array.isArray(raw.sessionIds) || !Array.isArray(raw.podIds)) return null;
-  if (Object.keys(raw).some((key) => key !== "type" && key !== "revision" && key !== "sessionIds" && key !== "podIds")) return null;
+      !Array.isArray(raw.sessionIds)) return null;
+  if (Object.keys(raw).some((key) => key !== "type" && key !== "revision" && key !== "sessionIds")) return null;
   if (raw.sessionIds.length > MAX_UI_SESSION_SUBSCRIPTIONS || !raw.sessionIds.every(validSessionId)) return null;
-  if (raw.podIds.length > MAX_UI_POD_SUBSCRIPTIONS || !raw.podIds.every(validSessionId)) return null;
   if (new Set(raw.sessionIds).size !== raw.sessionIds.length) return null;
-  if (new Set(raw.podIds).size !== raw.podIds.length) return null;
   return {
     type: "session_subscriptions",
     revision: raw.revision as number,
     sessionIds: raw.sessionIds,
-    podIds: raw.podIds,
   };
 }

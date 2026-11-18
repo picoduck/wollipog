@@ -2,12 +2,12 @@
 
 The `/ui` WebSocket carries two classes of data:
 
-- scoped metadata deltas used by board, sidebar, runner, run, and pod lists;
-- high-volume session events, history resets, shell chunks, and pod context.
+- scoped metadata deltas used by board, sidebar, runner, and run lists;
+- high-volume session events, history resets, shell chunks.
 
 Current dashboards send a revisioned complete replacement `session_subscriptions` message containing
-the session and pod ids needed by the active view. The control plane replies in writer order with the
-exact authorized selection in `session_subscriptions_applied`. Session/run/pod navigation is
+the session ids needed by the active view. The control plane replies in writer order with the
+exact authorized selection in `session_subscriptions_applied`. Session and run navigation is
 late-bound to the live store, so membership changes refresh the selection. Metadata remains global
 within the authenticated principal's scope. The control plane filters requested ids through
 authorization and rechecks access again at delivery time, but first skips clients that are not
@@ -20,9 +20,9 @@ tabs and one rolling-upgrade legacy client without allowing a single credential 
 memory, authorization reads, or independent writer queues without bound. A run is capped at the same
 256-session limit as one live selection, so every accepted run remains recoverable.
 
-Compatibility is additive. A dashboard that sends no subscription message receives the legacy
-authorized stream. A current dashboard waits for the snapshot capability; an older control plane
-does not advertise it, so the dashboard stays in legacy delivery and recovers history immediately.
+A dashboard that sends no subscription message receives the legacy authorized stream. Targeted
+delivery uses the `sessionSubscriptionsV2` snapshot capability. Dashboards and control planes
+from opposite sides of the Pods removal use the legacy stream and recover history immediately.
 
 Each client has one serialized writer. It bounds queued messages, queued UTF-8 bytes, and the
 underlying WebSocket `bufferedAmount`. Unsent upserts for the same entity collapse even when durable
@@ -31,7 +31,7 @@ A client that exceeds a ceiling is removed immediately and closed with code `101
 browser reconnect obtains a fresh metadata snapshot. After the replacement acknowledgement, the UI
 fetches durable event gaps from the runner sequence frozen before that replacement was sent; a live
 post-ack event therefore cannot advance recovery past older outage gaps. A successful fetch advances
-the cursor used by later run/pod metadata refreshes instead of replaying full histories. The control
+the cursor used by later run metadata refreshes instead of replaying full histories. The control
 plane increments a session event epoch whenever reprocess replaces a log and carries that epoch on
 snapshots, session metadata, and reset frames, so a missed reset invalidates stale events and cursors.
 Older control planes expose no epoch; current dashboards conservatively discard their bounded visible

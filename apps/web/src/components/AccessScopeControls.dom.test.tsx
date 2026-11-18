@@ -393,10 +393,10 @@ async function renderProjectsPage(who: IdentityAdministrationView) {
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
+        sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
         accessScopeManagement: true,
       },
-      runners: [runner], boxes: [], sessions: [], runs: [], pods: [], projects: [project],
+      runners: [runner], boxes: [], sessions: [], runs: [], projects: [project],
     } as UiSnapshotMessage);
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });

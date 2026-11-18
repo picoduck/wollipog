@@ -108,7 +108,7 @@ during periodic maintenance, and before inspection, role conversion and approval
 resume delivery, even if the requesting runner is offline. They no longer block
 role conversion. Configuration, approving identity, original approval time and
 audit history remain available; consumed creation receipts never expire.
-Card and audit settlement commits before notifications or workflow/pod lifecycle
+Card and audit settlement commits before notifications or workflow lifecycle
 callbacks run. Owed lifecycle work survives restart; a failed expiration is retried
 without stopping unrelated prompt delivery. Expired approval resumes remain fenced
 even while cleanup is deferred.

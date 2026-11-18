@@ -10,7 +10,7 @@ import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adoptLegacyCheckpointRefs, anchorForkRef, anchorTurnRef, captureWorktreeTree, clearGhPrCacheForTests, computeDiffHash, deleteTurnRef, deleteTurnRefs, gitDiff, gitStatus, gitSummary, readTurnRef, restoreWorktreeToTree, runPodReconcile, synchronizeCheckpointRefs } from "./git-ops.js";
+import { adoptLegacyCheckpointRefs, anchorForkRef, anchorTurnRef, captureWorktreeTree, clearGhPrCacheForTests, computeDiffHash, deleteTurnRef, deleteTurnRefs, gitDiff, gitStatus, gitSummary, readTurnRef, restoreWorktreeToTree, synchronizeCheckpointRefs } from "./git-ops.js";
 import { initRepo } from "./git-test-repo.js";
 
 function gitAvailable(): boolean {
@@ -353,113 +353,6 @@ function seedReconciliationWorktrees(): { root: string; repo: string; source: st
   git(repo, ["worktree", "add", "-q", target, "target"]);
   return { root, repo, source, target };
 }
-
-test("pod reconciliation (real git): creates an exact non-FF audit merge and converges on retry", { skip: !GIT }, async () => {
-  const fixture = seedReconciliationWorktrees();
-  try {
-    writeFileSync(join(fixture.source, "source.txt"), "committed source work\n");
-    git(fixture.source, ["add", "-A"]);
-    git(fixture.source, ["commit", "-q", "-m", "source change"]);
-    writeFileSync(join(fixture.target, "target.txt"), "independent target work\n");
-    git(fixture.target, ["add", "-A"]);
-    git(fixture.target, ["commit", "-q", "-m", "target change"]);
-    const sourceHead = git(fixture.source, ["rev-parse", "HEAD"]).trim();
-    const targetHead = git(fixture.target, ["rev-parse", "HEAD"]).trim();
-
-    const applied = await runPodReconcile(fixture.target, fixture.source, {
-      kind: "pod_reconcile",
-      sourceSessionId: "source-session",
-      message: "Merge source into integration target",
-    });
-    assert.equal(applied.status, "applied");
-    assert.equal(applied.sourceHead, sourceHead);
-    assert.equal(applied.targetHead, targetHead);
-    assert.deepEqual(git(fixture.target, ["rev-parse", "HEAD^1", "HEAD^2"]).trim().split(/\s+/), [targetHead, sourceHead]);
-    assert.equal(
-      git(fixture.target, ["log", "-1", "--format=%an <%ae>"]).trim(),
-      "Wollipog <wollipog@localhost>",
-    );
-    assert.equal(readFileSync(join(fixture.target, "source.txt"), "utf8"), "committed source work\n");
-    assert.equal(git(fixture.target, ["status", "--porcelain"]), "");
-
-    const converged = await runPodReconcile(fixture.target, fixture.source, {
-      kind: "pod_reconcile",
-      sourceSessionId: "source-session",
-      message: "Retry the same immutable source",
-    });
-    assert.equal(converged.status, "already_applied");
-    assert.equal(converged.resultHead, applied.resultHead);
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true });
-  }
-});
-
-test("pod reconciliation (real git): reports conflicts only after proving the target restored clean", { skip: !GIT }, async () => {
-  const fixture = seedReconciliationWorktrees();
-  try {
-    writeFileSync(join(fixture.source, "shared.txt"), "source version\n");
-    git(fixture.source, ["add", "-A"]);
-    git(fixture.source, ["commit", "-q", "-m", "source conflict"]);
-    writeFileSync(join(fixture.target, "shared.txt"), "target version\n");
-    git(fixture.target, ["add", "-A"]);
-    git(fixture.target, ["commit", "-q", "-m", "target conflict"]);
-    const targetHead = git(fixture.target, ["rev-parse", "HEAD"]).trim();
-
-    const result = await runPodReconcile(fixture.target, fixture.source, {
-      kind: "pod_reconcile",
-      sourceSessionId: "source-session",
-      message: "Expected conflict",
-    });
-    assert.equal(result.status, "conflicted");
-    assert.deepEqual(result.conflictPaths, ["shared.txt"]);
-    assert.equal(git(fixture.target, ["rev-parse", "HEAD"]).trim(), targetHead);
-    assert.equal(git(fixture.target, ["status", "--porcelain"]), "");
-    assert.equal(readFileSync(join(fixture.target, "shared.txt"), "utf8"), "target version\n");
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true });
-  }
-});
-
-test("pod reconciliation (real git): rejects dirty source and target worktrees before merging", { skip: !GIT }, async () => {
-  const fixture = seedReconciliationWorktrees();
-  try {
-    writeFileSync(join(fixture.source, "untracked.txt"), "not committed\n");
-    await assert.rejects(
-      runPodReconcile(fixture.target, fixture.source, {
-        kind: "pod_reconcile", sourceSessionId: "source-session", message: "must not merge",
-      }),
-      /source member worktree must be clean and committed/,
-    );
-    rmSync(join(fixture.source, "untracked.txt"));
-    writeFileSync(join(fixture.target, "shared.txt"), "dirty target\n");
-    await assert.rejects(
-      runPodReconcile(fixture.target, fixture.source, {
-        kind: "pod_reconcile", sourceSessionId: "source-session", message: "must not merge",
-      }),
-      /target member worktree must be clean/,
-    );
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true });
-  }
-});
-
-test("pod reconciliation (real git): rejects clean linked worktrees from different repositories", { skip: !GIT }, async () => {
-  const first = seedReconciliationWorktrees();
-  const second = seedReconciliationWorktrees();
-  try {
-    await assert.rejects(
-      runPodReconcile(first.target, second.source, {
-        kind: "pod_reconcile", sourceSessionId: "other-repo", message: "must not cross repositories",
-      }),
-      /same git repository/,
-    );
-    assert.equal(git(first.target, ["status", "--porcelain"]), "");
-    assert.equal(git(second.source, ["status", "--porcelain"]), "");
-  } finally {
-    rmSync(first.root, { recursive: true, force: true });
-    rmSync(second.root, { recursive: true, force: true });
-  }
-});
 
 test("checkpoints (real git): anchor, read, restore (incl. deleting post-checkpoint files), delete refs", { skip: !GIT }, async () => {
   const repo = mkdtempSync(join(tmpdir(), "wollipog-ckpt-"));

@@ -69,7 +69,7 @@ test("output after a silence ends it at once, from the session's own heartbeat",
         <WorkingIndicator progress={progress} now={NOW} liveActivitySessionId="s1" />
       </StoreProvider>,
     ));
-    await act(async () => socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [session], runs: [], pods: [] }));
+    await act(async () => socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [session], runs: [] }));
     assert.equal(note()?.textContent, "No new output for 3m");
 
     await act(async () => socket.push({

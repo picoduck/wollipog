@@ -141,12 +141,12 @@ const pages = new Map(members.map((session) => [session.id, session.id === claud
 
 const snapshot = {
   type: "snapshot",
-  capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+  capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
   runners: [{
     runnerId: "runner-1", hostname: "studio-mac", displayName: "Studio Mac", os: "macos", version: "1", status: "online", protocolVersion: PROTOCOL_VERSION,
     agents: [], workspaces: [{ id: "ws-wollipog", name: "Wollipog", path: "/repo" }], connectedAt: NOW, lastSeen: NOW,
   }],
-  boxes: [], projects: [], sessions: members, runs: [run], pods: [],
+  boxes: [], projects: [], sessions: members, runs: [run],
 } as ControlPlaneToUi;
 
 class FixtureSocket implements UiSocket {

@@ -60,7 +60,6 @@ beforeEach(() => {
 
 const cases: ReadonlyArray<{ experiment: ExperimentId; view: View; path: string; content: string }> = [
   { experiment: "multiAgent", view: { name: "runs" }, path: "/runs", content: "Runs List" },
-  { experiment: "pods", view: { name: "pods" }, path: "/pods", content: "Pods List" },
 ];
 
 for (const { experiment, view, path, content } of cases) {
@@ -101,7 +100,7 @@ for (const { experiment, view, path, content } of cases) {
       const header = page().querySelector(".page > header.page-header");
       assert.ok(header, "the page keeps its header");
       assert.equal(page().querySelector("h1#page-title")?.textContent, name);
-      const description = destination(view.name as "runs" | "pods").description;
+      const description = destination(view.name as "runs").description;
       assert.ok(description, "the destination has a description to keep");
       assert.equal(header!.querySelector(".page-heading > p.page-desc")?.textContent, description,
         "the header keeps the working page's description, so it is the same height");
@@ -161,7 +160,7 @@ test("a turned-off entity route keeps its bare header: only destinations carry a
 
 test("the shell hands both gates the route's description", () => {
   const app = readFileSync(fileURLToPath(new URL("../App.tsx", import.meta.url)), "utf8");
-  for (const experiment of ["multiAgent", "pods"]) {
+  for (const experiment of ["multiAgent"]) {
     assert.match(app, new RegExp(`<ExperimentGate experiment="${experiment}" pageTitle=\\{viewTitle\\(view, entityTitle\\)\\} pageDescription=\\{viewDescription\\(view\\)\\}`));
   }
 });

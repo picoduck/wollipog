@@ -976,20 +976,20 @@ test("pausing while the replacement tail is in flight preserves the forward read
 test("reconnect tail replacement merges newer live rows and keeps omitted history reachable", async () => {
   const store = new Store();
   store.dispatch({ type: "msg", msg: {
-    type: "snapshot", capabilities: { sessionSubscriptions: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 3 } as SessionView], runs: [], pods: [],
+    type: "snapshot", capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 3 } as SessionView], runs: [],
   } });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
   store.prepareSubscriptionRecovery(1, ["s1"]);
   store.dispatch({ type: "msg", msg: {
-    type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [],
+    type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"],
   } });
   store.beginEventHistoryLoad("s1", 3, 1, generation);
   store.loadEvents("s1", [event(9), event(10)], 3, 1, true, generation, true);
   store.prepareSubscriptionRecovery(2, ["s1"]);
   store.dispatch({ type: "msg", msg: {
-    type: "session_subscriptions_applied", revision: 2, sessionIds: ["s1"], podIds: [],
+    type: "session_subscriptions_applied", revision: 2, sessionIds: ["s1"],
   } });
   store.beginEventHistoryLoad("s1", 3, 2, generation);
   assert.equal(await recoverSessionHistoryGap(
@@ -1118,20 +1118,20 @@ for (const cachedRows of [[], [event(1)]]) for (const resumed of [false, true]) 
   test(`unavailable reconnect tail preserves ${resumed ? "live-only paging" : "the paused window"}, ignoring ${cachedRows.length} cached prefix rows`, async () => {
     const store = new Store();
     store.dispatch({ type: "msg", msg: {
-      type: "snapshot", capabilities: { sessionSubscriptions: true, boundedDelivery: true },
-      runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 3 } as SessionView], runs: [], pods: [],
+      type: "snapshot", capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
+      runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 3 } as SessionView], runs: [],
     } });
     store.navigate({ name: "session", id: "s1" });
     const generation = store.getState().snapshotRevision;
     store.prepareSubscriptionRecovery(1, ["s1"]);
     store.dispatch({ type: "msg", msg: {
-      type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [],
+      type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"],
     } });
     store.beginEventHistoryLoad("s1", 3, 1, generation);
     store.loadEvents("s1", [event(9), event(10)], 3, 1, true, generation, true);
     store.prepareSubscriptionRecovery(2, ["s1"]);
     store.dispatch({ type: "msg", msg: {
-      type: "session_subscriptions_applied", revision: 2, sessionIds: ["s1"], podIds: [],
+      type: "session_subscriptions_applied", revision: 2, sessionIds: ["s1"],
     } });
     store.beginEventHistoryLoad("s1", 3, 2, generation);
     let paused = true;

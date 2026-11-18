@@ -219,7 +219,7 @@ async function mount(
     rows,
     render,
     online: () => act(async () => {
-      sockets.at(-1)!.onmessage?.({ data: JSON.stringify({ type: "snapshot", runners: [], boxes: [], sessions: [parentSession()], runs: [], pods: [] }) });
+      sockets.at(-1)!.onmessage?.({ data: JSON.stringify({ type: "snapshot", runners: [], boxes: [], sessions: [parentSession()], runs: [] }) });
       await Promise.resolve();
     }),
     unmount: () => act(async () => { root.unmount(); container.remove(); }),

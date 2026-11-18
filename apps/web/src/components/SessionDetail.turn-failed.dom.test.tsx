@@ -145,8 +145,8 @@ async function withFailedTurn(
     ));
     await act(async () => socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [{ ...runner, status: runnerStatus, protocolVersion: runnerProtocolVersion }], boxes: [], projects: [], sessions: [session], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+      runners: [{ ...runner, status: runnerStatus, protocolVersion: runnerProtocolVersion }], boxes: [], projects: [], sessions: [session], runs: [],
     }));
     await flush();
     const resolve = tail.shift();

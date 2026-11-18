@@ -139,12 +139,12 @@ async function mount(client: Partial<ApiClient>, sessions: SessionView[] = [clau
   ));
   await act(async () => socket.push({
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
     runners: [{
       runnerId: "runner-1", hostname: "studio", displayName: "Studio", os: "macos", version: "1", status: "online",
       protocolVersion: PROTOCOL_VERSION, agents: [], workspaces: [], connectedAt: NOW, lastSeen: NOW,
     }],
-    boxes: [], projects: [], sessions, runs: [run], pods: [],
+    boxes: [], projects: [], sessions, runs: [run],
   } as unknown as UiSnapshotMessage));
   await settle();
   return { container, root };

@@ -866,14 +866,15 @@ test("Notifications says where alerts come from when none can work, and how to a
   expect(noticeBox!.y + noticeBox!.height, "the notice sits above the surface").toBeLessThanOrEqual(surfaceBox!.y);
 });
 
-test("both Experimental rows are one line at 1440px", async ({ page }) => {
-  // The section description says once what turning a feature off does, so each row's own
+test("the Multi-Agent Runs experiment has a one-line title and description at 1440px", async ({ page }) => {
+  // The section description says once what turning a feature off does, so the row's own
   // description is short enough for one line (#3022): one line of title and one of description,
   // which is exactly --row-h-2 on the shared grid (§8.2, #3140).
   await page.setViewportSize({ width: 1440, height: 900 });
   await useHarness(page, "dark", { section: "experimental" });
   const rows = page.locator(".settings-panel .setting-row");
-  await expect(rows).toHaveCount(2);
+  await expect(rows).toHaveCount(1);
+  await expect(rows.locator(".setting-row-title")).toHaveText("Multi-Agent Runs");
   const measured = await rows.evaluateAll((elements) => elements.map((row) => {
     const lines = (selector: string) => {
       const element = row.querySelector(selector)!;

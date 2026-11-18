@@ -193,13 +193,12 @@ async function mountSession({
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
       runners: [{ ...runner, protocolVersion, status: runnerStatus }],
       boxes: [],
       projects: [project],
       sessions: [session],
       runs: [],
-      pods: [],
     });
   });
   await flushAsyncWork();

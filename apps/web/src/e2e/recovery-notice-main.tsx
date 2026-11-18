@@ -177,7 +177,7 @@ const session: SessionView = {
 const snapshotMessage: ControlPlaneToUi = {
   type: "snapshot",
   capabilities: {
-    sessionSubscriptions: false,
+    sessionSubscriptionsV2: false,
     boundedDelivery: false,
     paginatedSessionHistory: false,
     projects: true,
@@ -187,7 +187,6 @@ const snapshotMessage: ControlPlaneToUi = {
   projects: [],
   sessions: [session],
   runs: [],
-  pods: [],
 };
 
 let fixtureSocket: FixtureSocket | null = null;

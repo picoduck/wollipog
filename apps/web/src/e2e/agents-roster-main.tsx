@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
-import { PROTOCOL_VERSION, type PodView, type RunView, type RunnerView, type SessionView,
+import { PROTOCOL_VERSION, type RunView, type RunnerView, type SessionView,
   type UiSnapshotMessage } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -13,12 +13,12 @@ import "../styles.css";
 
 /**
  * The Agents roster (#2857) in a 380px side-panel frame (full width on a phone), for one scene:
- * `pod` (a pod lead with subagents, a background job and pod members), `run` (a run member and its
+ * `workers` (subagents and a background job), `run` (a run member and its
  * run's other members), `nested` (subagents three deep, one asking), `offline` (the same, runner
  * offline), `empty` (nothing active, one finished) and `many` (120 workers).
  */
 const params = new URLSearchParams(location.search);
-const scene = params.get("scene") ?? "pod";
+const scene = params.get("scene") ?? "workers";
 document.documentElement.dataset.theme = params.get("theme") === "light" ? "light" : "dark";
 const now = Date.now();
 const minutes = (value: number) => now - value * 60_000;
@@ -47,9 +47,8 @@ let session: SessionView = lead;
 let items: TimelineItem[] = [];
 let sessions: SessionView[] = [];
 let runs: RunView[] = [];
-let pods: PodView[] = [];
 
-if (scene === "pod") {
+if (scene === "workers") {
   sessions = [
     // 3h 20m in, and a member idle for 16 days, whose time reads in days (#3037).
     member("grammar", "Grammar Worker", { status: "running", createdAt: minutes(200),
@@ -59,13 +58,6 @@ if (scene === "pod") {
     member("review", "Parser Reviewer", { status: "input_required", pendingApproval: {
       requestId: "lint", title: "Bash: npm run lint -- --fix", options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }] } }),
   ];
-  pods = [{ id: "pod-1", title: "Parser Rewrite Pod", objective: "", status: "active", createdAt: minutes(50), updatedAt: now,
-    members: [
-      { sessionId: "lead", joinedAt: minutes(50), role: "lead", contextTokenBudget: null, lastContextSeq: 0 },
-      { sessionId: "grammar", joinedAt: minutes(49), role: "worker", contextTokenBudget: null, lastContextSeq: 0 },
-      { sessionId: "tests", joinedAt: minutes(49), role: "worker", contextTokenBudget: null, lastContextSeq: 0 },
-      { sessionId: "review", joinedAt: minutes(48), role: "reviewer", contextTokenBudget: null, lastContextSeq: 0 },
-    ] }];
   items = [
     agent("inspect", 1, "Inspect Parser Entry Points"), step("inspect-npm", 2, "inspect", "$ npm test -- parser"),
     agent("audit", 3, "Audit Storage Adapters", { status: "completed", completedAt: minutes(4) }),
@@ -118,7 +110,7 @@ class FixtureSocket implements UiSocket {
       this.onopen?.();
       const snapshot: UiSnapshotMessage = { type: "snapshot", runners: [runner(scene !== "offline")], boxes: [],
         // The panel's own session stays out of the store, so the fixture's copy is the one shown.
-        sessions, runs, pods } as unknown as UiSnapshotMessage;
+        sessions, runs } as unknown as UiSnapshotMessage;
       this.onmessage?.({ data: JSON.stringify(snapshot) });
     }, 0);
   }

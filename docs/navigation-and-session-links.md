@@ -9,8 +9,6 @@ kept in lockstep without a second router state:
 | Connections | `/connections` (`/runners` remains a legacy alias) |
 | Multi-Agent runs | `/runs` |
 | Run detail | `/runs/:id` |
-| Collaboration pods | `/pods` |
-| Pod detail | `/pods/:id` |
 | Automations | `/automations` |
 | Session detail | `/sessions/:id` |
 
@@ -25,8 +23,8 @@ ids, extra literal segments, and unknown paths resolve to Board and replace the 
 
 - In-app navigation adds one browser history entry only when the destination changes.
 - Back and Forward dispatch through the existing store navigation reducer without adding another
-  entry. That reducer remains responsible for pruning off-view timelines, shell scrollback, pod
-  context, and recovery cursors.
+  entry. That reducer remains responsible for pruning off-view timelines, shell scrollback,
+  and recovery cursors.
 - Each entry the app pushes records its position in `history.state` (`history-position.ts`), so an
   editor with unsaved changes can hold Back and Forward (#3218): the move is undone with
   `history.go` while the editor asks, and redone if the person leaves. On desktop, a move onto
@@ -64,7 +62,7 @@ Archived sessions are omitted from the bounded live snapshot. Session deep links
 one exact, authorized `GET /api/sessions/lookup/by-id?id=...` lookup and upsert that result into the
 same store. Keeping the identifier in a query value prevents URL-path normalization from changing
 ids that contain slashes or dot segments; a guessed or inaccessible id retains the normal uniform
-`404` boundary. Run/pod links wait for the authoritative initial snapshot. None of the detail views
+`404` boundary. Run links wait for the authoritative initial snapshot. None of the detail views
 claims a resource is missing while its authoritative source is still loading.
 
 ## Extending navigation

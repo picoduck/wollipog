@@ -255,8 +255,8 @@ async function mount({
   await act(async () => {
     const snapshot = {
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false },
-      runners: [], boxes: [], projects: [], sessions, runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
+      runners: [], boxes: [], projects: [], sessions, runs: [],
     } as unknown as UiSnapshotMessage;
     if (summarySnapshot) {
       socket.push({ ...snapshot, sessions: [], sessionsComplete: false });

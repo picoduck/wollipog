@@ -193,8 +193,8 @@ async function mount() {
   ));
   await push({
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [runner], boxes: [], projects: [], sessions: [fixture], runs: [], pods: [],
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    runners: [runner], boxes: [], projects: [], sessions: [fixture], runs: [],
   });
   for (const payload of history) await append(payload);
   await act(async () => new Promise((resolve) => setTimeout(resolve, 25)));

@@ -112,10 +112,10 @@ class FakeSocket implements UiSocket {
 const snapshot = (runners: RunnerView[], accessScopeManagement = false): UiSnapshotMessage => ({
   type: "snapshot",
   capabilities: {
-    sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
+    sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
     ...(accessScopeManagement ? { accessScopeManagement: true } : {}),
   },
-  runners, boxes: [], projects: [], sessions: [], runs: [], pods: [],
+  runners, boxes: [], projects: [], sessions: [], runs: [],
 });
 const navigation = (view: View): ViewNavigation => ({ current: () => view, push() {}, replace() {}, listen: () => () => {} });
 const settle = () => act(async () => { for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setTimeout(resolve, 0)); });

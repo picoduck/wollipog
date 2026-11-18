@@ -91,13 +91,13 @@ function snapshot(capabilities: UiSnapshotMessage["capabilities"] = {}): UiSnaps
   return {
     type: "snapshot",
     capabilities: {
-      sessionSubscriptions: false,
+      sessionSubscriptionsV2: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
       projects: true,
       ...capabilities,
     },
-    runners: [], boxes: [], projects: [], sessions: [], runs: [], pods: [],
+    runners: [], boxes: [], projects: [], sessions: [], runs: [],
   };
 }
 

@@ -146,8 +146,8 @@ test("a campaign parent's session detail lists held children from its projection
     ));
     await act(async () => socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [runner], boxes: [], projects: [], sessions: [parent, storedChild], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+      runners: [runner], boxes: [], projects: [], sessions: [parent, storedChild], runs: [],
     }));
     await settle();
     await settle();

@@ -9,7 +9,7 @@ import { statusMeta, type StatusValue } from "./status-meta.js";
 
 /**
  * What a Multi-Agent Run is and whether it needs the person (#2974): the Runs list row's icon, type
- * and one badge. Pure, so the run page and the Pods rows can reuse the same rollup.
+ * and one badge.
  */
 
 /** The most instances one `GET /api/workflow-instances` page returns (the server's default limit). */

@@ -192,7 +192,7 @@ function snapshot(options: { sessions?: SessionView[]; projects?: ProjectView[];
   return {
     type: "snapshot",
     capabilities: {
-      sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false,
+      sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
       projects: true, sessionReminders: true,
     },
     runners: [studio],
@@ -201,7 +201,6 @@ function snapshot(options: { sessions?: SessionView[]; projects?: ProjectView[];
     projects: options.projects ?? [],
     reminders: options.reminders ?? [],
     runs: [],
-    pods: [],
   };
 }
 

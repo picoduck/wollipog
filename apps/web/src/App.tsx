@@ -97,7 +97,7 @@ import { recordRecentSession } from "./recent-sessions.js";
 import { handleSettingsNavigationKey } from "./settings-navigation.js";
 import { InstanceSelector } from "./components/InstanceSelector.js";
 import { RemoteInstanceBanner } from "./components/RemoteInstanceBanner.js";
-import { AppBarSearchProvider } from "./components/PageHeader.js";
+import { AppBarSearchProvider, PageHeader } from "./components/PageHeader.js";
 import { Rail } from "./components/Rail.js";
 import { InstanceRecoveryShell } from "./components/InstanceRecoveryShell.js";
 import { useNewSessionShortcut } from "./useNewSessionShortcut.js";
@@ -123,9 +123,6 @@ const RunDetail = lazy(() => import("./components/RunsView.js").then((module) =>
 const ArchivedSessionsView = lazy(() => import("./components/ArchivedSessionsView.js").then((module) => ({ default: module.ArchivedSessionsView })));
 const NewSessionDialog = lazy(() => import("./components/NewSessionDialog.js").then((module) => ({ default: module.NewSessionDialog })));
 const NewRunDialog = lazy(() => import("./components/NewRunDialog.js").then((module) => ({ default: module.NewRunDialog })));
-const NewPodDialog = lazy(() => import("./components/NewPodDialog.js").then((module) => ({ default: module.NewPodDialog })));
-const PodDetail = lazy(() => import("./components/PodsView.js").then((module) => ({ default: module.PodDetail })));
-const PodsView = lazy(() => import("./components/PodsView.js").then((module) => ({ default: module.PodsView })));
 const AssistantsView = lazy(() => import("./components/AssistantsView.js").then((module) => ({ default: module.AssistantsView })));
 const AutomationsView = lazy(() => import("./components/AutomationsView.js").then((module) => ({ default: module.AutomationsView })));
 const AutomationDetail = lazy(() => import("./components/AutomationDetail.js").then((module) => ({ default: module.AutomationDetail })));
@@ -270,11 +267,10 @@ export function Shell() {
   const theme = useTheme();
   const { navigate, reconnectNow } = useStoreActions();
   const view = useStoreSelector((s) => s.view);
-  // A loaded run or pod titles its page by name; the generic noun is only the loading fallback. An
+  // A loaded run titles its page by name; the generic noun is only the loading fallback. An
   // automation is not in the store: its page and its editor report its name (#2968).
   const storeEntityTitle = useStoreSelector((s) =>
     s.view.name === "run" ? s.runs.get(s.view.id)?.title
-      : s.view.name === "pod" ? s.pods.get(s.view.id)?.title
         : undefined);
   const [reportedEntityTitle, reportEntityTitle] = useEntityTitleState();
   const entityTitle = storeEntityTitle ?? reportedTitleFor(reportedEntityTitle, view);
@@ -323,7 +319,7 @@ export function Shell() {
   const filesSupported = runnerSupportsProtocol(activeRunnerProtocol, "sessionFiles");
   const conversationSteeringSupported = runnerSupportsProtocol(activeRunnerProtocol, "conversationSteering");
   const turnInterruptionSupported = runnerSupportsProtocol(activeRunnerProtocol, "turnInterruptionAck");
-  const [dialog, setDialog] = useState<null | { kind: "session"; preset?: NewSessionPreset } | { kind: "run" } | { kind: "pod" }>(null);
+  const [dialog, setDialog] = useState<null | { kind: "session"; preset?: NewSessionPreset } | { kind: "run" }>(null);
   const [shortcutReferenceOpen, setShortcutReferenceOpen] = useState(false);
   // What had focus when the reference opened: its focus zone picks the "Current Page" group.
   const [shortcutReferenceOpener, setShortcutReferenceOpener] = useState<HTMLElement | null>(null);
@@ -799,7 +795,7 @@ export function Shell() {
 
   const dialogKey = dialog?.kind ?? (palette !== null ? "search" : shortcutReferenceOpen ? "shortcuts" : "closed");
   const dialogTitle = dialog?.kind === "session" ? "New Session"
-    : dialog?.kind === "run" ? "New Run" : dialog?.kind === "pod" ? "New Pod"
+    : dialog?.kind === "run" ? "New Run"
     : palette !== null ? "Search" : "Keyboard Shortcuts";
   const shell = (
     <RemoteAccessProvider><div className={`app${rightPanel.dragging ? " panel-dragging" : ""}`}>
@@ -908,10 +904,13 @@ export function Shell() {
               {view.name === "runs" ? <RunsView onNewRun={() => setDialog({ kind: "run" })} /> : <RunDetail runId={view.id} member={view.member} />}
             </ExperimentGate>
           )}
-          {(view.name === "pods" || view.name === "pod") && (
-            <ExperimentGate experiment="pods" pageTitle={viewTitle(view, entityTitle)} pageDescription={viewDescription(view)} onOpenSettings={openExperimentalSettings}>
-              {view.name === "pods" ? <PodsView onNewPod={() => setDialog({ kind: "pod" })} /> : <PodDetail podId={view.id} member={view.member} onNewSession={() => setDialog({ kind: "session", preset: { worktree: true } })} />}
-            </ExperimentGate>
+          {view.name === "not-found" && (
+            <div className="page">
+              <PageHeader title={viewTitle(view)} />
+              <State actions={<button type="button" className="btn" onClick={() => navigate(sessionsDestination(instanceScope))}>Back to Sessions</button>}>
+                This page is no longer available.
+              </State>
+            </div>
           )}
           {view.name === "assistants" && <AssistantsView threadId={view.threadId} rightPanel={rightPanel} />}
           {view.name === "automations" && (view.editor ? <AutomationEditor key={viewPath(view)} route={view.editor} /> : <AutomationsView />)}
@@ -1027,9 +1026,6 @@ export function Shell() {
         />
       )}
       {dialog?.kind === "run" && <NewRunDialog onClose={() => setDialog(null)} />}
-      {dialog?.kind === "pod" && (
-        <NewPodDialog onClose={() => setDialog(null)} onNewSession={() => setDialog({ kind: "session", preset: { worktree: true } })} />
-      )}
       {palette !== null && (
         <CommandPalette initialQuery={palette} onClose={() => setPalette(null)} onOpenShortcuts={openShortcutReference} />
       )}

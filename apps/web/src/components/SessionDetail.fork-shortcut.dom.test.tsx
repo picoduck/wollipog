@@ -155,8 +155,8 @@ async function mountSession(patch: Partial<SessionView>, options: { accept?: boo
   ));
   await act(async () => socket.push({
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [runner], boxes: [], projects: [], sessions: [session], runs: [], pods: [],
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    runners: [runner], boxes: [], projects: [], sessions: [session], runs: [],
   } as ControlPlaneToUi));
   await settle();
   await settle();

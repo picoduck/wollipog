@@ -86,4 +86,4 @@ claims; offline facts are unverified. Pending badges clear after delivery settle
 remain historical. These presentation facts do not change execution, spending, approval, or
 at-most-once submission protections.
 
-Inbox rows, session headers, the pinned summary, Board cards, Run member columns, Pod member rows, archives, filters, counts, notifications, and mobile layouts consume these terms. A surface omits a dimension when it lacks authoritative evidence, but it must never substitute workflow placement or another dimension as proof.
+Inbox rows, session headers, the pinned summary, Board cards, Run member columns, archives, filters, counts, notifications, and mobile layouts consume these terms. A surface omits a dimension when it lacks authoritative evidence, but it must never substitute workflow placement or another dimension as proof.

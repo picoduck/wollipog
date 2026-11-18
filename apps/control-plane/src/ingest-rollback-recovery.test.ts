@@ -63,13 +63,13 @@ function eventEpoch(db: ControlPlaneDb, sessionId = "sess-1"): number {
 function reconnectDashboard(store: DashboardStore, db: ControlPlaneDb, revision: number): void {
   store.dispatch({ type: "msg", msg: {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
-    runners: [], boxes: [], runs: [], pods: [],
+    capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
+    runners: [], boxes: [], runs: [],
     sessions: [{ id: "sess-1", eventEpoch: eventEpoch(db) } as SessionView],
   } });
   store.prepareSubscriptionRecovery(revision, ["sess-1"]);
   store.dispatch({ type: "msg", msg: {
-    type: "session_subscriptions_applied", revision, sessionIds: ["sess-1"], podIds: [],
+    type: "session_subscriptions_applied", revision, sessionIds: ["sess-1"],
   } });
   const epoch = store.eventEpoch("sess-1");
   store.beginEventHistoryLoad("sess-1", epoch, revision);
@@ -127,8 +127,8 @@ async function streamThenCrash(root: string, campaign = false): Promise<{
   const store = await dashboardStore();
   store.dispatch({ type: "msg", msg: {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
-    runners: [], boxes: [], runs: [], pods: [],
+    capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
+    runners: [], boxes: [], runs: [],
     sessions: [{ id: "sess-1", eventEpoch: eventEpoch(db) } as SessionView],
   } });
   store.navigate({ name: "session", id: "sess-1" });
