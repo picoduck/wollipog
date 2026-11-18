@@ -515,7 +515,7 @@ function archivedVerifiedChild() {
 }
 
 /** The second item's delivery recorded the way the reproduction does: an attempt on `child`, ended
- * at once by the delivery record. */
+ * by the delivery record. `whileOpen` runs before the record closes it. */
 async function recordSecondDelivery(h: ReturnType<typeof archivedVerifiedChild>, whileOpen: () => void = () => {}) {
   const assigned = h.svc.assignCampaignWorkItem("root", { workItemId: h.advisory, childSessionId: "child" });
   assert.ok(assigned.ok, assigned.error ?? "assignment refused");
@@ -523,6 +523,31 @@ async function recordSecondDelivery(h: ReturnType<typeof archivedVerifiedChild>,
   const recorded = await h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.advisory, pullRequests: h.pullRequests });
   assert.ok(recorded.ok, recorded.error ?? "delivery refused");
   assert.deepEqual(recorded.data!.item.attempts.map((attempt) => attempt.endReason), ["superseded"]);
+}
+
+/** Work reaching `child` in each form the runner records it. */
+function deliverToChild(h: ReturnType<typeof archivedVerifiedChild>, form: "prompt" | "notice" | "recovered_answer" | "runner_continuation") {
+  if (form === "notice") {
+    // Even an informational notice keeps the attempt superseding the report.
+    h.db.stageRestartNotice({ occurrenceIds: [], command: { commandId: "notice", sessionId: "child", runnerId: "r",
+      payloadJson: "{}", payloadSha256: "test", now: Date.now(), expiresAt: Date.now() + 1000 } });
+  }
+  if (form === "prompt" || form === "notice") {
+    h.db.appendEvent("child", { kind: "user_message", text: "Take the second item.",
+      ...(form === "notice" ? { commandId: "notice" } : {}) }, Date.now());
+  }
+  if (form === "recovered_answer") {
+    // A recovered async answer starts a provider turn without a user message; the turn fails
+    // before any newer report, and its durable command ends failed.
+    h.db.stageSessionPromptCommand({ commandId: "answer", sessionId: "child", runnerId: "r",
+      payloadJson: "{}", payloadSha256: "test", now: Date.now(), expiresAt: Date.now() + 1000 });
+    h.db.appendEvent("child", { kind: "question_resolved", requestId: "q", occurrenceId: "q-1", answered: true,
+      startsTurn: true, resolutionReason: "submitted", commandId: "answer" }, Date.now());
+    h.db.raw().prepare("UPDATE session_prompt_commands SET state='failed' WHERE command_id='answer'").run();
+  }
+  if (form === "runner_continuation") {
+    h.db.appendEvent("child", { kind: "stderr", text: "Runner continued after managed background work completed." }, Date.now());
+  }
 }
 
 test("an attempt a delivery record ends at once keeps an archived child's verified report (#4684)", async () => {
@@ -547,51 +572,46 @@ test("an attempt a delivery record ends at once keeps an archived child's verifi
   } finally { h.db.close(); }
 });
 
-const supersedingLater = ["open", "prompt", "notice", "recovered_answer", "runner_continuation"] as const;
-for (const later of supersedingLater) test(`a later attempt that is open or reached the child still supersedes its report: ${later} (#4684)`, async () => {
+test("an open later attempt still supersedes an archived child's report (#4684)", () => {
   const h = archivedVerifiedChild();
   try {
-    if (later === "open") {
-      assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.advisory, childSessionId: "child" }).ok);
-    } else {
-      await recordSecondDelivery(h, () => {
-        if (later === "notice") {
-          // Even an informational notice reaching the child inside the attempt keeps it superseding.
-          h.db.stageRestartNotice({ occurrenceIds: [], command: { commandId: "notice", sessionId: "child", runnerId: "r",
-            payloadJson: "{}", payloadSha256: "test", now: Date.now(), expiresAt: Date.now() + 1000 } });
-        }
-        if (later === "prompt" || later === "notice") {
-          h.db.appendEvent("child", { kind: "user_message", text: "Take the second item.",
-            ...(later === "notice" ? { commandId: "notice" } : {}) }, Date.now());
-        }
-        if (later === "recovered_answer") {
-          // A recovered async answer starts a provider turn without a user message; the turn fails
-          // before any newer report, and its durable command ends failed.
-          h.db.stageSessionPromptCommand({ commandId: "answer", sessionId: "child", runnerId: "r",
-            payloadJson: "{}", payloadSha256: "test", now: Date.now(), expiresAt: Date.now() + 1000 });
-          h.db.appendEvent("child", { kind: "question_resolved", requestId: "q", occurrenceId: "q-1", answered: true,
-            startsTurn: true, resolutionReason: "submitted", commandId: "answer" }, Date.now());
-          h.db.raw().prepare("UPDATE session_prompt_commands SET state='failed' WHERE command_id='answer'").run();
-        }
-        if (later === "runner_continuation") {
-          h.db.appendEvent("child", { kind: "stderr", text: "Runner continued after managed background work completed." }, Date.now());
-        }
-      });
-    }
-    const superseded = () => {
-      assert.equal(h.db.durableFinalReportSeq("child"), null);
-      assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
-      const again = h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: h.report, followUpsAccounted: true });
-      assert.equal(again.status, 409, again.error ?? "verification accepted");
-    };
-    superseded();
-    if (later === "recovered_answer" || later === "runner_continuation") {
-      // Archived-history pruning keeps neither kind; losing the event must not revive the report (#1729).
-      h.db.raw().prepare("DELETE FROM session_events WHERE session_id='child' AND kind IN ('question_resolved','stderr')").run();
-      superseded();
-    }
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.advisory, childSessionId: "child" }).ok);
+    assert.equal(h.db.durableFinalReportSeq("child"), null);
+    assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
+    assert.equal(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: h.report,
+      followUpsAccounted: true }).status, 409);
   } finally { h.db.close(); }
 });
+
+for (const form of ["prompt", "notice", "recovered_answer", "runner_continuation"] as const) {
+  for (const timing of ["during", "after"] as const) {
+    test(`work reaching the child ${timing} a later attempt supersedes its report: ${form} (#4684)`, async () => {
+      const h = archivedVerifiedChild();
+      try {
+        // "after": the runner's event lands only once the delivery record has closed the attempt.
+        await recordSecondDelivery(h, () => { if (timing === "during") deliverToChild(h, form); });
+        if (timing === "after") deliverToChild(h, form);
+        const superseded = () => {
+          assert.equal(h.db.durableFinalReportSeq("child"), null);
+          assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
+          const again = h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: h.report, followUpsAccounted: true });
+          assert.equal(again.status, 409, again.error ?? "verification accepted");
+        };
+        superseded();
+        if (form === "recovered_answer" || form === "runner_continuation") {
+          // Archived-history pruning keeps neither kind; it records how far it pruned instead, and
+          // losing the event must not revive the report (#1729).
+          const pruned = h.db.raw().prepare(
+            "SELECT MAX(seq) AS seq FROM session_events WHERE session_id='child' AND kind IN ('question_resolved','stderr')",
+          ).get() as { seq: number };
+          h.db.raw().prepare("DELETE FROM session_events WHERE session_id='child' AND kind IN ('question_resolved','stderr')").run();
+          h.db.raw().prepare("UPDATE sessions SET history_prune_through_seq=? WHERE id='child'").run(pruned.seq);
+          superseded();
+        }
+      } finally { h.db.close(); }
+    });
+  }
+}
 
 test("a delivery with an open attempt closes it, and another session still working refuses it", async () => {
   const h = fixture();

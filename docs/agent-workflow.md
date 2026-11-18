@@ -289,9 +289,10 @@ Wollipog; report provider-exit deferrals. Parent verification, rather than idlen
 
 For a failed child, use `verify_campaign_child` with its exact last completed top-level report.
 The report must still stand: a newer completed report, a real later prompt or a later campaign
-assignment supersedes it. An assignment supersedes it while its attempt is open, and after the
-attempt ends unless the child's history did not move while it was open: an attempt a delivery
-record closed at once leaves the report standing. A system notice that produced no completed response does not supersede
+assignment supersedes it. An assignment supersedes it while its attempt is open. After the
+attempt ends it stops superseding only while the child's history has not moved since the attempt
+opened, as when a delivery record closes it at once; any later event of any kind supersedes it
+again. A system notice that produced no completed response does not supersede
 it only when durable server-recorded command provenance proves it was an informational restart
 notice. Decision resumes, review continuations, PR-watch wakes and campaign continuations can
 carry work, so they still supersede reports. Unknown legacy
