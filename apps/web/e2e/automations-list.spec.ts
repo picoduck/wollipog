@@ -35,6 +35,20 @@ async function capture(page: Page, name: string) {
   await page.screenshot({ path: join(evidenceDir, `${name}.png`) });
 }
 
+for (const width of [1440, 390]) {
+  test(`a retired action shows why it is paused at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await open(page, "dark", "list&retired-workflow");
+    const retired = row(page, NIGHTLY);
+    await expect(retired.locator(".status")).toHaveText("Paused");
+    const reason = retired.getByText("The workflow action was removed.", { exact: true });
+    await expect(reason).toBeVisible();
+    expect(await reason.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await expect(retired.getByRole("switch")).toHaveCount(0);
+    await capture(page, `after-automation-list-${width}`);
+  });
+}
+
 test.describe("at 1440×900", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 

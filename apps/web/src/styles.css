@@ -17339,12 +17339,13 @@ button.review-finding-location {
   white-space: nowrap;
 }
 .automation-row-meta > .automation-row-target { flex: 0 1 auto; }
-/* Phones keep one whole fact rather than clipping three: the next run for a scheduled row, the
-   schedule for a paused one. The switch borrows a 44px hit area around its track (the track's 1px
-   edge is outside the padding box the inset is measured from). */
+/* Phones keep one whole fact: the next run, the paused schedule, or the reason for retiring the
+   action. The switch borrows a 44px hit area around its track (the track's 1px edge is outside the
+   padding box the inset is measured from). */
 @media (max-width: 760px) {
   .automation-row[data-phone-fact="next"] .automation-row-meta > :not(.automation-row-next),
-  .automation-row[data-phone-fact="schedule"] .automation-row-meta > :not(.automation-row-schedule) {
+  .automation-row[data-phone-fact="schedule"] .automation-row-meta > :not(.automation-row-schedule),
+  .automation-row[data-phone-fact="target"] .automation-row-meta > :not(.automation-row-target) {
     display: none;
   }
   .automation-row-switch > .ui-switch::before {

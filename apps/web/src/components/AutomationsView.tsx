@@ -36,7 +36,7 @@ export function actionTarget(action: AutomationSchedule["action"], names: Target
   if (action.kind === "prompt_session") {
     return { icon: <InboxIcon size={14} aria-hidden="true" />, label: names.sessionTitle(action.sessionId) ?? "Session" };
   }
-  if (action.kind === "retired") return { icon: null, label: "Retired Action" };
+  if (action.kind === "retired") return { icon: null, label: "The workflow action was removed." };
   // The agent the scheduler starts: a saved installation's agent wherever discovery now lists it,
   // else the stored agent (as `actionSentence` names it).
   const runner = names.runners.get(action.request.runnerId);
@@ -66,7 +66,8 @@ function viewerTimeZone(): string | undefined {
 /**
  * One automation (#2969, docs/design-system.md §5.2): a two-line row whose one open target is the
  * name, its one badge and its meta, and beside it an Enabled switch that saves at once. On a phone
- * line 2 keeps one whole fact: the next run while it is scheduled, the schedule while paused.
+ * line 2 keeps one whole fact: the next run while scheduled, the schedule while paused, or the
+ * reason when the action has been retired.
  */
 function AutomationRow({ item, now, zone, names, toggling, onOpen, onToggle }: {
   item: AutomationSchedule;
@@ -80,15 +81,16 @@ function AutomationRow({ item, now, zone, names, toggling, onOpen, onToggle }: {
   const titleId = `${useId().replace(/:/g, "")}-title`;
   const schedule = describeSchedule(item.cron, item.timezone, now, { viewerTimeZone: zone });
   const nextRun = item.nextFireAt !== undefined ? formatCalendarTime(item.nextFireAt, now, zone) : schedule.nextLabel;
-  const next = item.enabled ? nextRun && `Next ${nextRun}` : "Paused";
+  const retired = item.action.kind === "retired";
+  const next = retired ? undefined : item.enabled ? nextRun && `Next ${nextRun}` : "Paused";
   const target = actionTarget(item.action, names);
-  const badge = item.action.kind === "retired" ? null : item.latestExecution?.status === "ceiling_paused" ? "last_run_ceiling_paused"
+  const badge = retired ? "paused" : item.latestExecution?.status === "ceiling_paused" ? "last_run_ceiling_paused"
     : item.latestExecution?.status === "failed" ? "last_run_failed"
     : item.targetHealth || automationInstallationUnavailable(item, names.runners) ? "target_unavailable"
       : null;
   return (
     <div className="row row-2 automation-row" data-automation-id={item.automationId}
-      data-phone-fact={next && item.enabled ? "next" : "schedule"}>
+      data-phone-fact={retired ? "target" : next && item.enabled ? "next" : "schedule"}>
       <button type="button" className="automation-row-open" onClick={onOpen}>
         <span className="row-body">
           <span className="row-line">
@@ -106,7 +108,7 @@ function AutomationRow({ item, now, zone, names, toggling, onOpen, onToggle }: {
           </span>
         </span>
       </button>
-      {item.action.kind !== "retired" && <span className="automation-row-trail">
+      {!retired && <span className="automation-row-trail">
         <Switch
           label="Enabled"
           describedBy={titleId}
