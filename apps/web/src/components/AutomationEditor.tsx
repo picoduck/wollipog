@@ -1,4 +1,3 @@
-import { RETIRED_WORKFLOW_AUTOMATION_REASON } from "@wollipog/protocol";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   AutomationAction,
@@ -181,6 +180,12 @@ export function AutomationEditor({ route }: { route: AutomationEditorRoute }) {
     return () => { active = false; };
   }, [api, automationId, attempt]);
 
+  const automation = stored.state === "loaded" && stored.automation.automationId === automationId ? stored.automation : null;
+  const retiredId = automation?.action.kind === "retired" ? automation.automationId : null;
+  useEffect(() => {
+    if (retiredId) navigate({ name: "automation", id: retiredId }, { replace: true });
+  }, [navigate, retiredId]);
+
   // An edit returns to the automation's page (#2968); a new automation, and one that is gone, to
   // the list.
   const toList = () => navigate({ name: "automations" });
@@ -218,12 +223,8 @@ export function AutomationEditor({ route }: { route: AutomationEditorRoute }) {
       </State>
     ));
   }
-  const automation = stored.state === "loaded" ? stored.automation : null;
-  if (!snapshotLoaded || (automationId !== null && !automation)) {
+  if (!snapshotLoaded || retiredId || (automationId !== null && !automation)) {
     return frame(fallbackTitle, <State variant="loading">Loading the automation…</State>);
-  }
-  if (automation?.action.kind === "retired") {
-    return frame(automation.name, <State title="Automation Paused">{RETIRED_WORKFLOW_AUTOMATION_REASON}</State>);
   }
   return (
     <AutomationEditorForm

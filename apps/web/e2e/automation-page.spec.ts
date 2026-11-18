@@ -142,6 +142,16 @@ for (const { label, viewport } of [
       await expect(page.getByRole("button", { name: /^Session Role:/ })).toBeVisible();
     });
 
+    test("an old edit link for a retired automation opens its paused detail page", async ({ page }) => {
+      const path = `${automationRoute("automation-nightly-sweep")}/edit`;
+      await page.goto(`/automations-e2e.html?theme=${theme}&retired-workflow&route=${encodeURIComponent(path)}`);
+      await expect(page.locator(".automation-detail .glance")).toBeVisible();
+      await expect(page.getByText("Workflow Runs Removed", { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "New Automation", exact: true })).toBeVisible();
+      await expect(page.locator(".automation-editor")).toHaveCount(0);
+      await capture(page, `after-retired-edit-${label}-${theme}`);
+    });
+
     test("needs attention: a failed run and a waiting target are one danger notice with +1 More", async ({ page }) => {
       await openPage(page, "automation-nightly-sweep", theme, "&failed-run&waiting-target");
       const notices = page.locator(".automation-notice-slot .notice");
