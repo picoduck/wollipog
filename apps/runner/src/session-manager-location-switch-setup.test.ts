@@ -4174,7 +4174,7 @@ test(`a requested worktree made again where a row stored under its branch's id w
   ? "leaves that id's records to the other Location's row that shares it"
   : stuck ? "is refused, keeping everything of that id's, until its processes stop" : "stops its processes, then gives that id's port block back"}`, async () => {
   if (process.platform === "win32") return;
-  await withSession(`request-remade-stored-id-${shared ? "shared" : stuck ? "stuck" : "alone"}`, async (h) => {
+  await withSession(`remade-${shared ? "shared" : stuck ? "stuck" : "alone"}`, async (h) => {
     const teardownLog = join(h.root, "teardown-log");
     commitSetupWithTeardown(h, h.docs, "main", teardownLog);
     serveOriginLocally(h);
@@ -4184,12 +4184,15 @@ test(`a requested worktree made again where a row stored under its branch's id w
     const moved = meta().worktreePath!;
     const goBack = async () => {
       await h.manager.selectWorktree(h.sessionId, moved);
-      await waitFor(() => meta().worktreePath === moved && h.providers.at(-1)?.cwd === moved && meta().status === "idle",
+      await waitFor(() => meta().worktreePath === moved && h.providers.at(-1)?.cwd === moved && !h.providers.at(-1)?.disposed && meta().status === "idle",
         "the session did not go back to its switch worktree");
     };
     const requesting = h.manager.requestWorktree(h.sessionId, { baseRef: "main", branch: "fix/legacy" });
     await answerTrust(h, "trust");
     const { worktree } = await requesting;
+    // Activation returns before the provider rebind; finish it before selecting back or rekeying.
+    await waitFor(() => h.providers.at(-1)?.cwd === worktree.path && !h.providers.at(-1)?.disposed && meta().status === "idle",
+      "the requested worktree provider did not launch");
     await goBack();
     // As an earlier runner stored it, under the branch-only slot.
     const oldId = requestedSlot("fix/legacy");
@@ -4267,6 +4270,8 @@ test(`a requested worktree made again where a row stored under its branch's id w
     assert.equal(allocator.get(oldOwner), undefined, "the stored row's port block is given back");
     assert.equal(meta().worktreeHooks?.[oldId], undefined, "with its teardown");
     assert.equal(meta().worktreeProcessMarkers?.[oldId], undefined, "and its marker");
+    await waitFor(() => h.providers.at(-1)?.cwd === again.worktree.path && !h.providers.at(-1)?.disposed && meta().status === "idle",
+      "the remade worktree provider did not launch");
     await goBack();
     await h.manager.discardWorktree(h.sessionId, worktree.path);
     assert.equal(existsSync(worktree.path), false);
