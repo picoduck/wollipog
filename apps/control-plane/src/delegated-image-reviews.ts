@@ -87,7 +87,7 @@ export function delegatedImageReviewPrompt(evidenceIds: readonly string[], brief
     "   missing copy, broken layout or spacing, clipped or overlapping content, wrong states, and",
     "   anything the claims say should be visible but is not.",
     "   Whatever the claims say, also fail an image that shows any of these:",
-    "   - content scrolled sideways or cut off at an edge;",
+    "   - content scrolled sideways, or clipped at an edge without an ellipsis;",
     "   - a primary action that is not fully visible;",
     "   - new content pushing a view's existing primary content (such as a list's rows) out of sight.",
     "   When the claims describe something that can grow (a list, notice, cards or requests) and no",
