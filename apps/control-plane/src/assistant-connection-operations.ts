@@ -57,7 +57,7 @@ export function registerAssistantConnectionOperations(operations: AssistantOpera
       inputSchema: {type: "object", properties, additionalProperties: false,
         required: [...(scoped ? ["connectionId"] : []), ...(subscription ? ["subscriptionId"] : []),
           ...(name === "install_name" ? ["name"] : []), ...(mutation ? ["commandId"] : [])]},
-      resolveTarget: target,
+      destructive: name === "delivery_resume", resolveTarget: target,
       ownerCanAccess: (owner, resource) => {
         if (resource.kind === "control_plane") return resource.id === db.instanceId();
         const connection = db.assistantConnections.get(resource.id);

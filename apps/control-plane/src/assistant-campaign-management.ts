@@ -151,6 +151,8 @@ export function registerAssistantCampaignManagement(operations: AssistantOperati
     operations.register({name, description: descriptions[name] ?? descriptions[ASSISTANT_CAMPAIGN_ALIASES.find(([alias]) => alias === name)![1]]!,
       inputSchema: {type: "object", additionalProperties: false, properties,
         required: ["sessionId", ...parameters, ...(image ? ["commandId"] : git ? ["payload"] : command ? ["commandId", ...(name === "campaign_branch_clean" ? [] : ["payload"])] : [])]},
+      // session_git only for discard_file, review_find_set only to resolve or dismiss: see `destructive` below.
+      destructive: git || name === "campaign_branch_clean" || name === "review_find_set",
       resolveTarget: target,
       ownerCanAccess: (owner, resource) => resource.kind === "session" && db.canAccessSession(owner, resource.id),
       execute: async (value, ctx) => {

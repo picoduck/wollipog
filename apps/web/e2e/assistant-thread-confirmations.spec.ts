@@ -35,7 +35,7 @@ test("the open thread shows its owner confirmation first, and Approve Once settl
   const request = card(page);
   await expect(request).toBeVisible();
   await expect(request).toContainText("Approval Needed");
-  await expect(request).toContainText("Stops the session. Its transcript is kept, but it takes no further messages until it is restarted.");
+  await expect(request).toContainText("Stops the session and cancels its queued prompts and background jobs. Its transcript and worktree are kept, but it takes no further messages until it is restarted.");
   await expect(request.getByRole("definition").filter({ hasText: "Fix the Flaky Upload Test (sess-flaky)" })).toBeVisible();
   await expect(request.locator("dl[aria-label='Arguments']")).toContainText("sess-flaky");
   // Drawn ahead of the work cards it would unblock.

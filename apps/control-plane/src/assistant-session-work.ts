@@ -45,7 +45,7 @@ export function registerAssistantSessionWork(operations: AssistantOperations, de
   type Context = Parameters<AssistantOperation["execute"]>[1];
   const define = (name: string, description: string, properties: Record<string, unknown>, required: string[],
     mutate: boolean, destructive: boolean, run: (args: Record<string, unknown>) => OwnerManagementResult | Promise<OwnerManagementResult>) => {
-    operations.register({name, description,
+    operations.register({name, description, destructive,
       inputSchema: {type: "object", additionalProperties: false,
         properties: {sessionId: str, ...properties, ...(mutate ? {commandId: str, confirmationId: str} : {})},
         required: ["sessionId", ...required, ...(mutate ? ["commandId"] : [])]},

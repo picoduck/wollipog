@@ -132,7 +132,7 @@ export function registerAssistantMachineManagement(operations: AssistantOperatio
   for (const [name, route, kind, mutate, destructive] of ASSISTANT_MACHINE_MANAGEMENT) {
     const properties = kind === "control_plane" ? {} : kind === "project" ? {projectId: string} : {runnerId: string, ...(kind === "workspace" ? {workspaceId: string} : {})};
     const space = route.indexOf(" "), method = route.slice(0, space), path = route.slice(space + 1);
-    operations.register({name, description: descriptions[name], ownerCanAccess: (owner, resolved) =>
+    operations.register({name, description: descriptions[name], destructive, ownerCanAccess: (owner, resolved) =>
       humanGlobalResourceAuthorizationError(method, path, owner) === null && access(owner, resolved),
       inputSchema: {type: "object", additionalProperties: false, properties: {...properties, payload: {type: "object"},
         ...(mutate ? {commandId: string, confirmationId: string} : {})},

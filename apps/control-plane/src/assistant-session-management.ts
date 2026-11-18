@@ -37,7 +37,7 @@ export class AssistantSessionManagement {
     const {operations, db, receipts} = this, target = spec.target ?? this.target;
     const properties = {...(spec.target ? {} : {sessionId: {type: "string"}}), ...spec.properties,
       ...(spec.mutate ? {commandId: {type: "string"}, confirmationId: {type: "string"}} : {})};
-    operations.register({name: spec.name, description: spec.description,
+    operations.register({name: spec.name, description: spec.description, destructive: spec.destructive,
       inputSchema: {type: "object", additionalProperties: false, properties,
         required: [...(spec.target ? [] : ["sessionId"]), ...(spec.required ?? []), ...(spec.mutate ? ["commandId"] : [])]},
       resolveTarget: target, ownerCanAccess: (owner, t) => t.kind === "session" ? db.canAccessSession(owner, t.id)

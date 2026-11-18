@@ -14,7 +14,7 @@ function confirmation(overrides: Partial<AssistantOwnerConfirmation> = {}): Assi
     threadId: "thr_fixture",
     operation: "session_archive",
     title: "Archive Session",
-    summary: "Stops the session if it is running, then archives it. Its transcript is kept, and it can be unarchived later.",
+    summary: "Stops the session if it is running, then archives it and its side chat. Its transcript is kept, and it can be unarchived later.",
     target: { kind: "session", id: "session-alpha", label: "Slack Prototype" },
     impact: [
       { label: "Status", value: "Idle" },
@@ -74,7 +74,7 @@ test("the Inbox lists a thread's owner confirmation, and Review shows its exact 
   const dialog = await review(page);
   await expect(dialog).toContainText("Approval Needed · Ship the Slack Adapter Spike");
   // What approving it does, in a plain sentence, before the target and its details.
-  await expect(dialog.getByText("Stops the session if it is running, then archives it.", { exact: false })).toBeVisible();
+  await expect(dialog.getByText("Stops the session if it is running, then archives it and its side chat.", { exact: false })).toBeVisible();
   await expect(dialog.getByRole("definition").filter({ hasText: "Slack Prototype (session-alpha)" })).toBeVisible();
   const args = dialog.locator("dl[aria-label='Arguments']");
   await expect(args).toContainText("sessionId");

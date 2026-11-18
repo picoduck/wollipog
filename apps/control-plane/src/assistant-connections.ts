@@ -199,6 +199,9 @@ export interface AssistantOperation {
   inputSchema: Record<string, unknown>;
   /** Explicit metadata-only operations may run with a selected-project grant and no target. */
   metadata?: boolean;
+  /** Can ask for destructive confirmation (for some arguments, at least). Each such operation's
+   * owner confirmation card needs its own impact sentence (#4675). */
+  destructive?: boolean;
   resolveTarget(args: unknown): AssistantTarget | Promise<AssistantTarget>;
   /** Must use existing application resource access rules, never session ancestry. */
   ownerCanAccess(owner: HumanPrincipal, target: AssistantTarget): boolean;
@@ -218,6 +221,10 @@ export class AssistantOperations {
   }
   inventory(): { name: string; description: string }[] {
     return [...this.operations.values()].map(({name, description}) => ({name, description}));
+  }
+  /** Names of the operations that can ask for destructive confirmation. */
+  destructive(): string[] {
+    return [...this.operations.values()].filter(operation => operation.destructive).map(operation => operation.name).sort();
   }
   /** Background delivery/result reads use connection identity, not a retained bearer secret.
    * This rechecks current owner authority, grant and resource access. No campaign ancestry. */
