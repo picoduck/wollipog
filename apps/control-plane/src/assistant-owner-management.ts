@@ -201,6 +201,34 @@ export function registerAssistantOwnerManagement(operations: AssistantOperations
         location.runnerId === runnerId && location.workspaceId === workspaceId && location.availability !== "runner_removed"));
     if (!reachable) throw new AssistantRefusal("This workspace is outside the connection's granted projects. The owner can add the Location or grant all projects in Assistant Connections.");
   };
+  // A thread may give a new project only to its own owner, privately (#4678): that narrows who sees
+  // it and grants nothing. Any other owner, or an owner on any other operation, stays on the
+  // owner's authenticated access-scope path.
+  const checkOwnerField = (name: string, payload: Record<string, unknown>, ctx: Context) => {
+    if (!Object.hasOwn(payload, "owner")) return;
+    const owner = payload.owner as Record<string, unknown> | null;
+    const ownPrivate = name === "project_create" && !!owner && typeof owner === "object" && !Array.isArray(owner) &&
+      Object.keys(owner).length === 2 && owner.kind === "user" && owner.userId === ctx.owner.userId;
+    if (ownPrivate) return;
+    throw new AssistantRefusal(name === "project_create"
+      ? `A thread can only create a project privately owned by its owner: payload.owner ${JSON.stringify({kind: "user", userId: ctx.owner.userId})}. Any other owner or wider access requires the owner's authenticated access-scope path.`
+      : "Resource authority selection requires the owner's authenticated access-scope path.");
+  };
+  // The owner service refuses a Location that would expose a workspace to a wider project audience,
+  // but only after a thread may have created that wider project for it. Name the way forward in the
+  // same refusal (#4678). Only explain resources the owner can already see; anything else keeps the
+  // owner service's own refusal, and the database rule stays authoritative either way.
+  const checkWorkspaceAudience = (name: string, args: Record<string, unknown>, payload: Record<string, unknown>, ctx: Context) => {
+    if (name !== "location_add") return;
+    const {runnerId, workspaceId} = payload, projectId = args.projectId;
+    if (typeof runnerId !== "string" || typeof workspaceId !== "string" || typeof projectId !== "string") return;
+    if (!db.canManageProject(ctx.owner, projectId) || !db.canAccessWorkspace(ctx.owner, runnerId, workspaceId)) return;
+    const projectScope = db.projectScope(projectId), workspaceScope = db.workspaceScope(runnerId, workspaceId) ?? db.runnerScope(runnerId);
+    if (!projectScope || !workspaceScope || db.scopeAudienceContainedWithMembership(projectScope, workspaceScope)) return;
+    throw new AssistantRefusal("This workspace is more private than the project, so it cannot be a Location of it. Nothing was changed. " +
+      `Add it to a project no wider than the workspace instead: for a workspace private to the owner, create one with project_create and payload.owner ${JSON.stringify({kind: "user", userId: ctx.owner.userId})}, then call location_add there. ` +
+      "Only the owner can widen the workspace's access, in its Machine settings.");
+  };
   const projectImpact = (name: string, args: Record<string, unknown>, ctx: Context) => {
     const payload = args.payload === undefined ? {} : object(args.payload);
     let location: ReturnType<ControlPlaneDb["getProjectLocation"]> = null;
@@ -230,9 +258,10 @@ export function registerAssistantOwnerManagement(operations: AssistantOperations
         return {kind: "project", id: projectId, projectId};
       }, mutate, destructive, async (args, ctx) => {
         const payload = args.payload === undefined ? {} : object(args.payload);
-        if (Object.hasOwn(payload, "owner")) throw new AssistantRefusal("Resource authority selection requires the owner's authenticated access-scope path.");
+        checkOwnerField(name, payload, ctx);
         if (Object.hasOwn(payload, "childSessionDefaults")) throw new AssistantRefusal("Changing persistent child budget and tool guardrails requires authenticated owner Project settings.");
         checkLocationResources(name, payload, ctx);
+        checkWorkspaceAudience(name, args, payload, ctx);
         if (route.includes(":locationId")) text(args, "locationId");
         if (name === "location_move") {
           const source = db.getProjectLocation(text(payload, "locationId"));

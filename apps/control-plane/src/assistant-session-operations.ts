@@ -148,7 +148,11 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
   };
   const launchTarget = (value: unknown): AssistantTarget => {
     const location = db.getProjectLocation(text(object(value), "locationId"));
-    if (!location) throw new AssistantRefusal("Location not found. Refresh project_list and select a current location.");
+    // A workspace with no Location cannot be launched in. Say how to get one before the thread
+    // guesses (#4678): a private workspace joins only a project at least as private.
+    if (!location) throw new AssistantRefusal("Location not found. Refresh project_list and select a current location. " +
+      "A workspace that is not yet a project's Location must be added with location_add first; a workspace private to the owner " +
+      "can only join a project privately owned by them (project_create with payload.owner {\"kind\":\"user\",\"userId\":<the owner's user id>}).");
     return {kind: "project", id: location.projectId, projectId: location.projectId};
   };
   mutation("session_launch", "Launch work in an authorized project/location using its local or SSH runner. Reconcile commandId before retrying.",
