@@ -114,7 +114,7 @@ export function MachineWorkspacesSection({ runner, machineName, online, canAdd }
       {adding && <AddWorkspaceDialog runner={runner} machineName={machineName} onClose={() => setAdding(false)} />}
       {changingAccess?.scope && identity && (
         <AccessScopeChangeDialog
-          resource={{ kind: "workspace", runnerId: runner.runnerId, workspaceId: changingAccess.id, name: changingAccess.name }}
+          resource={{ kind: "workspace", runnerId: runner.runnerId, workspaceId: changingAccess.id, name: changingAccess.name, noun: "workspace" }}
           scope={changingAccess.scope}
           identity={identity}
           onClose={() => setChangingAccess(null)}

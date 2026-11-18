@@ -1011,7 +1011,7 @@ for (const width of [1440, 390]) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 
     await rows.filter({ hasText: "Home" }).getByRole("button", { name: "Change Access…" }).click();
-    const change = page.getByRole("dialog", { name: "Change Location Access" });
+    const change = page.getByRole("dialog", { name: "Change Workspace Access" });
     await change.getByRole("radio", { name: /Organization-Wide/ }).check();
     await expect(change.getByRole("button", { name: "Change Access" })).toBeEnabled();
     await change.getByRole("button", { name: "Change Access" }).click();
