@@ -1035,6 +1035,29 @@ for (const width of [1440, 390]) {
   });
 }
 
+for (const width of [1440, 1000, 800]) {
+  test(`at ${width}px a Workspace row keeps its actions inside the detail pane, even with an 80-character team (#4683)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`/machine-management-e2e.html?access=1&team=long&workspaces=long&${DESIGN_WORKSTATION}`);
+    const rows = page.getByRole("region", { name: /^Workspaces/ }).locator(".surface > .row");
+    await expect(rows.locator(".machine-workspace-access")).toHaveCount(3);
+    await expect(rows.filter({ hasText: "Acme Storefront" }).locator(".machine-workspace-access"))
+      .toHaveAttribute("title", `Team: Builders ${"W".repeat(71)}`);
+    const geometry = await rows.evaluateAll((items) => items.map((row) => {
+      const box = row.getBoundingClientRect();
+      return {
+        overflow: row.scrollWidth - row.clientWidth,
+        outside: [...row.querySelectorAll("button")].filter((button) => {
+          const rect = button.getBoundingClientRect();
+          return rect.left < box.left - 0.5 || rect.right > box.right + 0.5;
+        }).map((button) => button.textContent),
+      };
+    }));
+    expect(geometry).toEqual(geometry.map(() => ({ overflow: 0, outside: [] })));
+    expect(await page.locator(".master-detail-detail").evaluate((pane) => pane.scrollWidth <= pane.clientWidth)).toBe(true);
+  });
+}
+
 test("inline switching retains terms consent and cancellation, and disabling applies directly", async ({ page }) => {
   const toggle = providerAccounts(page).getByRole("switch", { name: "Switch Accounts at a Usage Limit" });
   await expect(toggle).toHaveAttribute("aria-checked", "false");

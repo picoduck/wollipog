@@ -348,6 +348,8 @@ if (fixtureParams.get("workspaces") === "removable" && runner) {
  * Builders is a team, and each workspace has an access the owner may change from the machine.
  */
 const accessFixture = fixtureParams.get("access") === "1";
+/** `team=long` names Builders with the longest name a team may have, 80 characters. */
+const teamName = fixtureParams.get("team") === "long" ? `Builders ${"W".repeat(71)}` : "Builders";
 const accessScopeOf = (owner: ResourceOwner): ResourceScope => ({ organizationId: PERSONAL_ORGANIZATION_ID, owner });
 const privateToOwner = accessScopeOf({ kind: "user", userId: "owner" });
 if (accessFixture && runner) {
@@ -578,7 +580,7 @@ const client = {
       organizations: [{ organizationId: PERSONAL_ORGANIZATION_ID, name: "Organization", createdAt: 1 }],
       memberships: [],
       teams: accessFixture
-        ? [{ teamId: "team-builders", organizationId: PERSONAL_ORGANIZATION_ID, name: "Builders", memberUserIds: ["owner", "pat"], createdAt: 1 }]
+        ? [{ teamId: "team-builders", organizationId: PERSONAL_ORGANIZATION_ID, name: teamName, memberUserIds: ["owner", "pat"], createdAt: 1 }]
         : [],
     };
   },

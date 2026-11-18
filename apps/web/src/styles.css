@@ -10769,25 +10769,32 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Its access (#4683): the access icon and label in the dim small face, kept whole after the path. */
+/* Its access (#4683): the access icon and label in the dim small face after the path, whole up to
+   a quarter of the row. A longer team name ends in an ellipsis, so the actions stay in the row. */
 .machine-workspace-access {
   display: inline-flex;
   flex: none;
   align-items: center;
   gap: var(--space-1);
+  min-width: 0;
+  max-width: 25%;
   color: var(--text-dim);
   font: var(--type-small);
   white-space: nowrap;
 }
+.machine-workspace-access > svg { flex: none; }
 .machine-workspace-access > span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* A phone has no room for all of it on one line. The first keeps what it always had: the name,
-   the path given at least 30%, and Remove…; the access, under the name, and Change Access… make
-   the second. */
-@media (max-width: 760px) {
+/* The list is its own container, so the row follows the room the detail pane gives it rather than
+   the window: a split view at 1000px is as narrow as a tablet. */
+.machine-workspaces { container: machine-workspaces / inline-size; }
+/* Short of room for all of it on one line, the first keeps what it always had: the name, the path
+   given at least 30%, and Remove…; the access, under the name, and Change Access… make the
+   second. */
+@container machine-workspaces (max-width: 759px) {
   .machine-workspaces > .row:has(> .machine-workspace-access) {
     display: grid;
     grid-template-columns: var(--icon) minmax(0, max-content) minmax(30%, 1fr) auto;
@@ -10799,6 +10806,7 @@ textarea {
     grid-row: 2;
     grid-column: 2 / 4;
     min-width: 0;
+    max-width: none;
   }
   .machine-workspaces > .row > .btn { justify-self: end; }
   .machine-workspaces > .row > .machine-workspace-change-access {

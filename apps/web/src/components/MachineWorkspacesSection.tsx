@@ -86,7 +86,7 @@ export function MachineWorkspacesSection({ runner, machineName, online, canAdd }
                 <span className="row-title" id={titleId}>{workspace.name}</span>
                 <span className="machine-workspace-path" title={workspace.path}><bdi>{workspace.path}</bdi></span>
                 {identity && workspace.scope && (
-                  <span className="machine-workspace-access">
+                  <span className="machine-workspace-access" title={accessScopeLabel(workspace.scope, identity)}>
                     <AccessScopeIcon owner={workspace.scope.owner} />
                     <span>{accessScopeLabel(workspace.scope, identity)}</span>
                   </span>
