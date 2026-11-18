@@ -27,8 +27,8 @@ import type {
   SessionEventPayload,
   SessionSnapshot,
   WorkflowDecisionView,
-  WorkflowArtifact,
-  WorkflowArtifactView,
+  Artifact,
+  ArtifactView,
   type UsageAmount,
   AgentDriverKind,
   RatePricedUsageTotal,
@@ -172,9 +172,9 @@ function createScreenshotArtifact(
   owner: { sessionId: string; runId?: never } | { runId: string; sessionId?: never },
   artifactId: string,
   metadata: Record<string, unknown> = { purpose: "prompt_image" },
-): WorkflowArtifactView {
+): ArtifactView {
   const bytes = Buffer.from("/9j/2Q==", "base64");
-  const artifact: WorkflowArtifactView = {
+  const artifact: ArtifactView = {
     artifactId,
     ...owner,
     kind: "screenshot",
@@ -187,10 +187,10 @@ function createScreenshotArtifact(
     metadata,
     createdAt: 1,
   };
-  return db.createWorkflowArtifactBytes(artifact, bytes);
+  return db.createArtifactBytes(artifact, bytes);
 }
 
-function createSteeringPromptImage(db: ControlPlaneDb, sessionId: string, artifactId: string): WorkflowArtifactView {
+function createSteeringPromptImage(db: ControlPlaneDb, sessionId: string, artifactId: string): ArtifactView {
   return createScreenshotArtifact(db, { sessionId }, artifactId);
 }
 
@@ -528,11 +528,11 @@ test("an attached connection leaves artifact blob collection to the control plan
     // again, ahead of the row that will reference them. Only the server's own map knows that.
     server.raw().prepare("INSERT INTO artifact_blob_gc (blob_key, queued_at) VALUES (?, 1)").run(key);
     await server.stageArtifactBlob(key, bytes, 2);
-    const blobFile = artifactBlobFilePath(server.workflowArtifactBlobRoot()!, key);
+    const blobFile = artifactBlobFilePath(server.artifactBlobRoot()!, key);
     try {
       for (const readOnly of [true, false]) {
         const attached = ControlPlaneDb.attach(path, { readOnly });
-        assert.deepEqual(attached.collectWorkflowArtifactBlobs(), { examined: 0, deleted: 0, retained: 0 });
+        assert.deepEqual(attached.collectArtifactBlobs(), { examined: 0, deleted: 0, retained: 0 });
         attached.close();
         assert.ok(existsSync(blobFile), `closing a ${readOnly ? "read-only" : "writable"} attached connection keeps the staged blob`);
         assert.ok(server.raw().prepare("SELECT 1 FROM artifact_blob_gc WHERE blob_key=?").get(key), "the queue stays for the server");
@@ -7646,7 +7646,7 @@ test("runner history resets preserve attachment rows, timestamps, and retry iden
     const image = createScreenshotArtifact(db, { sessionId: id }, "reset-image",
       { purpose: "session_attachment" });
     const videoBytes = Buffer.from("attachment video");
-    const video = db.createWorkflowArtifactBytes({
+    const video = db.createArtifactBytes({
       ...image,
       artifactId: "reset-video",
       kind: "video",
@@ -7674,8 +7674,8 @@ test("runner history resets preserve attachment rows, timestamps, and retry iden
       assert.equal(db.getSession(id)?.lastEventAt, 200);
       assert.equal(db.hasAttachmentEvent(id, image.artifactId), true);
       assert.equal(db.hasAttachmentEvent(id, video.artifactId), true);
-      assert.ok(db.getWorkflowArtifact(image.artifactId));
-      assert.ok(db.getWorkflowArtifact(video.artifactId));
+      assert.ok(db.getArtifact(image.artifactId));
+      assert.ok(db.getArtifact(video.artifactId));
 
       const hydrated = db.appendHydratedPage(
         id, { afterSeq: 0, historyEpoch: epoch, eventEpoch },
@@ -8785,22 +8785,20 @@ test("automation delivery plans stage atomically, gate dependencies, and apply r
     name: "Receipted workflow", cron: "* * * * *", timezone: "UTC", enabled: true,
     misfirePolicy: { kind: "fire_once" }, runnerPolicy: { kind: "wait" }, concurrencyPolicy: "wait",
     limits: { maxCostUsd: 1, maxToolCalls: 10 }, notifications: { pushEvents: [] },
-    action: { kind: "workflow_run", request: {
-      runnerId: "runner-1", workspaceId: "ws-1", workflowId: "wf-1", task: "Build",
-    } },
+    action: { kind: "create_session", request: { runnerId: "runner-1", workspaceId: "repo", agentId: "agent-1" } },
   };
   db.createAutomation({ automationId: "auto-receipt", spec, nextFireAt: 1_000,
     actor: { kind: "human", id: "device" }, now: 100 });
   db.claimAutomationExecution({
     executionId: "exec-receipt", automationId: "auto-receipt", expectedNextFireAt: 1_000,
-    scheduledFor: 1_000, nextFireAt: 2_000, actionKind: "workflow_run", status: "dispatching",
+    scheduledFor: 1_000, nextFireAt: 2_000, actionKind: "create_session", status: "dispatching",
     deliveryMode: "receipted_v53", actor: { kind: "system", id: "scheduler" }, now: 1_000,
   });
   const firstPayload = JSON.stringify({ type: "start_session", spec: { sessionId: "worker" } });
   const secondPayload = JSON.stringify({ type: "start_session", spec: { sessionId: "orchestrator" } });
   const staged = db.stageAutomationDeliveryPlan({
-    executionId: "exec-receipt", runnerId: "runner-1", runId: "run-1", workflowInstanceId: "instance-1",
-    planJson: JSON.stringify({ kind: "workflow_run", runId: "run-1" }), now: 1_001,
+    executionId: "exec-receipt", runnerId: "runner-1",
+    planJson: JSON.stringify({ kind: "create_session", runId: "run-1" }), now: 1_001,
     commands: [
       { commandId: "cmd-worker", ordinal: 0, runnerId: "runner-1", sessionId: "worker",
         kind: "start_session", payloadJson: firstPayload, payloadSha256: "a".repeat(64), expiresAt: 90_000,
@@ -9178,12 +9176,126 @@ test("governance policies persist ordered selectors/conditions and support updat
   assert.equal(db.deleteGovernancePolicy("workspace-shell"), false);
 });
 
-test("workflow artifacts persist immutable content, provenance, metadata, and run/session indexes", () => {
+test("upgrading populated workflow tables preserves sessions, artifacts and working automations", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-workflow-removal-"));
+  const path = join(root, "cp.db");
+  const spec: AutomationSpec = {
+    name: "Nightly", cron: "0 2 * * *", timezone: "UTC", enabled: true,
+    misfirePolicy: { kind: "skip" }, runnerPolicy: { kind: "wait" }, concurrencyPolicy: "wait",
+    limits: { maxCostUsd: 5, maxToolCalls: 20 }, notifications: { pushEvents: [] },
+    action: { kind: "create_session", request: { runnerId: "runner-1", workspaceId: "ws-1", agentId: "acp-agent" } },
+  };
+  try {
+    const legacy = ControlPlaneDb.open(path);
+    try {
+      legacy.registerRunner(meta(), 500);
+      legacy.createSession(newSession());
+      legacy.createRun({ id: "run-legacy", runnerId: "runner-1", workspaceId: "ws-1", title: "Legacy", prompt: "Build", now: 500 });
+      legacy.addRunMember("run-legacy", "sess-1", "acp-agent");
+      createScreenshotArtifact(legacy, { runId: "run-legacy" }, "workflow-output");
+      createScreenshotArtifact(legacy, { sessionId: "sess-1" }, "session-image");
+      for (const automationId of ["still-working", "old-workflow"]) {
+        legacy.createAutomation({ automationId, spec, nextFireAt: 2000, actor: { kind: "human", id: "owner" }, now: 1000 });
+      }
+      assert.ok(legacy.claimAutomationExecution({
+        automationId: "old-workflow", executionId: "running-execution", expectedNextFireAt: 2000, scheduledFor: 2000,
+        nextFireAt: 3000, actionKind: "create_session", status: "dispatching", actor: { kind: "system" }, now: 2000,
+      }));
+      const payloadJson = JSON.stringify({ type: "start_session", spec: { sessionId: "not-launched" } });
+      legacy.stageAutomationDeliveryPlan({
+        executionId: "running-execution", runnerId: "runner-1", planJson: "{}", now: 2000,
+        commands: [{
+          commandId: "old-command", ordinal: 0, runnerId: "runner-1", sessionId: "not-launched",
+          kind: "start_session", payloadJson, payloadSha256: createHash("sha256").update(payloadJson).digest("hex"),
+          deliveryDeadlineAt: 3000,
+        }],
+      });
+      const raw = legacy.raw();
+      assert.equal(raw.prepare("PRAGMA foreign_keys").get()?.foreign_keys, 1);
+      raw.exec(`
+        DELETE FROM control_plane_metadata WHERE key='workflow_engine_retired';
+        CREATE TABLE workflow_definitions (workflow_id TEXT, version INTEGER, PRIMARY KEY (workflow_id, version));
+        CREATE TABLE workflow_instances (
+          instance_id TEXT PRIMARY KEY, workflow_id TEXT, workflow_version INTEGER,
+          run_id TEXT REFERENCES multi_agent_runs(id) ON DELETE CASCADE,
+          FOREIGN KEY (workflow_id, workflow_version) REFERENCES workflow_definitions(workflow_id, version)
+        );
+        CREATE TABLE workflow_node_states (
+          instance_id TEXT REFERENCES workflow_instances(instance_id) ON DELETE CASCADE,
+          node_id TEXT, PRIMARY KEY (instance_id, node_id)
+        );
+        CREATE TABLE workflow_attempts (
+          attempt_id TEXT PRIMARY KEY, instance_id TEXT, node_id TEXT,
+          FOREIGN KEY (instance_id, node_id) REFERENCES workflow_node_states(instance_id, node_id) ON DELETE CASCADE
+        );
+        CREATE TABLE workflow_attempt_artifacts (
+          attempt_id TEXT REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
+          artifact_id TEXT REFERENCES artifacts(id), PRIMARY KEY (attempt_id, artifact_id)
+        );
+        CREATE TABLE workflow_events (instance_id TEXT REFERENCES workflow_instances(instance_id) ON DELETE CASCADE);
+        CREATE TABLE workflow_event_prunes (instance_id TEXT REFERENCES workflow_instances(instance_id) ON DELETE CASCADE);
+        CREATE TABLE workflow_event_retention_policy (retention_days INTEGER);
+        CREATE TABLE workflow_event_retention_runs (finished_at INTEGER);
+        INSERT INTO workflow_definitions VALUES ('builtin:build-review', 1);
+        INSERT INTO workflow_instances VALUES ('instance', 'builtin:build-review', 1, 'run-legacy');
+        INSERT INTO workflow_node_states VALUES ('instance', 'build');
+        INSERT INTO workflow_attempts VALUES ('attempt', 'instance', 'build');
+        INSERT INTO workflow_attempt_artifacts VALUES ('attempt', 'workflow-output');
+        INSERT INTO workflow_events VALUES ('instance');
+        INSERT INTO workflow_event_prunes VALUES ('instance');
+        INSERT INTO workflow_event_retention_policy VALUES (90);
+        INSERT INTO workflow_event_retention_runs VALUES (2000);
+        UPDATE automations SET action_json='{"kind":"workflow_run","request":{"workflowId":"builtin:build-review"}}'
+        WHERE automation_id='old-workflow';
+        ALTER TABLE automation_executions ADD COLUMN run_id TEXT;
+        ALTER TABLE automation_executions ADD COLUMN workflow_instance_id TEXT;
+        UPDATE automation_executions SET action_kind='workflow_run', workflow_instance_id='instance'
+        WHERE execution_id='running-execution';
+      `);
+      assert.deepEqual(raw.prepare("PRAGMA foreign_key_check").all(), []);
+    } finally {
+      legacy.close();
+    }
+    const upgrade = () => {
+      const db = ControlPlaneDb.open(path);
+      try {
+        const raw = db.raw();
+        assert.equal(raw.prepare("PRAGMA foreign_keys").get()?.foreign_keys, 1);
+        assert.deepEqual(raw.prepare("PRAGMA foreign_key_check").all(), []);
+        const tables = raw.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name GLOB 'workflow_*' ORDER BY name").all();
+        assert.deepEqual(tables.map((table) => table.name), ["workflow_decision_action_receipts", "workflow_decisions"]);
+        assert.equal(raw.prepare("PRAGMA table_info(automation_executions)").all().some((column) => column.name === "workflow_instance_id"), false);
+        assert.deepEqual(db.getRun("run-legacy")?.sessionIds, ["sess-1"]);
+        assert.equal(db.getSession("sess-1")?.title, "My session");
+        assert.equal(db.getArtifact("workflow-output"), null);
+        assert.equal(db.getArtifact("session-image")?.sessionId, "sess-1");
+        assert.deepEqual(db.getAutomation("still-working")?.action, spec.action);
+        assert.equal(db.getAutomation("still-working")?.nextFireAt, 2000);
+        const paused = db.getAutomation("old-workflow")!;
+        assert.equal(paused.enabled, false);
+        assert.equal(paused.nextFireAt, undefined);
+        assert.equal(paused.revision, 2);
+        assert.deepEqual(paused.action, { kind: "retired", reason: "workflow_removed" });
+        const execution = db.getAutomationExecution("running-execution")!;
+        assert.equal(execution.status, "failed");
+        assert.equal(execution.commands?.[0]?.state, "rejected");
+      } finally {
+        db.close();
+      }
+    };
+    upgrade();
+    upgrade();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("artifacts persist immutable content, provenance, metadata, and session indexes", () => {
   const db = withRunner();
   db.createSession(newSession());
   db.createRun({ id: "run-artifacts", title: "Artifacts", prompt: "p", workspaceId: "ws-1", runnerId: "runner-1", now: 1000 });
   db.addRunMember("run-artifacts", "sess-1", "acp-agent");
-  const artifact: WorkflowArtifact = {
+  const artifact: Artifact = {
     artifactId: "art-1",
     runId: "run-artifacts",
     sessionId: "sess-1",
@@ -9198,22 +9310,22 @@ test("workflow artifacts persist immutable content, provenance, metadata, and ru
     metadata: { round: 1, accepted: true },
     createdAt: 2000,
   };
-  db.createWorkflowArtifact(artifact);
+  db.createArtifact(artifact);
   const stored = db.raw().prepare("SELECT data, blob_key FROM artifacts WHERE id=?").get(artifact.artifactId) as unknown as
     { data: string; blob_key: string };
   assert.deepEqual({ ...stored }, { data: "", blob_key: artifact.sha256 }, "SQLite retains metadata but not artifact bytes");
-  assert.deepEqual(db.getWorkflowArtifact("art-1"), artifact);
-  const runList = db.listRunWorkflowArtifacts("run-artifacts");
+  assert.deepEqual(db.getArtifact("art-1"), artifact);
+  const runList = db.listSessionArtifacts("sess-1");
   assert.equal(runList.length, 1);
   assert.equal("data" in runList[0]!, false, "list endpoints never copy artifact bodies");
-  assert.deepEqual(db.listSessionWorkflowArtifacts("sess-1"), runList);
+  assert.deepEqual(db.listSessionArtifacts("sess-1"), runList);
   assert.equal(db.getRun("run-artifacts")!.updatedAt, 2000);
-  db.createWorkflowArtifact({ ...artifact, artifactId: "art-session-only", runId: undefined, createdAt: 2001 });
+  db.createArtifact({ ...artifact, artifactId: "art-session-only", runId: undefined, createdAt: 2001 });
   db.deleteSession("sess-1");
-  assert.equal(db.getWorkflowArtifact("art-session-only"), null, "session-only artifact follows explicit session deletion");
-  assert.ok(db.getWorkflowArtifact("art-1"), "run-owned artifact survives member-session deletion");
+  assert.equal(db.getArtifact("art-session-only"), null, "session-only artifact follows explicit session deletion");
+  assert.ok(db.getArtifact("art-1"), "run-owned artifact survives member-session deletion");
   db.raw().prepare("DELETE FROM multi_agent_runs WHERE id=?").run("run-artifacts");
-  assert.equal(db.getWorkflowArtifact("art-1"), null, "run-owned artifacts cascade with the run");
+  assert.equal(db.getArtifact("art-1"), null, "run-owned artifacts cascade with the run");
 });
 
 test("legacy dead artifact rows migrate content-safely into the workflow artifact schema", () => {
@@ -9225,7 +9337,7 @@ test("legacy dead artifact rows migrate content-safely into the workflow artifac
     raw.prepare("INSERT INTO artifacts VALUES (?, ?, ?, ?, ?, ?)").run("legacy-1", "gone-session", "unknown", "logs/old.txt", "legacy data", 1234);
     raw.close();
     const db = ControlPlaneDb.open(path);
-    const artifact = db.getWorkflowArtifact("legacy-1")!;
+    const artifact = db.getArtifact("legacy-1")!;
     assert.deepEqual([artifact.kind, artifact.name, artifact.data, artifact.createdBy], [
       "test_log", "old.txt", "legacy data", { kind: "system", id: "legacy-migration" },
     ]);
@@ -9248,7 +9360,7 @@ test("startup migrates legacy inline large event bodies once and preserves exact
     initial.registerRunner(meta(), 500);
     initial.createSession(newSession());
     initial.appendEvent("sess-1", { kind: "command_output", text: original }, 1_000);
-    assert.deepEqual(initial.listSessionWorkflowArtifacts("sess-1"), []);
+    assert.deepEqual(initial.listSessionArtifacts("sess-1"), []);
     initial.close();
 
     const migrated = ControlPlaneDb.open(path);
@@ -9264,7 +9376,7 @@ test("startup migrates legacy inline large event bodies once and preserves exact
       artifactIds.length,
     );
     assert.equal(
-      Buffer.concat(artifactIds.map((artifactId) => migrated.readWorkflowArtifactBytes(artifactId)!)).toString("utf8"),
+      Buffer.concat(artifactIds.map((artifactId) => migrated.readArtifactBytes(artifactId)!)).toString("utf8"),
       original,
     );
     migrated.close();
@@ -9279,7 +9391,7 @@ test("startup migrates legacy inline large event bodies once and preserves exact
     assert.equal(again.payload.kind, "command_output");
     if (again.payload.kind !== "command_output") return;
     assert.deepEqual(again.payload.textRefs?.map((ref) => ref.artifactId), artifactIds, "migration is idempotent");
-    assert.equal(reopened.listSessionWorkflowArtifacts("sess-1").length, artifactIds.length);
+    assert.equal(reopened.listSessionArtifacts("sess-1").length, artifactIds.length);
     assert.equal(
       (reopened.raw().prepare("SELECT backfilled FROM session_event_artifact_reference_state WHERE id=1")
         .get() as { backfilled: number }).backfilled,
@@ -9300,7 +9412,7 @@ test("startup removes crash-window event payload artifacts that no committed eve
     initial.registerRunner(meta(), 500);
     initial.createSession(newSession());
     const data = "orphaned event body";
-    initial.createWorkflowArtifact({
+    initial.createArtifact({
       artifactId: "orphan-event-artifact",
       sessionId: "sess-1",
       kind: "test_log",
@@ -9317,7 +9429,7 @@ test("startup removes crash-window event payload artifacts that no committed eve
     initial.close();
 
     const reopened = ControlPlaneDb.open(path);
-    assert.equal(reopened.getWorkflowArtifact("orphan-event-artifact"), null);
+    assert.equal(reopened.getArtifact("orphan-event-artifact"), null);
     reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

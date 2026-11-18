@@ -125,7 +125,6 @@ function Harness({ initial, runnerOnline = true, childSessions, onOpenPrimaryReq
   const client: ApiClient = {
     ...api,
     childSessions: childSessions ?? (async () => { throw new Error("registry unavailable"); }),
-    workflowInstances: async () => [],
     approve: async (_sessionId, { requestId }) => {
       const next = { ...current, pendingApproval: removePendingRequest(current.pendingApproval, requestId) };
       setCurrent(next);

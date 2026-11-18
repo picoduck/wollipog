@@ -1,15 +1,15 @@
 import { hasWebmDocType } from "@wollipog/protocol/webm-header";
 import { createHash } from "node:crypto";
 import type {
-  CreateWorkflowArtifactRequest,
-  WorkflowArtifactKind,
-  WorkflowArtifactMetadataValue,
+  CreateArtifactRequest,
+  ArtifactKind,
+  ArtifactMetadataValue,
 } from "@wollipog/protocol";
 import { EVENT_PAYLOAD_CHUNK_BYTES, MAX_PROMPT_IMAGE_BYTES, MAX_SESSION_VIDEO_BYTES, PROMPT_IMAGE_MIME_TYPES } from "@wollipog/protocol";
 
 export const SESSION_ARTIFACT_RETENTION_MS = 180 * 24 * 60 * 60_000;
 
-const KIND_CONTRACT: Record<WorkflowArtifactKind, { encoding: CreateWorkflowArtifactRequest["encoding"]; mimeTypes: string[]; maxBytes: number }> = {
+const KIND_CONTRACT: Record<ArtifactKind, { encoding: CreateArtifactRequest["encoding"]; mimeTypes: string[]; maxBytes: number }> = {
   html_preview: { encoding: "utf8", mimeTypes: ["text/html"], maxBytes: 2 * 1024 * 1024 },
   patch: { encoding: "utf8", mimeTypes: ["text/x-diff", "text/plain"], maxBytes: EVENT_PAYLOAD_CHUNK_BYTES },
   review_report: { encoding: "utf8", mimeTypes: ["text/markdown", "text/plain"], maxBytes: 2 * 1024 * 1024 },
@@ -19,8 +19,8 @@ const KIND_CONTRACT: Record<WorkflowArtifactKind, { encoding: CreateWorkflowArti
   verdict: { encoding: "json", mimeTypes: ["application/json"], maxBytes: 256 * 1024 },
 };
 
-export type ValidatedWorkflowArtifact = CreateWorkflowArtifactRequest & { sizeBytes: number; sha256: string };
-export type ArtifactValidation = { ok: true; value: ValidatedWorkflowArtifact } | { ok: false; error: string };
+export type ValidatedArtifact = CreateArtifactRequest & { sizeBytes: number; sha256: string };
+export type ArtifactValidation = { ok: true; value: ValidatedArtifact } | { ok: false; error: string };
 
 /** Attaching from a file is cheap for an agent, so a loop could otherwise fill the control plane's
  * disk. These bound what agents may attach to one session; they are far above any real review
@@ -55,7 +55,7 @@ export function screenshotBytesMatchMime(mimeType: string, bytes: Buffer): boole
     bytes.subarray(0, 4).toString("latin1") === "RIFF" && bytes.subarray(8, 12).toString("latin1") === "WEBP";
 }
 
-export function validateWorkflowArtifact(input: unknown): ArtifactValidation {
+export function validateArtifact(input: unknown): ArtifactValidation {
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ok: false, error: "artifact must be an object" };
   const raw = input as Record<string, unknown>;
   const allowed = new Set(["runId", "sessionId", "kind", "name", "mimeType", "encoding", "data", "metadata"]);
@@ -65,7 +65,7 @@ export function validateWorkflowArtifact(input: unknown): ArtifactValidation {
     return { ok: false, error: "artifact requires a bounded runId or sessionId" };
   }
   if (typeof raw.kind !== "string" || !(raw.kind in KIND_CONTRACT)) return { ok: false, error: "unsupported artifact kind" };
-  const contract = KIND_CONTRACT[raw.kind as WorkflowArtifactKind];
+  const contract = KIND_CONTRACT[raw.kind as ArtifactKind];
   if (typeof raw.name !== "string" || !raw.name.trim() || raw.name.length > 160 || /[\\/\x00-\x1f]/.test(raw.name)) {
     return { ok: false, error: "artifact name must be 1-160 characters without paths or controls" };
   }
@@ -108,7 +108,7 @@ export function validateWorkflowArtifact(input: unknown): ArtifactValidation {
   }
   if (bytes.length > contract.maxBytes) return { ok: false, error: `${raw.kind} artifact exceeds its size limit` };
 
-  let metadata: Record<string, WorkflowArtifactMetadataValue> | undefined;
+  let metadata: Record<string, ArtifactMetadataValue> | undefined;
   if (raw.metadata !== undefined) {
     if (!raw.metadata || typeof raw.metadata !== "object" || Array.isArray(raw.metadata)) return { ok: false, error: "artifact metadata must be an object" };
     const entries = Object.entries(raw.metadata);
@@ -119,7 +119,7 @@ export function validateWorkflowArtifact(input: unknown): ArtifactValidation {
       (typeof value === "string" && value.length > 2048))) {
       return { ok: false, error: "artifact metadata contains invalid keys or values" };
     }
-    metadata = Object.fromEntries(entries) as Record<string, WorkflowArtifactMetadataValue>;
+    metadata = Object.fromEntries(entries) as Record<string, ArtifactMetadataValue>;
     if (Buffer.byteLength(JSON.stringify(metadata), "utf8") > 16 * 1024) return { ok: false, error: "artifact metadata exceeds its size limit" };
   }
 
@@ -128,7 +128,7 @@ export function validateWorkflowArtifact(input: unknown): ArtifactValidation {
     value: {
       ...(typeof raw.runId === "string" ? { runId: raw.runId } : {}),
       ...(typeof raw.sessionId === "string" ? { sessionId: raw.sessionId } : {}),
-      kind: raw.kind as WorkflowArtifactKind,
+      kind: raw.kind as ArtifactKind,
       name: raw.name.trim(),
       mimeType: raw.mimeType,
       encoding: contract.encoding,

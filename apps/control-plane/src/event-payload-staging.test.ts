@@ -65,12 +65,12 @@ function assertRecoveredConsistently(copy: string): { events: number; artifacts:
   try {
     const artifacts = db.raw().prepare("SELECT id, blob_key FROM artifacts").all() as Array<{ id: string; blob_key: string }>;
     for (const artifact of artifacts) {
-      assert.ok(db.readWorkflowArtifactBytes(artifact.id), `artifact ${artifact.id} reads back verified`);
+      assert.ok(db.readArtifactBytes(artifact.id), `artifact ${artifact.id} reads back verified`);
     }
     const events = db.listEvents(SESSION);
     for (const event of events) {
       const refs = (event.payload as { textRefs?: Array<{ artifactId: string }> }).textRefs ?? [];
-      for (const ref of refs) assert.ok(db.getWorkflowArtifact(ref.artifactId), "event reference has its artifact row");
+      for (const ref of refs) assert.ok(db.getArtifact(ref.artifactId), "event reference has its artifact row");
     }
     assert.equal(count(db, "artifact_blob_pending"), 0, "startup recovery settles every pending blob");
     const referenced = new Set(artifacts.map((artifact) => artifact.blob_key));
@@ -161,7 +161,7 @@ test("staging flushes the pending row before publishing and writes rows only aft
     assert.deepEqual(commitLevels, [1], "the artifact rows of a durable blob commit without a flush on the event loop");
     assert.equal(synchronousLevel(), 2, "the connection returns to FULL");
     assert.equal(count(db, "artifact_blob_pending"), 0, "the artifact commit retires the pending row");
-    assert.equal(db.readWorkflowArtifactBytes(externalized.artifactIds[0]!)?.toString("utf8"), text);
+    assert.equal(db.readArtifactBytes(externalized.artifactIds[0]!)?.toString("utf8"), text);
     db.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -184,14 +184,14 @@ test("a staged blob survives cleanup and collection until every staging of its k
 
     const first = await stageSessionEventPayload(db, SESSION, payload, 2_000);
     const second = await stageSessionEventPayload(db, SESSION, payload, 2_000);
-    for (const artifactId of earlierIds) db.deleteWorkflowArtifact(artifactId);
+    for (const artifactId of earlierIds) db.deleteArtifact(artifactId);
     assert.ok(existsSync(blobPath), "collection skips a key with a staging in flight");
     first.release();
     assert.ok(existsSync(blobPath), "releasing one staging keeps the blob for the other");
 
     const externalized = second.commit();
     second.release();
-    assert.equal(db.readWorkflowArtifactBytes(externalized.artifactIds[0]!)?.toString("utf8"), payload.text);
+    assert.equal(db.readArtifactBytes(externalized.artifactIds[0]!)?.toString("utf8"), payload.text);
     assert.equal(count(db, "artifact_blob_pending"), 0);
 
     const abandoned = await stageSessionEventPayload(db, SESSION, { kind: "stderr", text: "abandoned-".repeat(4_000) }, 3_000);

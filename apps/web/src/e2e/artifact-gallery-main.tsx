@@ -1,6 +1,6 @@
 import React, { useCallback, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { ControlPlaneToUi, SessionView, WorkflowArtifactPage, WorkflowArtifactView } from "@wollipog/protocol";
+import type { ControlPlaneToUi, SessionView, ArtifactPage, ArtifactView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
@@ -90,7 +90,7 @@ const fixtures = new Map<string, { bytes: Uint8Array; mimeType: string }>();
 const exports: string[] = [];
 const listCursors: Array<string | null> = [];
 
-async function describeArtifacts(): Promise<WorkflowArtifactView[]> {
+async function describeArtifacts(): Promise<ArtifactView[]> {
   const now = Date.now();
   const shots = await Promise.all(SHOTS.map(async ([id, label, color], index) => {
     const bytes = await capture(label, color, index);
@@ -99,11 +99,11 @@ async function describeArtifacts(): Promise<WorkflowArtifactView[]> {
       artifactId: id, sessionId: SESSION_ID, kind: "screenshot", name: `${id}.png`, mimeType: "image/png",
       encoding: "base64", sizeBytes: bytes.byteLength, sha256: await sha256(bytes),
       createdBy: { kind: "agent", id: SESSION_ID }, createdAt: now - (SHOTS.length - index) * 60_000,
-    } satisfies WorkflowArtifactView;
+    } satisfies ArtifactView;
   }));
   const logBytes = new TextEncoder().encode(LOG_TEXT);
   fixtures.set("e2e-log", { bytes: logBytes, mimeType: "text/plain" });
-  const log: WorkflowArtifactView = {
+  const log: ArtifactView = {
     artifactId: "e2e-log", sessionId: SESSION_ID, kind: "test_log", name: "artifact-gallery.log", mimeType: "text/plain",
     encoding: "utf8", sizeBytes: logBytes.byteLength, sha256: await sha256(logBytes),
     createdBy: { kind: "agent", id: SESSION_ID }, createdAt: now,
@@ -116,16 +116,16 @@ async function describeArtifacts(): Promise<WorkflowArtifactView[]> {
       artifactId: id, sessionId: SESSION_ID, kind: "screenshot", name: `${label.toLowerCase().replace(/\W+/g, "-")}.png`,
       mimeType: "image/png", encoding: "base64", sizeBytes: bytes.byteLength, sha256: await sha256(bytes),
       createdBy: { kind: "agent", id: SESSION_ID }, createdAt: now + index + 1,
-    } satisfies WorkflowArtifactView;
+    } satisfies ArtifactView;
   }));
   return [...shots, log, ...cited];
 }
 
-let artifacts: WorkflowArtifactView[] = [];
+let artifacts: ArtifactView[] = [];
 const PAGE_SIZE = 3;
 const client: ApiClient = {
   ...api,
-  sessionWorkflowArtifacts: async (_sessionId: string, cursor?: string): Promise<WorkflowArtifactPage> => {
+  sessionArtifacts: async (_sessionId: string, cursor?: string): Promise<ArtifactPage> => {
     listCursors.push(cursor ?? null);
     const start = cursor ? Number(cursor) : 0;
     const next = start + PAGE_SIZE;
@@ -212,7 +212,7 @@ function Fixture() {
     setRequest({ sessionId: SESSION_ID, ...(artifactId ? { artifactId } : {}), request: ++nextRequest.current });
     setPanelOpen(true);
   }, []);
-  const onOpenArtifact = useCallback((artifact: WorkflowArtifactView) => openArtifact(artifact.artifactId), [openArtifact]);
+  const onOpenArtifact = useCallback((artifact: ArtifactView) => openArtifact(artifact.artifactId), [openArtifact]);
   (window as unknown as { __ARTIFACT_GALLERY_E2E__: unknown }).__ARTIFACT_GALLERY_E2E__ = {
     openLink: (artifactId?: string) => openArtifact(artifactId),
     exports: () => [...exports],

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { pendingRequests, type ChildSessionAttentionOwner,
-  type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type PendingApproval, type PodView, type RunView, type SessionView,
-  type WorkflowInstanceView } from "@wollipog/protocol";
+  type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type PendingApproval, type PodView, type RunView, type SessionView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { deriveSubagentLifecycle, IncrementalSubagentProjector, type SubagentDescriptor } from "../subagents.js";
@@ -445,32 +444,21 @@ export function groupWorkerRows(rows: readonly WorkerRow[], limit: number): { gr
 
 /**
  * The facts the roster knows about this session's member sessions: the heading each sits under (its
- * run's title, or its pod's; "Workflow" while a workflow's run is not loaded), the run title its own
- * title repeats, and its workflow phase.
+ * run's title or its pod's) and the run title its own title repeats.
  */
 export function memberMetadata(
   session: Pick<SessionView, "runId">,
   run: Pick<RunView, "title" | "sessionIds"> | undefined,
   pod: Pick<PodView, "id" | "title" | "members"> | undefined,
-  workflows: readonly Pick<WorkflowInstanceView, "nodeStates">[],
 ): Map<string, WorkerMemberMetadata> {
   const metadata = new Map<string, WorkerMemberMetadata>();
-  // A member sits under its run's title, or its pod's; a workflow member's run may not be loaded.
+  // A member sits under its run's title, or its pod's; the run may not be loaded.
   const runGroup: WorkerGroup | undefined = session.runId
-    ? { id: `run:${session.runId}`, name: run?.title ?? "Workflow" } : undefined;
+    ? { id: `run:${session.runId}`, name: run?.title ?? "Multi-Agent Run" } : undefined;
   const runFacts = runGroup ? { group: runGroup, ...(run?.title ? { runTitle: run.title } : {}) } : {};
   for (const member of pod?.members ?? []) metadata.set(member.sessionId, { role: member.role,
     group: { id: `pod:${pod!.id}`, name: pod!.title } });
   for (const id of run?.sessionIds ?? []) metadata.set(id, { ...metadata.get(id), ...runFacts });
-  for (const workflow of workflows) for (const node of workflow.nodeStates) {
-    if (node.sessionId) metadata.set(node.sessionId, {
-      ...metadata.get(node.sessionId), ...runFacts, phase: node.nodeId, activations: node.attemptCount,
-      ...(node.status === "succeeded" || node.status === "skipped" ? { terminalState: "completed" as const }
-        : node.status === "failed" ? { terminalState: "failed" as const }
-        : node.status === "stopped" ? { terminalState: "stopped" as const } : {}),
-      completedAt: node.completedAt,
-    });
-  }
   return metadata;
 }
 
@@ -516,29 +504,6 @@ export function AgentsPanel(props: Props) {
   const runs = useStoreSelector((state) => state.runs);
   const runners = useStoreSelector((state) => state.runners);
   const pods = useStoreSelector((state) => state.pods);
-  const [workflows, setWorkflows] = useState<WorkflowInstanceView[]>([]);
-  const [workflowError, setWorkflowError] = useState(false);
-  useEffect(() => {
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    setWorkflows([]);
-    setWorkflowError(false);
-    if (session.runId) {
-      const runId = session.runId;
-      const refresh = async () => {
-        try {
-          const result = await api.workflowInstances(runId);
-          if (!disposed) { setWorkflows(result); setWorkflowError(false); }
-        } catch {
-          if (!disposed) setWorkflowError(true);
-        } finally {
-          if (!disposed) timer = setTimeout(refresh, 15_000);
-        }
-      };
-      void refresh();
-    }
-    return () => { disposed = true; clearTimeout(timer); };
-  }, [api, session.runId]);
   const { navigate, loadSession } = useStoreActions();
   const projector = useRef(new IncrementalSubagentProjector());
   const projection = useMemo(() => projector.current.project(items, {
@@ -744,9 +709,9 @@ export function AgentsPanel(props: Props) {
   const { members, metadata } = useMemo(() => {
     const run = session.runId ? runs.get(session.runId) : undefined;
     const pod = [...pods.values()].find((value) => value.members.some((member) => member.sessionId === session.id));
-    const metadata = memberMetadata(session, run, pod, workflows);
+    const metadata = memberMetadata(session, run, pod);
     return { members: memberSessions(session, runs, pods, sessions, metadata.keys()), metadata };
-  }, [session, runs, sessions, pods, workflows]);
+  }, [session, runs, sessions, pods]);
   const rows = useMemo(() => {
     const unambiguousAgents = agents.map((agent) => projection.ambiguousIds.has(agent.id)
       ? { ...agent, lifecycle: "unknown" as const, availability: "recorded" as const } : agent);
@@ -974,10 +939,6 @@ export function AgentsPanel(props: Props) {
       unidentifiedChildren === 1 ? "1 Worker Not Listed" : `${unidentifiedChildren} Workers Not Listed`,
       unidentifiedChildren === 1 ? "1 worker can't be listed because its ID is ambiguous."
         : `${unidentifiedChildren} workers can't be listed because their IDs are ambiguous.`);
-  }
-  if (workflowError) {
-    info("agents-workflow-details", PANEL_NOTICE_RANK.workflowDetailsUnavailable, "Workflow Details Unavailable",
-      "Workflow phase details aren't available. Each worker's status is still shown.");
   }
   if (!targetEpochMatches) {
     info("agents-stale-link", PANEL_NOTICE_RANK.staleAttentionLink, "Attention Link Out of Date",

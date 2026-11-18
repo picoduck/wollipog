@@ -398,10 +398,7 @@ function automationCreationSession(): SessionView {
     snapshot.spec.action = { kind: "prompt_session", sessionId: "example-target-session", request: { text: "", slashCommand: "/inspect-ci" } };
     snapshot.effectiveTargets[0]!.config.permissionMode = "read-only";
   }
-  if (query.get("action") === "workflow") {
-    snapshot.spec.action = { kind: "workflow_run", request: { runnerId: "example-machine", workspaceId: "example-workspace",
-      workflowId: "example-health-workflow", workflowVersion: 3, useWorktree: true, task: "Inspect CI outcomes and report findings." } };
-  }
+
   return { ...base, title: "Automation Creation", pendingApproval: { ...base.pendingApproval!, title: "Create Automation Approval Required",
     context: { input: JSON.stringify(snapshot) }, workflowDecision: { ...base.pendingApproval!.workflowDecision!,
       category: "automation_creation", resourceSnapshot: snapshot, controllingSessionId: base.id, authority: "human" } } };

@@ -54,5 +54,5 @@ Markdown also carries `Content-Security-Policy: sandbox`.
 
 [Expiring transcript share links](./transcript-sharing.md) now persist this exact immutable
 projection behind a separately hashed, revocable capability. Public reads never return to live
-session events. Raw workflow artifacts use a separate authenticated, unredacted byte-download
-boundary; see [authenticated raw workflow artifact exports](./artifact-exports.md).
+session events. Raw session artifacts use a separate authenticated, unredacted byte-download
+boundary; see [authenticated raw session artifact exports](./artifact-exports.md).

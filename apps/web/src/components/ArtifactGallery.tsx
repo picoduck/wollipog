@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
-import type { WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactView } from "@wollipog/protocol";
 import { Modal } from "./Modal.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ChevronLeftIcon, ChevronRightIcon, LinkIcon, Minimize2Icon, PanelRightIcon, PlusIcon } from "./Icons.js";
@@ -43,9 +43,9 @@ const TAP_SLOP = 10;
  * An artifact's stable link (#3924): its session's Browser → Artifacts tab on it. Null where this
  * dashboard has no address another device can open.
  */
-export function useArtifactLink(sessionId?: string): (artifact: WorkflowArtifactView) => string | null {
+export function useArtifactLink(sessionId?: string): (artifact: ArtifactView) => string | null {
   const origin = useDashboardPublicOrigin();
-  return useCallback((artifact: WorkflowArtifactView) => {
+  return useCallback((artifact: ArtifactView) => {
     const owner = artifact.sessionId ?? sessionId;
     return origin && owner
       ? absoluteViewUrl(origin, { name: "session", id: owner, artifacts: { artifactId: artifact.artifactId } })
@@ -54,11 +54,11 @@ export function useArtifactLink(sessionId?: string): (artifact: WorkflowArtifact
 }
 
 /** Copy Link, with its toast; focus stays where the copy was asked for. */
-export function useCopyArtifactLink(sessionId?: string): ((artifact: WorkflowArtifactView) => void) | null {
+export function useCopyArtifactLink(sessionId?: string): ((artifact: ArtifactView) => void) | null {
   const linkFor = useArtifactLink(sessionId);
   const { showToast } = useFeedback();
   const origin = useDashboardPublicOrigin();
-  const copy = useCallback((artifact: WorkflowArtifactView) => {
+  const copy = useCallback((artifact: ArtifactView) => {
     const link = linkFor(artifact);
     if (!link) return;
     const from = document.activeElement;
@@ -105,7 +105,7 @@ type Gesture =
  * nothing reviewed and approves nothing.
  */
 export function ArtifactGallery({ artifacts, initialId, sessionId, onClose, returnFocusRef, onOpenInBrowser }: {
-  artifacts: readonly WorkflowArtifactView[];
+  artifacts: readonly ArtifactView[];
   initialId: string;
   /** The session the artifacts belong to, for Copy Link when an artifact does not name it. */
   sessionId?: string;
@@ -113,7 +113,7 @@ export function ArtifactGallery({ artifacts, initialId, sessionId, onClose, retu
   /** What opened the viewer, where focus returns on close. */
   returnFocusRef: { current: HTMLElement | null };
   /** Open in Browser: absent where the viewer is opened from the Browser itself. */
-  onOpenInBrowser?: (artifact: WorkflowArtifactView) => void;
+  onOpenInBrowser?: (artifact: ArtifactView) => void;
 }) {
   const [currentId, setCurrentId] = useState(initialId);
   const found = artifacts.findIndex((artifact) => artifact.artifactId === currentId);
@@ -135,7 +135,7 @@ export function ArtifactGallery({ artifacts, initialId, sessionId, onClose, retu
     }
   });
 
-  const show = (target: WorkflowArtifactView | undefined) => {
+  const show = (target: ArtifactView | undefined) => {
     if (target) setCurrentId(target.artifactId);
   };
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {

@@ -240,7 +240,7 @@ test("a child creation refused while storing its prompt images releases its rese
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
     const valid = { mimeType: "image/png", data: png.toString("base64") };
     const sha256 = createHash("sha256").update(png).digest("hex");
-    h.db.createWorkflowArtifactBytes({ artifactId: "art_root", sessionId: "root", kind: "screenshot", name: "root-image",
+    h.db.createArtifactBytes({ artifactId: "art_root", sessionId: "root", kind: "screenshot", name: "root-image",
       mimeType: "image/png", encoding: "base64", sizeBytes: png.byteLength, sha256, createdBy: { kind: "system", id: "test" },
       metadata: {}, createdAt: 4 }, png);
     const create = (images: Array<Record<string, unknown>>) => h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude",
@@ -257,7 +257,7 @@ test("a child creation refused while storing its prompt images releases its rese
       launches: h.sent.length,
     });
     const before = JSON.stringify(state());
-    const store = h.db.createWorkflowArtifactBytes;
+    const store = h.db.createArtifactBytes;
     for (const [label, images, status, error, failStorage] of [
       ["invalid bytes after a stored image", [valid, { mimeType: "image/png", data: Buffer.from("not a png").toString("base64") }],
         400, /do not match the declared MIME type/u, false],
@@ -268,9 +268,9 @@ test("a child creation refused while storing its prompt images releases its rese
         404, /prompt image artifact not found/u, false],
       ["artifact storage failure", [valid], 500, /could not be stored/u, true],
     ] as const) {
-      if (failStorage) h.db.createWorkflowArtifactBytes = () => { throw new Error("SQLITE_FULL: artifact write failed"); };
+      if (failStorage) h.db.createArtifactBytes = () => { throw new Error("SQLITE_FULL: artifact write failed"); };
       const refused = create([...images]);
-      h.db.createWorkflowArtifactBytes = store;
+      h.db.createArtifactBytes = store;
       assert.equal(refused.status, status, `${label}: ${refused.error}`);
       assert.match(refused.error ?? "", error, label);
       assert.equal(JSON.stringify(state()), before, `${label}: creation released everything it reserved`);
@@ -317,7 +317,7 @@ test("deleting an unlaunched grandchild returns every ancestor's charge and refu
       title: "nested", useWorktree: false, creationActor: "agent", driver: "claude-code",
       config: { model: "claude-opus-5-5", maxToolCalls: 10 }, now: 6 });
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
-    h.db.createWorkflowArtifactBytes({ artifactId: "art_nested", sessionId: "nested", kind: "screenshot", name: "nested-image",
+    h.db.createArtifactBytes({ artifactId: "art_nested", sessionId: "nested", kind: "screenshot", name: "nested-image",
       mimeType: "image/png", encoding: "base64", sizeBytes: png.byteLength, sha256: createHash("sha256").update(png).digest("hex"),
       createdBy: { kind: "system", id: "test" }, metadata: {}, createdAt: 6 }, png);
     assert.throws(() => h.db.campaignBudgetTransaction(() => {
@@ -325,7 +325,7 @@ test("deleting an unlaunched grandchild returns every ancestor's charge and refu
       throw new Error("outer rollback");
     }), /outer rollback/u);
     assert.ok(h.db.getSession("nested"));
-    assert.deepEqual(h.db.readWorkflowArtifactBytes("art_nested"), png);
+    assert.deepEqual(h.db.readArtifactBytes("art_nested"), png);
   } finally { h.db.close(); }
 });
 

@@ -224,7 +224,6 @@ async function mount({ view, items, executions = {}, triggers = {}, client: over
       requests.push(`triggers:${id}`);
       return { triggers: triggers[id] ?? [] };
     },
-    workflowDefinitions: async () => { requests.push("workflows"); return []; },
     outboundEventSubscriptions: async () => [],
     updateAutomation: async (id: string, spec: AutomationSpec) => {
       updates.push(structuredClone(spec));
@@ -303,8 +302,6 @@ test("/automations/~<id> opens that automation's page directly and reads only it
       assert.ok(request === "automation:automation-a" || request === "triggers:automation-a",
         `the page asked for ${request}`);
     }
-    // A create-session action needs no workflow definitions.
-    assert.ok(!view.requests.includes("workflows"));
   } finally {
     await view.unmount();
   }
@@ -873,34 +870,6 @@ test("a configurable prompt-session trigger sends its prompt, named values, miss
   }
 });
 
-test("a workflow automation's New Trigger has no details switch, and a blank name is refused in place", async () => {
-  const creates: unknown[] = [];
-  const view = await mount({
-    view: route("automation-a"),
-    items: [automation("automation-a", "Nightly Sweep", {
-      action: { kind: "workflow_run", request: { workflowId: "workflow-1", runnerId: "runner-1", workspaceId: "workspace-1", task: "Audit." } } as AutomationSchedule["action"],
-    })],
-    client: { createAutomationTrigger: async (_id: string, request: unknown) => {
-      creates.push(request);
-      return { trigger: trigger("created"), secret: SECRET };
-    } } as Partial<ApiClient>,
-  });
-  try {
-    await click(menuItem(await openMore(view.body), "Add Webhook Trigger…"));
-    const dialog = dialogNamed(view.body, "New Webhook Trigger")!;
-    assertNoDomNode(dialog.querySelector('[role="switch"]'), "workflow actions take no details");
-    const name = dialog.querySelector<HTMLInputElement>("input")!;
-    await typeInto(name, "   ");
-    await click(buttonNamed(dialog, "Create Trigger"));
-    assert.deepEqual(creates, [], "nothing is sent");
-    assert.equal(name.getAttribute("aria-invalid"), "true");
-    assert.match(dialog.textContent ?? "", /Enter a name for the trigger\./);
-    assert.equal(focused(), name);
-  } finally {
-    await view.unmount();
-  }
-});
-
 test("a create the control plane refuses stays in the dialog as a notice", async () => {
   const view = await mount({
     view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")],
@@ -1188,11 +1157,6 @@ function historyRuns(): AutomationExecution[] {
       error: AUTOMATION_TARGET_UNAVAILABLE,
     }),
     run("succeeded", {
-      executionId: "axe_workflow", idempotencyKey: "automation-a:workflow", actionKind: "workflow_run",
-      sessionId: undefined, runId: "run-7", workflowInstanceId: "wfi-7",
-      scheduledFor: chicago(-4, 2), createdAt: chicago(-4, 2), startedAt: chicago(-4, 2), completedAt: chicago(-4, 3, 5),
-    }),
-    run("succeeded", {
       executionId: "axe_scheduled", idempotencyKey: "automation-a:scheduled", sessionId: "session-scheduled",
       scheduledFor: chicago(0, 2), createdAt: chicago(0, 2), startedAt: chicago(0, 2, 0, 7), completedAt: chicago(0, 2, 4, 9),
     }),
@@ -1271,7 +1235,6 @@ test("Run History is a table of Started, Result, Started By and Took in words, n
       ["Yesterday, 2:00 AM", "Failed", "Schedule", "Took 12m 0s", null, ["Open Session", "Run Actions, Yesterday, 2:00 AM"]],
       ["Oct 18, 2:00 AM", "Skipped", "Schedule", "—", "Skipped because the last run was still going.", ["Run Actions, Oct 18, 2:00 AM"]],
       ["Oct 17, 2:00 AM", "Expired", "Schedule", "—", "The machine stayed offline for 60 minutes.", ["Run Actions, Oct 17, 2:00 AM"]],
-      ["Oct 16, 2:00 AM", "Succeeded", "Schedule", "Took 1h 5m", null, ["Open Run", "Run Actions, Oct 16, 2:00 AM"]],
     ]);
     // On a phone a run with no duration leaves Took off line 2, where its reason goes instead.
     assert.ok(runRow(view.body, "axe_skipped").querySelectorAll("td")[2]!.classList.contains("cell-extra"));
@@ -1283,8 +1246,6 @@ test("Run History is a table of Started, Result, Started By and Took in words, n
       "no command state enum");
     assert.doesNotMatch(rowsText, /\d:\d\d:\d\d/, "no time with seconds");
     assert.doesNotMatch(rowsText, /axe_|cmd_|run-7|session-|runner-1/, "no ids");
-    await click(buttonNamed(runRow(view.body, "axe_workflow"), "Open Run"));
-    assertNoDomNode(page(view.body), "Open Run leaves for the workflow run");
   } finally {
     await view.unmount();
   }
@@ -1366,19 +1327,6 @@ test("ceiling-paused runs have warning badges and explain possible output in Run
     assert.equal(factsOf(dialog).Result, "Ceiling Paused", "the bound is stated only in the notice");
     assertNoDomNode(dialog.querySelector(".notice.t-danger"), "a governance pause is not a crash");
     assertNoDomNode(view.body.querySelector('[data-notice-key="last-run-failed"]'), "no failure alert");
-  } finally { await view.unmount(); }
-}));
-
-test("a workflow ceiling notice names its Open Run control", () => withRunClock(async () => {
-  const paused = run("ceiling_paused", { executionId: "axe_workflow_paused", actionKind: "workflow_run",
-    runId: "run-1", sessionId: undefined, governancePause: {
-      sessionId: "member-1", tripId: "trip-1", kind: "cost_budget", threshold: 6, observed: 6.71,
-    } });
-  const view = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], executions: { "automation-a": [paused] } });
-  try {
-    const dialog = await openRunDetails(view.body, "axe_workflow_paused");
-    assert.match(dialog.querySelector(".notice.t-warning")?.textContent ?? "", /Choose Open Run to inspect it\./);
-    assert.ok(buttonNamed(dialog, "Open Run"));
   } finally { await view.unmount(); }
 }));
 

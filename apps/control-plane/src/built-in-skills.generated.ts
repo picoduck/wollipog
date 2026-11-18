@@ -831,7 +831,7 @@ export const BUILT_IN_SKILL_SOURCES: readonly BuiltInSkillSource[] = [
           "",
           "A `PROVIDER_ACCOUNT_CHOICE_REQUIRED` refusal started nothing. Act on its `actions`: name an account",
           "as above, wait until `retryAt`, or relay a sign-in or review to a person. `create_run` takes",
-          "`providerAccountIds` by agent id and `create_workflow_run` takes `providerAccountBindings` by role, each",
+          "`providerAccountIds` by agent id, each",
           "with the same references. Whether an account's plan offers a model isn't known; when you name a model under a",
           "policy the result says so, and if the provider refuses it, name another account.",
           "",

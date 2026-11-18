@@ -87,14 +87,14 @@ export class WorkflowVideoEvidenceApprovals {
     const receipt = this.receipt(decision, evidenceId);
     if (!item?.mediaType?.startsWith("image/") || !item.artifactId || !receipt ||
       receipt.artifact_id !== item.artifactId || receipt.sha256 !== item.sha256) return false;
-    const source = this.database.workflowArtifactExportPreflight(item.artifactId)?.artifact;
+    const source = this.database.artifactExportPreflight(item.artifactId)?.artifact;
     const controllerScope = this.database.sessionScope(decision.controllingSessionId);
     const childScope = this.database.sessionScope(decision.sessionId);
     if (!controllerScope || !childScope ||
       !this.database.scopeAudienceContainedWithMembership(controllerScope, childScope) ||
       !source || source.sessionId !== decision.sessionId || source.kind !== "screenshot" ||
       source.mimeType !== item.mediaType || source.sha256 !== item.sha256) return false;
-    const bytes = this.database.readWorkflowArtifactBytes(item.artifactId);
+    const bytes = this.database.readArtifactBytes(item.artifactId);
     return Boolean(bytes && digest(bytes) === item.sha256);
   }
   private atomic<T>(operation: () => T, reviewIds?: readonly string[]): T {

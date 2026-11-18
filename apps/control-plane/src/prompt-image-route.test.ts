@@ -58,14 +58,14 @@ test("runner prompt-image route returns exact bytes with hardened headers", asyn
     canAccessSession: () => false,
     verifyActiveRunnerCredential: (_runner: string, hash: string) => hash.length === 64,
     getSession: () => ({ id: "s1", runnerId: "r1", runId: null }),
-    workflowArtifactExportPreflight: () => ({
+    artifactExportPreflight: () => ({
       artifact: {
         artifactId: "art1", sessionId: "s1", kind: "screenshot", encoding: "base64",
         mimeType: "image/png", name: "image", sizeBytes: bytes.length, sha256: "a".repeat(64),
         createdBy: { kind: "system" }, createdAt: 1,
       }, storedDataBytes: bytes.length,
     }),
-    readWorkflowArtifactBytes: () => bytes,
+    readArtifactBytes: () => bytes,
   } as never;
   registerPromptImageRoutes(app, {
     db,

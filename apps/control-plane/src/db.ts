@@ -116,6 +116,7 @@ import {
   normalizeBackgroundFollowUp,
   scopeAudienceContained,
   validatePromptImageInputs,
+  type AutomationAction,
   type AutomationAuditEvent,
   type AccessScopeChangePreview,
   type AccessScopeAuditView,
@@ -326,17 +327,8 @@ import {
   type ShellStatus,
   type ShellView,
   type WorkspaceInfo,
-  type WorkflowArtifact,
-  type WorkflowArtifactView,
-  type WorkflowAttemptView,
-  type WorkflowAttemptStatus,
-  type WorkflowDefinition,
-  type WorkflowEventView,
-  type WorkflowInstanceDetail,
-  type WorkflowInstanceStatus,
-  type WorkflowInstanceView,
-  type WorkflowNodeState,
-  type WorkflowNodeOutcome,
+  type Artifact,
+  type ArtifactView,
   sessionRole,
   type SessionRole,
   mergeSessionCapabilities,
@@ -412,7 +404,6 @@ import {
 import type { DurableBackgroundPushDelivery, PushAudience, PushServiceOutcome } from "./web-push.js";
 import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./workspace-match.js";
 import { installMaintenanceIndexes } from "./maintenance-indexes.js";
-import { WORKFLOW_EVENT_RETENTION_SCHEMA } from "./workflow-event-retention-store.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { CAMPAIGN_RECOVERY_SCHEMA, CampaignRecoveryStore, type CampaignRecoveryVerifiedReport } from "./campaign-recovery-store.js";
 import {
@@ -639,14 +630,73 @@ BEGIN
   VALUES (OLD.blob_key, CAST(strftime('%s', 'now') AS INTEGER) * 1000);
 END;
 `;
-const WORKFLOW_ATTEMPT_ARTIFACT_COLUMNS = /* sql */ `(
-  attempt_id TEXT NOT NULL,
-  contract_name TEXT NOT NULL,
-  artifact_id TEXT NOT NULL,
-  PRIMARY KEY (attempt_id, contract_name),
-  FOREIGN KEY (attempt_id) REFERENCES workflow_attempts(attempt_id) ON DELETE CASCADE,
-  FOREIGN KEY (artifact_id) REFERENCES artifacts(id)
-)`;
+
+/** Retire the graph and its outbox atomically while retaining sessions and automation history. */
+function retireWorkflowEngine(db: DatabaseSync): void {
+  if (db.prepare("SELECT 1 FROM control_plane_metadata WHERE key='workflow_engine_retired'").get()) return;
+  const oldColumns = db.prepare("PRAGMA table_info(automation_executions)").all();
+  const oldArtifactColumns = db.prepare("PRAGMA table_info(artifacts)").all();
+  const now = Date.now();
+  const reason = "Workflow runs were removed.";
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    // Drop referencing tables first. The artifacts and run membership tables are shared.
+    db.exec(`
+      DROP TABLE IF EXISTS workflow_attempt_artifacts;
+      DROP TABLE IF EXISTS workflow_attempts;
+      DROP TABLE IF EXISTS workflow_node_states;
+      DROP TABLE IF EXISTS workflow_events;
+      DROP TABLE IF EXISTS workflow_event_prunes;
+      DROP TABLE IF EXISTS workflow_instances;
+      DROP TABLE IF EXISTS workflow_definitions;
+      DROP TABLE IF EXISTS workflow_event_retention_policy;
+      DROP TABLE IF EXISTS workflow_event_retention_runs;
+      DELETE FROM control_plane_metadata WHERE key='workflow_event_environment_policy';
+    `);
+    if (oldArtifactColumns.some((column) => column.name === "run_id")) {
+      db.exec(`
+        DELETE FROM artifacts WHERE run_id IS NOT NULL AND session_id IS NULL;
+        UPDATE artifacts SET run_id=NULL WHERE run_id IS NOT NULL;
+      `);
+    }
+    db.prepare(`
+      UPDATE automation_commands
+      SET state=CASE WHEN state IN ('staged','pending') AND last_sent_at IS NULL THEN 'rejected' ELSE 'uncertain' END,
+          revision=revision+1, last_error=?, updated_at=?, completed_at=?, next_attempt_at=NULL
+      WHERE state IN ('staged','pending','sent','accepted','started')
+        AND execution_id IN (SELECT execution_id FROM automation_executions WHERE action_kind='workflow_run')
+    `).run(reason, now, now);
+    db.prepare(`
+      UPDATE automation_executions SET status='failed', error=?, completed_at=?
+      WHERE action_kind='workflow_run' AND status IN ('dispatching','running')
+    `).run(reason, now);
+    db.exec(`
+      UPDATE automation_executions SET spec_json=NULL, delivery_plan_json=NULL WHERE action_kind='workflow_run';
+      UPDATE automation_trigger_invocations SET state='rejected'
+      WHERE state='pending' AND json_extract(spec_json, '$.action.kind')='workflow_run';
+      DELETE FROM automation_resolution_waits WHERE automation_id IN (
+        SELECT automation_id FROM automations WHERE json_extract(action_json, '$.kind')='workflow_run'
+      );
+    `);
+    db.prepare(`
+      UPDATE automations SET enabled=0, next_fire_at=NULL, revision=revision+1, updated_at=?,
+             action_json='{"kind":"retired","reason":"workflow_removed"}'
+      WHERE json_extract(action_json, '$.kind')='workflow_run'
+    `).run(now);
+    if (oldColumns.some((column) => column.name === "workflow_instance_id")) {
+      db.exec("ALTER TABLE automation_executions DROP COLUMN workflow_instance_id");
+    }
+    if (oldColumns.some((column) => column.name === "run_id")) {
+      db.exec("ALTER TABLE automation_executions DROP COLUMN run_id");
+    }
+    db.exec("INSERT INTO control_plane_metadata (key, value) VALUES ('workflow_engine_retired', '1')");
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 const STEERING_ATTEMPT_ARTIFACT_COLUMNS = /* sql */ `(
   request_id  TEXT NOT NULL,
   artifact_id TEXT NOT NULL,
@@ -2029,92 +2079,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_pod_context_member_output
 
 ${ARTIFACT_TABLE_SCHEMA}
 
-CREATE TABLE IF NOT EXISTS workflow_definitions (
-  workflow_id TEXT NOT NULL,
-  version     INTEGER NOT NULL,
-  name        TEXT NOT NULL,
-  description TEXT,
-  max_transitions INTEGER NOT NULL,
-  graph       TEXT NOT NULL,
-  source      TEXT NOT NULL,
-  created_by_kind TEXT NOT NULL,
-  created_by_id TEXT,
-  created_at  INTEGER NOT NULL,
-  PRIMARY KEY (workflow_id, version)
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_definitions_created
-  ON workflow_definitions(created_at DESC, workflow_id, version);
-
-CREATE TABLE IF NOT EXISTS workflow_instances (
-  instance_id TEXT PRIMARY KEY,
-  workflow_id TEXT NOT NULL,
-  workflow_version INTEGER NOT NULL,
-  run_id TEXT NOT NULL,
-  status TEXT NOT NULL,
-  transition_count INTEGER NOT NULL DEFAULT 0,
-  created_by_kind TEXT NOT NULL,
-  created_by_id TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  completed_at INTEGER,
-  FOREIGN KEY (workflow_id, workflow_version) REFERENCES workflow_definitions(workflow_id, version),
-  FOREIGN KEY (run_id) REFERENCES multi_agent_runs(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_instances_run ON workflow_instances(run_id, created_at, instance_id);
-CREATE INDEX IF NOT EXISTS idx_workflow_instances_workflow ON workflow_instances(workflow_id, workflow_version, created_at);
-
-CREATE TABLE IF NOT EXISTS workflow_node_states (
-  instance_id TEXT NOT NULL,
-  node_id TEXT NOT NULL,
-  status TEXT NOT NULL,
-  attempt_count INTEGER NOT NULL DEFAULT 0,
-  session_id TEXT,
-  started_at INTEGER,
-  completed_at INTEGER,
-  error TEXT,
-  ready_at INTEGER,
-  outcome TEXT,
-  PRIMARY KEY (instance_id, node_id),
-  FOREIGN KEY (instance_id) REFERENCES workflow_instances(instance_id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS workflow_attempts (
-  attempt_id TEXT PRIMARY KEY,
-  instance_id TEXT NOT NULL,
-  node_id TEXT NOT NULL,
-  attempt INTEGER NOT NULL,
-  status TEXT NOT NULL,
-  dispatch_key TEXT NOT NULL UNIQUE,
-  session_id TEXT,
-  started_at INTEGER NOT NULL,
-  deadline_at INTEGER NOT NULL,
-  completed_at INTEGER,
-  error TEXT,
-  UNIQUE (instance_id, node_id, attempt),
-  FOREIGN KEY (instance_id, node_id) REFERENCES workflow_node_states(instance_id, node_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_attempts_instance ON workflow_attempts(instance_id, started_at, attempt_id);
-
-CREATE TABLE IF NOT EXISTS workflow_attempt_artifacts ${WORKFLOW_ATTEMPT_ARTIFACT_COLUMNS};
-
-CREATE TABLE IF NOT EXISTS workflow_events (
-  event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  instance_id TEXT NOT NULL,
-  seq INTEGER NOT NULL,
-  kind TEXT NOT NULL,
-  node_id TEXT,
-  attempt_id TEXT,
-  actor_kind TEXT NOT NULL,
-  actor_id TEXT,
-  detail TEXT,
-  created_at INTEGER NOT NULL,
-  UNIQUE (instance_id, seq),
-  FOREIGN KEY (instance_id) REFERENCES workflow_instances(instance_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_events_instance ON workflow_events(instance_id, seq);
-
-${WORKFLOW_EVENT_RETENTION_SCHEMA}
-
 -- Durable schedules are soft-deleted so actor-attributed audit and execution history survives.
 -- Action/config JSON is secret-free and validated at the service boundary before insertion.
 CREATE TABLE IF NOT EXISTS automations (
@@ -2157,8 +2121,6 @@ CREATE TABLE IF NOT EXISTS automation_executions (
   actor_id           TEXT,
   runner_id          TEXT,
   session_id         TEXT,
-  run_id             TEXT,
-  workflow_instance_id TEXT,
   error              TEXT,
   created_at         INTEGER NOT NULL,
   started_at         INTEGER,
@@ -4472,19 +4434,19 @@ interface PodReconciliationRow {
   completed_at: number | null;
 }
 
-interface WorkflowArtifactRow {
+interface ArtifactRow {
   id: string;
   run_id: string | null;
   session_id: string | null;
-  kind: WorkflowArtifact["kind"];
+  kind: Artifact["kind"];
   name: string;
   mime_type: string;
-  encoding: WorkflowArtifact["encoding"];
+  encoding: Artifact["encoding"];
   data?: string;
   blob_key?: string | null;
   size_bytes: number;
   sha256: string;
-  created_by_kind: WorkflowArtifact["createdBy"]["kind"];
+  created_by_kind: Artifact["createdBy"]["kind"];
   created_by_id: string | null;
   metadata: string | null;
   created_at: number;
@@ -4499,64 +4461,32 @@ export class SessionArtifactQuotaError extends Error {
 }
 const MAX_WORKFLOW_ARTIFACT_INLINE_BYTES = 11 * 1024 * 1024;
 
-function workflowArtifactBytes(input: {
-  encoding: WorkflowArtifact["encoding"];
+function artifactBytes(input: {
+  encoding: Artifact["encoding"];
   data: string;
   sizeBytes: number;
   sha256: string;
 }): Buffer {
   if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 0 || input.sizeBytes > MAX_WORKFLOW_ARTIFACT_BLOB_BYTES) {
-    throw new Error("workflow artifact size is invalid");
+    throw new Error("artifact size is invalid");
   }
   assertArtifactBlobKey(input.sha256);
   let bytes: Buffer;
   if (input.encoding === "base64") {
     if (input.data.length % 4 !== 0 || /[^A-Za-z0-9+/=]/u.test(input.data)) {
-      throw new Error("workflow artifact base64 is not canonical");
+      throw new Error("artifact base64 is not canonical");
     }
     bytes = Buffer.from(input.data, "base64");
-    if (bytes.toString("base64") !== input.data) throw new Error("workflow artifact base64 is not canonical");
+    if (bytes.toString("base64") !== input.data) throw new Error("artifact base64 is not canonical");
   } else if (input.encoding === "utf8" || input.encoding === "json") {
     bytes = Buffer.from(input.data, "utf8");
   } else {
-    throw new Error("workflow artifact encoding is invalid");
+    throw new Error("artifact encoding is invalid");
   }
   if (bytes.byteLength !== input.sizeBytes || artifactBlobSha256(bytes) !== input.sha256) {
-    throw new Error("workflow artifact bytes do not match metadata");
+    throw new Error("artifact bytes do not match metadata");
   }
   return bytes;
-}
-
-interface WorkflowDefinitionRow {
-  workflow_id: string; version: number; name: string; description: string | null;
-  max_transitions: number; graph: string; source: WorkflowDefinition["source"];
-  created_by_kind: WorkflowDefinition["createdBy"]["kind"]; created_by_id: string | null; created_at: number;
-}
-
-interface WorkflowInstanceRow {
-  instance_id: string; workflow_id: string; workflow_version: number; run_id: string;
-  status: WorkflowInstanceStatus; transition_count: number;
-  created_by_kind: WorkflowInstanceView["createdBy"]["kind"]; created_by_id: string | null;
-  created_at: number; updated_at: number; completed_at: number | null;
-}
-
-interface WorkflowNodeStateRow {
-  node_id: string; status: WorkflowNodeState["status"]; attempt_count: number; session_id: string | null;
-  started_at: number | null; completed_at: number | null; error: string | null;
-  ready_at: number | null; outcome: WorkflowNodeState["outcome"] | null;
-}
-
-interface WorkflowAttemptRow {
-  attempt_id: string; instance_id: string; node_id: string; attempt: number;
-  status: WorkflowAttemptView["status"]; dispatch_key: string; session_id: string | null;
-  started_at: number; deadline_at: number; completed_at: number | null; error: string | null;
-}
-
-interface WorkflowEventRow {
-  event_id: number; instance_id: string; seq: number; kind: WorkflowEventView["kind"];
-  node_id: string | null; attempt_id: string | null;
-  actor_kind: WorkflowEventView["actor"]["kind"]; actor_id: string | null;
-  detail: string | null; created_at: number;
 }
 
 interface AutomationRow {
@@ -4572,9 +4502,9 @@ interface AutomationExecutionRow {
   automation_revision: number; spec_json: string | null; delivery_mode: string; delivery_plan_json: string | null;
   trigger_delivery_json: string | null;
   governance_pause_json: string | null;
-  action_kind: AutomationExecution["actionKind"]; status: AutomationExecutionStatus;
+  action_kind: AutomationAction["kind"] | "workflow_run"; status: AutomationExecutionStatus;
   actor_kind: AutomationExecution["actor"]["kind"]; actor_id: string | null; runner_id: string | null;
-  session_id: string | null; run_id: string | null; workflow_instance_id: string | null; error: string | null;
+  session_id: string | null; error: string | null;
   created_at: number; started_at: number | null; completed_at: number | null;
 }
 
@@ -5380,8 +5310,6 @@ export interface StageAutomationDeliveryPlanInput {
   executionId: string;
   runnerId: string;
   sessionId?: string;
-  runId?: string;
-  workflowInstanceId?: string;
   planJson: string;
   commands: Array<{
     commandId: string;
@@ -7692,21 +7620,7 @@ export class ControlPlaneDb {
         status, turns_used, updated_at)
        SELECT id, 'manual', 4096, 512, 12, 2, 'idle', 0, updated_at FROM pods`,
     );
-    const workflowArtifactParent = () => (
-      db.prepare("PRAGMA foreign_key_list(workflow_attempt_artifacts)").all() as unknown as Array<{
-        table: string;
-        from: string;
-      }>
-    ).find((foreignKey) => foreignKey.from === "artifact_id")?.table;
-    const rebuildWorkflowArtifactAssociations = () => {
-      db.exec(`CREATE TABLE workflow_attempt_artifacts_repaired ${WORKFLOW_ATTEMPT_ARTIFACT_COLUMNS}`);
-      db.exec(
-        `INSERT INTO workflow_attempt_artifacts_repaired (attempt_id, contract_name, artifact_id)
-         SELECT attempt_id, contract_name, artifact_id FROM workflow_attempt_artifacts`,
-      );
-      db.exec("DROP TABLE workflow_attempt_artifacts");
-      db.exec("ALTER TABLE workflow_attempt_artifacts_repaired RENAME TO workflow_attempt_artifacts");
-    };
+    retireWorkflowEngine(db);
     const steeringArtifactParent = () => (
       db.prepare("PRAGMA foreign_key_list(session_steering_attempt_artifacts)").all() as unknown as Array<{
         table: string;
@@ -7799,26 +7713,10 @@ export class ControlPlaneDb {
         }
         // ALTER TABLE rewrites child foreign keys to the temporary legacy table. Rebuild the
         // association before dropping that table so data-bearing prerelease databases migrate
-        // without tripping foreign-key enforcement or losing workflow outputs.
-        if (workflowArtifactParent() !== "artifacts") rebuildWorkflowArtifactAssociations();
+        // without tripping foreign-key enforcement or losing session artifact references.
         if (steeringArtifactParent() !== "artifacts") rebuildSteeringArtifactAssociations();
         if (sessionEventArtifactNeedsRepair()) rebuildSessionEventArtifactAssociations();
         db.exec("DROP TABLE artifacts_legacy_v1");
-        db.exec("COMMIT");
-      } catch (error) {
-        db.exec("ROLLBACK");
-        throw error;
-      }
-    }
-    // SQLite rewrites foreign-key targets when a referenced table is renamed. Older databases
-    // therefore had workflow_attempt_artifacts.artifact_id retargeted to artifacts_legacy_v1 by
-    // the artifact-table migration above, immediately before that temporary table was dropped.
-    // Rebuild the association table so upgraded databases can validate cascades (including box
-    // and runner removal) and continue recording workflow outputs.
-    if (workflowArtifactParent() !== "artifacts") {
-      db.exec("BEGIN");
-      try {
-        rebuildWorkflowArtifactAssociations();
         db.exec("COMMIT");
       } catch (error) {
         db.exec("ROLLBACK");
@@ -7867,19 +7765,6 @@ export class ControlPlaneDb {
       }
     }
     db.exec(ARTIFACT_BLOB_SCHEMA);
-    // Phase 7.3 execution columns are additive because Phase 7.2 may already have created these
-    // durable tables in a user database.
-    for (const [table, column] of [
-      ["workflow_node_states", "ready_at INTEGER"],
-      ["workflow_node_states", "outcome TEXT"],
-      ["workflow_attempts", "deadline_at INTEGER NOT NULL DEFAULT 0"],
-    ] as const) {
-      try {
-        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
-      } catch {
-        /* column already present */
-      }
-    }
     try {
       db.exec("ALTER TABLE governance_audit ADD COLUMN governance_policy_id TEXT");
     } catch {
@@ -8803,12 +8688,12 @@ export class ControlPlaneDb {
     try {
       installMaintenanceIndexes(db);
       controlPlane.recoverPendingArtifactBlobs();
-      controlPlane.migrateInlineWorkflowArtifacts();
+      controlPlane.migrateInlineArtifacts();
       controlPlane.backfillSessionEventArtifactReferences();
       controlPlane.collectExpiredPreparedPromptImages(Date.now());
       controlPlane.collectOrphanedEventPayloadArtifacts();
       controlPlane.migrateInlineSessionEventPayloads();
-      controlPlane.collectWorkflowArtifactBlobs();
+      controlPlane.collectArtifactBlobs();
       controlPlane.rekeyNestedCampaignChildReports();
       controlPlane.captureUnresetLegacyCampaignReports();
       controlPlane.recordEarlierUnreadLocations(Date.now());
@@ -15915,7 +15800,7 @@ export class ControlPlaneDb {
       this.db.exec("ROLLBACK");
       throw err;
     }
-    this.collectWorkflowArtifactBlobs();
+    this.collectArtifactBlobs();
     return { runnerId: row.runner_id, sessionIds, runIds, podIds };
   }
 
@@ -15975,7 +15860,7 @@ export class ControlPlaneDb {
       this.db.exec("ROLLBACK");
       throw err;
     }
-    this.collectWorkflowArtifactBlobs();
+    this.collectArtifactBlobs();
     return { sessionIds, runIds, podIds };
   }
 
@@ -20007,7 +19892,7 @@ export class ControlPlaneDb {
       throw new Error("updateSessionFromSnapshot requires an autocommit connection");
     }
     const history = this.atomic(() => this.updateSessionFromSnapshotInTransaction(id, snap, now, "runtime"));
-    if (history?.reset) this.collectWorkflowArtifactBlobs();
+    if (history?.reset) this.collectArtifactBlobs();
     this.maybeMaintainUsageAggregation();
     return history;
   }
@@ -20035,7 +19920,7 @@ export class ControlPlaneDb {
       if (options.fallbackOnRollback && !this.db.isTransaction) return [];
       throw error;
     }
-    if (histories.some((history) => history?.reset)) this.collectWorkflowArtifactBlobs();
+    if (histories.some((history) => history?.reset)) this.collectArtifactBlobs();
     this.maybeMaintainUsageAggregation();
     return histories;
   }
@@ -20055,7 +19940,7 @@ export class ControlPlaneDb {
       before?.();
       return this.updateSessionFromSnapshotInTransaction(snapshot.id, snapshot, now, "runtime");
     }));
-    if (histories.some((history) => history?.reset)) this.collectWorkflowArtifactBlobs();
+    if (histories.some((history) => history?.reset)) this.collectArtifactBlobs();
     this.maybeMaintainUsageAggregation();
     return histories;
   }
@@ -21084,7 +20969,7 @@ export class ControlPlaneDb {
       throw new Error("reconcileRunnerHistory requires an autocommit connection");
     }
     const result = this.atomic(() => this.reconcileRunnerHistoryInTransaction(id, historyEpoch, tailSeq));
-    if (result?.reset) this.collectWorkflowArtifactBlobs();
+    if (result?.reset) this.collectArtifactBlobs();
     return result;
   }
 
@@ -21342,7 +21227,7 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM session_pruned_tool_calls WHERE session_id=?").run(id);
       this.db.exec("COMMIT");
       this.settleIngestRollback(id);
-      this.collectWorkflowArtifactBlobs();
+      this.collectArtifactBlobs();
     } catch (err) {
       this.db.exec("ROLLBACK");
       throw err;
@@ -21353,7 +21238,6 @@ export class ControlPlaneDb {
 
   /** Retention removal and its marker are atomic and safely repeatable after an OS rollback.
    * The pass's final FULL commit flushes them, like archived-history retention batches. */
-  workflowEventRetentionCommit<T>(work: () => T): T { return this.relaxedCommit(work); }
 
   getArchivedHistoryRetentionPolicy(organizationId: string): {
     retentionDays: number | null; prunesFrom: number | null;
@@ -21640,7 +21524,7 @@ export class ControlPlaneDb {
     const batch = this.relaxedCommit(() => this.atomic(() => this.removeArchivedHistoryBatch(sessionId, input)));
     if ("removed" in batch) return { ...batch, finished: false, prunedEvents: 0 };
     const closed = this.atomic(() => this.finishArchivedHistoryPrune(sessionId, input.now, batch.complete));
-    if (closed.removedArtifacts) this.collectWorkflowArtifactBlobs();
+    if (closed.removedArtifacts) this.collectArtifactBlobs();
     if (closed.prunedEvents > 0) this.eventEpochAdvancedListener?.(sessionId);
     return { removed: 0, searchLength: 0, finished: true, prunedEvents: closed.prunedEvents };
   }
@@ -26310,11 +26194,11 @@ export class ControlPlaneDb {
       if (!item.artifactId || !item.mediaType?.startsWith("image/")) return [];
       const receipt = candidates.find((candidate) => candidate.artifactId === item.artifactId && candidate.sha256 === item.sha256);
       if (!receipt) return [];
-      const artifact = this.workflowArtifactExportPreflight(item.artifactId)?.artifact;
+      const artifact = this.artifactExportPreflight(item.artifactId)?.artifact;
       if (!artifact || artifact.sessionId !== decision.sessionId || artifact.kind !== "screenshot" ||
           artifact.sha256 !== item.sha256 || artifact.mimeType !== item.mediaType) return [];
       try {
-        const bytes = this.readWorkflowArtifactBytes(item.artifactId);
+        const bytes = this.readArtifactBytes(item.artifactId);
         if (!bytes || createHash("sha256").update(bytes).digest("hex") !== item.sha256) return [];
       } catch { return []; }
       return [{ ...receipt, evidenceId: item.evidenceId }];
@@ -28225,7 +28109,7 @@ export class ControlPlaneDb {
 
   deleteSession(id: string): void {
     this.deleteSessionRows(id);
-    this.collectWorkflowArtifactBlobs();
+    this.collectArtifactBlobs();
   }
 
   /** Delete a session whose creation failed before its launch was sent (#3183), returning what its
@@ -28249,7 +28133,7 @@ export class ControlPlaneDb {
       this.deleteSessionRows(id);
     });
     // An outer transaction can still roll the rows back, so its blobs wait for a later pass.
-    if (!nested) this.collectWorkflowArtifactBlobs();
+    if (!nested) this.collectArtifactBlobs();
   }
 
   private deleteSessionRows(id: string): void {
@@ -30202,8 +30086,7 @@ export class ControlPlaneDb {
                SELECT 1 FROM session_steering_attempt_artifacts ref
                 WHERE ref.artifact_id=artifacts.id AND ref.request_id NOT IN (${placeholders})
              )
-             AND NOT EXISTS (SELECT 1 FROM session_event_artifacts ref WHERE ref.artifact_id=artifacts.id)
-             AND NOT EXISTS (SELECT 1 FROM workflow_attempt_artifacts ref WHERE ref.artifact_id=artifacts.id)`,
+             AND NOT EXISTS (SELECT 1 FROM session_event_artifacts ref WHERE ref.artifact_id=artifacts.id)`,
         ).run(artifactId, ...requestIds);
         deletedArtifacts += Number(deleted.changes);
       }
@@ -30215,7 +30098,7 @@ export class ControlPlaneDb {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    if (deletedArtifacts) this.collectWorkflowArtifactBlobs();
+    if (deletedArtifacts) this.collectArtifactBlobs();
     return Number(compacted.changes);
   }
 
@@ -30234,8 +30117,6 @@ export class ControlPlaneDb {
           SELECT 1 FROM session_steering_attempt_artifacts ref WHERE ref.artifact_id=artifact.id
         ) AND NOT EXISTS (
           SELECT 1 FROM session_event_artifacts ref WHERE ref.artifact_id=artifact.id
-        ) AND NOT EXISTS (
-          SELECT 1 FROM workflow_attempt_artifacts ref WHERE ref.artifact_id=artifact.id
         ) ORDER BY artifact.id LIMIT ?`,
       ).all(bounded) as unknown as Array<{ id: string }>;
       for (const row of rows) {
@@ -30246,7 +30127,7 @@ export class ControlPlaneDb {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    if (deleted) this.collectWorkflowArtifactBlobs();
+    if (deleted) this.collectArtifactBlobs();
     return deleted;
   }
 
@@ -32597,13 +32478,6 @@ export class ControlPlaneDb {
     return rows.map((r) => this.runView(r));
   }
 
-  workflowRunScope(runId: string): { runnerId: string | null; workspaceId: string | null } | null {
-    const row = this.stmt("SELECT runner_id, workspace_id FROM multi_agent_runs WHERE id=?").get(runId) as unknown as
-      | { runner_id: string | null; workspace_id: string | null }
-      | undefined;
-    return row ? { runnerId: row.runner_id, workspaceId: row.workspace_id } : null;
-  }
-
   private runView(row: RunRow): RunView {
     const sessionIds = (
       this.stmt("SELECT session_id FROM multi_agent_run_members WHERE run_id=? ORDER BY rowid")
@@ -33371,302 +33245,6 @@ export class ControlPlaneDb {
     };
   }
 
-  createWorkflowDefinition(definition: Omit<WorkflowDefinition, "version">): WorkflowDefinition {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const version = ((this.stmt("SELECT MAX(version) AS version FROM workflow_definitions WHERE workflow_id=?")
-        .get(definition.workflowId) as unknown as { version: number | null }).version ?? 0) + 1;
-      this.stmt(
-        `INSERT INTO workflow_definitions
-         (workflow_id, version, name, description, max_transitions, graph, source,
-          created_by_kind, created_by_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        definition.workflowId, version, definition.name, definition.description ?? null,
-        definition.maxTransitions, JSON.stringify({ nodes: definition.nodes, edges: definition.edges }),
-        definition.source, definition.createdBy.kind, definition.createdBy.id ?? null, definition.createdAt,
-      );
-      this.db.exec("COMMIT");
-      return { ...definition, version };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  getWorkflowDefinition(workflowId: string, version?: number): WorkflowDefinition | null {
-    const row = (version === undefined
-      ? this.stmt("SELECT * FROM workflow_definitions WHERE workflow_id=? ORDER BY version DESC LIMIT 1").get(workflowId)
-      : this.stmt("SELECT * FROM workflow_definitions WHERE workflow_id=? AND version=?").get(workflowId, version)) as unknown as WorkflowDefinitionRow | undefined;
-    return row ? this.workflowDefinition(row) : null;
-  }
-
-  listWorkflowDefinitions(limit = 100): WorkflowDefinition[] {
-    const rows = this.stmt(
-      `SELECT d.* FROM workflow_definitions d
-       JOIN (SELECT workflow_id, MAX(version) AS version FROM workflow_definitions GROUP BY workflow_id) latest
-         ON latest.workflow_id=d.workflow_id AND latest.version=d.version
-       ORDER BY d.created_at DESC, d.workflow_id LIMIT ?`,
-    ).all(limit) as unknown as WorkflowDefinitionRow[];
-    return rows.map((row) => this.workflowDefinition(row));
-  }
-
-  private workflowDefinition(row: WorkflowDefinitionRow): WorkflowDefinition {
-    const graph = JSON.parse(row.graph) as Pick<WorkflowDefinition, "nodes" | "edges">;
-    return {
-      workflowId: row.workflow_id,
-      version: row.version,
-      name: row.name,
-      ...(row.description !== null ? { description: row.description } : {}),
-      maxTransitions: row.max_transitions,
-      nodes: graph.nodes,
-      edges: graph.edges,
-      source: row.source,
-      createdBy: { kind: row.created_by_kind, ...(row.created_by_id ? { id: row.created_by_id } : {}) },
-      createdAt: row.created_at,
-    };
-  }
-
-  createWorkflowInstance(input: {
-    instanceId: string;
-    definition: WorkflowDefinition;
-    runId: string;
-    createdBy: WorkflowInstanceView["createdBy"];
-    now: number;
-  }): WorkflowInstanceDetail {
-    const destinations = new Set(input.definition.edges.map((edge) => edge.to));
-    const roots = input.definition.nodes.filter((node) => !destinations.has(node.nodeId));
-    const initialStatus: WorkflowInstanceStatus = roots.some((node) => node.kind === "agent") ? "queued" : "waiting_gate";
-    this.db.exec("BEGIN");
-    try {
-      this.stmt(
-        `INSERT INTO workflow_instances
-         (instance_id, workflow_id, workflow_version, run_id, status, transition_count,
-          created_by_kind, created_by_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
-      ).run(input.instanceId, input.definition.workflowId, input.definition.version, input.runId,
-        initialStatus, input.createdBy.kind, input.createdBy.id ?? null, input.now, input.now);
-      const insertNode = this.stmt(
-        `INSERT INTO workflow_node_states (instance_id, node_id, status, attempt_count)
-         VALUES (?, ?, ?, 0)`,
-      );
-      for (const node of input.definition.nodes) {
-        const root = !destinations.has(node.nodeId);
-        insertNode.run(input.instanceId, node.nodeId, root ? (node.kind === "agent" ? "ready" : "waiting_gate") : "pending");
-      }
-      this.stmt(
-        `INSERT INTO workflow_events
-         (instance_id, seq, kind, actor_kind, actor_id, created_at)
-         VALUES (?, 1, 'instance_created', ?, ?, ?)`,
-      ).run(input.instanceId, input.createdBy.kind, input.createdBy.id ?? null, input.now);
-      this.stmt("UPDATE multi_agent_runs SET updated_at=MAX(updated_at + 1, ?) WHERE id=?").run(input.now, input.runId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    return this.getWorkflowInstance(input.instanceId)!;
-  }
-
-  getWorkflowInstance(instanceId: string): WorkflowInstanceDetail | null {
-    const row = this.stmt("SELECT * FROM workflow_instances WHERE instance_id=?").get(instanceId) as unknown as WorkflowInstanceRow | undefined;
-    if (!row) return null;
-    const definition = this.getWorkflowDefinition(row.workflow_id, row.workflow_version);
-    if (!definition) throw new Error(`workflow definition ${row.workflow_id}@${row.workflow_version} is missing`);
-    const attempts = this.listWorkflowAttempts(instanceId, 501);
-    const events = this.listWorkflowEvents(instanceId, 1_001);
-    return {
-      ...this.workflowInstanceView(row),
-      definition,
-      attempts: attempts.slice(-500),
-      events: events.slice(-1_000),
-      ...(attempts.length > 500 ? { attemptsTruncated: true } : {}),
-      ...(events.length > 1_000 ? { eventsTruncated: true } : {}),
-    };
-  }
-
-  listWorkflowInstances(runId?: string, limit = 100): WorkflowInstanceView[] {
-    const rows = (runId
-      ? this.stmt("SELECT * FROM workflow_instances WHERE run_id=? ORDER BY created_at DESC, instance_id LIMIT ?").all(runId, limit)
-      : this.stmt("SELECT * FROM workflow_instances ORDER BY created_at DESC, instance_id LIMIT ?").all(limit)) as unknown as WorkflowInstanceRow[];
-    return rows.map((row) => this.workflowInstanceView(row));
-  }
-
-  private workflowInstanceView(row: WorkflowInstanceRow): WorkflowInstanceView {
-    const pruned = this.stmt("SELECT pruned_at,event_count,retention_days FROM workflow_event_prunes WHERE instance_id=?")
-      .get(row.instance_id) as { pruned_at: number; event_count: number; retention_days: number } | undefined;
-    const states = this.stmt("SELECT * FROM workflow_node_states WHERE instance_id=? ORDER BY rowid")
-      .all(row.instance_id) as unknown as WorkflowNodeStateRow[];
-    return {
-      instanceId: row.instance_id,
-      workflowId: row.workflow_id,
-      ...(pruned ? { eventHistoryPruned: { prunedAt: pruned.pruned_at, eventCount: pruned.event_count, retentionDays: pruned.retention_days } } : {}),
-      workflowVersion: row.workflow_version,
-      runId: row.run_id,
-      status: row.status,
-      transitionCount: row.transition_count,
-      nodeStates: states.map((state) => ({
-        nodeId: state.node_id, status: state.status, attemptCount: state.attempt_count,
-        ...(state.session_id ? { sessionId: state.session_id } : {}),
-        ...(state.started_at !== null ? { startedAt: state.started_at } : {}),
-        ...(state.completed_at !== null ? { completedAt: state.completed_at } : {}),
-        ...(state.error ? { error: state.error } : {}),
-        ...(state.ready_at !== null ? { readyAt: state.ready_at } : {}),
-        ...(state.outcome ? { outcome: state.outcome } : {}),
-      })),
-      createdBy: { kind: row.created_by_kind, ...(row.created_by_id ? { id: row.created_by_id } : {}) },
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      ...(row.completed_at !== null ? { completedAt: row.completed_at } : {}),
-    };
-  }
-
-  runMemberSessions(runId: string, agentId: string): SessionView[] {
-    const rows = this.stmt(
-      "SELECT session_id FROM multi_agent_run_members WHERE run_id=? AND agent_id=? ORDER BY rowid",
-    ).all(runId, agentId) as unknown as Array<{ session_id: string }>;
-    return rows.map((row) => this.getSession(row.session_id)).filter((session): session is SessionView => session !== null);
-  }
-
-  getWorkflowAttemptByDispatchKey(dispatchKey: string): WorkflowAttemptView | null {
-    const row = this.stmt("SELECT * FROM workflow_attempts WHERE dispatch_key=?").get(dispatchKey) as unknown as WorkflowAttemptRow | undefined;
-    return row ? this.workflowAttempt(row) : null;
-  }
-
-  getWorkflowAttempt(attemptId: string): WorkflowAttemptView | null {
-    const row = this.stmt("SELECT * FROM workflow_attempts WHERE attempt_id=?").get(attemptId) as unknown as WorkflowAttemptRow | undefined;
-    return row ? this.workflowAttempt(row) : null;
-  }
-
-  claimWorkflowAttempt(input: {
-    attemptId: string; instanceId: string; nodeId: string; dispatchKey: string; sessionId: string;
-    timeoutMs: number; maxTransitions: number; actor: WorkflowEventView["actor"]; now: number;
-  }): { attempt: WorkflowAttemptView; idempotent: boolean } {
-    const existing = this.getWorkflowAttemptByDispatchKey(input.dispatchKey);
-    if (existing) {
-      if (existing.instanceId !== input.instanceId || existing.nodeId !== input.nodeId) {
-        throw new Error("dispatch key is already bound to another workflow node");
-      }
-      return { attempt: existing, idempotent: true };
-    }
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const state = this.stmt(
-        "SELECT status, attempt_count, ready_at FROM workflow_node_states WHERE instance_id=? AND node_id=?",
-      ).get(input.instanceId, input.nodeId) as unknown as { status: string; attempt_count: number; ready_at: number | null } | undefined;
-      if (!state) throw new Error("workflow node not found");
-      if (state.status !== "ready") throw new Error(`workflow node is ${state.status}`);
-      if (state.ready_at !== null && state.ready_at > input.now) throw new Error(`workflow node retry is not ready until ${state.ready_at}`);
-      const instanceUpdate = this.stmt(
-        `UPDATE workflow_instances SET status='running', transition_count=transition_count+1,
-         updated_at=MAX(updated_at + 1, ?)
-         WHERE instance_id=? AND status NOT IN ('succeeded','failed','stopped') AND transition_count < ?`,
-      ).run(input.now, input.instanceId, input.maxTransitions);
-      if (Number(instanceUpdate.changes) !== 1) throw new Error("workflow transition limit reached or instance is terminal");
-      const attempt = state.attempt_count + 1;
-      const deadlineAt = input.now + input.timeoutMs;
-      this.stmt(
-        `UPDATE workflow_node_states SET status='running', attempt_count=?, session_id=?, started_at=?,
-         completed_at=NULL, error=NULL, ready_at=NULL, outcome=NULL WHERE instance_id=? AND node_id=?`,
-      ).run(attempt, input.sessionId, input.now, input.instanceId, input.nodeId);
-      this.stmt(
-        `INSERT INTO workflow_attempts
-         (attempt_id, instance_id, node_id, attempt, status, dispatch_key, session_id, started_at, deadline_at)
-         VALUES (?, ?, ?, ?, 'dispatching', ?, ?, ?, ?)`,
-      ).run(input.attemptId, input.instanceId, input.nodeId, attempt, input.dispatchKey, input.sessionId, input.now, deadlineAt);
-      this.insertWorkflowEvent({
-        instanceId: input.instanceId, kind: "attempt_started", nodeId: input.nodeId,
-        attemptId: input.attemptId, actor: input.actor, detail: { dispatchKey: input.dispatchKey }, createdAt: input.now,
-      });
-      this.stmt(
-        "UPDATE multi_agent_runs SET updated_at=MAX(updated_at + 1, ?) WHERE id=(SELECT run_id FROM workflow_instances WHERE instance_id=?)",
-      ).run(input.now, input.instanceId);
-      this.db.exec("COMMIT");
-      return { attempt: this.getWorkflowAttempt(input.attemptId)!, idempotent: false };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  setWorkflowAttemptStatus(
-    attemptId: string,
-    expected: WorkflowAttemptStatus[],
-    status: WorkflowAttemptStatus,
-    actor: WorkflowEventView["actor"] = { kind: "system", id: "workflow-runtime" },
-    now = Date.now(),
-  ): WorkflowAttemptView | null {
-    const placeholders = expected.map(() => "?").join(",");
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = this.stmt(`UPDATE workflow_attempts SET status=? WHERE attempt_id=? AND status IN (${placeholders})`)
-        .run(status, attemptId, ...expected);
-      if (Number(result.changes) !== 1) { this.db.exec("ROLLBACK"); return null; }
-      const attempt = this.getWorkflowAttempt(attemptId)!;
-      this.stmt("UPDATE workflow_instances SET updated_at=MAX(updated_at + 1, ?) WHERE instance_id=?")
-        .run(now, attempt.instanceId);
-      this.stmt(
-        "UPDATE multi_agent_runs SET updated_at=MAX(updated_at + 1, ?) WHERE id=(SELECT run_id FROM workflow_instances WHERE instance_id=?)",
-      ).run(now, attempt.instanceId);
-      this.insertWorkflowEvent({
-        instanceId: attempt.instanceId, kind: "attempt_status_changed", nodeId: attempt.nodeId,
-        attemptId, actor, detail: { status }, createdAt: now,
-      });
-      this.db.exec("COMMIT");
-      return attempt;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  finishWorkflowInstance(input: {
-    instanceId: string; status: Extract<WorkflowInstanceStatus, "failed" | "stopped">;
-    error: string; actor: WorkflowEventView["actor"]; now: number;
-  }): WorkflowInstanceDetail {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const changed = this.stmt(
-        `UPDATE workflow_instances SET status=?, updated_at=MAX(updated_at + 1, ?), completed_at=?
-         WHERE instance_id=? AND status NOT IN ('succeeded','failed','stopped')`,
-      ).run(input.status, input.now, input.now, input.instanceId);
-      if (Number(changed.changes) !== 1) throw new Error("workflow instance is terminal");
-      this.stmt(
-        `UPDATE workflow_node_states SET status=CASE WHEN status IN ('pending','ready','waiting_gate') THEN 'stopped' ELSE status END,
-         error=CASE WHEN status IN ('pending','ready','waiting_gate') THEN ? ELSE error END,
-         completed_at=CASE WHEN status IN ('pending','ready','waiting_gate') THEN ? ELSE completed_at END
-         WHERE instance_id=?`,
-      ).run(input.error, input.now, input.instanceId);
-      this.stmt(
-        `UPDATE workflow_attempts SET status='cancelled', completed_at=?, error=?
-         WHERE instance_id=? AND status IN ('dispatching','running','awaiting_output')`,
-      ).run(input.now, input.error, input.instanceId);
-      this.stmt(
-        `UPDATE workflow_node_states SET status='stopped', completed_at=?, error=?
-         WHERE instance_id=? AND status='running'`,
-      ).run(input.now, input.error, input.instanceId);
-      this.insertWorkflowEvent({
-        instanceId: input.instanceId, kind: "instance_status_changed", actor: input.actor,
-        detail: { status: input.status, error: input.error }, createdAt: input.now,
-      });
-      this.stmt(
-        "UPDATE multi_agent_runs SET updated_at=MAX(updated_at + 1, ?) WHERE id=(SELECT run_id FROM workflow_instances WHERE instance_id=?)",
-      ).run(input.now, input.instanceId);
-      this.db.exec("COMMIT");
-      return this.getWorkflowInstance(input.instanceId)!;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  activeWorkflowAttemptsForSession(sessionId: string): WorkflowAttemptView[] {
-    const rows = this.stmt(
-      "SELECT * FROM workflow_attempts WHERE session_id=? AND status IN ('dispatching','running','awaiting_output') ORDER BY started_at, attempt_id",
-    ).all(sessionId) as unknown as WorkflowAttemptRow[];
-    return rows.map((row) => this.workflowAttempt(row));
-  }
-
   /** True while a durable automation execution owns this session's command lifecycle. Steering
    * around that outbox would bypass its ordering, receipt, and failure semantics. */
   hasActiveAutomationCommandForSession(sessionId: string): boolean {
@@ -33680,251 +33258,22 @@ export class ControlPlaneDb {
     ).get(sessionId));
   }
 
-  activeWorkflowAttempts(deadlineAtOrBefore?: number): WorkflowAttemptView[] {
-    const rows = (deadlineAtOrBefore === undefined
-      ? this.stmt("SELECT * FROM workflow_attempts WHERE status IN ('dispatching','running','awaiting_output') ORDER BY started_at, attempt_id").all()
-      : this.stmt("SELECT * FROM workflow_attempts WHERE status IN ('dispatching','running','awaiting_output') AND deadline_at<=? ORDER BY deadline_at, attempt_id").all(deadlineAtOrBefore)) as unknown as WorkflowAttemptRow[];
-    return rows.map((row) => this.workflowAttempt(row));
-  }
-
-  finishWorkflowAttempt(input: {
-    attemptId: string; status: Extract<WorkflowAttemptStatus, "succeeded" | "failed" | "timed_out" | "cancelled">;
-    outcome: WorkflowNodeOutcome; outputs?: Record<string, string>;
-    retryAt?: number; nextNodes?: Array<{ nodeId: string; kind: "agent" | "human_gate" | "policy_gate" }>;
-    instanceStatus?: WorkflowInstanceStatus; error?: string;
-    actor: WorkflowEventView["actor"]; now: number;
-  }): WorkflowInstanceDetail {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const attempt = this.stmt("SELECT * FROM workflow_attempts WHERE attempt_id=?").get(input.attemptId) as unknown as WorkflowAttemptRow | undefined;
-      if (!attempt) throw new Error("workflow attempt not found");
-      if (!["dispatching", "running", "awaiting_output"].includes(attempt.status)) throw new Error(`workflow attempt is ${attempt.status}`);
-      this.stmt("UPDATE workflow_attempts SET status=?, completed_at=?, error=? WHERE attempt_id=?")
-        .run(input.status, input.now, input.error ?? null, input.attemptId);
-      for (const [contractName, artifactId] of Object.entries(input.outputs ?? {})) {
-        this.stmt(
-          "INSERT INTO workflow_attempt_artifacts (attempt_id, contract_name, artifact_id) VALUES (?, ?, ?)",
-        ).run(input.attemptId, contractName, artifactId);
-      }
-      const retry = input.retryAt !== undefined;
-      this.stmt(
-        `UPDATE workflow_node_states SET status=?, completed_at=?, error=?, ready_at=?, outcome=?
-         WHERE instance_id=? AND node_id=?`,
-      ).run(retry ? "ready" : input.status === "succeeded" ? "succeeded" : "failed",
-        retry ? null : input.now, input.error ?? null, input.retryAt ?? null, input.outcome,
-        attempt.instance_id, attempt.node_id);
-      for (const next of input.nextNodes ?? []) {
-        this.stmt(
-          `UPDATE workflow_node_states SET status=?, completed_at=NULL, error=NULL, ready_at=NULL, outcome=NULL
-           WHERE instance_id=? AND node_id=? AND status IN ('pending','succeeded','failed')`,
-        ).run(next.kind === "agent" ? "ready" : "waiting_gate", attempt.instance_id, next.nodeId);
-      }
-      this.stmt(
-        `UPDATE workflow_instances SET status=COALESCE(?, status), updated_at=MAX(updated_at + 1, ?),
-         completed_at=CASE WHEN ? IN ('succeeded','failed','stopped') THEN ? ELSE completed_at END
-         WHERE instance_id=?`,
-      ).run(input.instanceStatus ?? null, input.now, input.instanceStatus ?? null, input.now, attempt.instance_id);
-      if (input.instanceStatus && ["succeeded", "failed", "stopped"].includes(input.instanceStatus)) {
-        this.stmt(
-          `UPDATE workflow_attempts SET status='cancelled', completed_at=?, error='workflow reached a terminal stop condition'
-           WHERE instance_id=? AND attempt_id<>? AND status IN ('dispatching','running','awaiting_output')`,
-        ).run(input.now, attempt.instance_id, attempt.attempt_id);
-        this.stmt(
-          `UPDATE workflow_node_states SET status='stopped', completed_at=?, error='workflow reached a terminal stop condition'
-           WHERE instance_id=? AND node_id<>? AND status IN ('pending','ready','running','waiting_gate')`,
-        ).run(input.now, attempt.instance_id, attempt.node_id);
-      }
-      this.insertWorkflowEvent({
-        instanceId: attempt.instance_id, kind: "attempt_finished", nodeId: attempt.node_id,
-        attemptId: attempt.attempt_id, actor: input.actor,
-        detail: { status: input.status, outcome: input.outcome, retry: retry }, createdAt: input.now,
-      });
-      this.stmt(
-        "UPDATE multi_agent_runs SET updated_at=MAX(updated_at + 1, ?) WHERE id=(SELECT run_id FROM workflow_instances WHERE instance_id=?)",
-      ).run(input.now, attempt.instance_id);
-      this.db.exec("COMMIT");
-      return this.getWorkflowInstance(attempt.instance_id)!;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  resolveWorkflowGateState(input: {
-    instanceId: string; nodeId: string; outcome: Extract<WorkflowNodeOutcome, "success" | "failure">;
-    nextNodes: Array<{ nodeId: string; kind: "agent" | "human_gate" | "policy_gate" }>;
-    instanceStatus?: WorkflowInstanceStatus; maxTransitions: number; actor: WorkflowEventView["actor"]; now: number;
-  }): WorkflowInstanceDetail {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const changed = this.stmt(
-        `UPDATE workflow_node_states SET status=?, outcome=?, completed_at=?
-         WHERE instance_id=? AND node_id=? AND status='waiting_gate'`,
-      ).run(input.outcome === "success" ? "succeeded" : "failed", input.outcome, input.now, input.instanceId, input.nodeId);
-      if (Number(changed.changes) !== 1) throw new Error("workflow gate is not waiting");
-      const transitioned = this.stmt(
-        `UPDATE workflow_instances SET transition_count=transition_count+1
-         WHERE instance_id=? AND status NOT IN ('succeeded','failed','stopped') AND transition_count < ?`,
-      ).run(input.instanceId, input.maxTransitions);
-      if (Number(transitioned.changes) !== 1) throw new Error("workflow transition limit reached or instance is terminal");
-      for (const next of input.nextNodes) {
-        this.stmt(
-          `UPDATE workflow_node_states SET status=?, completed_at=NULL, error=NULL, ready_at=NULL, outcome=NULL
-           WHERE instance_id=? AND node_id=? AND status IN ('pending','succeeded','failed')`,
-        ).run(next.kind === "agent" ? "ready" : "waiting_gate", input.instanceId, next.nodeId);
-      }
-      this.stmt(
-        `UPDATE workflow_instances SET status=COALESCE(?, 'running'), updated_at=MAX(updated_at + 1, ?),
-         completed_at=CASE WHEN ? IN ('succeeded','failed','stopped') THEN ? ELSE completed_at END
-         WHERE instance_id=?`,
-      ).run(input.instanceStatus ?? null, input.now, input.instanceStatus ?? null, input.now, input.instanceId);
-      if (input.instanceStatus && ["succeeded", "failed", "stopped"].includes(input.instanceStatus)) {
-        this.stmt(
-          `UPDATE workflow_attempts SET status='cancelled', completed_at=?, error='workflow reached a terminal gate condition'
-           WHERE instance_id=? AND status IN ('dispatching','running','awaiting_output')`,
-        ).run(input.now, input.instanceId);
-        this.stmt(
-          `UPDATE workflow_node_states SET status='stopped', completed_at=?, error='workflow reached a terminal gate condition'
-           WHERE instance_id=? AND node_id<>? AND status IN ('pending','ready','running','waiting_gate')`,
-        ).run(input.now, input.instanceId, input.nodeId);
-      }
-      this.insertWorkflowEvent({
-        instanceId: input.instanceId, kind: "gate_resolved", nodeId: input.nodeId,
-        actor: input.actor, detail: { outcome: input.outcome }, createdAt: input.now,
-      });
-      this.stmt(
-        "UPDATE multi_agent_runs SET updated_at=MAX(updated_at + 1, ?) WHERE id=(SELECT run_id FROM workflow_instances WHERE instance_id=?)",
-      ).run(input.now, input.instanceId);
-      this.db.exec("COMMIT");
-      return this.getWorkflowInstance(input.instanceId)!;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  workflowAttemptOutputs(attemptId: string): Record<string, WorkflowArtifact> {
-    const rows = this.stmt(
-      `SELECT wa.contract_name, a.* FROM workflow_attempt_artifacts wa
-       JOIN artifacts a ON a.id=wa.artifact_id WHERE wa.attempt_id=? ORDER BY wa.contract_name`,
-    ).all(attemptId) as unknown as Array<WorkflowArtifactRow & { contract_name: string }>;
-    return Object.fromEntries(rows.map((row) => [row.contract_name, this.workflowArtifact(row, true) as WorkflowArtifact]));
-  }
-
-  latestWorkflowOutputs(instanceId: string): Record<string, WorkflowArtifact> {
-    const rows = this.stmt(
-      `SELECT * FROM (
-         SELECT wa.contract_name, a.*, ROW_NUMBER() OVER (
-           PARTITION BY wa.contract_name ORDER BY att.completed_at DESC, att.attempt_id DESC
-         ) AS output_rank
-         FROM workflow_attempt_artifacts wa
-         JOIN workflow_attempts att ON att.attempt_id=wa.attempt_id AND att.status='succeeded'
-         JOIN artifacts a ON a.id=wa.artifact_id
-         WHERE att.instance_id=?
-       ) WHERE output_rank=1 LIMIT 1024`,
-    ).all(instanceId) as unknown as Array<WorkflowArtifactRow & { contract_name: string }>;
-    return Object.fromEntries(rows.map((row) => [row.contract_name, this.workflowArtifact(row, true) as WorkflowArtifact]));
-  }
-
-  /** Metadata-first workflow inputs so binary outputs never materialize through a base64 string. */
-  latestWorkflowOutputViews(instanceId: string): Record<string, WorkflowArtifactView> {
-    const rows = this.stmt(
-      `SELECT * FROM (
-         SELECT wa.contract_name, a.*, ROW_NUMBER() OVER (
-           PARTITION BY wa.contract_name ORDER BY att.completed_at DESC, att.attempt_id DESC
-         ) AS output_rank
-         FROM workflow_attempt_artifacts wa
-         JOIN workflow_attempts att ON att.attempt_id=wa.attempt_id AND att.status='succeeded'
-         JOIN artifacts a ON a.id=wa.artifact_id
-         WHERE att.instance_id=?
-       ) WHERE output_rank=1 LIMIT 1024`,
-    ).all(instanceId) as unknown as Array<WorkflowArtifactRow & { contract_name: string }>;
-    return Object.fromEntries(rows.map((row) => [row.contract_name, this.workflowArtifact(row, false) as WorkflowArtifactView]));
-  }
-
-  createWorkflowAttempt(attempt: WorkflowAttemptView): WorkflowAttemptView {
-    this.stmt(
-      `INSERT INTO workflow_attempts
-       (attempt_id, instance_id, node_id, attempt, status, dispatch_key, session_id, started_at, deadline_at, completed_at, error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(attempt.attemptId, attempt.instanceId, attempt.nodeId, attempt.attempt, attempt.status,
-      attempt.dispatchKey, attempt.sessionId ?? null, attempt.startedAt, attempt.deadlineAt, attempt.completedAt ?? null, attempt.error ?? null);
-    return attempt;
-  }
-
-  listWorkflowAttempts(instanceId: string, limit = 501): WorkflowAttemptView[] {
-    const rows = this.stmt(
-      `SELECT * FROM (SELECT * FROM workflow_attempts WHERE instance_id=? ORDER BY started_at DESC, attempt_id DESC LIMIT ?)
-       ORDER BY started_at, attempt_id`,
-    ).all(instanceId, limit) as unknown as WorkflowAttemptRow[];
-    return rows.map((row) => this.workflowAttempt(row));
-  }
-
-  private workflowAttempt(row: WorkflowAttemptRow): WorkflowAttemptView {
-    return {
-      attemptId: row.attempt_id, instanceId: row.instance_id, nodeId: row.node_id, attempt: row.attempt,
-      status: row.status, dispatchKey: row.dispatch_key,
-      ...(row.session_id ? { sessionId: row.session_id } : {}), startedAt: row.started_at, deadlineAt: row.deadline_at,
-      ...(row.completed_at !== null ? { completedAt: row.completed_at } : {}),
-      ...(row.error ? { error: row.error } : {}),
-    };
-  }
-
-  appendWorkflowEvent(event: Omit<WorkflowEventView, "eventId" | "seq">): WorkflowEventView {
-    this.db.exec("BEGIN");
-    try {
-      const inserted = this.insertWorkflowEvent(event);
-      this.db.exec("COMMIT");
-      return inserted;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  private insertWorkflowEvent(event: Omit<WorkflowEventView, "eventId" | "seq">): WorkflowEventView {
-    const seq = (this.stmt(`SELECT MAX(
-      COALESCE((SELECT MAX(seq) FROM workflow_events WHERE instance_id=?),0),
-      COALESCE((SELECT through_seq FROM workflow_event_prunes WHERE instance_id=?),0)) AS seq`)
-      .get(event.instanceId, event.instanceId) as { seq: number }).seq + 1;
-    const info = this.stmt(
-      `INSERT INTO workflow_events
-       (instance_id, seq, kind, node_id, attempt_id, actor_kind, actor_id, detail, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(event.instanceId, seq, event.kind, event.nodeId ?? null, event.attemptId ?? null,
-      event.actor.kind, event.actor.id ?? null, event.detail ? JSON.stringify(event.detail) : null, event.createdAt);
-    return { ...event, eventId: Number(info.lastInsertRowid), seq };
-  }
-
-  listWorkflowEvents(instanceId: string, limit = 1_001): WorkflowEventView[] {
-    const rows = this.stmt(
-      `SELECT * FROM (SELECT * FROM workflow_events WHERE instance_id=? ORDER BY seq DESC LIMIT ?) ORDER BY seq`,
-    ).all(instanceId, limit) as unknown as WorkflowEventRow[];
-    return rows.map((row) => ({
-      eventId: row.event_id, instanceId: row.instance_id, seq: row.seq, kind: row.kind,
-      ...(row.node_id ? { nodeId: row.node_id } : {}), ...(row.attempt_id ? { attemptId: row.attempt_id } : {}),
-      actor: { kind: row.actor_kind, ...(row.actor_id ? { id: row.actor_id } : {}) },
-      ...(row.detail ? { detail: JSON.parse(row.detail) as WorkflowEventView["detail"] } : {}),
-      createdAt: row.created_at,
-    }));
-  }
-
-  createWorkflowArtifact(artifact: WorkflowArtifact): WorkflowArtifact {
-    const bytes = workflowArtifactBytes(artifact);
-    this.createWorkflowArtifactBytes(artifact, bytes);
+  createArtifact(artifact: Artifact): Artifact {
+    const bytes = artifactBytes(artifact);
+    this.createArtifactBytes(artifact, bytes);
     return artifact;
   }
 
   /** Persist already-validated bytes without manufacturing a base64 copy in the control plane. */
-  createWorkflowArtifactBytes(
-    artifact: WorkflowArtifactView,
+  createArtifactBytes(
+    artifact: ArtifactView,
     bytes: Buffer,
     options: { preparedPromptImageExpiresAt?: number } = {},
-  ): WorkflowArtifactView {
+  ): ArtifactView {
     if (!Number.isSafeInteger(artifact.sizeBytes) || artifact.sizeBytes < 0 ||
         artifact.sizeBytes > MAX_WORKFLOW_ARTIFACT_BLOB_BYTES || bytes.byteLength !== artifact.sizeBytes ||
         artifactBlobSha256(bytes) !== artifact.sha256) {
-      throw new Error("workflow artifact bytes do not match metadata");
+      throw new Error("artifact bytes do not match metadata");
     }
     assertArtifactBlobKey(artifact.sha256);
     this.stmt("INSERT OR IGNORE INTO artifact_blob_pending (blob_key, created_at) VALUES (?, ?)")
@@ -33978,7 +33327,7 @@ export class ControlPlaneDb {
     }
   }
 
-  private insertArtifactRow(artifact: WorkflowArtifactView): void {
+  private insertArtifactRow(artifact: ArtifactView): void {
     this.stmt(
       `INSERT INTO artifacts
        (id, run_id, session_id, kind, name, mime_type, encoding, data, blob_key, size_bytes, sha256,
@@ -34036,7 +33385,7 @@ export class ControlPlaneDb {
    * stageArtifactBlob made durable. Like the event row that follows, the chunks are replayable
    * from the runner, so the commit is relaxed: if an OS crash rolls it back, the durable pending
    * row lets startup recovery remove the blob. */
-  createStagedEventPayloadArtifacts(artifacts: readonly WorkflowArtifactView[]): void {
+  createStagedEventPayloadArtifacts(artifacts: readonly ArtifactView[]): void {
     for (const artifact of artifacts) {
       if (!this.stagingArtifactBlobs.has(artifact.sha256) || artifact.runId ||
           artifact.metadata?.purpose !== "session_event_payload" ||
@@ -34081,26 +33430,26 @@ export class ControlPlaneDb {
     name: string,
     mimeType: string,
     actor: GovernanceActor,
-  ): WorkflowArtifactView | null {
+  ): ArtifactView | null {
     const row = this.stmt(
       `SELECT id FROM artifacts
        WHERE session_id=? AND kind='screenshot' AND sha256=? AND name=? AND mime_type=?
          AND created_by_kind=? AND created_by_id IS ?
        ORDER BY created_at, id LIMIT 1`,
     ).get(sessionId, sha256, name, mimeType, actor.kind, actor.id ?? null) as unknown as { id: string } | undefined;
-    return row ? this.workflowArtifactExportPreflight(row.id)?.artifact ?? null : null;
+    return row ? this.artifactExportPreflight(row.id)?.artifact ?? null : null;
   }
 
   findAttachedVideo(
     sessionId: string, sha256: string, name: string, mimeType: string, actor: GovernanceActor,
-  ): WorkflowArtifactView | null {
+  ): ArtifactView | null {
     const row = this.stmt(
       `SELECT id FROM artifacts
        WHERE session_id=? AND kind='video' AND sha256=? AND name=? AND mime_type=?
          AND created_by_kind=? AND created_by_id IS ?
        ORDER BY created_at, id LIMIT 1`,
     ).get(sessionId, sha256, name, mimeType, actor.kind, actor.id ?? null) as { id: string } | undefined;
-    return row ? this.workflowArtifactExportPreflight(row.id)?.artifact ?? null : null;
+    return row ? this.artifactExportPreflight(row.id)?.artifact ?? null : null;
   }
 
   hasAttachmentEvent(sessionId: string, artifactId: string): boolean {
@@ -34119,14 +33468,13 @@ export class ControlPlaneDb {
   }
 
   /** The explicit 180-day retention policy applies to file-attached evidence only. Prompt images,
-   * event payload chunks, and workflow outputs retain their separate reachability/lifecycle rules. */
+   * and event payload chunks retain their separate reachability/lifecycle rules. */
   pruneExpiredSessionAttachments(cutoff: number, limit = 1_000): number {
     const bounded = Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 10_000)) : 1_000;
     const ids = this.stmt(
       `SELECT id,kind,session_id FROM artifacts WHERE session_id IS NOT NULL AND run_id IS NULL
          AND kind IN ('screenshot','video') AND created_at < ?
          AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_attachment'
-         AND NOT EXISTS (SELECT 1 FROM workflow_attempt_artifacts WHERE artifact_id=artifacts.id)
        ORDER BY created_at,id LIMIT ?`,
     ).all(cutoff, bounded) as Array<{ id: string; kind: string; session_id: string }>;
     if (!ids.length) return 0;
@@ -34147,7 +33495,7 @@ export class ControlPlaneDb {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    this.collectWorkflowArtifactBlobs();
+    this.collectArtifactBlobs();
     return ids.length;
   }
 
@@ -34167,7 +33515,7 @@ export class ControlPlaneDb {
     this.atomic(() => {
       for (const row of rows) this.stmt("DELETE FROM artifacts WHERE id=?").run(row.id);
     });
-    this.collectWorkflowArtifactBlobs();
+    this.collectArtifactBlobs();
     return rows.length;
   }
 
@@ -34183,13 +33531,13 @@ export class ControlPlaneDb {
   }
 
   /** Exact verified bytes for authenticated raw delivery. */
-  readWorkflowArtifactBytes(artifactId: string): Buffer | null {
+  readArtifactBytes(artifactId: string): Buffer | null {
     const row = this.stmt(
       `SELECT id, encoding, data, blob_key, size_bytes, sha256 FROM artifacts WHERE id=?`,
-    ).get(artifactId) as unknown as Pick<WorkflowArtifactRow, "id" | "encoding" | "data" | "blob_key" | "size_bytes" | "sha256"> | undefined;
+    ).get(artifactId) as unknown as Pick<ArtifactRow, "id" | "encoding" | "data" | "blob_key" | "size_bytes" | "sha256"> | undefined;
     if (!row) return null;
     if (!row.blob_key) {
-      return workflowArtifactBytes({
+      return artifactBytes({
         encoding: row.encoding,
         data: row.data ?? "",
         sizeBytes: row.size_bytes,
@@ -34199,12 +33547,12 @@ export class ControlPlaneDb {
     assertArtifactBlobKey(row.blob_key);
     if (row.blob_key !== row.sha256 || !Number.isSafeInteger(row.size_bytes) || row.size_bytes < 0 ||
         row.size_bytes > MAX_WORKFLOW_ARTIFACT_BLOB_BYTES) {
-      throw new Error("workflow artifact blob metadata is invalid");
+      throw new Error("artifact blob metadata is invalid");
     }
     return this.artifactBlobs.read(row.blob_key, row.size_bytes);
   }
 
-  deleteWorkflowArtifact(artifactId: string): boolean {
+  deleteArtifact(artifactId: string): boolean {
     const nested = Boolean((this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction);
     const deleted = this.atomic(() => {
       const source = this.stmt("SELECT kind,session_id FROM artifacts WHERE id=?").get(artifactId) as
@@ -34223,7 +33571,7 @@ export class ControlPlaneDb {
     });
     // An outer transaction may still roll back; collecting blobs before it commits would delete
     // bytes that the rollback restores. Normal callers collect immediately after the atomic delete.
-    if (deleted && !nested) this.collectWorkflowArtifactBlobs();
+    if (deleted && !nested) this.collectArtifactBlobs();
     return deleted;
   }
 
@@ -34233,13 +33581,13 @@ export class ControlPlaneDb {
     sizeBytes: number,
     sha256: string,
     renewUntil: number,
-  ): WorkflowArtifactView | null {
+  ): ArtifactView | null {
     const row = this.stmt(
       `SELECT artifact_id FROM prepared_prompt_image_artifacts
        WHERE session_id=? AND mime_type=? AND size_bytes=? AND sha256=?`,
     ).get(sessionId, mimeType, sizeBytes, sha256) as { artifact_id: string } | undefined;
     if (!row) return null;
-    const artifact = this.getWorkflowArtifact(row.artifact_id);
+    const artifact = this.getArtifact(row.artifact_id);
     if (!artifact || artifact.sessionId !== sessionId || artifact.kind !== "screenshot" ||
         artifact.encoding !== "base64" || artifact.mimeType !== mimeType ||
         artifact.sizeBytes !== sizeBytes || artifact.sha256 !== sha256) {
@@ -34256,7 +33604,7 @@ export class ControlPlaneDb {
     for (const artifactId of new Set(artifactIds)) remove.run(artifactId);
   }
 
-  /** Expire only uploads that never gained durable attempt, event, or workflow reachability. */
+  /** Expire only uploads that never gained durable attempt or event reachability. */
   collectExpiredPreparedPromptImages(now: number, limit = 1_000): number {
     const bounded = Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 10_000)) : 1_000;
     const rows = this.stmt(
@@ -34272,14 +33620,13 @@ export class ControlPlaneDb {
           `SELECT 1 WHERE
              EXISTS (SELECT 1 FROM session_event_artifacts WHERE artifact_id=?) OR
              EXISTS (SELECT 1 FROM session_steering_attempt_artifacts WHERE artifact_id=?) OR
-             EXISTS (SELECT 1 FROM workflow_attempt_artifacts WHERE artifact_id=?) OR
              EXISTS (
                SELECT 1 FROM session_prompt_commands command,
                  json_each(CASE WHEN json_valid(command.payload_json) THEN command.payload_json ELSE '{}' END, '$.images') image
                WHERE command.dismissed_at IS NULL
                  AND json_extract(image.value, '$.artifactId')=?
              )`,
-        ).get(row.artifact_id, row.artifact_id, row.artifact_id, row.artifact_id);
+        ).get(row.artifact_id, row.artifact_id, row.artifact_id);
         if (referenced) {
           this.stmt("DELETE FROM prepared_prompt_image_artifacts WHERE artifact_id=?").run(row.artifact_id);
         } else {
@@ -34291,30 +33638,30 @@ export class ControlPlaneDb {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    if (deleted) this.collectWorkflowArtifactBlobs();
+    if (deleted) this.collectArtifactBlobs();
     return deleted;
   }
 
-  getWorkflowArtifact(artifactId: string): WorkflowArtifact | null {
+  getArtifact(artifactId: string): Artifact | null {
     const row = this.stmt(
       `SELECT id, run_id, session_id, kind, name, mime_type, encoding, blob_key, size_bytes, sha256,
               created_by_kind, created_by_id, metadata, created_at,
               LENGTH(CAST(data AS BLOB)) AS stored_data_bytes
        FROM artifacts WHERE id=?`,
-    ).get(artifactId) as unknown as (WorkflowArtifactRow & { stored_data_bytes: number }) | undefined;
+    ).get(artifactId) as unknown as (ArtifactRow & { stored_data_bytes: number }) | undefined;
     if (!row) return null;
     if (!row.blob_key) {
       if (!Number.isSafeInteger(row.stored_data_bytes) || row.stored_data_bytes < 0 ||
           row.stored_data_bytes > MAX_WORKFLOW_ARTIFACT_INLINE_BYTES) {
-        throw new Error("workflow artifact inline body is invalid");
+        throw new Error("artifact inline body is invalid");
       }
       const body = this.stmt("SELECT data FROM artifacts WHERE id=?").get(artifactId) as unknown as { data: string } | undefined;
       row.data = body?.data ?? "";
     }
-    return this.workflowArtifact(row, true) as WorkflowArtifact;
+    return this.artifact(row, true) as Artifact;
   }
 
-  workflowArtifactScope(artifactId: string): { runId?: string; sessionId?: string } | null {
+  artifactScope(artifactId: string): { runId?: string; sessionId?: string } | null {
     const row = this.stmt("SELECT run_id, session_id FROM artifacts WHERE id=?").get(artifactId) as unknown as
       { run_id: string | null; session_id: string | null } | undefined;
     return row ? {
@@ -34325,8 +33672,8 @@ export class ControlPlaneDb {
 
   /** Metadata and materialized-byte size only, so export authorization and corruption bounds run
    * before the sidecar store copies artifact bytes into the Node process. */
-  workflowArtifactExportPreflight(artifactId: string): {
-    artifact: WorkflowArtifactView;
+  artifactExportPreflight(artifactId: string): {
+    artifact: ArtifactView;
     storedDataBytes: number;
   } | null {
     const row = this.stmt(
@@ -34334,37 +33681,27 @@ export class ControlPlaneDb {
               created_by_kind, created_by_id, metadata, created_at,
               CASE WHEN blob_key IS NULL THEN LENGTH(CAST(data AS BLOB)) ELSE size_bytes END AS stored_data_bytes
        FROM artifacts WHERE id=?`,
-    ).get(artifactId) as unknown as (WorkflowArtifactRow & { stored_data_bytes: number }) | undefined;
+    ).get(artifactId) as unknown as (ArtifactRow & { stored_data_bytes: number }) | undefined;
     if (row?.blob_key) {
       assertArtifactBlobKey(row.blob_key);
-      if (row.blob_key !== row.sha256) throw new Error("workflow artifact blob key does not match metadata");
+      if (row.blob_key !== row.sha256) throw new Error("artifact blob key does not match metadata");
     }
     return row
-      ? { artifact: this.workflowArtifact(row, false), storedDataBytes: Number(row.stored_data_bytes) }
+      ? { artifact: this.artifact(row, false), storedDataBytes: Number(row.stored_data_bytes) }
       : null;
   }
 
-  listRunWorkflowArtifacts(runId: string, after: { createdAt: number; artifactId: string } | null = null, limit = 51): WorkflowArtifactView[] {
-    const rows = this.stmt(
-      `SELECT id, run_id, session_id, kind, name, mime_type, encoding, size_bytes, sha256,
-              created_by_kind, created_by_id, metadata, created_at
-       FROM artifacts WHERE run_id=? AND (? IS NULL OR created_at > ? OR (created_at = ? AND id > ?))
-       ORDER BY created_at, id LIMIT ?`,
-    ).all(runId, after?.artifactId ?? null, after?.createdAt ?? 0, after?.createdAt ?? 0, after?.artifactId ?? "", limit) as unknown as WorkflowArtifactRow[];
-    return rows.map((row) => this.workflowArtifact(row, false));
-  }
-
-  listSessionWorkflowArtifacts(sessionId: string, after: { createdAt: number; artifactId: string } | null = null, limit = 51): WorkflowArtifactView[] {
+  listSessionArtifacts(sessionId: string, after: { createdAt: number; artifactId: string } | null = null, limit = 51): ArtifactView[] {
     const rows = this.stmt(
       `SELECT id, run_id, session_id, kind, name, mime_type, encoding, size_bytes, sha256,
               created_by_kind, created_by_id, metadata, created_at
        FROM artifacts WHERE session_id=? AND (? IS NULL OR created_at > ? OR (created_at = ? AND id > ?))
        ORDER BY created_at, id LIMIT ?`,
-    ).all(sessionId, after?.artifactId ?? null, after?.createdAt ?? 0, after?.createdAt ?? 0, after?.artifactId ?? "", limit) as unknown as WorkflowArtifactRow[];
-    return rows.map((row) => this.workflowArtifact(row, false));
+    ).all(sessionId, after?.artifactId ?? null, after?.createdAt ?? 0, after?.createdAt ?? 0, after?.artifactId ?? "", limit) as unknown as ArtifactRow[];
+    return rows.map((row) => this.artifact(row, false));
   }
 
-  private workflowArtifact(row: WorkflowArtifactRow, includeData: boolean): WorkflowArtifactView | WorkflowArtifact {
+  private artifact(row: ArtifactRow, includeData: boolean): ArtifactView | Artifact {
     return {
       artifactId: row.id,
       ...(row.run_id ? { runId: row.run_id } : {}),
@@ -34376,16 +33713,16 @@ export class ControlPlaneDb {
       sizeBytes: row.size_bytes,
       sha256: row.sha256,
       createdBy: { kind: row.created_by_kind, ...(row.created_by_id ? { id: row.created_by_id } : {}) },
-      ...(row.metadata ? { metadata: JSON.parse(row.metadata) as WorkflowArtifactView["metadata"] } : {}),
+      ...(row.metadata ? { metadata: JSON.parse(row.metadata) as ArtifactView["metadata"] } : {}),
       createdAt: row.created_at,
-      ...(includeData ? { data: this.workflowArtifactData(row) } : {}),
+      ...(includeData ? { data: this.artifactData(row) } : {}),
     };
   }
 
-  private workflowArtifactData(row: WorkflowArtifactRow): string {
+  private artifactData(row: ArtifactRow): string {
     if (!row.blob_key) {
       const data = row.data ?? "";
-      workflowArtifactBytes({
+      artifactBytes({
         encoding: row.encoding,
         data,
         sizeBytes: row.size_bytes,
@@ -34394,9 +33731,9 @@ export class ControlPlaneDb {
       return data;
     }
     assertArtifactBlobKey(row.blob_key);
-    if (row.blob_key !== row.sha256) throw new Error("workflow artifact blob key does not match metadata");
+    if (row.blob_key !== row.sha256) throw new Error("artifact blob key does not match metadata");
     if (!Number.isSafeInteger(row.size_bytes) || row.size_bytes < 0 || row.size_bytes > MAX_WORKFLOW_ARTIFACT_BLOB_BYTES) {
-      throw new Error("workflow artifact blob size is invalid");
+      throw new Error("artifact blob size is invalid");
     }
     const bytes = this.artifactBlobs.read(row.blob_key, row.size_bytes);
     return row.encoding === "base64" ? bytes.toString("base64") : bytes.toString("utf8");
@@ -34422,14 +33759,14 @@ export class ControlPlaneDb {
     for (const row of rows) this.cleanupPendingArtifactBlob(row.blob_key);
   }
 
-  private migrateInlineWorkflowArtifacts(): void {
+  private migrateInlineArtifacts(): void {
     let cursor = "";
     while (true) {
       const preflight = this.stmt(
         `SELECT id, encoding, size_bytes, sha256, LENGTH(CAST(data AS BLOB)) AS stored_data_bytes
          FROM artifacts WHERE blob_key IS NULL AND id > ? ORDER BY id LIMIT 1`,
       ).get(cursor) as unknown as
-        | { id: string; encoding: WorkflowArtifact["encoding"]; size_bytes: number; sha256: string; stored_data_bytes: number }
+        | { id: string; encoding: Artifact["encoding"]; size_bytes: number; sha256: string; stored_data_bytes: number }
         | undefined;
       if (!preflight) return;
       cursor = preflight.id;
@@ -34440,7 +33777,7 @@ export class ControlPlaneDb {
       if (!body) continue;
       let bytes: Buffer;
       try {
-        bytes = workflowArtifactBytes({
+        bytes = artifactBytes({
           encoding: preflight.encoding,
           data: body.data,
           sizeBytes: preflight.size_bytes,
@@ -34559,7 +33896,7 @@ export class ControlPlaneDb {
         ORDER BY a.id LIMIT ?`,
     ).all(bounded) as unknown as Array<{ id: string }>;
     for (const row of rows) this.stmt("DELETE FROM artifacts WHERE id=?").run(row.id);
-    if (rows.length) this.collectWorkflowArtifactBlobs();
+    if (rows.length) this.collectArtifactBlobs();
     return rows.length;
   }
 
@@ -34633,7 +33970,7 @@ export class ControlPlaneDb {
       .run(deferred ? cursor : target);
   }
 
-  collectWorkflowArtifactBlobs(limit = 1_000): { examined: number; deleted: number; retained: number } {
+  collectArtifactBlobs(limit = 1_000): { examined: number; deleted: number; retained: number } {
     // An attached connection cannot see the owner's staging map, so it could unlink a blob the
     // owner is staging again. The queue stays for the owner's next pass (#3789).
     if (this.attached) return { examined: 0, deleted: 0, retained: 0 };
@@ -34666,7 +34003,7 @@ export class ControlPlaneDb {
   }
 
   /** Test/diagnostic-only location; null for an in-memory store. */
-  workflowArtifactBlobRoot(): string | null {
+  artifactBlobRoot(): string | null {
     return this.artifactBlobs.rootPath;
   }
 
@@ -35708,8 +35045,8 @@ export class ControlPlaneDb {
   }
 
   stageAutomationDeliveryPlan(input: StageAutomationDeliveryPlanInput): AutomationCommandRecord[] {
-    if (!input.commands.length && (!input.runId || !input.workflowInstanceId)) {
-      throw new Error("automation delivery plan requires a command or a control-plane-only workflow");
+    if (!input.commands.length) {
+      throw new Error("automation delivery plan requires a command");
     }
     JSON.parse(input.planJson);
     const ordinals = new Set<number>();
@@ -35736,10 +35073,10 @@ export class ControlPlaneDb {
     this.db.exec("SAVEPOINT automation_delivery_plan");
     try {
       const execution = this.stmt(
-        "SELECT automation_id, status, delivery_mode, delivery_plan_json, runner_id, session_id, run_id, workflow_instance_id FROM automation_executions WHERE execution_id=?",
+        "SELECT automation_id, status, delivery_mode, delivery_plan_json, runner_id, session_id FROM automation_executions WHERE execution_id=?",
       ).get(input.executionId) as unknown as {
         automation_id: string; status: AutomationExecutionStatus; delivery_mode: string; delivery_plan_json: string | null;
-        runner_id: string | null; session_id: string | null; run_id: string | null; workflow_instance_id: string | null;
+        runner_id: string | null; session_id: string | null;
       } | undefined;
       if (!execution) throw new Error("automation execution not found");
       if (execution.status !== "dispatching") throw new Error(`automation execution is ${execution.status}`);
@@ -35749,7 +35086,6 @@ export class ControlPlaneDb {
       if (execution.delivery_plan_json !== null || existing.length) {
         const samePlan = execution.delivery_mode === "receipted_v53" && execution.delivery_plan_json === input.planJson &&
           execution.runner_id === input.runnerId && execution.session_id === (input.sessionId ?? null) &&
-          execution.run_id === (input.runId ?? null) && execution.workflow_instance_id === (input.workflowInstanceId ?? null) &&
           existing.length === input.commands.length && existing.every((row, index) => {
             const command = [...input.commands].sort((a, b) => a.ordinal - b.ordinal || a.commandId.localeCompare(b.commandId))[index];
             return command && row.command_id === command.commandId && row.ordinal === command.ordinal &&
@@ -35768,9 +35104,8 @@ export class ControlPlaneDb {
       }
       const changed = this.stmt(
         `UPDATE automation_executions SET delivery_mode='receipted_v53', delivery_plan_json=?, runner_id=?,
-         session_id=?, run_id=?, workflow_instance_id=? WHERE execution_id=? AND status='dispatching'`,
-      ).run(input.planJson, input.runnerId, input.sessionId ?? null, input.runId ?? null,
-        input.workflowInstanceId ?? null, input.executionId);
+         session_id=? WHERE execution_id=? AND status='dispatching'`,
+      ).run(input.planJson, input.runnerId, input.sessionId ?? null, input.executionId);
       if (Number(changed.changes) !== 1) throw new Error("automation execution could not stage delivery");
       const insert = this.stmt(
         `INSERT INTO automation_commands
@@ -36240,8 +35575,6 @@ export class ControlPlaneDb {
     actor: GovernanceActor;
     runnerId?: string;
     sessionId?: string;
-    runId?: string;
-    workflowInstanceId?: string;
     error?: string;
     now: number;
   }): AutomationExecution | null {
@@ -36258,14 +35591,14 @@ export class ControlPlaneDb {
     try {
       const changed = this.stmt(
         `UPDATE automation_executions SET status=?, runner_id=COALESCE(?,runner_id),
-          session_id=COALESCE(?,session_id), run_id=COALESCE(?,run_id),
-          workflow_instance_id=COALESCE(?,workflow_instance_id), error=?, governance_pause_json=?,
+          session_id=COALESCE(?,session_id),
+          error=?, governance_pause_json=?,
           started_at=COALESCE(started_at,?), completed_at=?,
           spec_json=CASE WHEN ? IS NOT NULL AND trigger_delivery_json IS NOT NULL THEN NULL ELSE spec_json END
           WHERE execution_id=? AND ${allowed}`,
       ).run(
-        storedStatus, input.runnerId ?? null, input.sessionId ?? null, input.runId ?? null,
-        input.workflowInstanceId ?? null, input.error ?? null,
+        storedStatus, input.runnerId ?? null, input.sessionId ?? null,
+        input.error ?? null,
         input.governancePause ? JSON.stringify(input.governancePause) : null,
         started, terminal, terminal, input.executionId,
       );
@@ -36396,7 +35729,7 @@ export class ControlPlaneDb {
       executionId: row.execution_id, automationId: row.automation_id, idempotencyKey: row.idempotency_key,
       scheduledFor: row.scheduled_for, automationRevision: row.automation_revision,
       ...(row.spec_json ? { specSnapshot: JSON.parse(row.spec_json) as AutomationSpec } : {}),
-      actionKind: row.action_kind, status: row.governance_pause_json ? "ceiling_paused" : row.status,
+      actionKind: row.action_kind === "workflow_run" ? "retired" : row.action_kind, status: row.governance_pause_json ? "ceiling_paused" : row.status,
       ...(row.governance_pause_json ? {
         governancePause: JSON.parse(row.governance_pause_json) as AutomationExecution["governancePause"],
       } : {}),
@@ -36404,8 +35737,6 @@ export class ControlPlaneDb {
       actor: { kind: row.actor_kind, ...(row.actor_id ? { id: row.actor_id } : {}) },
       ...(row.runner_id ? { runnerId: row.runner_id } : {}),
       ...(row.session_id ? { sessionId: row.session_id } : {}),
-      ...(row.run_id ? { runId: row.run_id } : {}),
-      ...(row.workflow_instance_id ? { workflowInstanceId: row.workflow_instance_id } : {}),
       ...(row.trigger_delivery_json ? {
         triggerDelivery: JSON.parse(row.trigger_delivery_json) as AutomationTriggerDeliveryMetadata,
       } : {}),
@@ -36804,7 +36135,7 @@ export class ControlPlaneDb {
 
   close(): void {
     this.stopWalCheckpoints();
-    this.collectWorkflowArtifactBlobs();
+    this.collectArtifactBlobs();
     this.db.close();
   }
 }

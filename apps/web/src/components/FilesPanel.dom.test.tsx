@@ -167,7 +167,7 @@ const client = {
     if (searchAnswer) return searchAnswer(query);
     return { results: searchResults, truncated: searchTruncated, match: searchMatch, limit: searchLimit };
   },
-  sessionWorkflowArtifacts: async () => ({ artifacts: [] }),
+  sessionArtifacts: async () => ({ artifacts: [] }),
 } as unknown as ApiClient;
 
 function gitStatus(): GitStatus {

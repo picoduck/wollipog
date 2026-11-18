@@ -9,7 +9,7 @@ function harness(scope: { sessionId?: string; runId?: string } = { sessionId: "s
     verifyActiveRunnerCredential: (runnerId: string, hash: string) => active && runnerId === "r1" && hash === "valid-hash",
     getSession: (sessionId: string) => sessionId === "s1" ? { id: "s1", runnerId: "r1", runId: "run1" } : null,
     sessionForkIncludesAncestor: (_target: string, source: string) => forkAncestor && source === scope.sessionId,
-    workflowArtifactExportPreflight: () => ({
+    artifactExportPreflight: () => ({
       artifact: {
         artifactId: "art1", kind: "screenshot", encoding: "base64", mimeType: "image/png",
         name: "image", sizeBytes: bytes.length, sha256: "a".repeat(64), createdBy: { kind: "system" }, createdAt: 1,
@@ -17,7 +17,7 @@ function harness(scope: { sessionId?: string; runId?: string } = { sessionId: "s
       },
       storedDataBytes: bytes.length,
     }),
-    readWorkflowArtifactBytes: () => bytes,
+    readArtifactBytes: () => bytes,
   };
   return { db: db as never, bytes, revoke: () => { active = false; } };
 }

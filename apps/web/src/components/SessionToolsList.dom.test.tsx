@@ -51,12 +51,11 @@ const notHere = () => Promise.reject(new ApiError("This fixture has no control p
 const client = {
   ...api,
   childSessions: () => { registryReads += 1; return registry ? Promise.resolve(registry) : notHere(); },
-  workflowInstances: notHere,
   reviewFindings: async () => {
     findingReads += 1;
     return { findings: [], summary: summary() };
   },
-  sessionWorkflowArtifacts: async () => ({ artifacts: [] }),
+  sessionArtifacts: async () => ({ artifacts: [] }),
   gitDiff: async (_id: string, scope: GitDiffScope) => {
     diffScopes.push(scope);
     const none = { filesChanged: 0, insertions: 0, deletions: 0 };

@@ -46,7 +46,7 @@ export class AutomationCreationService {
     });
     const targets: AutomationRunnerTarget[] = [];
     const action = spec.action;
-    if (action.kind !== "prompt_session") action.request.useWorktree ??= action.kind === "workflow_run";
+    if (action.kind !== "prompt_session") action.request.useWorktree ??= false;
     if (action.kind === "prompt_session") {
       if (!this.db.canAccessSession(principal, action.sessionId)) return fail("Target session is outside this session's audience", 404);
       const target = this.db.getSession(action.sessionId);
@@ -57,13 +57,7 @@ export class AutomationCreationService {
       states.push({ sessionId: target.id, scope: this.db.sessionScope(target.id), model: target.model,
         effort: target.effort, permissionMode: target.permissionMode, worktreePath: target.worktreePath });
     } else {
-      if (action.kind === "workflow_run") {
-        const definition = this.db.getWorkflowDefinition(action.request.workflowId, action.request.workflowVersion);
-        if (!definition) return fail("Workflow definition is unavailable");
-        action.request.workflowVersion = definition.version;
-        states.push(definition);
-        targets.push({ ...action.request, installationBindings: action.installationBindings });
-      } else targets.push({ ...action.request, installationBindings: action.installationBindings });
+      targets.push({ ...action.request, installationBindings: action.installationBindings });
       if (spec.runnerPolicy.kind === "alternate") targets.push(...spec.runnerPolicy.targets);
     }
     for (const target of targets) {
@@ -89,17 +83,10 @@ export class AutomationCreationService {
       }
       states.push({ runnerId: target.runnerId, workspace: { id: workspace.id, path: workspace.path }, scope: this.db.workspaceScope(target.runnerId, target.workspaceId),
         locations: this.db.projectLocationsForWorkspace(target.runnerId, target.workspaceId).map(placementIdentity) });
-      const ids = action.kind === "workflow_run"
-        ? this.db.getWorkflowDefinition(action.request.workflowId, action.request.workflowVersion)!.nodes
-          .filter((node) => node.kind === "agent").map((node) => ({ key: `role:${node.agentId!}`,
-            id: target.agentBindings?.[node.agentId!] ?? action.request.agentBindings?.[node.agentId!] ?? node.agentId! }))
-        : [{ key: "agent", id: target.agentId! }];
-      if (action.kind === "workflow_run" && (target.orchestratorAgentId ?? action.request.orchestratorAgentId)) {
-        ids.push({ key: "orchestrator", id: target.orchestratorAgentId ?? action.request.orchestratorAgentId! });
-      }
-      for (const { key, id } of ids) {
-        const pin = target.installationBindings?.[key];
-        const agentId = pin ? this.db.resolveSavedHarnessInstallation(target.runnerId, pin) : id;
+      {
+        const key = "agent";
+        const pin = target.installationBindings?.agent;
+        const agentId = pin ? this.db.resolveSavedHarnessInstallation(target.runnerId, pin) : target.agentId;
         const agent = runner.agents.find((a) => a.id === agentId && a.available);
         if (!agentId || !agent || !this.db.getAgentLaunch(target.runnerId, agentId)) return fail("The selected agent installation is unavailable");
         const config: SessionConfig = { ...inheritedConfig, ...action.request.config };
@@ -121,7 +108,7 @@ export class AutomationCreationService {
           launchDigest: auditDigest({ command: launch.command, args: launch.args }) });
       }
     }
-    const capabilityError = automationCapabilityError(this.db, this.sessions, spec);
+    const capabilityError = automationCapabilityError(this.db, spec);
     if (capabilityError) return fail(capabilityError);
     if (spec.action.kind === "create_session" && spec.action.request.campaign) {
       const scope = this.db.sessionScope(requesterId);

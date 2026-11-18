@@ -99,4 +99,4 @@ The SQLite database and its backups contain active plaintext redacted projection
 capability protects access credentials, not snapshot contents. Protect and encrypt backups as
 sensitive data. Public capability sharing remains transcript-only. Authenticated raw workflow
 artifact downloads have their own explicitly unredacted boundary; see
-[raw workflow artifact exports](./artifact-exports.md).
+[raw session artifact exports](./artifact-exports.md).

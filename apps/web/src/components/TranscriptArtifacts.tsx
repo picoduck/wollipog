@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { SessionArtifactDirectory } from "../artifact-directory.js";
 import { referencedArtifactIds } from "../artifact-references.js";
@@ -23,7 +23,7 @@ export interface TranscriptArtifactSlot {
    */
   role: "preview" | "more" | "hidden";
   /** The turn's artifacts, each once, in transcript order: what the viewer steps through. */
-  group: readonly WorkflowArtifactView[];
+  group: readonly ArtifactView[];
   /** This row's artifact in `group`. */
   index: number;
 }
@@ -38,8 +38,8 @@ export const TRANSCRIPT_ARTIFACT_COPY = {
 
 interface TranscriptArtifactActions {
   /** Open the viewer on `group`, at `artifactId`; focus returns to `opener` on close. */
-  openViewer: (group: readonly WorkflowArtifactView[], artifactId: string, opener: HTMLElement | null) => void;
-  openInBrowser?: (artifact: WorkflowArtifactView) => void;
+  openViewer: (group: readonly ArtifactView[], artifactId: string, opener: HTMLElement | null) => void;
+  openInBrowser?: (artifact: ArtifactView) => void;
 }
 
 const TranscriptArtifactContext = createContext<TranscriptArtifactActions | null>(null);
@@ -56,19 +56,19 @@ export const useArtifactDirectory = (): SessionArtifactDirectory | null => useCo
  */
 export function TranscriptArtifactViewerProvider({ children, onOpenInBrowser, sessionId }: {
   children: ReactNode;
-  onOpenInBrowser?: (artifact: WorkflowArtifactView) => void;
+  onOpenInBrowser?: (artifact: ArtifactView) => void;
   /** The session whose artifact ids a reply's references resolve against (#3970); none resolves
    * without it, as in a public shared transcript. */
   sessionId?: string;
 }) {
   const api = useApi();
   const directory = useMemo(
-    () => sessionId ? new SessionArtifactDirectory(sessionId, api.sessionWorkflowArtifacts) : null,
+    () => sessionId ? new SessionArtifactDirectory(sessionId, api.sessionArtifacts) : null,
     [api, sessionId],
   );
-  const [viewer, setViewer] = useState<{ group: readonly WorkflowArtifactView[]; artifactId: string } | null>(null);
+  const [viewer, setViewer] = useState<{ group: readonly ArtifactView[]; artifactId: string } | null>(null);
   const openerRef = useRef<HTMLElement | null>(null);
-  const openViewer = useCallback((group: readonly WorkflowArtifactView[], artifactId: string, opener: HTMLElement | null) => {
+  const openViewer = useCallback((group: readonly ArtifactView[], artifactId: string, opener: HTMLElement | null) => {
     openerRef.current = opener;
     setViewer({ group, artifactId });
   }, []);
@@ -116,7 +116,7 @@ function useNearViewport(enabled: boolean): [(element: HTMLElement | null) => vo
  * Open in Viewer, Copy Link and Open in Browser. A turn's fourth artifact is its View All instead,
  * and later ones are not drawn; the viewer reaches every one of them.
  */
-export function TranscriptArtifact({ artifact, slot }: { artifact: WorkflowArtifactView; slot?: TranscriptArtifactSlot }) {
+export function TranscriptArtifact({ artifact, slot }: { artifact: ArtifactView; slot?: TranscriptArtifactSlot }) {
   const actions = useContext(TranscriptArtifactContext);
   const group = slot?.group ?? [artifact];
   const index = slot?.index ?? 0;
@@ -128,7 +128,7 @@ export function TranscriptArtifact({ artifact, slot }: { artifact: WorkflowArtif
 }
 
 function TranscriptArtifactsMore({ group, index, actions }: {
-  group: readonly WorkflowArtifactView[];
+  group: readonly ArtifactView[];
   index: number;
   actions: TranscriptArtifactActions | null;
 }) {
@@ -151,8 +151,8 @@ function TranscriptArtifactsMore({ group, index, actions }: {
 }
 
 function TranscriptArtifactPreview({ artifact, group, actions }: {
-  artifact: WorkflowArtifactView;
-  group: readonly WorkflowArtifactView[];
+  artifact: ArtifactView;
+  group: readonly ArtifactView[];
   actions: TranscriptArtifactActions | null;
 }) {
   const previewClass = classifyArtifactPreview(artifact);
@@ -223,7 +223,7 @@ const noVersion = () => 0;
  * the directory about ids it has not settled; a streaming reply waits, so a half-written id is never
  * looked up.
  */
-function useResolvedArtifacts(ids: readonly string[], active: boolean): WorkflowArtifactView[] {
+function useResolvedArtifacts(ids: readonly string[], active: boolean): ArtifactView[] {
   const directory = useArtifactDirectory();
   const version = useSyncExternalStore(directory?.subscribe ?? noSubscribe, directory?.getVersion ?? noVersion, noVersion);
   useEffect(() => {

@@ -3,7 +3,7 @@ import test, { describe } from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { RunView, SessionView, UiSnapshotMessage, WorkflowArtifactView, WorkflowDefinition, WorkflowInstanceDetail, WorkflowInstanceView } from "@wollipog/protocol";
+import type { RunView, SessionView, UiSnapshotMessage, ArtifactView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { viewTitle, type View, type ViewNavigation } from "../navigation.js";
@@ -27,23 +27,6 @@ const runA: RunView = {
   createdAt: 1, updatedAt: 1, sessionIds: [],
 };
 const runB: RunView = { ...runA, id: "run-b", title: "Run B", prompt: "Second task" };
-
-const workflowA = {
-  instanceId: "instance-a", workflowId: "builtin:build-review", workflowVersion: 1, runId: runA.id,
-  status: "running", transitionCount: 0, createdBy: { kind: "system" }, createdAt: 1, updatedAt: 1,
-  nodeStates: [{ nodeId: "build", status: "running", attemptCount: 1 }],
-  definition: {
-    workflowId: "builtin:build-review", version: 1, source: "builtin", name: "Run A Workflow",
-    maxTransitions: 4, edges: [], createdBy: { kind: "system" }, createdAt: 1,
-    nodes: [{ nodeId: "build", kind: "agent", role: "builder", agentId: "claude", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
-  },
-  attempts: [], events: [],
-} as WorkflowInstanceDetail;
-
-const artifactA = {
-  artifactId: "artifact-a", runId: runA.id, kind: "test_log", name: "run-a-notes.txt", mimeType: "text/plain",
-  encoding: "utf8", sizeBytes: 12, sha256: "a".repeat(64), createdBy: { kind: "system" }, createdAt: 1,
-} as WorkflowArtifactView;
 
 class FakeSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;
@@ -120,7 +103,7 @@ const section = (container: HTMLDivElement, label: string) => container.querySel
 const title = (container: HTMLDivElement) => container.querySelector(".detail-bar-title")?.textContent;
 
 test("a loaded run titles its page by name and returns to Multi-Agent Runs", async () => {
-  const fixture = await mountRunDetail({ workflowInstances: pending, runWorkflowArtifacts: pending } as Partial<ApiClient>);
+  const fixture = await mountRunDetail({});
   try {
     const heading = fixture.container.querySelector("h1#page-title")?.textContent;
     assert.equal(heading, "Run A");
@@ -130,68 +113,6 @@ test("a loaded run titles its page by name and returns to Multi-Agent Runs", asy
     // A run the snapshot does not have falls back to the generic noun.
     await fixture.jumpTo("run-missing");
     assert.equal(fixture.container.querySelector("h1#page-title")?.textContent, "Multi-Agent Run");
-  } finally {
-    await unmount(fixture);
-  }
-});
-
-test("a direct run-to-run route change drops the previous run's error banners while the new run loads", async () => {
-  const workflowRequests: string[] = [];
-  const fixture = await mountRunDetail({
-    workflowInstances: async (runId: string) => {
-      workflowRequests.push(runId);
-      if (runId === runA.id) throw new Error("Run A workflow failed");
-      return pending();
-    },
-    runWorkflowArtifacts: async (runId: string) => {
-      if (runId === runA.id) throw new Error("Run A artifacts failed");
-      return pending();
-    },
-  } as Partial<ApiClient>);
-  try {
-    assert.equal(title(fixture.container), "Run A");
-    assert.match(fixture.container.querySelector(".run-workflow-error")?.textContent ?? "", /Run A workflow failed/u);
-    assert.match(section(fixture.container, "Workflow Artifacts")?.textContent ?? "", /Run A artifacts failed/u);
-
-    await fixture.jumpTo(runB.id);
-
-    assert.equal(title(fixture.container), "Run B");
-    assert.deepEqual(workflowRequests, [runA.id, runB.id], "run B's workflow request is still pending");
-    assert.equal(Boolean(fixture.container.querySelector(".run-workflow-error")), false, "run A's workflow error is not shown");
-    assert.equal(Boolean(section(fixture.container, "Workflow Artifacts")), false, "Workflow Artifacts is not shown");
-    assert.doesNotMatch(fixture.container.textContent ?? "", /Run A/u);
-  } finally {
-    await unmount(fixture);
-  }
-});
-
-test("a direct run-to-run route change while offline drops the previous run's workflow, artifacts and preview", async () => {
-  const workflowRequests: string[] = [];
-  const fixture = await mountRunDetail({
-    workflowInstances: async (runId: string) => {
-      workflowRequests.push(runId);
-      return runId === runA.id ? [workflowA] : pending();
-    },
-    workflowInstance: async () => workflowA,
-    runWorkflowArtifacts: async (runId: string) => runId === runA.id ? { artifacts: [artifactA] } : pending(),
-  } as Partial<ApiClient>);
-  try {
-    assert.match(section(fixture.container, "Workflow Progress")?.textContent ?? "", /Run A Workflow/u);
-    const artifactCard = [...fixture.container.querySelectorAll("button")].find((button) =>
-      button.textContent?.includes(artifactA.name));
-    assert.ok(artifactCard, "run A's artifact is listed");
-    await act(async () => artifactCard.click());
-    assert.ok(domWindow.document.querySelector('[role="dialog"]'), "run A's artifact preview is open");
-
-    await act(async () => fixture.socket.onclose?.({ code: 1006 }));
-    await fixture.jumpTo(runB.id);
-
-    assert.equal(title(fixture.container), "Run B");
-    assert.deepEqual(workflowRequests, [runA.id], "offline, run B's workflow is never requested");
-    assert.equal(Boolean(section(fixture.container, "Workflow Progress")), false, "Workflow Progress is not shown");
-    assert.equal(Boolean(section(fixture.container, "Workflow Artifacts")), false, "Workflow Artifacts is not shown");
-    assert.equal(Boolean(domWindow.document.querySelector('[role="dialog"]')), false, "no artifact preview is open");
-    assert.doesNotMatch(fixture.container.textContent ?? "", /Run A|run-a-notes/u);
   } finally {
     await unmount(fixture);
   }
@@ -218,7 +139,7 @@ async function mountRunsList(drive: (socket: FakeSocket) => void, client: Partia
   };
   const opened: View[] = [];
   const navigation: ViewNavigation = { current: () => ({ name: "runs" }), push: (view) => { opened.push(view); }, listen: () => () => {} };
-  const apiClient = { ...api, workflowInstances: async () => [], workflowDefinitions: async () => [], ...client } as unknown as ApiClient;
+  const apiClient = { ...api, ...client } as unknown as ApiClient;
   await act(async () => root.render(
     <ApiProvider client={apiClient}>
       <StoreProvider connection={connection} navigation={navigation}>
@@ -285,7 +206,7 @@ test("an offline or unpaired dashboard shows the Runs list as unavailable, not e
 test("with no runs after the snapshot, exactly one New Run renders, in the empty state", async () => {
   const empty = await renderRunsList((socket) => socket.push(snapshotWithRuns([])));
   assert.match(empty.text, /No Multi-Agent Runs Yet/u);
-  assert.match(empty.text, /Give one task to two or three agents, or run a Build and Review workflow, and compare what each one does\./u);
+  assert.match(empty.text, /Give the same task to multiple agents and compare what each one does\./u);
   assert.equal(empty.createButton, true);
   assert.equal(empty.headerCreateButton, false, "the empty state owns the one create action");
   assert.equal(empty.newRunButtons, 1);
@@ -321,20 +242,12 @@ describe("Runs list rows (#2974)", () => {
     id: "run_wf_88d0", title: "Build and review the parser", prompt: "Build it", workspaceId: "ws-alpha", workspaceName: "Alpha",
     createdAt: Date.now() - 60_000, updatedAt: 1, sessionIds: [builder.id],
   };
-  const gatedInstance = {
-    instanceId: "instance-gated", workflowId: "builtin:build-review", workflowVersion: 1, runId: gated.id, status: "waiting_gate",
-    transitionCount: 1, createdBy: { kind: "system" }, createdAt: gated.createdAt, updatedAt: 1,
-    nodeStates: [{ nodeId: "build", status: "succeeded", attemptCount: 1, sessionId: builder.id }, { nodeId: "gate", status: "waiting_gate", attemptCount: 0 }],
-  } as WorkflowInstanceView;
-  const definitions = [{ workflowId: "builtin:build-review", name: "Build and Review" }] as WorkflowDefinition[];
-
   const rowNamed = (container: HTMLDivElement, title: string) =>
     [...container.querySelectorAll<HTMLButtonElement>(".surface > .row.row-2")].find((row) => row.querySelector(".row-title")?.textContent === title)!;
   const meta = (row: Element) => [...row.querySelectorAll(".list-row-meta > span")].map((span) => span.textContent);
 
   const loaded = (client: Partial<ApiClient> = {}) => mountRunsList(
     (socket) => socket.push(snapshotWithRuns([comparison, finished, gated], [claude, codex, opencode, gemini, builder])),
-    { workflowInstances: async () => [gatedInstance], workflowDefinitions: async () => definitions, ...client } as Partial<ApiClient>,
   );
 
   test("each row is one two-line row with an icon, the title, at most one badge, the type, project, agents and time, and no ids", async () => {
@@ -361,22 +274,16 @@ describe("Runs list rows (#2974)", () => {
       assert.equal(compare.querySelector(".row-trail time")?.textContent, "5m ago");
       assert.doesNotMatch(compare.querySelector(".list-row-meta")?.textContent ?? "", /·/u, "meta is spaced, not dotted");
 
-      const workflow = rowNamed(fixture.container, gated.title);
-      assert.deepEqual(meta(workflow), ["Build and Review", "Alpha", "Claude Code"]);
-      assert.notEqual(workflow.querySelector(".row-icon")?.innerHTML, compare.querySelector(".row-icon")?.innerHTML,
-        "a workflow and a comparison lead with different icons");
       assert.deepEqual(meta(rowNamed(fixture.container, finished.title)), ["Comparison", "Claude Code, OpenCode"]);
     } finally {
       await fixture.unmount();
     }
   });
 
-  test("a gated workflow reads Awaiting Decision, a comparison with a running member Running, and an idle one no badge", async () => {
+  test("a comparison with a running member reads Running and an idle one has no badge", async () => {
     const fixture = await loaded();
     try {
       const badge = (title: string) => rowNamed(fixture.container, title).querySelector(".status");
-      assert.equal(badge(gated.title)?.textContent, "Awaiting Decision");
-      assert.ok(badge(gated.title)?.classList.contains("t-warning"));
       assert.equal(badge(comparison.title)?.textContent, "Running");
       assert.ok(badge(comparison.title)?.classList.contains("t-info"));
       assert.ok(badge(comparison.title)?.classList.contains("pulse"));
@@ -387,25 +294,6 @@ describe("Runs list rows (#2974)", () => {
       await act(async () => fixture.socket.push(snapshotWithRuns([comparison, finished, gated], [asking, codex, opencode, gemini, builder])));
       assert.equal(badge(comparison.title)?.textContent, "Approval Required");
       assert.equal(badge(finished.title)?.textContent, "Approval Required");
-    } finally {
-      await fixture.unmount();
-    }
-  });
-
-  test("workflows load once with the list and again when a run's updatedAt changes", async () => {
-    const requests: string[] = [];
-    const fixture = await loaded({
-      workflowInstances: async () => { requests.push("instances"); return [gatedInstance]; },
-      workflowDefinitions: async () => { requests.push("definitions"); return definitions; },
-    } as Partial<ApiClient>);
-    try {
-      assert.deepEqual(requests.sort(), ["definitions", "instances"]);
-      await act(async () => fixture.socket.push(snapshotWithRuns([comparison, finished, gated], [claude, codex, opencode, gemini, builder])));
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-      assert.equal(requests.length, 2, "an unchanged run does not reload");
-      await act(async () => fixture.socket.onmessage?.({ data: JSON.stringify({ type: "run_upsert", run: { ...gated, updatedAt: 2 } }) }));
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-      assert.deepEqual(requests.sort(), ["definitions", "definitions", "instances", "instances"]);
     } finally {
       await fixture.unmount();
     }
@@ -425,178 +313,11 @@ describe("Runs list rows (#2974)", () => {
       assert.ok(!stale!.contains(line), "the line is not dimmed with them");
       assert.equal(stale!.querySelectorAll(".row").length, 3);
       assert.doesNotMatch(page.textContent ?? "", /No Multi-Agent Runs Yet|Unavailable/u, "never an empty state");
-      assert.equal(rowNamed(fixture.container, gated.title).querySelector(".status")?.textContent, "Awaiting Decision", "last-known status stays");
+      assert.equal(rowNamed(fixture.container, comparison.title).querySelector(".status")?.textContent, "Running", "last-known status stays");
       await act(async () => rowNamed(fixture.container, comparison.title).click());
       assert.deepEqual(fixture.opened.at(-1), { name: "run", id: comparison.id });
     } finally {
       await fixture.unmount();
-    }
-  });
-
-  test("a failed workflow load leaves the rows without a type rather than guessing one", async () => {
-    const fixture = await loaded({ workflowInstances: async () => { throw new Error("offline"); } } as Partial<ApiClient>);
-    try {
-      const row = rowNamed(fixture.container, finished.title);
-      assert.deepEqual(meta(row), ["Claude Code, OpenCode"]);
-      assertNoDomNode(row.querySelector(".row-icon svg"), "no type icon either");
-    } finally {
-      await fixture.unmount();
-    }
-  });
-
-  test("a load the list has moved past never applies, even after the newer one fails", async () => {
-    const loads: Array<{ resolve: (value: WorkflowInstanceView[]) => void; reject: (error: Error) => void }> = [];
-    const fixture = await loaded({
-      workflowInstances: () => new Promise<WorkflowInstanceView[]>((resolve, reject) => { loads.push({ resolve, reject }); }),
-    } as Partial<ApiClient>);
-    try {
-      assert.equal(loads.length, 1);
-      // A workflow instance is attached to the run: its update starts a second load.
-      await act(async () => fixture.socket.onmessage?.({ data: JSON.stringify({ type: "run_upsert", run: { ...gated, updatedAt: 2 } }) }));
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-      assert.equal(loads.length, 2);
-      await act(async () => { loads[1]!.reject(new Error("offline")); await new Promise((resolve) => setTimeout(resolve, 0)); });
-      // The first load answered from before the attachment: it must not label the run Comparison.
-      await act(async () => { loads[0]!.resolve([]); await new Promise((resolve) => setTimeout(resolve, 0)); });
-      assert.deepEqual(meta(rowNamed(fixture.container, gated.title)), ["Alpha", "Claude Code"]);
-      assertNoDomNode(rowNamed(fixture.container, gated.title).querySelector(".row-icon svg"), "no type is guessed");
-    } finally {
-      await fixture.unmount();
-    }
-  });
-
-  test("a failed definition load only costs a workflow its name", async () => {
-    const fixture = await loaded({ workflowDefinitions: async () => { throw new Error("forbidden"); } } as Partial<ApiClient>);
-    try {
-      const workflow = rowNamed(fixture.container, gated.title);
-      assert.deepEqual(meta(workflow), ["Workflow", "Alpha", "Claude Code"]);
-      assert.equal(workflow.querySelector(".status")?.textContent, "Awaiting Decision");
-      assert.deepEqual(meta(rowNamed(fixture.container, finished.title)), ["Comparison", "Claude Code, OpenCode"]);
-    } finally {
-      await fixture.unmount();
-    }
-  });
-});
-
-test("a pruned workflow explains missing events while retaining node outcomes", async () => {
-  const workflow: WorkflowInstanceDetail = { ...workflowA, events: [],
-    eventHistoryPruned: { prunedAt: 1, eventCount: 1200, retentionDays: 90 } };
-  const fixture = await mountRunDetail({ workflowInstances: async () => [workflow], workflowInstance: async () => workflow,
-    runWorkflowArtifacts: async () => ({ artifacts: [] }) } as Partial<ApiClient>);
-  try {
-    const progress = section(fixture.container, "Workflow Progress")?.textContent ?? "";
-    assert.match(progress, /Event History Pruned[\s\S]*1,200 workflow events were removed[\s\S]*90-day/);
-    assert.match(progress, /node outcomes, attempts, artifacts, decisions and action receipts are kept/);
-    assert.equal(fixture.container.querySelectorAll(".wf-step").length, workflow.nodeStates.length);
-  } finally { await unmount(fixture); }
-});
-
-test("a canceled workflow attempt reads Canceled, while its wire status stays cancelled", async () => {
-  const workflow = {
-    ...workflowA,
-    attempts: [{
-      attemptId: "attempt-1", instanceId: workflowA.instanceId, nodeId: "build", attempt: 1, status: "cancelled",
-      dispatchKey: "dispatch-1", startedAt: 1, deadlineAt: 2, completedAt: 2,
-    }],
-  } as WorkflowInstanceDetail;
-  const fixture = await mountRunDetail({
-    workflowInstances: async () => [workflow],
-    workflowInstance: async () => workflow,
-    runWorkflowArtifacts: async () => ({ artifacts: [] }),
-  } as Partial<ApiClient>);
-  try {
-    const progress = section(fixture.container, "Workflow Progress")?.textContent ?? "";
-    assert.match(progress, /Last Attempt\s*Canceled/u);
-    assert.doesNotMatch(progress, /Cancelled/u);
-  } finally {
-    await unmount(fixture);
-  }
-});
-
-describe("Run detail's artifacts (#2855)", () => {
-  const member = {
-    id: "s_member_7c1d", runnerId: "runner-1", agentId: "claude", agentName: "Claude", driver: "claude-code",
-    title: "Builder", status: "idle", runId: runA.id,
-  } as unknown as SessionView;
-  const byAgent = {
-    ...artifactA, artifactId: "artifact-agent", name: "Build log with a long name that the row truncates",
-    mimeType: "text/plain", sha256: "b".repeat(64), createdBy: { kind: "agent", id: member.id }, createdAt: Date.now() - 120_000,
-  } as WorkflowArtifactView;
-  const byPerson = {
-    ...artifactA, artifactId: "artifact-person", name: "review.md", kind: "review_report", mimeType: "text/markdown",
-    sha256: "c".repeat(64), createdBy: { kind: "human", id: "usr_51e0a9" }, createdAt: Date.now() - 60_000,
-  } as WorkflowArtifactView;
-  const later = { ...artifactA, artifactId: "artifact-later", name: "later.txt", sha256: "d".repeat(64) } as WorkflowArtifactView;
-
-  const rowsOf = (container: HTMLDivElement) => [...container.querySelectorAll<HTMLButtonElement>(".run-artifacts .surface .row.row-2")];
-
-  test("artifacts are full-width two-line rows naming kind, agent, time and size, with no ids or hashes", async () => {
-    const fixture = await mountRunDetail({
-      workflowInstances: async () => [],
-      runWorkflowArtifacts: async () => ({ artifacts: [byAgent, byPerson] }),
-    } as Partial<ApiClient>);
-    try {
-      await act(async () => fixture.socket.push({
-        type: "snapshot",
-        capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-        runners: [], boxes: [], projects: [], sessions: [member], runs: [runA, runB], pods: [],
-      }));
-      const rows = rowsOf(fixture.container);
-      assert.equal(rows.length, 2);
-      assert.equal(rows[0]!.querySelector(".row-title")?.textContent, byAgent.name);
-      assert.deepEqual([...rows[0]!.querySelectorAll(".art-row-meta > span")].map((span) => span.textContent), ["Test log", "Claude"]);
-      assert.ok(rows[0]!.querySelector(".art-row-meta > time"), "when it was saved");
-      assert.equal(rows[0]!.querySelector(".art-size")?.textContent, "12 B");
-      assert.ok(rows[0]!.querySelector(".art-kind svg"), "the kind's icon leads the row");
-      assert.equal(fixture.container.querySelector(".run-artifacts-head")?.textContent, "Artifacts 2");
-      const text = fixture.container.querySelector(".run-artifacts")?.textContent ?? "";
-      for (const forbidden of [member.id, "usr_", "text/plain", "text/markdown", "bbbbbbbbbbbb", "cccccccccccc"]) {
-        assert.ok(!text.includes(forbidden), `the list never shows ${forbidden}`);
-      }
-      assertNoDomNode(fixture.container.querySelector(".run-artifact-card"), "no card grid");
-    } finally {
-      await unmount(fixture);
-    }
-  });
-
-  test("choosing a row opens the preview in a large dialog with Done, and no × renders", async () => {
-    const fixture = await mountRunDetail({
-      workflowInstances: async () => [],
-      runWorkflowArtifacts: async () => ({ artifacts: [byAgent] }),
-    } as Partial<ApiClient>);
-    try {
-      await act(async () => rowsOf(fixture.container)[0]!.click());
-      const dialog = document.querySelector('[role="dialog"]');
-      assert.ok(dialog?.closest(".modal.lg"), "a large dialog (§7.1)");
-      assert.equal(dialog!.querySelector(".modal-title")?.textContent, byAgent.name);
-      assert.doesNotMatch(document.body.textContent ?? "", /×/u);
-      const done = [...dialog!.querySelectorAll<HTMLButtonElement>(".modal-foot button")].find((button) => button.textContent === "Done")!;
-      await act(async () => done.click());
-      assertNoDomNode(document.querySelector('[role="dialog"]'), "Done closes the preview");
-    } finally {
-      await unmount(fixture);
-    }
-  });
-
-  test("a list foot's Show More loads the next page", async () => {
-    const cursors: Array<string | undefined> = [];
-    const fixture = await mountRunDetail({
-      workflowInstances: async () => [],
-      runWorkflowArtifacts: async (_runId: string, cursor?: string) => {
-        cursors.push(cursor);
-        return cursor ? { artifacts: [later] } : { artifacts: [byAgent], nextCursor: "page-2" };
-      },
-    } as Partial<ApiClient>);
-    try {
-      assert.equal(fixture.container.querySelector(".run-artifacts-head")?.textContent, "Artifacts 1+");
-      const more = fixture.container.querySelector<HTMLButtonElement>(".run-artifacts .list-foot button")!;
-      assert.equal(more.textContent?.trim(), "Show More");
-      await act(async () => { more.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
-      assert.equal(cursors.at(-1), "page-2");
-      assert.equal(rowsOf(fixture.container).length, 2);
-      assertNoDomNode(fixture.container.querySelector(".run-artifacts .list-foot"), "the last page has no Show More");
-    } finally {
-      await unmount(fixture);
     }
   });
 });

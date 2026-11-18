@@ -127,7 +127,7 @@ async function mount(client: Partial<ApiClient>, opening: View = { name: "run", 
     listen: () => () => {},
   };
   const apiClient = {
-    ...api, workflowInstances: async () => [], runWorkflowArtifacts: async () => ({ artifacts: [] }),
+    ...api, workflowInstances: async () => [], runArtifacts: async () => ({ artifacts: [] }),
     getSessionEventPage: pending, ...client,
   } as unknown as ApiClient;
   await act(async () => root.render(

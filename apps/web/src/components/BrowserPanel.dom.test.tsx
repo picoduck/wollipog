@@ -5,7 +5,7 @@ import { beforeEach, describe, mock, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionView, WorkflowArtifactKind, WorkflowArtifactPage, WorkflowArtifactView } from "@wollipog/protocol";
+import type { SessionView, ArtifactKind, ArtifactPage, ArtifactView } from "@wollipog/protocol";
 import { api } from "../api.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { BrowserPanel, PAGE_BLOCKED_AFTER_MS } from "./BrowserPanel.js";
@@ -32,7 +32,7 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
-function artifact(id: string, text: string, kind: WorkflowArtifactKind = "test_log", sizeBytes = Buffer.byteLength(text)): WorkflowArtifactView {
+function artifact(id: string, text: string, kind: ArtifactKind = "test_log", sizeBytes = Buffer.byteLength(text)): ArtifactView {
   return {
     artifactId: id,
     sessionId: "session_1",
@@ -59,11 +59,11 @@ async function waitForPreviewToSettle(container: HTMLDivElement): Promise<void> 
 
 /** Mount the panel over a stubbed artifact list, and restore the API and the DOM afterwards. */
 async function withPanel(
-  list: (cursor?: string) => Promise<WorkflowArtifactPage>,
+  list: (cursor?: string) => Promise<ArtifactPage>,
   run: (container: HTMLDivElement) => Promise<void>,
 ): Promise<void> {
-  const priorList = api.sessionWorkflowArtifacts;
-  api.sessionWorkflowArtifacts = async (_sessionId: string, cursor?: string) => list(cursor);
+  const priorList = api.sessionArtifacts;
+  api.sessionArtifacts = async (_sessionId: string, cursor?: string) => list(cursor);
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
@@ -76,7 +76,7 @@ async function withPanel(
     await run(container);
   } finally {
     await act(async () => { root.unmount(); });
-    api.sessionWorkflowArtifacts = priorList;
+    api.sessionArtifacts = priorList;
     container.remove();
   }
 }
@@ -186,11 +186,11 @@ test("labelFor names every kind for a person", () => {
   assert.equal(labelFor("verdict"), "Verdict (JSON)");
   assert.equal(labelFor("test_log"), "Test log");
   assert.equal(labelFor("review_report"), "Review report");
-  assert.equal(labelFor("future_kind" as WorkflowArtifactKind), "Future kind");
+  assert.equal(labelFor("future_kind" as ArtifactKind), "Future kind");
 });
 
 test("the artifact list shows three skeleton rows while it loads", async () => {
-  let release: (page: WorkflowArtifactPage) => void = () => undefined;
+  let release: (page: ArtifactPage) => void = () => undefined;
   await withPanel(() => new Promise((resolve) => { release = resolve; }), async (container) => {
     const skeleton = container.querySelector(".browser-artifacts .skeleton")!;
     assert.ok(skeleton, container.innerHTML);
@@ -409,9 +409,9 @@ describe("an open artifact in the Browser is a page (#2855, #2914)", () => {
   test("a page whose artifact the next session's list doesn't carry gives way to that list", async () => {
     const first = artifact("first", "first body");
     const other = artifact("other", "other body");
-    const priorList = api.sessionWorkflowArtifacts;
+    const priorList = api.sessionArtifacts;
     const priorExport = api.artifactExport;
-    api.sessionWorkflowArtifacts = async (sessionId: string) => ({ artifacts: sessionId === "session_1" ? [first] : [other] });
+    api.sessionArtifacts = async (sessionId: string) => ({ artifacts: sessionId === "session_1" ? [first] : [other] });
     api.artifactExport = async () => new Blob(["first body"], { type: "text/plain" });
     const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
     domWindow.document.body.append(container as never);
@@ -435,7 +435,7 @@ describe("an open artifact in the Browser is a page (#2855, #2914)", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
-      api.sessionWorkflowArtifacts = priorList;
+      api.sessionArtifacts = priorList;
       api.artifactExport = priorExport;
     }
   });

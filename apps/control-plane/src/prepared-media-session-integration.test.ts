@@ -91,7 +91,7 @@ function harness(sourceBytes?: Buffer, validation = false) {
     config: { model: "claude-opus-5-5", costBudgetUsd: 2, maxToolCalls: 10 }, now: 4 });
   db.updateSessionStatus("child", "running", 5);
   const source = sourceBytes ?? Buffer.from("synthetic storage bytes, not real video evidence");
-  db.createWorkflowArtifactBytes({ artifactId: "source", sessionId: "child", kind: "video", name: "Synthetic.webm",
+  db.createArtifactBytes({ artifactId: "source", sessionId: "child", kind: "video", name: "Synthetic.webm",
     mimeType: "video/webm", encoding: "base64", sha256: sha(source), sizeBytes: source.length,
     createdBy: { kind: "agent", id: "child" }, metadata: { purpose: "session_attachment" }, createdAt: 6 }, source);
   const suppliedSnapshot = { category: "ui_evidence_approval" as const, evidence: [{ evidenceId: "original-video",
@@ -694,7 +694,7 @@ async function gateHarness(t: { skip(reason: string): void; after(fn: () => void
   const h = harness(source); t.after(() => h.db.close());
   if (withImage) {
     const image = readFileSync(new URL("../../web/public/icons/icon-192.png", import.meta.url));
-    h.db.createWorkflowArtifactBytes({ artifactId: "direct-image", sessionId: "child", kind: "screenshot", name: "Synthetic Test Image.png",
+    h.db.createArtifactBytes({ artifactId: "direct-image", sessionId: "child", kind: "screenshot", name: "Synthetic Test Image.png",
       mimeType: "image/png", encoding: "base64", sha256: sha(image), sizeBytes: image.length,
       createdBy: { kind: "agent", id: "child" }, metadata: { purpose: "session_attachment" }, createdAt: 8 }, image);
     const original = h.db.workflowDecisionByOccurrence("original-gate")!;
@@ -726,7 +726,7 @@ async function gateHarness(t: { skip(reason: string): void; after(fn: () => void
     normalCompletion: () => settled, workerAdmission: (_binding, phase) => phase === "historical"
       ? settled ? reviewer.admission : null : h.service.campaignBudgetWorkerPreflight("root",
         { kind: "managed", sessionId: reviewer.sessionId }).data ?? null,
-    readSource: (id) => h.db.readWorkflowArtifactBytes(id) };
+    readSource: (id) => h.db.readArtifactBytes(id) };
   const runtime = new VideoEvidenceRuntime(store, runtimeAccess);
   const derived = await runtime.derive(binding, "video/webm", criteria); assert.ok(derived.ok);
   if (!derived.ok) throw new Error("Fixture derivation refused");
@@ -1030,7 +1030,7 @@ test("Session deletion removes private quality metadata while retaining exact un
     purposePromptPresent: typeof p?.command?.initialPrompt === "string",
     launchEnvironmentFieldCount: Object.keys(p?.command?.spec?.env ?? {}).length,
     budgetMemberUnchanged: budgetBefore === JSON.stringify(h.db.raw().prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(reviewerId)) }));
-  assert.equal(h.db.workflowArtifactExportPreflight("source"), null);
+  assert.equal(h.db.artifactExportPreflight("source"), null);
   assert.equal(h.store.getReview(h.record.reviewId) === null, true, "deleted private source cannot leave rationale/frame/criteria records");
   assert.deepEqual(h.db.raw().prepare("SELECT record FROM media_session_purposes WHERE session_id=?").get(reviewerId), purposeRow);
   assert.equal(budgetBefore, JSON.stringify(h.db.raw().prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(reviewerId)));
@@ -1137,12 +1137,12 @@ test("root or reviewer deletion cascades private quality records but retained so
   for (const target of ["root", "reviewer"] as const) {
     const h = await gateHarness(t); if (!h) return; h.complete();
     const frameId = h.record.reviewId + ":frame:0";
-    assert.ok(h.db.workflowArtifactExportPreflight(frameId));
+    assert.ok(h.db.artifactExportPreflight(frameId));
     h.db.deleteSession(target === "reviewer" ? h.record.binding.reviewerSessionId : target);
     assert.equal(h.store.getReview(h.record.reviewId), null);
     assert.equal(h.store.latestReceipts(h.record.reviewId).length, 0);
     assert.equal(h.store.getVerdict(h.record.reviewId), null);
-    assert.ok(h.db.workflowArtifactExportPreflight(frameId), "source-owned frame bytes use existing retention; no full privacy cleanup claim");
+    assert.ok(h.db.artifactExportPreflight(frameId), "source-owned frame bytes use existing retention; no full privacy cleanup claim");
   }
 });
 

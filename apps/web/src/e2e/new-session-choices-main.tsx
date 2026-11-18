@@ -10,7 +10,6 @@ import {
   type ProjectView,
   type RunnerView,
   type UiSnapshotMessage,
-  type WorkflowDefinition,
 } from "@wollipog/protocol";
 import { saveAgentDefault } from "../agent-defaults.js";
 import { api, type ApiClient } from "../api.js";
@@ -460,7 +459,6 @@ const client = {
   agentHarnessDefaults: () => savedDefaults === "error"
     ? Promise.reject(new Error("Saved defaults are unavailable."))
     : savedDefaults === "pending" ? new Promise<AgentHarnessDefaultsView>(() => undefined) : Promise.resolve(defaults),
-  workflowDefinitions: async (): Promise<WorkflowDefinition[]> => [],
   ...(policyFixture ? {
     orchestratorSettings: () => policyFixture === "error"
       ? Promise.reject(new TypeError("Failed to fetch"))

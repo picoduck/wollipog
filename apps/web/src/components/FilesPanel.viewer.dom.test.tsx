@@ -143,7 +143,7 @@ const client = {
     hostActions.push(action);
     return { ok: true as const };
   },
-  sessionWorkflowArtifacts: async () => ({ artifacts: [] }),
+  sessionArtifacts: async () => ({ artifacts: [] }),
 } as unknown as ApiClient;
 
 const session = {

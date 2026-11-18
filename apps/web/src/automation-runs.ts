@@ -83,14 +83,13 @@ export function runReason(execution: AutomationExecution, currentPolicy?: Automa
   return limit === undefined ? subject.gaveUp : `${subject.stayed} for ${minutes(limit)}.`;
 }
 
-/** Where a run's work can be opened: a workflow run, else its session. */
-export function runOpenTarget(execution: AutomationExecution): { label: "Open Campaign" | "Open Run" | "Open Session"; view: View } | null {
+/** The session or campaign started by this execution. */
+export function runOpenTarget(execution: AutomationExecution): { label: "Open Campaign" | "Open Session"; view: View } | null {
   const campaignSessionId = execution.campaignSessionId ?? (execution.sessionId &&
     execution.specSnapshot?.action.kind === "create_session" && execution.specSnapshot.action.request.campaign ? execution.sessionId : undefined);
   if (campaignSessionId) {
     return { label: "Open Campaign", view: { name: "session", id: campaignSessionId, campaign: true } };
   }
-  if (execution.runId) return { label: "Open Run", view: { name: "run", id: execution.runId } };
   if (execution.sessionId) return { label: "Open Session", view: { name: "session", id: execution.sessionId } };
   return null;
 }
@@ -108,13 +107,13 @@ export function deliveredLabel(delivery: AutomationTriggerDeliveryMetadata): str
 /**
  * Whether a legacy run was sent once without delivery receipts. The control plane stamps every run
  * it claims without a delivery mode as legacy, including skips and expiries it never sent (#2970,
- * CR-1.1), so only a run with evidence of delivery (it started, or has a session or a workflow run)
+ * CR-1.1), so only a run with evidence of delivery (it started, or has a session)
  * counts.
  */
 export function sentWithoutReceipts(execution: AutomationExecution): boolean {
   if (execution.deliveryMode !== "legacy_at_most_once" || execution.commands?.length) return false;
   if (execution.status === "skipped" || execution.status === "expired") return false;
-  return execution.startedAt !== undefined || Boolean(execution.sessionId || execution.runId || execution.workflowInstanceId);
+  return execution.startedAt !== undefined || Boolean(execution.sessionId);
 }
 
 /** A step's kind in words. */

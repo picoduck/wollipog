@@ -1,7 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
-import type { AgentDefinition, ControlPlaneToUi, ProjectLocationView, ProjectView, RunnerView, WorkflowDefinition } from "@wollipog/protocol";
+import type { AgentDefinition, ControlPlaneToUi, ProjectLocationView, ProjectView, RunnerView } from "@wollipog/protocol";
 import { ApiError, api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -103,18 +103,6 @@ const projects: ProjectView[] = [
   },
 ];
 
-const workflow: WorkflowDefinition = {
-  workflowId: "builtin:build-review", version: 1, source: "builtin", name: "Build and independent review",
-  description: "Claude builds, Codex reviews, and Claude addresses findings until accepted or capped.",
-  maxTransitions: 24, createdBy: { kind: "system" }, createdAt: 1, edges: [],
-  nodes: [
-    { nodeId: "build", kind: "agent", role: "builder", agentId: "claude", inputs: [], outputs: [], retry: { maxAttempts: 2, backoffMs: 1_000 }, timeoutMs: 1 },
-    { nodeId: "review", kind: "agent", role: "reviewer", agentId: "codex", inputs: [], outputs: [], retry: { maxAttempts: 2, backoffMs: 1_000 }, timeoutMs: 1 },
-    { nodeId: "approve", kind: "human_gate", role: "approver", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1 },
-    { nodeId: "address", kind: "agent", role: "remediator", agentId: "claude", inputs: [], outputs: [], retry: { maxAttempts: 2, backoffMs: 1_000 }, timeoutMs: 1 },
-  ],
-};
-
 const snapshot: ControlPlaneToUi = {
   type: "snapshot",
   capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
@@ -157,7 +145,6 @@ const refuse = () => {
 
 const client = {
   ...api,
-  workflowDefinitions: async () => [workflow],
   // `account-priority-memory`: inside a project, a policy won't move memory held by the account.
   providerAccountSelection: async (_runnerId: string, target: { agentId?: string; projectId?: string }) => (target.agentId === "codex" ? {
     provider: "codex", mode: "fixed", policyRevision: 1, status: "selected", source: "fixed_default", accountId: "d",
@@ -182,11 +169,6 @@ const client = {
     if (scenario === "error") refuse();
     document.body.dataset.request = JSON.stringify(request);
     return { run: { id: "run-new" }, sessions: [] };
-  },
-  createWorkflowRun: async (request: unknown) => {
-    if (scenario === "error") refuse();
-    document.body.dataset.request = JSON.stringify(request);
-    return { run: { id: "run-new" }, sessions: [], instance: {} };
   },
 } as unknown as ApiClient;
 

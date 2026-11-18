@@ -106,7 +106,7 @@ async function harness(t: { after(fn: () => void): void }, options: { proof?: bo
   db.createSession({ id: "child", parentSessionId: "root", runnerId: options.otherRepository ? "r2" : "r", workspaceId: options.otherRepository ? "a" : "w", agentId: "child-agent", title: "Synthetic Child",
     useWorktree: false, driver: "claude-code", scope: audience, config: { model: "claude-opus-5-5", costBudgetUsd: 2, maxToolCalls: 10 }, now: 4 });
   db.updateSessionStatus("child", "running", 5);
-  db.createWorkflowArtifactBytes({ artifactId: "source", sessionId: "child", kind: "video", name: "Synthetic.webm", mimeType: "video/webm",
+  db.createArtifactBytes({ artifactId: "source", sessionId: "child", kind: "video", name: "Synthetic.webm", mimeType: "video/webm",
     encoding: "base64", sha256: sha(source), sizeBytes: source.length, createdBy: { kind: "agent", id: "child" },
     metadata: { purpose: "session_attachment" }, createdAt: 6 }, source);
   const normalized = normalizeWorkflowDecisionSnapshot({ category: "ui_evidence_approval",
@@ -476,7 +476,7 @@ const members = (h: Awaited<ReturnType<typeof harness>>) =>
 function recapture(h: Awaited<ReturnType<typeof harness>>, n: number, bytes = Buffer.concat([source, Buffer.from(`repair ${n}`)]),
   evidenceId = `repair-video-${n}`) {
   const artifactId = `repair-source-${n}`;
-  h.db.createWorkflowArtifactBytes({ artifactId, sessionId: "child", kind: "video", name: `Repair ${n}.webm`, mimeType: "video/webm",
+  h.db.createArtifactBytes({ artifactId, sessionId: "child", kind: "video", name: `Repair ${n}.webm`, mimeType: "video/webm",
     encoding: "base64", sha256: sha(bytes), sizeBytes: bytes.length, createdBy: { kind: "agent", id: "child" },
     metadata: { purpose: "session_attachment" }, createdAt: 10 + n }, bytes);
   const created = h.sessions.createWorkflowDecision("child", { requestId: `repair-${n}`, resourceKey: "synthetic",

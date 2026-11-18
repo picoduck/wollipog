@@ -89,13 +89,6 @@ import {
   type CreateAutomationRequest,
   type CreateAutomationTriggerRequest,
   type CreateOutboundEventSubscriptionRequest,
-  type CreateWorkflowDefinitionRequest,
-  type CreateWorkflowDefinitionVersionRequest,
-  type CreateWorkflowInstanceRequest,
-  type CreateWorkflowRunRequest,
-  type CompleteWorkflowAttemptRequest,
-  type DispatchWorkflowNodeRequest,
-  type CreateWorkflowArtifactRequest,
   type AttachSessionScreenshotRequest,
   type AttachSessionVideoRequest,
   type CreateSessionRequest,
@@ -133,7 +126,6 @@ import {
   type ReconcilePodRequest,
   type RunnerToControlPlane,
   type RunnerProtocolCapability,
-  type ResolveWorkflowGateRequest,
   type SetSessionReminderRequest,
   type SetColumnRequest,
   type SessionProviderAccountOptionsResponse,
@@ -144,7 +136,7 @@ import {
   type UpdateAutomationRequest,
   type CampaignPullRequestRef,
 } from "@wollipog/protocol";
-import { SESSION_ARTIFACT_RETENTION_MS } from "./workflow-artifacts.js";
+import { SESSION_ARTIFACT_RETENTION_MS } from "./artifacts.js";
 import { OutboundEventsService } from "./outbound-events.js";
 import {
   nativeTuiCreationError,
@@ -235,8 +227,6 @@ import { registerSessionNamingRoutes } from "./session-naming-route.js";
 import { registerDecisionModelRoutes } from "./decision-model-route.js";
 import { DecisionModelSettings } from "./decision-model-settings.js";
 import { DecisionRuntime, hubDecisionTransport, sanitizeRunDecisionResult } from "./decision-runtime.js";
-import { WorkflowEventRetention } from "./workflow-event-retention.js";
-import { registerWorkflowEventRetentionRoutes } from "./workflow-event-retention-route.js";
 import { ArchivedHistoryRetention } from "./archived-history-retention.js";
 import { registerSessionArchiveRoute } from "./session-archive-route.js";
 import { MutationAuditArchiveRetention } from "./mutation-audit-archive-retention.js";
@@ -343,8 +333,8 @@ import {
 import { registerAuthenticationRecoveryRoutes } from "./authentication-recovery-routes.js";
 import { AutomationsService } from "./automations.js";
 import { buildAuthorizedSessionTranscriptExport, type TranscriptExportFormat } from "./session-exports.js";
-import { principalCanReadWorkflowArtifact } from "./artifact-exports.js";
-import { registerWorkflowArtifactExportRoute } from "./artifact-export-route.js";
+import { principalCanReadArtifact } from "./artifact-exports.js";
+import { registerArtifactExportRoute } from "./artifact-export-route.js";
 import { registerRunnerCredentialRoutes } from "./runner-credential-route.js";
 import { SessionRoleConversions, registerSessionRoleRoutes } from "./session-role-conversion.js";
 import { makeSkillsSyncPusher, registerSkillRoutes } from "./skills-route.js";
@@ -819,8 +809,8 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   }
   if (routePath === "/api/artifacts/:artifactId/export") {
     const artifactId = typeof params.artifactId === "string" ? params.artifactId : "";
-    const scope = artifactId ? db.workflowArtifactScope(artifactId) : null;
-    if (!scope || !principalCanReadWorkflowArtifact(db, principal, scope)) {
+    const scope = artifactId ? db.artifactScope(artifactId) : null;
+    if (!scope || !principalCanReadArtifact(db, principal, scope)) {
       return { statusCode: 404, error: "artifact not found" };
     }
   }
@@ -1068,8 +1058,6 @@ const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process
 registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPrincipal);
 const mutationAuditArchiveRetention = new MutationAuditArchiveRetention(db, { env: process.env, log: app.log });
 const incrementalVacuum = new IncrementalVacuum(db, { env: process.env, log: app.log });
-const workflowEventRetention = new WorkflowEventRetention(db, { env: process.env, log: app.log });
-registerWorkflowEventRetentionRoutes(app, workflowEventRetention, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
 registerReviewSettingsRoutes(app, new ReviewSettingsService(db), requestPrincipal);
@@ -1507,7 +1495,6 @@ app.register(async (instance) => {
         }
         else svc.reconcileRunnerSessions(runnerId, msg.liveSessions ?? []);
         svc.reconcileArchivedCampaignWorktrees(runnerId);
-        svc.recoverWorkflowRunner(runnerId);
         svc.recoverCampaignBudgetAllocations(runnerId);
         svc.recoverCampaignReviewJobs(runnerId);
         svc.recoverSessionReviewJobs(runnerId);
@@ -5814,17 +5801,6 @@ app.post("/api/pods/:id/close", async (req, reply) =>
   respond(reply, svc.closePod((req.params as { id: string }).id)),
 );
 
-app.post("/api/workflow-runs", async (req, reply) => {
-  const body = req.body as CreateWorkflowRunRequest;
-  const principal = requestPrincipal(req);
-  if (typeof body?.projectId === "string" && (!principal || !db.canAccessProject(principal, body.projectId))) {
-    return reply.code(404).send({ error: "project not found" });
-  }
-  return respond(reply, svc.createWorkflowRun(body, workflowActor(req), undefined,
-    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId }
-      : principal?.kind === "human" ? { launcherUserId: principal.userId } : undefined));
-});
-
 app.get("/api/automations", async () => automations.list());
 
 app.post("/api/automations", async (req, reply) =>
@@ -5920,20 +5896,6 @@ app.post("/hooks/v1/automation-triggers/:triggerId", { bodyLimit: AUTOMATION_TRI
   return respond(reply, result);
 });
 
-app.post("/api/artifacts", { bodyLimit: 3 * 1024 * 1024 }, async (req, reply) => {
-  const body = req.body as CreateWorkflowArtifactRequest;
-  if (body?.kind === "screenshot") return reply.code(400).send({ error: "screenshots use /api/artifacts/screenshots" });
-  return respond(reply, svc.createWorkflowArtifact(body, workflowActor(req)));
-});
-
-// An 8 MiB screenshot expands to ~10.7 MiB base64. Only this kind-specific route receives the
-// larger parser allowance; the service still verifies canonical image bytes and decoded size.
-app.post("/api/artifacts/screenshots", { bodyLimit: 11 * 1024 * 1024 }, async (req, reply) => {
-  const body = req.body as CreateWorkflowArtifactRequest;
-  if (body?.kind !== "screenshot") return reply.code(400).send({ error: "this route accepts screenshot artifacts only" });
-  return respond(reply, svc.createWorkflowArtifact(body, workflowActor(req)));
-});
-
 // The file-based attach path. The session is the route parameter, so the auth gate confines a
 // session credential to its own row before this runs; kind and encoding are fixed here rather than
 // taken from the caller. The answer is metadata only — the uploaded bytes are never echoed back,
@@ -5950,100 +5912,15 @@ app.post("/api/sessions/:id/artifacts/videos", { bodyLimit: 44 * 1024 * 1024 }, 
   return respond(reply, svc.attachSessionVideo(id, body, workflowActor(req)));
 });
 
-app.get("/api/artifacts/:artifactId", async (req, reply) =>
-  respond(reply, svc.workflowArtifact((req.params as { artifactId: string }).artifactId)),
-);
-
-registerWorkflowArtifactExportRoute(app, { db, requestHuman });
-
-app.get("/api/runs/:id/artifacts", async (req, reply) => {
-  const query = req.query as { cursor?: string; limit?: string };
-  return respond(reply, svc.runWorkflowArtifacts(
-    (req.params as { id: string }).id,
-    query.cursor,
-    query.limit === undefined ? 50 : Number(query.limit),
-  ));
-});
+registerArtifactExportRoute(app, { db, requestHuman });
 
 app.get("/api/sessions/:id/artifacts", async (req, reply) => {
   const query = req.query as { cursor?: string; limit?: string };
-  return respond(reply, svc.sessionWorkflowArtifacts(
+  return respond(reply, svc.sessionArtifacts(
     (req.params as { id: string }).id,
     query.cursor,
     query.limit === undefined ? 50 : Number(query.limit),
   ));
-});
-
-app.get("/api/workflows", async (req, reply) => {
-  const query = req.query as { limit?: string };
-  return respond(reply, svc.workflowDefinitions(query.limit === undefined ? 100 : Number(query.limit)));
-});
-
-// 64 nodes may each carry a 32 KiB prompt; keep the parser limit aligned with the validator's
-// aggregate maximum while retaining a route-specific cap.
-app.post("/api/workflows", { bodyLimit: 3 * 1024 * 1024 }, async (req, reply) => {
-  return respond(reply, svc.createWorkflowDefinition(req.body as CreateWorkflowDefinitionRequest, workflowActor(req)));
-});
-
-app.post("/api/workflows/:workflowId/versions", { bodyLimit: 3 * 1024 * 1024 }, async (req, reply) => {
-  return respond(reply, svc.createWorkflowDefinitionVersion(
-    (req.params as { workflowId: string }).workflowId,
-    req.body as CreateWorkflowDefinitionVersionRequest,
-    workflowActor(req),
-  ));
-});
-
-app.get("/api/workflows/:workflowId", async (req, reply) => {
-  const query = req.query as { version?: string };
-  const version = query.version === undefined ? undefined : Number(query.version);
-  if (version !== undefined && (!Number.isInteger(version) || version < 1)) {
-    return reply.code(400).send({ error: "workflow version must be a positive integer" });
-  }
-  return respond(reply, svc.workflowDefinition(
-    (req.params as { workflowId: string }).workflowId,
-    version,
-  ));
-});
-
-app.get("/api/workflow-instances", async (req, reply) => {
-  const query = req.query as { runId?: string; limit?: string };
-  return respond(reply, svc.workflowInstances(query.runId, query.limit === undefined ? 100 : Number(query.limit)));
-});
-
-app.post("/api/workflow-instances", async (req, reply) => {
-  return respond(reply, svc.createWorkflowInstance(req.body as CreateWorkflowInstanceRequest, workflowActor(req)));
-});
-
-app.get("/api/workflow-instances/:instanceId", async (req, reply) =>
-  respond(reply, svc.workflowInstance((req.params as { instanceId: string }).instanceId)),
-);
-
-app.post("/api/workflow-instances/:instanceId/nodes/:nodeId/dispatch", async (req, reply) => {
-  const params = req.params as { instanceId: string; nodeId: string };
-  return respond(reply, svc.dispatchWorkflowNode(params.instanceId, params.nodeId, req.body as DispatchWorkflowNodeRequest, workflowActor(req)));
-});
-
-app.post("/api/workflow-attempts/:attemptId/complete", async (req, reply) => {
-  return respond(reply, svc.completeWorkflowAttempt(
-    (req.params as { attemptId: string }).attemptId,
-    req.body as CompleteWorkflowAttemptRequest,
-    workflowActor(req),
-  ));
-});
-
-app.get("/api/workflow-attempts/:attemptId/outputs", async (req, reply) => {
-  const attemptId = (req.params as { attemptId: string }).attemptId;
-  if (!db.getWorkflowAttempt(attemptId)) return reply.code(404).send({ error: "workflow attempt not found" });
-  const outputs = Object.fromEntries(Object.entries(db.workflowAttemptOutputs(attemptId)).map(([name, artifact]) => {
-    const { data: _data, ...view } = artifact;
-    return [name, view];
-  }));
-  return { outputs };
-});
-
-app.post("/api/workflow-instances/:instanceId/nodes/:nodeId/resolve", async (req, reply) => {
-  const params = req.params as { instanceId: string; nodeId: string };
-  return respond(reply, svc.resolveWorkflowGate(params.instanceId, params.nodeId, req.body as ResolveWorkflowGateRequest, workflowActor(req)));
 });
 
 /* -------------------------------- Startup -------------------------------- */
@@ -6051,8 +5928,6 @@ app.post("/api/workflow-instances/:instanceId/nodes/:nodeId/resolve", async (req
 // Graceful shutdown: kill the box SSH children (and stop reconnecting) before exit. Registered
 // before listen() so the hook is in place by the time anything can close. Signals also cover the
 // tsx-watch reload in dev, which would otherwise orphan ssh processes + their remote runners.
-const workflowRecoveryTimer = setInterval(() => svc.recoverExpiredWorkflowAttempts(), 5_000);
-workflowRecoveryTimer.unref();
 const automationTimer = setInterval(() => {
   try {
     automations.tick(Date.now());
@@ -6181,7 +6056,7 @@ const artifactMaintenanceTimer = setInterval(() => {
     if (expiredAttachments) app.log.info({ event: "session_artifacts_expired", count: expiredAttachments }, "session attachments expired");
     db.collectOrphanedSteeringPromptImages(1_000);
     db.collectOrphanedEventPayloadArtifacts(1_000);
-    db.collectWorkflowArtifactBlobs(1_000);
+    db.collectArtifactBlobs(1_000);
     db.prunePolicyHookDecisions(now - 7 * 24 * 60 * 60_000, 1_000);
     db.pruneGovernanceAudit(now - GOVERNANCE_AUDIT_RETENTION_MS, 1_000);
   } catch (error) {
@@ -6192,7 +6067,6 @@ artifactMaintenanceTimer.unref();
 archivedHistoryRetention.start();
 mutationAuditArchiveRetention.start();
 incrementalVacuum.start();
-workflowEventRetention.start();
 // Half-open-socket liveness sweep. A runner whose socket silently died (sleep / Wi-Fi drop / NAT
 // rebind) stays readyState=OPEN with no FIN/RST, so onGone never fires: the runner reads 'online'
 // and its sessions 'running' forever, and prompts written to the dead socket are lost. The app-level
@@ -6239,7 +6113,6 @@ runnerLivenessTimer.unref();
 app.addHook("onClose", async () => {
   campaignForgeObserver.dispose();
   mergeClosureWatcher.dispose();
-  clearInterval(workflowRecoveryTimer);
   clearInterval(automationTimer);
   clearInterval(assistantConfirmationTimer);
   clearInterval(outboundEventTimer);
@@ -6257,7 +6130,6 @@ app.addHook("onClose", async () => {
   archivedHistoryRetention.stop();
   mutationAuditArchiveRetention.stop();
   incrementalVacuum.stop();
-  workflowEventRetention.stop();
   clearInterval(runnerLivenessTimer);
   try {
     await outboundEvents.close();

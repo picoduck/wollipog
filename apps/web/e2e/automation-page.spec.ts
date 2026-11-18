@@ -124,6 +124,21 @@ for (const { label, viewport } of [
       await capture(page, `automation-page-never-ran-${label}-${theme}`);
     });
 
+    test("an automation with a retired action explains its pause and links to the editor", async ({ page }) => {
+      await openPage(page, "automation-nightly-sweep", theme, "&retired-workflow");
+      await expect(page.locator(phone ? ".automation-status .status" : ".detail-bar .status")).toHaveText("Paused");
+      await expect(page.getByText(/This automation is paused because workflow runs were removed/)).toBeVisible();
+      await expect(page.getByText(/Orchestrator session role/)).toBeVisible();
+      await expect(page.getByRole("button", { name: "Resume", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Edit", exact: true })).toHaveCount(0);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
+      await capture(page, `retired-workflow-${label}-${theme}`);
+      await page.getByRole("button", { name: "New Automation", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "New Automation", exact: true })).toBeVisible();
+      await expect(page.getByRole("radio", { name: "Run a Workflow" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: /^Session Role:/ })).toBeVisible();
+    });
+
     test("needs attention: a failed run and a waiting target are one danger notice with +1 More", async ({ page }) => {
       await openPage(page, "automation-nightly-sweep", theme, "&failed-run&waiting-target");
       const notices = page.locator(".automation-notice-slot .notice");
@@ -192,51 +207,6 @@ for (const { label, viewport } of [
   { label: "mobile", viewport: { width: 375, height: 812 } },
 ]) {
   for (const theme of ["dark", "light"] as const) {
-    test.describe(`${label} ${theme} inherited alternate workflow pins`, () => {
-      test.use({ viewport });
-      test("shows the edited primary identity in inherited alternate selectors", async ({ page }) => {
-        await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-bound&inherited-alternate-pins`);
-        await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
-        await page.getByRole("button", { name: "Edit", exact: true }).click();
-        await expect(page.getByRole("button", { name: "Other Auditor Agent: Claude Code" })).toBeVisible();
-        await expect(page.getByRole("button", { name: "Other Orchestrator Agent: Claude Code" })).toBeVisible();
-        const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
-        if (evidenceDir) await page.screenshot({
-          path: join(evidenceDir, `automation-inherited-pins-before-${label}-${theme}.png`), fullPage: true,
-        });
-
-        await page.getByRole("button", { name: "Auditor Agent: Claude Code", exact: true }).click();
-        await page.getByRole("option", { name: "Codex App Server" }).click();
-        await page.getByRole("button", { name: "Orchestrator Agent: Claude Code", exact: true }).click();
-        await page.getByRole("option", { name: "Codex App Server" }).click();
-        await expect(page.getByRole("button", { name: "Other Auditor Agent: Codex App Server" })).toBeVisible();
-        await expect(page.getByRole("button", { name: "Other Orchestrator Agent: Codex App Server" })).toBeVisible();
-        await expect(page.getByText(/The saved installation of (this role's|the Orchestrator's) agent isn't available on the other machine\./)).toHaveCount(0);
-        if (evidenceDir) await page.screenshot({
-          path: join(evidenceDir, `automation-inherited-pins-after-${label}-${theme}.png`), fullPage: true,
-        });
-      });
-    });
-
-    test.describe(`${label} ${theme} workflow orchestrator installation`, () => {
-      test.use({ viewport });
-      test("shows a card warning when the saved orchestrator has no installation binding", async ({ page }) => {
-        const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
-        const card = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
-        await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-bound`);
-        await card.click();
-        await expect(page.getByText(/This automation's agent installation isn't available\. Edit the automation to choose another installation\./)).toHaveCount(0);
-        if (evidenceDir) await page.screenshot({
-          path: join(evidenceDir, `automation-orchestrator-before-${label}-${theme}.png`), fullPage: true,
-        });
-        await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-unbound`);
-        await card.click();
-        await expect(page.getByText(/This automation's agent installation isn't available\. Edit the automation to choose another installation\./)).toBeVisible();
-        if (evidenceDir) await page.screenshot({
-          path: join(evidenceDir, `automation-orchestrator-after-${label}-${theme}.png`), fullPage: true,
-        });
-      });
-    });
 
     test.describe(`${label} ${theme} alternate installation`, () => {
       test.use({ viewport });
@@ -265,25 +235,6 @@ for (const { label, viewport } of [
   { label: "mobile", viewport: { width: 375, height: 812 } },
 ]) {
   for (const theme of ["dark", "light"] as const) {
-    test.describe(`${label} ${theme} workflow Machine switch`, () => {
-      test.use({ viewport });
-      test("shows the new Machine's configured role instead of the old installation", async ({ page }) => {
-        await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch`);
-        await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
-        await page.getByRole("button", { name: "Edit", exact: true }).click();
-        const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
-        if (evidenceDir) await page.screenshot({
-          path: join(evidenceDir, `automation-machine-before-${label}-${theme}.png`), fullPage: true,
-        });
-        await page.getByRole("button", { name: "Machine: runner-1", exact: true }).click();
-        await page.getByRole("option", { name: "runner-2" }).click();
-        await expect(page.getByRole("button", { name: "Auditor Agent: Configured Agent" })).toBeVisible();
-        await expect(page.getByText(/The saved installation of this role's agent isn't available\./)).toHaveCount(0);
-        if (evidenceDir) await page.screenshot({
-          path: join(evidenceDir, `automation-machine-after-${label}-${theme}.png`), fullPage: true,
-        });
-      });
-    });
   }
 }
 
@@ -391,32 +342,6 @@ for (const { label, viewport } of [
             ? "Choose an available installation of this agent on the other machine."
             : "Choose an available installation of this agent on this machine.")).toBeVisible();
           await capture(page, `automation-wording-${alternate ? "alternate" : "primary"}-save-error`);
-        }
-      });
-
-      test("names unavailable workflow pins and the machine a role rebind needs", async ({ page }) => {
-        for (const alternate of [false, true]) {
-          await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-bound` +
-            "&inherited-alternate-pins&unavailable-pins&rediscover");
-          await card(page).click();
-          await page.getByRole("button", { name: "Edit", exact: true }).click();
-          const warning = (text: string) => page.locator(".notice.t-warning").filter({ hasText: text });
-          for (const text of [
-            "The saved installation of this role's agent isn't available.Use",
-            "The saved installation of the Orchestrator's agent isn't available.Use",
-            "The saved installation of this role's agent isn't available on the other machine.",
-            "The saved installation of the Orchestrator's agent isn't available on the other machine.",
-          ]) await expect(warning(text)).toBeVisible();
-          if (!alternate) await capture(page, "automation-wording-workflow-warnings");
-          await warning(alternate
-            ? "The saved installation of this role's agent isn't available on the other machine."
-            : "The saved installation of this role's agent isn't available.Use",
-          ).getByRole("button", { name: "Use Current Installation" }).click();
-          await page.evaluate(() => (window as unknown as { automationsRediscover: () => void }).automationsRediscover());
-          await page.getByRole("button", { name: "Save Changes" }).click();
-          await expect(saveError(page, `Choose an available installation of the agent for Auditor on ${
-            alternate ? "the other" : "this"} machine.`)).toBeVisible();
-          await capture(page, `automation-wording-workflow-${alternate ? "alternate" : "primary"}-save-error`);
         }
       });
     });

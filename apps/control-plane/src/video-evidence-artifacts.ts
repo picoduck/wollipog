@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactView } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { SqliteVideoReviewStore, type VideoReviewFrameStorage } from "./video-evidence-runtime-store.js";
 import { PACED_VIDEO_REVIEW_PROFILE, videoReviewBindingDigest, type VideoReviewRecord } from "./video-evidence-runtime.js";
@@ -31,26 +31,26 @@ export class ControlPlaneVideoFrameStorage implements VideoReviewFrameStorage {
     if (!frame || frame.index !== index || bytes.length !== frame.sizeBytes ||
       bytes.length > PACED_VIDEO_PREPARATION_PROFILE.frameBytes ||
       createHash("sha256").update(bytes).digest("hex") !== frame.sha256 ||
-      this.db.workflowArtifactExportPreflight(id)?.artifact) throw new Error("Derived video frame storage identity is invalid.");
-    const artifact: WorkflowArtifactView = {
+      this.db.artifactExportPreflight(id)?.artifact) throw new Error("Derived video frame storage identity is invalid.");
+    const artifact: ArtifactView = {
       artifactId: id, sessionId: review.binding.childSessionId, kind: "screenshot",
       name: "Video Frame " + (index + 1) + ".png", mimeType: "image/png", encoding: "base64",
       sizeBytes: bytes.length, sha256: frame.sha256, createdBy: { kind: "system", id: "video-review-v2" },
       metadata: metadata(review, index), createdAt: review.createdAt,
     };
-    this.db.createWorkflowArtifactBytes(artifact, bytes);
+    this.db.createArtifactBytes(artifact, bytes);
     this.created.add(id);
   }
   readFrame(review: VideoReviewRecord, index: number): Buffer | null {
     const frame = review.manifest.frames[index];
     const id = artifactId(review, index);
-    const artifact = this.db.workflowArtifactExportPreflight(id)?.artifact;
+    const artifact = this.db.artifactExportPreflight(id)?.artifact;
     if (!frame || !artifact || artifact.sessionId !== review.binding.childSessionId ||
       artifact.kind !== "screenshot" || artifact.encoding !== "base64" || artifact.mimeType !== "image/png" ||
       artifact.sha256 !== frame.sha256 || artifact.sizeBytes !== frame.sizeBytes ||
       artifact.createdBy.kind !== "system" || artifact.createdBy.id !== "video-review-v2" ||
       JSON.stringify(artifact.metadata) !== JSON.stringify(metadata(review, index))) return null;
-    try { return this.db.readWorkflowArtifactBytes(id); } catch { return null; }
+    try { return this.db.readArtifactBytes(id); } catch { return null; }
   }
   finishDerivation(review: VideoReviewRecord): void {
     for (const frame of review.manifest.frames) this.created.delete(artifactId(review, frame.index));
@@ -59,7 +59,7 @@ export class ControlPlaneVideoFrameStorage implements VideoReviewFrameStorage {
     const id = artifactId(review, index);
     // Failure rollback removes only rows this instance successfully created, never a colliding
     // pre-existing artifact. Content-addressed bytes shared with another row remain retained.
-    if (this.created.delete(id)) this.db.deleteWorkflowArtifact(id);
+    if (this.created.delete(id)) this.db.deleteArtifact(id);
   }
 }
 export function createControlPlaneVideoReviewStore(db: ControlPlaneDb): SqliteVideoReviewStore {

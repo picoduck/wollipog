@@ -79,7 +79,7 @@ test("artifact author, manifest metadata and timing tampering fail closed; colli
   const frames = new ControlPlaneVideoFrameStorage(db);
   assert.throws(() => frames.writeFrame(record, 0, image), /identity is invalid/u);
   frames.deleteFrame(record, 0);
-  assert.ok(db.workflowArtifactExportPreflight(id)?.artifact, "unowned collision is never deleted by cleanup");
+  assert.ok(db.artifactExportPreflight(id)?.artifact, "unowned collision is never deleted by cleanup");
 });
 
 test("source deletion and attachment retention remove only server-authored same-source temporal frames", (t) => {
@@ -87,24 +87,24 @@ test("source deletion and attachment retention remove only server-authored same-
     const db = fixtureDb(); t.after(() => db.close());
     const record = review();
     const source = Buffer.from("source");
-    db.createWorkflowArtifactBytes({
+    db.createArtifactBytes({
       artifactId: "source", sessionId: "child", kind: "video", name: "Synthetic.webm",
       mimeType: "video/webm", encoding: "base64", sizeBytes: source.length, sha256: hash(source),
       createdBy: { kind: "agent", id: "child" }, metadata: { purpose: "session_attachment" }, createdAt: 1_000,
     }, source);
     const store = createControlPlaneVideoReviewStore(db);
     store.saveDerived(record, [image, image]);
-    const owned = db.workflowArtifactExportPreflight(record.reviewId + ":frame:0")!.artifact;
+    const owned = db.artifactExportPreflight(record.reviewId + ":frame:0")!.artifact;
     for (const [id, sessionId, createdBy] of [
       ["agent_copy", "child", { kind: "agent" as const, id: "child" }],
       ["other_child", "another", { kind: "system" as const, id: "video-review-v2" }],
-    ] as const) db.createWorkflowArtifactBytes({ ...owned, artifactId: id, sessionId, createdBy }, image);
+    ] as const) db.createArtifactBytes({ ...owned, artifactId: id, sessionId, createdBy }, image);
     if (retention) assert.equal(db.pruneExpiredSessionAttachments(2_000), 1);
-    else assert.equal(db.deleteWorkflowArtifact("source"), true);
+    else assert.equal(db.deleteArtifact("source"), true);
     assert.equal(store.readFrame(record.reviewId, 0), null);
     assert.equal(store.readFrame(record.reviewId, 1), null);
-    assert.ok(db.workflowArtifactExportPreflight("agent_copy"));
-    assert.ok(db.workflowArtifactExportPreflight("other_child"));
+    assert.ok(db.artifactExportPreflight("agent_copy"));
+    assert.ok(db.artifactExportPreflight("other_child"));
   }
 });
 
@@ -113,14 +113,14 @@ test("bounded expiry sweep removes crashed staging and expired frames without tr
   const record = review(), frames = new ControlPlaneVideoFrameStorage(db);
   // A crash before review publication leaves private rows without any usable review grant.
   frames.writeFrame(record, 0, image);
-  const owned = db.workflowArtifactExportPreflight(record.reviewId + ":frame:0")!.artifact;
-  db.createWorkflowArtifactBytes({ ...owned, artifactId: "agent_copy", createdBy: { kind: "agent", id: "child" } }, image);
-  db.createWorkflowArtifactBytes({ ...owned, artifactId: "invalid_expiry",
+  const owned = db.artifactExportPreflight(record.reviewId + ":frame:0")!.artifact;
+  db.createArtifactBytes({ ...owned, artifactId: "agent_copy", createdBy: { kind: "agent", id: "child" } }, image);
+  db.createArtifactBytes({ ...owned, artifactId: "invalid_expiry",
     metadata: { ...owned.metadata, expiresAt: "1" } }, image);
   assert.equal(db.pruneExpiredTemporalVideoFrames(record.expiresAt - 1), 0);
   assert.equal(db.pruneExpiredTemporalVideoFrames(record.expiresAt, 1), 1);
   assert.equal(db.pruneExpiredTemporalVideoFrames(record.expiresAt, 1), 0);
-  assert.ok(db.workflowArtifactExportPreflight("agent_copy"));
-  assert.ok(db.workflowArtifactExportPreflight("invalid_expiry"));
-  assert.equal(db.workflowArtifactExportPreflight(record.reviewId + ":frame:0"), null);
+  assert.ok(db.artifactExportPreflight("agent_copy"));
+  assert.ok(db.artifactExportPreflight("invalid_expiry"));
+  assert.equal(db.artifactExportPreflight(record.reviewId + ":frame:0"), null);
 });

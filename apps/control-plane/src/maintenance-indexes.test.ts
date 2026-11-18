@@ -8,7 +8,7 @@ import { installMaintenanceIndexes } from "./maintenance-indexes.js";
 import { BENCHMARK_NOW, captureMaintenanceQueries, seedMaintenanceFixture } from "../scripts/maintenance-benchmark-fixture.js";
 
 const NEW_INDEXES = [
-  "idx_workflow_attempts_deadline_active", "idx_session_stop_intents_pending",
+  "idx_session_stop_intents_pending",
   "idx_session_command_invocations_expiry", "idx_session_prompt_commands_expiry",
   "idx_session_prompt_commands_retention", "idx_outbound_event_deliveries_lease",
   "idx_outbound_event_deliveries_retention", "idx_outbound_event_deliveries_retry",

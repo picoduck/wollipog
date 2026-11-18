@@ -233,15 +233,12 @@ test("a request is never attributed to an owner that is unresolved or ambiguous"
   assert.equal(subagentStatusMeta(reused, subagentStatusContext(asking, true)).label, "Running");
 });
 
-test("members sit under their pod's or run's title, workflow members under Workflow when the run is not loaded", () => {
-  const workflow = [{ nodeStates: [{ nodeId: "review", sessionId: "wf", status: "running", attemptCount: 1 }] }] as never;
+test("members sit under their pod's or run's title", () => {
   const pod = memberMetadata({ runId: null }, undefined, { id: "p1", title: "Parser Pod",
-    members: [{ sessionId: "m1", role: "worker" }] } as never, []);
+    members: [{ sessionId: "m1", role: "worker" }] } as never);
   assert.deepEqual(pod.get("m1")?.group, { id: "pod:p1", name: "Parser Pod" });
-  const run = memberMetadata({ runId: "r1" }, { title: "Release Audit", sessionIds: ["a", "b"] }, undefined, workflow);
+  const run = memberMetadata({ runId: "r1" }, { title: "Release Audit", sessionIds: ["a", "b"] }, undefined);
   assert.deepEqual(run.get("a"), { group: { id: "run:r1", name: "Release Audit" }, runTitle: "Release Audit" });
-  assert.equal(run.get("wf")?.group?.name, "Release Audit");
-  assert.equal(memberMetadata({ runId: "r1" }, undefined, undefined, workflow).get("wf")?.group?.name, "Workflow");
 });
 
 test("groups keep their first row's order, count every filtered row, and page across groups", () => {

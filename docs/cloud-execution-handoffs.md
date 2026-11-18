@@ -115,7 +115,7 @@ The runner computes provenance immediately before `prepare`:
 - SHA-256 of the origin URL, if configured, never the URL itself;
 - SHA-256 over porcelain status, the binary `HEAD` patch, and sorted untracked-file path/blob hashes;
 - dirty state and a bounded untracked-file count;
-- up to 32 authorized workflow-artifact references with kind, size, and SHA-256;
+- up to 32 authorized session artifact references with kind, size, and SHA-256;
 - exact target environment, boundaries, policy, destination/source session ids, and USD budget.
 
 The tracked binary patch is bounded at 8 MiB and untracked files at 256. Unsafe paths, invalid git
@@ -123,7 +123,7 @@ objects, oversized input, missing native Git, or an unsettled source session rej
 branch names, patch bytes, artifact bodies, remote URLs, adapter output, and the private handoff id are
 not persisted in the control plane.
 
-Artifact references come from the authoritative workflow-artifact store; browser-supplied ids are
+Artifact references come from the authoritative session artifact store; browser-supplied ids are
 resolved and ownership-checked before runner dispatch. Bodies remain behind the existing authorized
 artifact export boundary. A provider adapter that needs those bytes must use its operator-owned,
 authenticated artifact integration; Wollipog does not place artifact bodies or credentials

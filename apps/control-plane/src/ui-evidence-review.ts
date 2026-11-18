@@ -6,7 +6,7 @@ import {
   runnerSupportsProtocol,
   type AgentCapabilities,
   type UiEvidenceReviewUnavailableCode,
-  type WorkflowArtifactView,
+  type ArtifactView,
   type WorkflowDecisionAuthority,
   type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
@@ -109,7 +109,7 @@ export function evaluateUiEvidenceItems(
   driver: string | null | undefined,
   childSessionId: string,
   evidence: readonly UiEvidenceItem[],
-  artifactView: (artifactId: string) => WorkflowArtifactView | null,
+  artifactView: (artifactId: string) => ArtifactView | null,
 ): UiEvidenceReviewEvaluation {
   const imageTypes: readonly string[] = driver === "codex-app-server"
     ? CODEX_APP_SERVER_IMAGE_MIME_TYPES

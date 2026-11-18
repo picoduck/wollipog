@@ -22,8 +22,9 @@ export function installAssistantAutomationAuthority(sql: DatabaseSync): void {
 }
 
 /** Server placement, including every alternate. Client-supplied Project labels are assertions. */
-export function automationManagementTargets(db: ControlPlaneDb, value: AutomationSpec): AssistantTarget[] {
+export function automationManagementTargets(db: ControlPlaneDb, value: Pick<AutomationSchedule, "action" | "runnerPolicy">): AssistantTarget[] {
   const action = value.action;
+  if (action.kind === "retired") throw new AssistantRefusal("The automation action was retired.");
   if (action.kind === "prompt_session") {
     const session = db.getSession(action.sessionId);
     if (!session) throw new AssistantRefusal("Automation target session is unavailable.");
@@ -40,7 +41,8 @@ export function automationManagementTargets(db: ControlPlaneDb, value: Automatio
   });
 }
 
-export function ownerCanAccessAutomation(db: ControlPlaneDb, owner: HumanPrincipal, value: AutomationSpec): boolean {
+export function ownerCanAccessAutomation(db: ControlPlaneDb, owner: HumanPrincipal, value: Pick<AutomationSchedule, "action" | "runnerPolicy">): boolean {
+  if (value.action.kind === "retired") return false;
   if (value.action.kind === "prompt_session") return db.canAccessSession(owner, value.action.sessionId);
   return [value.action.request, ...(value.runnerPolicy.kind === "alternate" ? value.runnerPolicy.targets : [])]
     .every(t => db.canAccessRunner(owner, t.runnerId) && db.canAccessWorkspace(owner, t.runnerId, t.workspaceId) &&
@@ -49,7 +51,7 @@ export function ownerCanAccessAutomation(db: ControlPlaneDb, owner: HumanPrincip
 
 /** This checks standing authority, not a retained credential or a session/campaign grant. */
 export function authorizeAssistantAutomation(db: ControlPlaneDb, connectionId: string,
-  operation: AssistantAutomationOperation, spec: AutomationSpec): {owner: HumanPrincipal; grantRevision: number} {
+  operation: AssistantAutomationOperation, spec: Pick<AutomationSchedule, "action" | "runnerPolicy">): {owner: HumanPrincipal; grantRevision: number} {
   const connection = db.assistantConnections.get(connectionId);
   if (!connection || connection.revoked) throw new AssistantRefusal("assistant_connection_revoked: The schedule's Assistant connection is unavailable. The owner must reconnect and re-authorize this schedule.");
   const owner = db.operatingHumanPrincipal(connection.ownerUserId, connection.organizationId);

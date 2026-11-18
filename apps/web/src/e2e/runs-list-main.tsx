@@ -4,8 +4,6 @@ import type {
   ControlPlaneToUi,
   RunView,
   SessionView,
-  WorkflowDefinition,
-  WorkflowInstanceView,
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -75,18 +73,6 @@ const sessions: SessionView[] = [
   member("s-dates-codex", "codex", "Codex", "codex-app-server", "completed", "run-dates"),
 ];
 
-const instances = [{
-  instanceId: "instance-review", workflowId: "builtin:build-review", workflowVersion: 1, runId: "run-review",
-  status: "waiting_gate", transitionCount: 2, createdBy: { kind: "human", id: "local" }, createdAt: NOW - 2 * MINUTE,
-  updatedAt: NOW, nodeStates: [
-    { nodeId: "build", status: "succeeded", attemptCount: 1, sessionId: "s-builder" },
-    { nodeId: "review", status: "succeeded", attemptCount: 1, sessionId: "s-reviewer" },
-    { nodeId: "approve", status: "waiting_gate", attemptCount: 0 },
-  ],
-}] as WorkflowInstanceView[];
-
-const definitions = [{ workflowId: "builtin:build-review", name: "Build and Review" }] as WorkflowDefinition[];
-
 const snapshot = {
   type: "snapshot",
   capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
@@ -131,8 +117,6 @@ const navigation: ViewNavigation = {
 
 const client = {
   ...api,
-  workflowInstances: async () => instances,
-  workflowDefinitions: async () => definitions,
 } as unknown as ApiClient;
 
 createRoot(document.getElementById("root")!).render(

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { WorkflowArtifactPage, WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactPage, ArtifactView } from "@wollipog/protocol";
 import { SessionArtifactDirectory } from "./artifact-directory.js";
 import {
   ARTIFACT_REFERENCE_TAG,
@@ -90,14 +90,14 @@ test("the rehype pass marks ids in prose and whole-id code spans, and leaves fen
   assert.equal(fenced.children[0]!.children[0]!.value, SHORT);
 });
 
-const artifact = (id: string, sessionId = "s1"): WorkflowArtifactView => ({
+const artifact = (id: string, sessionId = "s1"): ArtifactView => ({
   artifactId: id, sessionId, kind: "screenshot", name: `${id}.png`, mimeType: "image/png", encoding: "base64",
   sizeBytes: 1, sha256: "0".repeat(64), createdBy: { kind: "agent", id: sessionId }, createdAt: 1,
 });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 test("the directory names attachments without a read, and pages the list only as far as asked", async () => {
-  const pages: Record<string, WorkflowArtifactPage> = {
+  const pages: Record<string, ArtifactPage> = {
     first: { artifacts: [artifact("art_000000000001")], nextCursor: "2" },
     "2": { artifacts: [artifact("art_000000000002")], nextCursor: "3" },
     "3": { artifacts: [artifact("art_000000000003")] },

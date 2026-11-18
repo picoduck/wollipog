@@ -2238,7 +2238,6 @@ reads "Saving…".
 `--text`, tabular), and steps are 16px apart. `.steps.horizontal` lays three or four short steps side
 by side with 24px between them (a first-run explainer under an empty state), and stacks them again
 under 760px. It replaced `.onboard-steps`; the proposed `.how-steps` is this variant. The Automations
-workflow step list is a different component and keeps a local name.
 
 
 ---
@@ -2451,7 +2450,6 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Queued message (`queuedMessage`: the composer queue) | Pending, Queued, Canceled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |
 | Message receipt (`messageReceipt`: the one line under a sent message in the transcript — pending prompts, steering, provider commands, the rename) | Sending: a spinner and the word, no badge · Queued, Canceled, Dismissed: neutral · Delivered, Steered the Current Turn: success (inline) · Delivery Uncertain: warning · Delivery Failed, Not Sent, Not Accepted, Rejected, Rename Failed: danger. Rendered as the inline badge. |
 | Workflow gate / run decision | Awaiting Decision: warning · Approved: success (inline) · Rejected: neutral |
-| Workflow run step (`workflowNode`, #2977: a step's badge and marker on the workflow run page) | Waiting, Skipped, Stopped: neutral · Ready: info · Running: info (pulse) · Awaiting Decision: warning · Succeeded: success · Failed: danger. Amber is Awaiting Decision's alone. |
 | Multi-Agent Run (`run`, `runStatus()`, #2974: the Runs list row) | Awaiting Decision (a workflow node waits at a gate), Approval Required (a member needs the person): warning · Running: info (pulse) · Failed (the workflow failed): danger. In that order; none while every member is idle. |
 | Run follow-up (`followUp`, #2976: each member's send in the run's Follow Up dialog) | Delivered: success (inline) · Failed: danger (inline, with the reason beside it) |
 | Request decision (`requestDecision`: the outcome of every Decision Record and of the settled question row, #2204) | Allowed, Answered, Answered by Policy, Answered by Parent, Rechecked Automatically: success · Rejected, Dismissed, Dismissed by Parent, Ended Early, Replaced, Expired, Resolved by Provider, Another Account Selected, Escalated, Resolved: neutral · Blocked (by a policy, or fail-closed by Wollipog): danger · Timed Out: warning. Always past tense, never a provider's option id. |
@@ -2788,7 +2786,7 @@ value is not in the DOM.
 
 ### 11.9 Artifact Preview
 
-One anatomy for a workflow artifact, in the Browser tool and in Run detail (#2855,
+One anatomy for an artifact in the Browser tool (#2855,
 `components/ArtifactPreview.tsx`): a header, a meta line and the body.
 
 - **Header.** In the Browser an open artifact is a page on the panel's stack (§4.9, #2914), keyed by
@@ -2805,14 +2803,12 @@ One anatomy for a workflow artifact, in the Browser tool and in Run detail (#285
   and Download's menu opens as a sheet. The page has no bar of its own: the meta line follows the
   header directly and scrolls with the body. Being a page, an open artifact
   clears on a tool switch or when the panel closes, and the Browser reopens on its list; the tab, the
-  address and the open page stay in panel scratch (#1202). Run detail opens the same preview in a
-  `Modal` of size `lg` (a sheet on phones, §7.5), whose title is the artifact's name, with Enlarge
-  before Close and Download and **Done** in the footer.
+  address and the open page stay in panel scratch (#1202).
 - **Meta line.** `.art-meta` (§11.3): the kind (`labelFor`), the size (`formatBytes`), who saved it
   by name ("Claude", "You", a member's name or Wollipog; never a session or user id) and, once the
   bytes match their checksum, `ShieldCheck` **Verified**. The MIME type and the hash are not shown.
 - **Download.** A menu (§9.1), opened from the Browser header's icon button and elsewhere from a `.btn`
-  labelled Download (Run detail's footer, a transcript row): **Download Original File**, whose description is the one
+  labelled Download (a transcript row): **Download Original File**, whose description is the one
   warning ("Not redacted. It may contain secrets or personal data."), and **Copy Checksum**, which
   copies the full SHA-256. No paragraph under the meta line repeats the warning.
 - **Bodies.** Markdown with the shared renderer, without a leading H1 that repeats the title; text
@@ -3890,8 +3886,7 @@ green. Area work adopts the component instead of writing the class again.
 
 The merged-away names (`.kv`, `.kv-list`, `.copy-field`, `.drop-up`, `.modal-backdrop.nested`,
 `.masked-field`, `.how-steps`, `.tools-group`, `.progress` and a bare `.listbox`) are never
-written. The Automations workflow step list is a different component from `.steps`, and takes a
-local name so the two do not collide.
+written.
 
 **Already delivered** (no promotion needed):
 

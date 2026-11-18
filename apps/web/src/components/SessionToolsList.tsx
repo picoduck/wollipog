@@ -148,7 +148,7 @@ function useArtifactCount(sessionId: string, observation: number): { count: numb
   const [artifacts, setArtifacts] = useState<{ sessionId: string; count: number; more: boolean } | null>(null);
   useEffect(() => {
     let current = true;
-    api.sessionWorkflowArtifacts(sessionId).then(
+    api.sessionArtifacts(sessionId).then(
       (page) => { if (current) setArtifacts({ sessionId, count: page.artifacts.length, more: Boolean(page.nextCursor) }); },
       () => { /* the fact then offers a web preview alone */ },
     );

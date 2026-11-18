@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type {
   CreateRunRequest,
-  CreateWorkflowRunRequest,
   ProjectLocationView,
   ProjectView,
   RunnerView,
@@ -147,7 +146,7 @@ test("initial Project selection preserves real, explicit No Project, and absent 
   assert.equal(initialProjectSelectionForPreset(false, selectedProject, { projectId: "project-1" }), "");
 });
 
-test("parallel and workflow run requests preserve the same exact Project placement", () => {
+test("comparison run requests preserve exact Project placement", () => {
   const selectedLocation = location("selected", { projectId: "project-1" });
   const selectedProject = project("project-1", [selectedLocation]);
   const placement = projectSessionPlacement(true, selectedProject, selectedLocation, {
@@ -159,13 +158,7 @@ test("parallel and workflow run requests preserve the same exact Project placeme
     agentIds: ["codex"],
     task: "Compare implementations",
   };
-  const workflow: CreateWorkflowRunRequest = {
-    ...placement,
-    workflowId: "build-review",
-    task: "Build and review",
-  };
-
-  for (const request of [parallel, workflow]) {
+  for (const request of [parallel]) {
     assert.equal(request.runnerId, selectedLocation.runnerId);
     assert.equal(request.workspaceId, selectedLocation.workspaceId);
     assert.equal(request.projectId, selectedProject.id);

@@ -1506,6 +1506,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   384,
   // v385 slot
   // v386 slot
+  // 386: Workflow runs and workflow automation actions are retired (Refs #4692).
+  386,
   // v387 slot
   // v388 slot
   // v389 slot

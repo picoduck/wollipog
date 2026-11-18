@@ -98,7 +98,7 @@ export async function seedDelegatedVideoEvidence(databasePath: string, workspace
       config: { model: "claude-opus-5-5", costBudgetUsd: 2, maxToolCalls: 10 }, now });
     db.updateSessionStatus("video-child", "running", now);
     const source = readFileSync(fileURLToPath(new URL("../../../control-plane/test-fixtures/video-preparation-paced.webm", import.meta.url)));
-    db.createWorkflowArtifactBytes({ artifactId: "video-source", sessionId: "video-child", kind: "video", name: "Walkthrough.webm",
+    db.createArtifactBytes({ artifactId: "video-source", sessionId: "video-child", kind: "video", name: "Walkthrough.webm",
       mimeType: "video/webm", encoding: "base64", sha256: sha(source), sizeBytes: source.length, createdBy: { kind: "agent", id: "video-child" },
       metadata: { purpose: "session_attachment" }, createdAt: now }, source);
     const normalized = normalizeWorkflowDecisionSnapshot({ category: "ui_evidence_approval",

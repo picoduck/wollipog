@@ -285,7 +285,7 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
       assert.ok(h.enable().ok);
       // Fixture PNG, not an implementation capture or a model-visible quality verdict.
       const bytes = readFileSync(fileURLToPath(new URL("../../web/public/icons/icon-192.png", import.meta.url)));
-      const artifact = h.svc.createWorkflowArtifact({ sessionId: "worker", kind: "screenshot", name: "fixture.png",
+      const artifact = h.svc.createArtifact({ sessionId: "worker", kind: "screenshot", name: "fixture.png",
         mimeType: "image/png", encoding: "base64", data: bytes.toString("base64") }, { kind: "agent", id: "worker" });
       assert.ok(artifact.ok, artifact.error ?? "attachment failed");
       const evidence = { evidenceId: "fixture-capture", artifactId: artifact.data!.artifactId,
@@ -299,7 +299,7 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
       assert.ok(reject.ok, reject.error ?? "rejection failed");
       assert.equal(h.db.workflowDecisionByOccurrence(first.data!.occurrenceId)!.status, "denied");
       const repairedBytes = readFileSync(fileURLToPath(new URL("../../web/public/icons/icon-512.png", import.meta.url)));
-      const repairedArtifact = h.svc.createWorkflowArtifact({ sessionId: "worker", kind: "screenshot", name: "fixture-repaired.png",
+      const repairedArtifact = h.svc.createArtifact({ sessionId: "worker", kind: "screenshot", name: "fixture-repaired.png",
         mimeType: "image/png", encoding: "base64", data: repairedBytes.toString("base64") }, { kind: "agent", id: "worker" });
       assert.ok(repairedArtifact.ok, repairedArtifact.error ?? "repair attachment failed");
       snapshot = { category: "ui_evidence_approval", evidence: [{ ...evidence,
@@ -571,7 +571,7 @@ test("Full Control owns evidence it cannot inspect, yet never delivers another S
       else assert.ok(h.svc.setParentControlPolicy("root", { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, ui_evidence_approval: "orchestrator" },
         h.db.getSession("root")!.parentControlPolicy?.revision).ok);
       const bytes = readFileSync(fileURLToPath(new URL("../../web/public/icons/icon-192.png", import.meta.url)));
-      const foreign = h.svc.createWorkflowArtifact({ sessionId: "sibling", kind: "screenshot", name: "sibling.png",
+      const foreign = h.svc.createArtifact({ sessionId: "sibling", kind: "screenshot", name: "sibling.png",
         mimeType: "image/png", encoding: "base64", data: bytes.toString("base64") }, { kind: "agent", id: "sibling" });
       assert.ok(foreign.ok, foreign.error ?? "attachment failed");
       const decision = h.svc.createWorkflowDecision("worker", { requestId: "foreign", resourceKey: "foreign", resourceSnapshot: {

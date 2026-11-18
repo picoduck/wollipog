@@ -38,7 +38,7 @@ test("campaign approval exposes authority overrides and account placement before
   }
 });
 
-test("slash commands, workflow identity and inherited settings are readable before opening full configuration", () => {
+test("slash commands and inherited settings are readable before opening full configuration", () => {
   const prompt = structuredClone(fixture);
   prompt.spec.action = { kind: "prompt_session", sessionId: "target", request: { text: "", slashCommand: "/inspect-ci" } };
   prompt.effectiveTargets = [{ runnerId: "machine", workspaceId: "workspace", agentId: "agent", role: "agent",
@@ -48,10 +48,5 @@ test("slash commands, workflow identity and inherited settings are readable befo
   assert.ok(promptFacts.includes("Inherit at Run Time"));
   assert.ok(promptFacts.includes("current-model"));
   assert.ok(promptFacts.includes("does not override future session settings"));
-  const workflow = structuredClone(fixture);
-  workflow.spec.action = { kind: "workflow_run", request: { runnerId: "machine", workspaceId: "workspace", workflowId: "health-workflow", workflowVersion: 3, task: "Inspect CI" } };
-  const workflowFacts = renderToStaticMarkup(<AutomationCreationSummary snapshot={workflow} />).split("<details>")[0]!;
-  assert.ok(workflowFacts.includes("health-workflow"));
-  assert.ok(workflowFacts.includes("Workflow Version"));
-  assert.match(workflowFacts, /<dd>3<\/dd>/);
+
 });

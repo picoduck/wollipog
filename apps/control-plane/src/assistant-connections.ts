@@ -32,7 +32,7 @@ export const assistantCallContext = new AsyncLocalStorage<{ connectionId: string
 /** Operations an Assistant thread may not call: each schedules future work, turns a session into
  * one that starts its own, or (a fork) materializes a session on the runner without the session
  * creation that counts a thread's launches. Its owner can still use them directly. */
-const THREAD_EXCLUDED_OPERATIONS = new Set(["auto_create", "auto_update", "auto_enable", "auto_test", "workflow_run",
+const THREAD_EXCLUDED_OPERATIONS = new Set(["auto_create", "auto_update", "auto_enable", "auto_test",
   "session_role", "session_adopt", "session_fork"]);
 export class AssistantConflict extends AssistantRefusal {}
 export interface AssistantActivityRecord {

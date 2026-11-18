@@ -32,7 +32,7 @@ export class AssistantPromptImages {
     const source = args.sourceArtifactId;
     const recheck = () => {
       if (source === undefined) return;
-      const scope = typeof source === "string" ? this.db.workflowArtifactScope(source) : null;
+      const scope = typeof source === "string" ? this.db.artifactScope(source) : null;
       const session = scope?.sessionId ? this.db.getSession(scope.sessionId) : null;
       if (!session) throw new AssistantRefusal("Image source is unavailable or outside current access.");
       operations.authorize(connectionId, "prompt_image_add", {kind: "session", id: session.id, ...(session.projectId ? {projectId: session.projectId} : {})});
@@ -40,10 +40,10 @@ export class AssistantPromptImages {
     if (source !== undefined) {
       if (typeof source !== "string") throw new AssistantRefusal("sourceArtifactId must be an opaque artifact reference.");
       recheck();
-      const metadata = this.db.workflowArtifactExportPreflight(source)?.artifact;
+      const metadata = this.db.artifactExportPreflight(source)?.artifact;
       if (!metadata || !(PROMPT_IMAGE_MIME_TYPES as readonly string[]).includes(metadata.mimeType) || metadata.sizeBytes > MAX_PROMPT_IMAGE_BYTES) throw new AssistantRefusal("Use an allowed, bounded image artifact.");
       mimeType = metadata.mimeType;
-      const stored = this.db.readWorkflowArtifactBytes(source);
+      const stored = this.db.readArtifactBytes(source);
       if (!stored) throw new AssistantRefusal("Image source is unavailable.");
       bytes = stored;
     } else {

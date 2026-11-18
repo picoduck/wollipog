@@ -27,10 +27,6 @@ export function seedMaintenanceFixture(db: ControlPlaneDb, historyRows = 20_000)
   type Generator = (i: number) => SQLInputValue;
   const now = BENCHMARK_NOW;
   const tables: Record<string, Record<string, Generator>> = {
-    workflow_attempts: {
-      status: i => i % 1_000 === 0 ? "running" : "succeeded", session_id: i => `s${i % 2_000}`,
-      deadline_at: i => i % 1_000 === 0 ? now - 1 : now + 1,
-    },
     session_reminders: {
       session_id: i => `s${i % 2_000}`, user_id: i => `user${i}`, schedule_kind: () => "timed",
       scheduled_for: i => now + (i % 1_000 === 0 ? -1 : 1), time_zone: () => "UTC",
@@ -116,7 +112,6 @@ export function captureMaintenanceQueries(db: ControlPlaneDb): MaintenanceQuery[
   });
   const now = BENCHMARK_NOW;
   const actions: Array<[string, () => unknown]> = [
-    ["activeWorkflowAttempts", () => db.activeWorkflowAttempts(now)],
     ["fireDueSessionReminders", () => db.fireDueSessionReminders(now)],
     ["pendingSessionStopIntents", () => db.pendingSessionStopIntents()],
     ["dueSessionCommandInvocationRunnerIds", () => db.dueSessionCommandInvocationRunnerIds(now)],

@@ -71,13 +71,13 @@ test("organization roles centrally gate mutations while reads remain available",
 });
 
 test("agent mutations pass only after the separate agent-control route allowlist authenticates them", () => {
-  assert.equal(mutationAuthorizationError("POST", "/api/workflows", {
+  assert.equal(mutationAuthorizationError("PUT", "/api/governance/policies/:policyId", {
     kind: "agent",
     actorId: "s_agent",
     organizationId: "org_1",
     delegatedScope: { organizationId: "org_1", owner: { kind: "organization", organizationId: "org_1" } },
   }), null);
-  assert.match(mutationAuthorizationError("POST", "/api/workflows", null)!, /authentication/);
+  assert.match(mutationAuthorizationError("PUT", "/api/governance/policies/:policyId", null)!, /authentication/);
   assert.equal(mutationAuthorizationError("POST", "/hooks/v1/example", null), null);
 });
 
@@ -102,8 +102,8 @@ test("a user- or team-scoped agent session cannot mutate organization-global res
   };
   assert.equal(agentDelegationAuthorizationError("/api/compatibility", userAgent), null);
   assert.equal(agentDelegationAuthorizationError("/api/sessions/s_1/prompt", userAgent), null);
-  assert.match(agentDelegationAuthorizationError("/api/workflows", userAgent)!, /organization-wide/);
-  assert.equal(agentDelegationAuthorizationError("/api/workflows", {
+  assert.match(agentDelegationAuthorizationError("/api/governance/policies/:policyId", userAgent)!, /organization-wide/);
+  assert.equal(agentDelegationAuthorizationError("/api/governance/policies/:policyId", {
     ...userAgent,
     delegatedScope: { organizationId: "org_1", owner: { kind: "organization", organizationId: "org_1" } },
   }), null);

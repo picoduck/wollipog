@@ -7,8 +7,8 @@ export type RunnerPromptImageResult =
 /** Authenticate, scope, and verify a prompt-image read before any bytes leave the blob store. */
 export function runnerPromptImage(
   db: Pick<ControlPlaneDb,
-    "verifyActiveRunnerCredential" | "getSession" | "workflowArtifactExportPreflight" |
-    "readWorkflowArtifactBytes" | "sessionForkIncludesAncestor">,
+    "verifyActiveRunnerCredential" | "getSession" | "artifactExportPreflight" |
+    "readArtifactBytes" | "sessionForkIncludesAncestor">,
   runnerId: string,
   sessionId: string,
   artifactId: string,
@@ -19,9 +19,9 @@ export function runnerPromptImage(
   }
   const session = db.getSession(sessionId);
   if (!session || session.runnerId !== runnerId) return { ok: false, status: 404, error: "artifact not found" };
-  let preflight: ReturnType<ControlPlaneDb["workflowArtifactExportPreflight"]>;
+  let preflight: ReturnType<ControlPlaneDb["artifactExportPreflight"]>;
   try {
-    preflight = db.workflowArtifactExportPreflight(artifactId);
+    preflight = db.artifactExportPreflight(artifactId);
   } catch {
     return { ok: false, status: 422, error: "artifact content is invalid" };
   }
@@ -33,7 +33,7 @@ export function runnerPromptImage(
     return { ok: false, status: 404, error: "artifact not found" };
   }
   try {
-    const body = db.readWorkflowArtifactBytes(artifactId);
+    const body = db.readArtifactBytes(artifactId);
     return body
       ? { ok: true, body, mimeType: artifact.mimeType }
       : { ok: false, status: 404, error: "artifact not found" };

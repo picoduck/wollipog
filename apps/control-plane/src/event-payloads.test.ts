@@ -5,7 +5,7 @@ import {
   EVENT_PAYLOAD_CHUNK_BYTES,
   EVENT_PAYLOAD_MAX_BYTES,
   EVENT_PAYLOAD_PREVIEW_BYTES,
-  type WorkflowArtifactView,
+  type ArtifactView,
 } from "@wollipog/protocol";
 import {
   eventPayloadPreview,
@@ -14,16 +14,16 @@ import {
 } from "./event-payloads.js";
 
 class ArtifactDb {
-  created: Array<{ artifact: WorkflowArtifactView; bytes: Buffer }> = [];
+  created: Array<{ artifact: ArtifactView; bytes: Buffer }> = [];
   deleted: string[] = [];
   failAt = -1;
 
-  createWorkflowArtifactBytes(artifact: WorkflowArtifactView, bytes: Buffer): void {
+  createArtifactBytes(artifact: ArtifactView, bytes: Buffer): void {
     if (this.created.length === this.failAt) throw new Error("blob store unavailable");
     this.created.push({ artifact, bytes: Buffer.from(bytes) });
   }
 
-  deleteWorkflowArtifact(artifactId: string): void {
+  deleteArtifact(artifactId: string): void {
     this.deleted.push(artifactId);
   }
 }

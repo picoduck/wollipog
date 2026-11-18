@@ -149,8 +149,6 @@ const NetworkPanel = lazy(() => import("./components/SettingsView.js").then((mod
 const NotificationsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NotificationsPanel })));
 const SettingsView = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.SettingsView })));
 const SessionTitlesPanel = lazy(() => import("./components/SessionTitlesPanel.js").then((module) => ({ default: module.SessionTitlesPanel })));
-const WorkflowEventRetentionPanel = lazy(() => import("./components/WorkflowEventRetentionPanel.js")
-  .then((module) => ({ default: module.WorkflowEventRetentionPanel })));
 const ArchivedHistoryRetentionPanel = lazy(() => import("./components/ArchivedHistoryRetentionPanel.js")
   .then((module) => ({ default: module.ArchivedHistoryRetentionPanel })));
 
@@ -971,7 +969,7 @@ export function Shell() {
                 orchestrator: <><OrchestratorSettingsPanel discoveryRevision={runners} /><DecisionModelPanel /></>,
                 reviews: <ReviewSettingsPanel />,
                 network: <NetworkPanel tailnet={tailnet} onNavigate={navigate} />,
-                storage: <><ArchivedHistoryRetentionPanel /><WorkflowEventRetentionPanel /></>,
+                storage: <ArchivedHistoryRetentionPanel />,
                 experimental: (
                   <ExperimentalPanel
                     flags={experiments.flags}

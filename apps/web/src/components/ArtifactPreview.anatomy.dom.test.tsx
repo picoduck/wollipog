@@ -4,7 +4,7 @@ import { afterEach, describe, test } from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { WorkflowArtifactKind, WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactKind, ArtifactView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -28,12 +28,12 @@ for (const [name, value] of Object.entries({
   MouseEvent: domWindow.MouseEvent, KeyboardEvent: domWindow.KeyboardEvent, React, IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
-const MIME: Record<WorkflowArtifactKind, string> = {
+const MIME: Record<ArtifactKind, string> = {
   html_preview: "text/html", patch: "text/x-diff", review_report: "text/markdown", screenshot: "image/png",
   test_log: "text/plain", verdict: "application/json", video: "video/webm",
 };
 
-function artifact(kind: WorkflowArtifactKind, name: string, body: string | Uint8Array, extra: Partial<WorkflowArtifactView> = {}): WorkflowArtifactView {
+function artifact(kind: ArtifactKind, name: string, body: string | Uint8Array, extra: Partial<ArtifactView> = {}): ArtifactView {
   const bytes = typeof body === "string" ? Buffer.from(body) : body;
   return {
     artifactId: `${kind}-1`, sessionId: "session_1", kind, name, mimeType: MIME[kind],
@@ -47,7 +47,7 @@ const viewer: ViewerIdentity = { userId: "usr_8f2c41", shared: false, names: new
 
 /** The Browser's anatomy without the panel: the header's actions (in a stand-in for its action
  * slot), the meta line and the body over one load. */
-function Preview({ item }: { item: WorkflowArtifactView }) {
+function Preview({ item }: { item: ArtifactView }) {
   const model = useArtifactPreview(item);
   return (
     <div>
@@ -83,7 +83,7 @@ async function render(ui: React.ReactNode, exportArtifact: ApiClient["artifactEx
   return container;
 }
 
-const exporting = (item: WorkflowArtifactView, body: string | Uint8Array): ApiClient["artifactExport"] =>
+const exporting = (item: ArtifactView, body: string | Uint8Array): ApiClient["artifactExport"] =>
   async () => new Blob([body as BlobPart], { type: item.mimeType });
 
 /** Waits for `predicate`. Assertions here compare booleans, never DOM nodes: a failed `assert.equal`
@@ -201,7 +201,7 @@ describe("a Copy Checksum write that settles late (#3582)", () => {
 
   let close: () => void = () => {};
   /** The preview behind a recording toast, which `close` removes as closing its panel would. */
-  function Closable({ item, toasts }: { item: WorkflowArtifactView; toasts: string[] }) {
+  function Closable({ item, toasts }: { item: ArtifactView; toasts: string[] }) {
     const [open, setOpen] = React.useState(true);
     close = () => setOpen(false);
     const feedback = {
@@ -213,7 +213,7 @@ describe("a Copy Checksum write that settles late (#3582)", () => {
     return <FeedbackContext.Provider value={feedback}>{open && <Preview item={item} />}</FeedbackContext.Provider>;
   }
 
-  async function copyChecksum(item: WorkflowArtifactView, toasts: string[]): Promise<{ container: HTMLDivElement; trigger: HTMLButtonElement }> {
+  async function copyChecksum(item: ArtifactView, toasts: string[]): Promise<{ container: HTMLDivElement; trigger: HTMLButtonElement }> {
     const container = await render(<Closable item={item} toasts={toasts} />, exporting(item, "built\n"));
     await settle(ready(container), "the log");
     const trigger = buttonNamed(container, "Download")!;

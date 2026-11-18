@@ -298,8 +298,8 @@ test("a prune keeps prompts, the final response, completions, usage and attachme
     assert.equal(searchHits(db, "ospreyfinal", "s1"), 1);
     assert.ok(searchHits(db, "narwhaloutput", "other") > 0, "other sessions keep their search rows");
     for (const { id } of payloadArtifacts) {
-      assert.equal(db.getWorkflowArtifact(id), null, "payloads of pruned events are removed");
-      assert.equal(db.readWorkflowArtifactBytes(id), null);
+      assert.equal(db.getArtifact(id), null, "payloads of pruned events are removed");
+      assert.equal(db.readArtifactBytes(id), null);
     }
     assert.ok(kinds(db, "other").includes("tool_call"), "a session archived more recently is untouched");
 

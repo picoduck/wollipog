@@ -1,21 +1,14 @@
-import type { AgentDefinition, ProjectLocationView, ProjectView, RunnerView, WorkflowDefinition } from "@wollipog/protocol";
+import type { AgentDefinition, ProjectLocationView, ProjectView, RunnerView } from "@wollipog/protocol";
 import { agentAvailableForRunnerDefault, providerForDriver } from "@wollipog/protocol";
 import { agentOptions, agentSetupReason, type AgentOption } from "./components/agent-options.js";
 import { titleCaseLabel } from "./format.js";
 import { liveLocationAvailability } from "./project-session-selection.js";
-import type { RunWorkMode } from "./workflow-presets.js";
 
 /**
  * What New Multi-Agent Run offers (#2978): the agents a comparison can choose and which start
- * chosen, each Location as a folder on a Machine, the roles a workflow binds, and why the primary
+ * chosen, each Location as a folder on a Machine and why the primary
  * is unavailable. Pure, so the dialog and its tests read the same rules.
  */
-
-/** The sentence under the type switch, for the selected type. */
-export const RUN_TYPE_DESCRIPTION: Record<RunWorkMode, string> = {
-  parallel: "Each agent gets the same task in its own worktree.",
-  workflow: "Agents take turns as roles, and you approve between steps.",
-};
 
 /** The agent's provider says it is signed out. Such an agent can start, but its first turn fails. */
 export function agentSignedOut(agent: AgentDefinition): boolean {
@@ -220,48 +213,6 @@ export function runVisibilitySentence(project: ProjectView | null, noProject: bo
   }
 }
 
-export interface WorkflowRoleField {
-  /** The binding key: the agent id the definition's agent steps name. */
-  key: string;
-  /** The steps it takes, in Title Case: "Builder Agent", or "Builder and Remediator Agent". */
-  label: string;
-}
-
-const roleWords = (role: string) => titleCaseLabel(role.replace(/[_-]+/gu, " ").trim());
-
-function joinWords(words: readonly string[]): string {
-  return words.length <= 1 ? (words[0] ?? "") : `${words.slice(0, -1).join(", ")} and ${words.at(-1)}`;
-}
-
-/**
- * One field per agent the workflow binds, labelled by the roles of the steps it takes rather than
- * by its id: the built-in Build and independent review binds `claude` to Builder and Remediator.
- * A key whose steps name no role falls back to the key itself.
- */
-export function workflowRoleFields(definition: WorkflowDefinition | undefined): WorkflowRoleField[] {
-  if (!definition) return [];
-  const roles = new Map<string, string[]>();
-  for (const node of definition.nodes) {
-    if (node.kind !== "agent" || !node.agentId) continue;
-    const list = roles.get(node.agentId) ?? [];
-    const words = roleWords(node.role);
-    if (words && !list.includes(words)) list.push(words);
-    roles.set(node.agentId, list);
-  }
-  return [...roles].map(([key, words]) => {
-    const name = words.length ? joinWords(words) : roleWords(key) || key;
-    return { key, label: /\bAgent$/u.test(name) ? name : `${name} Agent` };
-  });
-}
-
-/** The workflow's human steps, by role, in definition order: the person answers them in the run. */
-export function workflowHumanRoles(definition: WorkflowDefinition | undefined): string[] {
-  if (!definition) return [];
-  return [...new Set(definition.nodes
-    .filter((node) => node.kind === "human_gate")
-    .map((node) => roleWords(node.role) || "Approver"))];
-}
-
 export interface NewRunBlockInput {
   task: string;
   machinesOnline: boolean;
@@ -273,10 +224,7 @@ export interface NewRunBlockInput {
   runners: ReadonlyMap<string, RunnerView>;
   runnerId: string;
   workspaceId: string;
-  mode: RunWorkMode;
   agentCount: number;
-  workflowChosen: boolean;
-  workflowBound: boolean;
   /** The first member, by its visible name, that can't start until it has an account. */
   accountChoiceMissing?: string | null;
 }
@@ -298,7 +246,5 @@ export function newRunBlockedReason(input: NewRunBlockInput): string | null {
     if (!launchable(input.location)) return "Choose an available location to continue.";
   }
   const account = input.accountChoiceMissing ? `Choose an account for ${input.accountChoiceMissing} to continue.` : null;
-  if (input.mode === "parallel") return input.agentCount > 0 ? account : "Choose at least one agent.";
-  if (!input.workflowChosen) return "Choose a workflow to continue.";
-  return input.workflowBound ? account : "Choose an agent for every role.";
+  return input.agentCount > 0 ? account : "Choose at least one agent.";
 }

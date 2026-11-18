@@ -130,7 +130,6 @@ const connection: UiConnectionRuntime = {
 };
 const client: ApiClient = { ...api,
   childSessions: async () => { throw new Error("The fixture has no child registry."); },
-  workflowInstances: async () => [],
 };
 
 function Fixture() {

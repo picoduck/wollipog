@@ -18,12 +18,13 @@ function spec(value: unknown): AutomationSpec {
 }
 function specOf(schedule: AutomationSchedule): AutomationSpec {
   const {name, cron, timezone, enabled, misfirePolicy, runnerPolicy, concurrencyPolicy, limits, notifications, action} = schedule;
+  if (action.kind === "retired") throw new AssistantRefusal("The automation action was retired.");
   return {name, cron, timezone, enabled, misfirePolicy, runnerPolicy, concurrencyPolicy, limits, notifications, action};
 }
 
 export function registerAssistantAutomations(operations: AssistantOperations, db: ControlPlaneDb,
   service: AutomationsService, mutations: ManagementMutations): void {
-  const accessible = (owner: HumanPrincipal, value: AutomationSpec) => {
+  const accessible = (owner: HumanPrincipal, value: Pick<AutomationSchedule, "action" | "runnerPolicy">) => {
     return ownerCanAccessAutomation(db, owner, value);
   };
   const load = (a: Record<string, unknown>, includeDeleted = false): AutomationSchedule => {
@@ -53,7 +54,7 @@ export function registerAssistantAutomations(operations: AssistantOperations, db
         (!!db.getAutomation(t.id, name === "auto_delete") && accessible(owner, db.getAutomation(t.id, name === "auto_delete")!)),
       execute: async (value, context) => {
         const a = object(value);
-        const authorize = (configuration: AutomationSpec) => {
+        const authorize = (configuration: Pick<AutomationSchedule, "action" | "runnerPolicy">) => {
           if (!accessible(context.owner, configuration)) throw new AssistantRefusal("The granting owner cannot access every automation target.");
           const current = db.assistantConnections.get(context.connection.id)!;
           const targets = automationManagementTargets(db, configuration);

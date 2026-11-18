@@ -10,7 +10,7 @@ import {
   ChevronDownIcon, CopyIcon, DiffIcon, DownloadIcon, HtmlIcon, ImageIcon, JsonIcon, LogIcon,
   Maximize2Icon, ReportIcon, ShieldCheckIcon, VideoIcon, WrapLinesIcon,
 } from "./Icons.js";
-import type { WorkflowArtifactKind, WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactKind, ArtifactView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { writeClipboardText } from "../clipboard.js";
 import { artifactDownloadFilename } from "../artifact-download.js";
@@ -50,14 +50,14 @@ type PreviewState =
 
 /** One artifact's preview: what it is showing, and what its header, meta line and body act on. */
 export interface ArtifactPreviewModel {
-  artifact: WorkflowArtifactView;
+  artifact: ArtifactView;
   previewClass: ArtifactPreviewClass;
   state: PreviewState;
   /** Load and check the bytes again, after a failure. */
   retry: () => void;
 }
 
-const KIND_ICONS: Readonly<Record<WorkflowArtifactKind, (props: { size?: number }) => ReactNode>> = {
+const KIND_ICONS: Readonly<Record<ArtifactKind, (props: { size?: number }) => ReactNode>> = {
   html_preview: HtmlIcon,
   patch: DiffIcon,
   review_report: ReportIcon,
@@ -68,7 +68,7 @@ const KIND_ICONS: Readonly<Record<WorkflowArtifactKind, (props: { size?: number 
 };
 
 /** An artifact's kind as its icon. */
-export function ArtifactKindIcon({ kind, size = 16 }: { kind: WorkflowArtifactKind; size?: number }) {
+export function ArtifactKindIcon({ kind, size = 16 }: { kind: ArtifactKind; size?: number }) {
   const KindIcon = KIND_ICONS[kind] ?? ReportIcon;
   return <KindIcon size={size} />;
 }
@@ -85,9 +85,9 @@ function decodeUtf8(bytes: ArrayBuffer): string {
  * bytes that match the artifact's length, type and SHA-256 reach a renderer. With no artifact (a host
  * whose list shows in its place) it loads nothing and has no model.
  */
-export function useArtifactPreview(artifact: WorkflowArtifactView): ArtifactPreviewModel;
-export function useArtifactPreview(artifact: WorkflowArtifactView | null): ArtifactPreviewModel | null;
-export function useArtifactPreview(artifact: WorkflowArtifactView | null): ArtifactPreviewModel | null {
+export function useArtifactPreview(artifact: ArtifactView): ArtifactPreviewModel;
+export function useArtifactPreview(artifact: ArtifactView | null): ArtifactPreviewModel | null;
+export function useArtifactPreview(artifact: ArtifactView | null): ArtifactPreviewModel | null {
   const api = useApi();
   const transcriptImageCache = useTranscriptImageCache();
   const previewClass = artifact ? classifyArtifactPreview(artifact) : "unsupported";
@@ -95,7 +95,7 @@ export function useArtifactPreview(artifact: WorkflowArtifactView | null): Artif
   const [attempt, setAttempt] = useState(0);
   // Keyed by the load it describes, so another artifact or a Retry starts loading in the render that
   // asks for it, never showing the previous bytes (or their Verified) for a commit.
-  const [settled, setSettled] = useState<{ artifact: WorkflowArtifactView; attempt: number; state: PreviewState } | null>(null);
+  const [settled, setSettled] = useState<{ artifact: ArtifactView; attempt: number; state: PreviewState } | null>(null);
   const state: PreviewState = previewClass === "unsupported" ? { phase: "unsupported" }
     : settled?.artifact === artifact && settled.attempt === attempt ? settled.state
       : { phase: "loading" };
@@ -180,7 +180,7 @@ function useArtifactDownload(model: ArtifactPreviewModel) {
 }
 
 /** Who saved the artifact, by name: never a session or user id (#2855). */
-function useArtifactAuthor(artifact: WorkflowArtifactView): string | null {
+function useArtifactAuthor(artifact: ArtifactView): string | null {
   const viewer = useContext(ViewerIdentityContext);
   const agentSessionId = artifact.createdBy.kind === "agent" ? artifact.createdBy.id : undefined;
   const agent = useOptionalStoreSelector((state) => {
@@ -293,7 +293,7 @@ function EnlargeButton({ model, onEnlarge }: { model: ArtifactPreviewModel; onEn
  * Evidence Viewer presents media (#2207) without its review controls. Done returns to Enlarge.
  */
 function EnlargedArtifact({ artifact, loaded, returnFocusRef, onClose }: {
-  artifact: WorkflowArtifactView;
+  artifact: ArtifactView;
   loaded: Extract<LoadedPreview, { kind: "image" | "html" }>;
   returnFocusRef: { current: HTMLElement | null };
   onClose: () => void;
@@ -318,7 +318,7 @@ function EnlargedArtifact({ artifact, loaded, returnFocusRef, onClose }: {
 }
 
 /** The untrusted HTML in a frame that runs no scripts, submits no forms and follows no links. */
-function HtmlFrame({ artifact, source, className }: { artifact: WorkflowArtifactView; source: string; className: string }) {
+function HtmlFrame({ artifact, source, className }: { artifact: ArtifactView; source: string; className: string }) {
   return (
     <iframe
       className={className}
@@ -480,7 +480,7 @@ export function ArtifactPreviewBody({ model, onOpenImage }: {
  * Run detail's preview (#2855; §7.1, §7.5): a large dialog, a sheet on a phone, titled with the
  * artifact over its meta line, with Enlarge in the header and Download and Done in the footer.
  */
-export function ArtifactPreviewDialog({ artifact, onClose }: { artifact: WorkflowArtifactView; onClose: () => void }) {
+export function ArtifactPreviewDialog({ artifact, onClose }: { artifact: ArtifactView; onClose: () => void }) {
   const model = useArtifactPreview(artifact);
   return (
     <Modal
@@ -507,7 +507,7 @@ export function ArtifactPreviewDialog({ artifact, onClose }: { artifact: Workflo
  * No ids or hashes. `pageKey` names the side panel page the row opens (§4.9), where focus returns.
  */
 export function ArtifactRow({ artifact, now, showAuthor = false, pageKey, onOpen }: {
-  artifact: WorkflowArtifactView;
+  artifact: ArtifactView;
   now: number;
   showAuthor?: boolean;
   pageKey?: string;

@@ -4,7 +4,7 @@ import { afterEach, test } from "node:test";
 import React, { act, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactView } from "@wollipog/protocol";
 import { api } from "../api.js";
 import { ArtifactGallery } from "./ArtifactGallery.js";
 
@@ -37,11 +37,11 @@ Object.defineProperty(domWindow.HTMLImageElement.prototype, "naturalHeight", { c
 
 const PNG = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 1]);
 const PNG_SHA = createHash("sha256").update(PNG).digest("hex");
-const shot = (id: string): WorkflowArtifactView => ({
+const shot = (id: string): ArtifactView => ({
   artifactId: id, sessionId: "session_1", kind: "screenshot", name: `${id}.png`, mimeType: "image/png",
   encoding: "base64", sizeBytes: PNG.byteLength, sha256: PNG_SHA, createdBy: { kind: "agent", id: "session_1" }, createdAt: 1,
 });
-const clip = (id: string): WorkflowArtifactView => ({ ...shot(id), kind: "video", name: `${id}.webm`, mimeType: "video/webm" });
+const clip = (id: string): ArtifactView => ({ ...shot(id), kind: "video", name: `${id}.webm`, mimeType: "video/webm" });
 
 let root: Root | null = null;
 let container: HTMLElement | null = null;
@@ -54,13 +54,13 @@ afterEach(async () => {
   api.artifactExport = priorExport;
 });
 
-function Host({ artifacts }: { artifacts: WorkflowArtifactView[] }) {
+function Host({ artifacts }: { artifacts: ArtifactView[] }) {
   const opener = useRef<HTMLElement | null>(null);
   return <ArtifactGallery artifacts={artifacts} initialId={artifacts[0]!.artifactId} returnFocusRef={opener} onClose={() => {}} />;
 }
 
 const settle = () => act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 5)); });
-async function open(artifacts: WorkflowArtifactView[]) {
+async function open(artifacts: ArtifactView[]) {
   api.artifactExport = async (id) => new Blob([PNG], { type: id.startsWith("clip") ? "video/webm" : "image/png" });
   container = domWindow.document.createElement("div") as unknown as HTMLElement;
   domWindow.document.body.append(container as never);

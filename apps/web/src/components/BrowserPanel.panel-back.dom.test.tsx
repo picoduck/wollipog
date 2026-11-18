@@ -5,7 +5,7 @@ import { after, before, beforeEach, describe, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionView, WorkflowArtifactView } from "@wollipog/protocol";
+import type { SessionView, ArtifactView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { StoreProvider } from "../store.js";
@@ -61,7 +61,7 @@ after(() => {
 
 const session = { id: "session-1", runnerId: "runner-1", driver: "claude-code", status: "idle", adopted: false, eventEpoch: 1 } as SessionView;
 const body = "ok 1 - the panel has one back control\n";
-const log: WorkflowArtifactView = {
+const log: ArtifactView = {
   artifactId: "log-1", sessionId: session.id, kind: "test_log", name: "web unit suite.log", mimeType: "text/plain",
   encoding: "utf8", sizeBytes: Buffer.byteLength(body), sha256: createHash("sha256").update(body).digest("hex"),
   createdBy: { kind: "system" }, createdAt: Date.now() - 60_000,
@@ -69,7 +69,7 @@ const log: WorkflowArtifactView = {
 const client = {
   ...api,
   childSessions: () => Promise.reject(new ApiError("This fixture has no durable child-session registry.", 404)),
-  sessionWorkflowArtifacts: async () => ({ artifacts: [log] }),
+  sessionArtifacts: async () => ({ artifacts: [log] }),
   artifactExport: async () => new Blob([body], { type: "text/plain" }),
 } as ApiClient;
 const connection: UiConnectionRuntime = {

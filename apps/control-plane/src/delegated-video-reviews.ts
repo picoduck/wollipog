@@ -557,7 +557,7 @@ export class DelegatedVideoReviews {
     resuming: (binding) => this.resuming(binding),
     normalCompletion: (binding) => this.budgetProvenance.normalCompletion(binding),
     workerAdmission: (binding, phase) => phase === "active" ? this.budgetProvenance.active(binding) : this.budgetProvenance.historical(binding),
-    readSource: (artifactId) => { try { return this.db.readWorkflowArtifactBytes(artifactId); } catch { return null; } },
+    readSource: (artifactId) => { try { return this.db.readArtifactBytes(artifactId); } catch { return null; } },
   };
 
   /** An open reviewer left provisionally stopped (by an older control plane's startup, for example)
@@ -584,7 +584,7 @@ export class DelegatedVideoReviews {
       const gate = this.attached?.sessions.delegatedVideoGate(request.occurrenceId, ["pending"]);
       const item = gate ? videoItem(gate.decision, request.evidenceId) : null;
       const target = gate ? this.target(gate.root, gate.child) : null;
-      const source = item?.artifactId ? this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact : null;
+      const source = item?.artifactId ? this.db.artifactExportPreflight(item.artifactId)?.artifact : null;
       if (!binding || !item || !target) return null;
       return { binding, criteria: structuredClone([...VIDEO_REVIEW_CRITERIA]), target, mediaType: item.mediaType as "video/webm" | "video/mp4",
         mode: "full_control", sourceGrantVerified: Boolean(source && source.sessionId === row.childSessionId && source.kind === "video" &&
@@ -1073,7 +1073,7 @@ export class DelegatedVideoReviews {
       const expected = videoValidationIdentity({ rootSessionId: gate.root.id, childSessionId: gate.child.id,
         occurrenceId: gate.decision.occurrenceId, resourceDigest: gate.decision.resourceDigest }, item.evidenceId, subject.profile);
       if (!identity || sha(identityOf(identity)) !== sha(expected)) return null;
-      const artifact = this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact;
+      const artifact = this.db.artifactExportPreflight(item.artifactId)?.artifact;
       const derived = this.derivations.get(item.sha256, subject.profile);
       const installation = mediaReviewerInstallations(this.db, target.runnerId).find((candidate) => candidate.agentId === target.agentId);
       if (!artifact || artifact.sessionId !== gate.child.id || artifact.kind !== "video" || artifact.sha256 !== item.sha256 ||
@@ -1108,7 +1108,7 @@ export class DelegatedVideoReviews {
     }
     if (!this.derivations.get(basis.item.sha256, request.profile)) {
       let bytes: Buffer | null;
-      try { bytes = this.db.readWorkflowArtifactBytes(basis.item.artifactId); } catch { bytes = null; }
+      try { bytes = this.db.readArtifactBytes(basis.item.artifactId); } catch { bytes = null; }
       if (!bytes || createHash("sha256").update(bytes).digest("hex") !== basis.item.sha256) return this.refuse("preparation", "The source artifact no longer matches its digest.");
       const derived = await this.validation.runtime.validationManifest(bytes, basis.item.mediaType as "video/webm" | "video/mp4", request.profile);
       if (!derived.ok) return this.refuse("preparation", `The source cannot be derived for this profile: ${derived.code}.`);

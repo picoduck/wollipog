@@ -185,16 +185,12 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type AppendPodContextRequest,
   type CreatePodRequest,
   type CreateRunRequest,
-  type CreateWorkflowRunRequest,
-  type CreateWorkflowRunResult,
-  type CreateWorkflowInstanceRequest,
   type CreateSessionRequest,
   type CreateWorkspaceReferenceRequest,
   type DirectoryEntry,
   type DurableSessionCommand,
   type DurableSessionCommandResultMessage,
   type DurableSessionCommandUpdateMessage,
-  type DispatchWorkflowNodeResult,
   type BackgroundJobStopActor,
   type BackgroundJobStopResponse,
   type StopBackgroundJobRefusal,
@@ -305,15 +301,9 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type StartPodOrchestrationRequest,
   type UpdatePodMemberRequest,
   type UpdatePodOrchestrationRequest,
-  type WorkflowArtifact,
-  type WorkflowArtifactPage,
-  type WorkflowArtifactView,
-  type WorkflowAttemptView,
-  type WorkflowDefinition,
-  type WorkflowInstanceDetail,
-  type WorkflowInstanceView,
-  type WorkflowNodeDefinition,
-  type WorkflowNodeOutcome,
+  type Artifact,
+  type ArtifactPage,
+  type ArtifactView,
   type WorkflowDecisionAuthority,
   type WorkflowDecisionAction,
   type WorkflowDecisionCategory,
@@ -444,9 +434,8 @@ import {
   MAX_SESSION_ATTACHED_VIDEOS,
   MAX_SESSION_ATTACHED_VIDEO_BYTES,
   screenshotBytesMatchMime,
-  validateWorkflowArtifact,
-} from "./workflow-artifacts.js";
-import { BUILD_REVIEW_WORKFLOW, validateWorkflowDefinition } from "./workflow-graphs.js";
+  validateArtifact,
+} from "./artifacts.js";
 import {
   formatReviewFindingsPrompt,
   parseBundleReviewFindings,
@@ -889,12 +878,10 @@ export interface PreStagedDeliveryPlan {
   runnerId: string;
   commands: DurableSessionCommand[];
   sessionId?: string;
-  runId?: string;
-  workflowInstanceId?: string;
 }
 
-/** The account a workflow member starts on, resolved like any session's. */
-interface WorkflowMemberAccount {
+/** The account a run member starts on, resolved like any session's. */
+interface RunMemberAccount {
   providerAccount?: ProviderAccountDefinition;
   selection?: ProviderAccountSelectionRecord;
 }
@@ -903,11 +890,6 @@ interface WorkflowMemberAccount {
  * throwing from `stage` prevents materialization, while `activate` runs only after it completes. */
 export interface PreStagedDeliveryOptions {
   sessionId?: string;
-  runId?: string;
-  workflowInstanceId?: string;
-  memberSessionIds?: string[];
-  /** Generates deterministic member IDs after the workflow definition reveals its member count. */
-  memberSessionId?: (index: number) => string;
   /** Trusted automation origin copied into every newly materialized session before it is visible. */
   automationOrigin?: SessionAutomationOrigin;
   /** Recovery-only exact commands read from the durable outbox. When present, resource
@@ -2221,13 +2203,13 @@ const ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL = "A Wollipog Assistant thread canno
   "Launch an ordinary session instead, or ask your owner to start the campaign.";
 
 /** A multi-session run or workflow would start several sessions outside one thread launch. */
-const ASSISTANT_THREAD_RUN_REFUSAL = "A Wollipog Assistant thread launches one session at a time and cannot start runs or workflows. " +
+const ASSISTANT_THREAD_RUN_REFUSAL = "A Wollipog Assistant thread launches one session at a time and cannot start runs. " +
   "Launch a session instead, or ask your owner to start it.";
 
 /** A fan-out from inside a thread's launched tree would start several sessions outside the per-child
  * reservation that keeps the tree within the thread's budget (#4671). */
 const ASSISTANT_THREAD_TREE_RUN_REFUSAL = "This session runs in a Wollipog Assistant thread, whose budget its whole session tree shares, " +
-  "so it creates child sessions one at a time and cannot start runs or workflows. Create a child session instead.";
+  "so it creates child sessions one at a time and cannot start runs. Create a child session instead.";
 
 /** An agent raising or clearing a thread-tree session's cap would give it budget nobody reserved (#4671). */
 const ASSISTANT_THREAD_TREE_CAP_REFUSAL = "This session runs in a Wollipog Assistant thread, whose budget its whole session tree shares. " +
@@ -2259,7 +2241,7 @@ function retiredCodexExecAgent(db: ControlPlaneDb, runnerId: string, agentId: st
   return db.getRunner(runnerId)?.agents.some((agent) => agent.id === agentId && isRetiredCodexExec(agent)) ?? false;
 }
 
-function workflowMemberCapabilityError(
+function runMemberCapabilityError(
   agentId: string,
   config: SessionConfig | undefined,
   launch: AgentLaunch,
@@ -2270,43 +2252,6 @@ function workflowMemberCapabilityError(
   }
   const error = capabilityConfigError(config, launch.capabilities);
   return error ? `${agentId}: ${error}` : null;
-}
-
-/** Resolve the effective workflow members exactly as ordinary dispatch does and reject only
- * advertised capability conflicts. Unknown definitions, agents, and legacy capability rows remain
- * subject to the authoritative runtime checks instead of turning admission into a discovery gate. */
-export function workflowRunCapabilityError(
-  db: ControlPlaneDb,
-  req: CreateWorkflowRunRequest,
-): string | null {
-  if (req.config?.serviceTier && !runnerSupportsProtocol(
-    db.getRunner(req.runnerId)?.protocolVersion,
-    "codexServiceTiers",
-  )) {
-    return runnerCapabilityRequirement(
-      db.getRunner(req.runnerId)?.protocolVersion,
-      "codexServiceTiers",
-      "Codex service tier selection",
-    );
-  }
-  const definition = db.getWorkflowDefinition(req.workflowId, req.workflowVersion);
-  if (!definition) return null;
-  const logicalAgentIds = [...new Set(definition.nodes
-    .filter((node) => node.kind === "agent")
-    .map((node) => node.agentId!))];
-  const bindings = req.agentBindings ?? {};
-  for (const roleId of logicalAgentIds) {
-    const agentId = Object.hasOwn(bindings, roleId) ? bindings[roleId]! : roleId;
-    const launch = db.getAgentLaunch(req.runnerId, agentId);
-    if (!launch) continue;
-    const error = workflowMemberCapabilityError(agentId, req.config, launch);
-    if (error) return error;
-  }
-  if (req.orchestratorAgentId) {
-    const launch = db.getAgentLaunch(req.runnerId, req.orchestratorAgentId);
-    if (launch) return workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch);
-  }
-  return null;
 }
 
 export function auditDigest(value: unknown): string | undefined {
@@ -2448,7 +2393,7 @@ function parseArtifactCursor(cursor: string | undefined): { createdAt: number; a
   }
 }
 
-function workflowArtifactPage(rows: WorkflowArtifactView[], limit: number): WorkflowArtifactPage {
+function artifactPage(rows: ArtifactView[], limit: number): ArtifactPage {
   const artifacts = rows.slice(0, limit);
   const last = artifacts.at(-1);
   return {
@@ -2668,507 +2613,6 @@ export class SessionsService {
           }
           break;
         }
-      }
-    }
-  }
-
-  private ensureBuiltinWorkflows(): void {
-    if (this.db.getWorkflowDefinition("builtin:build-review")) return;
-    this.db.createWorkflowDefinition({
-      workflowId: "builtin:build-review",
-      ...BUILD_REVIEW_WORKFLOW,
-      source: "builtin",
-      createdBy: { kind: "system", id: "control-plane" },
-      createdAt: Date.now(),
-    });
-  }
-
-  workflowDefinitions(limit = 100): ServiceResult<WorkflowDefinition[]> {
-    if (!Number.isInteger(limit) || limit < 1 || limit > 100) return fail("limit must be an integer between 1 and 100", 400);
-    this.ensureBuiltinWorkflows();
-    return ok(this.db.listWorkflowDefinitions(limit));
-  }
-
-  workflowDefinition(workflowId: string, version?: number): ServiceResult<WorkflowDefinition> {
-    this.ensureBuiltinWorkflows();
-    const definition = this.db.getWorkflowDefinition(workflowId, version);
-    return definition ? ok(definition) : fail("workflow definition not found", 404);
-  }
-
-  workflowRunCapabilityError(req: CreateWorkflowRunRequest): string | null {
-    this.ensureBuiltinWorkflows();
-    return workflowRunCapabilityError(this.db, req);
-  }
-
-  createWorkflowDefinition(input: unknown, actor: GovernanceActor = { kind: "human", id: "local" }): ServiceResult<WorkflowDefinition> {
-    const validated = validateWorkflowDefinition(input);
-    if (!validated.ok) return fail(validated.error, 400);
-    const definition = this.db.createWorkflowDefinition({
-      workflowId: shortId("wf_"),
-      ...validated.value,
-      source: "custom",
-      createdBy: actor,
-      createdAt: Date.now(),
-    });
-    return ok(definition, 201);
-  }
-
-  createWorkflowDefinitionVersion(
-    workflowId: string,
-    input: unknown,
-    actor: GovernanceActor = { kind: "human", id: "local" },
-  ): ServiceResult<WorkflowDefinition> {
-    if (!workflowId || workflowId.length > 256) return fail("workflow id is invalid", 400);
-    this.ensureBuiltinWorkflows();
-    const current = this.db.getWorkflowDefinition(workflowId);
-    if (!current) return fail("workflow definition not found", 404);
-    if (current.source !== "custom") return fail("built-in workflow definitions are immutable", 409);
-    const validated = validateWorkflowDefinition(input);
-    if (!validated.ok) return fail(validated.error, 400);
-    const definition = this.db.createWorkflowDefinition({
-      workflowId,
-      ...validated.value,
-      source: "custom",
-      createdBy: actor,
-      createdAt: Date.now(),
-    });
-    return ok(definition, 201);
-  }
-
-  createWorkflowInstance(input: unknown, actor: GovernanceActor = { kind: "human", id: "local" }): ServiceResult<WorkflowInstanceDetail> {
-    if (!input || typeof input !== "object" || Array.isArray(input)) return fail("workflow instance request is malformed", 400);
-    const body = input as Partial<CreateWorkflowInstanceRequest> & Record<string, unknown>;
-    if (Object.keys(body).some((key) => !["workflowId", "workflowVersion", "runId"].includes(key)) ||
-        typeof body.workflowId !== "string" || !body.workflowId || body.workflowId.length > 256 ||
-        typeof body.runId !== "string" || !body.runId || body.runId.length > 256 ||
-        (body.workflowVersion !== undefined && (!Number.isInteger(body.workflowVersion) || body.workflowVersion < 1))) {
-      return fail("workflow instance request is malformed", 400);
-    }
-    this.ensureBuiltinWorkflows();
-    const definition = this.db.getWorkflowDefinition(body.workflowId, body.workflowVersion);
-    if (!definition) return fail("workflow definition not found", 404);
-    const run = this.db.getRun(body.runId);
-    if (!run) return fail("run not found", 404);
-    const instance = this.db.createWorkflowInstance({
-      instanceId: shortId("wfi_"), definition, runId: body.runId, createdBy: actor, now: Date.now(),
-    });
-    const advanced = this.advanceWorkflowPolicyGates(instance);
-    const updated = this.db.getRun(body.runId);
-    if (updated) this.hub.runChanged(updated);
-    return ok(advanced, 201);
-  }
-
-  workflowInstances(runId?: string, limit = 100): ServiceResult<WorkflowInstanceView[]> {
-    if (!Number.isInteger(limit) || limit < 1 || limit > 100) return fail("limit must be an integer between 1 and 100", 400);
-    if (runId && !this.db.getRun(runId)) return fail("run not found", 404);
-    return ok(this.db.listWorkflowInstances(runId, limit));
-  }
-
-  workflowInstance(instanceId: string): ServiceResult<WorkflowInstanceDetail> {
-    const instance = this.db.getWorkflowInstance(instanceId);
-    return instance ? ok(instance) : fail("workflow instance not found", 404);
-  }
-
-  dispatchWorkflowNode(
-    instanceId: string,
-    nodeId: string,
-    input: unknown,
-    actor: GovernanceActor = { kind: "human", id: "local" },
-  ): ServiceResult<DispatchWorkflowNodeResult> {
-    if (!input || typeof input !== "object" || Array.isArray(input) ||
-        Object.keys(input).some((key) => key !== "dispatchKey")) return fail("dispatch request is malformed", 400);
-    const dispatchKey = (input as { dispatchKey?: unknown }).dispatchKey;
-    if (typeof dispatchKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/.test(dispatchKey)) {
-      return fail("dispatchKey is invalid", 400);
-    }
-    const existing = this.db.getWorkflowAttemptByDispatchKey(dispatchKey);
-    if (existing) {
-      if (existing.instanceId !== instanceId || existing.nodeId !== nodeId) return fail("dispatchKey is already in use", 409);
-      return ok({ attempt: existing, idempotent: true });
-    }
-    const instance = this.db.getWorkflowInstance(instanceId);
-    if (!instance) return fail("workflow instance not found", 404);
-    const node = instance.definition.nodes.find((candidate) => candidate.nodeId === nodeId);
-    if (!node) return fail("workflow node not found", 404);
-    if (node.kind !== "agent") return fail("gate nodes are resolved, not dispatched", 409);
-    const state = instance.nodeStates.find((candidate) => candidate.nodeId === nodeId)!;
-    if (state.status !== "ready") return fail(`workflow node is ${state.status}`, 409);
-    if (state.readyAt !== undefined && state.readyAt > Date.now()) return fail(`workflow node retry is not ready until ${state.readyAt}`, 409);
-    const sessions = this.db.runMemberSessions(instance.runId, node.agentId!);
-    if (sessions.length !== 1) return fail(`workflow requires exactly one run member for agent '${node.agentId}'`, 409);
-    const session = sessions[0]!;
-    if (isTerminal(session.status)) {
-      const restarted = this.restart(session.id);
-      return restarted.ok
-        ? fail("workflow member session is restarting; retry dispatch when it is idle", 409)
-        : failAs(restarted, "workflow member session could not restart");
-    }
-    if (session.status !== "idle") return fail(`workflow member session is ${session.status}`, 409);
-
-    const prepared = this.workflowPrompt(instance, node);
-    if (!prepared.ok || !prepared.data) return failAs(prepared, "workflow inputs could not be prepared");
-    const now = Date.now();
-    let claimed: { attempt: WorkflowAttemptView; idempotent: boolean };
-    try {
-      claimed = this.db.claimWorkflowAttempt({
-        attemptId: shortId("wfa_"), instanceId, nodeId, dispatchKey, sessionId: session.id,
-        timeoutMs: node.timeoutMs, maxTransitions: instance.definition.maxTransitions, actor, now,
-      });
-    } catch (error) {
-      const message = (error as Error).message;
-      if (message.includes("transition limit")) {
-        const stopped = this.db.finishWorkflowInstance({
-          instanceId, status: "failed", error: "workflow transition limit reached",
-          actor: { kind: "system", id: "transition-limit" }, now: Date.now(),
-        });
-        this.cancelWorkflowSiblingTurns(stopped);
-        this.broadcastWorkflowRun(instance.runId);
-      }
-      return fail(message, 409);
-    }
-    const sent = this.prompt(session.id, prepared.data.text, prepared.data.images, undefined, undefined, undefined, "run");
-    if (!sent.ok) {
-      this.failWorkflowAttempt(claimed.attempt, "failed", sent.error ?? "runner rejected the prompt", Date.now(), { kind: "system", id: "dispatcher" });
-      return { ...failAs(sent), error: `workflow dispatch failed: ${sent.error ?? "runner rejected the prompt"}` };
-    }
-    const running = this.db.setWorkflowAttemptStatus(claimed.attempt.attemptId, ["dispatching"], "running") ?? claimed.attempt;
-    this.broadcastWorkflowRun(instance.runId);
-    return ok({ attempt: running, idempotent: false });
-  }
-
-  completeWorkflowAttempt(
-    attemptId: string,
-    input: unknown,
-    actor: GovernanceActor = { kind: "human", id: "local" },
-  ): ServiceResult<WorkflowInstanceDetail> {
-    const parsed = this.parseWorkflowCompletion(input);
-    if (!parsed.ok || !parsed.data) return failAs(parsed, "workflow completion is malformed");
-    const completion = parsed.data;
-    const attempt = this.db.getWorkflowAttempt(attemptId);
-    if (!attempt) return fail("workflow attempt not found", 404);
-    if (attempt.status !== "awaiting_output") return fail(`workflow attempt is ${attempt.status}; wait for agent output`, 409);
-    const instance = this.db.getWorkflowInstance(attempt.instanceId)!;
-    const node = instance.definition.nodes.find((candidate) => candidate.nodeId === attempt.nodeId)!;
-    if (node.kind !== "agent") return fail("workflow attempt does not belong to an agent node", 409);
-    if (node.stopCondition?.kind === "verdict") {
-      if (!["accepted", "changes_requested", "rejected"].includes(completion.outcome)) return fail("this node requires a verdict outcome", 400);
-    } else if (!["success", "failure"].includes(completion.outcome)) return fail("this node does not accept verdict outcomes", 400);
-
-    const outputs = completion.outputs ?? {};
-    if (completion.outcome !== "failure") {
-      const expected = new Map(node.outputs.map((contract) => [contract.name, contract]));
-      if (Object.keys(outputs).some((name) => !expected.has(name))) return fail("completion contains an unknown output contract", 400);
-      for (const contract of node.outputs.filter((candidate) => candidate.required !== false)) {
-        if (!outputs[contract.name]) return fail(`required output '${contract.name}' is missing`, 400);
-      }
-      for (const [name, artifactId] of Object.entries(outputs)) {
-        const artifact = this.db.getWorkflowArtifact(artifactId);
-        const contract = expected.get(name)!;
-        if (!artifact) return fail(`artifact '${artifactId}' not found`, 404);
-        if (artifact.runId !== instance.runId || artifact.kind !== contract.kind) return fail(`artifact '${artifactId}' does not satisfy '${name}'`, 409);
-        if (artifact.sessionId && artifact.sessionId !== attempt.sessionId) return fail(`artifact '${artifactId}' belongs to another session`, 409);
-        if (artifact.createdAt < attempt.startedAt) return fail(`artifact '${artifactId}' predates this attempt`, 409);
-        if (contract.kind === "verdict") {
-          try {
-            const verdict = JSON.parse(artifact.data) as { outcome?: unknown };
-            if (verdict.outcome !== completion.outcome) return fail("verdict artifact outcome does not match completion outcome", 409);
-          } catch {
-            return fail("verdict artifact is malformed", 409);
-          }
-        }
-      }
-    }
-    if (completion.outcome === "failure") {
-      return ok(this.failWorkflowAttempt(attempt, "failed", completion.error ?? "workflow node reported failure", Date.now(), actor));
-    }
-    const nextNodes = this.workflowNextNodes(instance, attempt.nodeId, completion.outcome);
-    const activeAgentOthers = this.workflowHasActiveAgent(instance, attempt.nodeId);
-    const activatesAgent = nextNodes.some((next) => next.kind === "agent");
-    const waitingGate = this.workflowHasWaitingGate(instance, attempt.nodeId) || nextNodes.some((next) => next.kind !== "agent");
-    const verdictStops = node.stopCondition?.kind === "verdict" && nextNodes.length === 0;
-    const instanceStatus = verdictStops
-      ? (completion.outcome === "accepted" ? "succeeded" : "failed")
-      : waitingGate && !activeAgentOthers && !activatesAgent
-        ? "waiting_gate"
-        : nextNodes.length === 0 && !activeAgentOthers
-          ? (completion.outcome === "rejected" || completion.outcome === "changes_requested" ? "failed" : "succeeded")
-          : undefined;
-    try {
-      const completed = this.db.finishWorkflowAttempt({
-        attemptId, status: "succeeded", outcome: completion.outcome, outputs,
-        nextNodes, instanceStatus, actor, now: Date.now(),
-      });
-      const advanced = this.advanceWorkflowPolicyGates(completed);
-      if (advanced.status === "succeeded" || advanced.status === "failed" || advanced.status === "stopped") this.cancelWorkflowSiblingTurns(advanced);
-      this.broadcastWorkflowRun(instance.runId);
-      return ok(advanced);
-    } catch (error) {
-      return fail((error as Error).message, 409);
-    }
-  }
-
-  resolveWorkflowGate(
-    instanceId: string,
-    nodeId: string,
-    input: unknown,
-    actor: GovernanceActor = { kind: "human", id: "local" },
-    skipPolicyAdvance = false,
-  ): ServiceResult<WorkflowInstanceDetail> {
-    if (!input || typeof input !== "object" || Array.isArray(input) ||
-        Object.keys(input).some((key) => key !== "outcome") ||
-        !["success", "failure"].includes(String((input as { outcome?: unknown }).outcome))) {
-      return fail("gate resolution is malformed", 400);
-    }
-    const instance = this.db.getWorkflowInstance(instanceId);
-    if (!instance) return fail("workflow instance not found", 404);
-    const node = instance.definition.nodes.find((candidate) => candidate.nodeId === nodeId);
-    if (!node) return fail("workflow node not found", 404);
-    if (node.kind === "agent") return fail("agent nodes are completed through attempts", 409);
-    if (node.kind === "policy_gate") {
-      const effect = this.workflowPolicyEffect(instance, node);
-      if (actor.kind === "policy") {
-        const expected = effect === "allow" ? "success" : effect === "deny" ? "failure" : null;
-        if (actor.id !== node.policyId || expected !== (input as { outcome: string }).outcome) {
-          return fail("policy gate resolution does not match the named policy decision", 409);
-        }
-      } else if (actor.kind !== "human" || effect !== "ask") {
-        return fail("this policy gate is not awaiting a human decision", 409);
-      }
-    }
-    const outcome = (input as { outcome: "success" | "failure" }).outcome;
-    const nextNodes = this.workflowNextNodes(instance, nodeId, outcome);
-    const activeAgentOthers = this.workflowHasActiveAgent(instance, nodeId);
-    const activatesAgent = nextNodes.some((next) => next.kind === "agent");
-    const waitingGate = this.workflowHasWaitingGate(instance, nodeId) || nextNodes.some((next) => next.kind !== "agent");
-    const instanceStatus = waitingGate && !activeAgentOthers && !activatesAgent
-      ? "waiting_gate"
-      : nextNodes.length === 0 && !activeAgentOthers ? (outcome === "success" ? "succeeded" : "failed") : undefined;
-    try {
-      const resolved = this.db.resolveWorkflowGateState({
-        instanceId, nodeId, outcome, nextNodes, instanceStatus,
-        maxTransitions: instance.definition.maxTransitions, actor, now: Date.now(),
-      });
-      if (instanceStatus && ["succeeded", "failed", "stopped"].includes(instanceStatus)) this.cancelWorkflowSiblingTurns(resolved);
-      const advanced = skipPolicyAdvance ? resolved : this.advanceWorkflowPolicyGates(resolved);
-      this.broadcastWorkflowRun(instance.runId);
-      return ok(advanced);
-    } catch (error) {
-      const message = (error as Error).message;
-      if (message.includes("transition limit")) {
-        const stopped = this.db.finishWorkflowInstance({
-          instanceId, status: "failed", error: "workflow transition limit reached",
-          actor: { kind: "system", id: "transition-limit" }, now: Date.now(),
-        });
-        this.cancelWorkflowSiblingTurns(stopped);
-        this.broadcastWorkflowRun(instance.runId);
-        return ok(stopped);
-      }
-      return fail(message, 409);
-    }
-  }
-
-  recoverExpiredWorkflowAttempts(now = Date.now()): number {
-    let recovered = 0;
-    for (const attempt of this.db.activeWorkflowAttempts(now)) {
-      try {
-        this.failWorkflowAttempt(attempt, "timed_out", "workflow node timed out", now, { kind: "system", id: "timeout-recovery" });
-        recovered++;
-      } catch {
-        /* another completion won the race */
-      }
-    }
-    return recovered;
-  }
-
-  recoverWorkflowRunner(runnerId: string): number {
-    let recovered = 0;
-    for (const session of this.db.runnerSessionInventory(runnerId)) {
-      for (const attempt of this.db.activeWorkflowAttemptsForSession(session.id)) {
-        if (session.status === "idle" || session.status === "completed") {
-          if (this.db.setWorkflowAttemptStatus(attempt.attemptId, ["dispatching", "running"], "awaiting_output")) recovered++;
-        } else if (isTerminal(session.status)) {
-          try {
-            this.failWorkflowAttempt(attempt, "failed", "runner no longer holds the workflow session", Date.now(), { kind: "system", id: "runner-recovery" });
-            recovered++;
-          } catch {
-            /* another completion won the race */
-          }
-        } else if (attempt.status === "dispatching") {
-          if (this.db.setWorkflowAttemptStatus(attempt.attemptId, ["dispatching"], "running")) recovered++;
-        }
-      }
-    }
-    return recovered;
-  }
-
-  private workflowPrompt(instance: WorkflowInstanceDetail, node: WorkflowNodeDefinition): ServiceResult<{ text: string; images: PromptImageReference[] }> {
-    const artifacts = new Map(Object.entries(this.db.latestWorkflowOutputViews(instance.instanceId)));
-    const textParts = [`Workflow task:\n${this.db.getRun(instance.runId)?.prompt ?? ""}`];
-    if (node.prompt) textParts.push(`Node instructions:\n${node.prompt}`);
-    const images: PromptImageReference[] = [];
-    for (const contract of node.inputs) {
-      const artifact = artifacts.get(contract.name);
-      if (!artifact || artifact.kind !== contract.kind) {
-        if (contract.required !== false) return fail(`required input artifact '${contract.name}' is unavailable`, 409);
-        continue;
-      }
-      if (artifact.kind === "screenshot") images.push(this.promptImageReference(artifact));
-      else {
-        const materialized = this.db.getWorkflowArtifact(artifact.artifactId);
-        if (!materialized) return fail(`input artifact '${contract.name}' is unavailable`, 409);
-        textParts.push(`Input artifact ${contract.name} (${artifact.kind}, ${artifact.artifactId}):\n${materialized.data}`);
-      }
-    }
-    textParts.push(`Required outputs:\n${node.outputs.map((output) => `- ${output.name}: ${output.kind}${output.required === false ? " (optional)" : ""}`).join("\n") || "- none"}`);
-    const text = textParts.join("\n\n");
-    const imageValidation = validatePromptImageInputs(images);
-    if (Buffer.byteLength(text, "utf8") > 2 * 1024 * 1024 || !imageValidation.ok) {
-      return fail(imageValidation.error ?? "workflow input artifacts exceed prompt limits", 413);
-    }
-    return ok({ text, images });
-  }
-
-  private workflowNextNodes(instance: WorkflowInstanceDetail, nodeId: string, outcome: WorkflowNodeOutcome) {
-    const ids = new Set(instance.definition.edges
-      .filter((edge) => edge.from === nodeId && (edge.on === outcome || edge.on === "always"))
-      .map((edge) => edge.to));
-    return instance.definition.nodes
-      .filter((node) => ids.has(node.nodeId))
-      .map((node) => ({ nodeId: node.nodeId, kind: node.kind }));
-  }
-
-  private failWorkflowAttempt(
-    attempt: WorkflowAttemptView,
-    status: "failed" | "timed_out",
-    error: string,
-    now: number,
-    actor: GovernanceActor,
-  ): WorkflowInstanceDetail {
-    const instance = this.db.getWorkflowInstance(attempt.instanceId)!;
-    const node = instance.definition.nodes.find((candidate) => candidate.nodeId === attempt.nodeId)!;
-    const retryAt = attempt.attempt < node.retry.maxAttempts ? now + node.retry.backoffMs : undefined;
-    const nextNodes = retryAt === undefined ? this.workflowNextNodes(instance, node.nodeId, "failure") : [];
-    const activeAgentOthers = this.workflowHasActiveAgent(instance, node.nodeId);
-    const activatesAgent = nextNodes.some((next) => next.kind === "agent");
-    const waitingGate = this.workflowHasWaitingGate(instance, node.nodeId) || nextNodes.some((next) => next.kind !== "agent");
-    const instanceStatus = retryAt !== undefined
-      ? (activeAgentOthers ? undefined : "queued")
-      : waitingGate && !activeAgentOthers && !activatesAgent
-        ? "waiting_gate"
-        : nextNodes.length === 0 ? "failed" : undefined;
-    const updated = this.db.finishWorkflowAttempt({
-      attemptId: attempt.attemptId, status, outcome: "failure", error, retryAt, nextNodes, instanceStatus, actor, now,
-    });
-    const advanced = this.advanceWorkflowPolicyGates(updated);
-    if (advanced.status === "succeeded" || advanced.status === "failed" || advanced.status === "stopped") this.cancelWorkflowSiblingTurns(advanced);
-    this.broadcastWorkflowRun(instance.runId);
-    return advanced;
-  }
-
-  private parseWorkflowCompletion(input: unknown): ServiceResult<{ outcome: WorkflowNodeOutcome; outputs?: Record<string, string>; error?: string }> {
-    if (!input || typeof input !== "object" || Array.isArray(input)) return fail("workflow completion is malformed", 400);
-    const body = input as Record<string, unknown>;
-    if (Object.keys(body).some((key) => !["outcome", "outputs", "error"].includes(key)) ||
-        !["success", "failure", "accepted", "changes_requested", "rejected"].includes(String(body.outcome)) ||
-        (body.error !== undefined && (typeof body.error !== "string" || body.error.length > 4_000))) {
-      return fail("workflow completion is malformed", 400);
-    }
-    let outputs: Record<string, string> | undefined;
-    if (body.outputs !== undefined) {
-      if (!body.outputs || typeof body.outputs !== "object" || Array.isArray(body.outputs) || Object.keys(body.outputs).length > 16) {
-        return fail("workflow outputs are malformed", 400);
-      }
-      outputs = {};
-      for (const [name, artifactId] of Object.entries(body.outputs as Record<string, unknown>)) {
-        if (!/^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(name) || typeof artifactId !== "string" || !artifactId || artifactId.length > 256) {
-          return fail("workflow outputs are malformed", 400);
-        }
-        outputs[name] = artifactId;
-      }
-    }
-    if (body.outcome === "failure" && outputs && Object.keys(outputs).length > 0) {
-      return fail("failed workflow attempts cannot attach outputs", 400);
-    }
-    return ok({ outcome: body.outcome as WorkflowNodeOutcome, ...(outputs ? { outputs } : {}), ...(body.error ? { error: body.error as string } : {}) });
-  }
-
-  private broadcastWorkflowRun(runId: string): void {
-    const run = this.db.getRun(runId);
-    if (run) this.hub.runChanged(run);
-  }
-
-  private workflowPolicyEffect(instance: WorkflowInstanceDetail, node: WorkflowNodeDefinition): "allow" | "deny" | "ask" {
-    if (node.kind !== "policy_gate") return "ask";
-    const policy = this.governancePolicies().find((candidate) => candidate.policyId === node.policyId);
-    if (!policy) return "ask";
-    const members = this.db.listSessions({ includeArchived: true }).filter((session) => session.runId === instance.runId);
-    const first = members[0];
-    const runScope = this.db.workflowRunScope(instance.runId);
-    const runnerId = first?.runnerId ?? runScope?.runnerId;
-    const workspaceId = first?.workspaceId ?? runScope?.workspaceId;
-    if (!runnerId) return "ask";
-    const status = members.some((session) => session.status === "running" || session.status === "starting")
-      ? "running"
-      : members.some((session) => session.status === "input_required") ? "input_required" : "idle";
-    const decision = evaluateApprovalPolicies({
-      scope: {
-        sessionId: instance.instanceId,
-        runnerId,
-        ...(workspaceId ? { workspaceId } : {}),
-        toolName: `workflow:${node.nodeId}`,
-      },
-      status,
-      costUsd: members.reduce((sum, session) => sum + session.costUsd, 0),
-      toolCallCount: members.reduce((sum, session) => sum + (session.toolCallCount ?? 0), 0),
-      escalated: false,
-    }, [policy]);
-    return decision.policy?.policyId === node.policyId ? decision.effect : "ask";
-  }
-
-  private workflowHasActiveAgent(instance: WorkflowInstanceDetail, excludeNodeId: string): boolean {
-    return instance.nodeStates.some((state) => {
-      if (state.nodeId === excludeNodeId || !["ready", "running"].includes(state.status)) return false;
-      return instance.definition.nodes.find((node) => node.nodeId === state.nodeId)?.kind === "agent";
-    });
-  }
-
-  private workflowHasWaitingGate(instance: WorkflowInstanceDetail, excludeNodeId: string): boolean {
-    return instance.nodeStates.some((state) => {
-      if (state.nodeId === excludeNodeId || state.status !== "waiting_gate") return false;
-      return instance.definition.nodes.find((node) => node.nodeId === state.nodeId)?.kind !== "agent";
-    });
-  }
-
-  private advanceWorkflowPolicyGates(initial: WorkflowInstanceDetail): WorkflowInstanceDetail {
-    let instance = initial;
-    // Continue until quiescent. Cycles are bounded by the durable maxTransitions counter inside
-    // resolveWorkflowGateState, which turns a policy-only loop into a terminal failed instance
-    // instead of stranding one auto-resolvable gate after an arbitrary node-count pass.
-    while (!["succeeded", "failed", "stopped"].includes(instance.status)) {
-      const gate = instance.definition.nodes.find((node) =>
-        node.kind === "policy_gate" && instance.nodeStates.find((state) => state.nodeId === node.nodeId)?.status === "waiting_gate" &&
-        this.workflowPolicyEffect(instance, node) !== "ask");
-      if (!gate) break;
-      const effect = this.workflowPolicyEffect(instance, gate);
-      const resolved = this.resolveWorkflowGate(
-        instance.instanceId,
-        gate.nodeId,
-        { outcome: effect === "allow" ? "success" : "failure" },
-        { kind: "policy", id: gate.policyId },
-        true,
-      );
-      if (!resolved.ok || !resolved.data) break;
-      instance = resolved.data;
-    }
-    return instance;
-  }
-
-  private cancelWorkflowSiblingTurns(instance: WorkflowInstanceDetail): void {
-    for (const attempt of instance.attempts) {
-      if (attempt.status !== "cancelled" || !attempt.sessionId) continue;
-      const session = this.db.getSession(attempt.sessionId);
-      if (session && this.hub.isRunnerOnline(session.runnerId)) {
-        this.hub.sendToRunner(session.runnerId, { type: "cancel_session", sessionId: session.id });
       }
     }
   }
@@ -4364,7 +3808,7 @@ export class SessionsService {
     return { ok: false, status: 409, ...capabilityRefusal(runner.protocolVersion, capability, label) };
   }
 
-  private promptImageReference(artifact: WorkflowArtifactView): PromptImageReference {
+  private promptImageReference(artifact: ArtifactView): PromptImageReference {
     return {
       artifactId: artifact.artifactId,
       mimeType: artifact.mimeType,
@@ -4374,12 +3818,11 @@ export class SessionsService {
   }
 
   /** Convert rolling-compatible inline inputs once, then keep only immutable metadata on every
-   * durable/control-plane boundary. Workflow dispatch may opt into run-scoped outputs. */
+   * durable/control-plane boundary. */
   private externalizePromptImages(
     sessionId: string,
     inputs: PromptImageInput[],
     actor: GovernanceActor = { kind: "system", id: "prompt-image" },
-    allowRunArtifacts = false,
   ): ServiceResult<PromptImageInput[]> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -4387,7 +3830,7 @@ export class SessionsService {
     if (!validation.ok) return fail(validation.error ?? "invalid image attachment", 400);
     const created: string[] = [];
     const cleanup = () => {
-      for (const artifactId of created) this.db.deleteWorkflowArtifact(artifactId);
+      for (const artifactId of created) this.db.deleteArtifact(artifactId);
     };
     const references: PromptImageInput[] = [];
     try {
@@ -4397,14 +3840,13 @@ export class SessionsService {
           continue;
         }
         if (isPromptImageReference(input)) {
-          const preflight = this.db.workflowArtifactExportPreflight(input.artifactId);
+          const preflight = this.db.artifactExportPreflight(input.artifactId);
           const artifact = preflight?.artifact;
           const ownedBySession = artifact?.sessionId === sessionId || Boolean(
             artifact?.sessionId && this.db.sessionForkIncludesAncestor(sessionId, artifact.sessionId),
           );
-          const ownedByRun = allowRunArtifacts && Boolean(session.runId && artifact?.runId === session.runId);
           if (!artifact || artifact.kind !== "screenshot" || artifact.encoding !== "base64" ||
-              (!ownedBySession && !ownedByRun) || artifact.mimeType !== input.mimeType ||
+              !ownedBySession || artifact.mimeType !== input.mimeType ||
               artifact.sizeBytes !== input.sizeBytes || artifact.sha256 !== input.sha256) {
             cleanup();
             return fail("prompt image artifact not found", 404);
@@ -4418,7 +3860,7 @@ export class SessionsService {
           return fail("prompt image bytes do not match the declared MIME type", 400);
         }
         const now = Date.now();
-        const artifact: WorkflowArtifactView = {
+        const artifact: ArtifactView = {
           artifactId: shortId("art_"),
           sessionId,
           kind: "screenshot",
@@ -4431,7 +3873,7 @@ export class SessionsService {
           metadata: { purpose: "prompt_image" },
           createdAt: now,
         };
-        this.db.createWorkflowArtifactBytes(artifact, bytes);
+        this.db.createArtifactBytes(artifact, bytes);
         created.push(artifact.artifactId);
         references.push(this.promptImageReference(artifact));
       }
@@ -4470,7 +3912,7 @@ export class SessionsService {
     const now = Date.now();
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const expiresAt = now + PREPARED_PROMPT_IMAGE_RETENTION_MS;
-    let reusable: WorkflowArtifactView | null;
+    let reusable: ArtifactView | null;
     try {
       reusable = this.db.findPreparedPromptImageArtifact(
         sessionId,
@@ -4483,17 +3925,17 @@ export class SessionsService {
       return fail("prompt image artifact could not be stored", 500);
     }
     if (reusable) return ok(this.promptImageReference(reusable), 200);
-    const artifact: WorkflowArtifactView = {
+    const artifact: ArtifactView = {
       artifactId: shortId("art_"), sessionId, kind: "screenshot",
       name: `prompt-image-${now}`, mimeType, encoding: "base64",
       sizeBytes: bytes.byteLength, sha256,
       createdBy: actor, metadata: { purpose: "prompt_image" }, createdAt: now,
     };
     try {
-      this.db.createWorkflowArtifactBytes(artifact, bytes, { preparedPromptImageExpiresAt: expiresAt });
+      this.db.createArtifactBytes(artifact, bytes, { preparedPromptImageExpiresAt: expiresAt });
       return ok(this.promptImageReference(artifact), 201);
     } catch {
-      try { this.db.deleteWorkflowArtifact(artifact.artifactId); } catch { /* startup/maintenance retries blob cleanup */ }
+      try { this.db.deleteArtifact(artifact.artifactId); } catch { /* startup/maintenance retries blob cleanup */ }
       return fail("prompt image artifact could not be stored", 500);
     }
   }
@@ -4740,7 +4182,7 @@ export class SessionsService {
         if (candidate.effort === undefined && campaignBehavior.childEffort !== null) {
           candidate.effort = campaignBehavior.childEffort;
         }
-        const capabilityError = workflowMemberCapabilityError(member.agentId, candidate, member.launch);
+        const capabilityError = runMemberCapabilityError(member.agentId, candidate, member.launch);
         if (capabilityError) return fail(capabilityError, 409);
       }
       if (candidate.maxChildSessions !== undefined && (!Number.isSafeInteger(candidate.maxChildSessions) ||
@@ -4817,13 +4259,13 @@ export class SessionsService {
     }
     const item = decision.resourceSnapshot.category === "ui_evidence_approval"
       ? decision.resourceSnapshot.evidence.find((e) => e.evidenceId === subject.evidenceId) : undefined;
-    const source = item?.artifactId ? this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact : null;
+    const source = item?.artifactId ? this.db.artifactExportPreflight(item.artifactId)?.artifact : null;
     if (!item || !source || source.sessionId !== child.id || source.kind !== "video" || source.sha256 !== item.sha256 ||
       source.mimeType !== item.mediaType || !["video/webm", "video/mp4"].includes(source.mimeType ?? "")) {
       return fail("The original source artifact is unavailable or mismatched.", 409);
     }
     let bytes: Buffer | null;
-    try { bytes = this.db.readWorkflowArtifactBytes(source.artifactId); } catch { bytes = null; }
+    try { bytes = this.db.readArtifactBytes(source.artifactId); } catch { bytes = null; }
     if (!bytes || bytes.length > MAX_SESSION_VIDEO_BYTES || createHash("sha256").update(bytes).digest("hex") !== item.sha256) {
       return fail("The original source artifact no longer matches its immutable digest.", 409);
     }
@@ -5314,7 +4756,7 @@ export class SessionsService {
       for (const artifactId of artifactIds) {
         let preflight;
         try {
-          preflight = this.db.workflowArtifactExportPreflight(artifactId);
+          preflight = this.db.artifactExportPreflight(artifactId);
         } catch {
           return fail(`cloud handoff artifact '${artifactId}' is invalid`, 422);
         }
@@ -6335,7 +5777,7 @@ export class SessionsService {
     config?: SessionConfig,
     reviewedResultRevision?: string,
     /** Internal: a Full Control first message's own durable identity (#2940). */
-    binding?: Parameters<SessionsService["prompt"]>[8],
+    binding?: Parameters<SessionsService["prompt"]>[7],
   ): ServiceResult<PromptAdmissionView> {
     if (this.db.campaignPaused(sessionId)) return fail("The campaign is paused; resume it before sending messages.", 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
@@ -6351,7 +5793,6 @@ export class SessionsService {
       slashCommand,
       config,
       undefined,
-      "session",
       true,
       binding,
     );
@@ -7177,7 +6618,7 @@ export class SessionsService {
    * agent sees it at its next tool boundary instead.
    *
    * Steering is strictly best-effort and never the only chance: every refusal it can produce — a
-   * pending guardrail decision, workflow/automation/pod ownership, a provider without verified
+   * pending guardrail decision, automation/pod ownership, a provider without verified
    * steering, an unsupported runner, or the turn ending underneath us — falls through to the
    * ordinary queue, which behaves exactly as before. Attempting to steer can therefore delay a
    * message by one round trip but can never lose it. */
@@ -7196,7 +6637,7 @@ export class SessionsService {
     if (reviewRefusal) return fail(reviewRefusal, 409);
     const steered = await this.steerMidTurnPrompt(sessionId, text, images, slashCommand, config, sender);
     return steered ??
-      this.prompt(sessionId, text, images, slashCommand, config, undefined, "session", false, undefined, holdReader);
+      this.prompt(sessionId, text, images, slashCommand, config, undefined, false, undefined, holdReader);
   }
 
   /** Try the steering lane for a mid-turn message. Returns null to mean "not steered — use the
@@ -7294,7 +6735,6 @@ export class SessionsService {
     slashCommand?: string,
     config?: SessionConfig,
     delivery?: PreStagedDeliveryOptions,
-    imageScope: "session" | "run" = "session",
     retainAcrossWorktreeRecovery = false,
     /** Control-plane-owned text bound to its own record as it is admitted. On the durable lane
      * `stage` replaces the plain outbox write, and `admitAs` then applies as it does for a
@@ -7511,7 +6951,6 @@ export class SessionsService {
         sessionId,
         effectiveImages,
         { kind: "system", id: "prompt-image" },
-        imageScope === "run",
       );
       if (!externalized.ok || !externalized.data) {
         return failAs(externalized, "prompt images could not be stored");
@@ -7643,7 +7082,7 @@ export class SessionsService {
   }
 
   private promptSystemNotice(sessionId: string, text: string): ServiceResult<PromptAdmissionView> {
-    return this.prompt(sessionId, text, [], undefined, undefined, undefined, "session", false, undefined, undefined, true);
+    return this.prompt(sessionId, text, [], undefined, undefined, undefined, false, undefined, undefined, true);
   }
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
@@ -8647,9 +8086,8 @@ export class SessionsService {
         command.invocation.executionMode !== "structured") {
       return fail("the provider command execution mode is not supported", 409);
     }
-    if (this.db.activeWorkflowAttemptsForSession(sessionId).length > 0 ||
-        this.db.hasActiveAutomationCommandForSession(sessionId)) {
-      return fail("workflow- and automation-owned sessions cannot accept manual provider commands", 409);
+    if (this.db.hasActiveAutomationCommandForSession(sessionId)) {
+      return fail("automation-owned sessions cannot accept manual provider commands", 409);
     }
     const pod = this.db.activePodForSession(sessionId);
     if (pod?.orchestration?.state.status === "running" && pod.orchestration.state.currentSessionId === sessionId) {
@@ -8922,9 +8360,6 @@ export class SessionsService {
     if (isPolicyApproval(session.pendingApproval)) {
       return fail("resolve the guardrail decision before steering the active turn", 409);
     }
-    if (this.db.activeWorkflowAttemptsForSession(sessionId).length > 0) {
-      return fail("workflow-owned sessions cannot be steered", 409);
-    }
     if (this.db.hasActiveAutomationCommandForSession(sessionId)) {
       return fail("automation-owned sessions cannot be steered", 409);
     }
@@ -8997,7 +8432,7 @@ export class SessionsService {
         now: Date.now(),
       });
     } catch {
-      for (const artifactId of ownedArtifactIds) this.db.deleteWorkflowArtifact(artifactId);
+      for (const artifactId of ownedArtifactIds) this.db.deleteArtifact(artifactId);
       return fail("steering attempt could not be persisted", 500);
     }
     if (created.kind === "conflict") return fail("submissionId was already used for different steering content", 409);
@@ -9599,9 +9034,6 @@ export class SessionsService {
     if (!session) return fail("session not found", 404);
     if (session.status === "queued" || session.status === "starting") {
       return fail("turn interruption is available only after the active turn starts", 409);
-    }
-    if (this.db.activeWorkflowAttemptsForSession(sessionId).length > 0) {
-      return fail("workflow-owned sessions must be stopped through workflow lifecycle controls", 409);
     }
     const pod = this.db.activePodForSession(sessionId);
     if (pod?.orchestration?.state.status === "running" && pod.orchestration.state.currentSessionId === sessionId) {
@@ -12602,7 +12034,7 @@ export class SessionsService {
     const ids = held.map((watch) => watch.watchId);
     let claimed = false;
     const sent = this.prompt(
-      sessionId, held.flatMap(pullRequestWatchWakeLines).join("\n"), [], undefined, undefined, undefined, "session", true, {
+      sessionId, held.flatMap(pullRequestWatchWakeLines).join("\n"), [], undefined, undefined, undefined, true, {
         admitAs: "queued" as const,
         durable: true,
         stage: (runnerId, command, at) => this.promptOutbox.stagePullRequestWatchWake(ids, sessionId, runnerId, command, at),
@@ -12714,7 +12146,7 @@ export class SessionsService {
     const ids = held.map((review) => review.reviewSessionId);
     let claimed = false;
     const sent = this.prompt(
-      requesterSessionId, reviewContinuationPrompt(held, this.repositoryMismatchRole(session)), [], undefined, undefined, undefined, "session", true, {
+      requesterSessionId, reviewContinuationPrompt(held, this.repositoryMismatchRole(session)), [], undefined, undefined, undefined, true, {
         admitAs: "queued" as const,
         // The durable lane is where the runner validates this trusted continuation marker.
         ...(supportsQuestionRetention ? { durable: true, reviewContinuation: true as const } : {}),
@@ -13053,7 +12485,7 @@ export class SessionsService {
     }
     const otherEvidence = normalized.data.evidence.filter((candidate) => candidate !== item);
     if (otherEvidence.length && evaluateUiEvidenceItems(controller.session.driver, sessionId,
-      otherEvidence, (artifactId) => this.db.workflowArtifactExportPreflight(artifactId)?.artifact ?? null,
+      otherEvidence, (artifactId) => this.db.artifactExportPreflight(artifactId)?.artifact ?? null,
     ).effectiveOwner === "human") {
       return this.createWorkflowDecision(sessionId, request, canAccess);
     }
@@ -13063,19 +12495,19 @@ export class SessionsService {
     }
     SessionsService.videoReviewRequests.add(sessionId);
     try {
-      const source = this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact;
+      const source = this.db.artifactExportPreflight(item.artifactId)?.artifact;
       if (!source || source.sessionId !== sessionId || source.kind !== "video" ||
           source.mimeType !== "video/webm" || source.sha256 !== item.sha256) {
         return fallback("The video evidence does not match a child-owned Session artifact.");
       }
       let sourceBytes: Buffer | null;
-      try { sourceBytes = this.db.readWorkflowArtifactBytes(source.artifactId); } catch { sourceBytes = null; }
+      try { sourceBytes = this.db.readArtifactBytes(source.artifactId); } catch { sourceBytes = null; }
       if (!sourceBytes || createHash("sha256").update(sourceBytes).digest("hex") !== item.sha256) {
         return fallback("The video bytes no longer match the digest bound to this decision.");
       }
       const decoded = await decodeShortSilentWebm(sourceBytes);
       if (!decoded.ok) return fallback(decoded.reason);
-      const retainedSource = this.db.workflowArtifactExportPreflight(source.artifactId)?.artifact;
+      const retainedSource = this.db.artifactExportPreflight(source.artifactId)?.artifact;
       if (!retainedSource || retainedSource.sessionId !== sessionId ||
           retainedSource.sha256 !== source.sha256 || retainedSource.kind !== "video") {
         return fallback("The source video was removed while its frames were being derived.");
@@ -13120,7 +12552,7 @@ export class SessionsService {
       }
       const missing: typeof frames = [];
       for (const frame of frames) {
-        const existing = this.db.workflowArtifactExportPreflight(frame.artifactId)?.artifact;
+        const existing = this.db.artifactExportPreflight(frame.artifactId)?.artifact;
         if (!existing) { missing.push(frame); continue; }
         if (existing.sessionId !== sessionId || existing.kind !== "screenshot" ||
             existing.mimeType !== "image/png" || existing.sha256 !== frame.sha256 ||
@@ -13133,10 +12565,10 @@ export class SessionsService {
         }
       }
       const created: string[] = [];
-      const cleanup = () => { for (const id of created) this.db.deleteWorkflowArtifact(id); };
+      const cleanup = () => { for (const id of created) this.db.deleteArtifact(id); };
       try {
         for (const frame of missing) {
-          const artifact: WorkflowArtifactView = {
+          const artifact: ArtifactView = {
             artifactId: frame.artifactId,
             sessionId,
             kind: "screenshot",
@@ -13150,7 +12582,7 @@ export class SessionsService {
               sourceSha256: source.sha256, frameIndex: frame.index, ptsMs: frame.ptsMs },
             createdAt: Date.now(),
           };
-          this.db.createWorkflowArtifactBytes(artifact, frame.bytes);
+          this.db.createArtifactBytes(artifact, frame.bytes);
           created.push(frame.artifactId);
         }
         const decided = this.createWorkflowDecision(sessionId, { ...request, resourceSnapshot: replacement }, canAccess, {
@@ -16566,7 +15998,7 @@ export class SessionsService {
       const video = decision.resourceSnapshot.videoReview;
       if (normalizedResolution.outcome === "approve" && video) {
         let sourceBytes: Buffer | null;
-        try { sourceBytes = this.db.readWorkflowArtifactBytes(video.sourceArtifactId); } catch { sourceBytes = null; }
+        try { sourceBytes = this.db.readArtifactBytes(video.sourceArtifactId); } catch { sourceBytes = null; }
         if (!sourceBytes || createHash("sha256").update(sourceBytes).digest("hex") !== video.sourceSha256) {
           this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });
           return fail("the source video no longer matches the digest bound to this decision", 409);
@@ -16804,7 +16236,7 @@ export class SessionsService {
     if (managedPublication()) return fail(managedPublicationRefusal, 409);
     if (video) {
       let sourceBytes: Buffer | null;
-      try { sourceBytes = this.db.readWorkflowArtifactBytes(video.sourceArtifactId); } catch { sourceBytes = null; }
+      try { sourceBytes = this.db.readArtifactBytes(video.sourceArtifactId); } catch { sourceBytes = null; }
       if (!sourceBytes || createHash("sha256").update(sourceBytes).digest("hex") !== video.sourceSha256) {
         this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
         return fail("the source video no longer matches the digest bound to this decision", 409);
@@ -17994,13 +17426,13 @@ export class SessionsService {
     if (!video) return true;
     const { manifestSha256, ...manifest } = video;
     if (auditDigest(manifest) !== manifestSha256) return false;
-    const source = this.db.workflowArtifactExportPreflight(video.sourceArtifactId)?.artifact;
+    const source = this.db.artifactExportPreflight(video.sourceArtifactId)?.artifact;
     if (!source || source.kind !== "video" || source.mimeType !== "video/webm" ||
         source.sessionId !== childSessionId || source.sha256 !== video.sourceSha256) return false;
     return video.frames.every((frame, index) => {
       if (frame.index !== index || (index > 0 && frame.ptsMs - video.frames[index - 1]!.ptsMs < 250)) return false;
       const item = snapshot.evidence.find((candidate) => candidate.evidenceId === frame.evidenceId);
-      const artifact = this.db.workflowArtifactExportPreflight(frame.artifactId)?.artifact;
+      const artifact = this.db.artifactExportPreflight(frame.artifactId)?.artifact;
       return item?.artifactId === frame.artifactId && item.sha256 === frame.sha256 &&
         item.mediaType === "image/png" && artifact?.createdBy.kind === "system" &&
         artifact.createdBy.id === "video-review-v1" && artifact.sessionId === childSessionId &&
@@ -18086,13 +17518,13 @@ export class SessionsService {
     if (!snapshot.videoReview && child && this.productionVideoReviewAvailable(controller, child, snapshot)) {
       const images = snapshot.evidence.filter((item) => item.mediaType?.startsWith("image/"));
       return images.length ? evaluateUiEvidenceItems(controller.driver, childSessionId, images,
-        (artifactId) => this.db.workflowArtifactExportPreflight(artifactId)?.artifact ?? null) : { effectiveOwner: "orchestrator" };
+        (artifactId) => this.db.artifactExportPreflight(artifactId)?.artifact ?? null) : { effectiveOwner: "orchestrator" };
     }
     return evaluateUiEvidenceItems(
       controller.driver,
       childSessionId,
       snapshot.evidence,
-      (artifactId) => this.db.workflowArtifactExportPreflight(artifactId)?.artifact ?? null,
+      (artifactId) => this.db.artifactExportPreflight(artifactId)?.artifact ?? null,
     );
   }
 
@@ -18135,11 +17567,11 @@ export class SessionsService {
       snapshot.evidence.some((item) => !item.mediaType?.startsWith("image/") &&
         item.mediaType !== "video/webm" && item.mediaType !== "video/mp4")) return false;
     for (const item of videos) {
-      const source = item.artifactId ? this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact : null;
+      const source = item.artifactId ? this.db.artifactExportPreflight(item.artifactId)?.artifact : null;
       if (!source || source.sessionId !== child.id || source.kind !== "video" ||
         source.mimeType !== item.mediaType || source.sha256 !== item.sha256 || source.sizeBytes > MAX_SESSION_VIDEO_BYTES) return false;
       let bytes: Buffer | null;
-      try { bytes = this.db.readWorkflowArtifactBytes(source.artifactId); } catch { return false; }
+      try { bytes = this.db.readArtifactBytes(source.artifactId); } catch { return false; }
       if (!bytes || createHash("sha256").update(bytes).digest("hex") !== item.sha256) return false;
     }
     return this.workflowVideoApprovals.available(controller, child, snapshot);
@@ -18302,7 +17734,7 @@ export class SessionsService {
       const client = evaluateUiEvidenceReviewClient(this.db.uiEvidenceReviewClient(parent, "orchestrator"));
       const single = frame || client.effectiveOwner !== "orchestrator" ? (frame ? direct : client)
         : evaluateUiEvidenceItems(parent.driver, childSessionId, [item],
-          (artifactId) => this.db.workflowArtifactExportPreflight(artifactId)?.artifact ?? null);
+          (artifactId) => this.db.artifactExportPreflight(artifactId)?.artifact ?? null);
       if (single.effectiveOwner !== "orchestrator") {
         return fail(`${single.fallback?.reason ?? "The Orchestrator cannot inspect this evidence."} Ask the child for screenshots attached as Session artifacts, or deny the claim as unproven.`, 409);
       }
@@ -18319,7 +17751,7 @@ export class SessionsService {
         return fail("an earlier video frame cannot be redelivered after later frames; request a fresh decision", 409);
       }
       let original: Buffer | null;
-      try { original = this.db.readWorkflowArtifactBytes(video!.sourceArtifactId); } catch { original = null; }
+      try { original = this.db.readArtifactBytes(video!.sourceArtifactId); } catch { original = null; }
       if (!original || createHash("sha256").update(original).digest("hex") !== video!.sourceSha256) {
         this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: { kind: "agent", id: parentSessionId } });
         return fail("the source video no longer matches the digest bound to this decision", 409);
@@ -18329,7 +17761,7 @@ export class SessionsService {
     // the decision snapshot is the identity the human delegated, and it must be what is delivered.
     let bytes: Buffer | null;
     try {
-      bytes = this.db.readWorkflowArtifactBytes(item.artifactId);
+      bytes = this.db.readArtifactBytes(item.artifactId);
     } catch {
       bytes = null;
     }
@@ -18692,7 +18124,7 @@ export class SessionsService {
     }
     let bytes: Buffer | null;
     try {
-      bytes = this.db.readWorkflowArtifactBytes(item.artifactId);
+      bytes = this.db.readArtifactBytes(item.artifactId);
     } catch {
       bytes = null;
     }
@@ -19356,7 +18788,7 @@ export class SessionsService {
     const occurrenceIds = held.map((entry) => entry.occurrenceId);
     let claimed = false;
     const notice = this.prompt(
-      sessionId, restartRevokedDecisionsPrompt(held), [], undefined, undefined, undefined, "session", true, {
+      sessionId, restartRevokedDecisionsPrompt(held), [], undefined, undefined, undefined, true, {
         // An idle child admits it the way a decision's resume is admitted, following its receipts.
         ...(session.status === "idle" ? { admitAs: "queued" as const } : {}),
         stage: (runnerId, command, at) => this.promptOutbox.stageRestartNotice(occurrenceIds, sessionId, runnerId, command, at),
@@ -21455,7 +20887,7 @@ export class SessionsService {
       count: MAX_SESSION_ATTACHED_SCREENSHOTS,
       bytes: MAX_SESSION_ATTACHED_SCREENSHOT_BYTES,
     },
-  ): ServiceResult<WorkflowArtifactView> {
+  ): ServiceResult<ArtifactView> {
     return this.attachSessionMedia(sessionId, body, actor, "screenshot", limits);
   }
 
@@ -21467,7 +20899,7 @@ export class SessionsService {
       count: MAX_SESSION_ATTACHED_VIDEOS,
       bytes: MAX_SESSION_ATTACHED_VIDEO_BYTES,
     },
-  ): ServiceResult<WorkflowArtifactView> {
+  ): ServiceResult<ArtifactView> {
     return this.attachSessionMedia(sessionId, body, actor, "video", limits);
   }
 
@@ -21477,8 +20909,8 @@ export class SessionsService {
     actor: GovernanceActor,
     kind: "screenshot" | "video",
     limits: { count: number; bytes: number },
-  ): ServiceResult<WorkflowArtifactView> {
-    const validated = validateWorkflowArtifact({
+  ): ServiceResult<ArtifactView> {
+    const validated = validateArtifact({
       sessionId,
       kind,
       encoding: "base64",
@@ -21518,36 +20950,36 @@ export class SessionsService {
         );
       }
     }
-    const created = this.storeWorkflowArtifact(validated.value, actor);
+    const created = this.storeArtifact(validated.value, actor);
     if (!created.ok || !created.data) return failAs(created);
     const { data: _bytes, ...view } = created.data;
     this.ensureAttachmentEvent(sessionId, view);
     return ok(view, 201);
   }
 
-  private ensureAttachmentEvent(sessionId: string, artifact: WorkflowArtifactView): void {
+  private ensureAttachmentEvent(sessionId: string, artifact: ArtifactView): void {
     if (this.db.hasAttachmentEvent(sessionId, artifact.artifactId)) return;
     const event = this.db.appendEvent(sessionId, { kind: "artifact_attached", artifact }, Date.now());
     this.hub.sessionEvent(event);
   }
 
-  createWorkflowArtifact(input: unknown, actor: GovernanceActor = { kind: "human", id: "local" }): ServiceResult<WorkflowArtifact> {
-    const validated = validateWorkflowArtifact(input);
+  createArtifact(input: unknown, actor: GovernanceActor = { kind: "human", id: "local" }): ServiceResult<Artifact> {
+    const validated = validateArtifact(input);
     if (!validated.ok) return fail(validated.error, 400);
     if (validated.value.kind === "video") return fail("video artifacts use the session video attachment route", 400);
-    return this.storeWorkflowArtifact(validated.value, actor);
+    return this.storeArtifact(validated.value, actor);
   }
 
-  private storeWorkflowArtifact(
-    value: Extract<ReturnType<typeof validateWorkflowArtifact>, { ok: true }>["value"],
+  private storeArtifact(
+    value: Extract<ReturnType<typeof validateArtifact>, { ok: true }>["value"],
     actor: GovernanceActor,
-  ): ServiceResult<WorkflowArtifact> {
+  ): ServiceResult<Artifact> {
     const run = value.runId ? this.db.getRun(value.runId) : null;
     const session = value.sessionId ? this.db.getSession(value.sessionId) : null;
     if (value.runId && !run) return fail("run not found", 404);
     if (value.sessionId && !session) return fail("session not found", 404);
     if (run && session && session.runId !== run.id) return fail("session is not a member of the artifact run", 409);
-    const artifact: WorkflowArtifact = {
+    const artifact: Artifact = {
       artifactId: shortId("art_"),
       ...(value.runId ? { runId: value.runId } : {}),
       ...(value.sessionId ? { sessionId: value.sessionId } : {}),
@@ -21563,7 +20995,7 @@ export class SessionsService {
       createdAt: Date.now(),
     };
     try {
-      this.db.createWorkflowArtifact(artifact);
+      this.db.createArtifact(artifact);
     } catch (error) {
       if (error instanceof SessionArtifactQuotaError) return fail(error.message, 409);
       throw error;
@@ -21575,577 +21007,12 @@ export class SessionsService {
     return ok(artifact, 201);
   }
 
-  workflowArtifact(artifactId: string): ServiceResult<WorkflowArtifact> {
-    const artifact = this.db.getWorkflowArtifact(artifactId);
-    return artifact ? ok(artifact) : fail("artifact not found", 404);
-  }
-
-  runWorkflowArtifacts(runId: string, cursor?: string, limit = 50): ServiceResult<WorkflowArtifactPage> {
-    if (!this.db.getRun(runId)) return fail("run not found", 404);
-    if (!Number.isInteger(limit) || limit < 1 || limit > 100) return fail("limit must be an integer between 1 and 100", 400);
-    const after = parseArtifactCursor(cursor);
-    if (after === false) return fail("artifact cursor is malformed", 400);
-    return ok(workflowArtifactPage(this.db.listRunWorkflowArtifacts(runId, after, limit + 1), limit));
-  }
-
-  sessionWorkflowArtifacts(sessionId: string, cursor?: string, limit = 50): ServiceResult<WorkflowArtifactPage> {
+  sessionArtifacts(sessionId: string, cursor?: string, limit = 50): ServiceResult<ArtifactPage> {
     if (!this.db.getSession(sessionId)) return fail("session not found", 404);
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) return fail("limit must be an integer between 1 and 100", 400);
     const after = parseArtifactCursor(cursor);
     if (after === false) return fail("artifact cursor is malformed", 400);
-    return ok(workflowArtifactPage(this.db.listSessionWorkflowArtifacts(sessionId, after, limit + 1), limit));
-  }
-
-  createWorkflowRun(
-    req: CreateWorkflowRunRequest,
-    actor: GovernanceActor = { kind: "human", id: "local" },
-    delivery?: PreStagedDeliveryOptions,
-    creationContext?: { parentSessionId?: string; /** The authenticated human launching it (#3840). */ launcherUserId?: string },
-  ): ServiceResult<CreateWorkflowRunResult> {
-    const parentSessionId = creationContext?.parentSessionId;
-    if (parentSessionId) {
-      const reviewRefusal = this.reviewSessionRefusal(parentSessionId, "creates no sessions");
-      if (reviewRefusal) return fail(reviewRefusal, 409);
-    }
-    if (this.assistantThreadLaunch()) return fail(ASSISTANT_THREAD_RUN_REFUSAL, 409);
-    if (parentSessionId && delivery) return fail("agent-created workflow runs cannot use automation delivery snapshots", 409);
-    if (!req || typeof req !== "object" || Array.isArray(req)) return fail("workflow run request is malformed", 400);
-    const allowed = new Set([
-      "runnerId", "workspaceId", "projectId", "projectLocationId", "workflowId", "workflowVersion", "task", "title", "useWorktree",
-      "config", "costBudgetUsd", "maxToolCalls", "agentBindings", "orchestratorAgentId",
-      "providerAccountBindings", "orchestratorProviderAccountId",
-    ]);
-    if (Object.keys(req).some((key) => !allowed.has(key))) return fail("workflow run request is malformed", 400);
-    if (typeof req.runnerId !== "string" || !req.runnerId || typeof req.workspaceId !== "string" || !req.workspaceId ||
-        typeof req.workflowId !== "string" || !req.workflowId || typeof req.task !== "string" || !req.task.trim() ||
-        (req.workflowVersion !== undefined && (!Number.isInteger(req.workflowVersion) || req.workflowVersion < 1)) ||
-        (req.title !== undefined && typeof req.title !== "string") ||
-        (req.useWorktree !== undefined && typeof req.useWorktree !== "boolean") ||
-        (req.orchestratorAgentId !== undefined && (typeof req.orchestratorAgentId !== "string" || !req.orchestratorAgentId)) ||
-        (req.costBudgetUsd !== undefined && (!Number.isFinite(req.costBudgetUsd) || req.costBudgetUsd < 0)) ||
-        (req.maxToolCalls !== undefined && (!Number.isFinite(req.maxToolCalls) || req.maxToolCalls < 0))) {
-      return fail("workflow run request is malformed", 400);
-    }
-    if (req.agentBindings !== undefined &&
-        (typeof req.agentBindings !== "object" || req.agentBindings === null || Array.isArray(req.agentBindings))) {
-      return fail("workflow agent bindings are malformed", 400);
-    }
-    const snapshotStarts = delivery?.commandSnapshots;
-    if (snapshotStarts?.some((command) => command.type !== "start_session")) {
-      return fail("pre-staged workflow command snapshot is malformed", 409);
-    }
-    const workspacePath = snapshotStarts?.[0]?.type === "start_session"
-      ? snapshotStarts[0].spec.workspacePath
-      : this.db.getWorkspacePath(req.runnerId, req.workspaceId);
-    if (!workspacePath) return fail(`unknown workspace '${req.workspaceId}'`, 404);
-    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
-    const requestedProject = this.requestedProjectAssignment(
-      req, req.runnerId, req.workspaceId, false, parentSessionId,
-    );
-    if (!requestedProject.ok || !requestedProject.data) {
-      return failAs(requestedProject, "project assignment is invalid");
-    }
-    if (req.config?.serviceTier) {
-      const unsupported = this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex service tier selection");
-      if (unsupported) return unsupported;
-    }
-    this.ensureBuiltinWorkflows();
-    const definition = this.db.getWorkflowDefinition(req.workflowId, req.workflowVersion);
-    if (!definition) return fail("workflow definition not found", 404);
-
-    const logicalAgentIds = [...new Set(definition.nodes
-      .filter((node) => node.kind === "agent")
-      .map((node) => node.agentId!))];
-    const bindings = req.agentBindings ?? {};
-    if (Object.keys(bindings).some((key) => !logicalAgentIds.includes(key)) ||
-        Object.values(bindings).some((value) => typeof value !== "string" || !value || value.length > 256)) {
-      return fail("workflow agent bindings are malformed", 400);
-    }
-    const namedAccountsError = memberProviderAccountsError(req.providerAccountBindings, logicalAgentIds, "providerAccountBindings") ??
-      memberProviderAccountsError(req.orchestratorProviderAccountId === undefined ? undefined : { orchestrator: req.orchestratorProviderAccountId },
-        req.orchestratorAgentId ? ["orchestrator"] : [], "orchestratorProviderAccountId");
-    if (namedAccountsError) return fail(namedAccountsError, 400);
-
-    const members: Array<{
-      roleId: string;
-      agentId: string;
-      launch: AgentLaunch;
-      orchestrator: boolean;
-      account: WorkflowMemberAccount;
-    }> = [];
-    const expectedMemberCount = logicalAgentIds.length + (req.orchestratorAgentId ? 1 : 0);
-    if (snapshotStarts && snapshotStarts.length !== expectedMemberCount) {
-      return fail("pre-staged workflow command snapshot does not cover every member", 409);
-    }
-    for (const [index, roleId] of logicalAgentIds.entries()) {
-      const agentId = Object.hasOwn(bindings, roleId) ? bindings[roleId]! : roleId;
-      const snapshot = snapshotStarts?.[index];
-      if (snapshot?.type === "start_session" && snapshot.spec.agentId !== agentId) {
-        return fail("pre-staged workflow command snapshot conflicts with its role bindings", 409);
-      }
-      const launch = snapshot?.type === "start_session" ? {
-        command: snapshot.spec.command,
-        args: snapshot.spec.args,
-        env: snapshot.spec.env,
-        driver: snapshot.spec.driver ?? "acp",
-        context: snapshot.spec.context ?? { kind: "native" as const },
-        version: snapshot.spec.agentVersion,
-        capabilities: snapshot.spec.capabilities,
-        // Account readiness is `launchProviderAccount`'s to refuse, with its reasons.
-      } : this.db.getAgentLaunch(req.runnerId, agentId, false, { allowAccountSelection: true });
-      if (!launch && retiredCodexExecAgent(this.db, req.runnerId, agentId)) {
-        return fail(`${agentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
-      }
-      if (!launch) return fail(`workflow role '${roleId}' is bound to unknown agent '${agentId}'`, 404);
-      const configError = workflowMemberCapabilityError(agentId, req.config, launch);
-      if (configError) return fail(configError, 409);
-      const account = this.workflowMemberAccount(req, agentId, launch, snapshot, this.memberLaunchProjectId(requestedProject.data, req, parentSessionId),
-        delivery?.memberSessionId?.(members.length) ?? delivery?.memberSessionIds?.[members.length],
-        { key: roleId, named: req.providerAccountBindings && Object.hasOwn(req.providerAccountBindings, roleId) ? req.providerAccountBindings[roleId] : undefined, namedByAgent: Boolean(parentSessionId) });
-      if (!account.ok || !account.data) return failAs(account);
-      members.push({ roleId, agentId, launch, orchestrator: false, account: account.data });
-    }
-    if (req.orchestratorAgentId) {
-      const snapshot = snapshotStarts?.[logicalAgentIds.length];
-      if (snapshot?.type === "start_session" && snapshot.spec.agentId !== req.orchestratorAgentId) {
-        return fail("pre-staged workflow command snapshot conflicts with its orchestrator", 409);
-      }
-      const launch = snapshot?.type === "start_session" ? {
-        command: snapshot.spec.command,
-        args: snapshot.spec.args,
-        env: snapshot.spec.env,
-        driver: snapshot.spec.driver ?? "acp",
-        context: snapshot.spec.context ?? { kind: "native" as const },
-        version: snapshot.spec.agentVersion,
-        capabilities: snapshot.spec.capabilities,
-      } : this.db.getAgentLaunch(req.runnerId, req.orchestratorAgentId, false, { allowAccountSelection: true });
-      if (!launch && retiredCodexExecAgent(this.db, req.runnerId, req.orchestratorAgentId)) {
-        return fail(`${req.orchestratorAgentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
-      }
-      if (!launch) return fail(`unknown orchestrator agent '${req.orchestratorAgentId}'`, 404);
-      const configError = workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch);
-      if (configError) return fail(configError, 409);
-      const account = this.workflowMemberAccount(req, req.orchestratorAgentId, launch, snapshot, this.workflowOrchestratorLaunchProjectId(requestedProject.data, req),
-        delivery?.memberSessionId?.(members.length) ?? delivery?.memberSessionIds?.[members.length],
-        { key: "orchestrator", named: req.orchestratorProviderAccountId, namedByAgent: Boolean(parentSessionId) });
-      if (!account.ok || !account.data) return failAs(account);
-      members.push({ roleId: "__orchestrator__", agentId: req.orchestratorAgentId, launch, orchestrator: true, account: account.data });
-    }
-
-    // Workflow/run definitions and their orchestrator-facing MCP tools are organization resources.
-    // Keep worker sessions under the selected workspace owner, but give the trusted orchestrator
-    // session an explicit organization scope so a user/team-owned project cannot accidentally
-    // disable the workflow routes it was created to drive.
-    const runnerScope = this.db.runnerScope(req.runnerId);
-    const orchestratorScope = members.some((member) => member.orchestrator) ? this.workflowOrchestratorScope(req.runnerId) : null;
-    if (members.some((member) => member.orchestrator) && !orchestratorScope) {
-      return fail(`runner '${req.runnerId}' has no organization ownership`, 409);
-    }
-    const workerSessionScope = this.sessionScopeForProjectAssignment(
-      requestedProject.data,
-      this.db.workspaceScope(req.runnerId, req.workspaceId) ?? runnerScope,
-    );
-    if (!workerSessionScope.ok || !workerSessionScope.data) {
-      return failAs(workerSessionScope, "workflow session ownership is unavailable");
-    }
-    let childSessionScope = workerSessionScope.data;
-    if (parentSessionId) {
-      const parentScope = this.db.sessionScope(parentSessionId);
-      if (!parentScope) return fail("parent session ownership is unavailable", 409);
-      if (!this.db.scopeAudienceContainedWithMembership(parentScope, workerSessionScope.data)) {
-        return fail("parent session access is broader than the selected Project or execution Location", 409);
-      }
-      childSessionScope = parentScope;
-    }
-    // Like a run, a workflow cannot launch new turns for an owner or launcher (#3840) past their
-    // daily allowance, through its workers or its organization-owned orchestrator.
-    const launcherUserId = parentSessionId
-      ? this.db.sessionLauncherUserId(parentSessionId)
-      : creationContext?.launcherUserId ?? null;
-    for (const scope of [childSessionScope, ...(orchestratorScope ? [orchestratorScope] : [])]) {
-      const admissionDenied = this.dailyBudgetAdmissionError(scope, launcherUserId);
-      if (admissionDenied) return fail(admissionDenied, 409);
-    }
-    // Trusted orchestrators require organization scope for organization workflow tools. When a
-    // Project is narrower, keep only that infrastructure session explicitly outside the Project;
-    // every ordinary workflow child still adopts the inherited Project and parent scope.
-    const orchestratorProject = members.some((member) => member.orchestrator) &&
-      requestedProject.data.projectId && orchestratorScope &&
-      !this.db.scopeAudienceContainedWithMembership(
-        orchestratorScope,
-        this.db.projectScope(requestedProject.data.projectId)!,
-      )
-      ? { projectId: null, projectLocationId: null }
-      : requestedProject.data;
-
-    if (delivery) {
-      return this.createPreStagedWorkflowRun(
-        req, actor, definition, workspacePath, members, delivery, orchestratorScope,
-        workerSessionScope.data, requestedProject.data, orchestratorProject, launcherUserId,
-      );
-    }
-
-    const memberConfig = this.runMemberConfig(req, Boolean(parentSessionId));
-    const spawnRequest = { title: req.title, agentId: members.map((member) => member.agentId).join(", "),
-      operation: "workflow", request: req, members: members.map((member) => ({ roleId: member.roleId, agentId: member.agentId })) };
-    const admitted = this.admitRunChildren(
-      parentSessionId,
-      members.map(() => ({ ...memberConfig })),
-      spawnRequest,
-      members,
-      { runnerId: req.runnerId, workspaceId: req.workspaceId },
-    );
-    if (!admitted.ok || !admitted.data) return failAs(admitted);
-
-    const now = Date.now();
-    const runId = shortId("r_");
-    const title = (req.title?.trim() || titleFromPrompt(req.task, RUN_TASK_TITLE_MAX) || definition.name).slice(0, 120);
-    const titleSource = req.title?.trim() ? "user" as const : "generated" as const;
-    this.db.createRun({
-      id: runId,
-      title,
-      prompt: req.task.trim(),
-      workspaceId: req.workspaceId,
-      runnerId: req.runnerId,
-      now,
-    });
-
-    const sessions: SessionView[] = [];
-    const starts: Array<{ spec: SessionLaunchSpec; orchestrator: boolean }> = [];
-    for (const [memberIndex, member] of members.entries()) {
-      const id = shortId("s_");
-      const config = admitted.data[memberIndex]!;
-      const maxCalls = parentSessionId ? config.maxToolCalls : req.maxToolCalls;
-      const runMaxCalls = maxCalls != null ? Math.floor(maxCalls) : 0;
-      const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
-      if (runMaxCalls > 0) config.maxToolCalls = runMaxCalls;
-      const memberTitle = `${title} · ${member.orchestrator ? "orchestrator" : member.roleId}`.slice(0, 120);
-      const useWorktree = member.orchestrator ? false : (req.useWorktree ?? true);
-      const memberProject = member.orchestrator ? orchestratorProject : requestedProject.data;
-      const session = this.db.createSession({
-        id,
-        parentSessionId,
-        runnerId: req.runnerId,
-        workspaceId: req.workspaceId,
-        ...memberProject,
-        agentId: member.agentId,
-        ...(member.account.providerAccount
-          ? { providerAccountId: member.account.providerAccount.id, providerAccountLabel: member.account.providerAccount.label } : {}),
-        ...(member.account.selection ? { providerAccountSelection: member.account.selection } : {}),
-        title: memberTitle,
-        titleSource,
-        useWorktree,
-        runId,
-        driver: member.launch.driver,
-        config,
-        scope: member.orchestrator ? orchestratorScope! : childSessionScope,
-        ...(launcherUserId ? { launcherUserId } : {}),
-        now,
-      });
-      const costBudget = parentSessionId ? config.costBudgetUsd : req.costBudgetUsd;
-      if (costBudget && costBudget > 0) this.db.updateSessionCostBudget(id, costBudget, now);
-      if (runMaxCalls > 0) this.db.updateSessionMaxToolCalls(id, runMaxCalls, now);
-      if (runCheckpoints) this.db.updateSessionCostCheckpoints(id, runCheckpoints, now);
-      this.db.addRunMember(runId, id, member.roleId);
-      const view = this.db.getSession(id) ?? session;
-      this.hub.sessionChanged(view);
-      sessions.push(view);
-      starts.push({
-        orchestrator: member.orchestrator,
-        spec: {
-          sessionId: id,
-          workspaceId: req.workspaceId,
-          workspacePath,
-          agentId: member.agentId,
-          ...(member.account.providerAccount
-            ? { providerAccountId: member.account.providerAccount.id, providerAccountLabel: member.account.providerAccount.label } : {}),
-          ...this.providerAccountSelectionForRunner(this.db.getRunner(req.runnerId) ?? {}, member.account.selection),
-          agentVersion: member.launch.version,
-          capabilities: member.launch.capabilities,
-          title: memberTitle,
-          titleSource,
-          command: member.launch.command,
-          args: member.launch.args,
-          env: member.launch.env,
-          useWorktree,
-          driver: member.launch.driver,
-          context: member.launch.context,
-          config,
-        },
-      });
-    }
-
-    let instance = this.db.createWorkflowInstance({
-      instanceId: shortId("wfi_"), definition, runId, createdBy: actor, now,
-    });
-    instance = this.advanceWorkflowPolicyGates(instance);
-    const orderedStarts = [
-      ...starts.filter((item) => !item.orchestrator),
-      ...starts.filter((item) => item.orchestrator),
-    ];
-    const delivered: typeof orderedStarts = [];
-    if (!["succeeded", "failed", "stopped"].includes(instance.status)) {
-      for (const start of orderedStarts) {
-        const initialPrompt = start.orchestrator
-          ? [
-              `Orchestrate workflow instance ${instance.instanceId} for run ${runId}.`,
-              `The user's task is: ${req.task.trim()}`,
-              "Use the workflow inspection and mutation tools to dispatch ready nodes, inspect each worker after it settles, publish only faithful artifacts, complete the corresponding attempt, and continue until the instance is terminal. Never fabricate an artifact or mark a step complete before its worker output is available.",
-            ].join("\n\n")
-          : undefined;
-        const sent = this.hub.sendToRunner(req.runnerId, {
-          type: "start_session",
-          spec: start.spec,
-          ...(initialPrompt ? { initialPrompt } : {}),
-        });
-        if (sent) {
-          delivered.push(start);
-          continue;
-        }
-
-        // The runner can disconnect after preflight. Keep the durable run observable but fail it
-        // closed, cancel any starts already delivered, and never launch the remaining members.
-        const failedAt = Date.now();
-        for (const accepted of delivered) {
-          this.hub.sendToRunner(req.runnerId, { type: "cancel_session", sessionId: accepted.spec.sessionId });
-        }
-        for (const session of sessions) {
-          this.db.updateSessionStatus(session.id, "stopped", failedAt, { cause: "launch_undelivered" });
-          this.hub.sessionChangedById(session.id);
-        }
-        instance = this.db.finishWorkflowInstance({
-          instanceId: instance.instanceId,
-          status: "failed",
-          error: `runner disconnected while launching workflow member '${start.spec.agentId}'`,
-          actor: { kind: "system", id: "workflow-launch" },
-          now: failedAt,
-        });
-        this.broadcastWorkflowRun(runId);
-        return fail("runner disconnected while launching the workflow", 409);
-      }
-    } else {
-      // A policy-only graph may settle during creation. Its unused members must not consume box
-      // capacity merely to observe an instance that is already terminal.
-      const settledAt = Date.now();
-      for (const session of sessions) {
-        this.db.updateSessionStatus(session.id, "stopped", settledAt, {
-          cause: "not_launched",
-          confirmation: "not_launched",
-        });
-        this.hub.sessionChangedById(session.id);
-      }
-    }
-    const run = this.db.getRun(runId)!;
-    this.hub.runChanged(run);
-    this.log.info(`workflow run created ${runId} from ${definition.workflowId}@${definition.version}`);
-    return ok({ run, sessions, instance }, 201);
-  }
-
-  private createPreStagedWorkflowRun(
-    req: CreateWorkflowRunRequest,
-    actor: GovernanceActor,
-    definition: WorkflowDefinition,
-    workspacePath: string,
-    members: Array<{ roleId: string; agentId: string; launch: AgentLaunch; orchestrator: boolean; account: WorkflowMemberAccount }>,
-    delivery: PreStagedDeliveryOptions,
-    orchestratorScope: ResourceScope | null,
-    workerSessionScope: ResourceScope,
-    requestedProject: { projectId?: string | null; projectLocationId?: string | null },
-    orchestratorProject: { projectId?: string | null; projectLocationId?: string | null },
-    launcherUserId: string | null,
-  ): ServiceResult<CreateWorkflowRunResult> {
-    const invalidId = (value: string | undefined): boolean =>
-      value !== undefined && (!value.trim() || value.length > 256);
-    if (invalidId(delivery.runId) || invalidId(delivery.workflowInstanceId)) {
-      return fail("pre-staged workflow resource id is invalid", 400);
-    }
-    if (delivery.memberSessionIds && delivery.memberSessionIds.length < members.length) {
-      return fail("pre-staged workflow member ids do not cover every member", 400);
-    }
-
-    const runId = delivery.runId ?? shortId("r_");
-    const instanceId = delivery.workflowInstanceId ?? shortId("wfi_");
-    const memberIds = members.map((_, index) =>
-      delivery.memberSessionId?.(index) ?? delivery.memberSessionIds?.[index] ?? shortId("s_"));
-    if (memberIds.some((id) => invalidId(id)) || new Set(memberIds).size !== memberIds.length) {
-      return fail("pre-staged workflow member ids must be valid and unique", 400);
-    }
-    if (delivery.commandSnapshots?.some((command, index) =>
-      command.type !== "start_session" || command.spec.sessionId !== memberIds[index])) {
-      return fail("pre-staged workflow command snapshot conflicts with its session ids", 409);
-    }
-
-    const now = Date.now();
-    const title = (req.title?.trim() || titleFromPrompt(req.task, RUN_TASK_TITLE_MAX) || definition.name).slice(0, 120);
-    const titleSource = req.title?.trim() ? "user" as const : "generated" as const;
-    const runMaxCalls = req.maxToolCalls != null ? Math.floor(req.maxToolCalls) : 0;
-    const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
-    const planned = members.map((member, index) => {
-      const id = memberIds[index]!;
-      const snapshot = delivery.commandSnapshots?.[index];
-      const config = { ...(snapshot?.type === "start_session" ? snapshot.spec.config : req.config) };
-      if (!snapshot) {
-        if (req.costBudgetUsd && req.costBudgetUsd > 0) config.costBudgetUsd = req.costBudgetUsd;
-        if (runMaxCalls > 0) config.maxToolCalls = runMaxCalls;
-      }
-      const memberTitle = snapshot?.type === "start_session"
-        ? (snapshot.spec.title ?? `${title} \u00b7 ${member.orchestrator ? "orchestrator" : member.roleId}`.slice(0, 120))
-        : `${title} \u00b7 ${member.orchestrator ? "orchestrator" : member.roleId}`.slice(0, 120);
-      const useWorktree = snapshot?.type === "start_session"
-        ? snapshot.spec.useWorktree
-        : (member.orchestrator ? false : (req.useWorktree ?? true));
-      const spec: SessionLaunchSpec = {
-        sessionId: id,
-        campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(id),
-        workspaceId: req.workspaceId,
-        workspacePath,
-        agentId: member.agentId,
-        ...(member.account.providerAccount
-          ? { providerAccountId: member.account.providerAccount.id, providerAccountLabel: member.account.providerAccount.label } : {}),
-        ...this.providerAccountSelectionForRunner(this.db.getRunner(req.runnerId) ?? {}, member.account.selection),
-        agentVersion: member.launch.version,
-        capabilities: member.launch.capabilities,
-        title: memberTitle,
-        titleSource,
-        command: member.launch.command,
-        args: member.launch.args,
-        env: member.launch.env,
-        useWorktree,
-        driver: member.launch.driver,
-        context: member.launch.context,
-        config,
-      };
-      const initialPrompt = member.orchestrator
-        ? [
-            `Orchestrate workflow instance ${instanceId} for run ${runId}.`,
-            `The user's task is: ${req.task.trim()}`,
-            "Use the workflow inspection and mutation tools to dispatch ready nodes, inspect each worker after it settles, publish only faithful artifacts, complete the corresponding attempt, and continue until the instance is terminal. Never fabricate an artifact or mark a step complete before its worker output is available.",
-          ].join("\n\n")
-        : undefined;
-      const command: DurableSessionCommand = snapshot ?? {
-        type: "start_session",
-        spec,
-        ...(initialPrompt ? { initialPrompt } : {}),
-      };
-      return { member, id, config, memberTitle, useWorktree, command };
-    });
-    const commands = [
-      ...planned.filter((item) => !item.member.orchestrator),
-      ...planned.filter((item) => item.member.orchestrator),
-    ].map((item) => item.command);
-    const plan: PreStagedDeliveryPlan = {
-      runnerId: req.runnerId,
-      commands,
-      runId,
-      workflowInstanceId: instanceId,
-    };
-
-    const existingRun = this.db.getRun(runId);
-    const existingScope = existingRun ? this.db.workflowRunScope(runId) : null;
-    if (existingRun && (
-      existingRun.title !== title ||
-      existingRun.prompt !== req.task.trim() ||
-      existingRun.workspaceId !== req.workspaceId ||
-      existingScope?.runnerId !== req.runnerId
-    )) {
-      return fail(`pre-staged run id '${runId}' conflicts with an existing run`, 409);
-    }
-    for (const item of planned) {
-      const existing = this.db.getSession(item.id);
-      const itemProject = item.member.orchestrator ? orchestratorProject : requestedProject;
-      if (existing && (
-        existing.runnerId !== req.runnerId ||
-        existing.workspaceId !== req.workspaceId ||
-        (itemProject.projectId !== undefined && existing.projectId !== itemProject.projectId) ||
-        (itemProject.projectLocationId !== undefined &&
-          existing.projectLocationId !== itemProject.projectLocationId) ||
-        existing.agentId !== item.member.agentId ||
-        existing.title !== item.memberTitle ||
-        (existing.titleSource ?? "generated") !== titleSource ||
-        existing.useWorktree !== item.useWorktree ||
-        existing.runId !== runId ||
-        existing.driver !== (item.member.launch.driver ?? "acp")
-      )) {
-        return fail(`pre-staged session id '${item.id}' conflicts with an existing session`, 409);
-      }
-      if (existingRun?.sessionIds.includes(item.id) &&
-          !this.db.runMemberSessions(runId, item.member.roleId).some((session) => session.id === item.id)) {
-        return fail(`pre-staged session id '${item.id}' conflicts with an existing workflow role`, 409);
-      }
-    }
-    const existingInstance = this.db.getWorkflowInstance(instanceId);
-    if (existingInstance && (
-      existingInstance.runId !== runId ||
-      existingInstance.workflowId !== definition.workflowId ||
-      existingInstance.workflowVersion !== definition.version ||
-      existingInstance.createdBy.kind !== actor.kind ||
-      (existingInstance.createdBy.id ?? undefined) !== (actor.id ?? undefined)
-    )) {
-      return fail(`pre-staged workflow instance id '${instanceId}' conflicts with an existing instance`, 409);
-    }
-
-    // Every exact start command, including the orchestrator's ID-bearing initial prompt, exists
-    // before this point. A staging exception therefore precedes all run/session/instance writes.
-    delivery.stage(plan);
-
-    if (!existingRun) {
-      this.db.createRun({
-        id: runId,
-        title,
-        prompt: req.task.trim(),
-        workspaceId: req.workspaceId,
-        runnerId: req.runnerId,
-        now,
-      });
-    }
-    const sessions: SessionView[] = [];
-    for (const item of planned) {
-      const itemProject = item.member.orchestrator ? orchestratorProject : requestedProject;
-      const session = this.db.getSession(item.id) ?? this.db.createSession({
-        id: item.id,
-        runnerId: req.runnerId,
-        workspaceId: req.workspaceId,
-        ...itemProject,
-        agentId: item.member.agentId,
-        ...(item.member.account.providerAccount
-          ? { providerAccountId: item.member.account.providerAccount.id, providerAccountLabel: item.member.account.providerAccount.label } : {}),
-        ...(item.member.account.selection ? { providerAccountSelection: item.member.account.selection } : {}),
-        title: item.memberTitle,
-        titleSource,
-        useWorktree: item.useWorktree,
-        runId,
-        driver: item.member.launch.driver,
-        config: item.config,
-        scope: item.member.orchestrator ? orchestratorScope! : workerSessionScope,
-        automationOrigin: delivery.automationOrigin,
-        ...(launcherUserId ? { launcherUserId } : {}),
-        now,
-      });
-      if (req.costBudgetUsd && req.costBudgetUsd > 0) {
-        this.db.updateSessionCostBudget(item.id, req.costBudgetUsd, now);
-      }
-      if (runMaxCalls > 0) this.db.updateSessionMaxToolCalls(item.id, runMaxCalls, now);
-      if (runCheckpoints) this.db.updateSessionCostCheckpoints(item.id, runCheckpoints, now);
-      this.db.addRunMember(runId, item.id, item.member.roleId);
-      const view = this.db.getSession(item.id) ?? session;
-      this.hub.sessionChanged(view);
-      sessions.push(view);
-    }
-
-    let instance = existingInstance ?? this.db.createWorkflowInstance({
-      instanceId,
-      definition,
-      runId,
-      createdBy: actor,
-      now,
-    });
-    instance = this.advanceWorkflowPolicyGates(instance);
-    delivery.activate(plan);
-
-    const run = this.db.getRun(runId)!;
-    this.hub.runChanged(run);
-    this.log.info(`workflow run created ${runId} from ${definition.workflowId}@${definition.version}`);
-    return ok({ run, sessions, instance }, 201);
+    return ok(artifactPage(this.db.listSessionArtifacts(sessionId, after, limit + 1), limit));
   }
 
   /* ----------------------- Collaboration pods ---------------------------- */
@@ -22797,37 +21664,12 @@ export class SessionsService {
     named: string | undefined,
     launch: { agentId: string; launch: AgentLaunch; namedByAgent?: boolean; model?: string;
       pinned?: { accountId?: string; selection?: ProviderAccountSelectionRecord } },
-  ): ServiceResult<WorkflowMemberAccount> {
+  ): ServiceResult<RunMemberAccount> {
     if (named && !launch.pinned && !runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")) {
       return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "providerAccounts", "choosing an account"));
     }
     const account = this.launchProviderAccount({ ...launch, runner, hostTarget: true, ...(named ? { requestedId: named } : {}) });
     return named && !account.ok ? { ...account, error: `${member}: ${account.error}` } : account;
-  }
-
-  /** One workflow member's account. A recorded command keeps the account it was staged with. */
-  private workflowMemberAccount(
-    req: Pick<CreateWorkflowRunRequest, "runnerId" | "config">,
-    agentId: string,
-    launch: AgentLaunch,
-    snapshot: DurableSessionCommand | undefined,
-    projectId: string | null | undefined,
-    stagedSessionId: string | undefined,
-    member: { key: string; named: string | undefined; namedByAgent: boolean },
-  ): ServiceResult<WorkflowMemberAccount> {
-    const runner = this.db.getRunner(req.runnerId);
-    if (!runner) return fail("runner not found", 404);
-    // A retried delivery keeps what it first resolved to: its recorded command, or the row it finds.
-    const staged = stagedSessionId ? this.db.getSession(stagedSessionId) : null;
-    const pinned = snapshot?.type === "start_session"
-      ? { accountId: snapshot.spec.providerAccountId, selection: snapshot.spec.providerAccountSelection }
-      : staged ? { accountId: staged.providerAccountId, selection: staged.providerAccountSelection } : undefined;
-    const account = this.namedMemberProviderAccount(runner, member.key, member.named, {
-      agentId, launch, ...(pinned ? { pinned } : {}), ...(member.namedByAgent ? { namedByAgent: true } : {}),
-      ...(req.config?.model ? { model: req.config.model } : {}) });
-    if (!account.ok || !account.data) return failAs(account);
-    const memoryRefusal = pinned ? null : this.accountMemoryRefusal<WorkflowMemberAccount>(runner, agentId, launch, account.data.selection, projectId);
-    return memoryRefusal ?? account;
   }
 
   /** The saved policy this runner's launch must honor. A fixed default needs a runner with accounts.
@@ -23066,25 +21908,6 @@ export class SessionsService {
   ): string | null {
     return this.launchProjectId(assignment, req.runnerId, req.workspaceId, this.db.effectiveSessionScope(req.runnerId, req.workspaceId,
       (parentSessionId ? this.db.sessionScope(parentSessionId) : null) ?? undefined));
-  }
-
-  private workflowOrchestratorScope(runnerId: string): ResourceScope | null {
-    const runnerScope = this.db.runnerScope(runnerId);
-    return runnerScope
-      ? { organizationId: runnerScope.organizationId, owner: { kind: "organization", organizationId: runnerScope.organizationId } }
-      : null;
-  }
-
-  /** A workflow's orchestrator is organization-scoped, so a narrower project keeps it out, however the
-   * project was assigned. This answers for that session, whose memory may differ from its workers'. */
-  private workflowOrchestratorLaunchProjectId(
-    assignment: { projectId?: string | null },
-    req: { runnerId: string; workspaceId: string },
-  ): string | null {
-    const scope = this.workflowOrchestratorScope(req.runnerId);
-    const projectScope = assignment.projectId ? this.db.projectScope(assignment.projectId) : null;
-    if (scope && projectScope && !this.db.scopeAudienceContainedWithMembership(scope, projectScope)) return null;
-    return this.launchProjectId(assignment, req.runnerId, req.workspaceId, scope);
   }
 
   /** Every account of this provider an agent could name instead. References and reason codes only. */
@@ -23445,7 +22268,6 @@ export class SessionsService {
     // Guardrail gate at turn-settle: apply a policy pause here if a newly tripped rule does not
     // already have one. Existing control-plane cards remain sticky across the trailing idle.
     if (status === "idle") this.gateOnPolicy(sessionId, Date.now());
-    this.reconcileWorkflowSessionStatus(sessionId, status, Date.now());
     this.reconcileReviewSessionStatus(sessionId, status);
     if (detail && status === "failed") {
       const ev = this.db.appendEvent(sessionId, { kind: "error", message: detail }, Date.now());
@@ -23554,16 +22376,6 @@ export class SessionsService {
     }
     this.hub.sessionChangedById(message.sessionId);
     return true;
-  }
-
-  private reconcileWorkflowSessionStatus(sessionId: string, status: SessionStatus, now: number): void {
-    for (const attempt of this.db.activeWorkflowAttemptsForSession(sessionId)) {
-      if (status === "idle" || status === "completed") {
-        this.db.setWorkflowAttemptStatus(attempt.attemptId, ["dispatching", "running"], "awaiting_output");
-      } else if (status === "failed" || status === "stopped") {
-        this.failWorkflowAttempt(attempt, "failed", `workflow session ${status}`, now, { kind: "system", id: "session-lifecycle" });
-      }
-    }
   }
 
   /**
@@ -23809,7 +22621,6 @@ export class SessionsService {
 
   private replayRestoredPolicyIdle(previous: SessionView, sessionId: string, now: number): void {
     this.gateOnPolicy(sessionId, now);
-    this.reconcileWorkflowSessionStatus(sessionId, "idle", now);
     this.handlePodOrchestrationSettle(sessionId, "idle");
     this.clearSettledPolicyResumeStatus(sessionId);
     // The visible CP state was input_required, but the swallowed provider transition was

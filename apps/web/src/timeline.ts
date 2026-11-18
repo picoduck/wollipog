@@ -14,7 +14,7 @@ import type {
   ReviewRiskLevel,
   SessionCommandExecutionMode,
   SessionEvent,
-  WorkflowArtifactView,
+  ArtifactView,
   QuestionAnswerSummaryEntry,
   StructuredRequestResolutionReason,
 } from "@wollipog/protocol";
@@ -65,7 +65,7 @@ export function mergeTurnUsage(current: TurnUsage | undefined, addition: TurnUsa
 }
 
 export type TimelineItem =
-  | { kind: "artifact_attached"; id: number; artifact: WorkflowArtifactView; createdAt: number }
+  | { kind: "artifact_attached"; id: number; artifact: ArtifactView; createdAt: number }
   | {
       kind: "user_message";
       id: number;

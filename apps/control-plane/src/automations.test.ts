@@ -6,7 +6,6 @@ import type {
   AgentDriverKind,
   AutomationSpec,
   CreateSessionRequest,
-  CreateWorkflowRunRequest,
   DurableSessionCommand,
   RunnerMetadata,
 } from "@wollipog/protocol";
@@ -14,7 +13,7 @@ import { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import type { PreStagedDeliveryOptions, SessionsService } from "./sessions.js";
 import { AutomationsService, validateAutomationSpec } from "./automations.js";
-import { SessionsService as RealSessionsService, workflowRunCapabilityError } from "./sessions.js";
+import { SessionsService as RealSessionsService } from "./sessions.js";
 import { signAutomationTrigger } from "./automation-trigger-ingress.js";
 
 function runner(
@@ -59,24 +58,6 @@ function modelCapabilities(model: string): AgentCapabilities {
   };
 }
 
-function installCapabilityWorkflow(db: ControlPlaneDb, workflowId = "workflow-capabilities"): void {
-  db.createWorkflowDefinition({
-    workflowId,
-    name: "Capability Workflow",
-    maxTransitions: 4,
-    nodes: [
-      { nodeId: "build", kind: "agent", role: "builder", agentId: "worker", inputs: [], outputs: [],
-        retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
-      { nodeId: "review", kind: "agent", role: "reviewer", agentId: "reviewer", inputs: [], outputs: [],
-        retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
-    ],
-    edges: [],
-    source: "custom",
-    createdBy: { kind: "system", id: "test" },
-    createdAt: 0,
-  });
-}
-
 function baseSpec(overrides: Partial<AutomationSpec> = {}): AutomationSpec {
   return {
     name: "Every minute",
@@ -115,7 +96,6 @@ function harness(
   } as unknown as Hub;
   const created: CreateSessionRequest[] = [];
   const prompted: Array<{ id: string; text: string; config: unknown }> = [];
-  const workflows: CreateWorkflowRunRequest[] = [];
   const failures = { create: false, throwCreate: false, throwAfterStage: false };
   const recoveredSnapshots: DurableSessionCommand[][] = [];
   const launchers: Array<{ action: string; launcherUserId?: string }> = [];
@@ -160,53 +140,36 @@ function harness(
       if (plan) delivery!.activate(plan);
       return { ok: true, status: 200, data: db.getSession(id)! };
     },
-    createWorkflowRun(request: CreateWorkflowRunRequest, _actor: unknown, delivery?: PreStagedDeliveryOptions,
-      context?: { launcherUserId?: string }) {
-      workflows.push(request);
-      launchers.push({ action: "workflow_run", ...(context?.launcherUserId ? { launcherUserId: context.launcherUserId } : {}) });
-      const runId = delivery?.runId ?? "run-auto";
-      const instanceId = delivery?.workflowInstanceId ?? "instance-auto";
-      const memberIds = delivery
-        ? [delivery.memberSessionId?.(0) ?? "workflow-session-0", delivery.memberSessionId?.(1) ?? "workflow-session-1"]
-        : ["workflow-session-0", "workflow-session-1"];
-      const plan = delivery ? {
-        runnerId: request.runnerId,
-        runId,
-        workflowInstanceId: instanceId,
-        commands: memberIds.map((memberId) => (
-          { type: "start_session" as const, spec: { sessionId: memberId } as never }
-        )),
-      } : undefined;
-      if (plan) delivery!.stage(plan);
-      if (plan) delivery!.activate(plan);
-      return {
-        ok: true,
-        status: 201,
-        data: {
-          run: { id: runId, title: "Run", prompt: request.task, workspaceId: request.workspaceId,
-            workspaceName: "Repo", createdAt: 100, updatedAt: 100, sessionIds: [] },
-          sessions: [],
-          instance: { instanceId, workflowId: request.workflowId, workflowVersion: 1,
-            runId, status: "running", transitionCount: 0, nodeStates: [],
-            createdBy: { kind: "system", id: "test" }, createdAt: 100, updatedAt: 100,
-            definition: { workflowId: request.workflowId, version: 1, name: "Workflow", maxTransitions: 1,
-              nodes: [], edges: [], source: "custom", createdBy: { kind: "system", id: "test" }, createdAt: 100 },
-            attempts: [], events: [] },
-        },
-      };
-    },
-    workflowRunCapabilityError(request: CreateWorkflowRunRequest) {
-      return workflowRunCapabilityError(db, request);
-    },
   } as unknown as SessionsService;
   const notifications: string[] = [];
   const service = new AutomationsService(db, hub, sessions, { info() {}, warn() {} },
     (_automation, execution, event) => notifications.push(`${execution.executionId}:${event}`));
   const restartService = () => new AutomationsService(db, hub, sessions, { info() {}, warn() {} },
     (_automation, execution, event) => notifications.push(`${execution.executionId}:${event}`));
-  return { db, hub, online, service, restartService, created, prompted, workflows, notifications, failures,
+  return { db, hub, online, service, restartService, created, prompted, notifications, failures,
     delivered, recoveredSnapshots, launchers };
 }
+
+test("automation creation and updates refuse the removed workflow action", () => {
+  const { db, service } = harness();
+  const actor = { kind: "human" as const, id: "owner" };
+  try {
+    const active = service.create(baseSpec(), actor, 0).data!;
+    const legacy = {
+      ...baseSpec(),
+      action: { kind: "workflow_run", request: { runnerId: "runner-1", workspaceId: "ws-1",
+        workflowId: "builtin:build-review", task: "Inspect the build" } },
+    } as unknown as AutomationSpec;
+    for (const attempt of [service.create(legacy, actor, 1), service.update(active.automationId, legacy, actor, 1)]) {
+      assert.equal(attempt.status, 400);
+      assert.match(attempt.error ?? "", /Workflow runs were removed/);
+    }
+    assert.deepEqual(db.getAutomation(active.automationId), active);
+    assert.equal(db.listAutomations().length, 1);
+  } finally {
+    db.close();
+  }
+});
 
 function receiveSignedTrigger(
   service: AutomationsService,
@@ -517,118 +480,6 @@ test("a previous command's correlated trip cannot mark a later execution or rewr
   } finally { db.close(); }
 });
 
-test("a workflow ceiling pause finishes the instance and cancels siblings before releasing wait or skip", () => {
-  for (const concurrencyPolicy of ["wait", "skip"] as const) {
-    for (const replay of ["live", "completed", "failed", "attempt-prompt"] as const) {
-      for (const kind of ["cost_budget", "max_tool_calls"] as const) {
-        const { db, service, delivered } = harness();
-        try {
-          installCapabilityWorkflow(db, "wf-1");
-          const actor = { kind: "human" as const, id: "device" };
-          const automation = service.create(baseSpec({ concurrencyPolicy, action: { kind: "workflow_run", request: {
-            workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
-            agentBindings: { worker: "agent-1", reviewer: "agent-1" },
-          } } }), actor, 0).data!;
-          service.tick(60_000);
-          const execution = db.listAutomationExecutions(automation.automationId)[0]!;
-          const commands = execution.commands!;
-          db.createRun({ id: execution.runId!, title: "Run", prompt: "Build", workspaceId: null, runnerId: null, now: 60_000 });
-          db.createWorkflowInstance({ instanceId: execution.workflowInstanceId!, definition: db.getWorkflowDefinition("wf-1")!,
-            runId: execution.runId!, createdBy: actor, now: 60_000 });
-          for (const command of commands) {
-            db.createSession({ id: command.sessionId, runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
-              title: "Member", useWorktree: false, driver: "acp", config: {}, now: 60_000 });
-            db.updateSessionStatus(command.sessionId, "running", 60_001);
-            if (replay === "live" || command !== commands[0]) {
-              service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
-                commandId: command.commandId, sessionId: command.sessionId, state: "started", revision: 1 }, 60_001);
-            }
-          }
-          if (replay === "attempt-prompt") {
-            db.recordAutomationCommandReceipt({ commandId: commands[0]!.commandId, runnerId: "runner-1",
-              sessionId: commands[0]!.sessionId, state: "completed", revision: 1, now: 60_001 });
-            db.createWorkflowAttempt({ attemptId: "attempt-prompt", instanceId: execution.workflowInstanceId!,
-              nodeId: "build", attempt: 1, status: "running", dispatchKey: "attempt-prompt",
-              sessionId: commands[0]!.sessionId, startedAt: 60_001, deadlineAt: 120_001 });
-            db.stageSessionPromptCommand({ commandId: "prompt_workflow", sessionId: commands[0]!.sessionId,
-              runnerId: "runner-1", payloadJson: "{}", payloadSha256: "a".repeat(64), expiresAt: 120_000, now: 60_001 });
-          }
-          runnerPause(db, commands[0]!.sessionId, 60_002, { tripId: "workflow-trip", kind,
-            threshold: kind === "cost_budget" ? 1.5 : 12, observed: kind === "cost_budget" ? 2 : 12,
-            ...(replay !== "live" ? { commandId: replay === "attempt-prompt" ? "prompt_workflow" : commands[0]!.commandId } : {}) });
-          if (replay === "live" || replay === "attempt-prompt") service.onGovernanceTripped(commands[0]!.sessionId, 60_003);
-          else service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
-            commandId: commands[0]!.commandId, sessionId: commands[0]!.sessionId, state: replay, revision: 2,
-            ...(replay === "failed" ? { error: "provider cancelled" } : {}) }, 60_003);
-          assert.equal(db.getAutomationExecution(execution.executionId)?.status, "ceiling_paused");
-          assert.equal(db.getWorkflowInstance(execution.workflowInstanceId!)?.status, "failed",
-            "the workflow must be terminal before its automation slot is freed");
-          assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "uncertain");
-          assert.ok(delivered.some((message) => (message as { type: string; sessionId?: string }).type === "cancel_session" &&
-            (message as { sessionId?: string }).sessionId === commands[1]!.sessionId), "the sibling receives cancellation");
-          assert.ok(db.getSession(commands[0]!.sessionId)?.pendingApproval, "the source approval remains available");
-          service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
-            commandId: commands[0]!.commandId, sessionId: commands[0]!.sessionId,
-            state: "failed", revision: 2, error: "provider cancelled" }, 60_004);
-          service.tick(120_000);
-          assert.equal(db.listAutomationExecutions(automation.automationId).length, 2,
-            "the next occurrence may launch only after the prior instance finished and siblings were cancelled");
-          assert.equal(db.getAutomationExecution(execution.executionId)?.status, "ceiling_paused");
-        } finally { db.close(); }
-      }
-    }
-  }
-});
-
-test("a control-plane workflow pause cancels active attempt siblings without launch commands", () => {
-  for (const correlation of ["none", "current", "old-prompt", "other-session", "after-window"] as const) {
-    const { db, service, delivered } = harness();
-    try {
-      installCapabilityWorkflow(db, "wf-1");
-      const actor = { kind: "human" as const, id: "device" };
-      const automation = service.create(baseSpec({ action: { kind: "workflow_run", request: {
-        workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
-        agentBindings: { worker: "agent-1", reviewer: "agent-1" },
-      } } }), actor, 0).data!;
-      db.claimAutomationExecution({ executionId: "native", automationId: automation.automationId,
-        expectedNextFireAt: 60_000, scheduledFor: 60_000, nextFireAt: 120_000, actionKind: "workflow_run",
-        status: "dispatching", deliveryMode: "receipted_v53", actor, now: 60_000 });
-      db.createRun({ id: "run-native", title: "Run", prompt: "Build", workspaceId: null, runnerId: null, now: 60_000 });
-      db.createWorkflowInstance({ instanceId: "wfi-native", definition: db.getWorkflowDefinition("wf-1")!,
-        runId: "run-native", createdBy: actor, now: 60_000 });
-      db.settleAutomationExecution({ executionId: "native", status: "running", runId: "run-native",
-        workflowInstanceId: "wfi-native", runnerId: "runner-1", actor, now: 60_001 });
-      for (const nodeId of ["build", "review"]) {
-        db.createSession({ id: nodeId, runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
-          title: "Member", useWorktree: false, driver: "acp", config: {}, now: 60_001 });
-        db.updateSessionStatus(nodeId, "running", 60_001);
-        db.createWorkflowAttempt({ attemptId: `attempt-${nodeId}`, instanceId: "wfi-native", nodeId, attempt: 1,
-          status: "running", dispatchKey: nodeId, sessionId: nodeId, startedAt: 60_001, deadlineAt: 120_001,
-          ...(correlation === "after-window" ? { completedAt: 60_001 } : {}) });
-      }
-      if (correlation !== "none") db.stageSessionPromptCommand({ commandId: "prompt_workflow",
-        sessionId: correlation === "other-session" ? "review" : "build", runnerId: "runner-1",
-        payloadJson: "{}", payloadSha256: "a".repeat(64), expiresAt: 120_000,
-        now: correlation === "old-prompt" ? 60_000 : 60_001 });
-      runnerPause(db, "build", 60_002, { tripId: "workflow-attempt", kind: "cost_budget", threshold: 1.5, observed: 2,
-        ...(correlation !== "none" ? { commandId: "prompt_workflow" } : {}) });
-      service.onGovernanceTripped("build", 60_003);
-      if (!["none", "current"].includes(correlation)) {
-        assert.equal(db.getAutomationExecution("native")?.status, "running", correlation);
-        assert.ok(db.activeAutomationExecution(automation.automationId), "unrelated evidence cannot release the slot");
-        assert.deepEqual(delivered, []);
-        continue;
-      }
-      assert.equal(db.getAutomationExecution("native")?.status, "ceiling_paused");
-      assert.equal(db.getWorkflowInstance("wfi-native")?.status, "failed");
-      assert.ok(db.getWorkflowInstance("wfi-native")?.attempts.every((attempt) => attempt.status === "cancelled"));
-      assert.deepEqual(delivered, [{ type: "cancel_session", sessionId: "review" }]);
-      assert.ok(db.getSession("build")?.pendingApproval);
-      assert.equal(db.activeAutomationExecution(automation.automationId), null);
-    } finally { db.close(); }
-  }
-});
-
 test("a transient-looking receipt cannot create a replacement for a ceiling-paused execution", () => {
   const { db, service, delivered } = harness();
   try {
@@ -743,32 +594,24 @@ test("runner ceiling evidence wins over cancellation receipts and survives recov
   }
 });
 
-test("a prompt target or workflow member's runner pause identifies the owning execution", () => {
-  for (const kind of ["prompt_session", "workflow_run"] as const) {
-    const { db, service } = harness();
-    try {
-      db.createSession({ id: "target", runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
-        title: "Target", useWorktree: false, driver: "acp", config: {}, now: 0 });
-      db.updateSessionStatus("target", "idle", 1);
-      const action: AutomationSpec["action"] = kind === "prompt_session"
-        ? { kind, sessionId: "target", request: { text: "Continue" } }
-        : { kind, request: { runnerId: "runner-1", workspaceId: "ws-1", workflowId: "wf-1", task: "Build" } };
-      const automation = service.create(baseSpec({ action }), { kind: "human", id: "device" }, 0).data!;
-      service.tick(60_000);
-      const execution = db.listAutomationExecutions(automation.automationId)[0]!;
-      const command = execution.commands![0]!;
-      if (kind === "workflow_run") db.createSession({ id: command.sessionId, runnerId: "runner-1",
-        workspaceId: "ws-1", agentId: "agent-1", title: "Member", useWorktree: false,
-        driver: "acp", config: {}, now: 60_000 });
-      service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
-        commandId: command.commandId, sessionId: command.sessionId, state: "started", revision: 1 }, 60_001);
-      runnerPause(db, command.sessionId, 60_002);
-      service.onGovernanceTripped(command.sessionId, 60_003);
-      assert.equal(db.getAutomationExecution(execution.executionId)?.status, "ceiling_paused");
-      assert.equal(db.getAutomationExecution(execution.executionId)?.governancePause?.sessionId, command.sessionId);
-      assert.ok(db.getSession(command.sessionId)?.pendingApproval, "the approval card remains available");
-    } finally { db.close(); }
-  }
+test("a prompt target's runner pause identifies the owning execution", () => {
+  const { db, service } = harness();
+  try {
+    db.createSession({ id: "target", runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+      title: "Target", useWorktree: false, driver: "acp", config: {}, now: 0 });
+    db.updateSessionStatus("target", "idle", 1);
+    const automation = service.create(baseSpec({ action: { kind: "prompt_session", sessionId: "target", request: { text: "Continue" } } }), { kind: "human", id: "device" }, 0).data!;
+    service.tick(60_000);
+    const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+    const command = execution.commands![0]!;
+    service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+      commandId: command.commandId, sessionId: command.sessionId, state: "started", revision: 1 }, 60_001);
+    runnerPause(db, command.sessionId, 60_002);
+    service.onGovernanceTripped(command.sessionId, 60_003);
+    assert.equal(db.getAutomationExecution(execution.executionId)?.status, "ceiling_paused");
+    assert.equal(db.getAutomationExecution(execution.executionId)?.governancePause?.sessionId, command.sessionId);
+    assert.ok(db.getSession(command.sessionId)?.pendingApproval, "the approval card remains available");
+  } finally { db.close(); }
 });
 
 test("old runners and CP-only guardrail cards retain ordinary cancellation settlement", () => {
@@ -1446,154 +1289,6 @@ test("create and update reject config unsupported by the primary or any alternat
   assert.equal(db.getAutomation(existing.automationId)?.runnerPolicy.kind, "wait");
 });
 
-test("workflow admission rejects unsupported primary workers and orchestrators", () => {
-  const supported = modelCapabilities("gpt-5");
-  const unsupported = modelCapabilities("claude-opus-4-1");
-  const { db, service } = harness(53, [
-    runnerWithAgents("runner-1", [
-      { id: "worker", capabilities: supported },
-      { id: "reviewer", capabilities: unsupported },
-      { id: "orchestrator", capabilities: unsupported },
-    ]),
-  ]);
-  installCapabilityWorkflow(db);
-  const actor = { kind: "human" as const, id: "device" };
-  const request: CreateWorkflowRunRequest = {
-    runnerId: "runner-1",
-    workspaceId: "ws-1",
-    workflowId: "workflow-capabilities",
-    task: "Build and review",
-    config: { model: "gpt-5", effort: "high" },
-  };
-
-  const workerRejected = service.create(baseSpec({
-    action: { kind: "workflow_run", request },
-  }), actor, 0);
-  assert.equal(workerRejected.status, 409);
-  assert.match(workerRejected.error ?? "", /runner-1\/ws-1.*reviewer:.*model.*gpt-5/);
-
-  const orchestratorRejected = service.create(baseSpec({
-    action: { kind: "workflow_run", request: {
-      ...request,
-      agentBindings: { reviewer: "worker" },
-      orchestratorAgentId: "orchestrator",
-    } },
-  }), actor, 1);
-  assert.equal(orchestratorRejected.status, 409);
-  assert.match(orchestratorRejected.error ?? "", /runner-1\/ws-1.*orchestrator:.*model.*gpt-5/);
-});
-
-test("workflow admission checks alternate bindings and orchestrators without partial updates", () => {
-  const supported = modelCapabilities("gpt-5");
-  const unsupported = modelCapabilities("claude-opus-4-1");
-  const { db, service } = harness(53, [
-    runnerWithAgents("runner-1", [
-      { id: "worker", capabilities: supported },
-      { id: "reviewer", capabilities: supported },
-    ]),
-    runnerWithAgents("runner-2", [
-      { id: "worker", capabilities: supported },
-      { id: "alternate-reviewer", capabilities: unsupported },
-      { id: "alternate-orchestrator", capabilities: unsupported },
-    ]),
-  ]);
-  installCapabilityWorkflow(db);
-  const actor = { kind: "human" as const, id: "device" };
-  const request: CreateWorkflowRunRequest = {
-    runnerId: "runner-1",
-    workspaceId: "ws-1",
-    workflowId: "workflow-capabilities",
-    task: "Build and review",
-    config: { model: "gpt-5", effort: "high" },
-  };
-  const alternateSpec = baseSpec({
-    action: { kind: "workflow_run", request },
-    runnerPolicy: { kind: "alternate", targets: [{
-      runnerId: "runner-2", workspaceId: "ws-1",
-      agentBindings: { reviewer: "alternate-reviewer" },
-      orchestratorAgentId: "alternate-orchestrator",
-    }] },
-  });
-
-  const bindingRejected = service.create(alternateSpec, actor, 0);
-  assert.equal(bindingRejected.status, 409);
-  assert.match(bindingRejected.error ?? "", /runner-2\/ws-1.*alternate-reviewer:.*model.*gpt-5/);
-
-  db.registerRunner(runnerWithAgents("runner-2", [
-    { id: "worker", capabilities: supported },
-    { id: "alternate-reviewer", capabilities: supported },
-    { id: "alternate-orchestrator", capabilities: unsupported },
-  ]), 2, 53);
-  const orchestratorRejected = service.create(alternateSpec, actor, 1);
-  assert.equal(orchestratorRejected.status, 409);
-  assert.match(orchestratorRejected.error ?? "", /runner-2\/ws-1.*alternate-orchestrator:.*model.*gpt-5/);
-
-  const existing = service.create(baseSpec({ action: { kind: "workflow_run", request } }), actor, 2).data!;
-  const updated = service.update(existing.automationId, alternateSpec, actor, 3);
-  assert.equal(updated.status, 409);
-  assert.match(updated.error ?? "", /alternate-orchestrator/);
-  const stored = db.getAutomation(existing.automationId)!;
-  assert.equal(stored.runnerPolicy.kind, "wait");
-  assert.equal(stored.action.kind, "workflow_run");
-});
-
-test("workflow admission preserves legacy metadata and allows disabling after capability drift", () => {
-  const explicitConfig = { model: "future-model", effort: "max", permissionMode: "future-mode" };
-  const actor = { kind: "human" as const, id: "device" };
-  const legacy = harness(53, [
-    runnerWithAgents("runner-1", [
-      { id: "worker" },
-      { id: "reviewer" },
-      { id: "orchestrator" },
-    ]),
-  ]);
-  installCapabilityWorkflow(legacy.db);
-  const legacySpec = baseSpec({
-    action: { kind: "workflow_run", request: {
-      runnerId: "runner-1",
-      workspaceId: "ws-1",
-      workflowId: "workflow-capabilities",
-      task: "Use mixed-version discovery",
-      orchestratorAgentId: "orchestrator",
-      config: explicitConfig,
-    } },
-  });
-  assert.equal(legacy.service.create(legacySpec, actor, 0).status, 201);
-
-  const supported = modelCapabilities("gpt-5");
-  const narrowed = modelCapabilities("claude-opus-4-1");
-  const drift = harness(53, [
-    runnerWithAgents("runner-1", [
-      { id: "worker", capabilities: supported },
-      { id: "reviewer", capabilities: supported },
-      { id: "orchestrator", capabilities: supported },
-    ]),
-  ]);
-  installCapabilityWorkflow(drift.db);
-  const supportedRequest: CreateWorkflowRunRequest = {
-    runnerId: "runner-1",
-    workspaceId: "ws-1",
-    workflowId: "workflow-capabilities",
-    task: "Stay recoverable",
-    orchestratorAgentId: "orchestrator",
-    config: { model: "gpt-5", effort: "high" },
-  };
-  const supportedSpec = baseSpec({
-    action: { kind: "workflow_run", request: supportedRequest },
-  });
-  const created = drift.service.create(supportedSpec, actor, 0).data!;
-  drift.db.registerRunner(runnerWithAgents("runner-1", [
-    { id: "worker", capabilities: narrowed },
-    { id: "reviewer", capabilities: narrowed },
-    { id: "orchestrator", capabilities: narrowed },
-  ]), 2, 53);
-
-  assert.match(workflowRunCapabilityError(drift.db, supportedRequest), /worker:.*model.*gpt-5/);
-  const paused = drift.service.update(created.automationId, { ...supportedSpec, enabled: false }, actor, 3);
-  assert.equal(paused.status, 200);
-  assert.equal(drift.db.getAutomation(created.automationId)?.enabled, false);
-});
-
 test("legacy capabilities stay permissive and capability drift cannot prevent pausing", () => {
   const actor = { kind: "human" as const, id: "device" };
   const explicitConfig = baseSpec({
@@ -1842,70 +1537,6 @@ test("reordering alternate targets preserves each runner's explicit installation
     [target.runnerId, target.installationBindings?.agent?.installationId]),
   [["runner-3", "system"], ["runner-2", "system"]],
   "reordering cannot discard runner-2's explicit pin because its Machine selection changed");
-});
-
-test("changing a workflow's primary Machine drops an orphaned alternate Orchestrator pin", () => {
-  const installedRunner = (runnerId: string): RunnerMetadata => {
-    const base = runnerWithAgents(runnerId, [
-      { id: "worker" }, { id: "reviewer" }, { id: "orchestrator", driver: "codex-app-server" },
-    ]);
-    return { ...base, agents: base.agents.map((agent) => agent.id === "orchestrator"
-      ? { ...agent, installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } }
-      : agent) };
-  };
-  const { db, online, service, workflows } = harness(175, [
-    installedRunner("runner-1"), installedRunner("runner-2"),
-    runnerWithAgents("runner-3", [{ id: "worker" }, { id: "reviewer" }]),
-  ]);
-  installCapabilityWorkflow(db);
-  const actor = { kind: "human" as const, id: "device" };
-  const original = service.create(baseSpec({
-    action: { kind: "workflow_run", request: {
-      runnerId: "runner-1", workspaceId: "ws-1", workflowId: "workflow-capabilities",
-      task: "Build", orchestratorAgentId: "orchestrator",
-    } },
-    runnerPolicy: { kind: "alternate", targets: [{ runnerId: "runner-2", workspaceId: "ws-1" }] },
-  }), actor, 0).data!;
-  assert.equal(original.runnerPolicy.kind, "alternate");
-  if (original.runnerPolicy.kind !== "alternate" || original.action.kind !== "workflow_run") {
-    throw new Error("expected alternate workflow automation");
-  }
-  assert.equal(original.runnerPolicy.targets[0]?.installationBindings?.orchestrator?.installationId, "system");
-
-  const changed = service.update(original.automationId, baseSpec({
-    action: { ...original.action, request: {
-      ...original.action.request, runnerId: "runner-3", orchestratorAgentId: undefined,
-    } },
-    runnerPolicy: original.runnerPolicy,
-  }), actor, 1_000).data!;
-  assert.equal(changed.action.kind, "workflow_run");
-  assert.equal(changed.runnerPolicy.kind, "alternate");
-  if (changed.action.kind !== "workflow_run" || changed.runnerPolicy.kind !== "alternate") {
-    throw new Error("expected alternate workflow automation");
-  }
-  assert.equal(changed.action.installationBindings?.orchestrator, undefined);
-  assert.equal(changed.runnerPolicy.targets[0]?.installationBindings?.orchestrator, undefined);
-
-  // A schedule saved before this fix can still contain the orphaned alternate pin.
-  const oldPin = original.runnerPolicy.targets[0]!.installationBindings!.orchestrator!;
-  db.updateAutomation({
-    automationId: changed.automationId,
-    spec: baseSpec({
-      action: changed.action,
-      runnerPolicy: { kind: "alternate", targets: [{
-        ...changed.runnerPolicy.targets[0]!, installationBindings: {
-          ...changed.runnerPolicy.targets[0]!.installationBindings, orchestrator: oldPin,
-        },
-      }] },
-    }),
-    nextFireAt: changed.nextFireAt, actor, now: 2_000,
-  });
-  online.clear();
-  online.add("runner-2");
-  service.tick(60_000);
-  assert.equal(workflows.length, 1);
-  assert.equal(workflows[0]?.runnerId, "runner-2");
-  assert.equal(workflows[0]?.orchestratorAgentId, undefined);
 });
 
 test("an old plain-id create-session automation pins the sole advertised installation on save", () => {
@@ -2217,91 +1848,6 @@ test("explicitly reselecting a reused plain id clears a pinned installation", ()
     db.getAutomation(automation.automationId)?.action.installationBindings, {});
 });
 
-test("a partially pinned workflow does not adopt a rediscovered unbound role on pause", () => {
-  const base = runnerWithAgents("runner-1", [
-    { id: "worker", driver: "codex-app-server" }, { id: "reviewer", driver: "acp" },
-  ]);
-  const worker = { ...base.agents[0]!, installation: {
-    id: "worker-system", path: "/usr/bin/codex", via: "path" as const,
-  } };
-  const { db, service } = harness(175, [{ ...base, agents: [worker, base.agents[1]!] }]);
-  installCapabilityWorkflow(db);
-  db.selectHarnessInstallation("runner-1", "worker", "worker-system");
-  const actor = { kind: "human" as const, id: "device" };
-  const request: CreateWorkflowRunRequest = {
-    runnerId: "runner-1", workspaceId: "ws-1", workflowId: "workflow-capabilities", task: "Build",
-  };
-  const automation = service.create(baseSpec({ action: { kind: "workflow_run", request } }), actor, 0).data!;
-  assert.equal(automation.action.kind === "workflow_run" &&
-    automation.action.installationBindings?.["role:worker"]?.installationId, "worker-system");
-  assert.equal(automation.action.kind === "workflow_run" &&
-    automation.action.installationBindings?.["role:reviewer"], undefined);
-  const discovered = { ...base.agents[1]!, driver: "claude-code" as const, installation: {
-    id: "reviewer-system", path: "/usr/bin/claude", via: "path" as const,
-  } };
-  db.updateRunnerAgents("runner-1", [worker, discovered], 1_000);
-  db.selectHarnessInstallation("runner-1", "reviewer", "reviewer-system");
-  const paused = service.update(automation.automationId, baseSpec({
-    enabled: false, action: automation.action,
-  }), actor, 2_000).data!;
-  assert.equal(paused.action.kind === "workflow_run" &&
-    paused.action.installationBindings?.["role:reviewer"], undefined,
-  "an unrelated pause must leave the reused role unbound");
-});
-
-test("scheduled workflow role bindings keep their selected installation after agent ids move", () => {
-  const base = runnerWithAgents("runner-1", [{ id: "worker", driver: "codex-app-server" },
-    { id: "reviewer", driver: "claude-code" }]);
-  const worker = { ...base.agents[0]!, installation: {
-    id: "system", path: "/usr/bin/codex", via: "path" as const,
-  } };
-  const local = { ...worker, id: "local", installation: {
-    id: "local", path: "/home/u/.local/bin/codex", via: "common-dir" as const,
-  } };
-  const { db, service, workflows } = harness(175, [{ ...base, agents: [worker, local, base.agents[1]!] }]);
-  installCapabilityWorkflow(db);
-  db.selectHarnessInstallation("runner-1", "worker", "system");
-  const automation = service.create(baseSpec({ action: { kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "ws-1", workflowId: "workflow-capabilities", task: "Build",
-  } } }), { kind: "human", id: "device" }, 0).data!;
-  assert.equal(automation.action.kind === "workflow_run" &&
-    automation.action.installationBindings?.["role:worker"]?.installationId, "system");
-
-  db.updateRunnerAgents("runner-1", [{ ...local, id: "worker" },
-    { ...worker, id: "worker-new" }, base.agents[1]!], 1_000);
-  service.tick(60_000);
-  assert.equal(workflows[0]?.agentBindings?.worker, "worker-new");
-});
-
-test("an unavailable pinned workflow role does not validate against a reused id", () => {
-  const supported = modelCapabilities("gpt-5");
-  const narrowed = modelCapabilities("claude-opus-4-1");
-  const base = runnerWithAgents("runner-1", [
-    { id: "worker", capabilities: supported }, { id: "reviewer", capabilities: supported },
-  ]);
-  const worker = { ...base.agents[0]!, installation: {
-    id: "system", path: "/usr/bin/claude", via: "path" as const,
-  } };
-  const reused = { ...worker, capabilities: narrowed, installation: {
-    id: "local", path: "/home/u/.local/bin/claude", via: "common-dir" as const,
-  } };
-  const { db, service } = harness(175, [{ ...base, agents: [worker, base.agents[1]!] }]);
-  installCapabilityWorkflow(db);
-  db.selectHarnessInstallation("runner-1", "worker", "system");
-  const request: CreateWorkflowRunRequest = {
-    runnerId: "runner-1", workspaceId: "ws-1", workflowId: "workflow-capabilities",
-    task: "Build", config: { model: "gpt-5", effort: "high" },
-  };
-  const actor = { kind: "human" as const, id: "device" };
-  const automation = service.create(baseSpec({ action: { kind: "workflow_run", request } }), actor, 0).data!;
-  db.updateRunnerAgents("runner-1", [reused, base.agents[1]!], 1_000);
-  const updated = service.update(automation.automationId,
-    baseSpec({ name: "Updated Schedule", action: { kind: "workflow_run", request } }), actor, 2_000);
-  assert.equal(updated.status, 200, "an unavailable saved role waits instead of checking the reused id");
-  assert.equal(updated.data?.action.kind === "workflow_run" &&
-    updated.data.action.installationBindings?.["role:worker"]?.installationId, "system");
-});
-
 test("runner wait, bounded expiry, and explicit alternate target policies are durable", () => {
   const { db, online, service, created, notifications } = harness();
   online.clear();
@@ -2327,8 +1873,8 @@ test("runner wait, bounded expiry, and explicit alternate target policies are du
   assert.equal(db.listAutomationExecutions(alternate.automationId)[0]?.runnerId, "runner-2");
 });
 
-test("alternate automation actions preserve exact team Project identity for sessions and workflows", () => {
-  const { db, online, service, created, workflows } = harness();
+test("alternate automation actions preserve exact team Project identity for sessions", () => {
+  const { db, online, service, created } = harness();
   const primaryLocation = db.findProjectLocation("runner-1", "ws-1")!;
   const alternateLocation = db.findProjectLocation("runner-2", "ws-1")!;
   db.moveProjectLocation(alternateLocation.id, primaryLocation.projectId, 2);
@@ -2366,26 +1912,10 @@ test("alternate automation actions preserve exact team Project identity for sess
   assert.equal(created.at(-1)?.projectLocationId, alternateLocation.id);
   assert.equal(db.listAutomationExecutions(createAutomation.automationId)[0]?.runnerId, "runner-2");
 
-  const workflowAutomation = service.create(baseSpec({
-    action: { kind: "workflow_run", request: {
-      runnerId: "runner-1", workspaceId: "ws-1", projectId: primaryLocation.projectId,
-      projectLocationId: primaryLocation.id, workflowId: "workflow-1", task: "Review",
-      agentBindings: { worker: "agent-1" },
-    } },
-    runnerPolicy: { kind: "alternate", targets: [{
-      runnerId: "runner-2", workspaceId: "ws-1", projectId: primaryLocation.projectId,
-      projectLocationId: alternateLocation.id, agentBindings: { worker: "agent-1" },
-    }] },
-  }), { kind: "human", id: "device" }, 0).data!;
-  assert.equal(service.tick(60_000), 1);
-  assert.equal(workflows.at(-1)?.runnerId, "runner-2");
-  assert.equal(workflows.at(-1)?.projectId, primaryLocation.projectId);
-  assert.equal(workflows.at(-1)?.projectLocationId, alternateLocation.id);
-  assert.equal(db.listAutomationExecutions(workflowAutomation.automationId)[0]?.runnerId, "runner-2");
 });
 
-test("misfire, concurrency, prompt ceilings, workflow links, and restart uncertainty stay explicit", () => {
-  const { db, service, prompted, workflows } = harness();
+test("misfire, concurrency, prompt ceilings, and restart uncertainty stay explicit", () => {
+  const { db, service, prompted } = harness();
   const skipped = service.create(baseSpec({ misfirePolicy: { kind: "skip" } }),
     { kind: "human", id: "device" }, 0).data!;
   assert.equal(service.tick(5 * 60_000), 1);
@@ -2405,20 +1935,10 @@ test("misfire, concurrency, prompt ceilings, workflow links, and restart uncerta
   assert.deepEqual(prompted[0]?.config, { costBudgetUsd: 4.75, maxToolCalls: 12 });
   assert.equal(db.listAutomationExecutions(prompt.automationId)[0]?.sessionId, "existing");
 
-  const workflow = service.create(baseSpec({
-    action: { kind: "workflow_run", request: {
-      runnerId: "runner-1", workspaceId: "ws-1", workflowId: "build-review", task: "Ship",
-    } },
-  }), { kind: "human", id: "device" }, 0).data!;
-  service.tick(60_000);
-  assert.equal(workflows[0]?.costBudgetUsd, 1.5);
-  assert.equal(workflows[0]?.maxToolCalls, 12);
-  assert.match(db.listAutomationExecutions(workflow.automationId)[0]?.workflowInstanceId ?? "", /^wfi_auto_axe_/);
-
   const uncertain = db.claimAutomationExecution({
-    executionId: "uncertain", automationId: workflow.automationId,
+    executionId: "uncertain", automationId: prompt.automationId,
     expectedNextFireAt: 120_000, scheduledFor: 120_000, nextFireAt: 180_000,
-    actionKind: "workflow_run", status: "dispatching",
+    actionKind: "prompt_session", status: "dispatching",
     actor: { kind: "system", id: "automation:test" }, now: 120_000,
   });
   assert.ok(uncertain);
@@ -2645,34 +2165,6 @@ test("a transient provider failure replaces the launch instead of failing the ex
   assert.equal(db.getAutomationExecution(execution.executionId)?.error, undefined);
 });
 
-test("an execution with no retry in flight still settles from its workflow instance", () => {
-  const { db, service } = harness();
-  const automation = service.create(baseSpec({
-    action: { kind: "workflow_run", request: {
-      workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
-    } },
-  }), { kind: "human", id: "device" }, 0).data!;
-  service.tick(60_000);
-  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
-  const commands = db.listAutomationCommands(execution.executionId);
-  assert.equal(commands.length > 1, true, "a workflow launch plan has sibling commands");
-
-  // One member started; a sibling is still owed delivery. That is an ordinary in-flight plan, not
-  // a retry, so the workflow instance's own terminal status must still settle the execution.
-  assert.equal(service.onDurableCommandReceipt("runner-1", {
-    type: "durable_session_command_update", commandId: commands[0]!.commandId,
-    sessionId: commands[0]!.sessionId, state: "started", revision: 2,
-  }, 60_100), true);
-  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running");
-  assert.equal(db.listAutomationCommands(execution.executionId)
-    .some((command) => ["staged", "pending", "sent"].includes(command.state)), true);
-
-  service.recover(60_300);
-  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "failed",
-    "the workflow instance settles its execution even while a sibling launch is undelivered");
-  assert.match(db.getAutomationExecution(execution.executionId)?.error ?? "", /workflow instance/);
-});
-
 test("a non-transient refusal fails on its first attempt and retries are bounded", () => {
   const { db, service, delivered } = harness();
   const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
@@ -2783,58 +2275,6 @@ test("wrong-runner, wrong-session, malformed, and stale receipts cannot mutate a
   assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running");
   assert.equal(db.listAutomationCommands(execution.executionId)[0]?.state, "started");
   assert.equal(db.listAutomationCommands(execution.executionId)[0]?.revision, 2);
-});
-
-test("a workflow command rejection terminalizes siblings before any retry can launch them", () => {
-  const { db, service, delivered } = harness();
-  const automation = service.create(baseSpec({
-    action: { kind: "workflow_run", request: {
-      workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
-    } },
-  }), { kind: "human", id: "device" }, 0).data!;
-  service.tick(60_000);
-  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
-  const commands = execution.commands!;
-  assert.equal(commands.length, 2);
-  const sentBeforeFailure = delivered.length;
-  assert.equal(service.onDurableCommandReceipt("runner-1", {
-    type: "durable_session_command_update", commandId: commands[0]!.commandId,
-    sessionId: commands[0]!.sessionId, state: "failed", revision: 1,
-    error: "launch rejected",
-  }, 60_100), true);
-  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "failed");
-  assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "uncertain",
-    "a sent sibling may have been accepted before its ACK was lost");
-  service.recover(90_000);
-  assert.equal(delivered.length, sentBeforeFailure + 1, "only the best-effort sibling cancellation is emitted");
-});
-
-test("restart cannot dispatch a workflow sibling after a failed receipt committed before reconciliation", () => {
-  const { db, service, delivered } = harness();
-  const automation = service.create(baseSpec({
-    action: { kind: "workflow_run", request: {
-      workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
-    } },
-  }), { kind: "human", id: "device" }, 0).data!;
-  service.tick(60_000);
-  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
-  const commands = execution.commands!;
-  const durableSendsBefore = delivered.filter((message) =>
-    (message as { type?: string }).type === "durable_session_command").length;
-  assert.ok(db.recordAutomationCommandReceipt({
-    commandId: commands[0]!.commandId,
-    runnerId: commands[0]!.runnerId,
-    sessionId: commands[0]!.sessionId,
-    state: "rejected",
-    revision: 1,
-    error: "committed immediately before simulated crash",
-    now: 60_100,
-  }));
-  service.recover(90_000);
-  assert.equal(delivered.filter((message) =>
-    (message as { type?: string }).type === "durable_session_command").length, durableSendsBefore);
-  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "failed");
-  assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "uncertain");
 });
 
 test("a runner capability downgrade makes a sent/lost-ACK command uncertain", () => {
@@ -2989,29 +2429,6 @@ test("protocol-v52 runners fail closed before claiming or delivering durable aut
   assert.equal(delivered.length, 0);
   assert.equal(db.listAutomationExecutions(automation.automationId).length, 0,
     "signed ingress must not bypass the protocol-v53 admission boundary");
-});
-
-test("workflow members receive stable distinct command and session ids", () => {
-  const { db, service } = harness();
-  const automation = service.create(baseSpec({
-    action: { kind: "workflow_run", request: {
-      runnerId: "runner-1", workspaceId: "ws-1", workflowId: "build-review", task: "Ship",
-    } },
-  }), { kind: "human", id: "device" }, 0).data!;
-
-  service.tick(60_000);
-  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
-  const commands = db.listAutomationCommands(execution.executionId);
-  assert.deepEqual(commands.map((command) => command.commandId), [
-    `ac_${execution.executionId}_000`,
-    `ac_${execution.executionId}_001`,
-  ]);
-  assert.deepEqual(commands.map((command) => command.sessionId), [
-    `s_auto_${execution.executionId}_000`,
-    `s_auto_${execution.executionId}_001`,
-  ]);
-  assert.equal(new Set(commands.map((command) => command.commandId)).size, 2);
-  assert.deepEqual(commands.map((command) => command.deliveryDeadlineAt), [31 * 60_000, 31 * 60_000]);
 });
 
 test("a command that never reaches its runner settles the execution and releases the wait policy", () => {
@@ -3194,12 +2611,8 @@ test("a transient-refusal replacement that never reaches its runner settles the 
 test("a webhook invocation launches an automation's sessions as its sole human author (#3898)", () => {
   const { db, service, launchers } = harness();
   try {
-    installCapabilityWorkflow(db, "wf-1");
     const creator = { kind: "human" as const, id: "usr_creator" };
-    const actions = [baseSpec().action, { kind: "workflow_run" as const, request: {
-      workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
-      agentBindings: { worker: "agent-1", reviewer: "agent-1" },
-    } }];
+    const actions = [baseSpec().action];
     actions.forEach((action, index) => {
       const automation = service.create(baseSpec({ name: `Hook ${index}`, action }), creator, 0).data!;
       const credential = service.createTrigger(automation.automationId, { kind: "webhook", name: "Hook" }, creator, 1_000);
@@ -3210,7 +2623,6 @@ test("a webhook invocation launches an automation's sessions as its sole human a
     });
     assert.deepEqual(launchers, [
       { action: "create_session", launcherUserId: "usr_creator" },
-      { action: "workflow_run", launcherUserId: "usr_creator" },
     ], "the trigger-attributed schedule does not hide the automation's creator");
   } finally { db.close(); }
 });
@@ -3218,13 +2630,7 @@ test("a webhook invocation launches an automation's sessions as its sole human a
 test("an automation launches its sessions as its human creator, never as a system actor (#3898)", () => {
   const { db, service, launchers } = harness();
   try {
-    installCapabilityWorkflow(db, "wf-1");
-    const workflow = { kind: "workflow_run" as const, request: {
-      workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
-      agentBindings: { worker: "agent-1", reviewer: "agent-1" },
-    } };
     service.create(baseSpec(), { kind: "human", id: "usr_creator" }, 0);
-    service.create(baseSpec({ name: "Workflow", action: workflow }), { kind: "human", id: "usr_creator" }, 0);
     service.create(baseSpec({ name: "System" }), { kind: "system", id: "seed" }, 0);
     // The creator's own edit keeps the attribution; another member's edit or trigger ends it.
     const ownEdit = service.create(baseSpec({ name: "Own Edit" }), { kind: "human", id: "usr_creator" }, 0).data!;
@@ -3243,7 +2649,6 @@ test("an automation launches its sessions as its human creator, never as a syste
       { action: "create_session" },
       { action: "create_session", launcherUserId: "usr_creator" },
       { action: "create_session", launcherUserId: "usr_creator" },
-      { action: "workflow_run", launcherUserId: "usr_creator" },
     ].map((entry) => JSON.stringify(entry)).sort());
   } finally { db.close(); }
 });

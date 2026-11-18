@@ -1,16 +1,16 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
-import { buildAuthorizedWorkflowArtifactExport } from "./artifact-exports.js";
+import { buildAuthorizedArtifactExport } from "./artifact-exports.js";
 
-export function registerWorkflowArtifactExportRoute(
+export function registerArtifactExportRoute(
   app: FastifyInstance,
   deps: { db: ControlPlaneDb; requestHuman(req: FastifyRequest): HumanPrincipal | null },
 ): void {
   app.get("/api/artifacts/:artifactId/export", async (req, reply) => {
     const principal = deps.requestHuman(req);
     if (!principal) return reply.code(401).send({ error: "authentication required" });
-    const result = buildAuthorizedWorkflowArtifactExport(
+    const result = buildAuthorizedArtifactExport(
       deps.db,
       principal,
       (req.params as { artifactId: string }).artifactId,

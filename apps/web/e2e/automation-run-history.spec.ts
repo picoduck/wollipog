@@ -97,7 +97,6 @@ test.describe("at 1440×900", () => {
     await expect(table.locator("thead")).toBeVisible();
     await expect(table.locator("tbody tr")).toHaveCount(10);
     await expect(runRow(page, "axe_signed").locator("td").nth(1)).toHaveText("Signed Trigger");
-    await expect(runRow(page, "axe_workflow").getByRole("button", { name: "Open Run" })).toBeVisible();
     // Desktop rows are one line; the reason waits for Run Details or the phone's second line.
     await expect(runRow(page, "axe_skipped").locator(".automation-run-reason")).toBeHidden();
     const tbody = await table.locator("tbody").innerText();

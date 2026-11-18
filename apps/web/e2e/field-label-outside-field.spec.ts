@@ -96,16 +96,6 @@ for (const theme of ["dark", "light"] as const) {
         ]);
       });
 
-      test("a workflow automation's agent labels are §8.1 field labels", async ({ page }) => {
-        await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-bound&inherited-alternate-pins`);
-        await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
-        await page.getByRole("button", { name: "Edit", exact: true }).click();
-        const agents = page.locator(EDITOR_LABELS).filter({ hasText: / Agent$/ });
-        await expect(agents).toHaveCount(4);
-        await expectLabelStyle(page, agents,
-          ["Auditor Agent", "Orchestrator Agent", "Other Auditor Agent", "Other Orchestrator Agent"]);
-      });
-
       test("the New Subscription dialog has §8.1 field labels", async ({ page }) => {
         await page.goto(`/automations-e2e.html?theme=${theme}&route=${encodeURIComponent("/automations/outbound")}`);
         await page.getByRole("button", { name: "New Subscription" }).click();

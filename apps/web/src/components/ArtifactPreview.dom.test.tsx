@@ -4,7 +4,7 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactView } from "@wollipog/protocol";
 import { api } from "../api.js";
 import { DEVICE_TOKEN_CHANGED_EVENT } from "../device-token.js";
 import { useArtifactPreview, ArtifactPreviewBody } from "./ArtifactPreview.js";
@@ -22,12 +22,12 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
-function PreviewHarness({ artifact }: { artifact: WorkflowArtifactView }) {
+function PreviewHarness({ artifact }: { artifact: ArtifactView }) {
   const model = useArtifactPreview(artifact);
   return <ArtifactPreviewBody model={model} />;
 }
 
-function artifact(id: string, bytes: Uint8Array): WorkflowArtifactView {
+function artifact(id: string, bytes: Uint8Array): ArtifactView {
   return {
     artifactId: id,
     sessionId: "session_1",
@@ -117,7 +117,7 @@ test("artifact preview fences stale loads and revokes its selected image URL on 
 
 test("verified video artifacts render a private inline player and release their URL", async () => {
   const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84, 0x77, 0x65, 0x62, 0x6d]);
-  const item: WorkflowArtifactView = { ...artifact("clip", bytes), kind: "video", name: "clip.webm", mimeType: "video/webm" };
+  const item: ArtifactView = { ...artifact("clip", bytes), kind: "video", name: "clip.webm", mimeType: "video/webm" };
   const priorExport = api.artifactExport;
   const priorCreate = URL.createObjectURL;
   const priorRevoke = URL.revokeObjectURL;
@@ -171,7 +171,7 @@ test("transcript screenshot remount reuses verified bytes until credentials or s
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  const render = async (session: string, item: WorkflowArtifactView | null) => {
+  const render = async (session: string, item: ArtifactView | null) => {
     await act(async () => root.render(
       <React.StrictMode>
         <TranscriptImageCacheProvider key={session}>

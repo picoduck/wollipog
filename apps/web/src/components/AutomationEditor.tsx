@@ -1,22 +1,22 @@
+import { RETIRED_WORKFLOW_AUTOMATION_REASON } from "@wollipog/protocol";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   AutomationAction,
   AutomationSchedule,
   AutomationSpec,
   RunnerView,
-  WorkflowDefinition,
 } from "@wollipog/protocol";
 import {
   AUTOMATION_CHOOSE_ALTERNATE_INSTALLATION, AUTOMATION_CHOOSE_INSTALLATION,
   AUTOMATION_SAVED_ALTERNATE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ALTERNATE_ORCHESTRATOR_INSTALLATION_UNAVAILABLE,
   AUTOMATION_SAVED_ALTERNATE_ROLE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_INSTALLATION_UNAVAILABLE,
   AUTOMATION_SAVED_ORCHESTRATOR_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ROLE_INSTALLATION_UNAVAILABLE,
-  automationChooseWorkflowInstallation, CODEX_EXEC_RETIRED_CONFIG_REASON, isRetiredCodexExec,
+  CODEX_EXEC_RETIRED_CONFIG_REASON, isRetiredCodexExec,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import {
-  bindableAgents, bindingAvailable, defaultAgentId, installationFor, offeredAgents,
+  bindingAvailable, defaultAgentId, installationFor, offeredAgents,
   resolvedInstallationAgentId, unboundInstallationUnavailable,
 } from "../automation-installations.js";
 import {
@@ -30,7 +30,6 @@ import { backLabel, ENTITY_FALLBACK_TITLES, type AutomationEditorRoute } from ".
 import { machineOptionLabels } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
-import { useExperiments } from "../use-experiments.js";
 import { agentOptions } from "./agent-options.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { FieldError } from "./FieldError.js";
@@ -48,14 +47,9 @@ import { Checkbox, ChoiceRows, Select, type ChoiceRowOption, type SelectOption }
 type ActionKind = AutomationAction["kind"];
 type Runner = RunnerView | undefined;
 
-/** Item 8 of #2967: why Run a Workflow is still offered while its experiment is off. */
-export const MULTI_AGENT_OFF_HELPER =
-  "The Multi-Agent Runs experiment is turned off in Settings › Experimental, but you can still edit and save this action.";
-
 const ACTIONS: Record<ActionKind, { title: string; description: string }> = {
   create_session: { title: "Start a Session", description: "Start a new session on a machine with the prompt." },
   prompt_session: { title: "Prompt a Session", description: "Send the prompt to a session that's already open." },
-  workflow_run: { title: "Run a Workflow", description: "Start a multi-agent workflow run with the task." },
 };
 
 /**
@@ -68,12 +62,7 @@ export class AutomationFieldError extends Error {
   }
 }
 
-/**
- * The fields a save error can belong to. Roles are keyed as the request binds them: `role:<agent
- * id>` and `orchestrator`, with `alternate:` in front for the other machine's.
- */
-type FieldKey = "cron" | "timezone" | "agent" | "fallbackRunner" | "fallbackAgent" | `role:${string}`
-  | "orchestrator" | `alternate:role:${string}` | "alternate:orchestrator";
+type FieldKey = "cron" | "timezone" | "agent" | "fallbackRunner" | "fallbackAgent";
 
 /** Time Zone's error (§8.5), for a stored zone the scheduler does not know. */
 const TIMEZONE_ERROR = "Choose a time zone from the list.";
@@ -98,8 +87,6 @@ interface Draft {
   rebindAlternate: boolean;
   primaryAgentTouched: boolean;
   alternateAgentTouched: boolean;
-  workflowBindingEdits: Record<string, string>;
-  alternateWorkflowBindingEdits: Record<string, string>;
 }
 
 function draftOf(form: FormState, rebind: { primary?: boolean; alternate?: boolean } = {}): Draft {
@@ -109,8 +96,6 @@ function draftOf(form: FormState, rebind: { primary?: boolean; alternate?: boole
     rebindAlternate: rebind.alternate ?? false,
     primaryAgentTouched: false,
     alternateAgentTouched: false,
-    workflowBindingEdits: {},
-    alternateWorkflowBindingEdits: {},
   };
 }
 
@@ -179,9 +164,6 @@ export function AutomationEditor({ route }: { route: AutomationEditorRoute }) {
     | { state: "failed"; message: string }
   >({ state: "loading" });
   const [attempt, setAttempt] = useState(0);
-  const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
-  const [workflowsError, setWorkflowsError] = useState<string | null>(null);
-  const [workflowsAttempt, setWorkflowsAttempt] = useState(0);
 
   useEffect(() => {
     if (automationId === null) return;
@@ -198,16 +180,6 @@ export function AutomationEditor({ route }: { route: AutomationEditorRoute }) {
     );
     return () => { active = false; };
   }, [api, automationId, attempt]);
-
-  useEffect(() => {
-    let active = true;
-    setWorkflowsError(null);
-    api.workflowDefinitions().then(
-      (result) => { if (active) setWorkflows(result); },
-      (cause) => { if (active) setWorkflowsError((cause as Error).message); },
-    );
-    return () => { active = false; };
-  }, [api, workflowsAttempt]);
 
   // An edit returns to the automation's page (#2968); a new automation, and one that is gone, to
   // the list.
@@ -250,13 +222,13 @@ export function AutomationEditor({ route }: { route: AutomationEditorRoute }) {
   if (!snapshotLoaded || (automationId !== null && !automation)) {
     return frame(fallbackTitle, <State variant="loading">Loading the automation…</State>);
   }
+  if (automation?.action.kind === "retired") {
+    return frame(automation.name, <State title="Automation Paused">{RETIRED_WORKFLOW_AUTOMATION_REASON}</State>);
+  }
   return (
     <AutomationEditorForm
       key={automation ? `${automation.automationId}:${automation.revision}` : "new"}
       automation={automation}
-      workflows={workflows}
-      workflowsError={workflowsError}
-      onRetryWorkflows={() => setWorkflowsAttempt((current) => current + 1)}
       onBack={back}
     />
   );
@@ -264,25 +236,15 @@ export function AutomationEditor({ route }: { route: AutomationEditorRoute }) {
 
 function AutomationEditorForm({
   automation,
-  workflows,
-  workflowsError,
-  onRetryWorkflows,
   onBack,
 }: {
   /** The stored automation being edited, or null for a new one. */
   automation: AutomationSchedule | null;
-  workflows: readonly WorkflowDefinition[];
-  workflowsError: string | null;
-  onRetryWorkflows: () => void;
   onBack: () => void;
 }) {
   const api = useApi();
   const { navigate } = useStoreActions();
   const { confirm, showToast } = useFeedback();
-  // Workflow runs belong to the Multi-Agent experiment: with it off, the editor must not offer
-  // creating one. An automation that ALREADY uses the action keeps its choice so editing it renders
-  // truthfully — the flag hides surfaces, it does not orphan stored data — and says why (#236).
-  const multiAgentEnabled = useExperiments().flags.multiAgent;
   const runners = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
   const sessions = useStoreSelector((state) => state.sessions);
@@ -351,26 +313,6 @@ function AutomationEditorForm({
     }
   }, [form.actionKind, form.runnerId, form.workspaceId, projects, projectsSupported]);
   const selectedFallback = runners.get(form.fallbackRunnerId);
-  const selectedWorkflow = workflows.find((workflow) => workflow.workflowId === form.workflowId &&
-    workflow.version === (editingSpec?.action.kind === "workflow_run" &&
-      editingSpec.action.request.workflowId === form.workflowId
-      ? editingSpec.action.request.workflowVersion ?? workflow.version : workflow.version));
-  // One field per agent the workflow binds, labelled by the roles that agent plays ("Builder
-  // Agent"); human steps are the person, in the run.
-  const workflowRoles = useMemo(() => {
-    const roles = new Map<string, string[]>();
-    for (const node of selectedWorkflow?.nodes ?? []) {
-      if (node.kind !== "agent" || !node.agentId) continue;
-      const names = roles.get(node.agentId) ?? [];
-      const name = titleCaseLabel(node.role);
-      if (!names.includes(name)) names.push(name);
-      roles.set(node.agentId, names);
-    }
-    return [...roles].map(([key, names]) => ({ key, label: names.join(" and ") }));
-  }, [selectedWorkflow]);
-  const humanSteps = selectedWorkflow?.nodes.filter((node) => node.kind === "human_gate") ?? [];
-  const roleLabel = (key: string) => workflowRoles.find((role) => role.key === key)?.label ?? titleCaseLabel(key);
-
   const primaryInstallationIssue = editingSpec?.action.kind === "create_session" &&
     editingSpec.action.request.runnerId === form.runnerId && !draft.rebindPrimary
     ? editingSpec.action.installationBindings?.agent
@@ -420,10 +362,6 @@ function AutomationEditorForm({
     form.runnerPolicy === "alternate" ? selectedFallback : undefined]
     .filter((runner): runner is RunnerView => Boolean(runner) && (runner!.protocolVersion ?? 0) < 53);
 
-  const storedWorkflowAction = editingSpec?.action.kind === "workflow_run";
-  const offersWorkflow = multiAgentEnabled || storedWorkflowAction;
-  const workflowKeptWhileOff = !multiAgentEnabled && storedWorkflowAction;
-
   const currentSpec = (): AutomationSpec => {
     const spec = buildSpec(form, {
       projectsSupported,
@@ -460,55 +398,6 @@ function AutomationEditorForm({
           target.installationBindings = {};
         }
       }
-    } else if (spec.action.kind === "workflow_run" && Object.keys(draft.workflowBindingEdits).length) {
-      const request = spec.action.request;
-      const bindings = { ...request.agentBindings };
-      const installations = { ...spec.action.installationBindings };
-      for (const [key, agentId] of Object.entries(draft.workflowBindingEdits)) {
-        const installation = installationFor(selectedRunner, agentId);
-        const configAgent = bindableAgents(selectedRunner).some((option) =>
-          option.agent.id === agentId && !option.agent.installation);
-        if (!installation && !configAgent) throw new AutomationFieldError(key as FieldKey, automationChooseWorkflowInstallation(
-          key === "orchestrator" ? "the Orchestrator" : roleLabel(key.slice("role:".length)), false));
-        if (key === "orchestrator") {
-          request.orchestratorAgentId = agentId;
-          if (installation) installations.orchestrator = installation;
-          else delete installations.orchestrator;
-          continue;
-        }
-        const role = key.slice("role:".length);
-        bindings[role] = agentId;
-        if (installation) installations[key] = installation;
-        else delete installations[key];
-      }
-      request.agentBindings = bindings;
-      spec.action.installationBindings = installations;
-    }
-    if (spec.action.kind === "workflow_run" && spec.runnerPolicy.kind === "alternate" &&
-        Object.keys(draft.alternateWorkflowBindingEdits).length) {
-      const target = spec.runnerPolicy.targets[0]!;
-      const bindings = { ...target.agentBindings };
-      const installations = { ...target.installationBindings };
-      for (const [key, agentId] of Object.entries(draft.alternateWorkflowBindingEdits)) {
-        const installation = installationFor(selectedFallback, agentId);
-        const configAgent = bindableAgents(selectedFallback).some((option) =>
-          option.agent.id === agentId && !option.agent.installation);
-        if (!installation && !configAgent) throw new AutomationFieldError(`alternate:${key}` as FieldKey,
-          automationChooseWorkflowInstallation(
-            key === "orchestrator" ? "the Orchestrator" : roleLabel(key.slice("role:".length)), true));
-        if (key === "orchestrator") {
-          target.orchestratorAgentId = agentId;
-          if (installation) installations.orchestrator = installation;
-          else delete installations.orchestrator;
-          continue;
-        }
-        const role = key.slice("role:".length);
-        bindings[role] = agentId;
-        if (installation) installations[key] = installation;
-        else delete installations[key];
-      }
-      target.agentBindings = bindings;
-      target.installationBindings = installations;
     }
     return spec;
   };
@@ -646,12 +535,6 @@ function AutomationEditorForm({
         : disabled.has(agent.id) ? { disabled: true, disabledReason: "Unavailable on this machine." } : {}),
     }));
   };
-  const roleOptions = (runner: Runner, boundId: string): SelectOption<string>[] => [
-    ...(!bindableAgents(runner).some((option) => option.agent.id === boundId)
-      ? [{ value: boundId, label: `${boundId} (Unavailable)` }] : []),
-    ...bindableAgents(runner).map((option) => ({ value: option.agent.id, label: option.label })),
-  ];
-  /** The warning beside an agent field whose saved installation is gone, with its Rebind action. */
   const installationWarning = (message: string, canRebind: boolean, rebind: () => void) => (
     <Notice
       tone="warning"
@@ -680,7 +563,7 @@ function AutomationEditorForm({
     if (kind !== "prompt_session") {
       if (!next.runnerId) {
         next = withMachine(next, firstMachine(runners));
-        rebound = { ...current, rebindPrimary: false, primaryAgentTouched: true, workflowBindingEdits: {} };
+        rebound = { ...current, rebindPrimary: false, primaryAgentTouched: true };
       } else {
         const runner = runners.get(next.runnerId);
         if (!next.workspaceId) next = { ...next, workspaceId: runner?.workspaces[0]?.id ?? "" };
@@ -690,13 +573,11 @@ function AutomationEditorForm({
     return { ...rebound, form: next };
   });
 
-  const actionChoices: ChoiceRowOption<ActionKind>[] = (["create_session", "prompt_session", "workflow_run"] as const)
-    .filter((kind) => kind !== "workflow_run" || offersWorkflow)
+  const actionChoices: ChoiceRowOption<ActionKind>[] = (["create_session", "prompt_session"] as const)
     .map((kind) => ({
       value: kind,
       title: ACTIONS[kind].title,
       description: ACTIONS[kind].description,
-      ...(kind === "workflow_run" && workflowKeptWhileOff ? { describedBy: fieldId("workflow-off") } : {}),
     }));
 
   const sessionOptions: SelectOption<string>[] = [
@@ -708,148 +589,6 @@ function AutomationEditorForm({
   const agentError = fieldError("agent");
   const fallbackRunnerError = fieldError("fallbackRunner");
   const fallbackAgentError = fieldError("fallbackAgent");
-
-  const primaryRoleFields = form.actionKind === "workflow_run" && workflowRoles.map(({ key: role, label }) => {
-    const stored = editingSpec?.action.kind === "workflow_run" &&
-      editingSpec.action.request.workflowId === form.workflowId &&
-      editingSpec.action.request.runnerId === form.runnerId ? editingSpec.action : null;
-    const reference = stored?.installationBindings?.[`role:${role}`];
-    const boundId = draft.workflowBindingEdits[`role:${role}`] ??
-      (reference ? resolvedInstallationAgentId(selectedRunner, reference) : undefined) ??
-      stored?.request.agentBindings?.[role] ?? role;
-    const unavailable = Boolean(stored) && !draft.workflowBindingEdits[`role:${role}`] && (reference
-      ? !bindingAvailable(selectedRunner, reference)
-      : !selectedRunner?.agents.some((agent) => agent.id === boundId && !agent.installation));
-    const error = fieldError(`role:${role}`);
-    const bind = (agentId: string) => update((current) => ({
-      ...current, workflowBindingEdits: { ...current.workflowBindingEdits, [`role:${role}`]: agentId },
-    }));
-    return (
-      <div className="field" key={role}>
-        <span className="field-label">{label} Agent</span>
-        <Select label={`${label} Agent`} value={boundId} onChange={bind} options={roleOptions(selectedRunner, boundId)}
-          invalid={error.invalid} describedBy={error.describedBy} />
-        {error.node}
-        {unavailable && installationWarning(AUTOMATION_SAVED_ROLE_INSTALLATION_UNAVAILABLE,
-          Boolean(installationFor(selectedRunner, boundId)), () => bind(boundId))}
-      </div>
-    );
-  });
-
-  const primaryOrchestratorField = form.actionKind === "workflow_run" && editingSpec?.action.kind === "workflow_run" &&
-    editingSpec.action.request.runnerId === form.runnerId &&
-    editingSpec.action.request.workflowId === form.workflowId &&
-    editingSpec.action.request.orchestratorAgentId && (() => {
-      const stored = editingSpec.action as Extract<AutomationAction, { kind: "workflow_run" }>;
-      const reference = stored.installationBindings?.orchestrator;
-      const boundId = draft.workflowBindingEdits.orchestrator ??
-        (reference ? resolvedInstallationAgentId(selectedRunner, reference) : undefined) ??
-        stored.request.orchestratorAgentId!;
-      const unavailable = !draft.workflowBindingEdits.orchestrator && (reference
-        ? !bindingAvailable(selectedRunner, reference)
-        : !selectedRunner?.agents.some((agent) => agent.id === boundId && !agent.installation));
-      const error = fieldError("orchestrator");
-      const bind = (agentId: string) => update((current) => ({
-        ...current, workflowBindingEdits: { ...current.workflowBindingEdits, orchestrator: agentId },
-      }));
-      return (
-        <div className="field">
-          <span className="field-label">Orchestrator Agent</span>
-          <Select label="Orchestrator Agent" value={boundId} onChange={bind} options={roleOptions(selectedRunner, boundId)}
-            invalid={error.invalid} describedBy={error.describedBy} />
-          {error.node}
-          {unavailable && installationWarning(AUTOMATION_SAVED_ORCHESTRATOR_INSTALLATION_UNAVAILABLE,
-            Boolean(installationFor(selectedRunner, boundId)), () => bind(boundId))}
-        </div>
-      );
-    })();
-
-  const alternateRoleFields = form.actionKind === "workflow_run" && form.runnerPolicy === "alternate" &&
-    workflowRoles.map(({ key: role, label }) => {
-      const oldTarget = editingSpec?.runnerPolicy.kind === "alternate" &&
-        editingSpec.action.kind === "workflow_run" &&
-        editingSpec.action.request.workflowId === form.workflowId &&
-        editingSpec.runnerPolicy.targets[0]?.runnerId === form.fallbackRunnerId
-        ? editingSpec.runnerPolicy.targets[0] : undefined;
-      const reference = oldTarget?.installationBindings?.[`role:${role}`];
-      const primaryChoice = draft.workflowBindingEdits[`role:${role}`] ??
-        (editingSpec?.action.kind === "workflow_run" &&
-          editingSpec.action.request.workflowId === form.workflowId &&
-          editingSpec.action.request.runnerId === form.runnerId
-          ? editingSpec.action.request.agentBindings?.[role] : undefined);
-      // A pin on an inherited target describes the old primary identity. Save-time pinning will
-      // replace it when that identity changes, so display the new choice.
-      const inheritedPrimaryChanged = Boolean(oldTarget && oldTarget.agentBindings?.[role] === undefined &&
-        (primaryChoice ?? role) !== (editingSpec?.action.kind === "workflow_run"
-          ? editingSpec.action.request.agentBindings?.[role] ?? role : role));
-      const effectiveReference = inheritedPrimaryChanged ? undefined : reference;
-      const boundId = draft.alternateWorkflowBindingEdits[`role:${role}`] ??
-        (effectiveReference ? resolvedInstallationAgentId(selectedFallback, effectiveReference) : undefined) ??
-        oldTarget?.agentBindings?.[role] ??
-        primaryChoice ?? role;
-      const unavailable = Boolean(oldTarget) && !draft.alternateWorkflowBindingEdits[`role:${role}`] && (effectiveReference
-        ? !bindingAvailable(selectedFallback, effectiveReference)
-        : inheritedPrimaryChanged
-          ? !bindableAgents(selectedFallback).some((option) => option.agent.id === boundId &&
-              (!option.agent.installation || installationFor(selectedFallback, boundId)))
-          : !selectedFallback?.agents.some((agent) => agent.id === boundId && !agent.installation));
-      const error = fieldError(`alternate:role:${role}`);
-      const bind = (agentId: string) => update((current) => ({
-        ...current,
-        alternateWorkflowBindingEdits: { ...current.alternateWorkflowBindingEdits, [`role:${role}`]: agentId },
-      }));
-      return (
-        <div className="field" key={role}>
-          <span className="field-label">Other {label} Agent</span>
-          <Select label={`Other ${label} Agent`} value={boundId} onChange={bind} options={roleOptions(selectedFallback, boundId)}
-            invalid={error.invalid} describedBy={error.describedBy} />
-          {error.node}
-          {unavailable && installationWarning(AUTOMATION_SAVED_ALTERNATE_ROLE_INSTALLATION_UNAVAILABLE,
-            Boolean(installationFor(selectedFallback, boundId)), () => bind(boundId))}
-        </div>
-      );
-    });
-
-  const alternateOrchestratorField = form.actionKind === "workflow_run" && form.runnerPolicy === "alternate" &&
-    editingSpec?.action.kind === "workflow_run" && (() => {
-      const storedAction = editingSpec.action as Extract<AutomationAction, { kind: "workflow_run" }>;
-      const oldTarget = editingSpec.runnerPolicy.kind === "alternate" &&
-        storedAction.request.workflowId === form.workflowId &&
-        editingSpec.runnerPolicy.targets[0]?.runnerId === form.fallbackRunnerId
-        ? editingSpec.runnerPolicy.targets[0] : undefined;
-      const primaryChoice = draft.workflowBindingEdits.orchestrator ??
-        (storedAction.request.workflowId === form.workflowId &&
-          storedAction.request.runnerId === form.runnerId
-          ? storedAction.request.orchestratorAgentId : undefined);
-      if (!oldTarget?.orchestratorAgentId && !primaryChoice) return null;
-      const reference = oldTarget?.installationBindings?.orchestrator;
-      const inheritedPrimaryChanged = Boolean(oldTarget && !oldTarget.orchestratorAgentId &&
-        primaryChoice !== storedAction.request.orchestratorAgentId);
-      const effectiveReference = inheritedPrimaryChanged ? undefined : reference;
-      const boundId = draft.alternateWorkflowBindingEdits.orchestrator ??
-        (effectiveReference ? resolvedInstallationAgentId(selectedFallback, effectiveReference) : undefined) ??
-        oldTarget?.orchestratorAgentId ?? primaryChoice!;
-      const unavailable = Boolean(oldTarget) && !draft.alternateWorkflowBindingEdits.orchestrator && (effectiveReference
-        ? !bindingAvailable(selectedFallback, effectiveReference)
-        : inheritedPrimaryChanged
-          ? !bindableAgents(selectedFallback).some((option) => option.agent.id === boundId &&
-              (!option.agent.installation || installationFor(selectedFallback, boundId)))
-          : !selectedFallback?.agents.some((agent) => agent.id === boundId && !agent.installation));
-      const error = fieldError("alternate:orchestrator");
-      const bind = (agentId: string) => update((current) => ({
-        ...current, alternateWorkflowBindingEdits: { ...current.alternateWorkflowBindingEdits, orchestrator: agentId },
-      }));
-      return (
-        <div className="field">
-          <span className="field-label">Other Orchestrator Agent</span>
-          <Select label="Other Orchestrator Agent" value={boundId} onChange={bind} options={roleOptions(selectedFallback, boundId)}
-            invalid={error.invalid} describedBy={error.describedBy} />
-          {error.node}
-          {unavailable && installationWarning(AUTOMATION_SAVED_ALTERNATE_ORCHESTRATOR_INSTALLATION_UNAVAILABLE,
-            Boolean(installationFor(selectedFallback, boundId)), () => bind(boundId))}
-        </div>
-      );
-    })();
 
   const alternateInstallationIssue = form.actionKind === "create_session" &&
     editingSpec?.runnerPolicy.kind === "alternate" && !draft.rebindAlternate && (() => {
@@ -875,16 +614,6 @@ function AutomationEditorForm({
   const editorTitle = isNew ? "New Automation" : `Edit ${savedName}`;
   // An edit's Back returns to the automation's page, by its name (#2968).
   const editorBack = isNew ? backLabel("automations") : `Back to ${savedName}`;
-  const workflowHelperId = fieldId("workflow-off");
-  const workflowOptions: SelectOption<string>[] = [
-    ...(form.workflowId && !workflows.some((workflow) => workflow.workflowId === form.workflowId)
-      ? [{ value: form.workflowId, label: form.workflowId, description: workflowsError ? "Workflows couldn't be loaded." : "Not available" }]
-      : []),
-    ...workflows.map((workflow) => ({
-      value: workflow.workflowId, label: workflow.name, description: `Version ${workflow.version}`,
-    })),
-  ];
-
   return (
     <div className="automation-editor" ref={rootRef}>
       <DetailBar title={editorTitle} backLabel={editorBack} onBack={onBack} />
@@ -900,7 +629,6 @@ function AutomationEditorForm({
               <span className="field-label" id={fieldId("action")}>Action</span>
               <ChoiceRows label="Action" labelledBy={fieldId("action")} value={form.actionKind} options={actionChoices}
                 onChange={chooseAction} />
-              {workflowKeptWhileOff && <p className="field-helper" id={workflowHelperId}>{MULTI_AGENT_OFF_HELPER}</p>}
             </div>
             {form.actionKind === "prompt_session" ? (
               <div className="field">
@@ -922,7 +650,6 @@ function AutomationEditorForm({
                         ...current,
                         rebindPrimary: false,
                         primaryAgentTouched: true,
-                        workflowBindingEdits: {},
                         form: { ...withMachine(current.form, runners.get(runnerId)), runnerId },
                       }))}
                       options={[...runners.values()].map((runner) => machineOption(runner,
@@ -938,56 +665,31 @@ function AutomationEditorForm({
                       emptyLabel="This machine has no folders" />
                   </div>
                 </div>
-                {form.actionKind === "create_session" ? (
-                  <div className="field">
-                    <span className="field-label">Agent</span>
-                    <Select
-                      label="Agent"
-                      value={form.agentId || null}
-                      placeholder={selectedRunner?.agents.length ? "Select an Agent…" : "No Agents on This Machine"}
-                      emptyLabel="This machine has no agents"
-                      onChange={(agentId) => update((current) => ({
-                        ...current, rebindPrimary: false, primaryAgentTouched: true, form: withAgent(current.form, agentId),
-                      }))}
-                      options={agentSelectOptions(selectedRunner, form.agentId)}
-                      invalid={agentError.invalid}
-                      describedBy={agentError.describedBy}
-                    />
-                    {agentError.node}
-                    {primaryInstallationIssue && installationWarning(AUTOMATION_SAVED_INSTALLATION_UNAVAILABLE,
-                      Boolean(installationFor(selectedRunner, form.agentId)),
-                      () => update((current) => ({ ...current, rebindPrimary: true })))}
-                    {/* An Orchestrator offered an account choice has its expectation under that choice. */}
-                    {(!form.campaign || orchestratorProviderAccounts(selectedRunner, form.agentId).length === 0) &&
-                      selectedRunner && form.agentId && (
-                      <AutomationExpectedProviderAccount runner={selectedRunner} agentId={form.agentId} placement={accountPlacement}
-                        namedAccountId={form.providerAccountId} />
-                    )}
-                  </div>
-                ) : (
-                  <>
-                    <div className="field">
-                      <span className="field-label">Workflow</span>
-                      <Select label="Workflow" value={form.workflowId || null} onChange={(value) => patch("workflowId", value)}
-                        options={workflowOptions} placeholder="Select a Workflow…" emptyLabel="No workflows yet" />
-                      {workflowsError && (
-                        <Notice tone="warning" compact
-                          actions={<button type="button" className="btn sm" onClick={onRetryWorkflows}>Try Again</button>}
-                          details={workflowsError}>
-                          Workflows couldn't be loaded.
-                        </Notice>
-                      )}
-                    </div>
-                    {primaryRoleFields}
-                    {primaryOrchestratorField}
-                    {humanSteps.map((node) => (
-                      <label className="field" key={node.nodeId}>
-                        <span>{titleCaseLabel(node.role)}</span>
-                        <input className="is-read-only" readOnly value="You, in the run" />
-                      </label>
-                    ))}
-                  </>
-                )}
+                <div className="field">
+                  <span className="field-label">Agent</span>
+                  <Select
+                    label="Agent"
+                    value={form.agentId || null}
+                    placeholder={selectedRunner?.agents.length ? "Select an Agent…" : "No Agents on This Machine"}
+                    emptyLabel="This machine has no agents"
+                    onChange={(agentId) => update((current) => ({
+                      ...current, rebindPrimary: false, primaryAgentTouched: true, form: withAgent(current.form, agentId),
+                    }))}
+                    options={agentSelectOptions(selectedRunner, form.agentId)}
+                    invalid={agentError.invalid}
+                    describedBy={agentError.describedBy}
+                  />
+                  {agentError.node}
+                  {primaryInstallationIssue && installationWarning(AUTOMATION_SAVED_INSTALLATION_UNAVAILABLE,
+                    Boolean(installationFor(selectedRunner, form.agentId)),
+                    () => update((current) => ({ ...current, rebindPrimary: true })))}
+                  {/* An Orchestrator offered an account choice has its expectation under that choice. */}
+                  {(!form.campaign || orchestratorProviderAccounts(selectedRunner, form.agentId).length === 0) &&
+                    selectedRunner && form.agentId && (
+                    <AutomationExpectedProviderAccount runner={selectedRunner} agentId={form.agentId} placement={accountPlacement}
+                      namedAccountId={form.providerAccountId} />
+                  )}
+                </div>
               </>
             )}
             {form.actionKind === "create_session" && (
@@ -1047,7 +749,7 @@ function AutomationEditorForm({
               </Notice>
             )}
             <label className="field">
-              <span>{form.actionKind === "workflow_run" ? "Task" : "Prompt"}</span>
+              <span>Prompt</span>
               <textarea value={form.prompt} maxLength={65_536} rows={4} onChange={(event) => patch("prompt", event.target.value)} />
             </label>
           </section>
@@ -1130,7 +832,6 @@ function AutomationEditorForm({
                           ...current,
                           rebindAlternate: false,
                           alternateAgentTouched: true,
-                          alternateWorkflowBindingEdits: {},
                           form: { ...current.form, fallbackRunnerId,
                             fallbackWorkspaceId: runner?.workspaces[0]?.id ?? "",
                             fallbackAgentId: defaultAgentId(runner?.agents, runner?.providerAccountDefaults) },
@@ -1173,8 +874,6 @@ function AutomationEditorForm({
                       () => update((current) => ({ ...current, rebindAlternate: true })))}
                   </div>
                 )}
-                {alternateRoleFields}
-                {alternateOrchestratorField}
               </>
             )}
             <div className="field-row">
@@ -1198,9 +897,7 @@ function AutomationEditorForm({
                     aria-describedby={fieldId("cost-help")} onChange={(event) => patch("maxCostUsd", event.target.value)} />
                 </span>
                 <p className="field-helper" id={fieldId("cost-help")}>
-                  {form.actionKind === "workflow_run"
-                    ? "Additional spend for each agent in a run, in US dollars."
-                    : "Additional spend for each run, in US dollars."}
+                  Additional spend for each run, in US dollars.
                 </p>
               </label>
               <label className="field">
@@ -1208,7 +905,7 @@ function AutomationEditorForm({
                 <input className="w-xs" type="number" min="1" max="100000" value={form.maxToolCalls}
                   aria-describedby={fieldId("tools-help")} onChange={(event) => patch("maxToolCalls", event.target.value)} />
                 <p className="field-helper" id={fieldId("tools-help")}>
-                  {form.actionKind === "workflow_run" ? "For each agent in a run." : "For each run."}
+                  For each run.
                 </p>
               </label>
             </div>

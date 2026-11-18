@@ -36,7 +36,6 @@ import type {
   SteerSessionMessage,
   SteerSessionResultMessage,
   WorkspaceReference,
-  WorkflowDefinitionSpec,
   ProviderAccountDefinition,
 } from "@wollipog/protocol";
 import { PROVIDER_ACCOUNT_CHOICE_REQUIRED, supportsClaudeProjectMemory } from "@wollipog/protocol";
@@ -1236,12 +1235,6 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     }, { parentSessionId: parent.id });
     assert.equal(wrongRunHarness.status, 409);
     assert.match(wrongRunHarness.error ?? "", /child harness is fixed by campaign policy/);
-    const wrongWorkflowHarness = svc.createWorkflowRun({
-      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review",
-      task: "Bypass through a workflow", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-    }, { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
-    assert.equal(wrongWorkflowHarness.status, 409);
-    assert.match(wrongWorkflowHarness.error ?? "", /child harness is fixed by campaign policy/);
     const wrongRunPair = svc.createRun({
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [CODEX_APP_AGENT_ID],
       task: "Bypass the fixed pair", config: { model: "image-model", effort: "low" },
@@ -4068,8 +4061,8 @@ test("session spawn policy parks the exact child request and creates only after 
   }
 });
 
-/** A live parent asking for approval to create one child, one run fan-out, or one workflow run. */
-function pendingSpawnFixture(kind: "session" | "run" | "workflow") {
+/** A live parent asking for approval to create one child, or one run fan-out. */
+function pendingSpawnFixture(kind: "session" | "run") {
   const harness = makeHarness();
   const { db, svc } = harness;
   const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
@@ -4082,11 +4075,7 @@ function pendingSpawnFixture(kind: "session" | "run" | "workflow") {
   const batchRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review", title: "Requested Batch" };
   const create = (): { ok: boolean; status: number; error?: string } => kind === "session"
     ? svc.createSession(sessionRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id })
-    : kind === "run"
-      ? svc.createRun({ ...batchRequest, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id })
-      : svc.createWorkflowRun({ ...batchRequest, workflowId: "builtin:build-review",
-          agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } },
-        { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
+    : svc.createRun({ ...batchRequest, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id });
   const asked = create();
   assert.equal(asked.status, 428, asked.error);
   const requestId = db.getSession(parent.id)!.pendingApproval!.requestId;
@@ -4094,7 +4083,7 @@ function pendingSpawnFixture(kind: "session" | "run" | "workflow") {
   return { ...harness, parent, create, requestId, approval, sessionRequest, children: kind === "session" ? 1 : 2 };
 }
 
-for (const kind of ["session", "run", "workflow"] as const) {
+for (const kind of ["session", "run"] as const) {
   test(`a pending ${kind} spawn approval survives a 60 s gap between identical calls and creates only on the next one`, () => {
     const { db, svc, hub, parent, create, requestId, approval, sessionRequest, children } = pendingSpawnFixture(kind);
     try {
@@ -5066,7 +5055,7 @@ test("a live owner can raise the concurrent child cap and restarts consume the s
   } finally { db.close(); }
 });
 
-for (const kind of ["run", "workflow"] as const) {
+for (const kind of ["run"] as const) {
   test(`agent-created ${kind} inherits its parent Project and applies Project defaults`, () => {
     const { db, svc, hub } = makeHarness();
     try {
@@ -5080,10 +5069,7 @@ for (const kind of ["run", "workflow"] as const) {
       db.updateSessionStatus(parent.id, "running", Date.now());
       const create = (overrides: { costBudgetUsd?: number; maxToolCalls?: number; config?: { maxChildSessions: number } } = {}) => {
         const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review", ...overrides };
-        return kind === "run"
-          ? svc.createRun({ ...request, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id })
-          : svc.createWorkflowRun({ ...request, workflowId: "builtin:build-review", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } },
-            { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
+        return svc.createRun({ ...request, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id });
       };
       const before = hub.sentOfType("start_session").length;
       hub.online = false;
@@ -5127,11 +5113,7 @@ for (const kind of ["run", "workflow"] as const) {
       { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } }).data!;
       db.updateSessionStatus(parent.id, "running", Date.now());
       const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review" };
-      const create = () => kind === "run"
-        ? svc.createRun({ ...request, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id })
-        : svc.createWorkflowRun({ ...request, workflowId: "builtin:build-review",
-            agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } },
-          { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
+      const create = () => svc.createRun({ ...request, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id });
       const before = hub.sentOfType("start_session").length;
       const created = create();
       assert.ok(created.ok, created.error);
@@ -5163,11 +5145,7 @@ for (const kind of ["run", "workflow"] as const) {
       assert.ok(svc.upsertGovernancePolicy({ policyId: "ask-batch", name: "Review Child Sessions",
         effect: "ask", priority: 100, enabled: true, scope: { toolName: "wollipog.create_session" } }).ok);
       const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review", title: "Requested Batch" };
-      const create = (task = request.task) => kind === "run"
-        ? svc.createRun({ ...request, task, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id })
-        : svc.createWorkflowRun({ ...request, task, workflowId: "builtin:build-review",
-            agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } },
-          { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
+      const create = (task = request.task) => svc.createRun({ ...request, task, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id });
       const before = hub.sentOfType("start_session").length;
       assert.equal(create().status, 428);
       const approval = db.getSession(parent.id)!.pendingApproval!;
@@ -5191,7 +5169,7 @@ for (const kind of ["run", "workflow"] as const) {
   });
 }
 
-for (const kind of ["run", "workflow"] as const) {
+for (const kind of ["run"] as const) {
   test(`agent-created ${kind} releases its whole fan-out from the concurrent child cap`, () => {
     const { db, svc } = makeHarness();
     try {
@@ -5204,20 +5182,12 @@ for (const kind of ["run", "workflow"] as const) {
         config: { maxChildSessions: 2 },
       }, undefined, scope).data!;
       db.updateSessionStatus(parent.id, "running", Date.now());
-      const create = () => kind === "run"
-        ? svc.createRun({
+      const create = () => svc.createRun({
             runnerId: RUNNER_ID,
             workspaceId: WORKSPACE_ID,
             agentIds: [AGENT_ID, CODEX_APP_AGENT_ID],
             task: "Build and review",
-          }, { parentSessionId: parent.id })
-        : svc.createWorkflowRun({
-            runnerId: RUNNER_ID,
-            workspaceId: WORKSPACE_ID,
-            workflowId: "builtin:build-review",
-            task: "Build and review",
-            agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-          }, { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
+          }, { parentSessionId: parent.id });
       const first = create();
       assert.ok(first.ok, first.error);
       assert.equal(db.childSessionAllocations(parent.id).liveCount, 2);
@@ -10592,25 +10562,6 @@ test("createSession fails closed when the runner disconnects after preflight", (
   assert.equal(persisted[0]!.status, "stopped");
 });
 
-test("partial workflow launch rollback retains legacy cancel_session semantics", () => {
-  const { hub, svc, db } = makeHarness();
-  let starts = 0;
-  hub.deliveryHandler = (_runnerId, message) => message.type !== "start_session" || (starts += 1) === 1;
-
-  const result = svc.createWorkflowRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    workflowId: "builtin:build-review",
-    task: "Rollback a partial launch",
-    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-  });
-
-  assert.equal(result.status, 409);
-  assert.equal(hub.sentOfType("cancel_session").length, 1);
-  assert.equal(hub.sentOfType("interrupt_turn").length, 0);
-  assert.equal(db.listSessions({ includeArchived: true }).every((session) => session.status === "stopped"), true);
-});
-
 test("ACP context is validated, persisted as references, forwarded, and restored on restart", () => {
   const { db, hub, svc } = makeHarness();
   const acpSessionContext = {
@@ -11046,7 +10997,7 @@ test("a run's members resolve accounts the way a session does, before anything i
   assert.equal(db.listRuns().length, runsBefore, "one member without an account refuses the whole run");
 });
 
-test("a run or workflow with no ready ranked account gets the structured refusal, not an unknown agent (#4353)", () => {
+test("a run with no ready ranked account gets the structured refusal, not an unknown agent (#4353)", () => {
   const { db, svc, meta } = priorityHarness();
   meta.agents = meta.agents.map((agent) => agent.id === AGENT_ID
     ? { ...agent, providerAccountReadiness: { defaultAuthStatus: "unauthenticated", readyAccountIds: [] } } : agent);
@@ -11054,10 +11005,6 @@ test("a run or workflow with no ready ranked account gets the structured refusal
   const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Compare" });
   assert.equal(run.status, 409, run.error);
   assert.equal(run.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
-  const workflow = svc.createWorkflowRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build it",
-    workflowId: "builtin:build-review", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } });
-  assert.equal(workflow.status, 409, workflow.error);
-  assert.equal(workflow.errorDetails?.code, PROVIDER_ACCOUNT_CHOICE_REQUIRED);
   assert.equal(db.listRuns().length, 0);
 });
 
@@ -11075,18 +11022,6 @@ test("a run honors a fixed Default Account, which it used to ignore (#4353)", ()
   assert.equal(run.data.sessions[0]?.providerAccountId, "personal");
   assert.equal(run.data.sessions[0]?.providerAccountSelection?.source, "fixed_default");
   assert.equal(hub.sentOfType("start_session").at(-1)?.spec.providerAccountId, "personal");
-});
-
-test("a workflow's members resolve accounts the way a session does (#4353)", () => {
-  const { hub, svc } = priorityHarness();
-  const run = svc.createWorkflowRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build it",
-    workflowId: "builtin:build-review", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } });
-  assert.ok(run.ok && run.data, run.error);
-  const claude = run.data.sessions.find((session) => session.agentId === AGENT_ID);
-  assert.equal(claude?.providerAccountId, "first-person-example-com");
-  assert.equal(claude?.providerAccountSelection?.source, "priority");
-  assert.ok(hub.sentOfType("start_session").some((message) => message.spec.agentId === AGENT_ID &&
-    message.spec.providerAccountId === "first-person-example-com"));
 });
 
 test("a child session resolves its account the same way (#4353)", () => {
@@ -11306,29 +11241,6 @@ test("an agent names a run member's account by reference, and only one it could 
   assert.ok(svc.createRun({ ...run, providerAccountIds: { [AGENT_ID]: "second" } }).ok, "a person keeps the sign-in decision");
 });
 
-test("a workflow names an account per role and for its orchestrator (#4353)", () => {
-  const { svc, setAccounts, meta } = priorityHarness();
-  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review", task: "Build and review",
-    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } };
-  const named = svc.createWorkflowRun({ ...request, providerAccountBindings: { claude: "second" } });
-  assert.ok(named.ok && named.data, named.error);
-  const builder = named.data.sessions.find((session) => session.agentId === AGENT_ID)!;
-  assert.equal(builder.providerAccountId, "second");
-  assert.equal(builder.providerAccountSelection?.source, "explicit");
-  assert.notEqual(named.data.sessions.find((session) => session.agentId === CODEX_APP_AGENT_ID)?.providerAccountSelection?.source, "explicit");
-
-  const wrongProvider = svc.createWorkflowRun({ ...request, providerAccountBindings: { claude: "codex-account" } });
-  assert.equal(wrongProvider.status, 409);
-  assert.match(wrongProvider.error ?? "", /^claude: The chosen provider account is not available/u);
-  assert.equal(svc.createWorkflowRun({ ...request, providerAccountBindings: { nobody: "second" } }).status, 400);
-  assert.equal(svc.createWorkflowRun({ ...request, orchestratorProviderAccountId: "second" }).status, 400, "there is no orchestrator to give it to");
-
-  setAccounts(meta.providerAccounts!.map((account) => account.provider === "claude" ? { ...account, selectionCooldownUntil: Date.now() + 60_000 } : account));
-  assert.equal(svc.createWorkflowRun(request).providerAccountSelection?.refusal, "no_eligible_account");
-  const chosen = svc.createWorkflowRun({ ...request, providerAccountBindings: { claude: "third" } });
-  assert.ok(chosen.ok, chosen.error);
-});
-
 test("a launch and its preview follow the project a Location infers, not only a chosen one (#4353)", () => {
   const { db, svc, request, meta } = priorityHarness();
   // A registered workspace has one Location, so a session naming no project joins that one.
@@ -11376,32 +11288,6 @@ test("only a launch naming a model under a policy is told its plan wasn't checke
   const explicit = svc.createSession({ ...request, providerAccountId: "second", config: { model: "chosen-model" } });
   assert.ok(explicit.ok && explicit.data, explicit.error);
   assert.equal(explicit.data.providerAccountSelection?.modelCompatibility, undefined);
-});
-
-test("a workflow's orchestrator answers for the project it joins, not its workers' (#4353)", () => {
-  const { db, svc } = priorityHarness();
-  // Project memory is fine on the workers' Claude Code; `test-orchestrator` reports no such version.
-  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review", task: "Build and review",
-    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID }, orchestratorAgentId: "test-orchestrator" };
-
-  // Everyone in the organization can reach the workspace's project, so the orchestrator joins it too.
-  const shared = svc.createWorkflowRun(request);
-  assert.equal(shared.providerAccountSelection?.refusal, "account_memory", shared.error);
-
-  // A narrower project keeps the organization-scoped orchestrator out, whether named or inferred, so
-  // it has no project memory to move. Its workers still join.
-  const { project, location, scope } = makeTeamOwnedProject(db);
-  assert.equal(db.setResourceScope({ resource: "workspace", runnerId: RUNNER_ID, resourceId: WORKSPACE_ID, scope, now: 3 }), true);
-  for (const placement of [{}, { projectId: project.id, projectLocationId: location.id }]) {
-    const run = svc.createWorkflowRun({ ...request, ...placement });
-    assert.ok(run.ok && run.data, run.error);
-    const orchestrator = run.data.sessions.find((session) => session.agentId === "test-orchestrator")!;
-    assert.equal(orchestrator.projectId, null);
-    assert.equal(orchestrator.providerAccountSelection?.source, "priority");
-    for (const worker of run.data.sessions.filter((session) => session.agentId !== "test-orchestrator")) {
-      assert.equal(worker.projectId, project.id);
-    }
-  }
 });
 
 test("an account reference and a configured id can never be each other (#4353)", () => {
@@ -11745,7 +11631,7 @@ test("Codex service-tier drift heals without blocking unrelated config changes o
   assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.serviceTier, "flex");
 });
 
-test("inherited and workflow service tiers respect rolling runner compatibility", () => {
+test("inherited service tiers respect rolling runner compatibility", () => {
   const { db, hub, svc } = makeHarness();
   const meta = runnerMeta();
   const codex = meta.agents.find((agent) => agent.id === CODEX_APP_AGENT_ID)!;
@@ -11765,15 +11651,6 @@ test("inherited and workflow service tiers respect rolling runner compatibility"
   assert.equal(sideChat.data!.session.serviceTier, null);
   assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.serviceTier, undefined);
 
-  const workflow = svc.createWorkflowRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    workflowId: "builtin:build-review",
-    task: "Use Fast when supported",
-    config: { serviceTier: "fast" },
-  });
-  assert.equal(workflow.status, 409);
-  assert.equal(workflow.capabilityRequirement?.requiredRunnerProtocolVersion, 126);
 });
 
 test("workspace references fail closed against a pre-v106 runner", () => {
@@ -12494,7 +12371,7 @@ test("createSession resolves cloud artifact provenance and enforces the target c
   db.registerRunner({ ...runnerMeta(), executionTargets: [cloud] }, Date.now(), 62);
   const sourceId = seedSession(svc, hub, { useWorktree: true });
   db.updateSessionStatus(sourceId, "idle", Date.now());
-  const artifact = svc.createWorkflowArtifact({
+  const artifact = svc.createArtifact({
     sessionId: sourceId,
     kind: "patch",
     name: "handoff.patch",
@@ -12575,8 +12452,8 @@ for (const durable of [false, true]) test(`createSession preserves ${durable ? "
     let stagedJson: string | undefined;
     let dispatchCalls = 0;
     let imageStored = false;
-    const storeImage = db.createWorkflowArtifactBytes.bind(db);
-    t.mock.method(db, "createWorkflowArtifactBytes", (...args: Parameters<ControlPlaneDb["createWorkflowArtifactBytes"]>) => {
+    const storeImage = db.createArtifactBytes.bind(db);
+    t.mock.method(db, "createArtifactBytes", (...args: Parameters<ControlPlaneDb["createArtifactBytes"]>) => {
       const result = storeImage(...args);
       imageStored = true;
       return result;
@@ -13082,7 +12959,7 @@ test("a fresh steering submission id is independent from a promoted queue id", a
   assert.equal(result.data?.state, "rejected");
 });
 
-test("steering fails closed for policy, workflow, and active pod ownership", async () => {
+test("steering fails closed for policy, automation, and active pod ownership", async () => {
   const policyHarness = makeHarness();
   const policyId = seedSession(policyHarness.svc, policyHarness.hub, { agentId: CODEX_APP_AGENT_ID });
   policyHarness.db.updateSessionStatus(policyId, "input_required", Date.now());
@@ -13092,19 +12969,6 @@ test("steering fails closed for policy, workflow, and active pod ownership", asy
   policyHarness.hub.activeTurnIds.set(policyId, "turn-policy");
   assert.equal((await policyHarness.svc.steer(policyId, {
     submissionId: "submission-policy", turnId: "turn-policy", text: "continue",
-  })).status, 409);
-
-  const workflowHarness = makeHarness();
-  const workflowId = seedSession(workflowHarness.svc, workflowHarness.hub, { agentId: CODEX_APP_AGENT_ID });
-  workflowHarness.db.updateSessionStatus(workflowId, "running", Date.now());
-  workflowHarness.hub.activeTurnIds.set(workflowId, "turn-workflow");
-  const activeAttempts = workflowHarness.db.activeWorkflowAttemptsForSession.bind(workflowHarness.db);
-  Object.defineProperty(workflowHarness.db, "activeWorkflowAttemptsForSession", {
-    configurable: true,
-    value: (sessionId: string) => sessionId === workflowId ? [{ attemptId: "attempt-steer" }] : activeAttempts(sessionId),
-  });
-  assert.equal((await workflowHarness.svc.steer(workflowId, {
-    submissionId: "submission-workflow", turnId: "turn-workflow", text: "continue",
   })).status, 409);
 
   const automationHarness = makeHarness();
@@ -14690,7 +14554,7 @@ test("raw prompt-image preparation deduplicates retries and expires only uncommi
   assert.ok(lease.expires_at >= Date.now() + PREPARED_PROMPT_IMAGE_RETENTION_MS - 1_000);
   assert.equal(db.collectExpiredPreparedPromptImages(lease.expires_at - 1), 0);
   assert.equal(db.collectExpiredPreparedPromptImages(lease.expires_at), 1);
-  assert.equal(db.getWorkflowArtifact(first.data!.artifactId), null,
+  assert.equal(db.getArtifact(first.data!.artifactId), null,
     "an abandoned preparation is removed at its documented expiry");
 
   const pending = svc.createPromptImageArtifact(id, "image/png", png, { kind: "human", id: "u1" });
@@ -14700,7 +14564,7 @@ test("raw prompt-image preparation deduplicates retries and expires only uncommi
     "SELECT expires_at FROM prepared_prompt_image_artifacts WHERE artifact_id=?",
   ).get(pending.data!.artifactId) as unknown as { expires_at: number };
   assert.equal(db.collectExpiredPreparedPromptImages(pendingLease.expires_at), 0);
-  assert.ok(db.getWorkflowArtifact(pending.data!.artifactId),
+  assert.ok(db.getArtifact(pending.data!.artifactId),
     "a durable prompt command protects its image before a user event exists");
 
   const referencedPng = Buffer.from([...png.subarray(0, -1), 4]);
@@ -14711,7 +14575,7 @@ test("raw prompt-image preparation deduplicates retries and expires only uncommi
     "SELECT expires_at FROM prepared_prompt_image_artifacts WHERE artifact_id=?",
   ).get(referenced.data!.artifactId) as unknown as { expires_at: number };
   assert.equal(db.collectExpiredPreparedPromptImages(referencedLease.expires_at), 0);
-  assert.ok(db.getWorkflowArtifact(referenced.data!.artifactId));
+  assert.ok(db.getArtifact(referenced.data!.artifactId));
   assert.equal(db.raw().prepare(
     "SELECT 1 FROM prepared_prompt_image_artifacts WHERE artifact_id=?",
   ).get(referenced.data!.artifactId), undefined,
@@ -16968,16 +16832,9 @@ test("child attention resolves by exact identity and preserves unrelated request
   assert.equal(pendingRequests(db.getSession(id)!.pendingApproval).length, 2);
   assert.deepEqual(svc.approvalQueue().filter((item) => item.sessionId === id)
     .map((item) => item.requestId), ["child-a", "child-b"]);
-  const settlements: string[] = [];
-  const reconcile = (svc as any).reconcileWorkflowSessionStatus.bind(svc);
-  (svc as any).reconcileWorkflowSessionStatus = (sessionId: string, status: string, now: number) => {
-    settlements.push(status);
-    return reconcile(sessionId, status, now);
-  };
   svc.onSessionStatus(id, "idle");
   assert.equal(db.getSession(id)!.status, "input_required");
   assert.equal(pendingRequests(db.getSession(id)!.pendingApproval).length, 2);
-  assert.deepEqual(settlements, ["idle"], "foreground settlement still reaches workflow consumers");
   assert.equal(svc.approve(id, "child-b", "not-offered").ok, false);
   assert.equal(pendingRequests(db.getSession(id)!.pendingApproval).length, 2);
   assert.equal(svc.approve(id, "child-b", "yes").ok, true);
@@ -19042,84 +18899,6 @@ test("bulk queue validation is atomic and rejects duplicates/unsupported fields"
   assert.equal(svc.rejectApprovalQueue([{ sessionId: id, requestId: "still-pending", action: "allow" }]).status, 400);
 });
 
-test("workflow artifact service validates ownership, binds run membership, and broadcasts run updates", () => {
-  const { db, hub, svc } = makeHarness();
-  const created = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentIds: [AGENT_ID],
-    task: "Build and review",
-  });
-  assert.ok(created.ok);
-  const run = created.data!.run;
-  const session = created.data!.sessions[0]!;
-  const broadcastsBefore = hub.runChangedCalls.length;
-  const result = svc.createWorkflowArtifact({
-    runId: run.id,
-    sessionId: session.id,
-    kind: "verdict",
-    name: "review-verdict.json",
-    mimeType: "application/json",
-    encoding: "json",
-    data: '{ "verdict": "upvote", "round": 1 }',
-    metadata: { reviewer: "codex", round: 1 },
-  }, { kind: "human", id: "device-artifacts" });
-  assert.equal(result.status, 201);
-  const artifact = result.data!;
-  assert.equal(artifact.data, '{"verdict":"upvote","round":1}');
-  assert.match(artifact.sha256, /^[a-f0-9]{64}$/);
-  assert.deepEqual(artifact.createdBy, { kind: "human", id: "device-artifacts" });
-  assert.equal(hub.runChangedCalls.length, broadcastsBefore + 1);
-  assert.deepEqual(svc.workflowArtifact(artifact.artifactId).data, artifact);
-  const listed = svc.runWorkflowArtifacts(run.id).data!.artifacts;
-  assert.equal(listed.length, 1);
-  assert.equal("data" in listed[0]!, false);
-  assert.equal(svc.sessionWorkflowArtifacts(session.id).data!.artifacts[0]!.artifactId, artifact.artifactId);
-  assert.ok(db.getRun(run.id)!.updatedAt >= artifact.createdAt);
-  for (const name of ["tests-1.log", "tests-2.log"]) {
-    assert.ok(svc.createWorkflowArtifact({
-      runId: run.id,
-      sessionId: session.id,
-      kind: "test_log",
-      name,
-      mimeType: "text/plain",
-      encoding: "utf8",
-      data: `${name}: passed`,
-    }).ok);
-  }
-  const firstPage = svc.runWorkflowArtifacts(run.id, undefined, 2).data!;
-  assert.equal(firstPage.artifacts.length, 2);
-  assert.ok(firstPage.nextCursor);
-  const secondPage = svc.runWorkflowArtifacts(run.id, firstPage.nextCursor, 2).data!;
-  assert.equal(secondPage.artifacts.length, 1);
-  assert.equal(secondPage.nextCursor, undefined);
-  assert.equal(new Set([...firstPage.artifacts, ...secondPage.artifacts].map((item) => item.artifactId)).size, 3);
-  assert.equal(svc.runWorkflowArtifacts(run.id, "not-a-cursor").status, 400);
-  assert.equal(svc.runWorkflowArtifacts(run.id, undefined, 101).status, 400);
-});
-
-test("workflow artifact service rejects cross-run association, unknown owners, and malformed content", () => {
-  const { hub, svc } = makeHarness();
-  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Run" }).data!.run;
-  const outsider = seedSession(svc, hub);
-  const body = {
-    runId: run.id,
-    sessionId: outsider,
-    kind: "test_log",
-    name: "tests.log",
-    mimeType: "text/plain",
-    encoding: "utf8",
-    data: "ok",
-  };
-  assert.equal(svc.createWorkflowArtifact(body).status, 409);
-  assert.equal(svc.createWorkflowArtifact({ ...body, runId: "missing" }).status, 404);
-  assert.equal(svc.createWorkflowArtifact({ ...body, runId: undefined, sessionId: "missing" }).status, 404);
-  assert.equal(svc.createWorkflowArtifact({ ...body, runId: undefined, sessionId: outsider, name: "../escape" }).status, 400);
-  assert.equal(svc.workflowArtifact("missing").status, 404);
-  assert.equal(svc.runWorkflowArtifacts("missing").status, 404);
-  assert.equal(svc.sessionWorkflowArtifacts("missing").status, 404);
-});
-
 test("an explicit empty question submission remains distinct from dismissal", () => {
   const { hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
@@ -21031,23 +20810,6 @@ test("cancelTurn rejects queued and starting launches instead of discarding thei
   }
 });
 
-test("cancelTurn rejects workflow-owned sessions so an interruption cannot advance partial output", async () => {
-  const { db, hub, svc } = makeHarness();
-  const id = seedSession(svc, hub);
-  db.updateSessionStatus(id, "running", Date.now());
-  const original = db.activeWorkflowAttemptsForSession.bind(db);
-  Object.defineProperty(db, "activeWorkflowAttemptsForSession", {
-    configurable: true,
-    value: (sessionId: string) => sessionId === id ? [{ attemptId: "attempt-1" }] : original(sessionId),
-  });
-
-  const result = await svc.cancelTurn(id);
-
-  assert.equal(result.status, 409);
-  assert.match(result.error ?? "", /workflow-owned sessions/i);
-  assert.equal(hub.sentOfType("interrupt_turn").length, 0);
-});
-
 test("cancelTurn rejects the active auto-orchestrated pod member so truncated output cannot advance", async () => {
   const { db, hub, svc } = makeHarness();
   const first = seedReadyPodSession(db, svc, hub, "Lead");
@@ -21197,7 +20959,7 @@ test("restart refuses every persisted Codex exec session instead of launching Ap
 });
 
 for (const runnerShape of ["older runner, exec available", "current runner, exec unavailable"] as const) {
-  test(`creating a session, run, or workflow on a Codex exec agent is refused with the retired reason: ${runnerShape} (#3259)`, () => {
+  test(`creating a session or run on a Codex exec agent is refused with the retired reason: ${runnerShape} (#3259)`, () => {
     const { db, hub, svc } = makeHarness();
     if (runnerShape === "current runner, exec unavailable") {
       db.updateRunnerAgents(RUNNER_ID, runnerMeta().agents.map((agent) => agent.id === CODEX_AGENT_ID
@@ -21214,12 +20976,6 @@ for (const runnerShape of ["older runner, exec available", "current runner, exec
     });
     assert.equal(run.status, 409);
     assert.equal(run.error, `${CODEX_AGENT_ID}: ${CODEX_EXEC_RETIRED_REASON}`, "never a partial run without the exec member");
-    const workflow = svc.createWorkflowRun({
-      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review", task: "Build and review",
-      agentBindings: { claude: AGENT_ID, codex: CODEX_AGENT_ID },
-    });
-    assert.equal(workflow.status, 409);
-    assert.equal(workflow.error, `${CODEX_AGENT_ID}: ${CODEX_EXEC_RETIRED_REASON}`);
     assert.equal(db.listRuns().length, 0, "nothing was created");
     assert.equal(hub.sentOfType("start_session").length, startsBefore, "nothing reached the runner");
   });
@@ -21503,7 +21259,7 @@ test("a known runner history epoch change atomically clears the cache and broadc
   assert.equal(db.getSession("s_box1")?.eventEpoch, 1);
   assert.deepEqual(hub.sessionEventsResetCalls.at(-1), { sessionId: "s_box1", events: [], eventEpoch: 1 });
   assert.equal(db.getRunnerHistoryState("s_box1")?.historyEpoch, 11);
-  assert.ok(artifactIds.every((artifactId) => db.getWorkflowArtifact(artifactId) === null));
+  assert.ok(artifactIds.every((artifactId) => db.getArtifact(artifactId) === null));
 });
 
 test("a runner history reset broadcasts retained attachment rows to open dashboards", () => {
@@ -22121,7 +21877,7 @@ test("large live event payloads persist and broadcast only a bounded artifact-ba
   assert.deepEqual(hub.sessionEventCalls.at(-1)?.payload, event.payload);
   assert.equal(event.payload.text.includes("uniquemiddletoken"), false, "the marker sits outside the bounded preview");
   assert.equal(db.searchEvents("uniqueftstoken")[0]?.sessionId, id, "FTS retains its existing bounded search coverage");
-  const reconstructed = Buffer.concat(event.payload.textRefs!.map((ref) => db.readWorkflowArtifactBytes(ref.artifactId)!))
+  const reconstructed = Buffer.concat(event.payload.textRefs!.map((ref) => db.readArtifactBytes(ref.artifactId)!))
     .toString("utf8");
   assert.equal(reconstructed, original);
 
@@ -22134,24 +21890,24 @@ test("large live event payloads persist and broadcast only a bounded artifact-ba
   assert.equal(db.collectOrphanedEventPayloadArtifacts(), 0, "indexed reachability retains committed chunks");
   db.clearSessionEvents(id);
   assert.deepEqual(db.listEvents(id), []);
-  assert.ok(artifactIds.every((artifactId) => db.getWorkflowArtifact(artifactId) === null));
+  assert.ok(artifactIds.every((artifactId) => db.getArtifact(artifactId) === null));
 });
 
 test("artifact storage failure keeps the original large live event losslessly", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
   const original = "lossless-".repeat(3_000);
-  const create = db.createWorkflowArtifactBytes.bind(db);
-  db.createWorkflowArtifactBytes = () => { throw new Error("storage unavailable"); };
+  const create = db.createArtifactBytes.bind(db);
+  db.createArtifactBytes = () => { throw new Error("storage unavailable"); };
   try {
     svc.onSessionEvent(id, { kind: "stderr", text: original });
   } finally {
-    db.createWorkflowArtifactBytes = create;
+    db.createArtifactBytes = create;
   }
   const event = db.listEvents(id)[0]!;
   assert.deepEqual(event.payload, { kind: "stderr", text: original });
   assert.deepEqual(hub.sessionEventCalls.at(-1)?.payload, event.payload);
-  assert.equal(db.listSessionWorkflowArtifacts(id).length, 0);
+  assert.equal(db.listSessionArtifacts(id).length, 0);
 });
 
 test("event append failure rolls back artifacts created for that uncommitted event", () => {
@@ -22168,7 +21924,7 @@ test("event append failure rolls back artifacts created for that uncommitted eve
     db.appendEvent = append;
   }
   assert.deepEqual(db.listEvents(id), []);
-  assert.deepEqual(db.listSessionWorkflowArtifacts(id), []);
+  assert.deepEqual(db.listSessionArtifacts(id), []);
 });
 
 test("runner deletion removes session-only large-event artifacts and their blobs", () => {
@@ -22184,7 +21940,7 @@ test("runner deletion removes session-only large-event artifacts and their blobs
 
   assert.ok(db.deleteRunner(RUNNER_ID));
   assert.equal(db.getSession(id), null);
-  assert.ok(artifactIds.every((artifactId) => db.getWorkflowArtifact(artifactId) === null));
+  assert.ok(artifactIds.every((artifactId) => db.getArtifact(artifactId) === null));
 });
 
 /** Hold every blob staging until released, so a test can act while a payload is in flight. */
@@ -22215,7 +21971,7 @@ test("a staged large live event commits only after its chunks are durable", asyn
   try {
     const staging = svc.stageLiveSessionEventPayload(id, { kind: "command_output", text }, undefined, RUNNER_ID);
     assert.ok(staging, "a large payload is staged asynchronously");
-    assert.deepEqual(db.listSessionWorkflowArtifacts(id), [], "no row exists while the blob is in flight");
+    assert.deepEqual(db.listSessionArtifacts(id), [], "no row exists while the blob is in flight");
     const waiting = svc.awaitStagedLiveSessionEvent(id, staging);
     gate.release();
     prepared = await waiting;
@@ -22227,12 +21983,12 @@ test("a staged large live event commits only after its chunks are durable", asyn
   const event = db.listEvents(id).find((candidate) => candidate.payload.kind === "command_output")!;
   assert.ok(event.payload.kind === "command_output" && event.payload.textRefs?.length);
   assert.equal(
-    Buffer.concat(event.payload.textRefs!.map((ref) => db.readWorkflowArtifactBytes(ref.artifactId)!)).toString("utf8"),
+    Buffer.concat(event.payload.textRefs!.map((ref) => db.readArtifactBytes(ref.artifactId)!)).toString("utf8"),
     text,
   );
   assert.equal(pendingBlobCount(db), 0);
   prepared.staged!.release();
-  assert.ok(db.readWorkflowArtifactBytes(event.payload.textRefs![0]!.artifactId), "releasing again is harmless");
+  assert.ok(db.readArtifactBytes(event.payload.textRefs![0]!.artifactId), "releasing again is harmless");
 });
 
 test("an inline payload, an unknown session, or a runner that does not own it stages nothing", () => {
@@ -22272,7 +22028,7 @@ test("a large live event whose blob staging fails keeps its original payload inl
   svc.onSessionEvent(id, { kind: "stderr", text: original }, undefined, undefined, RUNNER_ID, prepared);
   const event = db.listEvents(id).find((candidate) => candidate.payload.kind === "stderr")!;
   assert.deepEqual(event.payload, { kind: "stderr", text: original });
-  assert.deepEqual(db.listSessionWorkflowArtifacts(id), []);
+  assert.deepEqual(db.listSessionArtifacts(id), []);
   assert.equal(pendingBlobCount(db), 0, "the failed staging removed its pending blob");
 });
 
@@ -22298,7 +22054,7 @@ test("a live event whose history was reset while its payload staged is re-read f
   }
   svc.onSessionEvent("s_box1", payload, 1, 1_001, RUNNER_ID, prepared);
   assert.deepEqual(db.listEvents("s_box1"), [], "the old generation's event never enters the new one");
-  assert.deepEqual(db.listSessionWorkflowArtifacts("s_box1"), []);
+  assert.deepEqual(db.listSessionArtifacts("s_box1"), []);
   assert.equal(pendingBlobCount(db), 0);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.ok(requests.includes("session_history_page"), JSON.stringify(requests));
@@ -22345,7 +22101,7 @@ test("an indexed history page staged across a history reset is not applied", asy
   }
   assert.deepEqual(db.listEvents("s_box1"), [], "the old generation's page never enters the new one");
   assert.equal(db.getRunnerHistoryState("s_box1")?.historyEpoch, 11, "nor resets history back to it");
-  assert.deepEqual(db.listSessionWorkflowArtifacts("s_box1"), []);
+  assert.deepEqual(db.listSessionArtifacts("s_box1"), []);
   assert.equal(pendingBlobCount(db), 0);
   assert.equal(pages, 2, "a fresh pass reads the current history instead");
 });
@@ -22395,7 +22151,7 @@ test("a legacy history batch staged across a reprocess is not appended", async (
     ["replacement-generation event"],
     "only the replacement generation remains",
   );
-  assert.deepEqual(db.listSessionWorkflowArtifacts("s_box1"), []);
+  assert.deepEqual(db.listSessionArtifacts("s_box1"), []);
   assert.equal(pendingBlobCount(db), 0);
 });
 
@@ -22440,7 +22196,7 @@ test("an older reprocess result staged across a newer reprocess does not replace
     ["newer-result"],
   );
   assert.equal(db.getSession("s_box1")?.preview, "newer");
-  assert.deepEqual(db.listSessionWorkflowArtifacts("s_box1"), []);
+  assert.deepEqual(db.listSessionArtifacts("s_box1"), []);
   assert.equal(pendingBlobCount(db), 0);
 });
 
@@ -22509,7 +22265,7 @@ test("a runner's frames keep arrival order while a large payload becomes durable
     await untilStagingStarts(gate);
     for (let index = 0; index < 5; index++) await new Promise<void>((resolve) => setImmediate(resolve));
     assert.deepEqual(handled, [], "nothing overtakes the frame whose payload is still in flight");
-    assert.deepEqual(db.listSessionWorkflowArtifacts(slow), []);
+    assert.deepEqual(db.listSessionArtifacts(slow), []);
     gate.release();
     await eventually(() => handled.length === 4, "every frame was handled");
   } finally {
@@ -22549,7 +22305,7 @@ test("indexed history pages externalize large payloads before cache persistence 
   assert.ok(event.payload.textRefs?.length);
   assert.equal(JSON.stringify(hub.sessionEventCalls.at(-1)).includes(original), false);
   assert.equal(
-    Buffer.concat(event.payload.textRefs!.map((ref) => db.readWorkflowArtifactBytes(ref.artifactId)!)).toString("utf8"),
+    Buffer.concat(event.payload.textRefs!.map((ref) => db.readArtifactBytes(ref.artifactId)!)).toString("utf8"),
     original,
   );
 });
@@ -22880,7 +22636,7 @@ test("reprocessSession advances the event epoch before publishing the replacemen
   assert.equal(freshPayload.kind, "command_output");
   assert.ok(freshPayload.kind === "command_output" && freshPayload.textRefs?.length);
   assert.equal(JSON.stringify(freshPayload).includes(freshText), false);
-  assert.ok(staleArtifactIds.every((artifactId) => db.getWorkflowArtifact(artifactId) === null));
+  assert.ok(staleArtifactIds.every((artifactId) => db.getArtifact(artifactId) === null));
   assert.equal(hub.sessionChangedCalls.at(-1)?.id, "s_box1");
   assert.deepEqual(hub.sessionEventsResetCalls, [{
     sessionId: "s_box1",
@@ -24443,7 +24199,7 @@ test("notify hook: a permission ask that displaces a guardrail park re-notifies 
   assert.equal(sent.length, 2);
 });
 
-test("restoring swallowed hook idle replays workflow settlement and notification", () => {
+test("restoring swallowed hook idle replays the notification", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
   const hub = new FakeHub();
@@ -24452,26 +24208,8 @@ test("restoring swallowed hook idle replays workflow settlement and notification
     const message = pushDecision(previous, view);
     if (message) sent.push(message);
   });
-  const runResult = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentIds: [AGENT_ID, CODEX_APP_AGENT_ID],
-    task: "Exercise restored settlement",
-  });
-  assert.ok(runResult.ok && runResult.data);
-  const run = runResult.data!.run;
-  for (const session of runResult.data!.sessions) db.updateSessionStatus(session.id, "idle", Date.now());
-  const definition = svc.workflowDefinitions().data!
-    .find((candidate) => candidate.workflowId === "builtin:build-review")!;
-  const instance = svc.createWorkflowInstance({
-    workflowId: definition.workflowId,
-    runId: run.id,
-  }).data!;
-  const dispatched = svc.dispatchWorkflowNode(instance.instanceId, "build", {
-    dispatchKey: "restored-settlement:1",
-  }).data!.attempt;
-  const buildSession = db.runMemberSessions(run.id, AGENT_ID)[0]!;
-  assert.equal(db.getWorkflowAttempt(dispatched.attemptId)!.status, "running");
+  const buildSession = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+  db.updateSessionStatus(buildSession.id, "running", Date.now());
   assert.ok(svc.upsertGovernancePolicy({
     policyId: "ask-workflow-restored-idle",
     name: "Ask During Workflow Build",
@@ -24489,614 +24227,16 @@ test("restoring swallowed hook idle replays workflow settlement and notification
   }, true).data!;
   svc.onSessionStatus(buildSession.id, "idle");
   assert.equal(
-    db.getWorkflowAttempt(dispatched.attemptId)!.status,
-    "running",
+    db.getSession(buildSession.id)!.status,
+    "input_required",
     "the visible hook card swallows the runner idle until its decision",
   );
   const notificationCountBeforeResolution = sent.length;
 
   assert.ok(svc.approve(buildSession.id, asked.approvalRequestId!, "allow").ok);
   assert.equal(db.getSession(buildSession.id)!.status, "idle");
-  assert.equal(db.getWorkflowAttempt(dispatched.attemptId)!.status, "awaiting_output");
   assert.equal(sent.length, notificationCountBeforeResolution + 1);
   assert.match(sent.at(-1)!.body, /ready|finished|complete/i);
-  db.close();
-});
-
-test("workflow execution dispatches exactly once and advances the build-review artifact loop", () => {
-  const { db, hub, svc } = makeHarness();
-  const runResult = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID], task: "Implement the feature" });
-  assert.equal(runResult.ok, true);
-  const run = runResult.data!.run;
-  for (const session of runResult.data!.sessions) db.updateSessionStatus(session.id, "idle", Date.now());
-  const builtinResult = svc.workflowDefinitions();
-  const definition = builtinResult.data!.find((candidate) => candidate.workflowId === "builtin:build-review")!;
-  const instanceResult = svc.createWorkflowInstance({ workflowId: definition.workflowId, runId: run.id }, { kind: "human", id: "device-1" });
-  const instance = instanceResult.data!;
-
-  const beforeDispatch = hub.sentToRunner.length;
-  const dispatched = svc.dispatchWorkflowNode(instance.instanceId, "build", { dispatchKey: "build:1" }, { kind: "human", id: "device-1" });
-  assert.equal(dispatched.ok, true);
-  assert.equal(dispatched.data!.attempt.status, "running");
-  assert.equal(hub.sentToRunner.length, beforeDispatch + 1);
-  const duplicate = svc.dispatchWorkflowNode(instance.instanceId, "build", { dispatchKey: "build:1" }, { kind: "human", id: "device-1" });
-  assert.equal(duplicate.data!.idempotent, true);
-  assert.equal(hub.sentToRunner.length, beforeDispatch + 1);
-
-  const buildSession = db.runMemberSessions(run.id, AGENT_ID)[0]!;
-  svc.onSessionStatus(buildSession.id, "idle");
-  assert.equal(db.getWorkflowAttempt(dispatched.data!.attempt.attemptId)!.status, "awaiting_output");
-  const patch = svc.createWorkflowArtifact({
-    runId: run.id, sessionId: buildSession.id, kind: "patch", name: "implementation.diff",
-    mimeType: "text/x-diff", encoding: "utf8", data: "diff --git a/a b/a\n+done\n",
-  }, { kind: "agent", id: AGENT_ID });
-  assert.equal(patch.ok, true);
-  const buildComplete = svc.completeWorkflowAttempt(dispatched.data!.attempt.attemptId, {
-    outcome: "success", outputs: { implementation_patch: patch.data!.artifactId },
-  }, { kind: "agent", id: AGENT_ID });
-  assert.equal(buildComplete.ok, true);
-  assert.equal(buildComplete.data!.nodeStates.find((state) => state.nodeId === "review")!.status, "ready");
-
-  const review = svc.dispatchWorkflowNode(instance.instanceId, "review", { dispatchKey: "review:1" }, { kind: "system", id: "scheduler" });
-  assert.equal(review.ok, true);
-  assert.match((hub.lastSent() as Extract<ControlPlaneToRunner, { type: "prompt_session" }>).text, /implementation\.diff|diff --git/);
-  const reviewSession = db.runMemberSessions(run.id, CODEX_APP_AGENT_ID)[0]!;
-  svc.onSessionStatus(reviewSession.id, "idle");
-  const report = svc.createWorkflowArtifact({
-    runId: run.id, sessionId: reviewSession.id, kind: "review_report", name: "review.md",
-    mimeType: "text/markdown", encoding: "utf8", data: "Please fix the edge case.",
-  }, { kind: "agent", id: CODEX_APP_AGENT_ID });
-  const verdict = svc.createWorkflowArtifact({
-    runId: run.id, sessionId: reviewSession.id, kind: "verdict", name: "verdict.json",
-    mimeType: "application/json", encoding: "json", data: JSON.stringify({ outcome: "changes_requested" }),
-  }, { kind: "agent", id: CODEX_APP_AGENT_ID });
-  const reviewed = svc.completeWorkflowAttempt(review.data!.attempt.attemptId, {
-    outcome: "changes_requested",
-    outputs: { review_report: report.data!.artifactId, review_verdict: verdict.data!.artifactId },
-  }, { kind: "agent", id: CODEX_APP_AGENT_ID });
-  assert.equal(reviewed.ok, true);
-  assert.equal(reviewed.data!.nodeStates.find((state) => state.nodeId === "address")!.status, "ready");
-  assert.deepEqual(Object.keys(db.workflowAttemptOutputs(review.data!.attempt.attemptId)).sort(), ["review_report", "review_verdict"]);
-  db.close();
-});
-
-test("workflow durable delivery stages every deterministic start before resource writes", () => {
-  const { db, hub, svc } = makeHarness();
-  const local = db.localIdentityContext();
-  const userScope = {
-    organizationId: local.organizationId,
-    owner: { kind: "user" as const, userId: local.userId },
-  };
-  assert.equal(db.setResourceScope({
-    resource: "workspace", runnerId: RUNNER_ID, resourceId: WORKSPACE_ID, scope: userScope, now: 1,
-  }), true);
-  const order: string[] = [];
-  let staged: PreStagedDeliveryPlan | undefined;
-  const request = {
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    workflowId: "builtin:build-review",
-    task: "Build and review durably",
-    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-    orchestratorAgentId: "test-orchestrator",
-  };
-  const delivery = {
-    runId: "r_automation_exact",
-    workflowInstanceId: "wfi_automation_exact",
-    memberSessionId: (index: number) => `s_automation_member_${index}`,
-    stage(plan: PreStagedDeliveryPlan) {
-      order.push("stage");
-      const firstMaterialization = staged === undefined;
-      staged = plan;
-      if (firstMaterialization) {
-        assert.equal(db.getRun("r_automation_exact"), null);
-        assert.equal(db.getWorkflowInstance("wfi_automation_exact"), null);
-        for (let index = 0; index < 3; index++) {
-          assert.equal(db.getSession(`s_automation_member_${index}`), null);
-        }
-      }
-    },
-    activate(plan: PreStagedDeliveryPlan) {
-      order.push("activate");
-      assert.strictEqual(plan, staged);
-      assert.ok(db.getRun("r_automation_exact"));
-      assert.ok(db.getWorkflowInstance("wfi_automation_exact"));
-      for (const command of plan.commands) assert.ok(db.getSession(command.spec.sessionId));
-    },
-  };
-
-  const created = svc.createWorkflowRun(request, { kind: "system", id: "automation:test" }, delivery);
-  assert.equal(created.status, 201);
-  assert.deepEqual(order, ["stage", "activate"]);
-  assert.equal(created.data!.run.id, "r_automation_exact");
-  assert.equal(created.data!.instance.instanceId, "wfi_automation_exact");
-  assert.equal(staged!.commands.length, 3);
-  assert.deepEqual(staged!.commands.map((command) => command.spec.sessionId), [
-    "s_automation_member_0", "s_automation_member_1", "s_automation_member_2",
-  ]);
-  assert.equal(staged!.commands.filter((command) => command.initialPrompt !== undefined).length, 1);
-  const orchestrator = staged!.commands.at(-1)!;
-  assert.match(orchestrator.initialPrompt!, /wfi_automation_exact/);
-  assert.match(orchestrator.initialPrompt!, /r_automation_exact/);
-  assert.equal(orchestrator.spec.agentId, "test-orchestrator");
-  assert.deepEqual(db.sessionScope(orchestrator.spec.sessionId)?.owner, {
-    kind: "organization", organizationId: local.organizationId,
-  });
-  for (const worker of staged!.commands.slice(0, -1)) {
-    assert.deepEqual(db.sessionScope(worker.spec.sessionId), userScope);
-  }
-  assert.equal(hub.sentOfType("start_session").length, 0);
-
-  order.length = 0;
-  const recovered = svc.createWorkflowRun(request, { kind: "system", id: "automation:test" }, delivery);
-  assert.equal(recovered.status, 201);
-  assert.deepEqual(order, ["stage", "activate"]);
-  assert.equal(db.listRuns().filter((run) => run.id === "r_automation_exact").length, 1);
-  assert.equal(created.data!.sessions.length, recovered.data!.sessions.length);
-
-  let conflictStaged = false;
-  const conflict = svc.createWorkflowRun({ ...request, title: "conflict" }, { kind: "system", id: "automation:test" }, {
-    ...delivery,
-    stage() { conflictStaged = true; },
-  });
-  assert.equal(conflict.status, 409);
-  assert.equal(conflictStaged, false);
-  db.close();
-});
-
-
-
-test("workflow runs preserve an exact Project Location for every member", () => {
-  const { db, svc } = makeHarness();
-  const location = db.findProjectLocation(RUNNER_ID, WORKSPACE_ID)!;
-
-  const created = svc.createWorkflowRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    projectId: location.projectId,
-    projectLocationId: location.id,
-    workflowId: "builtin:build-review",
-    task: "Implement and review in one Project",
-    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-    orchestratorAgentId: "test-orchestrator",
-  });
-
-  assert.ok(created.ok && created.data);
-  for (const session of created.data!.sessions) {
-    assert.equal(session.projectId, location.projectId);
-    assert.equal(session.projectLocationId, location.id);
-  }
-});
-
-test("a long task leaves room in every workflow member's title for its role (#2209)", () => {
-  const { db, svc } = makeHarness();
-  const location = db.findProjectLocation(RUNNER_ID, WORKSPACE_ID)!;
-  const task = `${"Refactor the deployment pipeline so every stage reports its own health ".repeat(3)}\nthen ship it`;
-  const created = svc.createWorkflowRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    projectId: location.projectId,
-    projectLocationId: location.id,
-    workflowId: "builtin:build-review",
-    task,
-    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-    orchestratorAgentId: "test-orchestrator",
-  });
-  assert.ok(created.ok && created.data, created.error);
-  const titles = created.data!.sessions.map((session) => session.title);
-  assert.equal(new Set(titles).size, titles.length, `every member title is distinct: ${JSON.stringify(titles)}`);
-  for (const title of titles) {
-    assert.ok(title.length <= 120, title);
-    assert.match(title, /^Refactor the deployment pipeline.*… · \S+$/, "a word-boundary task title, then the role");
-  }
-});
-
-test("workflow workers adopt team Project scope while a trusted orchestrator stays organization-scoped", () => {
-  const { db, svc } = makeHarness();
-  const { project, location, scope } = makeTeamOwnedProject(db);
-  const request = {
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    projectId: project.id,
-    projectLocationId: location.id,
-    workflowId: "builtin:build-review",
-    task: "Implement and review for the Project team",
-    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-  };
-
-  const workerOnly = svc.createWorkflowRun(request);
-  assert.ok(workerOnly.ok && workerOnly.data);
-  for (const session of workerOnly.data!.sessions) {
-    assert.equal(session.projectId, project.id);
-    assert.deepEqual(db.sessionScope(session.id), scope);
-  }
-
-  const withOrchestrator = svc.createWorkflowRun({ ...request, orchestratorAgentId: "test-orchestrator" });
-  assert.ok(withOrchestrator.ok && withOrchestrator.data);
-  const orchestrator = withOrchestrator.data!.sessions.find((session) => session.agentId === "test-orchestrator")!;
-  const workers = withOrchestrator.data!.sessions.filter((session) => session.agentId !== "test-orchestrator");
-  assert.equal(orchestrator.projectId, null);
-  assert.equal(db.sessionScope(orchestrator.id)?.owner.kind, "organization");
-  for (const session of workers) {
-    assert.equal(session.projectId, project.id);
-    assert.deepEqual(db.sessionScope(session.id), scope);
-  }
-});
-
-test("workflow runs reject a mismatched exact Project Location before persistence", () => {
-  const { db, svc } = makeHarness();
-  const location = db.findProjectLocation(RUNNER_ID, WORKSPACE_ID)!;
-  const unrelated = db.createProject({ name: "Unrelated" });
-
-  const result = svc.createWorkflowRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    projectId: unrelated.id,
-    projectLocationId: location.id,
-    workflowId: "builtin:build-review",
-    task: "Do not misfile this workflow",
-  });
-
-  assert.equal(result.status, 409);
-  assert.equal(db.listRuns().length, 0);
-  assert.equal(db.listSessions({ includeArchived: true }).length, 0);
-});
-
-test("workflow run preset creates idle role-bound workers and prompts only its ordinary orchestrator", () => {
-  const { db, hub, svc } = makeHarness();
-  const local = db.localIdentityContext();
-  const userScope = {
-    organizationId: local.organizationId,
-    owner: { kind: "user" as const, userId: local.userId },
-  };
-  assert.equal(db.setResourceScope({
-    resource: "workspace", runnerId: RUNNER_ID, resourceId: WORKSPACE_ID, scope: userScope, now: 1,
-  }), true);
-  const created = svc.createWorkflowRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    workflowId: "builtin:build-review",
-    task: "Implement and independently review the change",
-    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-    orchestratorAgentId: "test-orchestrator",
-  }, { kind: "human", id: "device-1" });
-  assert.equal(created.status, 201);
-  assert.equal(created.ok, true);
-  const result = created.data!;
-  assert.equal(result.sessions.length, 3);
-  assert.equal(result.instance.runId, result.run.id);
-  assert.equal(result.instance.nodeStates.find((state) => state.nodeId === "build")!.status, "ready");
-  assert.equal(db.runMemberSessions(result.run.id, "claude").length, 1);
-  assert.equal(db.runMemberSessions(result.run.id, "codex").length, 1);
-  const orchestratorSession = db.runMemberSessions(result.run.id, "__orchestrator__")[0]!;
-  assert.equal(orchestratorSession.agentId, "test-orchestrator");
-  const orchestratorScope = db.sessionScope(orchestratorSession.id)!;
-  assert.deepEqual(orchestratorScope.owner, {
-    kind: "organization", organizationId: local.organizationId,
-  });
-  for (const worker of result.sessions.filter((session) => session.agentId !== "test-orchestrator")) {
-    assert.deepEqual(db.sessionScope(worker.id), userScope);
-  }
-  const orchestratorPrincipal: AgentPrincipal = {
-    kind: "agent", actorId: orchestratorSession.id, organizationId: local.organizationId,
-    delegatedScope: orchestratorScope,
-  };
-  assert.equal(agentDelegationAuthorizationError("/api/runs", orchestratorPrincipal), null);
-  assert.equal(agentDelegationAuthorizationError("/api/workflow-runs", orchestratorPrincipal), null);
-  assert.equal(agentDelegationAuthorizationError("/api/workflows", orchestratorPrincipal), null);
-  assert.equal(db.canAccessRunner(orchestratorPrincipal, RUNNER_ID), true);
-
-  const starts = hub.sentOfType("start_session");
-  assert.equal(starts.length, 3);
-  assert.equal(starts.filter((message) => message.initialPrompt !== undefined).length, 1);
-  const orchestratorStart = starts.find((message) => message.spec.agentId === "test-orchestrator")!;
-  assert.match(orchestratorStart.initialPrompt!, new RegExp(result.instance.instanceId));
-  assert.equal(orchestratorStart.spec.useWorktree, false);
-  for (const worker of starts.filter((message) => message.spec.agentId !== "test-orchestrator")) {
-    assert.equal(worker.initialPrompt, undefined, "workers wait for exact graph-node dispatch");
-    assert.equal(worker.spec.useWorktree, true);
-  }
-
-  const before = db.listRuns().length;
-  const bad = svc.createWorkflowRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    workflowId: "builtin:build-review",
-    task: "bad binding",
-    agentBindings: { claude: "missing-agent", codex: CODEX_APP_AGENT_ID },
-  });
-  assert.equal(bad.status, 404);
-  assert.equal(db.listRuns().length, before, "preflight failure does not persist a partial run");
-
-  assert.ok(svc.upsertGovernancePolicy({
-    policyId: "workflow:launch-check", name: "Workflow launch check", effect: "allow", priority: 50,
-    enabled: true, scope: { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID },
-  }).ok);
-  const policyOnly = svc.createWorkflowDefinition({
-    name: "Policy-only launch", maxTransitions: 1,
-    nodes: [{
-      nodeId: "gate", kind: "policy_gate", role: "launch policy", policyId: "workflow:launch-check",
-      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000,
-    }],
-    edges: [],
-  }).data!;
-  const startsBeforeSettledRun = hub.sentOfType("start_session").length;
-  const settled = svc.createWorkflowRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    workflowId: policyOnly.workflowId,
-    task: "evaluate without launching a worker",
-  });
-  assert.equal(settled.data!.instance.status, "succeeded");
-  assert.equal(settled.data!.sessions.length, 0);
-  assert.equal(hub.sentOfType("start_session").length, startsBeforeSettledRun);
-
-  const existingRunIds = new Set(db.listRuns().map((run) => run.id));
-  hub.deliver = false;
-  const raced = svc.createWorkflowRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    workflowId: "builtin:build-review",
-    task: "fail closed if the runner disconnects after preflight",
-    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-    orchestratorAgentId: "test-orchestrator",
-  });
-  assert.equal(raced.status, 409);
-  const failedRun = db.listRuns().find((run) => !existingRunIds.has(run.id))!;
-  const failedInstance = svc.workflowInstances(failedRun.id).data![0]!;
-  assert.equal(db.getWorkflowInstance(failedInstance.instanceId)!.status, "failed");
-  assert.ok(
-    db.listSessions({ includeArchived: true })
-      .filter((session) => session.runId === failedRun.id)
-      .every((session) => session.status === "stopped"),
-    "a post-preflight delivery race leaves no starting workflow members",
-  );
-  db.close();
-});
-
-test("a workflow dispatch refused by a runner capability gate keeps the runner versions (#2362)", () => {
-  const { db, svc } = makeHarness();
-  const runResult = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Dispatch" });
-  const session = runResult.data!.sessions[0]!;
-  db.updateSessionStatus(session.id, "idle", Date.now());
-  const definition = svc.createWorkflowDefinition({
-    name: "One node", maxTransitions: 3,
-    nodes: [{ nodeId: "work", kind: "agent", role: "worker", agentId: AGENT_ID, inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
-    edges: [],
-  }).data!;
-  const instance = svc.createWorkflowInstance({ workflowId: definition.workflowId, runId: runResult.data!.run.id }).data!;
-  const refusal = {
-    ok: false as const,
-    status: 409,
-    error: "This machine needs a newer runner for prompt image attachments. Update and restart the runner.",
-    capabilityRequirement: { requiredRunnerProtocolVersion: 56, runnerProtocolVersion: 55 },
-  };
-  (svc as unknown as { prompt: () => typeof refusal }).prompt = () => refusal;
-  const dispatched = svc.dispatchWorkflowNode(instance.instanceId, "work", { dispatchKey: "refused:1" });
-  assert.equal(dispatched.status, 409);
-  assert.equal(dispatched.error, `workflow dispatch failed: ${refusal.error}`);
-  assert.deepEqual(dispatched.capabilityRequirement, refusal.capabilityRequirement);
-  db.close();
-});
-
-test("workflow retries, timeouts, and human gates are durable and bounded", () => {
-  const { db, svc } = makeHarness();
-  const runResult = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Try safely" });
-  const run = runResult.data!.run;
-  const session = runResult.data!.sessions[0]!;
-  db.updateSessionStatus(session.id, "idle", Date.now());
-  const retrySpec: WorkflowDefinitionSpec = {
-    name: "Retry once", maxTransitions: 3,
-    nodes: [{ nodeId: "work", kind: "agent", role: "worker", agentId: AGENT_ID, inputs: [], outputs: [], retry: { maxAttempts: 2, backoffMs: 0 }, timeoutMs: 1_000 }],
-    edges: [],
-  };
-  const definition = svc.createWorkflowDefinition(retrySpec).data!;
-  const instance = svc.createWorkflowInstance({ workflowId: definition.workflowId, runId: run.id }).data!;
-  const first = svc.dispatchWorkflowNode(instance.instanceId, "work", { dispatchKey: "retry:1" }).data!.attempt;
-  svc.onSessionStatus(session.id, "idle");
-  const retry = svc.completeWorkflowAttempt(first.attemptId, { outcome: "failure", error: "transient" });
-  assert.equal(retry.data!.nodeStates[0]!.status, "ready");
-  db.updateSessionStatus(session.id, "idle", Date.now());
-  const second = svc.dispatchWorkflowNode(instance.instanceId, "work", { dispatchKey: "retry:2" }).data!.attempt;
-  svc.onSessionStatus(session.id, "idle");
-  assert.equal(db.getWorkflowAttempt(second.attemptId)!.status, "awaiting_output");
-  assert.equal(svc.recoverExpiredWorkflowAttempts(second.deadlineAt), 1);
-  const timedOut = db.getWorkflowInstance(instance.instanceId)!;
-  assert.equal(timedOut.status, "failed");
-  assert.equal(timedOut.attempts[1]!.status, "timed_out");
-
-  const gateSpec: WorkflowDefinitionSpec = {
-    name: "Human gate", maxTransitions: 2,
-    nodes: [{ nodeId: "approve", kind: "human_gate", role: "approver", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 }],
-    edges: [],
-  };
-  const gateDefinition = svc.createWorkflowDefinition(gateSpec).data!;
-  const gate = svc.createWorkflowInstance({ workflowId: gateDefinition.workflowId, runId: run.id }).data!;
-  assert.equal(gate.status, "waiting_gate");
-  assert.equal(gate.nodeStates[0]!.status, "waiting_gate");
-  const resolved = svc.resolveWorkflowGate(gate.instanceId, "approve", { outcome: "success" }, { kind: "human", id: "device-1" });
-  assert.equal(resolved.data!.status, "succeeded");
-  assert.equal(resolved.data!.events.at(-1)!.kind, "gate_resolved");
-  db.close();
-});
-
-test("workflow delivery failures roll back sessions, transition caps terminate, and policy gates cannot be human-bypassed", () => {
-  const { db, hub, svc } = makeHarness();
-  const runResult = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Bound the work" });
-  const run = runResult.data!.run;
-  const session = runResult.data!.sessions[0]!;
-  db.updateSessionStatus(session.id, "idle", Date.now());
-  const cappedSpec: WorkflowDefinitionSpec = {
-    name: "One transition", maxTransitions: 1,
-    nodes: [{ nodeId: "work", kind: "agent", role: "worker", agentId: AGENT_ID, inputs: [], outputs: [], retry: { maxAttempts: 2, backoffMs: 0 }, timeoutMs: 60_000 }],
-    edges: [],
-  };
-  const definition = svc.createWorkflowDefinition(cappedSpec).data!;
-  const deliveryInstance = svc.createWorkflowInstance({ workflowId: definition.workflowId, runId: run.id }).data!;
-  hub.deliver = false;
-  const delivery = svc.dispatchWorkflowNode(deliveryInstance.instanceId, "work", { dispatchKey: "delivery:1" });
-  assert.equal(delivery.status, 409);
-  assert.equal(db.getSession(session.id)!.status, "idle");
-  assert.equal(db.getWorkflowInstance(deliveryInstance.instanceId)!.nodeStates[0]!.status, "ready");
-
-  hub.deliver = true;
-  const capped = svc.createWorkflowInstance({ workflowId: definition.workflowId, runId: run.id }).data!;
-  const first = svc.dispatchWorkflowNode(capped.instanceId, "work", { dispatchKey: "cap:1" }).data!.attempt;
-  svc.onSessionStatus(session.id, "idle");
-  assert.equal(svc.completeWorkflowAttempt(first.attemptId, { outcome: "failure" }).ok, true);
-  const overCap = svc.dispatchWorkflowNode(capped.instanceId, "work", { dispatchKey: "cap:2" });
-  assert.equal(overCap.status, 409);
-  assert.equal(db.getWorkflowInstance(capped.instanceId)!.status, "failed");
-
-  const crashWindow = svc.createWorkflowInstance({ workflowId: definition.workflowId, runId: run.id }).data!;
-  const crashClaim = db.claimWorkflowAttempt({
-    attemptId: "crash-attempt", instanceId: crashWindow.instanceId, nodeId: "work",
-    dispatchKey: "crash:1", sessionId: session.id, timeoutMs: 60_000,
-    maxTransitions: crashWindow.definition.maxTransitions, actor: { kind: "system", id: "dispatcher" }, now: Date.now(),
-  }).attempt;
-  assert.equal(svc.recoverWorkflowRunner(RUNNER_ID), 1);
-  assert.equal(db.getWorkflowAttempt(crashClaim.attemptId)!.status, "awaiting_output");
-  assert.equal(svc.recoverExpiredWorkflowAttempts(crashClaim.deadlineAt), 1);
-  assert.equal(db.getWorkflowInstance(crashWindow.instanceId)!.nodeStates[0]!.status, "ready");
-
-  const policySpec: WorkflowDefinitionSpec = {
-    name: "Policy gate", maxTransitions: 1,
-    nodes: [{ nodeId: "policy", kind: "policy_gate", role: "release policy", policyId: "release:protected", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 }],
-    edges: [],
-  };
-  const policyDefinition = svc.createWorkflowDefinition(policySpec).data!;
-  assert.equal(svc.upsertGovernancePolicy({
-    policyId: "release:protected", name: "Protected release", effect: "allow", priority: 100,
-    enabled: true, scope: { runnerId: RUNNER_ID },
-  }).ok, true);
-  const policy = svc.createWorkflowInstance({ workflowId: policyDefinition.workflowId, runId: run.id }).data!;
-  assert.equal(policy.status, "succeeded");
-  assert.equal(policy.events.at(-1)!.actor.kind, "policy");
-  assert.equal(svc.resolveWorkflowGate(policy.instanceId, "policy", { outcome: "success" }, { kind: "human", id: "device-1" }).status, 409);
-  svc.upsertGovernancePolicy({
-    policyId: "release:protected", name: "Protected release", effect: "ask", priority: 100,
-    enabled: true, scope: { runnerId: RUNNER_ID },
-  });
-  const askedPolicy = svc.createWorkflowInstance({ workflowId: policyDefinition.workflowId, runId: run.id }).data!;
-  assert.equal(askedPolicy.status, "waiting_gate");
-  assert.equal(svc.resolveWorkflowGate(askedPolicy.instanceId, "policy", { outcome: "success" }, { kind: "human", id: "device-1" }).data!.status, "succeeded");
-  db.close();
-});
-
-test("workflow verdict stop conditions cancel active sibling attempts", () => {
-  const { db, hub, svc } = makeHarness();
-  const runResult = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID], task: "Compare in parallel" });
-  const run = runResult.data!.run;
-  for (const session of runResult.data!.sessions) db.updateSessionStatus(session.id, "idle", Date.now());
-  const spec: WorkflowDefinitionSpec = {
-    name: "Parallel stop", maxTransitions: 4,
-    nodes: [
-      { nodeId: "build", kind: "agent", role: "builder", agentId: AGENT_ID, inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
-      { nodeId: "review", kind: "agent", role: "reviewer", agentId: CODEX_APP_AGENT_ID, inputs: [], outputs: [{ name: "verdict", kind: "verdict" }], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000, stopCondition: { kind: "verdict", artifact: "verdict", outcomes: ["accepted", "rejected"] } },
-    ],
-    edges: [],
-  };
-  const definition = svc.createWorkflowDefinition(spec).data!;
-  const instance = svc.createWorkflowInstance({ workflowId: definition.workflowId, runId: run.id }).data!;
-  const build = svc.dispatchWorkflowNode(instance.instanceId, "build", { dispatchKey: "parallel:build" }).data!.attempt;
-  const review = svc.dispatchWorkflowNode(instance.instanceId, "review", { dispatchKey: "parallel:review" }).data!.attempt;
-  const reviewSession = db.runMemberSessions(run.id, CODEX_APP_AGENT_ID)[0]!;
-  svc.onSessionStatus(reviewSession.id, "idle");
-  const verdict = svc.createWorkflowArtifact({
-    runId: run.id, sessionId: reviewSession.id, kind: "verdict", name: "parallel-verdict.json",
-    mimeType: "application/json", encoding: "json", data: JSON.stringify({ outcome: "accepted" }),
-  }, { kind: "agent", id: CODEX_APP_AGENT_ID }).data!;
-  const completed = svc.completeWorkflowAttempt(review.attemptId, { outcome: "accepted", outputs: { verdict: verdict.artifactId } }).data!;
-  assert.equal(completed.status, "succeeded");
-  assert.equal(db.getWorkflowAttempt(build.attemptId)!.status, "cancelled");
-  assert.ok(hub.sentOfType("cancel_session").some((message) => message.sessionId === build.sessionId));
-  assert.equal(hub.sentOfType("interrupt_turn").length, 0, "workflow lifecycle cancellation never uses the turn-only path");
-  db.close();
-});
-
-test("workflow policy gates auto-advance after agent completion and terminal gates stop untaken branches", () => {
-  const { db, svc } = makeHarness();
-  const runResult = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Gate the release" });
-  const run = runResult.data!.run;
-  const session = runResult.data!.sessions[0]!;
-  db.updateSessionStatus(session.id, "idle", Date.now());
-  svc.upsertGovernancePolicy({
-    policyId: "workflow:release", name: "Release workflow", effect: "allow", priority: 100,
-    enabled: true, scope: { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID },
-  });
-  const spec: WorkflowDefinitionSpec = {
-    name: "Build then policy", maxTransitions: 4,
-    nodes: [
-      { nodeId: "build", kind: "agent", role: "builder", agentId: AGENT_ID, inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
-      { nodeId: "policy", kind: "policy_gate", role: "release policy", policyId: "workflow:release", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
-      { nodeId: "untaken", kind: "agent", role: "fallback", agentId: AGENT_ID, inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
-    ],
-    edges: [
-      { edgeId: "build_policy", from: "build", to: "policy", on: "success" },
-      { edgeId: "policy_untaken", from: "policy", to: "untaken", on: "failure" },
-    ],
-  };
-  const definition = svc.createWorkflowDefinition(spec).data!;
-  const instance = svc.createWorkflowInstance({ workflowId: definition.workflowId, runId: run.id }).data!;
-  const build = svc.dispatchWorkflowNode(instance.instanceId, "build", { dispatchKey: "policy-build:1" }).data!.attempt;
-  svc.onSessionStatus(session.id, "idle");
-  const completed = svc.completeWorkflowAttempt(build.attemptId, { outcome: "success" }).data!;
-  assert.equal(completed.status, "succeeded");
-  assert.equal(completed.nodeStates.find((state) => state.nodeId === "policy")!.status, "succeeded");
-  assert.equal(completed.nodeStates.find((state) => state.nodeId === "untaken")!.status, "stopped");
-  assert.equal(completed.events.at(-1)!.actor.kind, "policy");
-  db.close();
-});
-
-test("policy-only cycles terminate at the transition cap and mixed fan-out remains running", () => {
-  const { db, svc } = makeHarness();
-  const run = svc.createRun({
-    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Exercise workflow states",
-  }).data!.run;
-  for (const policyId of ["cycle:one", "cycle:two"]) {
-    assert.equal(svc.upsertGovernancePolicy({
-      policyId, name: policyId, effect: "allow", priority: 100, enabled: true,
-      scope: { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID },
-    }).ok, true);
-  }
-  const cycleSpec: WorkflowDefinitionSpec = {
-    name: "Bounded policy cycle", maxTransitions: 5,
-    nodes: [
-      { nodeId: "start", kind: "human_gate", role: "start", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
-      { nodeId: "one", kind: "policy_gate", role: "one", policyId: "cycle:one", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
-      { nodeId: "two", kind: "policy_gate", role: "two", policyId: "cycle:two", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
-    ],
-    edges: [
-      { edgeId: "start_one", from: "start", to: "one", on: "success" },
-      { edgeId: "one_two", from: "one", to: "two", on: "success" },
-      { edgeId: "two_one", from: "two", to: "one", on: "success" },
-    ],
-  };
-  const cycleDefinition = svc.createWorkflowDefinition(cycleSpec).data!;
-  const cycle = svc.createWorkflowInstance({ workflowId: cycleDefinition.workflowId, runId: run.id }).data!;
-  const capped = svc.resolveWorkflowGate(cycle.instanceId, "start", { outcome: "success" }, { kind: "human", id: "device-1" }).data!;
-  assert.equal(capped.status, "failed");
-  assert.equal(capped.transitionCount, cycleSpec.maxTransitions);
-  assert.ok(capped.nodeStates.every((state) => !["ready", "running", "waiting_gate"].includes(state.status)));
-
-  const fanoutSpec: WorkflowDefinitionSpec = {
-    name: "Agent and gate fan-out", maxTransitions: 4,
-    nodes: [
-      { nodeId: "start", kind: "human_gate", role: "start", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
-      { nodeId: "work", kind: "agent", role: "worker", agentId: AGENT_ID, inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
-      { nodeId: "approve", kind: "human_gate", role: "approver", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
-    ],
-    edges: [
-      { edgeId: "start_work", from: "start", to: "work", on: "success" },
-      { edgeId: "start_approve", from: "start", to: "approve", on: "success" },
-    ],
-  };
-  const fanoutDefinition = svc.createWorkflowDefinition(fanoutSpec).data!;
-  const fanout = svc.createWorkflowInstance({ workflowId: fanoutDefinition.workflowId, runId: run.id }).data!;
-  const advanced = svc.resolveWorkflowGate(fanout.instanceId, "start", { outcome: "success" }, { kind: "human", id: "device-1" }).data!;
-  assert.equal(advanced.status, "running");
-  assert.equal(advanced.nodeStates.find((state) => state.nodeId === "work")!.status, "ready");
-  assert.equal(advanced.nodeStates.find((state) => state.nodeId === "approve")!.status, "waiting_gate");
   db.close();
 });
 
@@ -25431,13 +24571,7 @@ test("a member's daily budget covers the organization-owned sessions they launch
   const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "spend more" },
     { launcherUserId: "usr_member" });
   assert.match(run.error ?? "", /daily budget reached/);
-  const workflow = svc.createWorkflowRun({
-    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review",
-    task: "spend more", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-  }, { kind: "human", id: "usr_member" }, undefined, { launcherUserId: "usr_member" });
-  assert.equal(workflow.status, 409);
-  assert.match(workflow.error ?? "", /daily budget reached/);
-  assert.equal(db.listRuns().length, runsBefore, "neither fan-out persisted a run");
+  assert.equal(db.listRuns().length, runsBefore, "the refused fan-out persisted no run");
   const nativeTui = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, launchSurface: "native_tui" },
     undefined, undefined, false, false, false, { defaultOwnerUserId: "usr_other" });
   assert.equal(nativeTui.status, 409);
@@ -25725,49 +24859,6 @@ test("run member sessions persist the run's checkpoints", () => {
   const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "go", config: { costCheckpointsUsd: [0.5, 2] } });
   assert.ok(run.ok && run.data, run.error);
   assert.deepEqual(db.getSession(run.data!.sessions[0]!.id)!.costCheckpointsUsd, [0.5, 2]);
-});
-
-test("direct and pre-staged workflow members persist and enforce the run's checkpoints", () => {
-  for (const path of ["direct", "pre-staged"] as const) {
-    const { db, svc } = makeHarness();
-    let staged = 0;
-    let activated = 0;
-    const delivery = path === "pre-staged" ? {
-      runId: "r_checkpoint_workflow",
-      workflowInstanceId: "wfi_checkpoint_workflow",
-      memberSessionId: (index: number) => `s_checkpoint_workflow_${index}`,
-      stage(_plan: PreStagedDeliveryPlan) { staged += 1; },
-      activate(_plan: PreStagedDeliveryPlan) { activated += 1; },
-    } : undefined;
-    const created = svc.createWorkflowRun({
-      runnerId: RUNNER_ID,
-      workspaceId: WORKSPACE_ID,
-      workflowId: "builtin:build-review",
-      task: `Check ${path} workflow checkpoints`,
-      agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-      config: { costCheckpointsUsd: [0.5, 2] },
-    }, { kind: "human", id: "device-1" }, delivery);
-
-    assert.ok(created.ok && created.data, `${path}: ${created.error}`);
-    assert.deepEqual([staged, activated], path === "pre-staged" ? [1, 1] : [0, 0],
-      `${path}: workflow took the wrong delivery path`);
-    assert.equal(created.data.sessions.length, 2, `${path}: expected both workflow members`);
-    for (const member of created.data.sessions) {
-      assert.deepEqual(db.getSession(member.id)!.costCheckpointsUsd, [0.5, 2],
-        `${path}: ${member.agentId} lost the workflow checkpoints`);
-      db.appendEvent(member.id, { kind: "token_usage", inputTokens: 1, costUsd: 0.75 }, Date.now(), {
-        accrueUsage: true,
-      });
-      svc.onSessionStatus(member.id, "idle");
-      const parked = db.getSession(member.id)!;
-      assert.equal(parked.status, "input_required", `${path}: ${member.agentId} did not park`);
-      assert.equal(parked.pendingApproval?.kind, "cost_checkpoint",
-        `${path}: ${member.agentId} did not show a checkpoint card`);
-      assert.match(parked.pendingApproval?.title ?? "", /\$0\.75 of \$0\.50/,
-        `${path}: ${member.agentId} did not stop at the first checkpoint`);
-    }
-    db.close();
-  }
 });
 
 test("Orchestrator is an additive role independent of the provider permission mode", () => {
@@ -26345,7 +25436,7 @@ function uiEvidenceReviewHarness(
   assert.ok(svc.setParentControlPolicy(parent.data.id, decisions, 0).ok);
   const screenshot = (sessionId: string, label: string) => {
     const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(label)]);
-    const artifact = svc.createWorkflowArtifact({
+    const artifact = svc.createArtifact({
       sessionId, kind: "screenshot", name: `${label}.png`, mimeType: "image/png", encoding: "base64",
       data: bytes.toString("base64"),
     }, { kind: "agent", id: sessionId });
@@ -26650,8 +25741,8 @@ test("validated local video path binds all source frames, ordered receipts, sour
       superseded.data.occurrenceId, frameId, () => true).status, 409);
     assert.equal(approve(replacement.data.occurrenceId).status, 409,
       "a replacement occurrence cannot reuse prior receipts");
-    h.db.deleteWorkflowArtifact(item.artifactId);
-    assert.equal(h.db.workflowArtifactExportPreflight(manifest.frames[0]!.artifactId), null,
+    h.db.deleteArtifact(item.artifactId);
+    assert.equal(h.db.artifactExportPreflight(manifest.frames[0]!.artifactId), null,
       "derived frames are removed with their source Session artifact");
     assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id,
       replacement.data.occurrenceId, frameId, () => true).status, 409,
@@ -26688,7 +25779,7 @@ test("video frame tampering and policy revocation invalidate a pending review", 
     if (snapshot.category !== "ui_evidence_approval") return;
     const first = snapshot.videoReview?.frames[0];
     assert.ok(first);
-    h.db.deleteWorkflowArtifact(first.artifactId);
+    h.db.deleteArtifact(first.artifactId);
     assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id,
       tampered.data.occurrenceId, first.evidenceId, () => true).status, 409);
     assert.equal(h.db.workflowDecisionByOccurrence(tampered.data.occurrenceId)?.status, "revoked");
@@ -26740,10 +25831,10 @@ test("retention pruning removes video-derived frames and unsupported mixed evide
     if (snapshot.category !== "ui_evidence_approval") return;
     const frameId = snapshot.videoReview?.frames[0]?.artifactId;
     assert.ok(frameId);
-    assert.ok(h.db.workflowArtifactExportPreflight(frameId));
+    assert.ok(h.db.artifactExportPreflight(frameId));
     const forgedBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
       Buffer.from("agent screenshot")]);
-    const forged = h.svc.createWorkflowArtifact({
+    const forged = h.svc.createArtifact({
       sessionId: child.id, kind: "screenshot", name: "agent.png", mimeType: "image/png",
       encoding: "base64", data: forgedBytes.toString("base64"),
       metadata: { purpose: "video_review_frame", sourceArtifactId: item.artifactId },
@@ -26753,16 +25844,16 @@ test("retention pruning removes video-derived frames and unsupported mixed evide
     const rawDb = (h.db as unknown as { db: { exec: (sql: string) => void } }).db;
     rawDb.exec("BEGIN IMMEDIATE");
     try {
-      assert.equal(h.db.deleteWorkflowArtifact(unrelated.item.artifactId), true,
+      assert.equal(h.db.deleteArtifact(unrelated.item.artifactId), true,
         "artifact deletion joins an existing transaction");
     } finally { rawDb.exec("ROLLBACK"); }
-    assert.deepEqual(h.db.readWorkflowArtifactBytes(unrelated.item.artifactId), unrelated.bytes,
+    assert.deepEqual(h.db.readArtifactBytes(unrelated.item.artifactId), unrelated.bytes,
       "rolling back an outer transaction does not lose its artifact blob");
     assert.ok(h.db.pruneExpiredSessionAttachments(Date.now() + 1000) >= 1);
-    assert.equal(h.db.workflowArtifactExportPreflight(item.artifactId), null);
-    assert.equal(h.db.workflowArtifactExportPreflight(frameId), null,
+    assert.equal(h.db.artifactExportPreflight(item.artifactId), null);
+    assert.equal(h.db.artifactExportPreflight(frameId), null,
       "retention pruning of the source also removes every server-derived frame");
-    assert.ok(h.db.workflowArtifactExportPreflight(forged.data.artifactId),
+    assert.ok(h.db.artifactExportPreflight(forged.data.artifactId),
       "agent-authored metadata cannot nominate a screenshot for frame cleanup");
   } finally { h.db.close(); }
 });
@@ -26966,7 +26057,7 @@ test("image receipt reuse refuses every identity, lifetime and revocation mismat
       };
       if (receiptChange[mismatch]) sql.prepare(`UPDATE ui_evidence_review_receipts SET ${receiptChange[mismatch]} WHERE occurrence_id=?`).run(source.occurrenceId);
       if (mismatch === "controller") sql.prepare("UPDATE workflow_decisions SET controlling_session_id=? WHERE occurrence_id=?").run(h.createChild("Other Controller").id, source.occurrenceId);
-      if (mismatch === "bytes") h.db.readWorkflowArtifactBytes = () => Buffer.from("tampered");
+      if (mismatch === "bytes") h.db.readArtifactBytes = () => Buffer.from("tampered");
       assert.deepEqual(h.db.reusableUiEvidenceReviewReceipts(target, h.parent.id, Date.now()), [], mismatch);
       const result = h.svc.resolveDescendantRequest(h.parent.id, child.id, target.occurrenceId,
         { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["image"] }, () => true);
@@ -27081,7 +26172,7 @@ test("unreviewable UI evidence falls back to the human with a specific reason an
     const other = h.createChild("Other Child");
     const image = h.screenshot(child.id, "after");
     const clip = h.video(child.id, "clip");
-    assert.deepEqual(h.db.readWorkflowArtifactBytes(clip.item.artifactId), clip.bytes);
+    assert.deepEqual(h.db.readArtifactBytes(clip.item.artifactId), clip.bytes);
     const cases: Array<[string, unknown, string]> = [
       ["video", clip.item, "media_video_unsupported"],
       ["external", { evidenceId: "after", uri: image.item.uri, sha256: image.item.sha256 }, "provider_untrusted"],
@@ -27135,7 +26226,7 @@ test("delegated UI evidence review fails closed on tampering, policy change, sup
     const tampered = h.screenshot(child.id, "tampered");
     const tamperedDecision = h.request(child.id, "tampered", [tampered.item]);
     assert.ok(tamperedDecision.ok && tamperedDecision.data);
-    h.db.deleteWorkflowArtifact(tampered.item.artifactId);
+    h.db.deleteArtifact(tampered.item.artifactId);
     assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, tamperedDecision.data.occurrenceId, "tampered", () => true).status, 409);
     assert.equal(h.db.workflowDecisionByOccurrence(tamperedDecision.data.occurrenceId)?.status, "revoked");
 
@@ -27577,7 +26668,7 @@ test("delegated image review fails closed on supersession, tampering, policy cha
     assert.ok(tamperedDecision.ok && tamperedDecision.data);
     const tamperedReview = prepareImageReview(h, child.id, tamperedDecision.data.occurrenceId);
     assert.ok(tamperedReview.ok && tamperedReview.data, tamperedReview.error);
-    h.db.deleteWorkflowArtifact(tampered.item.artifactId);
+    h.db.deleteArtifact(tampered.item.artifactId);
     assert.equal(reviewerImage(h,tamperedReview.data.reviewerSessionId, "tampered").status, 409);
     assert.equal(h.db.workflowDecisionByOccurrence(tamperedDecision.data.occurrenceId)?.status, "revoked");
     assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, tamperedReview.data.reviewId, () => true).data?.state, "ended");
@@ -28429,7 +27520,7 @@ test("file-based screenshot attach fixes the session, kind, and encoding and bou
     assert.ok(svc.attachSessionScreenshot(session.data.id, body("human"), { kind: "human", id: "owner" }, { count: 0, bytes: 0 }).ok);
     assert.equal(db.sessionAgentScreenshotUsage(session.data.id).count, 4);
 
-    const legacy = svc.createWorkflowArtifact({
+    const legacy = svc.createArtifact({
       sessionId: session.data.id, kind: "screenshot", encoding: "base64", ...body("legacy"),
     }, agent);
     assert.ok(legacy.ok && legacy.data, legacy.error);
@@ -28677,7 +27768,7 @@ test("an approved decision for a child whose worktree branch was switched is del
     // A caller whose credential may not manage the child's worktrees is told who can, with the same
     // branch and path, instead of being handed tools its route refuses (#1863).
     const cannotManageWorktrees = { canStopJobs: false, canRestart: true, canManageWorktrees: false };
-    const refusedForReader = svc.prompt(child.id, "are you there?", [], undefined, undefined, undefined, "session",
+    const refusedForReader = svc.prompt(child.id, "are you there?", [], undefined, undefined, undefined,
       false, undefined, cannotManageWorktrees);
     assert.equal(refusedForReader.status, 409);
     assert.match(refusedForReader.error ?? "", new RegExp(`branch agent/${child.id} in ${f.worktreePath}`, "u"));
@@ -29109,7 +28200,7 @@ test("approving a decision while a sibling background job is unterminated and a 
     assert.equal(db.getSession(child.id)?.status, "queued", "a prompt into a held session does not invent running");
     assert.match(followUp.data.promptDelivery?.detail ?? "", /restart_session/u);
     // A sender whose credential may neither stop the job nor restart the child is not told to (#1863).
-    const readerFollowUp = svc.prompt(child.id, "still there?", [], undefined, undefined, undefined, "session", false,
+    const readerFollowUp = svc.prompt(child.id, "still there?", [], undefined, undefined, undefined, false,
       undefined, { canStopJobs: false, canRestart: false, canManageWorktrees: true });
     assert.ok(readerFollowUp.ok && readerFollowUp.data, readerFollowUp.error);
     assert.match(readerFollowUp.data.promptDelivery?.detail ?? "", /Queued behind a hold on this session/u);
@@ -29789,7 +28880,7 @@ test("a provisional stop still fences every other durable prompt (#1827)", () =>
     // Restore the child, send it a human's durable prompt, and disconnect again: the resume is
     // kept, the human's prompt is fenced exactly as before.
     f.hydrate([f.liveChild()]);
-    const human = f.svc.prompt(child.id, "and one more thing", [], undefined, undefined, undefined, "session", true);
+    const human = f.svc.prompt(child.id, "and one more thing", [], undefined, undefined, undefined, true);
     assert.ok(human.ok, human.error);
     const humanCommand = db.raw().prepare(
       "SELECT command_id AS id FROM session_prompt_commands WHERE session_id=? AND command_id<>? ORDER BY rowid DESC LIMIT 1",
@@ -30399,7 +29490,7 @@ test("video attachments use private session storage, a video-specific limit, and
     assert.ok(first.ok && first.data, first.error);
     assert.equal(first.data.kind, "video");
     assert.equal(first.data.metadata?.purpose, "session_attachment");
-    assert.deepEqual(db.readWorkflowArtifactBytes(first.data.artifactId), webm);
+    assert.deepEqual(db.readArtifactBytes(first.data.artifactId), webm);
     const replay = svc.attachSessionVideo(id, body("walkthrough.webm"), agent, { count: 1, bytes: webm.length });
     assert.equal(replay.status, 200);
     assert.equal(replay.data?.artifactId, first.data.artifactId);
