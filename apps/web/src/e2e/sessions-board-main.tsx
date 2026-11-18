@@ -434,6 +434,16 @@ if (new URLSearchParams(location.search).has("campaigns")) {
     session("s-question", "Question Session", "input_required", { status: "input_required", updatedAt: at, lastEventAt: at,
       pendingApproval: { requestId: "campaign-question", kind: "question", title: "Which release?", options: [], questions: [] } as never }),
   );
+  // #4369: a Completed root beside its campaign state, and an active root whose child still works.
+  if (new URLSearchParams(location.search).has("campaign-labels")) {
+    sessions.splice(2, 0,
+      root("s-campaign-completed", "Campaign Root Completed: Every Issue Merged", "verified_complete",
+        { status: "completed", column: "done" }),
+      root("s-campaign-children", "Campaign Active: Child Still Working", "active"),
+      session("s-campaign-child", "#4369: Child Implementing a Fix", "running", { parentSessionId: "s-campaign-children",
+        status: "running", updatedAt: at, lastEventAt: at }),
+    );
+  }
 }
 
 const reminders: SessionReminderView[] = [
