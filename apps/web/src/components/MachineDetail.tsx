@@ -137,7 +137,7 @@ export function confirmDeleteMachine(
   const deleted = "its sessions are deleted from Wollipog. Files on the machine stay where they are.";
   return confirm({
     title: "Delete Machine",
-    message: kind === "ssh" ? `The connection to ${name} is removed, and ${deleted}` : `${name}, ${deleted}`,
+    message: kind === "ssh" ? `The connection to ${name} is removed, and ${deleted}` : `${name} and ${deleted}`,
     confirmLabel: "Delete Machine",
     tone: "danger",
     progress: "Deleting the machine…",
