@@ -97,6 +97,13 @@ test("discovery refuses malformed arguments", async () => {
   await assert.rejects(discover({ operations: Array.from({ length: 65 }, (_, index) => `fixture_${index}`) }), /1 to 64/u);
   await assert.rejects(discover({ operations: ["session_launch"], cursor: "session_launch" }), /not both/u);
   await assert.rejects(discover({ schemas: true }), /only operations or cursor/u);
+  // Unknown names are echoed in `unavailable`, so a long one is refused rather than returned.
+  await assert.rejects(discover({ operations: ["x".repeat(60_000)] }), /at most 32 characters/u);
+  await assert.rejects(discover({ operations: ["x".repeat(33)] }), /at most 32 characters/u);
+  await assert.rejects(discover({ cursor: "x".repeat(60_000) }), /nextCursor of an earlier result/u);
+  // The most a request can echo still fits the bound (`discover` asserts it).
+  const longest = Array.from({ length: 64 }, (_, index) => `z${String(index).padStart(31, "0")}`);
+  assert.deepEqual((await discover({ operations: longest })).unavailable, longest);
 });
 
 test("session_launch's discovered config lists every SessionConfig field with its type", async () => {
