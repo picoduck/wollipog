@@ -307,3 +307,61 @@ test("completed Location removal reconciles before reading removed effects and s
     await assert.rejects(h.call("location_remove", args), /excluded/);
   } finally {h.db.close();}
 });
+
+test("a thread may create a project private to its owner for a private workspace, and is told so up front (#4678)", async () => {
+  const h = harness();
+  try {
+    h.db.registerRunner({runnerId: "ssh", hostname: "ssh-fixture", os: "linux", version: "test",
+      agents: [{id: "agent", name: "Agent", driver: "acp", command: "fixture", args: [], env: {}, available: true,
+        capabilities: {models: [{id: "model-one"}], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true}}],
+      workspaces: [{id: "secret", name: "Secret", path: "/fixture/secret"}]}, Date.now(), PROTOCOL_VERSION);
+    const own = {kind: "user", userId: h.owner.userId} as const;
+    assert.equal(h.db.setResourceScope({resource: "workspace", runnerId: "ssh", resourceId: "secret",
+      scope: {organizationId: h.owner.organizationId, owner: own}, now: Date.now()}), true);
+    const projectCount = () => h.db.listProjects(true).length;
+    const before = projectCount();
+
+    // Naming any other owner, or widening access, is still refused before anything is created.
+    const wider: Array<[string, Record<string, unknown>]> = [
+      ["organization", {kind: "organization", organizationId: h.owner.organizationId}],
+      ["other-user", {kind: "user", userId: "usr_other"}],
+      ["team", {kind: "team", teamId: "team_any"}],
+      ["own-with-extra", {...own, organizationId: h.owner.organizationId}],
+    ];
+    for (const [commandId, owner] of wider) {
+      const refused = await h.call("project_create", {commandId, payload: {name: "Wider", owner}});
+      assert.equal(refused.receipt.status, "failed", commandId);
+      assert.match(refused.error, /privately owned by its owner/u);
+    }
+    const locationOwner = await h.call("location_create", {commandId: "location-owner", projectId: h.project.id,
+      payload: {name: "New", runnerId: "ssh", path: "/fixture/other", owner: own}});
+    assert.match(locationOwner.error, /access-scope path/u);
+    assert.equal(projectCount(), before);
+
+    // A wider project gets one refusal that names the way forward, and no Location.
+    const refused = await h.call("location_add", {commandId: "wider", projectId: h.second.id, payload: {runnerId: "ssh", workspaceId: "secret"}});
+    assert.equal(refused.receipt.status, "failed");
+    assert.match(refused.error, /Nothing was changed/u);
+    assert.ok(refused.error.includes(`payload.owner ${JSON.stringify(own)}`));
+    assert.equal(h.db.getProject(h.second.id)!.locations.length, 0);
+    assert.equal(projectCount(), before);
+    // A launch on a workspace that is not a Location explains the same rule.
+    await assert.rejects(h.call("session_launch", {commandId: "no-location", locationId: "secret", agentId: "agent"}),
+      /location_add first; a workspace private to the owner can only join a project privately owned by them/u);
+
+    // The narrowing case: the thread's own private project, then the Location and a launch there.
+    const created = await h.call("project_create", {commandId: "private", payload: {name: "Private", owner: own}});
+    assert.equal(created.receipt.status, "succeeded");
+    const projectId = created.receipt.resourceId as string;
+    assert.deepEqual(h.db.projectScope(projectId)!.owner, own);
+    const added = await h.call("location_add", {commandId: "add-private", projectId, payload: {runnerId: "ssh", workspaceId: "secret"}});
+    assert.equal(added.receipt.status, "succeeded");
+    const location = h.db.getProject(projectId)!.locations[0]!;
+    assert.equal(location.workspaceId, "secret");
+    const launched = await h.call("session_launch", {commandId: "launch-private", locationId: location.id, agentId: "agent", useWorktree: false});
+    assert.equal(launched.receipt.status, "succeeded");
+    // Leaving the owner out keeps the existing default for the owner role.
+    const defaulted = await h.call("project_create", {commandId: "default", payload: {name: "Default"}});
+    assert.equal(h.db.projectScope(defaulted.receipt.resourceId)!.owner.kind, "organization");
+  } finally {h.db.close();}
+});
