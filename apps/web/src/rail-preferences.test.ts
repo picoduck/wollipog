@@ -25,6 +25,8 @@ import {
 } from "./rail-preferences.js";
 
 const CANONICAL = GLOBAL_VIEW_ITEMS.map((item) => item.id);
+const ALL_ON = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true };
+const ALL_OFF = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: false };
 
 /** instance-storage reads the bare `localStorage` global; give the suite an isolated one. */
 const priorLocalStorage = (globalThis as Record<string, unknown>)["localStorage"];
@@ -58,10 +60,10 @@ test("absent, garbage, and non-object payloads all fall back to the canonical de
 });
 
 test("with no saved preferences the rail follows the Work, Oversight and Records groups", () => {
-  // docs/design-system.md §4.1. Projects is daily work, so it answers 3.
+  // docs/design-system.md §4.1. Assistants follows Sessions (#4690), so it answers 2.
   const preferences = getRailPreferences();
   assert.deepEqual([...preferences.order],
-    ["inbox", "automations", "projects", "assistants", "runs", "runners", "skills", "archived", "usage"]);
+    ["inbox", "assistants", "automations", "projects", "runs", "runners", "skills", "archived", "usage"]);
   assert.deepEqual(
     [...new Set(GLOBAL_VIEW_ITEMS.map((item) => item.group))],
     ["work", "oversight", "records"],
@@ -69,8 +71,34 @@ test("with no saved preferences the rail follows the Work, Oversight and Records
   );
   const flags = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true };
   const visible = visibleRailViews(preferences, flags);
-  assert.equal(railDigits(visible).get("projects"), "3");
-  assert.equal(railViewForDigit(visible, "3"), "projects");
+  assert.equal(railDigits(visible).get("assistants"), "2");
+  assert.equal(railViewForDigit(visible, "2"), "assistants");
+  assert.equal(railDigits(visible).get("automations"), "3");
+  assert.equal(railDigits(visible).get("projects"), "4");
+});
+
+test("a rail order saved under the previous default keeps it, and Reset to Default moves Assistants second", () => {
+  // The default from #4664 until #4690, saved whole by any rail edit (hiding Usage here).
+  const previousDefault = ["inbox", "automations", "projects", "assistants", "runs", "pods", "runners", "skills", "archived", "usage"];
+  saveInstanceStorageValue(
+    RAIL_PREFERENCES_STORAGE_KEY,
+    JSON.stringify({ v: 1, order: previousDefault, hidden: ["usage"], phoneBar: ["inbox", "projects", "runners", "automations"] }),
+  );
+  resetRailPreferencesForTest();
+  const preferences = getRailPreferences();
+  assert.deepEqual([...preferences.order], previousDefault.filter((id) => id !== "pods"), "a saved order is never re-sorted into the new default");
+  assert.deepEqual(preferences.phoneBar, ["inbox", "projects", "runners", "automations"], "a chosen phone bar is kept");
+  assert.equal(railPreferencesAreDefault(preferences), false, "so Reset to Default is offered");
+  const visible = visibleRailViews(preferences, ALL_ON);
+  assert.equal(railViewForDigit(visible, "2"), "automations");
+  assert.equal(railViewForDigit(visible, "4"), "assistants");
+
+  resetRailPreferences();
+  resetRailPreferencesForTest();
+  const reset = getRailPreferences();
+  assert.deepEqual([...reset.order], CANONICAL);
+  assert.equal(reset.order[1], "assistants");
+  assert.deepEqual(phoneBarViews(reset, ALL_ON), ["inbox", "assistants", "projects", "runners"]);
 });
 
 test("a version-1 rail preference saved before the regrouping keeps its order, hidden items and digits", () => {
@@ -82,8 +110,9 @@ test("a version-1 rail preference saved before the regrouping keeps its order, h
   );
   resetRailPreferencesForTest();
   const preferences = getRailPreferences();
-  // Assistants (#4664) is newer than the save, so it joins beside its canonical predecessor.
-  assert.deepEqual([...preferences.order], ["inbox", "automations", "runs", "runners", "skills", "projects", "assistants", "archived", "usage"],
+  // Assistants (#4664) is newer than the save, so it joins after its canonical predecessor,
+  // Sessions; every saved destination keeps its place relative to the others.
+  assert.deepEqual([...preferences.order], ["inbox", "assistants", ...previousDefault.slice(1).filter((id) => id !== "pods")],
     "a saved order is never re-sorted into the new default");
   assert.deepEqual([...preferences.hidden], ["archived"]);
   assert.equal(railPreferencesAreDefault(preferences), false);
@@ -91,7 +120,7 @@ test("a version-1 rail preference saved before the regrouping keeps its order, h
   const digits = railDigits(visibleRailViews(preferences, flags));
   assert.deepEqual(
     [...digits],
-    [["inbox", "1"], ["automations", "2"], ["runs", "3"], ["runners", "4"], ["skills", "5"], ["projects", "6"], ["assistants", "7"], ["usage", "8"]],
+    [["inbox", "1"], ["assistants", "2"], ["automations", "3"], ["runs", "4"], ["runners", "5"], ["skills", "6"], ["projects", "7"], ["usage", "8"]],
   );
 });
 
@@ -147,12 +176,12 @@ test("digits derive solely from the visible order and skip hidden or gated desti
   const preferences: RailPreferences = { order: CANONICAL, hidden: new Set(["automations"]), labels: false };
   const flags = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: false };
   const visible = visibleRailViews(preferences, flags);
-  assert.deepEqual(visible, ["inbox", "projects", "assistants", "runners", "skills", "archived", "usage"]);
+  assert.deepEqual(visible, ["inbox", "assistants", "projects", "runners", "skills", "archived", "usage"]);
   const digits = railDigits(visible);
   assert.equal(digits.get("inbox"), "1");
-  assert.equal(digits.get("projects"), "2", "a hidden destination consumes no slot");
+  assert.equal(digits.get("projects"), "3", "a hidden destination consumes no slot");
   assert.equal(digits.get("usage"), "7");
-  assert.equal(railViewForDigit(visible, "2"), "projects");
+  assert.equal(railViewForDigit(visible, "3"), "projects");
   assert.equal(railViewForDigit(visible, "8"), null, "a digit past the visible list is inert");
 });
 
@@ -183,31 +212,30 @@ test("reconcileRailOrder is deterministic for an empty save", () => {
   assert.deepEqual(reconcileRailOrder([]), CANONICAL);
 });
 
-const ALL_ON = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true };
-const ALL_OFF = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: false };
-
-test("the default phone bar is Sessions, Projects, Connections and Automations whatever the experiments", () => {
+test("the default phone bar is Sessions, Assistants, Projects and Connections whatever the experiments", () => {
   // Slicing the rail order let experiments take the phone's four slots and pushed Projects and
   // Connections into More (#1959).
   for (const flags of [ALL_ON, ALL_OFF]) {
-    assert.deepEqual(phoneBarViews(defaultRailPreferences(), flags), ["inbox", "projects", "runners", "automations"]);
+    assert.deepEqual(phoneBarViews(defaultRailPreferences(), flags), ["inbox", "assistants", "projects", "runners"]);
   }
   // Reordering the rail reorders digits and More, not the bar.
   const reordered: RailPreferences = { order: [...CANONICAL].reverse(), hidden: new Set(), labels: false };
-  assert.deepEqual(phoneBarViews(reordered, ALL_ON), ["inbox", "projects", "runners", "automations"]);
+  assert.deepEqual(phoneBarViews(reordered, ALL_ON), ["inbox", "assistants", "projects", "runners"]);
 });
 
 test("a hidden default tab is filled in place by the next visible non-experimental destination", () => {
   const hideProjects: RailPreferences = { order: CANONICAL, hidden: new Set(["projects"]), labels: false };
-  assert.deepEqual(phoneBarViews(hideProjects, ALL_ON), ["inbox", "assistants", "runners", "automations"],
-    "Multi-Agent Runs and Pods come first in rail order, but never fill a slot");
+  assert.deepEqual(phoneBarViews(hideProjects, ALL_ON), ["inbox", "assistants", "automations", "runners"]);
+  const hideAutomationsToo: RailPreferences = { order: CANONICAL, hidden: new Set(["projects", "automations"]), labels: false };
+  assert.deepEqual(phoneBarViews(hideAutomationsToo, ALL_ON), ["inbox", "assistants", "skills", "runners"],
+    "Multi-Agent Runs comes next in rail order, but never fills a slot");
   // The filler follows the user's rail order, not the canonical one.
   const usageFirst: RailPreferences = {
     order: ["usage", ...CANONICAL.filter((name) => name !== "usage")],
     hidden: new Set(["projects"]),
     labels: false,
   };
-  assert.deepEqual(phoneBarViews(usageFirst, ALL_ON), ["inbox", "usage", "runners", "automations"]);
+  assert.deepEqual(phoneBarViews(usageFirst, ALL_ON), ["inbox", "assistants", "usage", "runners"]);
   // Hide enough and the bar shrinks rather than taking an experiment.
   const sparse: RailPreferences = {
     order: CANONICAL,
@@ -221,10 +249,10 @@ test("a chosen phone bar overrides the default and may hold an experiment the us
   const chosen: RailPreferences = { order: CANONICAL, hidden: new Set(), phoneBar: ["runs", "inbox", "usage", "skills"], labels: false };
   assert.deepEqual(phoneBarViews(chosen, ALL_ON), ["runs", "inbox", "usage", "skills"]);
   // Turned off, the experiments' slots are topped up in place from the rail order.
-  assert.deepEqual(phoneBarViews(chosen, ALL_OFF), ["automations", "inbox", "usage", "skills"]);
+  assert.deepEqual(phoneBarViews(chosen, ALL_OFF), ["assistants", "inbox", "usage", "skills"]);
   // A choice shorter than the bar is topped up at its end.
   const short: RailPreferences = { order: CANONICAL, hidden: new Set(), phoneBar: ["usage"], labels: false };
-  assert.deepEqual(phoneBarViews(short, ALL_ON), ["usage", "inbox", "automations", "projects"]);
+  assert.deepEqual(phoneBarViews(short, ALL_ON), ["usage", "inbox", "assistants", "automations"]);
 });
 
 test("the phone bar choice is parsed defensively, survives edits and is cleared by reset", () => {

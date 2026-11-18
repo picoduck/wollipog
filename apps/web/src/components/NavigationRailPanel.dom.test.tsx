@@ -184,7 +184,7 @@ test("switching off Show Multi-Agent Runs in Navigation leaves the rail and renu
 
     await act(async () => { reset(container).click(); });
     assert.deepEqual(rows(container).map(rowTitle), [
-      "Sessions", "Automations", "Projects", "Assistants", "Multi-Agent Runs", "Connections", "Agent Skills",
+      "Sessions", "Assistants", "Automations", "Projects", "Multi-Agent Runs", "Connections", "Agent Skills",
       "Archived Sessions", "Usage and Cost",
     ], "the default order");
     assert.equal(control(container, "Show Multi-Agent Runs in Navigation").getAttribute("aria-checked"), "true");

@@ -397,6 +397,8 @@ const THEMES = ["dark", "light"] as const;
  *
  *   measured paint / legible at the device's own 2.625 ratio, both themes, portrait and landscape
  *   icon       1183-1285 / 977-1077      moreTrigger   275-284 / 218-232
+ *   (The Assistants glyph took the Automations bolt's place on the default bar in #4690. It
+ *   measures 1130-1147 / 905-943, so `icon` still trips when a third of it goes: 1130 × 2/3 = 753.)
  *   sheetIcon    451-1503 / 317-1460      sheetLabel   2079-3483 / 1425-2417
  *   (Re-measured when the labelled tab bar made the bar's icons 24px and the sheet's 20px, #1959.
  *   The floors keep the same ratios to the measured minimum as before: paint about 0.86 and
@@ -416,12 +418,6 @@ const THEMES = ["dark", "light"] as const;
 const SHORT_SHEET_TITLES = new Set(["Settings", "Assistants"]);
 const MARKS = {
   icon: { paint: 1000, legible: 450, illegibleCells: 0, minContrast: CONTRAST.icon },
-  /* The Automations bolt joined the primary bar when Board became a mode of Sessions (#499).
-     It is one stroked path where the other primary glyphs are two or three, so it measures 920-936
-     paint / 729-773 legible against the icon family's 1183-1285 / 977-1077 — a floor calibrated
-     for the beefier marks would reject a bolt that is fully painted. Same ratios to the measured
-     minimum as `icon`, so losing a third of the bolt still trips it. */
-  boltIcon: { paint: 780, legible: 340, illegibleCells: 0, minContrast: CONTRAST.icon },
   moreTrigger: { paint: 245, legible: 105, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetIcon: { paint: 390, legible: 150, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetLabel: { paint: 1850, legible: 650, illegibleCells: 0, minContrast: CONTRAST.label },
@@ -435,7 +431,7 @@ const MARKS = {
  *   measured paint / legible on a developer machine, both themes, portrait and landscape, with and
  *   without the keyboard
  *   Sessions 1094-1101 / 529-654   Projects 1026-1030 / 462-546   Connections 1509-1517 / 672-803
- *   Automations 1632-1640 / 725-864   More 719-723 / 318-422
+ *   Automations 1632-1640 / 725-864   More 719-723 / 318-422   Assistants 1318-1321 / 548-708 (#4690)
  *
  * These are text, so unlike the icons they follow the machine's font rasterisation: the CI runner
  * renders text smaller (e2e/README.md), and "More" painted 668 there against 719 here, a factor of
@@ -452,6 +448,7 @@ const tabLabel = (paint: number, legible: number): Mark =>
   ({ paint, legible, illegibleCells: 2, minContrast: CONTRAST.label, fraction: 0.36 });
 const TAB_LABEL_MARKS: Record<string, Mark> = {
   Sessions: tabLabel(941, 249),
+  Assistants: tabLabel(1133, 258),
   Projects: tabLabel(882, 217),
   Connections: tabLabel(1298, 316),
   Automations: tabLabel(1403, 341),
@@ -981,10 +978,7 @@ async function expectEveryPrimaryDestinationUsable(page: Page) {
     // The icon, on its own: measuring the item instead let its border, and on Connections its count
     // badge, stand in for an icon that had been erased. The More trigger is three small dots inside
     // the same 24px box as a full icon, so it clears a lower floor.
-    const isAutomations = !isMoreTrigger &&
-      (await item.evaluate((element) => new URL((element as HTMLAnchorElement).href).pathname)) === "/automations";
-    await expectPainted(page, item.locator("svg"), `${label} icon`,
-      isMoreTrigger ? MARKS.moreTrigger : isAutomations ? MARKS.boltIcon : MARKS.icon);
+    await expectPainted(page, item.locator("svg"), `${label} icon`, isMoreTrigger ? MARKS.moreTrigger : MARKS.icon);
     // And the label under it (#1959), measured like a sheet row's: the tab's own words, painted.
     const tabLabel = item.locator(".rail-tab-label");
     await expect(tabLabel, `the tab at "${label}" must be labelled "${name}"`).toHaveText(name);

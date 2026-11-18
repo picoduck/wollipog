@@ -226,7 +226,7 @@ for (const theme of THEMES) {
       }
     }
     // The digit is the keycap on a shown row and a dash on a hidden or turned-off one.
-    await expect(navRow(page, "Projects").locator(".rail-nav-digit kbd")).toHaveText("2");
+    await expect(navRow(page, "Projects").locator(".rail-nav-digit kbd")).toHaveText("3");
     await expect(navRow(page, "Automations").locator(".rail-nav-digit")).toHaveText("–");
     await expect(navRow(page, "Multi-Agent Runs").locator(".rail-nav-digit")).toHaveText("–");
   });

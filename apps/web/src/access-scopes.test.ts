@@ -196,3 +196,30 @@ test("server refusals are reworded, and only a narrower Location offers to chang
     kind: "incompatible", message: "Something new.", blockedByLocation: false,
   }, "an unknown reason is shown as written");
 });
+
+test("a Machine's workspace is worded as a workspace, never a location (#4694)", () => {
+  const admin = identity("admin");
+  const org = scope({ kind: "organization", organizationId: "org" });
+  const me = scope({ kind: "user", userId: "user-one" });
+  assert.deepEqual(accessScopeImpact(preview(org, me, { resource: "workspace" }), admin, "workspace"), {
+    kind: "narrowing",
+    title: "This Workspace Becomes Private to You",
+    body: "Others in your organization lose access to this workspace.",
+  });
+  assert.deepEqual(accessScopeImpact(preview(me, org, { resource: "workspace", totalSessionCount: 1 }), admin, "workspace"), {
+    kind: "broadening",
+    text: "Everyone in your organization will see this workspace, and its session keeps its current access.",
+  });
+  const refused = (reason: string) => accessScopeImpact(
+    preview(me, org, { resource: "workspace", compatible: false, confirmationToken: undefined, reason }), admin, "workspace");
+  for (const [reason, message] of [
+    ["The requested Location access would be broader than its Machine access.",
+      "The machine this workspace is on isn't shared that widely. Choose a more private option."],
+    ["The requested Location access is narrower than an attached Project. Narrow those Projects first or choose a broader Location scope.",
+      "A project that uses this workspace is shared more widely than this choice. Change that project's access first, or choose a wider option."],
+    ["A session in this Location has an incompatible private owner and cannot be transferred by a Location access change.",
+      "A session in this workspace is private to someone else, so changing the workspace's access can't include it."],
+  ] as const) {
+    assert.deepEqual(refused(reason), { kind: "incompatible", message, blockedByLocation: false });
+  }
+});

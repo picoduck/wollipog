@@ -103,7 +103,7 @@ test("navigation digits derive from the visible rail order and hidden destinatio
     const html = render();
     assert.match(html, /<dt>Automations<\/dt><dd class="shortcut-reason" title="Hidden in Settings → Appearance">Hidden in Settings → Appearance<\/dd><dd class="shortcut-keys"><kbd>—<\/kbd>/,
       "a hidden destination explains itself instead of advertising a digit");
-    assert.match(html, /<dt>Projects<\/dt><dd class="shortcut-keys"><kbd>2<\/kbd>/, "the survivor inherits the freed digit");
+    assert.match(html, /<dt>Projects<\/dt><dd class="shortcut-keys"><kbd>3<\/kbd>/, "the survivor inherits the freed digit");
     // The Navigation group labels each destination with its one name, in the rail's order.
     const navigation = html.slice(html.indexOf('id="shortcut-navigation"'), html.indexOf("Toggle List / Board"));
     assert.deepEqual([...navigation.matchAll(/<dt>([^<]+)<\/dt>/g)].map((match) => match[1]).slice(1),

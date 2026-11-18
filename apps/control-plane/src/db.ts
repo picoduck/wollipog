@@ -5384,6 +5384,22 @@ type ConfirmedSessionNamingHarnessTargetWrite = SessionNamingHarnessTargetWrite 
 // restart re-reserves the child's unspent limits.
 const TERMINAL_STATUS_SQL = "('completed','failed','stopped')";
 
+/** Whether the ledger attempt `assignment`, opened at or after a child's report, still supersedes
+ * that report (#4684). An open attempt does: work is pending for the child. An ended attempt
+ * stops superseding it only while the child's history has not moved since the attempt opened: it
+ * ended in its start epoch, and the session's seq high water (the highest seq it ever held, which
+ * pruning records in history_prune_through_seq) is still the attempt's start seq. That covers an
+ * attempt a delivery record closed at once. Any later event of any kind supersedes again, during
+ * the attempt or after it, because work reaches a child in more forms than a user message (a
+ * recovered question answer, a runner continuation) and can land after the attempt closed. The
+ * high water never falls, so archived-history pruning cannot make a superseded report count again
+ * (#1729). Keep it in step with sessionSeqHighWater. */
+const CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL = `(assignment.ended_at IS NULL OR assignment.end_seq IS NULL
+  OR assignment.end_event_epoch IS NOT assignment.start_event_epoch
+  OR MAX(COALESCE((SELECT MAX(moved.seq) FROM session_events moved WHERE moved.session_id=assignment.session_id), 0),
+    COALESCE((SELECT pruned.history_prune_through_seq FROM sessions pruned WHERE pruned.id=assignment.session_id), 0))
+    IS NOT assignment.start_seq)`;
+
 /** Rows one prune batch tests against HISTORY_PRUNE_KEEP_SQL at most: about 1 ms of JSON reads. */
 const HISTORY_PRUNE_SCAN_ROWS = 1024;
 
@@ -6804,16 +6820,25 @@ export class ControlPlaneDb {
     };
   }
 
+  /** An attempt's boundary seq is the session's seq high water, the seq its next event follows,
+   * so a boundary taken after archived-history pruning still matches the high water that
+   * CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL compares it with (#4684). A session without events or
+   * pruning keeps a null boundary. */
   private campaignAttemptBoundary(sessionId: string): CampaignAttemptBoundary {
     const row = this.stmt(
       `SELECT event_epoch, runner_history_epoch,
-         (SELECT MAX(seq) FROM session_events WHERE session_id=sessions.id) AS seq
+         (SELECT MAX(seq) FROM session_events WHERE session_id=sessions.id) AS seq,
+         history_prune_through_seq
        FROM sessions WHERE id=?`,
-    ).get(sessionId) as { event_epoch: number; runner_history_epoch: number | null; seq: number | null } | undefined;
+    ).get(sessionId) as {
+      event_epoch: number; runner_history_epoch: number | null; seq: number | null; history_prune_through_seq: number | null;
+    } | undefined;
+    const seq = row?.seq == null && row?.history_prune_through_seq == null
+      ? null : Math.max(row?.seq ?? 0, row?.history_prune_through_seq ?? 0);
     return {
       eventEpoch: row?.event_epoch ?? null,
       runnerHistoryEpoch: row?.runner_history_epoch ?? null,
-      seq: row?.seq ?? null,
+      seq,
     };
   }
 
@@ -22597,8 +22622,10 @@ export class ControlPlaneDb {
 
   /** Seq of the session's last top-level report when no later report or assignment superseded it,
    * and null when its last word is not a report. Failed/stopped recovery also requires proof that
-   * active commands and ledger assignments did not supersede it. Ordinary idle/completed stored
-   * attestations retain their established rules until a new turn or user message invalidates them. */
+   * active commands and ledger assignments did not supersede it; an ended assignment does not
+   * while the child's history has not moved since it opened
+   * (CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL). Ordinary idle/completed stored attestations retain
+   * their established rules until a new turn or user message invalidates them. */
   durableFinalReportSeq(sessionId: string): number | null {
     const row = this.stmt(
       `SELECT target.seq AS seq FROM session_events target
@@ -22630,6 +22657,7 @@ export class ControlPlaneDb {
          WHERE assignment.session_id=target.session_id
            AND assignment.start_event_epoch=(SELECT event_epoch FROM sessions WHERE id=target.session_id)
            AND assignment.start_seq>=target.seq
+           AND ${CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL}
        ) AND NOT EXISTS (
          SELECT 1 FROM session_events assignment
          WHERE assignment.session_id=target.session_id AND assignment.seq>target.seq
@@ -23389,6 +23417,7 @@ export class ControlPlaneDb {
            WHERE child.status IN ('failed','stopped') AND assignment.session_id=target.session_id
              AND assignment.start_event_epoch=child.event_epoch
              AND assignment.start_seq>=target.seq
+             AND ${CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL}
          )
          AND NOT EXISTS (
            SELECT 1 FROM session_events assignment

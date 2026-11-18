@@ -177,9 +177,9 @@ test("every destination has one name, in the §4.1 order", () => {
   // the visible renames to Sessions (#499) and Connections.
   assert.deepEqual(GLOBAL_VIEW_ITEMS.map((item) => [item.id, item.name, item.group]), [
     ["inbox", "Sessions", "work"],
+    ["assistants", "Assistants", "work"],
     ["automations", "Automations", "work"],
     ["projects", "Projects", "work"],
-    ["assistants", "Assistants", "work"],
     ["runs", "Multi-Agent Runs", "oversight"],
     ["runners", "Connections", "oversight"],
     ["skills", "Agent Skills", "oversight"],

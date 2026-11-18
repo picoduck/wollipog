@@ -16,6 +16,7 @@ import {
   resourceOwnerKey,
   scopeAudienceContainedForIdentity,
   type AccessScopeChoice,
+  type WorkspaceNoun,
 } from "../access-scopes.js";
 import { Modal, Spinner } from "./common.js";
 import { BuildingIcon, LockIcon, TeamIcon } from "./Icons.js";
@@ -101,7 +102,8 @@ export interface AccessScopeLocation {
 
 type ScopeResource =
   | { kind: "project"; projectId: string; name: string; locations?: readonly AccessScopeLocation[] }
-  | { kind: "workspace"; runnerId: string; workspaceId: string; name: string };
+  /** `noun` names it in the dialog: a Project's "location" (the default) or a Machine's "workspace". */
+  | { kind: "workspace"; runnerId: string; workspaceId: string; name: string; noun?: WorkspaceNoun };
 
 async function previewChange(api: ApiClient, resource: ScopeResource, owner: ResourceOwner) {
   return resource.kind === "project"
@@ -185,7 +187,8 @@ export function AccessScopeChangeDialog({
   const loaded = changing && preview?.key === selectedKey ? preview.value : null;
   const failed = changing && previewError?.key === selectedKey ? previewError.message : null;
   const checking = changing && !loaded && !failed;
-  const impact = loaded ? accessScopeImpact(loaded, identity) : null;
+  const workspaceNoun = resource.kind === "workspace" ? resource.noun ?? "location" : "location";
+  const impact = loaded ? accessScopeImpact(loaded, identity, workspaceNoun) : null;
   const canApply = Boolean(loaded?.compatible && loaded.confirmationToken);
   const choose = (key: string) => {
     if (busy) return;
@@ -231,7 +234,8 @@ export function AccessScopeChangeDialog({
 
   return (
     <Modal
-      title={resource.kind === "project" ? "Change Project Access" : "Change Location Access"}
+      title={resource.kind === "project" ? "Change Project Access"
+        : workspaceNoun === "workspace" ? "Change Workspace Access" : "Change Location Access"}
       description={resource.name}
       onClose={() => { if (!busy) onClose(); }}
       footer={(
