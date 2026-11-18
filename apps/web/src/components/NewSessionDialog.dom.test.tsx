@@ -118,13 +118,12 @@ const navigation: ViewNavigation = {
 function snapshot(overrides: Partial<UiSnapshotMessage> = {}): UiSnapshotMessage {
   return {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
     runners: [runner],
     boxes: [],
     projects: [project],
     sessions: [],
     runs: [],
-    pods: [],
     ...overrides,
   };
 }
@@ -2313,7 +2312,7 @@ test("Native TUI orchestrator creation is gated by its own runner capability", a
       } })),
     };
     const fixture = await mountFixture({ runners: [enabledRunner], capabilities: {
-      sessionSubscriptions: false, nativeTuiLaunch: true,
+      sessionSubscriptionsV2: false, nativeTuiLaunch: true,
     } }, undefined, undefined, undefined, undefined, strictOrchestratorDefaults);
     try {
       await act(async () => { await selectProject(fixture.container, project.id); });
@@ -2348,7 +2347,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
   };
   const ordinary = await mountFixture({
     runners: [wslRunner],
-    capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
+    capabilities: { sessionSubscriptionsV2: false, nativeTuiLaunch: true },
   });
   try {
     await act(async () => { await selectProject(ordinary.container, project.id); });
@@ -2367,7 +2366,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
 
   const orchestrator = await mountFixture({
     runners: [wslRunner],
-    capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
+    capabilities: { sessionSubscriptionsV2: false, nativeTuiLaunch: true },
   }, undefined, undefined, async () => ({ defaults: [{
     agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
@@ -2385,7 +2384,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
 
   const protocolOnly = await mountFixture({
     runners: [{ ...wslRunner, protocolVersion: 124 }],
-    capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
+    capabilities: { sessionSubscriptionsV2: false, nativeTuiLaunch: true },
   }, undefined, undefined, async () => ({ defaults: [{
     agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
@@ -2412,7 +2411,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
   const providerMode = await mountFixture({
     runners: [{ ...safeRunner, runtime: { ...safeRunner.runtime!,
       executionIsolation: { mode: "provider", network: "inherit" } } }],
-    capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
+    capabilities: { sessionSubscriptionsV2: false, nativeTuiLaunch: true },
   }, undefined, undefined, async () => ({ defaults: [{
     agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
@@ -2425,7 +2424,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
   } finally { await unmountFixture(providerMode); }
   const bridged = await mountFixture({
     runners: [safeRunner],
-    capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
+    capabilities: { sessionSubscriptionsV2: false, nativeTuiLaunch: true },
   }, undefined, undefined, async () => ({ defaults: [{
     agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
@@ -2454,7 +2453,7 @@ test("saved Orchestrator default is visible and gates Native TUI without requiri
       } })),
     };
     const fixture = await mountFixture({ runners: [enabledRunner], capabilities: {
-      sessionSubscriptions: false, nativeTuiLaunch: true,
+      sessionSubscriptionsV2: false, nativeTuiLaunch: true,
     } }, undefined, undefined, async () => ({ defaults: [{
       agentId: "claude", driver: "claude-code", context: { kind: "native" }, name: "Claude",
       installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
@@ -3152,7 +3151,7 @@ test("removing the selected Project from the live inventory disables submission 
 test("Native TUI is capability-gated, sends one-shot intent, and opens Terminal after success", async () => {
   const fixture = await mountFixture({
     capabilities: {
-      sessionSubscriptions: false,
+      sessionSubscriptionsV2: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
       projects: true,
@@ -3189,7 +3188,7 @@ test("Native TUI is capability-gated, sends one-shot intent, and opens Terminal 
 test("Native TUI says one sentence, without the accounting paragraph, whatever the runner reports (#2954)", async () => {
   const fixture = await mountFixture({
     capabilities: {
-      sessionSubscriptions: false,
+      sessionSubscriptionsV2: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
       projects: true,
@@ -3253,7 +3252,7 @@ test("Native TUI is disabled when the control plane does not advertise atomic la
 test("Native TUI initial launch fails closed against a v66 runner", async () => {
   const fixture = await mountFixture({
     capabilities: {
-      sessionSubscriptions: false,
+      sessionSubscriptionsV2: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
       projects: true,
@@ -3277,7 +3276,7 @@ test("Native TUI initial launch fails closed against a v66 runner", async () => 
 test("a failed atomic Native TUI launch leaves Terminal closed and surfaces the error", async () => {
   const fixture = await mountFixture({
     capabilities: {
-      sessionSubscriptions: false,
+      sessionSubscriptionsV2: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
       projects: true,
@@ -3311,7 +3310,7 @@ test("an ambiguous Native TUI launch retains one session and prevents duplicate 
   const retainedId = "session-retained";
   const fixture = await mountFixture({
     capabilities: {
-      sessionSubscriptions: false,
+      sessionSubscriptionsV2: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
       projects: true,
@@ -3359,7 +3358,7 @@ test("failed Native TUI compensation exposes the retained session and disables r
   const retainedId = "session-cleanup-failed";
   const fixture = await mountFixture({
     capabilities: {
-      sessionSubscriptions: false,
+      sessionSubscriptionsV2: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
       projects: true,
@@ -3663,7 +3662,7 @@ test("Orchestrator is an additive role that keeps the harness's ordinary provide
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "acceptEdits" },
   }] });
   const fixture = await mountFixture({ runners: [claudeRunner], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } }, undefined, undefined, savedAcceptEdits);
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
@@ -3683,7 +3682,7 @@ test("Orchestrator is an additive role that keeps the harness's ordinary provide
   } finally { await unmountFixture(fixture); }
 
   const strict = await mountFixture({ runners: [claudeRunner], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } }, undefined, undefined, savedAcceptEdits, undefined, strictOrchestratorDefaults);
   try {
     await act(async () => { await selectProject(strict.container, project.id); });
@@ -3725,7 +3724,7 @@ test("a non-strict Codex Orchestrator shows the saved harness default rather tha
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "read-only" },
   }] });
   const fixture = await mountFixture({ runners: [codexRunner], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } }, undefined, undefined, savedReadOnly);
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
@@ -3745,7 +3744,7 @@ test("a non-strict Codex Orchestrator shows the saved harness default rather tha
   } finally { await unmountFixture(fixture); }
 
   const strict = await mountFixture({ runners: [codexRunner], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } }, undefined, undefined, savedReadOnly, undefined, strictOrchestratorDefaults);
   try {
     await act(async () => { await selectProject(strict.container, project.id); });
@@ -3757,7 +3756,7 @@ test("a non-strict Codex Orchestrator shows the saved harness default rather tha
 
   const outdatedRunner = await mountFixture({
     runners: [{ ...codexRunner, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1 }],
-    capabilities: { sessionSubscriptions: false, projects: true, orchestratorRole: true },
+    capabilities: { sessionSubscriptionsV2: false, projects: true, orchestratorRole: true },
   }, undefined, undefined, savedReadOnly);
   try {
     await act(async () => { await selectProject(outdatedRunner.container, project.id); });
@@ -3792,7 +3791,7 @@ const windowsCodexRunner: RunnerView = {
 
 test("an additive Codex Orchestrator is offered where the audited sandbox is unavailable, and Strict Project Isolation is not", async () => {
   const fixture = await mountFixture({ runners: [windowsCodexRunner], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
@@ -3816,7 +3815,7 @@ test("an additive Codex Orchestrator is offered where the audited sandbox is una
   // The preset's own precondition is untouched: without it there is no Strict Project Isolation
   // here, and the dialog says which advertisement is missing rather than refusing the whole role.
   const strict = await mountFixture({ runners: [windowsCodexRunner], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } }, undefined, undefined, undefined, undefined, strictOrchestratorDefaults);
   try {
     await act(async () => { await selectProject(strict.container, project.id); });
@@ -3880,7 +3879,7 @@ test("an installation that offers only the additive role never submits the coupl
     ["a saved Orchestrator harness default this installation cannot honour", savedPreset],
   ] as const) {
     const additive = await mountFixture({ runners: [approvalLessCodexRunner], capabilities: {
-      sessionSubscriptions: false, projects: true, orchestratorRole: true,
+      sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
     } }, undefined, undefined, defaults);
     try {
       await act(async () => { await selectProject(additive.container, project.id); });
@@ -3903,7 +3902,7 @@ test("choosing Normal explicitly overrides a saved Orchestrator harness default 
     } })),
   };
   const fixture = await mountFixture({ runners: [claudeRunner], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } }, undefined, undefined, async () => ({ defaults: [{
     agentId: "claude", driver: "claude-code", context: { kind: "native" }, name: "Claude",
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
@@ -3943,7 +3942,7 @@ const piAdditiveRunner: RunnerView = {
 
 test("a Pi agent offering only the additive role can launch an Orchestrator", async () => {
   const fixture = await mountFixture({ runners: [piAdditiveRunner], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
@@ -3960,7 +3959,7 @@ test("a Pi agent offering only the additive role can launch an Orchestrator", as
 
 test("an additive-only Pi Orchestrator refuses Strict Project Isolation with a reason", async () => {
   const strict = await mountFixture({ runners: [piAdditiveRunner], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } }, undefined, undefined, undefined, undefined, strictOrchestratorDefaults);
   try {
     await act(async () => { await selectProject(strict.container, project.id); });
@@ -3989,7 +3988,7 @@ test("an agent offering neither Orchestrator advertisement still says the agent 
     })),
   };
   const fixture = await mountFixture({ runners: [plain], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
@@ -4001,7 +4000,7 @@ test("an agent offering neither Orchestrator advertisement still says the agent 
 
 test("Integration Isolation is an independent control that discloses what it removes", async () => {
   const fixture = await mountFixture({ runners: [piAdditiveRunner], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
@@ -4038,7 +4037,7 @@ test("an older runner blocks Integration Isolation rather than letting it be sub
     protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1,
   };
   const fixture = await mountFixture({ runners: [oldPi], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
@@ -4082,7 +4081,7 @@ test("an Orchestrator without Strict Project Isolation on an older runner says w
 
 test("Strict Project Isolation shows Integration Isolation as implied and not separately selectable", async () => {
   const fixture = await mountFixture({ runners: [piAdditiveRunner], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } }, undefined, undefined, undefined, undefined, strictOrchestratorDefaults);
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
@@ -4116,7 +4115,7 @@ test("the Claude Integration Isolation copy says MCP servers go and hooks, plugi
     }],
   };
   const fixture = await mountFixture({ runners: [claudeAdditive], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
@@ -4152,7 +4151,7 @@ async function preIntegrationIsolationDefaults(): Promise<OrchestratorSettingsVi
 test("an older control plane blocks Integration Isolation even when the runner supports it", async () => {
   // The peers upgrade independently: this runner is current, the control plane is not.
   const fixture = await mountFixture({ runners: [piAdditiveRunner], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } }, undefined, undefined, undefined, undefined, preIntegrationIsolationDefaults);
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
@@ -4509,7 +4508,7 @@ test("an ACP Orchestrator's permissions come from the preset, and a warning noti
         permissionModes: ["default", "orchestrator"] } }],
   };
   const fixture = await mountFixture({ runners: [acpRunner], capabilities: {
-    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+    sessionSubscriptionsV2: false, projects: true, orchestratorRole: true,
   } }, undefined, undefined, undefined, undefined, strictOrchestratorDefaults);
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });

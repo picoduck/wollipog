@@ -19,7 +19,7 @@ export async function installInboxFixture(page: Page) {
     eventEpoch: 0, messageCount: 0, preview: "A deterministic session preview.", pendingApproval: null,
     driver: "codex-app-server", model: null, effort: null, permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0,
   }));
-  const snapshot: UiSnapshotMessage = { type: "snapshot", runners: [runner], boxes: [], sessions, runs: [], pods: [] };
+  const snapshot: UiSnapshotMessage = { type: "snapshot", runners: [runner], boxes: [], sessions, runs: [] };
   await page.addInitScript(() => {
     window.__WOLLIPOG_SAME_ORIGIN__ = 1;
     localStorage.setItem("wollipog.deviceToken", "synthetic-pairing-token");

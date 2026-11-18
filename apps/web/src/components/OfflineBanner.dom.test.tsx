@@ -70,7 +70,7 @@ class FakeSocket implements UiSocket {
   close() {}
 }
 
-const SNAPSHOT = JSON.stringify({ type: "snapshot", runners: [], runs: [], pods: [], sessions: [] });
+const SNAPSHOT = JSON.stringify({ type: "snapshot", runners: [], runs: [], sessions: [] });
 const ORIGIN = "http://127.0.0.1:4317";
 
 beforeEach(() => { mock.method(Math, "random", () => 0); });

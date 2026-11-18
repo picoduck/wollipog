@@ -21,7 +21,6 @@ export type View =
   | { name: "board"; split?: SessionsTab }
   | { name: "runners"; section?: ConnectionSection; machineId?: string; accounts?: MachineAccountsIntent }
   | { name: "runs" }
-  | { name: "pods" }
   | { name: "automations"; editor?: AutomationEditorRoute; tab?: AutomationsTab }
   | { name: "automation"; id: string }
   /** The Assistants section (#4664): the Wollipog Assistant's threads, and one open thread. */
@@ -35,10 +34,7 @@ export type View =
   /** `member`: the comparison member a phone shows (#2975); wider layouts show every member. */
   | { name: "run"; id: string; member?: string }
   | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
-  /** The tab a phone shows (#2981): the Huddle (`tab: "huddle"`, also the default) or one
-   * `member`; wider layouts show the huddle beside every member. */
-  | { name: "pod"; id: string; tab?: "huddle"; member?: string };
-
+  | { name: "not-found" };
 /**
  * Settings sections, as ROUTES rather than dialog tabs.
  *
@@ -195,7 +191,7 @@ export type SkillsPane = "orphans" | "overview";
  */
 export type ProjectsPane = "overview";
 
-export type GlobalViewName = Extract<View["name"], "inbox" | "assistants" | "projects" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived" | "skills">;
+export type GlobalViewName = Extract<View["name"], "inbox" | "assistants" | "projects" | "runs" | "automations" | "usage" | "runners" | "archived" | "skills">;
 
 export type DestinationGroup = "work" | "oversight" | "records";
 
@@ -227,6 +223,14 @@ export interface GlobalViewItem {
  * as it was saved (rail-preferences.ts). */
 export const GLOBAL_VIEW_ITEMS: ReadonlyArray<GlobalViewItem> = [
   { id: "inbox", name: "Sessions", group: "work" },
+  // Right after Sessions (#4690): an assistant is a primary way to start, watch and steer
+  // sessions, so it takes digit 2 and every later destination moves down one.
+  {
+    id: "assistants",
+    name: "Assistants",
+    description: "Ask an assistant to start, watch and steer your sessions.",
+    group: "work",
+  },
   {
     id: "automations",
     name: "Automations",
@@ -239,23 +243,10 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<GlobalViewItem> = [
     description: "Group related sessions and choose the folders where they run.",
     group: "work",
   },
-  // Last in Work (#4664), so every destination before it keeps the digit it always had.
-  {
-    id: "assistants",
-    name: "Assistants",
-    description: "Ask an assistant to start, watch and steer your sessions.",
-    group: "work",
-  },
   {
     id: "runs",
     name: "Multi-Agent Runs",
     description: "Give one task to several agents and compare what each one does.",
-    group: "oversight",
-  },
-  {
-    id: "pods",
-    name: "Pods",
-    description: "Agents that share notes and a worktree while they work toward one objective.",
     group: "oversight",
   },
   { id: "runners", name: "Connections", group: "oversight" },
@@ -288,7 +279,6 @@ export function backLabel(id: GlobalViewName): string {
 export const ENTITY_FALLBACK_TITLES = {
   session: "Session",
   run: "Multi-Agent Run",
-  pod: "Pod",
   automation: "Automation",
   thread: "Thread",
 } as const;
@@ -301,7 +291,7 @@ export const ENTITY_FALLBACK_TITLES = {
  * one of its six routes. With no default branch, the next view that is added fails to compile
  * until it has a title.
  *
- * An entity page is titled by its entity: pass the loaded session's, run's or pod's own title.
+ * An entity page is titled by its entity: pass the loaded session's or run's own title.
  * The generic noun is only the fallback while it loads.
  */
 export function viewTitle(view: View, entityTitle?: string | null): string {
@@ -322,7 +312,6 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
     case "inbox":
     case "projects":
     case "runs":
-    case "pods":
     case "usage":
     case "runners":
     case "archived":
@@ -332,11 +321,11 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
       return destination(view.name).name;
     case "session":
     case "run":
-    case "pod":
     case "automation":
       return entityTitle || ENTITY_FALLBACK_TITLES[view.name];
     // The section is the <h2> inside the page; repeating it here would say it twice.
     case "settings": return "Settings";
+    case "not-found": return "Page Not Found";
   }
   // No default branch: this line stops compiling when a view is added without a title.
   const unhandled: never = view;
@@ -361,7 +350,6 @@ export function viewDescription(view: View): string | undefined {
     case "inbox":
     case "projects":
     case "runs":
-    case "pods":
     case "usage":
     case "runners":
     case "archived":
@@ -371,8 +359,8 @@ export function viewDescription(view: View): string | undefined {
       return SETTINGS_DESCRIPTION;
     case "session":
     case "run":
-    case "pod":
     case "automation":
+    case "not-found":
       return undefined;
   }
   // No default branch: this line stops compiling when a view is added without a decision here.
@@ -437,7 +425,7 @@ export function viewHasHeaderTabs(view: View, layout: { phone: boolean; compact:
  * names a type rather than the thing on screen.
  */
 export function viewSubjectName(view: View): string {
-  if (view.name === "session" || view.name === "run" || view.name === "pod" || view.name === "automation") {
+  if (view.name === "session" || view.name === "run" || view.name === "automation") {
     return `This ${viewTitle(view)}`;
   }
   if (view.name === "assistants" && view.threadId !== undefined) return `This ${ENTITY_FALLBACK_TITLES.thread}`;
@@ -565,7 +553,7 @@ export function viewPath(view: View): string {
       ? `/connections/machines/~${encodeResourceId(view.machineId)}`
       : `/connections/${view.section ?? "machines"}`;
     case "runs": return "/runs";
-    case "pods": return "/pods";
+    case "not-found": return "/not-found";
     case "automations": return view.editor?.kind === "new" ? "/automations/new"
       : view.editor?.kind === "edit" ? `/automations/~${encodeResourceId(view.editor.automationId)}/edit`
         : view.tab === "outbound" ? "/automations/outbound" : "/automations";
@@ -588,7 +576,6 @@ export function viewPath(view: View): string {
     case "settings": return view.section === "approvals" && view.policyId !== undefined
       ? `/settings/approvals/~${encodeResourceId(view.policyId)}`
       : view.section ? `/settings/${view.section}` : "/settings";
-    case "pod": return `/pods/~${encodeResourceId(view.id)}${podTabSearch(view)}`;
   }
 }
 
@@ -630,42 +617,21 @@ function runMemberFromSearch(search: string): string | undefined {
   return !member.trim() || member.length > MAX_RESOURCE_ID_LENGTH ? undefined : member;
 }
 
-const POD_TAB_PARAM = "tab";
-const POD_TAB_HUDDLE = "huddle";
-
-function podTabSearch(view: { tab?: "huddle"; member?: string }): string {
-  if (view.member !== undefined) return runMemberSearch(view.member);
-  return view.tab === POD_TAB_HUDDLE ? `?${new URLSearchParams({ [POD_TAB_PARAM]: POD_TAB_HUDDLE }).toString()}` : "";
-}
-
-/** The tab a pod URL names: the Huddle, one member, or neither when its query is anything else. */
-function podTabFromSearch(search: string): { tab: "huddle" } | { member: string } | Record<string, never> {
-  const member = runMemberFromSearch(search);
-  if (member !== undefined) return { member };
-  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
-  const keys = [...params.keys()];
-  return keys.length === 1 && keys[0] === POD_TAB_PARAM && params.get(POD_TAB_PARAM) === POD_TAB_HUDDLE
-    ? { tab: POD_TAB_HUDDLE }
-    : {};
-}
-
-function resourceView(kind: "sessions" | "runs" | "pods", encodedId: string, search: string): View | null {
+function resourceView(kind: "sessions" | "runs", encodedId: string, search: string): View | null {
   const id = decodeResourceId(encodedId);
   if (id === null) return null;
   if (kind === "sessions") return { name: "session", id };
-  if (kind === "runs") {
-    // A query that is not a member keeps the run open rather than failing the route.
-    const member = runMemberFromSearch(search);
-    return member === undefined ? { name: "run", id } : { name: "run", id, member };
-  }
-  // As for a run, a query that names no tab keeps the pod open on its default tab.
-  return { name: "pod", id, ...podTabFromSearch(search) };
+  // A query that is not a member keeps the run open rather than failing the route.
+  const member = runMemberFromSearch(search);
+  return member === undefined ? { name: "run", id } : { name: "run", id, member };
 }
 
 /** Parse only the dashboard's explicit route vocabulary. Unknown and malformed paths are not
  * treated as view ids, which keeps typos and encoded slashes from selecting surprising state. */
 export function viewFromPath(pathname: string, search = ""): View | null {
   const path = pathname.length > 1 ? (pathname.replace(/\/+$/, "") || "/") : pathname;
+  // Retired bookmarks show the missing-page state.
+  if (path === "/not-found" || path === "/pods" || path.startsWith("/pods/")) return { name: "not-found" };
   if (path === "/" || path.toLowerCase() === "/index.html" || path === "/inbox") return sessionsView("inbox", search);
   if (path === "/board") return sessionsView("board", search);
   // /runners was the canonical route before the user-facing Connections rename. Keep existing
@@ -681,7 +647,6 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     return machineId === null ? null : { name: "runners", section: "machines", machineId };
   }
   if (path === "/runs") return { name: "runs" };
-  if (path === "/pods") return { name: "pods" };
   if (path === "/automations") return { name: "automations" };
   if (path === "/automations/new") return { name: "automations", editor: { kind: "new" } };
   if (path === "/automations/outbound") return { name: "automations", tab: "outbound" };
@@ -771,8 +736,8 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     const location = locationFromSearch(sourcePath, search);
     return location ? { name: "session", id, location } : null;
   }
-  const match = /^\/(sessions|runs|pods)\/~([^/]+)$/.exec(path);
-  return match ? resourceView(match[1] as "sessions" | "runs" | "pods", match[2]!, search) : null;
+  const match = /^\/(sessions|runs)\/~([^/]+)$/.exec(path);
+  return match ? resourceView(match[1] as "sessions" | "runs", match[2]!, search) : null;
 }
 
 /** Compatibility bridge for notification links created by older service workers. */

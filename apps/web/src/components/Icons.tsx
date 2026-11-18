@@ -154,7 +154,6 @@ import {
   Upload as LucideUpload,
   UserX as LucideUserX,
   Users as LucideUsers,
-  UsersRound as LucideUsersRound,
   WandSparkles as LucideWandSparkles,
   Waypoints as LucideWaypoints,
   Wifi as LucideWifi,
@@ -283,10 +282,6 @@ export function RunsIcon(props: IconProps) {
 /** A comparison run: several agents side by side on one task (#2974). */
 export function CompareIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideColumns2} {...props} />;
-}
-
-export function PodsIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideUsersRound} {...props} />;
 }
 
 export function AutomationsIcon(props: IconProps) {

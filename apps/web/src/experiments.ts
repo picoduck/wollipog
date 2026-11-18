@@ -8,26 +8,23 @@ import { destination, type View } from "./navigation.js";
 /**
  * Experimental-feature flags: per device, per control-plane instance, client-side only.
  *
- * These gate UI EXPOSURE, not capability. The control plane keeps serving `/api/runs` and
- * `/api/pods` regardless, and a remote instance never inherits this device's choices —
+ * These gate UI exposure. The control plane keeps serving `/api/runs`, and a remote instance
+ * never inherits this device's choices,
  * which is why the value is instance-scoped rather than a plain browser key like the theme.
  */
 
-export type ExperimentId = "multiAgent" | "pods";
+export type ExperimentId = "multiAgent";
 
 export interface ExperimentFlags {
   /** Multi-Agent Runs and the workflow surfaces reached through them. */
   readonly multiAgent: boolean;
-  /** Pods. */
-  readonly pods: boolean;
 }
 
 export const EXPERIMENTS_STORAGE_KEY = "wollipog.experiments";
 
-/** multiAgent/pods default on: the flags EXISTING must not change what current installs render. */
+/** Runs default to on, preserving their visibility on existing installations. */
 export const DEFAULT_EXPERIMENT_FLAGS: ExperimentFlags = {
   multiAgent: true,
-  pods: true,
 };
 
 /** Payload schema version, written alongside the flags. Unversioned payloads parse the same way. */
@@ -48,7 +45,6 @@ export function parseExperimentFlags(raw: string | null): ExperimentFlags {
     typeof record[id] === "boolean" ? (record[id] as boolean) : DEFAULT_EXPERIMENT_FLAGS[id];
   return {
     multiAgent: flag("multiAgent"),
-    pods: flag("pods"),
   };
 }
 
@@ -63,7 +59,6 @@ export interface ExperimentCopy {
 }
 
 const multiAgentName = destination("runs").name;
-const podsName = destination("pods").name;
 
 /** One vocabulary for the settings rows and the turned-off route, so they cannot drift. */
 export const EXPERIMENT_COPY: Record<ExperimentId, ExperimentCopy> = {
@@ -71,11 +66,6 @@ export const EXPERIMENT_COPY: Record<ExperimentId, ExperimentCopy> = {
     name: multiAgentName,
     offTitle: `${multiAgentName} Are Turned Off`,
     offBody: `This experiment is off on this device. Turning it on adds ${multiAgentName} to the navigation.`,
-  },
-  pods: {
-    name: podsName,
-    offTitle: `${podsName} Are Turned Off`,
-    offBody: `This experiment is off on this device. Turning it on adds ${podsName} to the navigation.`,
   },
 };
 
@@ -85,7 +75,6 @@ export const EXPERIMENT_COPY: Record<ExperimentId, ExperimentCopy> = {
  */
 export function experimentForViewName(name: View["name"]): ExperimentId | null {
   if (name === "runs" || name === "run") return "multiAgent";
-  if (name === "pods" || name === "pod") return "pods";
   return null;
 }
 

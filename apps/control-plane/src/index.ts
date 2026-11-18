@@ -78,13 +78,10 @@ import {
   isWorkspaceReference,
   type AddBoxRequest,
   type AccessScopeChangePreview,
-  type AddPodMemberRequest,
-  type AppendPodContextRequest,
   type ApprovalQueueRejectRequest,
   type ExternalSessionDescriptor,
   type ApproveRequest,
   type ControlPlaneToRunner,
-  type CreatePodRequest,
   type CreateRunRequest,
   type CreateAutomationRequest,
   type CreateAutomationTriggerRequest,
@@ -122,17 +119,12 @@ import {
   type PromptRequest,
   type InvokeSessionCommandRequest,
   type SteerRequest,
-  type RelayPodRequest,
-  type ReconcilePodRequest,
   type RunnerToControlPlane,
   type RunnerProtocolCapability,
   type SetSessionReminderRequest,
   type SetColumnRequest,
   type SessionProviderAccountOptionsResponse,
   type SetSessionTitleRequest,
-  type StartPodOrchestrationRequest,
-  type UpdatePodMemberRequest,
-  type UpdatePodOrchestrationRequest,
   type UpdateAutomationRequest,
   type CampaignPullRequestRef,
 } from "@wollipog/protocol";
@@ -2291,7 +2283,7 @@ app.register(async (instance) => {
       hub.acknowledgeUiBackgroundDelivery(client, msg.sessionId, msg.continuationId);
       return;
     }
-    const applied = hub.setUiSessionSubscriptions(client, msg.revision, msg.sessionIds, msg.podIds);
+    const applied = hub.setUiSessionSubscriptions(client, msg.revision, msg.sessionIds);
     if (!applied.ok && applied.reason !== "client_missing") {
       hub.removeUiClient(client);
       socket.close(
@@ -3732,10 +3724,6 @@ app.delete("/api/boxes/:id", async (req, reply) => {
   if (!res) return reply.code(404).send({ error: "box not found" });
   for (const sid of res.sessionIds) hub.sessionRemoved(sid, false);
   for (const rid of res.runIds) hub.runRemoved(rid);
-  for (const podId of res.podIds) {
-    const pod = db.reconcilePodAfterMembershipLoss(podId, Date.now());
-    if (pod) hub.podChanged(pod);
-  }
   hub.boxRemoved(id);
   hub.runnerRemoved(res.runnerId);
   for (const projectId of projectIds) hub.projectChangedById(projectId);
@@ -5705,101 +5693,6 @@ app.post("/api/runs", async (req, reply) => {
     principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId }
       : principal?.kind === "human" ? { launcherUserId: principal.userId } : undefined));
 });
-
-app.get("/api/pods", async () => ({ pods: db.listPods() }));
-
-app.get("/api/pods/:id", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const pod = db.getPod(id);
-  if (!pod) return reply.code(404).send({ error: "pod not found" });
-  const memberIds = new Set(pod.members.map((member) => member.sessionId));
-  const sessions = db.listSessions({ includeArchived: true }).filter((session) => memberIds.has(session.id));
-  return { pod, sessions };
-});
-
-app.post("/api/pods", async (req, reply) => respond(reply, svc.createPod(req.body as CreatePodRequest)));
-
-app.get("/api/pods/:id/context", async (req, reply) => {
-  const podId = (req.params as { id: string }).id;
-  if (!db.getPod(podId)) return reply.code(404).send({ error: "pod not found" });
-  const query = req.query as { before?: string; limit?: string };
-  const before = query.before === undefined ? undefined : Number(query.before);
-  const limit = query.limit === undefined ? 100 : Number(query.limit);
-  if (before !== undefined && (!Number.isSafeInteger(before) || before <= 0)) {
-    return reply.code(400).send({ error: "before must be a positive integer" });
-  }
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
-    return reply.code(400).send({ error: "limit must be an integer from 1 to 200" });
-  }
-  const rows = db.listPodContextEntries(podId, before, limit + 1);
-  const hasMore = rows.length > limit;
-  const entries = hasMore ? rows.slice(1) : rows;
-  return { entries, ...(hasMore && entries[0] ? { beforeSeq: entries[0].seq } : {}) };
-});
-
-app.post("/api/pods/:id/context", async (req, reply) => {
-  return respond(reply, svc.appendPodContext(
-    (req.params as { id: string }).id,
-    req.body as AppendPodContextRequest,
-    humanActorId(req),
-  ));
-});
-
-app.post("/api/pods/:id/members", async (req, reply) =>
-  respond(reply, svc.addPodMember(
-    (req.params as { id: string }).id,
-    req.body as AddPodMemberRequest,
-  )),
-);
-
-app.delete("/api/pods/:id/members/:sessionId", async (req, reply) => {
-  const params = req.params as { id: string; sessionId: string };
-  return respond(reply, svc.removePodMember(params.id, params.sessionId));
-});
-
-app.patch("/api/pods/:id/members/:sessionId", async (req, reply) => {
-  const params = req.params as { id: string; sessionId: string };
-  return respond(reply, svc.updatePodMember(params.id, params.sessionId, req.body as UpdatePodMemberRequest));
-});
-
-app.put("/api/pods/:id/orchestration", async (req, reply) =>
-  respond(reply, svc.updatePodOrchestration(
-    (req.params as { id: string }).id,
-    req.body as UpdatePodOrchestrationRequest,
-  )),
-);
-
-app.post("/api/pods/:id/orchestration/start", async (req, reply) => {
-  return respond(reply, svc.startPodOrchestration(
-    (req.params as { id: string }).id,
-    (req.body ?? {}) as StartPodOrchestrationRequest,
-    humanActorId(req),
-  ));
-});
-
-app.post("/api/pods/:id/orchestration/stop", async (req, reply) =>
-  respond(reply, svc.stopPodOrchestration((req.params as { id: string }).id)),
-);
-
-app.post("/api/pods/:id/reconcile", async (req, reply) => {
-  return respond(reply, await svc.reconcilePod(
-    (req.params as { id: string }).id,
-    req.body as ReconcilePodRequest,
-    humanActorId(req),
-  ));
-});
-
-app.post("/api/pods/:id/relay", async (req, reply) => {
-  return respond(reply, svc.relayPod(
-    (req.params as { id: string }).id,
-    req.body as RelayPodRequest,
-    humanActorId(req),
-  ));
-});
-
-app.post("/api/pods/:id/close", async (req, reply) =>
-  respond(reply, svc.closePod((req.params as { id: string }).id)),
-);
 
 app.get("/api/automations", async () => automations.list());
 

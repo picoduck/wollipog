@@ -23,7 +23,6 @@ const ROUTES = [
   { name: "Automations", url: shell("/automations"), current: /^Automations/, list: false },
   { name: "Projects", url: shell("/projects"), current: /^Projects/, list: true },
   { name: "Multi-Agent Runs", url: shell("/runs"), current: /^Multi-Agent/, list: false },
-  { name: "Pods", url: shell("/pods"), current: /Pods/, list: false },
   // The Machines tab is a list beside the detail (#2985).
   { name: "Connections", url: shell("/connections"), current: /^Connections/, list: true },
   { name: "Agent Skills", url: shell("/skills"), current: /Skills/, list: true },
@@ -31,7 +30,6 @@ const ROUTES = [
   { name: "Usage and Cost", url: shell("/usage"), current: /^Usage/, list: false },
   { name: "Settings", url: shell("/settings"), current: /^Settings$/, list: false },
   { name: "a run detail", url: `${HARNESS}&view=run`, current: /^Multi-Agent/, list: false },
-  { name: "a pod detail", url: `${HARNESS}&view=pod`, current: /Pods/, list: false },
 ] as const;
 
 for (const route of ROUTES) {
@@ -152,7 +150,7 @@ test("any other key puts the zone line out, including a digit that changes the r
   expect((await zoneLine(page)).count).toBe(1);
   // A digit changes the route while the page root keeps focus.
   // Any other destination will do; the rail order (and so which page a digit opens) is not this test's concern.
-  await page.keyboard.press("3");
+  await page.keyboard.press("4");
   await expect(page.getByRole("heading", { level: 1, name: "Automations", exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   expect((await zoneLine(page)).count).toBe(0);

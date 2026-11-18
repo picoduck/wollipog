@@ -23,7 +23,6 @@ const projectList = readFileSync(new URL("./components/ProjectList.tsx", import.
 const projectLocationRow = readFileSync(new URL("./components/ProjectLocationRow.tsx", import.meta.url), "utf8");
 const pageHeader = readFileSync(new URL("./components/PageHeader.tsx", import.meta.url), "utf8");
 const runsView = readFileSync(new URL("./components/RunsView.tsx", import.meta.url), "utf8");
-const podsView = readFileSync(new URL("./components/PodsView.tsx", import.meta.url), "utf8");
 const createProjectDialog = readFileSync(new URL("./components/CreateProjectDialog.tsx", import.meta.url), "utf8");
 const commandPalette = readFileSync(new URL("./components/CommandPalette.tsx", import.meta.url), "utf8");
 const projectLocationDialog = readFileSync(new URL("./components/ProjectLocationDialog.tsx", import.meta.url), "utf8");
@@ -582,15 +581,10 @@ test("the desktop app never reaches the phone layout, which is why no phone bar 
   }
 });
 
-test("the Multi-Agent Run and Pod create actions are page header primaries", () => {
+test("the Multi-Agent Run create action is a page header primary", () => {
   // Runs hides its primary while the empty state offers the one New Run (#2974); the dialog keeps
   // its title, New Multi-Agent Run.
   assert.match(runsView, /<PageHeader\s+title=\{runsDestination\.name\}\s+description=\{runsDestination\.description\}\s+primary=\{empty \? undefined : \{ label: "New Run", onClick: onNewRun \}\}\s+\/>/);
-  // One verb per action (§17.2): the primary and the dialog it opens are both "New Pod". Pods also
-  // hides its primary while the empty state offers the one New Pod (#2979).
-  assert.match(podsView, /<PageHeader\s+title=\{podsDestination\.name\}\s+description=\{podsDestination\.description\}\s+primary=\{empty \? undefined : \{ label: "New Pod", onClick: onNewPod \}\}\s+\/>/);
-  assert.match(readFileSync(new URL("./components/NewPodDialog.tsx", import.meta.url), "utf8"),
-    /<Modal\s+title="New Pod"/);
   assert.doesNotMatch(app, /topbar-create|NewPodHeaderButton/, "the top bar holds no create action");
   // One `.btn.primary` with a `+` icon; on a phone it is the quiet `+` icon button alone, and its
   // label stays in the accessibility tree (clipped, never display: none) so the name still matches.

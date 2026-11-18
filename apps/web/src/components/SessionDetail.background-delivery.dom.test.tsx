@@ -150,8 +150,8 @@ async function observe(mode: SessionDetailMode, backgroundDeliveries: Background
     ));
     await act(async () => socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [runner], boxes: [], projects: [project], sessions: [session(backgroundDeliveries)], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+      runners: [runner], boxes: [], projects: [project], sessions: [session(backgroundDeliveries)], runs: [],
     } as ControlPlaneToUi));
     await settle();
     await settle();

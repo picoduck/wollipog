@@ -191,12 +191,12 @@ async function withSuggestion(
   );
   await act(async () => socket.push({
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
     runners: [{
       runnerId: "runner-1", hostname: "build-box", displayName: "Build Box", os: "linux", version: "1",
       status: "online", agents: [], workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: PROTOCOL_VERSION,
     }],
-    boxes: [], sessions: [], runs: [], pods: [],
+    boxes: [], sessions: [], runs: [],
   }));
   try {
     await run({ container: view.container, calls });

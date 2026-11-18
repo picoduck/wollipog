@@ -145,8 +145,8 @@ async function mount(client: Partial<ApiClient>, opening: View = { name: "run", 
   ));
   await act(async () => socket.push({
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [], boxes: [], projects: [], sessions: [claude, codex, gemini], runs: [run], pods: [],
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    runners: [], boxes: [], projects: [], sessions: [claude, codex, gemini], runs: [run],
   } as UiSnapshotMessage));
   await settle();
   return { container, root, replaced, publish: async (snapshot) => {
@@ -159,7 +159,7 @@ test("member tabs retain disconnected and request signals beside the comparison"
   const fixture = await mount({});
   try {
     await fixture.publish({ type: "snapshot", runners: [{ runnerId: "runner-1", status: "offline" }],
-      boxes: [], projects: [], pods: [], runs: [run], sessions: [
+      boxes: [], projects: [], runs: [run], sessions: [
         { ...claude, status: "running" },
         { ...codex, runnerId: "other", pendingApproval: { requestId: "approval", title: "Run?", options: [] } },
         gemini,

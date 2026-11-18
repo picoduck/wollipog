@@ -371,32 +371,12 @@ const VOCABULARY = {
     delivered: success("Delivered"),
     failed: danger("Failed"),
   },
-  pod: {
-    active: info("Active"),
-    paused: neutral("Paused"),
-    conflicted: warning("Conflicted"),
-    failed: danger("Failed"),
-    closed: neutral("Closed"),
-    /** Pod orchestration and reconciliation. */
-    idle: neutral("Idle"),
-    ready: neutral("Ready"),
-    running: info("Running", { pulse: true }),
-    stopped: neutral("Stopped"),
-  },
   /** A Wollipog Assistant thread (#4664). Needs You is a confirmation or approval waiting in it. */
   assistantThread: {
     working: info("Working", { pulse: true }),
     needs_you: warning("Needs You"),
     done: success("Done"),
     archived: neutral("Archived"),
-  },
-  /** One merge of a member's committed work into another's, in a pod's Recent Merges (#2980). */
-  podMerge: {
-    running: info("Running", { pulse: true }),
-    applied: success("Merged"),
-    already_applied: neutral("Already Up to Date"),
-    conflicted: warning("Conflicted"),
-    failed: danger("Failed"),
   },
   /** One work item in an issue campaign's ledger (Campaign Status, #2417). */
   campaignWork: {

@@ -55,12 +55,12 @@ The same policy applies to REST and `/ui` WebSockets:
 - inaccessible resource ids return `404`, avoiding cross-user existence disclosure;
 - non-admin REST access is limited to identity context, scoped runner/session operations, the
   device's own push subscription, and scoped workspace rename;
-- organization-global surfaces such as boxes, runs, pods, automations, review queues, and host
+- organization-global surfaces such as boxes, runs, automations, review queues, and host
   administration belong to the personal control-plane organization and remain available only to
   that organization's owner/admin members until they gain an explicit ownership model;
 - non-admin snapshots and deltas include only visible runners, workspaces, and sessions;
 - runner agent environment values and runtime diagnostics are redacted from scoped views;
-- global boxes, runs, and pods are omitted from non-admin WebSocket snapshots;
+- global boxes and runs are omitted from non-admin WebSocket snapshots;
 - membership, team, and ownership changes force scoped clients to reconnect and receive a fresh
   authorization-filtered snapshot.
 - push delivery resolves its session audience again at send time; suspending a member or changing

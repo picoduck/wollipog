@@ -102,13 +102,12 @@ class FakeSocket implements UiSocket {
 function snapshot(overrides: Partial<UiSnapshotMessage> = {}): UiSnapshotMessage {
   return {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
     runners: [runner],
     boxes: [],
     projects: [project],
     sessions: [],
     runs: [],
-    pods: [],
     ...overrides,
   };
 }
@@ -510,7 +509,7 @@ test("with no Machine online a warning leads the body, the form stays visible an
 
 test("without projects the run is placed by Machine and Folder, and no text reads runner", async () => {
   const fixture = await mountFixture({
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
     projects: undefined,
   });
   try {

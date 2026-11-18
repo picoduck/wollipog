@@ -71,11 +71,10 @@ const sessions: SessionView[] = [
 
 const snapshot = {
   type: "snapshot",
-  capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+  capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
   runners: [], boxes: [], projects: [],
   sessions: state === "empty" ? [] : sessions,
   runs: state === "empty" ? [] : runs,
-  pods: [],
 } as ControlPlaneToUi;
 
 class FixtureSocket implements UiSocket {

@@ -11,7 +11,6 @@ import {
   MoreHorizontalIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
-  PodsIcon,
   ProjectsIcon,
   RunsIcon,
   SearchIcon,
@@ -46,7 +45,6 @@ export const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; classNa
   assistants: AssistantsIcon,
   projects: ProjectsIcon,
   runs: RunsIcon,
-  pods: PodsIcon,
   automations: AutomationsIcon,
   usage: UsageIcon,
   runners: ConnectionsIcon,
@@ -147,7 +145,6 @@ function selectedRailView(view: View): GlobalViewName | null {
   // Board mode and an expanded session are both the Sessions destination.
   if (view.name === "session" || view.name === "board") return "inbox";
   if (view.name === "run") return "runs";
-  if (view.name === "pod") return "pods";
   if (view.name === "automation") return "automations";
   return GLOBAL_VIEW_ITEMS.some((item) => item.id === view.name) ? view.name as GlobalViewName : null;
 }

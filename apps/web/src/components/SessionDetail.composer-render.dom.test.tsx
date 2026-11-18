@@ -245,13 +245,12 @@ async function mount(client: Partial<ApiClient> = {}) {
   await act(async () => render(first.id));
   await act(async () => socket.push({
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
     runners: [runner],
     boxes: [],
     projects: [],
     sessions: [first, second],
     runs: [],
-    pods: [],
   }));
   await settle();
   assert.equal(fixture.historyReady, true, "history recovery completes before render counting begins");

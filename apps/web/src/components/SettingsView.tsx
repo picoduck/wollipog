@@ -802,12 +802,6 @@ export function ExperimentalPanel({
         checked={flags.multiAgent}
         onClick={() => onToggle("multiAgent", !flags.multiAgent)}
       />
-      <SwitchRow
-        title={EXPERIMENT_COPY.pods.name}
-        description="Shared-context groups of sessions."
-        checked={flags.pods}
-        onClick={() => onToggle("pods", !flags.pods)}
-      />
     </SettingsGroup>
   );
 }

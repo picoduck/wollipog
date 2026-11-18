@@ -41,9 +41,7 @@ test("nothing stored means every experiment stays at its default", () => {
 });
 
 test("defaults: existing surfaces stay on", () => {
-  // multiAgent and pods EXISTING must not change what an untouched install shows.
   assert.equal(DEFAULT_EXPERIMENT_FLAGS.multiAgent, true);
-  assert.equal(DEFAULT_EXPERIMENT_FLAGS.pods, true);
 });
 
 test("garbage and non-object payloads fall back to the defaults without throwing", () => {
@@ -56,26 +54,25 @@ test("unknown keys are ignored and missing keys keep their defaults", () => {
   // A DOWNGRADE path: a future release stores a flag this one does not know, alongside one it
   // does. The known flag must be honored and the unknown one must not corrupt the rest.
   const flags = parseExperimentFlags(JSON.stringify({ pods: false, warpDrive: false }));
-  assert.deepEqual(flags, { multiAgent: true, pods: false });
+  assert.deepEqual(flags, { multiAgent: true });
 });
 
 test("non-boolean values for known keys are rejected key-by-key", () => {
-  const flags = parseExperimentFlags(JSON.stringify({ pods: "off", multiAgent: false }));
-  assert.equal(flags.pods, true, "a string is not a decision to hide a surface");
-  assert.equal(flags.multiAgent, false);
+  const flags = parseExperimentFlags(JSON.stringify({ multiAgent: "off" }));
+  assert.equal(flags.multiAgent, true, "a string is not a decision to hide a surface");
 });
 
 test("a write round-trips through storage and notifies subscribers exactly once", () => {
   let notified = 0;
   const unsubscribe = subscribeExperimentFlags(() => { notified += 1; });
-  setExperimentFlag("pods", false);
+  setExperimentFlag("multiAgent", false);
   assert.equal(notified, 1);
-  assert.equal(getExperimentFlags().pods, false);
+  assert.equal(getExperimentFlags().multiAgent, false);
   const stored = localStorage.getItem(instanceStorageKey(EXPERIMENTS_STORAGE_KEY));
   assert.ok(stored, "the choice must survive a reload");
-  assert.equal(parseExperimentFlags(stored).pods, false);
+  assert.equal(parseExperimentFlags(stored).multiAgent, false);
   unsubscribe();
-  setExperimentFlag("pods", true);
+  setExperimentFlag("multiAgent", true);
   assert.equal(notified, 1, "an unsubscribed listener must not fire");
 });
 
@@ -84,21 +81,19 @@ test("the snapshot is referentially stable between writes", () => {
   // infinite render loop, so stability is part of the store's contract rather than a nicety.
   assert.equal(getExperimentFlags(), getExperimentFlags());
   const before = getExperimentFlags();
-  setExperimentFlag("pods", false);
+  setExperimentFlag("multiAgent", false);
   assert.notEqual(getExperimentFlags(), before, "a write must produce a new snapshot");
 });
 
 test("flags are scoped per control-plane instance", () => {
-  setExperimentFlag("pods", false, "local");
-  assert.equal(getExperimentFlags("remote-instance").pods, true,
+  setExperimentFlag("multiAgent", false, "local");
+  assert.equal(getExperimentFlags("remote-instance").multiAgent, true,
     "a remote instance must not inherit this device's local choices");
 });
 
 test("the list and detail views of a feature gate together", () => {
   assert.equal(experimentForViewName("runs"), "multiAgent");
   assert.equal(experimentForViewName("run"), "multiAgent");
-  assert.equal(experimentForViewName("pods"), "pods");
-  assert.equal(experimentForViewName("pod"), "pods");
   // Hiding /runs while /runs/~id still rendered would not be "off"; the inverse — gating a
   // view that has no experiment — would hide Inbox behind a switch nobody created.
   for (const name of ["inbox", "board", "projects", "session", "automations", "usage", "runners", "archived", "settings"] as const) {
@@ -111,7 +106,7 @@ test("every gated global destination takes its experiment's name from the naviga
     const experiment = experimentForViewName(item.id);
     if (experiment !== null) {
       // One name for the rail's page title, the settings row and the turned-off page, so the
-      // Pods rename (#1945) lands everywhere by editing the registry alone.
+      // naming stays consistent across surfaces.
       assert.equal(EXPERIMENT_COPY[experiment].name, item.name, item.id);
     }
   }
@@ -119,7 +114,6 @@ test("every gated global destination takes its experiment's name from the naviga
 
 test("a turned-off experiment's title agrees with its plural name and is written whole", () => {
   assert.equal(EXPERIMENT_COPY.multiAgent.offTitle, "Multi-Agent Runs Are Turned Off");
-  assert.equal(EXPERIMENT_COPY.pods.offTitle, `${EXPERIMENT_COPY.pods.name} Are Turned Off`);
   for (const [id, copy] of Object.entries(EXPERIMENT_COPY)) {
     assert.doesNotMatch(copy.offTitle, /\bIs Turned Off\b/u, `${id}: every experiment name is plural`);
     assert.match(copy.offBody, new RegExp(`^This experiment is off on this device\\. Turning it on adds ${copy.name} to the navigation\\.$`, "u"), id);
@@ -147,8 +141,6 @@ test("every surface that exposes a gated feature consults the flags", () => {
       "the numbered shortcuts must consult the flags through the visible rail order, or a hidden view stays one keypress away"],
     ["./App.tsx", /<ExperimentGate experiment="multiAgent"/,
       "a direct route into hidden Multi-Agent Runs must render the turned-off page, not the feature"],
-    ["./App.tsx", /<ExperimentGate experiment="pods"/,
-      "a direct route into hidden Pods must render the turned-off page, not the feature"],
     // The create action moved from the top bar into the Runs page header (#1801), so it renders
     // exactly when the page does.
     ["./App.tsx", /<ExperimentGate experiment="multiAgent"[^>]*>\s*\{view\.name === "runs" \? <RunsView /,

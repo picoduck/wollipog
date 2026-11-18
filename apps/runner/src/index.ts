@@ -164,8 +164,6 @@ import {
   gitDiff,
   resolveGitActionExecution,
   runGitAction,
-  runPodReconcile,
-  validatePodReconciliationMetadata,
   withGitExecutionContext,
 } from "./git-ops.js";
 import { flushProjectedOutbox, Outbox } from "./outbox.js";
@@ -4468,7 +4466,6 @@ const GIT_MUTATIONS = new Set<GitAction["kind"]>([
   "discard_file",
   "commit",
   "open_pr",
-  "pod_reconcile",
   "merge_pull_request",
 ]);
 
@@ -4476,14 +4473,8 @@ const GIT_MUTATIONS = new Set<GitAction["kind"]>([
 async function handleGitAction(msg: GitActionRequestMessage): Promise<void> {
   if (!GIT_MUTATIONS.has(msg.action.kind)) return runOneGitAction(msg);
   const receivedAt = Date.now();
-  // Reconciliation reads the source head and mutates the target, so it owns both session queues.
-  // This closes the race with a source-side commit that was already in flight (or arrives while
-  // the merge runs), even though the control plane also rejects new overlapping API mutations.
-  const lockedSessionIds = msg.action.kind === "pod_reconcile"
-    ? [...new Set([msg.sessionId, msg.action.sourceSessionId])].sort()
-    : [msg.sessionId];
-  const priors = lockedSessionIds.map((sessionId) => gitActionQueues.get(sessionId) ?? Promise.resolve());
-  const run = Promise.all(priors).then(() => {
+  const prior = gitActionQueues.get(msg.sessionId) ?? Promise.resolve();
+  const run = prior.then(() => {
     // A mutation that waited past the control plane's timeout has already been reported as
     // FAILED to the caller — executing it now would silently diverge (ghost commits). Expire it.
     const budget = msg.timeoutMs ?? 30_000;
@@ -4498,12 +4489,10 @@ async function handleGitAction(msg: GitActionRequestMessage): Promise<void> {
     }
     return runOneGitAction(msg);
   });
-  for (const sessionId of lockedSessionIds) gitActionQueues.set(sessionId, run);
+  gitActionQueues.set(msg.sessionId, run);
   await run.finally(() => {
     // Only the tail entry cleans up — a newer request may have chained past this one.
-    for (const sessionId of lockedSessionIds) {
-      if (gitActionQueues.get(sessionId) === run) gitActionQueues.delete(sessionId);
-    }
+    if (gitActionQueues.get(msg.sessionId) === run) gitActionQueues.delete(msg.sessionId);
   });
 }
 
@@ -4514,14 +4503,8 @@ async function runOneGitAction(msg: GitActionRequestMessage): Promise<void> {
     // (never captured vs capture failed) — gitDiff words its error differently for each.
     const meta = store.readMeta(msg.sessionId);
     const execution = resolveGitActionExecution(msg.worktreePath, msg.action, meta);
-    const data = await withGitExecutionContext(execution.context.context ?? { kind: "native" }, async () => {
-      if (msg.action.kind !== "pod_reconcile") {
-        return runGitAction(execution.cwd, msg.action, execution.context);
-      }
-      const source = store.readMeta(msg.action.sourceSessionId);
-      const resolved = validatePodReconciliationMetadata(execution.cwd, meta, source);
-      return { podReconciliation: await runPodReconcile(execution.cwd, resolved.sourceWorktreePath, msg.action) };
-    });
+    const data = await withGitExecutionContext(execution.context.context ?? { kind: "native" }, () =>
+      runGitAction(execution.cwd, msg.action, execution.context));
     if (msg.action.kind === "open_pr" && (data.pr?.created ?? data.pr?.createdWithGh)) {
       await sessions.linkWorktreePullRequest(
         msg.sessionId,

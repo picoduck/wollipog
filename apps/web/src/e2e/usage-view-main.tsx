@@ -442,7 +442,7 @@ class FixtureSocket implements UiSocket {
       // After the drop, every reconnect attempt stays unanswered.
       if (dropped || !this.onopen) return;
       this.onopen();
-      const snapshot = { type: "snapshot", runners, boxes: [], sessions: [], runs: [], pods: [] } as unknown as UiSnapshotMessage;
+      const snapshot = { type: "snapshot", runners, boxes: [], sessions: [], runs: [] } as unknown as UiSnapshotMessage;
       this.onmessage?.({ data: JSON.stringify(snapshot) });
       if (dropConnection) {
         window.setTimeout(() => {

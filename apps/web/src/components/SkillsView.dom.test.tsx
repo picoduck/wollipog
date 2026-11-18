@@ -166,12 +166,11 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
       runners: [runner],
       boxes: [],
       sessions: [],
       runs: [],
-      pods: [],
     });
   });
   await act(settle);
@@ -328,8 +327,8 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [runner], boxes: [], sessions: [], runs: [],
     });
   });
   await act(settle);
@@ -469,8 +468,8 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [runner], boxes: [], sessions: [], runs: [],
     });
   });
   await act(settle);
@@ -573,8 +572,8 @@ test("SkillsView keeps the orphaned copies entry reachable for a runner that can
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners: [{ ...runner, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift }], boxes: [], sessions: [], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [{ ...runner, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift }], boxes: [], sessions: [], runs: [],
     });
   });
   await act(settle);
@@ -628,8 +627,8 @@ async function mountSkills(client: ApiClient, instanceId: string, runners: Runne
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners, boxes: [], sessions: [], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners, boxes: [], sessions: [], runs: [],
     });
   });
   await act(settle);
@@ -1338,8 +1337,8 @@ test("SkillsView follows the route's selected skill, including back to no select
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [runner], boxes: [], sessions: [], runs: [],
     });
   });
   await act(settle);
@@ -1408,8 +1407,8 @@ test("SkillsView keeps following the selection when a mutation finishes after th
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [runner], boxes: [], sessions: [], runs: [],
     });
   });
   await act(settle);
@@ -1486,8 +1485,8 @@ async function mountRouted(client: ApiClient, key: string, view: View = { name: 
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners, boxes: [], sessions: [], runs: [], pods: [],
+      capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners, boxes: [], sessions: [], runs: [],
     });
   });
   await act(settle);

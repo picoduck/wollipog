@@ -259,13 +259,6 @@ import {
   type ProjectLocationView,
   type ProjectView,
   type ProviderLoginView,
-  type PodContextEntry,
-  type PodMemberRole,
-  type PodOrchestrationPolicy,
-  type PodOrchestrationStep,
-  type PodOrchestrationView,
-  type PodReconciliation,
-  type PodView,
   type ReviewSessionCapability,
   type RunnerMetadata,
   type RunnerCapacityBlocker,
@@ -384,7 +377,6 @@ const OUTBOUND_EVENT_KINDS = new Set<OutboundEventKind>([
   "cost.checkpoint",
   "cost.budget_exhausted",
 ]);
-import { DEFAULT_POD_ORCHESTRATION_POLICY, type PodContextSelectionWindow } from "./pod-orchestration.js";
 import { evaluateUiEvidenceReviewClient, type UiEvidenceReviewClient, type UiEvidenceReviewEvaluation } from "./ui-evidence-review.js";
 import {
   BOOTSTRAP_OWNER_NAME,
@@ -1981,110 +1973,6 @@ CREATE TABLE IF NOT EXISTS multi_agent_run_members (
   PRIMARY KEY (run_id, session_id),
   FOREIGN KEY (run_id) REFERENCES multi_agent_runs(id) ON DELETE CASCADE
 );
-
-CREATE TABLE IF NOT EXISTS pods (
-  id         TEXT PRIMARY KEY,
-  title      TEXT NOT NULL,
-  objective  TEXT NOT NULL DEFAULT '',
-  status     TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'closed')),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS pod_members (
-  pod_id               TEXT NOT NULL,
-  session_id           TEXT NOT NULL,
-  joined_at            INTEGER NOT NULL,
-  role                 TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('lead', 'worker', 'reviewer')),
-  context_token_budget INTEGER,
-  last_context_seq     INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (pod_id, session_id),
-  FOREIGN KEY (pod_id) REFERENCES pods(id) ON DELETE CASCADE,
-  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_pod_members_pod ON pod_members(pod_id, joined_at, session_id);
-
-CREATE TABLE IF NOT EXISTS pod_orchestration (
-  pod_id                 TEXT PRIMARY KEY,
-  mode                   TEXT NOT NULL DEFAULT 'manual' CHECK (mode IN ('manual', 'round_robin', 'lead_driven', 'event_triggered')),
-  context_token_budget   INTEGER NOT NULL DEFAULT 4096,
-  summary_token_budget   INTEGER NOT NULL DEFAULT 512,
-  max_turns              INTEGER NOT NULL DEFAULT 12,
-  max_repeated_outputs   INTEGER NOT NULL DEFAULT 2,
-  status                 TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'running', 'paused', 'stopped')),
-  run_id                 TEXT,
-  turns_used             INTEGER NOT NULL DEFAULT 0,
-  current_session_id     TEXT,
-  last_session_id        TEXT,
-  stop_reason            TEXT,
-  started_at             INTEGER,
-  updated_at             INTEGER NOT NULL,
-  FOREIGN KEY (pod_id) REFERENCES pods(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS pod_orchestration_steps (
-  step_id              TEXT PRIMARY KEY,
-  pod_id               TEXT NOT NULL,
-  run_id               TEXT NOT NULL,
-  turn                 INTEGER NOT NULL,
-  target_session_id    TEXT NOT NULL,
-  trigger_session_id   TEXT,
-  selected_entry_ids   TEXT NOT NULL,
-  summarized_from_seq  INTEGER,
-  summarized_to_seq    INTEGER,
-  estimated_tokens     INTEGER NOT NULL,
-  output_entry_id      TEXT,
-  output_hash          TEXT,
-  status               TEXT NOT NULL CHECK (status IN ('dispatching', 'running', 'settled', 'failed')),
-  error                TEXT,
-  created_at           INTEGER NOT NULL,
-  settled_at           INTEGER,
-  UNIQUE (pod_id, run_id, turn),
-  FOREIGN KEY (pod_id) REFERENCES pods(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_pod_orchestration_steps_run
-  ON pod_orchestration_steps(pod_id, run_id, turn DESC);
-
-CREATE TABLE IF NOT EXISTS pod_reconciliations (
-  reconciliation_id TEXT PRIMARY KEY,
-  pod_id             TEXT NOT NULL,
-  source_session_id  TEXT NOT NULL,
-  target_session_id  TEXT NOT NULL,
-  actor_id           TEXT NOT NULL,
-  status             TEXT NOT NULL CHECK (status IN ('running', 'applied', 'already_applied', 'conflicted', 'failed')),
-  source_head        TEXT,
-  target_head        TEXT,
-  merge_base         TEXT,
-  result_head        TEXT,
-  conflict_paths     TEXT,
-  error              TEXT,
-  created_at         INTEGER NOT NULL,
-  completed_at       INTEGER,
-  FOREIGN KEY (pod_id) REFERENCES pods(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_pod_reconciliations_pod
-  ON pod_reconciliations(pod_id, created_at DESC, reconciliation_id DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_pod_reconciliations_running
-  ON pod_reconciliations(pod_id) WHERE status='running';
-
-CREATE TABLE IF NOT EXISTS pod_context_entries (
-  id              TEXT PRIMARY KEY,
-  pod_id          TEXT NOT NULL,
-  seq             INTEGER NOT NULL,
-  ts              INTEGER NOT NULL,
-  source_kind     TEXT NOT NULL CHECK (source_kind IN ('human', 'session')),
-  source          TEXT NOT NULL,
-  source_session_id TEXT,
-  source_from_seq INTEGER,
-  source_to_seq   INTEGER,
-  content         TEXT NOT NULL,
-  UNIQUE (pod_id, seq),
-  FOREIGN KEY (pod_id) REFERENCES pods(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_pod_context_entries_pod ON pod_context_entries(pod_id, seq DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_pod_context_member_output
-  ON pod_context_entries(pod_id, source_session_id, source_from_seq, source_to_seq)
-  WHERE source_kind='session';
 
 ${ARTIFACT_TABLE_SCHEMA}
 
@@ -4372,77 +4260,6 @@ interface RunRow {
   updated_at: number;
 }
 
-interface PodRow {
-  id: string;
-  title: string;
-  objective: string;
-  status: PodView["status"];
-  created_at: number;
-  updated_at: number;
-}
-
-interface PodContextEntryRow {
-  id: string;
-  pod_id: string;
-  seq: number;
-  ts: number;
-  source: string;
-  content: string;
-}
-
-interface PodOrchestrationRow {
-  pod_id: string;
-  mode: PodOrchestrationPolicy["mode"];
-  context_token_budget: number;
-  summary_token_budget: number;
-  max_turns: number;
-  max_repeated_outputs: number;
-  status: PodOrchestrationView["state"]["status"];
-  run_id: string | null;
-  turns_used: number;
-  current_session_id: string | null;
-  last_session_id: string | null;
-  stop_reason: string | null;
-  started_at: number | null;
-  updated_at: number;
-}
-
-interface PodOrchestrationStepRow {
-  step_id: string;
-  pod_id: string;
-  run_id: string;
-  turn: number;
-  target_session_id: string;
-  trigger_session_id: string | null;
-  selected_entry_ids: string;
-  summarized_from_seq: number | null;
-  summarized_to_seq: number | null;
-  estimated_tokens: number;
-  output_entry_id: string | null;
-  output_hash: string | null;
-  status: PodOrchestrationStep["status"];
-  error: string | null;
-  created_at: number;
-  settled_at: number | null;
-}
-
-interface PodReconciliationRow {
-  reconciliation_id: string;
-  pod_id: string;
-  source_session_id: string;
-  target_session_id: string;
-  actor_id: string;
-  status: PodReconciliation["status"];
-  source_head: string | null;
-  target_head: string | null;
-  merge_base: string | null;
-  result_head: string | null;
-  conflict_paths: string | null;
-  error: string | null;
-  created_at: number;
-  completed_at: number | null;
-}
-
 interface ArtifactRow {
   id: string;
   run_id: string | null;
@@ -5503,6 +5320,22 @@ type ConfirmedSessionNamingHarnessTargetWrite = SessionNamingHarnessTargetWrite 
 // subtracts a deleted child's last charge, so deleting history cannot replenish an allowance, and a
 // restart re-reserves the child's unspent limits.
 const TERMINAL_STATUS_SQL = "('completed','failed','stopped')";
+
+/** Whether the ledger attempt `assignment`, opened at or after a child's report, still supersedes
+ * that report (#4684). An open attempt does: work is pending for the child. An ended attempt
+ * stops superseding it only while the child's history has not moved since the attempt opened: it
+ * ended in its start epoch, and the session's seq high water (the highest seq it ever held, which
+ * pruning records in history_prune_through_seq) is still the attempt's start seq. That covers an
+ * attempt a delivery record closed at once. Any later event of any kind supersedes again, during
+ * the attempt or after it, because work reaches a child in more forms than a user message (a
+ * recovered question answer, a runner continuation) and can land after the attempt closed. The
+ * high water never falls, so archived-history pruning cannot make a superseded report count again
+ * (#1729). Keep it in step with sessionSeqHighWater. */
+const CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL = `(assignment.ended_at IS NULL OR assignment.end_seq IS NULL
+  OR assignment.end_event_epoch IS NOT assignment.start_event_epoch
+  OR MAX(COALESCE((SELECT MAX(moved.seq) FROM session_events moved WHERE moved.session_id=assignment.session_id), 0),
+    COALESCE((SELECT pruned.history_prune_through_seq FROM sessions pruned WHERE pruned.id=assignment.session_id), 0))
+    IS NOT assignment.start_seq)`;
 
 /** Rows one prune batch tests against HISTORY_PRUNE_KEEP_SQL at most: about 1 ms of JSON reads. */
 const HISTORY_PRUNE_SCAN_ROWS = 1024;
@@ -6924,16 +6757,25 @@ export class ControlPlaneDb {
     };
   }
 
+  /** An attempt's boundary seq is the session's seq high water, the seq its next event follows,
+   * so a boundary taken after archived-history pruning still matches the high water that
+   * CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL compares it with (#4684). A session without events or
+   * pruning keeps a null boundary. */
   private campaignAttemptBoundary(sessionId: string): CampaignAttemptBoundary {
     const row = this.stmt(
       `SELECT event_epoch, runner_history_epoch,
-         (SELECT MAX(seq) FROM session_events WHERE session_id=sessions.id) AS seq
+         (SELECT MAX(seq) FROM session_events WHERE session_id=sessions.id) AS seq,
+         history_prune_through_seq
        FROM sessions WHERE id=?`,
-    ).get(sessionId) as { event_epoch: number; runner_history_epoch: number | null; seq: number | null } | undefined;
+    ).get(sessionId) as {
+      event_epoch: number; runner_history_epoch: number | null; seq: number | null; history_prune_through_seq: number | null;
+    } | undefined;
+    const seq = row?.seq == null && row?.history_prune_through_seq == null
+      ? null : Math.max(row?.seq ?? 0, row?.history_prune_through_seq ?? 0);
     return {
       eventEpoch: row?.event_epoch ?? null,
       runnerHistoryEpoch: row?.runner_history_epoch ?? null,
-      seq: row?.seq ?? null,
+      seq,
     };
   }
 
@@ -7597,38 +7439,17 @@ export class ControlPlaneDb {
              WHERE invocation.trigger_id=automation_triggers.trigger_id)`,
       );
     }
-    let addedPodRoleColumn = false;
-    for (const column of [
-      "role TEXT NOT NULL DEFAULT 'worker'",
-      "context_token_budget INTEGER",
-      "last_context_seq INTEGER NOT NULL DEFAULT 0",
-    ]) {
-      try {
-        db.exec(`ALTER TABLE pod_members ADD COLUMN ${column}`);
-        if (column.startsWith("role ")) addedPodRoleColumn = true;
-      } catch {
-        /* column already present */
-      }
-    }
-    if (addedPodRoleColumn) {
-      // Only legacy pods need a deterministic initial lead. Re-running this backfill on every open
-      // would overwrite an operator's intentional lead-less role configuration after restart.
-      db.exec(
-        `UPDATE pod_members AS member SET role='lead'
-         WHERE member.session_id=(
-           SELECT first.session_id FROM pod_members AS first
-           WHERE first.pod_id=member.pod_id ORDER BY first.joined_at, first.session_id LIMIT 1
-         ) AND NOT EXISTS (
-           SELECT 1 FROM pod_members AS existing WHERE existing.pod_id=member.pod_id AND existing.role='lead'
-         )`,
-      );
-    }
-    db.exec(
-      `INSERT OR IGNORE INTO pod_orchestration
-       (pod_id, mode, context_token_budget, summary_token_budget, max_turns, max_repeated_outputs,
-        status, turns_used, updated_at)
-       SELECT id, 'manual', 4096, 512, 12, 2, 'idle', 0, updated_at FROM pods`,
-    );
+    // Drop dependent tables first, with foreign-key enforcement still enabled.
+    db.exec(`
+      BEGIN IMMEDIATE;
+      DROP TABLE IF EXISTS pod_context_entries;
+      DROP TABLE IF EXISTS pod_reconciliations;
+      DROP TABLE IF EXISTS pod_orchestration_steps;
+      DROP TABLE IF EXISTS pod_orchestration;
+      DROP TABLE IF EXISTS pod_members;
+      DROP TABLE IF EXISTS pods;
+      COMMIT;
+    `);
     retireWorkflowEngine(db);
     const steeringArtifactParent = () => (
       db.prepare("PRAGMA foreign_key_list(session_steering_attempt_artifacts)").all() as unknown as Array<{
@@ -15755,7 +15576,7 @@ export class ControlPlaneDb {
    * table has NO foreign key to `runners`, so its rows must be removed explicitly (deleting
    * `sessions`/`runs` cascades their events/members). Returns the runner id + the removed session
    * ids so the caller can broadcast their removal to the UI. */
-  deleteBox(boxId: string): { runnerId: string; sessionIds: string[]; runIds: string[]; podIds: string[] } | null {
+  deleteBox(boxId: string): { runnerId: string; sessionIds: string[]; runIds: string[] } | null {
     if (this.boxHasPendingLegacyDataAdoption(boxId)) {
       throw new Error("cannot delete the Machine while its legacy SSH account adoption is pending");
     }
@@ -15769,11 +15590,6 @@ export class ControlPlaneDb {
     const runIds = (
       this.stmt("SELECT id FROM multi_agent_runs WHERE runner_id=?").all(row.runner_id) as unknown as { id: string }[]
     ).map((r) => r.id);
-    const podIds = (
-      this.stmt(
-        "SELECT DISTINCT m.pod_id AS id FROM pod_members m JOIN sessions s ON s.id=m.session_id WHERE s.runner_id=?",
-      ).all(row.runner_id) as unknown as { id: string }[]
-    ).map((pod) => pod.id);
     this.db.exec("BEGIN");
     try {
       this.detachRunnerProjectLocations(row.runner_id, Date.now());
@@ -15810,12 +15626,12 @@ export class ControlPlaneDb {
       throw err;
     }
     this.collectArtifactBlobs();
-    return { runnerId: row.runner_id, sessionIds, runIds, podIds };
+    return { runnerId: row.runner_id, sessionIds, runIds };
   }
 
   /** Delete a runner record and everything tied to it (agents, workspaces, sessions, runs, and its
    * box row if it was one). Used to drop a stale/offline runner from the dashboard. */
-  deleteRunner(runnerId: string): { sessionIds: string[]; runIds: string[]; podIds: string[] } | null {
+  deleteRunner(runnerId: string): { sessionIds: string[]; runIds: string[] } | null {
     const exists = this.stmt("SELECT 1 FROM runners WHERE runner_id=?").get(runnerId);
     if (!exists) return null;
     const managedBox = this.stmt("SELECT box_id FROM boxes WHERE runner_id=?").get(runnerId) as
@@ -15830,11 +15646,6 @@ export class ControlPlaneDb {
     const runIds = (
       this.stmt("SELECT id FROM multi_agent_runs WHERE runner_id=?").all(runnerId) as unknown as { id: string }[]
     ).map((r) => r.id);
-    const podIds = (
-      this.stmt(
-        "SELECT DISTINCT m.pod_id AS id FROM pod_members m JOIN sessions s ON s.id=m.session_id WHERE s.runner_id=?",
-      ).all(runnerId) as unknown as { id: string }[]
-    ).map((pod) => pod.id);
     this.db.exec("BEGIN");
     try {
       this.detachRunnerProjectLocations(runnerId, Date.now());
@@ -15870,7 +15681,7 @@ export class ControlPlaneDb {
       throw err;
     }
     this.collectArtifactBlobs();
-    return { sessionIds, runIds, podIds };
+    return { sessionIds, runIds };
   }
 
   getBox(boxId: string): BoxView | null {
@@ -22704,8 +22515,10 @@ export class ControlPlaneDb {
 
   /** Seq of the session's last top-level report when no later report or assignment superseded it,
    * and null when its last word is not a report. Failed/stopped recovery also requires proof that
-   * active commands and ledger assignments did not supersede it. Ordinary idle/completed stored
-   * attestations retain their established rules until a new turn or user message invalidates them. */
+   * active commands and ledger assignments did not supersede it; an ended assignment does not
+   * while the child's history has not moved since it opened
+   * (CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL). Ordinary idle/completed stored attestations retain
+   * their established rules until a new turn or user message invalidates them. */
   durableFinalReportSeq(sessionId: string): number | null {
     const row = this.stmt(
       `SELECT target.seq AS seq FROM session_events target
@@ -22737,6 +22550,7 @@ export class ControlPlaneDb {
          WHERE assignment.session_id=target.session_id
            AND assignment.start_event_epoch=(SELECT event_epoch FROM sessions WHERE id=target.session_id)
            AND assignment.start_seq>=target.seq
+           AND ${CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL}
        ) AND NOT EXISTS (
          SELECT 1 FROM session_events assignment
          WHERE assignment.session_id=target.session_id AND assignment.seq>target.seq
@@ -23496,6 +23310,7 @@ export class ControlPlaneDb {
            WHERE child.status IN ('failed','stopped') AND assignment.session_id=target.session_id
              AND assignment.start_event_epoch=child.event_epoch
              AND assignment.start_seq>=target.seq
+             AND ${CAMPAIGN_ATTEMPT_SUPERSEDES_REPORT_SQL}
          )
          AND NOT EXISTS (
            SELECT 1 FROM session_events assignment
@@ -32508,749 +32323,6 @@ export class ControlPlaneDb {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       sessionIds,
-    };
-  }
-
-  /* ------------------------------- Pods ---------------------------------- */
-
-  createPod(input: {
-    id: string;
-    title: string;
-    objective: string;
-    sessionIds: string[];
-    now: number;
-  }): PodView | null {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.stmt(
-        "INSERT INTO pods (id, title, objective, status, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?)",
-      ).run(input.id, input.title, input.objective, input.now, input.now);
-      const insertMember = this.stmt(
-        `INSERT INTO pod_members (pod_id, session_id, joined_at, role)
-         SELECT ?, ?, ?, ?
-         WHERE NOT EXISTS (
-           SELECT 1 FROM pod_members m JOIN pods p ON p.id=m.pod_id
-           WHERE m.session_id=? AND p.status='active'
-         )`,
-      );
-      for (const [index, sessionId] of input.sessionIds.entries()) {
-        const inserted = insertMember.run(input.id, sessionId, input.now + index, index === 0 ? "lead" : "worker", sessionId);
-        if (Number(inserted.changes) !== 1) {
-          this.db.exec("ROLLBACK");
-          return null;
-        }
-      }
-      this.stmt(
-        `INSERT INTO pod_orchestration
-         (pod_id, mode, context_token_budget, summary_token_budget, max_turns,
-          max_repeated_outputs, status, turns_used, updated_at)
-         VALUES (?, 'manual', 4096, 512, 12, 2, 'idle', 0, ?)`,
-      ).run(input.id, input.now);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    return this.getPod(input.id);
-  }
-
-  getPod(id: string): PodView | null {
-    const row = this.stmt("SELECT * FROM pods WHERE id=?").get(id) as unknown as PodRow | undefined;
-    return row ? this.podView(row) : null;
-  }
-
-  listPods(): PodView[] {
-    const rows = this.stmt("SELECT * FROM pods ORDER BY updated_at DESC, id")
-      .all() as unknown as PodRow[];
-    return rows.map((row) => this.podView(row));
-  }
-
-  activePodForSession(sessionId: string): PodView | null {
-    const row = this.stmt(
-      "SELECT p.* FROM pods p JOIN pod_members m ON m.pod_id=p.id WHERE m.session_id=? AND p.status='active' LIMIT 1",
-    ).get(sessionId) as unknown as PodRow | undefined;
-    return row ? this.podView(row) : null;
-  }
-
-  podsForSession(sessionId: string): PodView[] {
-    const rows = this.stmt(
-      "SELECT p.* FROM pods p JOIN pod_members m ON m.pod_id=p.id WHERE m.session_id=? ORDER BY p.updated_at DESC, p.id",
-    ).all(sessionId) as unknown as PodRow[];
-    return rows.map((row) => this.podView(row));
-  }
-
-  addPodMember(
-    podId: string,
-    sessionId: string,
-    now: number,
-    role: PodMemberRole = "worker",
-    contextTokenBudget: number | null = null,
-  ): PodView | null {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const inserted = this.stmt(
-        `INSERT INTO pod_members (pod_id, session_id, joined_at, role, context_token_budget)
-         SELECT ?, ?, ?, ?, ?
-         WHERE EXISTS (
-           SELECT 1 FROM pods target
-           WHERE target.id=? AND target.status='active'
-             AND (SELECT COUNT(*) FROM pod_members existing WHERE existing.pod_id=target.id) < 12
-         ) AND NOT EXISTS (
-           SELECT 1 FROM pod_members m JOIN pods p ON p.id=m.pod_id
-           WHERE m.session_id=? AND p.status='active'
-         )`,
-      ).run(podId, sessionId, now, role, contextTokenBudget, podId, sessionId);
-      if (Number(inserted.changes) !== 1) {
-        this.db.exec("ROLLBACK");
-        return null;
-      }
-      this.stmt("UPDATE pods SET updated_at=? WHERE id=?").run(now, podId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    return this.getPod(podId);
-  }
-
-  removePodMember(podId: string, sessionId: string, now: number): PodView | null {
-    const removed = this.stmt("DELETE FROM pod_members WHERE pod_id=? AND session_id=?")
-      .run(podId, sessionId);
-    if (Number(removed.changes) !== 1) return null;
-    this.stmt("UPDATE pods SET updated_at=? WHERE id=?").run(now, podId);
-    return this.getPod(podId);
-  }
-
-  closePod(podId: string, now: number): PodView | null {
-    this.stopPodOrchestration(podId, "pod_closed", now);
-    this.failPodReconciliations(podId, "pod closed during reconciliation", now);
-    const changed = this.stmt(
-      "UPDATE pods SET status='closed', updated_at=? WHERE id=? AND status='active'",
-    ).run(now, podId);
-    return Number(changed.changes) === 1 ? this.getPod(podId) : null;
-  }
-
-  /** Refresh a pod after a member disappeared through session/runner/box deletion. Active pods
-   * require at least two members, so infrastructure cleanup closes an undersized pod atomically
-   * instead of leaving an unusable active record behind. */
-  reconcilePodAfterMembershipLoss(podId: string, now: number): PodView | null {
-    const changed = this.stmt(
-      `UPDATE pods
-       SET status=CASE
-         WHEN status='active' AND (SELECT COUNT(*) FROM pod_members WHERE pod_id=?) < 2 THEN 'closed'
-         ELSE status
-       END,
-       updated_at=?
-       WHERE id=?`,
-    ).run(podId, now, podId);
-    this.stmt(
-      `UPDATE pod_orchestration
-       SET status='stopped', current_session_id=NULL, stop_reason='membership_changed', updated_at=?
-       WHERE pod_id=? AND status='running' AND (
-         NOT EXISTS (SELECT 1 FROM pod_members WHERE pod_id=? AND session_id=current_session_id)
-         OR EXISTS (SELECT 1 FROM pods WHERE id=? AND status='closed')
-       )`,
-    ).run(now, podId, podId, podId);
-    this.stmt(
-      `UPDATE pod_orchestration_steps SET status='failed', error='membership changed during orchestration', settled_at=?
-       WHERE pod_id=? AND status IN ('dispatching','running')
-         AND EXISTS (SELECT 1 FROM pod_orchestration o WHERE o.pod_id=? AND o.status='stopped')`,
-    ).run(now, podId, podId);
-    this.stmt(
-      `UPDATE pod_reconciliations
-       SET status='failed', error='membership changed during reconciliation', completed_at=?
-       WHERE pod_id=? AND status='running' AND (
-         NOT EXISTS (SELECT 1 FROM pod_members WHERE pod_id=? AND session_id=source_session_id)
-         OR NOT EXISTS (SELECT 1 FROM pod_members WHERE pod_id=? AND session_id=target_session_id)
-         OR EXISTS (SELECT 1 FROM pods WHERE id=? AND status='closed')
-       )`,
-    ).run(now, podId, podId, podId, podId);
-    return Number(changed.changes) === 1 ? this.getPod(podId) : null;
-  }
-
-  touchPod(podId: string, now: number): PodView | null {
-    const changed = this.stmt("UPDATE pods SET updated_at=? WHERE id=?").run(now, podId);
-    return Number(changed.changes) === 1 ? this.getPod(podId) : null;
-  }
-
-  updatePodMember(
-    podId: string,
-    sessionId: string,
-    patch: { role?: PodMemberRole; contextTokenBudget?: number | null },
-    now: number,
-  ): PodView | null {
-    const current = this.stmt(
-      "SELECT role, context_token_budget FROM pod_members WHERE pod_id=? AND session_id=?",
-    ).get(podId, sessionId) as unknown as { role: PodMemberRole; context_token_budget: number | null } | undefined;
-    if (!current) return null;
-    const changed = this.stmt(
-      `UPDATE pod_members SET role=?, context_token_budget=? WHERE pod_id=? AND session_id=?`,
-    ).run(
-      patch.role ?? current.role,
-      patch.contextTokenBudget === undefined ? current.context_token_budget : patch.contextTokenBudget,
-      podId,
-      sessionId,
-    );
-    if (Number(changed.changes) !== 1) return null;
-    this.stmt("UPDATE pods SET updated_at=? WHERE id=?").run(now, podId);
-    return this.getPod(podId);
-  }
-
-  updatePodOrchestrationPolicy(podId: string, policy: PodOrchestrationPolicy, now: number): PodView | null {
-    const changed = this.stmt(
-      `UPDATE pod_orchestration
-       SET mode=?, context_token_budget=?, summary_token_budget=?, max_turns=?,
-           max_repeated_outputs=?, updated_at=?
-       WHERE pod_id=? AND status<>'running'`,
-    ).run(
-      policy.mode,
-      policy.contextTokenBudget,
-      policy.summaryTokenBudget,
-      policy.maxTurns,
-      policy.maxRepeatedOutputs,
-      now,
-      podId,
-    );
-    if (Number(changed.changes) !== 1) return null;
-    this.stmt("UPDATE pods SET updated_at=? WHERE id=?").run(now, podId);
-    return this.getPod(podId);
-  }
-
-  startPodOrchestration(podId: string, runId: string, now: number): PodView | null {
-    const changed = this.stmt(
-      `UPDATE pod_orchestration
-       SET status='running', run_id=?, turns_used=0, current_session_id=NULL,
-           last_session_id=NULL, stop_reason=NULL, started_at=?, updated_at=?
-       WHERE pod_id=? AND status<>'running'`,
-    ).run(runId, now, now, podId);
-    if (Number(changed.changes) !== 1) return null;
-    this.stmt("UPDATE pods SET updated_at=? WHERE id=?").run(now, podId);
-    return this.getPod(podId);
-  }
-
-  beginPodOrchestrationStep(input: {
-    stepId: string;
-    podId: string;
-    runId: string;
-    targetSessionId: string;
-    triggerSessionId?: string;
-    selectedEntryIds: string[];
-    summarizedFromSeq?: number;
-    summarizedToSeq?: number;
-    estimatedTokens: number;
-    now: number;
-  }): PodOrchestrationStep | null {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const state = this.stmt(
-        `SELECT turns_used, max_turns FROM pod_orchestration
-         WHERE pod_id=? AND status='running' AND run_id=? AND current_session_id IS NULL`,
-      ).get(input.podId, input.runId) as unknown as { turns_used: number; max_turns: number } | undefined;
-      if (!state || state.turns_used >= state.max_turns) {
-        this.db.exec("ROLLBACK");
-        return null;
-      }
-      const turn = state.turns_used + 1;
-      this.stmt(
-        `INSERT INTO pod_orchestration_steps
-         (step_id, pod_id, run_id, turn, target_session_id, trigger_session_id,
-          selected_entry_ids, summarized_from_seq, summarized_to_seq, estimated_tokens,
-          status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'dispatching', ?)`,
-      ).run(
-        input.stepId,
-        input.podId,
-        input.runId,
-        turn,
-        input.targetSessionId,
-        input.triggerSessionId ?? null,
-        JSON.stringify(input.selectedEntryIds),
-        input.summarizedFromSeq ?? null,
-        input.summarizedToSeq ?? null,
-        input.estimatedTokens,
-        input.now,
-      );
-      this.stmt(
-        `UPDATE pod_orchestration SET turns_used=?, current_session_id=?, last_session_id=?, updated_at=?
-         WHERE pod_id=?`,
-      ).run(turn, input.targetSessionId, input.targetSessionId, input.now, input.podId);
-      this.stmt("UPDATE pods SET updated_at=? WHERE id=?").run(input.now, input.podId);
-      this.db.exec("COMMIT");
-      return this.podOrchestrationStep(
-        this.stmt("SELECT * FROM pod_orchestration_steps WHERE step_id=?").get(input.stepId) as unknown as PodOrchestrationStepRow,
-      );
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  markPodOrchestrationStepRunning(stepId: string, podId: string, targetSessionId: string, maxContextSeq: number, now: number): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const changed = this.stmt(
-        "UPDATE pod_orchestration_steps SET status='running' WHERE step_id=? AND pod_id=? AND status='dispatching'",
-      ).run(stepId, podId);
-      if (Number(changed.changes) !== 1) {
-        this.db.exec("ROLLBACK");
-        return false;
-      }
-      this.stmt(
-        `UPDATE pod_members SET last_context_seq=MAX(last_context_seq, ?)
-         WHERE pod_id=? AND session_id=?`,
-      ).run(maxContextSeq, podId, targetSessionId);
-      this.stmt("UPDATE pod_orchestration SET updated_at=? WHERE pod_id=?").run(now, podId);
-      this.db.exec("COMMIT");
-      return true;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  settlePodOrchestrationStep(
-    podId: string,
-    sessionId: string,
-    outputEntryId: string,
-    outputHash: string,
-    now: number,
-  ): PodOrchestrationStep | null {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const row = this.stmt(
-        `SELECT step.* FROM pod_orchestration_steps step
-         JOIN pod_orchestration state ON state.pod_id=step.pod_id AND state.run_id=step.run_id
-         WHERE state.pod_id=? AND state.status='running' AND state.current_session_id=?
-           AND step.turn=state.turns_used AND step.target_session_id=? AND step.status='running'`,
-      ).get(podId, sessionId, sessionId) as unknown as PodOrchestrationStepRow | undefined;
-      if (!row) {
-        this.db.exec("ROLLBACK");
-        return null;
-      }
-      this.stmt(
-        `UPDATE pod_orchestration_steps
-         SET status='settled', output_entry_id=?, output_hash=?, settled_at=? WHERE step_id=?`,
-      ).run(outputEntryId, outputHash, now, row.step_id);
-      this.stmt(
-        `UPDATE pod_orchestration SET current_session_id=NULL, updated_at=? WHERE pod_id=?`,
-      ).run(now, podId);
-      this.db.exec("COMMIT");
-      return this.podOrchestrationStep({
-        ...row,
-        status: "settled",
-        output_entry_id: outputEntryId,
-        output_hash: outputHash,
-        settled_at: now,
-      });
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  countPodOrchestrationOutputHash(podId: string, runId: string, outputHash: string): number {
-    return Number((this.stmt(
-      `SELECT COUNT(*) AS count FROM pod_orchestration_steps
-       WHERE pod_id=? AND run_id=? AND status='settled' AND output_hash=?`,
-    ).get(podId, runId, outputHash) as unknown as { count: number }).count);
-  }
-
-  stopPodOrchestration(
-    podId: string,
-    reason: string,
-    now: number,
-    status: "paused" | "stopped" = "stopped",
-  ): PodView | null {
-    const state = this.stmt("SELECT status FROM pod_orchestration WHERE pod_id=?")
-      .get(podId) as unknown as { status: PodOrchestrationView["state"]["status"] } | undefined;
-    if (!state) return null;
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.stmt(
-        `UPDATE pod_orchestration SET status=?, current_session_id=NULL, stop_reason=?, updated_at=? WHERE pod_id=?`,
-      ).run(status, reason.slice(0, 1_000), now, podId);
-      this.stmt(
-        `UPDATE pod_orchestration_steps
-         SET status='failed', error=?, settled_at=?
-         WHERE pod_id=? AND status IN ('dispatching','running')`,
-      ).run(reason.slice(0, 1_000), now, podId);
-      this.stmt("UPDATE pods SET updated_at=? WHERE id=?").run(now, podId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    return this.getPod(podId);
-  }
-
-  pauseInterruptedPodOrchestrations(now: number): void {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.stmt(
-        `UPDATE pods SET updated_at=?
-         WHERE id IN (SELECT pod_id FROM pod_orchestration WHERE status='running')`,
-      ).run(now);
-      this.stmt(
-        `UPDATE pod_orchestration_steps
-         SET status='failed', error='control plane restarted with delivery state uncertain', settled_at=?
-         WHERE status IN ('dispatching','running')`,
-      ).run(now);
-      this.stmt(
-        `UPDATE pod_orchestration
-         SET status='paused', current_session_id=NULL,
-             stop_reason='control_plane_restart', updated_at=? WHERE status='running'`,
-      ).run(now);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  beginPodReconciliation(input: {
-    reconciliationId: string;
-    podId: string;
-    sourceSessionId: string;
-    targetSessionId: string;
-    actorId: string;
-    now: number;
-  }): PodReconciliation | null {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const inserted = this.stmt(
-        `INSERT INTO pod_reconciliations
-         (reconciliation_id, pod_id, source_session_id, target_session_id, actor_id, status, created_at)
-         SELECT ?, pod.id, ?, ?, ?, 'running', ? FROM pods pod
-         WHERE pod.id=? AND pod.status='active'
-           AND EXISTS (SELECT 1 FROM pod_members WHERE pod_id=pod.id AND session_id=?)
-           AND EXISTS (SELECT 1 FROM pod_members WHERE pod_id=pod.id AND session_id=?)
-           AND NOT EXISTS (SELECT 1 FROM pod_orchestration WHERE pod_id=pod.id AND status='running')
-           AND NOT EXISTS (SELECT 1 FROM pod_reconciliations WHERE pod_id=pod.id AND status='running')`,
-      ).run(
-        input.reconciliationId,
-        input.sourceSessionId,
-        input.targetSessionId,
-        input.actorId.slice(0, 256),
-        input.now,
-        input.podId,
-        input.sourceSessionId,
-        input.targetSessionId,
-      );
-      if (Number(inserted.changes) !== 1) {
-        this.db.exec("ROLLBACK");
-        return null;
-      }
-      this.stmt("UPDATE pods SET updated_at=? WHERE id=?").run(input.now, input.podId);
-      this.db.exec("COMMIT");
-      return this.podReconciliation(
-        this.stmt("SELECT * FROM pod_reconciliations WHERE reconciliation_id=?")
-          .get(input.reconciliationId) as unknown as PodReconciliationRow,
-      );
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  settlePodReconciliation(
-    reconciliationId: string,
-    result: {
-      status: Exclude<PodReconciliation["status"], "running">;
-      sourceHead?: string;
-      targetHead?: string;
-      mergeBase?: string;
-      resultHead?: string;
-      conflictPaths?: string[];
-      error?: string;
-    },
-    now: number,
-  ): PodReconciliation | null {
-    const row = this.stmt("SELECT pod_id FROM pod_reconciliations WHERE reconciliation_id=? AND status='running'")
-      .get(reconciliationId) as unknown as { pod_id: string } | undefined;
-    if (!row) return null;
-    const changed = this.stmt(
-      `UPDATE pod_reconciliations
-       SET status=?, source_head=?, target_head=?, merge_base=?, result_head=?, conflict_paths=?, error=?, completed_at=?
-       WHERE reconciliation_id=? AND status='running'`,
-    ).run(
-      result.status,
-      result.sourceHead ?? null,
-      result.targetHead ?? null,
-      result.mergeBase ?? null,
-      result.resultHead ?? null,
-      result.conflictPaths ? JSON.stringify(result.conflictPaths.slice(0, 100).map((path) => path.slice(0, 512))) : null,
-      result.error?.slice(0, 1_000) ?? null,
-      now,
-      reconciliationId,
-    );
-    if (Number(changed.changes) !== 1) return null;
-    this.stmt("UPDATE pods SET updated_at=? WHERE id=?").run(now, row.pod_id);
-    return this.getPodReconciliation(reconciliationId);
-  }
-
-  failPodReconciliations(podId: string, reason: string, now: number): void {
-    this.stmt(
-      `UPDATE pod_reconciliations SET status='failed', error=?, completed_at=?
-       WHERE pod_id=? AND status='running'`,
-    ).run(reason.slice(0, 1_000), now, podId);
-  }
-
-  failInterruptedPodReconciliations(now: number): void {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.stmt(
-        `UPDATE pods SET updated_at=?
-         WHERE id IN (SELECT pod_id FROM pod_reconciliations WHERE status='running')`,
-      ).run(now);
-      this.stmt(
-        `UPDATE pod_reconciliations
-         SET status='failed', error='control plane restarted with reconciliation delivery uncertain', completed_at=?
-         WHERE status='running'`,
-      ).run(now);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  activePodReconciliationForSession(sessionId: string): PodReconciliation | null {
-    const row = this.stmt(
-      `SELECT reconciliation.* FROM pod_reconciliations reconciliation
-       JOIN pods pod ON pod.id=reconciliation.pod_id
-       WHERE reconciliation.status='running' AND pod.status='active'
-         AND (reconciliation.source_session_id=? OR reconciliation.target_session_id=?)
-       ORDER BY reconciliation.created_at DESC LIMIT 1`,
-    ).get(sessionId, sessionId) as unknown as PodReconciliationRow | undefined;
-    return row ? this.podReconciliation(row) : null;
-  }
-
-  getPodReconciliation(reconciliationId: string): PodReconciliation | null {
-    const row = this.stmt("SELECT * FROM pod_reconciliations WHERE reconciliation_id=?")
-      .get(reconciliationId) as unknown as PodReconciliationRow | undefined;
-    return row ? this.podReconciliation(row) : null;
-  }
-
-  listPodReconciliations(podId: string, limit = 20): PodReconciliation[] {
-    const rows = this.stmt(
-      `SELECT * FROM pod_reconciliations WHERE pod_id=?
-       ORDER BY created_at DESC, rowid DESC LIMIT ?`,
-    ).all(podId, Math.max(1, Math.min(100, Math.floor(limit)))) as unknown as PodReconciliationRow[];
-    return rows.map((row) => this.podReconciliation(row));
-  }
-
-  podContextSelectionWindow(podId: string, afterSeq: number, limit = 500): PodContextSelectionWindow {
-    const stats = this.stmt(
-      `SELECT COUNT(*) AS count, MIN(seq) AS min_seq, MAX(seq) AS max_seq
-       FROM pod_context_entries WHERE pod_id=? AND seq>?`,
-    ).get(podId, afterSeq) as unknown as { count: number; min_seq: number | null; max_seq: number | null };
-    const rows = this.stmt(
-      `SELECT id, pod_id, seq, ts, source, content FROM pod_context_entries
-       WHERE pod_id=? AND seq>? ORDER BY seq DESC LIMIT ?`,
-    ).all(podId, afterSeq, limit) as unknown as PodContextEntryRow[];
-    return {
-      entries: rows.reverse().map((row) => this.podContextEntry(row)),
-      totalCount: Number(stats.count),
-      ...(stats.min_seq == null ? {} : { minSeq: stats.min_seq }),
-      ...(stats.max_seq == null ? {} : { maxSeq: stats.max_seq }),
-    };
-  }
-
-  podOrchestrationSteps(podId: string, runId: string, limit = 100): PodOrchestrationStep[] {
-    const rows = this.stmt(
-      `SELECT * FROM pod_orchestration_steps WHERE pod_id=? AND run_id=? ORDER BY turn DESC LIMIT ?`,
-    ).all(podId, runId, limit) as unknown as PodOrchestrationStepRow[];
-    return rows.reverse().map((row) => this.podOrchestrationStep(row));
-  }
-
-  private podOrchestrationView(podId: string, podUpdatedAt: number): PodOrchestrationView {
-    const row = this.stmt("SELECT * FROM pod_orchestration WHERE pod_id=?")
-      .get(podId) as unknown as PodOrchestrationRow | undefined;
-    if (!row) {
-      return {
-        policy: DEFAULT_POD_ORCHESTRATION_POLICY,
-        state: { status: "idle", turnsUsed: 0, updatedAt: podUpdatedAt },
-      };
-    }
-    const lastStep = row.run_id
-      ? this.stmt(
-          `SELECT * FROM pod_orchestration_steps WHERE pod_id=? AND run_id=? ORDER BY turn DESC LIMIT 1`,
-        ).get(podId, row.run_id) as unknown as PodOrchestrationStepRow | undefined
-      : undefined;
-    return {
-      policy: {
-        mode: row.mode,
-        contextTokenBudget: row.context_token_budget,
-        summaryTokenBudget: row.summary_token_budget,
-        maxTurns: row.max_turns,
-        maxRepeatedOutputs: row.max_repeated_outputs,
-      },
-      state: {
-        status: row.status,
-        ...(row.run_id ? { runId: row.run_id } : {}),
-        turnsUsed: row.turns_used,
-        ...(row.current_session_id ? { currentSessionId: row.current_session_id } : {}),
-        ...(row.last_session_id ? { lastSessionId: row.last_session_id } : {}),
-        ...(row.stop_reason ? { stopReason: row.stop_reason } : {}),
-        ...(row.started_at == null ? {} : { startedAt: row.started_at }),
-        updatedAt: row.updated_at,
-      },
-      ...(lastStep ? { lastStep: this.podOrchestrationStep(lastStep) } : {}),
-    };
-  }
-
-  private podOrchestrationStep(row: PodOrchestrationStepRow): PodOrchestrationStep {
-    return {
-      stepId: row.step_id,
-      podId: row.pod_id,
-      runId: row.run_id,
-      turn: row.turn,
-      targetSessionId: row.target_session_id,
-      ...(row.trigger_session_id ? { triggerSessionId: row.trigger_session_id } : {}),
-      selectedEntryIds: JSON.parse(row.selected_entry_ids) as string[],
-      ...(row.summarized_from_seq == null ? {} : { summarizedFromSeq: row.summarized_from_seq }),
-      ...(row.summarized_to_seq == null ? {} : { summarizedToSeq: row.summarized_to_seq }),
-      estimatedTokens: row.estimated_tokens,
-      ...(row.output_entry_id ? { outputEntryId: row.output_entry_id } : {}),
-      status: row.status,
-      ...(row.error ? { error: row.error } : {}),
-      createdAt: row.created_at,
-      ...(row.settled_at == null ? {} : { settledAt: row.settled_at }),
-    };
-  }
-
-  private podReconciliation(row: PodReconciliationRow): PodReconciliation {
-    return {
-      reconciliationId: row.reconciliation_id,
-      podId: row.pod_id,
-      sourceSessionId: row.source_session_id,
-      targetSessionId: row.target_session_id,
-      actorId: row.actor_id,
-      status: row.status,
-      ...(row.source_head ? { sourceHead: row.source_head } : {}),
-      ...(row.target_head ? { targetHead: row.target_head } : {}),
-      ...(row.merge_base ? { mergeBase: row.merge_base } : {}),
-      ...(row.result_head ? { resultHead: row.result_head } : {}),
-      ...(row.conflict_paths ? { conflictPaths: JSON.parse(row.conflict_paths) as string[] } : {}),
-      ...(row.error ? { error: row.error } : {}),
-      createdAt: row.created_at,
-      ...(row.completed_at == null ? {} : { completedAt: row.completed_at }),
-    };
-  }
-
-  private podView(row: PodRow): PodView {
-    const members = this.stmt(
-      `SELECT session_id, joined_at, role, context_token_budget, last_context_seq
-       FROM pod_members WHERE pod_id=? ORDER BY joined_at, session_id`,
-    ).all(row.id) as unknown as Array<{
-      session_id: string;
-      joined_at: number;
-      role: PodMemberRole;
-      context_token_budget: number | null;
-      last_context_seq: number;
-    }>;
-    return {
-      id: row.id,
-      title: row.title,
-      objective: row.objective,
-      status: row.status,
-      members: members.map((member) => ({
-        sessionId: member.session_id,
-        joinedAt: member.joined_at,
-        role: member.role,
-        contextTokenBudget: member.context_token_budget,
-        lastContextSeq: member.last_context_seq,
-      })),
-      orchestration: this.podOrchestrationView(row.id, row.updated_at),
-      reconciliations: this.listPodReconciliations(row.id),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
-  }
-
-  appendPodContextEntry(input: {
-    id: string;
-    podId: string;
-    ts: number;
-    source: PodContextEntry["source"];
-    content: string;
-  }): { entry: PodContextEntry; created: boolean } {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      if (input.source.kind === "session") {
-        const existing = this.stmt(
-          `SELECT id, pod_id, seq, ts, source, content FROM pod_context_entries
-           WHERE pod_id=? AND source_kind='session' AND source_session_id=?
-             AND source_from_seq=? AND source_to_seq=?`,
-        ).get(input.podId, input.source.sessionId, input.source.fromSeq, input.source.toSeq) as unknown as
-          | PodContextEntryRow
-          | undefined;
-        if (existing) {
-          this.db.exec("COMMIT");
-          return { entry: this.podContextEntry(existing), created: false };
-        }
-      }
-      const nextSeq = ((this.stmt(
-        "SELECT MAX(seq) AS m FROM pod_context_entries WHERE pod_id=?",
-      ).get(input.podId) as unknown as { m: number | null }).m ?? 0) + 1;
-      this.stmt(
-        `INSERT INTO pod_context_entries
-          (id, pod_id, seq, ts, source_kind, source, source_session_id, source_from_seq, source_to_seq, content)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        input.id,
-        input.podId,
-        nextSeq,
-        input.ts,
-        input.source.kind,
-        JSON.stringify(input.source),
-        input.source.kind === "session" ? input.source.sessionId : null,
-        input.source.kind === "session" ? input.source.fromSeq : null,
-        input.source.kind === "session" ? input.source.toSeq : null,
-        input.content,
-      );
-      this.stmt("UPDATE pods SET updated_at=? WHERE id=?").run(input.ts, input.podId);
-      this.db.exec("COMMIT");
-      return {
-        entry: { id: input.id, podId: input.podId, seq: nextSeq, ts: input.ts, source: input.source, content: input.content },
-        created: true,
-      };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  listPodContextEntries(podId: string, beforeSeq?: number, limit = 100): PodContextEntry[] {
-    const rows = (beforeSeq === undefined
-      ? this.stmt(
-          `SELECT id, pod_id, seq, ts, source, content FROM pod_context_entries
-           WHERE pod_id=? ORDER BY seq DESC LIMIT ?`,
-        ).all(podId, limit)
-      : this.stmt(
-          `SELECT id, pod_id, seq, ts, source, content FROM pod_context_entries
-           WHERE pod_id=? AND seq<? ORDER BY seq DESC LIMIT ?`,
-        ).all(podId, beforeSeq, limit)) as unknown as PodContextEntryRow[];
-    return rows.reverse().map((row) => this.podContextEntry(row));
-  }
-
-  getPodContextEntries(podId: string, ids: string[]): PodContextEntry[] {
-    return ids.flatMap((id) => {
-      const row = this.stmt(
-        "SELECT id, pod_id, seq, ts, source, content FROM pod_context_entries WHERE pod_id=? AND id=?",
-      ).get(podId, id) as unknown as PodContextEntryRow | undefined;
-      return row ? [this.podContextEntry(row)] : [];
-    });
-  }
-
-  private podContextEntry(row: PodContextEntryRow): PodContextEntry {
-    return {
-      id: row.id,
-      podId: row.pod_id,
-      seq: row.seq,
-      ts: row.ts,
-      source: JSON.parse(row.source) as PodContextEntry["source"],
-      content: row.content,
     };
   }
 

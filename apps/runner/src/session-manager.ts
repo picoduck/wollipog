@@ -21712,7 +21712,7 @@ export class SessionManager {
     const projectedStatus = childAttention ? "input_required" : status;
     if (entry) entry.status = projectedStatus;
     // Foreground idle does not end independently owned child callbacks. Keep their snapshot
-    // actionable while the raw foreground status still reaches workflow/pod settlement consumers.
+    // actionable while the raw foreground status still reaches workflow settlement consumers.
     const settled = projectedStatus !== "running" && projectedStatus !== "starting" && projectedStatus !== "input_required";
     const [firstAsync, ...otherAsync] = terminal ? [] : pendingRequests(pending).filter((request) => request.async);
     // A typed launch failure survives a runner restart and a reconnect in the snapshot (#3843).

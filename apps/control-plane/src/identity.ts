@@ -384,7 +384,7 @@ export function boundedTargetId(params: unknown): string | undefined {
   if (!params || typeof params !== "object") return undefined;
   const record = params as Record<string, unknown>;
   for (const key of [
-    "shareId", "id", "sessionId", "runnerId", "resourceId", "podId", "workflowId", "policyId",
+    "shareId", "id", "sessionId", "runnerId", "resourceId", "workflowId", "policyId",
     "triggerId", "attemptId", "instanceId", "artifactId", "userId", "teamId",
   ] as const) {
     const value = record[key];

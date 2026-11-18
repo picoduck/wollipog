@@ -94,7 +94,7 @@ const connection: UiConnectionRuntime = {
   createSocket: () => {
     const socket: UiSocket = { readyState: UI_SOCKET_OPEN, onopen: null, onmessage: null, onclose: null, onerror: null, send() {}, close() {} };
     setTimeout(() => socket.onmessage?.({
-      data: JSON.stringify({ type: "snapshot", runners: [], boxes: [], sessions: [parentSession], runs: [], pods: [] }),
+      data: JSON.stringify({ type: "snapshot", runners: [], boxes: [], sessions: [parentSession], runs: [] }),
     }), 0);
     return socket;
   },

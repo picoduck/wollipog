@@ -306,8 +306,8 @@ async function renderPreview(
   ));
   await act(async () => socket.push({
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [{ ...runner, status: runnerStatus }], boxes: [], projects: [project], sessions: [value], runs: [], pods: [],
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    runners: [{ ...runner, status: runnerStatus }], boxes: [], projects: [project], sessions: [value], runs: [],
   } as ControlPlaneToUi));
   await settle();
   await settle();
@@ -462,9 +462,9 @@ async function renderRowAndBar(
   ));
   await act(async () => socket.push({
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
     runners: [{ ...runner, status: runnerOnline ? "online" : "offline" }], boxes: [], projects: [project],
-    sessions: [value], runs: [], pods: [],
+    sessions: [value], runs: [],
   } as ControlPlaneToUi));
   await settle();
   const badge = (scope: Element | null) => {

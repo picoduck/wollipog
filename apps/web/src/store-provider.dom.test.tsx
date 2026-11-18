@@ -73,7 +73,6 @@ function snapshot(id: string, title: string): string {
     type: "snapshot",
     runners: [],
     runs: [],
-    pods: [],
     sessions: [{
       id,
       title,
@@ -284,7 +283,7 @@ test("paged loading sends one complete stream selection, then reacts to live cha
     const second = { ...first, id: "busy-2", title: "Second" };
     await act(async () => {
       socket.onmessage?.({ data: JSON.stringify({ ...frame, sessions: [], sessionsComplete: false,
-        capabilities: { sessionSubscriptions: true } }) });
+        capabilities: { sessionSubscriptionsV2: true } }) });
     });
     assert.deepEqual(messages(), [], "an empty header cannot spend subscription admission");
     await act(async () => {
@@ -294,13 +293,13 @@ test("paged loading sends one complete stream selection, then reacts to live cha
     await act(async () => {
       socket.onmessage?.({ data: JSON.stringify({ type: "session_snapshot_page", sessions: [second], complete: true }) });
     });
-    assert.deepEqual(messages(), [{ type: "session_subscriptions", revision: 1, sessionIds: ["busy-1", "busy-2"], podIds: [] }]);
+    assert.deepEqual(messages(), [{ type: "session_subscriptions", revision: 1, sessionIds: ["busy-1", "busy-2"] }]);
     await act(async () => {
       socket.onmessage?.({ data: JSON.stringify({ type: "session_subscriptions_applied", revision: 1,
-        sessionIds: ["busy-1", "busy-2"], podIds: [] }) });
+        sessionIds: ["busy-1", "busy-2"] }) });
       socket.onmessage?.({ data: JSON.stringify({ type: "session_upsert", session: { ...second, status: "idle" } }) });
     });
-    assert.deepEqual(messages()[1], { type: "session_subscriptions", revision: 2, sessionIds: ["busy-1"], podIds: [] },
+    assert.deepEqual(messages()[1], { type: "session_subscriptions", revision: 2, sessionIds: ["busy-1"] },
       "post-snapshot live changes still update acknowledged streams");
   } finally {
     await act(async () => { root.unmount(); });
@@ -323,10 +322,10 @@ test("a legacy full snapshot sends its targeted stream selection immediately", a
     const frame = JSON.parse(snapshot("busy-1", "First"));
     frame.sessions[0].status = "running";
     await act(async () => {
-      socket.onmessage?.({ data: JSON.stringify({ ...frame, capabilities: { sessionSubscriptions: true } }) });
+      socket.onmessage?.({ data: JSON.stringify({ ...frame, capabilities: { sessionSubscriptionsV2: true } }) });
     });
     assert.deepEqual(socket.sent.map((data) => JSON.parse(data)), [{
-      type: "session_subscriptions", revision: 1, sessionIds: ["busy-1"], podIds: [],
+      type: "session_subscriptions", revision: 1, sessionIds: ["busy-1"],
     }]);
   } finally {
     await act(async () => { root.unmount(); });
@@ -369,7 +368,7 @@ test("rapid switching is paced under the server budget and still ends on the fin
       const frame = JSON.parse(snapshot("s0", "Session 0"));
       const ids = Array.from({ length: 2 * MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW }, (_, index) => `s${index}`);
       await act(async () => {
-        socket.onmessage?.({ data: JSON.stringify({ ...frame, capabilities: { sessionSubscriptions: true },
+        socket.onmessage?.({ data: JSON.stringify({ ...frame, capabilities: { sessionSubscriptionsV2: true },
           sessions: ids.map((id) => ({ ...frame.sessions[0], id, title: id })) }) });
       });
       assert.deepEqual(selections(), [[]], "the board's empty selection spends the first replacement");

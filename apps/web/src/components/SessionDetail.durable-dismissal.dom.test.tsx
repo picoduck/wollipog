@@ -248,7 +248,7 @@ async function mountFixture(options: {
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false,
+        sessionSubscriptionsV2: false,
         boundedDelivery: false,
         paginatedSessionHistory: false,
         projects: true,
@@ -258,7 +258,6 @@ async function mountFixture(options: {
       projects: [],
       sessions: [currentSession],
       runs: [],
-      pods: [],
     });
   });
   return {

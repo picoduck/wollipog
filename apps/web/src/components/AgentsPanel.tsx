@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { pendingRequests, type ChildSessionAttentionOwner,
-  type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type PendingApproval, type PodView, type RunView, type SessionView } from "@wollipog/protocol";
+  type ChildSessionRegistryEntry, type ChildSessionRegistryPage, type PendingApproval, type RunView, type SessionView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { deriveSubagentLifecycle, IncrementalSubagentProjector, type SubagentDescriptor } from "../subagents.js";
@@ -444,20 +444,16 @@ export function groupWorkerRows(rows: readonly WorkerRow[], limit: number): { gr
 
 /**
  * The facts the roster knows about this session's member sessions: the heading each sits under (its
- * run's title or its pod's) and the run title its own title repeats.
+ * run's title) and the run title its own title repeats.
  */
 export function memberMetadata(
   session: Pick<SessionView, "runId">,
   run: Pick<RunView, "title" | "sessionIds"> | undefined,
-  pod: Pick<PodView, "id" | "title" | "members"> | undefined,
 ): Map<string, WorkerMemberMetadata> {
   const metadata = new Map<string, WorkerMemberMetadata>();
-  // A member sits under its run's title, or its pod's; the run may not be loaded.
   const runGroup: WorkerGroup | undefined = session.runId
     ? { id: `run:${session.runId}`, name: run?.title ?? "Multi-Agent Run" } : undefined;
   const runFacts = runGroup ? { group: runGroup, ...(run?.title ? { runTitle: run.title } : {}) } : {};
-  for (const member of pod?.members ?? []) metadata.set(member.sessionId, { role: member.role,
-    group: { id: `pod:${pod!.id}`, name: pod!.title } });
   for (const id of run?.sessionIds ?? []) metadata.set(id, { ...metadata.get(id), ...runFacts });
   return metadata;
 }
@@ -503,7 +499,6 @@ export function AgentsPanel(props: Props) {
   const sessions = useStoreSelector((state) => state.sessions);
   const runs = useStoreSelector((state) => state.runs);
   const runners = useStoreSelector((state) => state.runners);
-  const pods = useStoreSelector((state) => state.pods);
   const { navigate, loadSession } = useStoreActions();
   const projector = useRef(new IncrementalSubagentProjector());
   const projection = useMemo(() => projector.current.project(items, {
@@ -708,10 +703,9 @@ export function AgentsPanel(props: Props) {
     [session.runnerId, runnerOnline, runners]);
   const { members, metadata } = useMemo(() => {
     const run = session.runId ? runs.get(session.runId) : undefined;
-    const pod = [...pods.values()].find((value) => value.members.some((member) => member.sessionId === session.id));
-    const metadata = memberMetadata(session, run, pod);
-    return { members: memberSessions(session, runs, pods, sessions, metadata.keys()), metadata };
-  }, [session, runs, sessions, pods]);
+    const metadata = memberMetadata(session, run);
+    return { members: memberSessions(session, runs, sessions, metadata.keys()), metadata };
+  }, [session, runs, sessions]);
   const rows = useMemo(() => {
     const unambiguousAgents = agents.map((agent) => projection.ambiguousIds.has(agent.id)
       ? { ...agent, lifecycle: "unknown" as const, availability: "recorded" as const } : agent);
@@ -842,7 +836,7 @@ export function AgentsPanel(props: Props) {
     return name ? `${name}, a subagent` : "A subagent";
   })();
   // Who needs the person (#2861): the session for its own requests, each subagent for its most
-  // urgent, then each member session (a pod's, a run's) whose row reads an attention word.
+  // urgent, then each member session of a run whose row reads an attention word.
   const askers: AttentionAsker[] = [
     ...attentionAskers(session.pendingApproval, (ownerId, request) =>
       (!projection.ambiguousIds.has(ownerId) ? agents.find((agent) => agent.id === ownerId)?.title : undefined) ??

@@ -1,9 +1,7 @@
 import {
-  MAX_UI_POD_SUBSCRIPTIONS,
   MAX_UI_SESSION_SUBSCRIPTIONS,
   MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW,
   UI_SUBSCRIPTION_RATE_WINDOW_MS,
-  type PodView,
   type RunView,
   type SessionEvent,
   type SessionView,
@@ -17,12 +15,11 @@ type SubscriptionView =
   | { name: "inbox" }
   | { name: "session"; id: string }
   | { name: "run"; id: string }
-  | { name: "pod"; id: string }
   // Settings subscribes to nothing — it reads local preferences — but it is a View like any other,
   // and leaving it out made the whole View union unassignable here.
   | { name: "settings"; section?: string }
   | { name: "assistants"; threadId?: string }
-  | { name: "board" | "runners" | "runs" | "pods" | "automations" | "automation" | "usage" | "projects" | "archived" | "skills"; id?: string };
+  | { name: "board" | "runners" | "runs" | "not-found" | "automations" | "automation" | "usage" | "projects" | "archived" | "skills"; id?: string };
 
 export interface UiSubscriptionSource {
   view: SubscriptionView;
@@ -31,7 +28,6 @@ export interface UiSubscriptionSource {
   assistantSessionId?: string | null;
   sessions: Map<string, SessionView>;
   runs: Map<string, RunView>;
-  pods: Map<string, PodView>;
 }
 
 export interface UiSubscriptionDeliveryState {
@@ -40,7 +36,6 @@ export interface UiSubscriptionDeliveryState {
   requestedRevision: number;
   appliedRevision: number;
   sessionIds: string[];
-  podIds: string[];
 }
 
 export const EMPTY_UI_SUBSCRIPTION_DELIVERY: UiSubscriptionDeliveryState = {
@@ -48,24 +43,18 @@ export const EMPTY_UI_SUBSCRIPTION_DELIVERY: UiSubscriptionDeliveryState = {
   requestedRevision: 0,
   appliedRevision: 0,
   sessionIds: [],
-  podIds: [],
 };
 
 /** Derive the high-volume streams needed by the active view plus lightweight heartbeat inputs.
  * Required detail streams are ordered first so the bounded subscription can never evict the thing
  * the user is looking at; busy sessions follow deterministically for activity aggregation. */
-export function uiStreamSubscriptions(state: UiSubscriptionSource): { sessionIds: string[]; podIds: string[] } {
+export function uiStreamSubscriptions(state: UiSubscriptionSource): { sessionIds: string[] } {
   const required = new Set<string>();
-  const podIds = new Set<string>();
   if (state.view.name === "inbox" && state.inbox?.selectedSessionId) required.add(state.inbox.selectedSessionId);
   else if (state.view.name === "session") required.add(state.view.id);
   else if (state.view.name === "assistants" && state.view.threadId !== undefined && state.assistantSessionId) {
     required.add(state.assistantSessionId);
   } else if (state.view.name === "run") state.runs.get(state.view.id)?.sessionIds.forEach((id) => required.add(id));
-  else if (state.view.name === "pod") {
-    podIds.add(state.view.id);
-    state.pods.get(state.view.id)?.members.forEach((member) => required.add(member.sessionId));
-  }
   const requiredIds = [...required].sort();
   const busyIds = [...state.sessions.values()]
     .filter((session) => !session.archived && isHeartbeatBusy(session.status) && !required.has(session.id))
@@ -73,7 +62,6 @@ export function uiStreamSubscriptions(state: UiSubscriptionSource): { sessionIds
     .sort();
   return {
     sessionIds: [...requiredIds, ...busyIds].slice(0, MAX_UI_SESSION_SUBSCRIPTIONS),
-    podIds: [...podIds].sort().slice(0, MAX_UI_POD_SUBSCRIPTIONS),
   };
 }
 
@@ -85,8 +73,7 @@ export class UiSubscriptionSynchronizer {
   private assistantSessionId: string | null = null;
   private sessions: Map<string, SessionView> | null = null;
   private runs: Map<string, RunView> | null = null;
-  private pods: Map<string, PodView> | null = null;
-  private desired: { sessionIds: string[]; podIds: string[]; key: string } | null = null;
+  private desired: { sessionIds: string[]; key: string } | null = null;
   private sentKey: string | null = null;
   private revision = 0;
 
@@ -111,26 +98,24 @@ export class UiSubscriptionSynchronizer {
       type: "session_subscriptions",
       revision,
       sessionIds: desired.sessionIds,
-      podIds: desired.podIds,
     };
   }
 
-  private desiredFor(state: UiSubscriptionSource): { sessionIds: string[]; podIds: string[]; key: string } {
+  private desiredFor(state: UiSubscriptionSource): { sessionIds: string[]; key: string } {
     const inboxSessionId = state.view.name === "inbox" ? state.inbox?.selectedSessionId ?? null : null;
     const assistantSessionId = state.view.name === "assistants" ? state.assistantSessionId ?? null : null;
     if (state.view !== this.view || inboxSessionId !== this.inboxSessionId ||
         assistantSessionId !== this.assistantSessionId ||
-        state.sessions !== this.sessions || state.runs !== this.runs || state.pods !== this.pods || !this.desired) {
+        state.sessions !== this.sessions || state.runs !== this.runs || !this.desired) {
       this.view = state.view;
       this.inboxSessionId = inboxSessionId;
       this.assistantSessionId = assistantSessionId;
       this.sessions = state.sessions;
       this.runs = state.runs;
-      this.pods = state.pods;
       const subscriptions = this.derive(state);
       this.desired = {
         ...subscriptions,
-        key: `${subscriptions.sessionIds.join("\u0000")}\u0001${subscriptions.podIds.join("\u0000")}`,
+        key: subscriptions.sessionIds.join("\u0000"),
       };
     }
     return this.desired;
@@ -187,14 +172,12 @@ export class UiSubscriptionPacer {
 export function subscriptionRecoveryRevision(
   delivery: UiSubscriptionDeliveryState,
   requiredSessionIds: readonly string[],
-  requiredPodIds: readonly string[] = [],
 ): number | null {
   if (delivery.mode === "unknown") return null;
   if (delivery.mode === "legacy") return 0;
   if (delivery.requestedRevision === 0 || delivery.appliedRevision !== delivery.requestedRevision) return null;
   const sessions = new Set(delivery.sessionIds);
-  const pods = new Set(delivery.podIds);
-  if (!requiredSessionIds.every((id) => sessions.has(id)) || !requiredPodIds.every((id) => pods.has(id))) return null;
+  if (!requiredSessionIds.every((id) => sessions.has(id))) return null;
   return delivery.appliedRevision > 0 ? delivery.appliedRevision : null;
 }
 

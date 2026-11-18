@@ -68,7 +68,6 @@ class FixtureSocket implements UiSocket {
         boxes: [],
         sessions: [],
         runs: [],
-        pods: [],
       };
       this.onmessage?.({ data: JSON.stringify(snapshot) });
     }, 0);

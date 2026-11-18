@@ -479,7 +479,7 @@ function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: {
-      sessionSubscriptions: false,
+      sessionSubscriptionsV2: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
       projects: false,
@@ -492,7 +492,6 @@ function snapshot(): UiSnapshotMessage {
     sessions: structuredClone(entryHydrated ? sessions : sessions.filter((value) => value.id !== "s-approval")),
     reminders: structuredClone(reminders),
     runs: [],
-    pods: [],
   };
 }
 

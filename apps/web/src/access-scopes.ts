@@ -158,9 +158,9 @@ export type AccessScopeImpact =
  * The server's refusal in the person's words (§17.2). The preview's reasons are fixed sentences, so
  * each is matched by its opening; a reason this does not know is shown as the server wrote it.
  */
-function incompatibleImpact(preview: AccessScopeChangePreview): AccessScopeImpact {
+function incompatibleImpact(preview: AccessScopeChangePreview, workspaceNoun: WorkspaceNoun): AccessScopeImpact {
   const reason = preview.reason ?? "";
-  const noun = preview.resource === "project" ? "project" : "location";
+  const noun = preview.resource === "project" ? "project" : workspaceNoun;
   if (reason.startsWith("The requested Project access would expose a narrower Location")) {
     return {
       kind: "incompatible",
@@ -169,14 +169,20 @@ function incompatibleImpact(preview: AccessScopeChangePreview): AccessScopeImpac
     };
   }
   const message = reason.startsWith("The requested Location access would be broader than its Machine access")
-    ? "The machine this location is on isn't shared that widely. Choose a more private option."
+    ? `The machine this ${noun} is on isn't shared that widely. Choose a more private option.`
     : reason.startsWith("The requested Location access is narrower than an attached Project")
-      ? "A project that uses this location is shared more widely than this choice. Change that project's access first, or choose a wider option."
+      ? `A project that uses this ${noun} is shared more widely than this choice. Change that project's access first, or choose a wider option.`
       : /^A session in this (Project|Location) has an incompatible private owner/u.test(reason)
         ? `A session in this ${noun} is private to someone else, so changing the ${noun}'s access can't include it.`
         : reason || "This access change isn't allowed.";
   return { kind: "incompatible", message, blockedByLocation: false };
 }
+
+/**
+ * What a workspace is called where its access changes: a Project's "location", or a Machine's
+ * "workspace" (#4694).
+ */
+export type WorkspaceNoun = "location" | "workspace";
 
 /**
  * What a previewed access change does, worded by who loses or gains access. The counts are the
@@ -187,9 +193,10 @@ function incompatibleImpact(preview: AccessScopeChangePreview): AccessScopeImpac
 export function accessScopeImpact(
   preview: AccessScopeChangePreview,
   identity: IdentityAdministrationView,
+  workspaceNoun: WorkspaceNoun = "location",
 ): AccessScopeImpact {
-  if (!preview.compatible) return incompatibleImpact(preview);
-  const noun = preview.resource === "project" ? "project" : "location";
+  if (!preview.compatible) return incompatibleImpact(preview, workspaceNoun);
+  const noun = preview.resource === "project" ? "project" : workspaceNoun;
   const total = preview.totalSessionCount;
   const active = preview.activeSessionCount;
   const target = preview.targetScope;
@@ -211,7 +218,7 @@ export function accessScopeImpact(
       kind: "narrowing",
       title: total > 0
         ? `${total} ${total === 1 ? "Session Becomes" : "Sessions Become"} Private to You`
-        : `This ${noun === "project" ? "Project" : "Location"} Becomes Private to You`,
+        : `This ${noun === "project" ? "Project" : noun === "workspace" ? "Workspace" : "Location"} Becomes Private to You`,
       body: (active > 0 ? `That includes ${active} active ${active === 1 ? "session" : "sessions"}. ` : "") +
         `Others in your organization lose access to this ${noun}${total > 0 ? " and its sessions" : ""}.`,
     };

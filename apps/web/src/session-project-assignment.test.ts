@@ -154,7 +154,7 @@ test("Project assignment responses cannot erase or resurrect live turn projectio
     runnerOnline: true,
     runnerProtocolVersion: 72,
   });
-  dispatch({ type: "snapshot", runners: [], boxes: [], sessions: [base], runs: [], pods: [] });
+  dispatch({ type: "snapshot", runners: [], boxes: [], sessions: [base], runs: [] });
 
   let resolveResponse!: (value: unknown) => void;
   const response = new Promise<unknown>((resolve) => { resolveResponse = resolve; });

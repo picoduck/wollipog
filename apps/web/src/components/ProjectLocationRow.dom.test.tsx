@@ -187,12 +187,12 @@ async function render(projects: ProjectView[], options: {
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
+        sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
         worktreeSetupConfig: options.setupCapability ?? true,
         renameProjectLocations: options.renameCapability ?? false,
       },
       runners: options.runners ?? [runner, offlineRunner],
-      boxes: [], sessions: [], runs: [], pods: [], projects,
+      boxes: [], sessions: [], runs: [], projects,
     } as UiSnapshotMessage);
   });
   await settle();

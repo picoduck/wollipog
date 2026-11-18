@@ -165,10 +165,10 @@ async function render(client: Partial<ApiClient>): Promise<{ body: HTMLElement; 
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
+        sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
         createProjectLocations: true, worktreeSetupConfig: true,
       },
-      runners: [runner], boxes: [], sessions: [], runs: [], pods: [], projects: [alpha],
+      runners: [runner], boxes: [], sessions: [], runs: [], projects: [alpha],
     } as UiSnapshotMessage);
   });
   await settle();

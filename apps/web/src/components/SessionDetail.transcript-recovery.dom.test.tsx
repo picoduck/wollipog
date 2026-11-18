@@ -396,7 +396,7 @@ test("a very long turn first renders its start and shares the opening across soc
     const revision = fixture.socket.sent.filter(message => message.type === "session_subscriptions").at(-1)?.revision;
     assert.ok(revision != null);
     await act(async () => fixture.socket.push({ type: "session_subscriptions_applied", revision,
-      sessionIds: [fixture.sessionId], podIds: [] }));
+      sessionIds: [fixture.sessionId] }));
     await flushAsyncWork();
     assert.equal(calls, 1, "the acknowledged owner reuses this exact opening response");
     assert.equal(followState(fixture), "paused");
@@ -467,14 +467,14 @@ test("reconnecting a paused turn-start reader preserves its slice when a new pro
     await flushAsyncWork();
     const saved = fixture.readLoadedEvents()!.map(event => event.seq);
     await act(async () => fixture.socket.push({ type: "snapshot",
-      capabilities: { sessionSubscriptions: true, currentTurnOpening: true }, runners: [runner], boxes: [],
-      sessions: [fixture.readSession()!], runs: [], pods: [] }));
+      capabilities: { sessionSubscriptionsV2: true, currentTurnOpening: true }, runners: [runner], boxes: [],
+      sessions: [fixture.readSession()!], runs: [] }));
     await act(async () => fixture.socket.push({ type: "session_upsert",
       session: { ...session(`${fixture.sessionId}-busy`), status: "running" } }));
     await flushAsyncWork();
     const revision = fixture.socket.sent.filter(message => message.type === "session_subscriptions").at(-1)!.revision!;
     await act(async () => fixture.socket.push({ type: "session_subscriptions_applied", revision,
-      sessionIds: [fixture.sessionId], podIds: [] }));
+      sessionIds: [fixture.sessionId] }));
     await flushAsyncWork();
     assert.equal(calls, 1, "a new generation must not reopen over a paused reader");
     assert.deepEqual(fixture.readLoadedEvents()!.map(event => event.seq), saved);
@@ -531,7 +531,7 @@ test("acknowledgement reuse preserves rows explicitly loaded above the opening",
     await flushAsyncWork();
     const revision = fixture.socket.sent.filter(message => message.type === "session_subscriptions").at(-1)!.revision!;
     await act(async () => fixture.socket.push({ type: "session_subscriptions_applied", revision,
-      sessionIds: [fixture.sessionId], podIds: [] }));
+      sessionIds: [fixture.sessionId] }));
     await flushAsyncWork();
     assert.equal(calls, 1);
     assert.deepEqual(fixture.readLoadedEvents()!.map(event => event.seq), [1,2,3,4,5,6,7,8,9,10]);
@@ -557,7 +557,7 @@ test("Jump resumes with the new owner when acknowledgement replaces a pending ta
     assert.equal(pages.tailCalls.length, 1);
     const revision = fixture.socket.sent.filter(message => message.type === "session_subscriptions").at(-1)!.revision!;
     await act(async () => fixture.socket.push({ type: "session_subscriptions_applied", revision,
-      sessionIds: [fixture.sessionId], podIds: [] }));
+      sessionIds: [fixture.sessionId] }));
     await flushAsyncWork();
     const tail: SessionEventsResponse = { events: [{ id: 1_000, seq: 1_000,
       sessionId: fixture.sessionId, ts: 1, payload: { kind: "agent_message", text: "Current tail", final: true } }],
@@ -814,7 +814,7 @@ async function mountFixture(
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: !acknowledgeSubscription,
+        sessionSubscriptionsV2: !acknowledgeSubscription,
         boundedDelivery: false,
         paginatedSessionHistory: false,
         currentTurnOpening: clientOverrides?.getSessionTurnStartPage !== undefined,
@@ -825,7 +825,6 @@ async function mountFixture(
       projects: [],
       sessions: [currentSession],
       runs: [],
-      pods: [],
     });
   });
   if (!initialSnapshot) await act(async () => connectionSetter("online"));
@@ -1026,7 +1025,7 @@ test("a cold conversation reads REST history and refreshes Starting before subsc
     const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
     assert.ok(revision != null);
     await act(async () => fixture.socket.push({
-      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId],
     }));
     await flushAsyncWork();
     assert.equal(pages.tailCalls.length, 2, "acknowledged recovery rechecks the bounded tail");
@@ -1069,7 +1068,7 @@ test("acknowledgement cancels the pending Starting metadata refresh", async () =
     const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
     assert.ok(revision != null);
     await act(async () => fixture.socket.push({
-      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId],
     }));
     await flushAsyncWork(2_050);
     assert.equal(metadataCalls, 1, "live admission owns status once acknowledged");
@@ -1155,7 +1154,7 @@ test("a provisional history read cannot replace an acknowledged recovery", async
     const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
     assert.ok(revision != null);
     await act(async () => fixture.socket.push({
-      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId],
     }));
     await flushAsyncWork();
     assert.equal(pages.tailCalls.length, 2, "acknowledged recovery owns a new read");
@@ -3184,7 +3183,7 @@ test("a paused provisional reader resumes its REST tail when the first subscript
     const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
     assert.ok(revision != null);
     await act(async () => fixture.socket.push({
-      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId],
     }));
     await flushAsyncWork();
     assert.deepEqual(pages.forwardAfters, [tail], "late acknowledgement must not replay the prefix or skip to the live seq");
@@ -3271,7 +3270,7 @@ test("unrelated busy-session subscriptions do not reread an already acknowledged
     const firstRevision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
     assert.ok(firstRevision != null);
     await act(async () => fixture.socket.push({
-      type: "session_subscriptions_applied", revision: firstRevision, sessionIds: [fixture.sessionId], podIds: [],
+      type: "session_subscriptions_applied", revision: firstRevision, sessionIds: [fixture.sessionId],
     }));
     await flushAsyncWork();
     await act(async () => pages.releaseForward({
@@ -3292,7 +3291,7 @@ test("unrelated busy-session subscriptions do not reread an already acknowledged
     assert.equal(pages.forwardCalls(), 1, "normal gap recovery still waits for the new acknowledgement");
     await act(async () => fixture.socket.push({
       type: "session_subscriptions_applied", revision: nextRevision,
-      sessionIds: [fixture.sessionId, otherSessionId], podIds: [],
+      sessionIds: [fixture.sessionId, otherSessionId],
     }));
     await flushAsyncWork();
     assert.deepEqual(pages.forwardAfters, [24, 24], "the new acknowledgement recovers from the existing tail");
@@ -3323,7 +3322,7 @@ test("fleet acknowledgement churn cannot strand an unfinished opening but skips 
     const firstRevision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
     assert.ok(firstRevision != null);
     await act(async () => fixture.socket.push({
-      type: "session_subscriptions_applied", revision: firstRevision, sessionIds: [fixture.sessionId], podIds: [],
+      type: "session_subscriptions_applied", revision: firstRevision, sessionIds: [fixture.sessionId],
     }));
     await flushAsyncWork();
     assert.equal(pages.tailCalls.length, 2, "the first acknowledgement starts ordinary opening recovery");
@@ -3347,7 +3346,7 @@ test("fleet acknowledgement churn cannot strand an unfinished opening but skips 
     assert.ok(nextRevision != null && nextRevision > firstRevision);
     await act(async () => fixture.socket.push({
       type: "session_subscriptions_applied", revision: nextRevision,
-      sessionIds: [fixture.sessionId, otherSessionId], podIds: [],
+      sessionIds: [fixture.sessionId, otherSessionId],
     }));
     await flushAsyncWork();
     assert.equal(pages.tailCalls.length, 4, "ordinary acknowledgement rechecks the complete empty tail");
@@ -3377,7 +3376,7 @@ test("a cancelled acknowledged gap still uses REST while its replacement acknowl
     const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
     assert.ok(revision != null);
     await act(async () => fixture.socket.push({
-      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId],
     }));
     await flushAsyncWork();
     assert.equal(pages.forwardCalls(), 1, "ordinary acknowledged recovery has an unfinished gap");
@@ -3415,7 +3414,7 @@ test("a failed acknowledged refresh can retry through REST while the next fleet 
     const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
     assert.ok(revision != null);
     await act(async () => fixture.socket.push({
-      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId],
     }));
     await flushAsyncWork();
     await act(async () => pages.releaseForward({
@@ -3458,7 +3457,7 @@ test("a temporary API source change cannot reuse an older acknowledged opening w
     const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
     assert.ok(revision != null);
     await act(async () => fixture.socket.push({
-      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId],
     }));
     await flushAsyncWork();
     await act(async () => pages.releaseForward({
@@ -3645,7 +3644,7 @@ test("a late resumed provisional response cannot replace acknowledged recovery",
     const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
     assert.ok(revision != null);
     await act(async () => fixture.socket.push({
-      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId],
     }));
     await flushAsyncWork();
     assert.deepEqual(pages.forwardAfters, [1_024]);
@@ -3764,7 +3763,7 @@ test("live activity after an empty opening can stage a bounded gap for a paused 
     const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
     assert.ok(revision != null);
     await act(async () => fixture.socket.push({
-      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId],
     }));
     await flushAsyncWork();
     assert.deepEqual(pages.forwardAfters, [0], "the first acknowledgement retains its frozen opening cursor");

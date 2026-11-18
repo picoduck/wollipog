@@ -61,12 +61,11 @@ class FakeSocket implements UiSocket {
 
 const snapshot: UiSnapshotMessage = {
   type: "snapshot",
-  capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+  capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
   runners: [],
   boxes: [],
   sessions: [],
   runs: [],
-  pods: [],
 };
 
 function subscription(id: string, overrides: Partial<OutboundEventSubscriptionView> = {}): OutboundEventSubscriptionView {

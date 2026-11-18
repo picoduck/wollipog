@@ -40,7 +40,7 @@ export const PHONE_BAR_SLOTS = 4;
  * whether this machine is online. Deliberately not the first four of the rail order, which let the
  * desktop's ordering, and experiments, decide the phone's most valuable slots.
  */
-export const DEFAULT_PHONE_BAR: readonly GlobalViewName[] = ["inbox", "projects", "runners", "automations"];
+export const DEFAULT_PHONE_BAR: readonly GlobalViewName[] = ["inbox", "assistants", "projects", "runners"];
 
 export interface RailPreferences {
   /** Every known destination exactly once, in the user's configured order. */

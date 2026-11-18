@@ -83,7 +83,7 @@ const connection: UiConnectionRuntime = {
       onmessage: null as ((event: { data: string }) => void) | null, onclose: null, onerror: null, send() {}, close() {} };
     window.setTimeout(() => {
       socket.onopen?.();
-      socket.onmessage?.({ data: JSON.stringify({ type: "snapshot", boxes: [], sessions: [], runs: [], pods: [],
+      socket.onmessage?.({ data: JSON.stringify({ type: "snapshot", boxes: [], sessions: [], runs: [],
         runners: [{ runnerId: "runner", displayName: "Build Box", hostname: "build-box", os: "linux", version: "1.0.0",
           status: "online", agents: [], workspaces: [], connectedAt: now, lastSeen: now }] }) });
     }, 0);

@@ -112,10 +112,10 @@ class FakeSocket implements UiSocket {
 const snapshot = (runners: RunnerView[], accessScopeManagement = false): UiSnapshotMessage => ({
   type: "snapshot",
   capabilities: {
-    sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
+    sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
     ...(accessScopeManagement ? { accessScopeManagement: true } : {}),
   },
-  runners, boxes: [], projects: [], sessions: [], runs: [], pods: [],
+  runners, boxes: [], projects: [], sessions: [], runs: [],
 });
 const navigation = (view: View): ViewNavigation => ({ current: () => view, push() {}, replace() {}, listen: () => () => {} });
 const settle = () => act(async () => { for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setTimeout(resolve, 0)); });
@@ -593,17 +593,22 @@ test("Workspaces shows each one's access, and Change Access… previews, applies
     assertNoDomNode(change(rows()[1]!), "someone who can't manage a workspace sees its access, with no action");
     await act(async () => change(rows()[0]!)!.click());
     await settle();
-    const dialog = dialogNamed(view.body, "Change Location Access")!;
-    assert.ok(dialog, "the existing access-scope dialog opens");
+    // #4694: opened from the Machine, the dialog names a workspace, never a Project's location.
+    assertNoDomNode(dialogNamed(view.body, "Change Location Access") ?? null, "it is not titled for a location");
+    const dialog = dialogNamed(view.body, "Change Workspace Access")!;
+    assert.ok(dialog, "the existing access-scope dialog opens, titled for a workspace");
     const organization = [...dialog.querySelectorAll<HTMLInputElement>("input[type=radio]")]
       .find((input) => input.closest("label")?.textContent?.startsWith("Organization-Wide"))!;
     await act(async () => { organization.click(); });
     await settle();
     assert.deepEqual(previews, [{ kind: "organization", organizationId: ORG }], "the server previews the change");
+    assert.equal(dialog.querySelector(".access-change-sentence")?.textContent,
+      "Everyone in your organization will see this workspace, and its session keeps its current access.");
+    assert.doesNotMatch(dialog.textContent ?? "", /location/iu, "nothing in the dialog names a location");
     await act(async () => buttonNamed(dialog, "Change Access")!.click());
     await settle();
     assert.deepEqual(updates, [{ workspaceId: "home", owner: { kind: "organization", organizationId: ORG }, token: "a".repeat(64) }]);
-    assertNoDomNode(dialogNamed(view.body, "Change Location Access") ?? null, "the dialog closes");
+    assertNoDomNode(dialogNamed(view.body, "Change Workspace Access") ?? null, "the dialog closes");
     await view.push(machine(everyone));
     assert.deepEqual(access(), ["Organization-Wide", "Team: Builders"], "the row updates with the machine's snapshot");
   } finally {

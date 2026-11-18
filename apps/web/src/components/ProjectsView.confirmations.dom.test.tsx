@@ -143,13 +143,12 @@ function snapshotOf(projects: ProjectView[], snapshot: Partial<UiSnapshotMessage
   return {
     type: "snapshot",
     capabilities: {
-      sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, stopBeforeArchive: true,
+      sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, stopBeforeArchive: true,
     },
     runners: [runner],
     boxes: [],
     sessions: [],
     runs: [],
-    pods: [],
     projects,
     ...snapshot,
   } as UiSnapshotMessage;

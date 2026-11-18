@@ -393,43 +393,6 @@ test("mixed attention kinds: the Agents badge and the Agents notice both count e
   }
 });
 
-test("the Agents badge counts a waiting pod member as the Agents notice does (#2861 review)", async () => {
-  const asking = { ...session, status: "input_required", pendingApproval: {
-    requestId: "edit", ownerToolUseId: "agent", title: "Edit: src/a.ts", options: [] } } as SessionView;
-  const reviewer = { ...session, id: "member-review", title: "Parser Reviewer", status: "input_required", pendingApproval: {
-    requestId: "ask", kind: "question", title: "Which?", options: [], questions: [{ id: "q", question: "Which?", options: [{ label: "A" }] }] },
-  } as unknown as SessionView;
-  const store: UiConnectionRuntime = {
-    instanceId: "session-tools-pod", runtimeKey: "session-tools-pod",
-    createSocket: () => {
-      const socket = { readyState: UI_SOCKET_OPEN, onopen: null as (() => void) | null,
-        onmessage: null as ((event: { data: string }) => void) | null, onclose: null, onerror: null, send() {}, close() {} };
-      setTimeout(() => {
-        socket.onopen?.();
-        socket.onmessage?.({ data: JSON.stringify({ type: "snapshot", runners: [], boxes: [], runs: [], sessions: [reviewer], pods: [{
-          id: "pod-1", title: "Pod", objective: "", status: "active", createdAt: 1, updatedAt: 1,
-          members: [asking, reviewer].map((member) => ({ sessionId: member.id, joinedAt: 1, role: "worker", contextTokenBudget: null, lastContextSeq: 0 })),
-        }] }) });
-      }, 0);
-      return socket;
-    },
-    close() {},
-  };
-  const panel = await mount({ git: gitWith(0), items: runningAgent, session: asking, store });
-  try {
-    await settle();
-    const badge = row(panel.container, "subagents")!.querySelector<HTMLElement>(".status")!;
-    assert.equal(badge.textContent, "2 Awaiting Input");
-    assert.equal(badge.getAttribute("title"), "1 Answer Required, 1 Approval Required");
-    await act(async () => row(panel.container, "subagents")!.click());
-    await settle();
-    assert.equal(panel.container.querySelector("#right-panel .rpanel-notices .notice-body")?.textContent,
-      "2 workers need you: 1 answer, 1 approval.");
-  } finally {
-    await panel.dispose();
-  }
-});
-
 test("offline, the Agents badge keeps the attention count in a neutral hollow badge that asks for nothing (#2861)", async () => {
   const asking = { ...session, status: "input_required", pendingApproval: {
     requestId: "edit", ownerToolUseId: "agent", title: "Edit: src/a.ts", options: [] } } as SessionView;

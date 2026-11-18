@@ -151,10 +151,10 @@ class FixtureSocket implements UiSocket {
       const snapshot: ControlPlaneToUi = {
         type: "snapshot",
         capabilities: {
-          sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false,
+          sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
           projects: true, createProjectLocations: true,
         },
-        runners: [], boxes: [], projects: [], sessions: [], runs: [], pods: [],
+        runners: [], boxes: [], projects: [], sessions: [], runs: [],
       };
       this.onmessage?.({ data: JSON.stringify(snapshot) });
     }, 0);

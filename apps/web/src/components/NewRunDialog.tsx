@@ -21,7 +21,7 @@ import {
   suggestedProjectLocation,
 } from "../project-session-selection.js";
 import { machineOptionLabels } from "../runners.js";
-import { podMachineNames } from "../pod-session-choices.js";
+import { machineDisplayNames } from "../machine-display-names.js";
 import {
   agentNeedsAccountChoice,
   choosableRunAgentIds,
@@ -71,7 +71,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
   );
   // Locations and agent rows name a Machine without ever falling back to its connection id.
   const machineNames = useMemo(
-    () => podMachineNames(runners.values(), (runnerId) => boxByRunner.get(runnerId)),
+    () => machineDisplayNames(runners.values(), (runnerId) => boxByRunner.get(runnerId)),
     [boxByRunner, runners],
   );
 

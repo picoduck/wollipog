@@ -540,7 +540,7 @@ class FixtureSocket implements UiSocket {
     this.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false,
+        sessionSubscriptionsV2: false,
         boundedDelivery: false,
         paginatedSessionHistory: false,
         projects: false,
@@ -549,7 +549,6 @@ class FixtureSocket implements UiSocket {
       boxes: [],
       sessions: listSessions,
       runs: [],
-      pods: [],
       // A project for Outbound Events' project-scoped subscription to name; only on that tab.
       ...(params.get("route")?.startsWith("/automations/outbound") ? { projects: outboundProjects } : {}),
     });

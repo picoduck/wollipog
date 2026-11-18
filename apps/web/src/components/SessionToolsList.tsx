@@ -257,16 +257,15 @@ function SessionToolsListView({
     return workerRoster(session, unambiguous, [], () => runnerOnline)
       .filter((row) => row.target.kind === "subagent");
   }, [projection, registry, runnerOnline, session]);
-  // The Agents row's one status badge (§11.1): the workers that need the person (subagents, and pod
-  // or run members), every kind counted from the same askers as the Agents panel's attention notice
+  // The Agents row's one status badge (§11.1): the workers that need the person (subagents and
+  // run members), every kind counted from the same askers as the Agents panel's attention notice
   // (#2861), and kept while the machine is offline; else "1 Running", where an Unverified agent never
   // takes the badge.
   const runs = useOptionalStoreSelector((state) => state.runs);
-  const pods = useOptionalStoreSelector((state) => state.pods);
   const sessions = useOptionalStoreSelector((state) => state.sessions);
   const runners = useOptionalStoreSelector((state) => state.runners);
-  const members = useMemo(() => runs && pods && sessions ? memberSessions(session, runs, pods, sessions) : [],
-    [session, runs, pods, sessions]);
+  const members = useMemo(() => runs && sessions ? memberSessions(session, runs, sessions) : [],
+    [session, runs, sessions]);
   const attention = attentionBadge([
     ...attentionAskers(session.pendingApproval, () => undefined).filter((asker) => asker.ownerId !== null),
     ...memberAttentionAskers(members, (id) => id === session.runnerId ? runnerOnline : runners?.get(id)?.status === "online"),

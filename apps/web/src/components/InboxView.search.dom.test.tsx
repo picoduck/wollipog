@@ -148,12 +148,11 @@ function session(id: string, lastEventAt: number, overrides: Partial<SessionView
 function snapshot(sessions: SessionView[]): UiSnapshotMessage {
   return {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
     runners: [],
     boxes: [],
     sessions,
     runs: [],
-    pods: [],
   };
 }
 

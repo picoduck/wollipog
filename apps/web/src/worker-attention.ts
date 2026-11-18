@@ -1,4 +1,4 @@
-import type { PendingApproval, PodView, RunView, SessionAttentionKind, SessionView } from "@wollipog/protocol";
+import type { PendingApproval, RunView, SessionAttentionKind, SessionView } from "@wollipog/protocol";
 import { prioritizedPendingRequests } from "@wollipog/protocol";
 import { statusMeta, statusValues, type StatusMeta } from "./status-meta.js";
 import { requestAttentionKind } from "./worker-roster.js";
@@ -18,7 +18,7 @@ export type AttentionAsker = {
 } & (
   /** A request this session holds: its most urgent, in the request dock's priority order. */
   | { request: PendingApproval; sessionId?: never; online?: never }
-  /** A pod, run or workflow member session waiting on the person, answered in that session; `online`
+  /** A run or workflow member session waiting on the person, answered in that session; `online`
    * is whether its own machine is connected, so it can be opened to answer now. */
   | { sessionId: string; online: boolean; request?: never }
 );
@@ -43,17 +43,15 @@ export function attentionAskers(
   return [...askers.values()];
 }
 
-/** The member sessions a session's roster lists: its run's other sessions and its pod's members. */
+/** The member sessions a session's roster lists: its run's other sessions. */
 export function memberSessions(
   session: Pick<SessionView, "id" | "runId">,
   runs: ReadonlyMap<string, Pick<RunView, "sessionIds">>,
-  pods: ReadonlyMap<string, Pick<PodView, "members">>,
   sessions: ReadonlyMap<string, SessionView>,
   extraIds: Iterable<string> = [],
 ): SessionView[] {
   const run = session.runId ? runs.get(session.runId) : undefined;
-  const pod = [...pods.values()].find((value) => value.members.some((member) => member.sessionId === session.id));
-  const ids = new Set([...(run?.sessionIds ?? []), ...(pod?.members.map((member) => member.sessionId) ?? []), ...extraIds]);
+  const ids = new Set([...(run?.sessionIds ?? []), ...extraIds]);
   ids.delete(session.id);
   return [...ids].flatMap((id) => {
     const member = sessions.get(id);

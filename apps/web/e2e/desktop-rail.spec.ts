@@ -57,23 +57,23 @@ test.describe("at 1440×900 with a mouse", () => {
     await openShell(page);
     await page.locator(".main").hover();
     const automations = rail(page).getByRole("link", { name: "Automations", exact: true });
-    await expect(automations).toHaveAttribute("aria-keyshortcuts", "2");
+    await expect(automations).toHaveAttribute("aria-keyshortcuts", "3");
     const started = Date.now();
     await automations.hover();
     await expect(tooltip(page)).toBeHidden();
-    await expect(tooltip(page)).toHaveText("Automations2");
+    await expect(tooltip(page)).toHaveText("Automations3");
     expect(Date.now() - started).toBeGreaterThanOrEqual(450);
-    await expect(tooltip(page).locator("kbd")).toHaveText("2");
+    await expect(tooltip(page).locator("kbd")).toHaveText("3");
     const box = await tooltip(page).boundingBox();
     expect(box!.x, "it opens to the right of the rail").toBeGreaterThanOrEqual(64);
 
     await rail(page).getByRole("link", { name: "Projects", exact: true }).hover();
-    await expect(tooltip(page)).toHaveText("Projects3", { timeout: 200 });
+    await expect(tooltip(page)).toHaveText("Projects4", { timeout: 200 });
 
     // The pointer can move onto the tooltip without it closing (WCAG 1.4.13).
     const projectsTip = (await tooltip(page).boundingBox())!;
     await page.mouse.move(projectsTip.x + projectsTip.width / 2, projectsTip.y + projectsTip.height / 2, { steps: 6 });
-    await expect(tooltip(page)).toHaveText("Projects3");
+    await expect(tooltip(page)).toHaveText("Projects4");
     await page.keyboard.press("Escape");
     await expect(tooltip(page)).toBeHidden();
   });
@@ -90,7 +90,7 @@ test.describe("at 1440×900 with a mouse", () => {
     await page.locator(".main").hover();
     await page.locator("#page-title").focus();
     await expect(tooltip(page)).toBeHidden();
-    await rail(page).getByRole("link", { name: "Pods", exact: true }).click();
+    await rail(page).getByRole("link", { name: "Multi-Agent Runs", exact: true }).click();
     await page.mouse.move(700, 450);
     await expect(tooltip(page)).toBeHidden();
   });
@@ -259,7 +259,7 @@ test.describe("the labelled rail at 1440×900 (#1968)", () => {
       clipped: element.scrollWidth > element.clientWidth,
     })));
     expect(labels.map((label) => label.name)).toEqual([
-      "Search", "Sessions", "Automations", "Projects", "Assistants", "Multi-Agent Runs", "Pods", "Connections", "Agent Skills",
+      "Search", "Sessions", "Assistants", "Automations", "Projects", "Multi-Agent Runs", "Connections", "Agent Skills",
       "Archived Sessions", "Usage and Cost", "Settings",
     ]);
     expect(labels.filter((label) => label.clipped), "every shipped name fits").toEqual([]);
@@ -374,15 +374,15 @@ test.describe("on an 834px coarse-pointer tablet", () => {
       [...new Set(items.map((item) => `${item.getBoundingClientRect().width}x${item.getBoundingClientRect().height}`))]);
     expect(sizes).toEqual(["48x48"]);
 
-    const pods = rail(page).getByRole("link", { name: "Pods", exact: true });
-    await pods.tap();
-    await expect(page.getByRole("heading", { level: 1, name: "Pods" })).toBeVisible();
+    const runs = rail(page).getByRole("link", { name: "Multi-Agent Runs", exact: true });
+    await runs.tap();
+    await expect(page.getByRole("heading", { level: 1, name: "Multi-Agent Runs" })).toBeVisible();
     await page.waitForTimeout(700);
     await expect(tooltip(page)).toBeHidden();
     const automations = rail(page).getByRole("link", { name: "Automations", exact: true });
     await automations.tap();
     await expect(page.getByRole("heading", { level: 1, name: "Automations" })).toBeVisible();
-    // Pods was tapped and left: its fill must be the rest fill, not the hover one.
-    expect(await pods.evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
+    // Multi-Agent Runs was tapped and left: its fill must be the rest fill, not the hover one.
+    expect(await runs.evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
   });
 });

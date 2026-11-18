@@ -190,7 +190,7 @@ class FixtureSocket implements UiSocket {
       const snapshot: ControlPlaneToUi = {
         type: "snapshot",
         capabilities: {
-          sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false,
+          sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
           projects: true, createProjectLocations: true,
         },
         runners: params.get("editors") === "1" ? [{
@@ -201,7 +201,7 @@ class FixtureSocket implements UiSocket {
             { id: "cursor", name: "Cursor", locations: { native: "column" } },
           ],
         }] : [],
-        boxes: [], projects: [], sessions: [], runs: [], pods: [],
+        boxes: [], projects: [], sessions: [], runs: [],
       };
       this.onmessage?.({ data: JSON.stringify(snapshot) });
     }, 0);

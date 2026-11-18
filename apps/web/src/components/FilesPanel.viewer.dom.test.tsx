@@ -242,8 +242,8 @@ async function mount(initial?: SourceLocation, editors: EditorInfo[] = []): Prom
   ));
   await act(async () => socket.push({
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [runnerWith(editors)], boxes: [], projects: [], sessions: [session], runs: [], pods: [],
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    runners: [runnerWith(editors)], boxes: [], projects: [], sessions: [session], runs: [],
   }));
   await settle();
   return {

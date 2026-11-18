@@ -127,7 +127,7 @@ function Harness() {
   const machines = Number(query.get("machines") ?? 1);
   // Which destination is current. Inbox is a PRIMARY destination, so with only that case the
   // active More trigger and the active overflow row — both real production states, reached by
-  // visiting Runs, Pods, Automations or Usage — are never rendered, and a rule erasing them
+  // visiting Runs, Automations or Usage — are never rendered, and a rule erasing them
   // matches nothing here.
   // Navigating moves it, as production's router does, so what a tap leaves behind on the NEXT page
   // (a ring, a hover fill, a stale current tab) is rendered here too (#1959).

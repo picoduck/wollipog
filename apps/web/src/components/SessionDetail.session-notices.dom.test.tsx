@@ -208,9 +208,9 @@ async function mount(current: SessionView, { online = true, runner: runnerOverri
   await act(async () => socket.push({
     type: "snapshot",
     capabilities: {
-      sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, unarchiveAndRestart,
+      sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, unarchiveAndRestart,
     },
-    runners: [{ ...runnerView(online), ...runnerOverrides }], boxes: [], projects: [], sessions: [current], runs: [], pods: [],
+    runners: [{ ...runnerView(online), ...runnerOverrides }], boxes: [], projects: [], sessions: [current], runs: [],
   }));
   await flush();
   const slot = () => container.querySelector(".session-notice-slot") as HTMLElement | null;

@@ -147,8 +147,8 @@ class FakeSocket implements UiSocket {
 function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-    runners: [machine], boxes: [], sessions: [], runs: [], pods: [],
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+    runners: [machine], boxes: [], sessions: [], runs: [],
   };
 }
 

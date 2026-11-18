@@ -31,7 +31,7 @@ See [Concepts and Glossary](docs/concepts-and-glossary.md) for the relationship 
 - Stream agent messages, reasoning summaries, plans, tool calls, file changes, terminal output, and errors.
 - Handle approvals, structured questions, authentication prompts, and policy decisions.
 - Fork or resume supported conversations while preserving filesystem provenance.
-- Coordinate Orchestrator campaigns, multi-agent runs, pods, durable automations, and review queues.
+- Coordinate Orchestrator campaigns, multi-agent runs, durable automations, and review queues.
 - Manage multiple Claude and Codex accounts and choose defaults for each Machine.
 - Import, version, assign, and deploy agent skills through the opt-in Skills Library.
 - Export transcripts and artifacts, create expiring share links, and track usage and cost.

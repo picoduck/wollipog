@@ -151,10 +151,10 @@ async function withSession(
     await act(async () => socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
+        sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
         worktreeSetupConfig: true,
       },
-      runners: [runner], boxes: [], projects: [project], sessions: [current], runs: [], pods: [],
+      runners: [runner], boxes: [], projects: [project], sessions: [current], runs: [],
       worktreeSetupNoticeDismissals: [],
     } as ControlPlaneToUi));
     await settle();

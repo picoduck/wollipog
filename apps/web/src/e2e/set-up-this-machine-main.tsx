@@ -86,13 +86,12 @@ let socket: FixtureSocket | null = null;
 function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
     runners: runner ? [structuredClone(runner)] : [],
     boxes: [],
     projects: [],
     sessions: [],
     runs: [],
-    pods: [],
   };
 }
 

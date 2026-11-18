@@ -217,7 +217,7 @@ async function mountBackgroundTurns(sessionId: string, cold = false, openingStar
   await act(async () => socket.push({
     type: "snapshot",
     capabilities: {
-      sessionSubscriptions: false,
+      sessionSubscriptionsV2: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
       currentTurnOpening: cold,
@@ -228,7 +228,6 @@ async function mountBackgroundTurns(sessionId: string, cold = false, openingStar
     projects: [],
     sessions: [session],
     runs: [],
-    pods: [],
   } as unknown as ControlPlaneToUi));
   await flushAsyncWork();
   const headings = () => [...container.querySelectorAll(".background-work-turn-head h3")].map((heading) => heading.textContent);

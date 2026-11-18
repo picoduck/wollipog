@@ -12,8 +12,6 @@ import type {
   SessionWorktreeCreateOperationSummary,
   SessionWorktreeCreateOperationView,
   AccessScopeChangePreview,
-  AddPodMemberRequest,
-  AppendPodContextRequest,
   ArchiveSessionMetadata,
   ApprovalQueueItem,
   ApprovalQueueRejectRequest,
@@ -30,7 +28,6 @@ import type {
   BoardColumn,
   BoxView,
   ChildSessionRegistryPage,
-  CreatePodRequest,
   CreateProjectRequest,
   CreateAutomationRequest,
   CreateAutomationTriggerRequest,
@@ -67,11 +64,6 @@ import type {
   ResourceOwner,
   ParentControlMode,
   ParentControlDecisionPolicy,
-  PodContextEntry,
-  PodContextPage,
-  PodOrchestrationActionResult,
-  PodReconciliationActionResult,
-  PodView,
   ProjectResponse,
   ProjectsResponse,
   DeleteProjectResponse,
@@ -83,9 +75,6 @@ import type {
   ProviderHomeLeaseInspection,
   QueuedPromptDraft,
   InvokeSessionCommandRequest,
-  RelayPodRequest,
-  RelayPodResult,
-  ReconcilePodRequest,
   RunView,
   ReviewFindingsResponse,
   ReviewSessionsPage,
@@ -127,7 +116,6 @@ import type {
   SideChatView,
   ShellHistoryPage,
   ShellView,
-  StartPodOrchestrationRequest,
   SshConfigHost,
   TeamView,
   TranscriptShareView,
@@ -149,9 +137,7 @@ import type {
   WorkspaceReferenceSearchLimit,
   WorkspaceReferenceSearchMatch,
   ArtifactPage,
-  UpdatePodMemberRequest,
   UpdateProjectRequest,
-  UpdatePodOrchestrationRequest,
   UpdateAutomationRequest,
   ControlPlaneInstanceInfo,
 } from "@wollipog/protocol";
@@ -1400,77 +1386,6 @@ export function createApiClient(transport: ApiTransport) {
     req<{ run: RunView; sessions: SessionView[] }>("/api/runs", {
       method: "POST",
       body: JSON.stringify(body),
-    }),
-
-  createPod: (body: CreatePodRequest) =>
-    req<{ pod: PodView; sessions: SessionView[] }>("/api/pods", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  pod: (id: string) =>
-    req<{ pod: PodView; sessions: SessionView[] }>(`/api/pods/${encodeURIComponent(id)}`),
-
-  podContext: (id: string, before?: number, limit = 100) => {
-    const query = new URLSearchParams({ limit: String(limit) });
-    if (before !== undefined) query.set("before", String(before));
-    return req<PodContextPage>(`/api/pods/${encodeURIComponent(id)}/context?${query}`);
-  },
-
-  appendPodContext: (id: string, body: AppendPodContextRequest) =>
-    req<{ entry: PodContextEntry; created: boolean; pod: PodView }>(
-      `/api/pods/${encodeURIComponent(id)}/context`,
-      { method: "POST", body: JSON.stringify(body) },
-    ),
-
-  addPodMember: (id: string, body: AddPodMemberRequest) =>
-    req<{ pod: PodView; sessions: SessionView[] }>(`/api/pods/${encodeURIComponent(id)}/members`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  removePodMember: (id: string, sessionId: string) =>
-    req<{ pod: PodView; sessions: SessionView[] }>(
-      `/api/pods/${encodeURIComponent(id)}/members/${encodeURIComponent(sessionId)}`,
-      { method: "DELETE" },
-    ),
-
-  updatePodMember: (id: string, sessionId: string, body: UpdatePodMemberRequest) =>
-    req<{ pod: PodView; sessions: SessionView[] }>(
-      `/api/pods/${encodeURIComponent(id)}/members/${encodeURIComponent(sessionId)}`,
-      { method: "PATCH", body: JSON.stringify(body) },
-    ),
-
-  updatePodOrchestration: (id: string, body: UpdatePodOrchestrationRequest) =>
-    req<{ pod: PodView }>(`/api/pods/${encodeURIComponent(id)}/orchestration`, {
-      method: "PUT",
-      body: JSON.stringify(body),
-    }),
-
-  startPodOrchestration: (id: string, body: StartPodOrchestrationRequest) =>
-    req<PodOrchestrationActionResult>(`/api/pods/${encodeURIComponent(id)}/orchestration/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  stopPodOrchestration: (id: string) =>
-    req<{ pod: PodView }>(`/api/pods/${encodeURIComponent(id)}/orchestration/stop`, { method: "POST" }),
-
-  reconcilePod: (id: string, body: ReconcilePodRequest) =>
-    req<PodReconciliationActionResult>(`/api/pods/${encodeURIComponent(id)}/reconcile`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  relayPod: (id: string, body: RelayPodRequest) =>
-    req<RelayPodResult>(`/api/pods/${encodeURIComponent(id)}/relay`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  closePod: (id: string) =>
-    req<{ pod: PodView; sessions: SessionView[] }>(`/api/pods/${encodeURIComponent(id)}/close`, {
-      method: "POST",
     }),
 
   artifactExport: (artifactId: string) => artifactExport(transport, artifactId),

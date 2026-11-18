@@ -41,10 +41,10 @@ export function shouldHydrateRoutedSession(
   return !session || session.projection === "summary" || ((Boolean(session.archived) || summarySnapshot) && snapshotRevision > 0);
 }
 
-const RESOURCE_NOUN = { Session: "session", Run: "run", Pod: "pod", Automation: "automation" } as const;
+const RESOURCE_NOUN = { Session: "session", Run: "run", Automation: "automation" } as const;
 
 /**
- * The state a Session, Run, Pod or Automation page shows while its entity is not loaded (docs/design-system.md
+ * The state a Session, Run or Automation page shows while its entity is not loaded (docs/design-system.md
  * §12). The copy names what the person can do, never Wollipog's internals: the shell's offline
  * banner already offers Retry Now, and the pairing banner holds the pairing form (#2202).
  */
@@ -92,7 +92,7 @@ export function detailPlaceholder(
 
 /** A resource list before the first snapshot, or while disconnected. An empty map proves nothing
  * then, so the list must not claim "No … Yet" or offer to create what may already exist. */
-export function listPlaceholder(list: "runs" | "pods", conn: ConnState): ListPlaceholder {
+export function listPlaceholder(list: "runs", conn: ConnState): ListPlaceholder {
   const resource = destination(list).name;
   if (conn === "unauthorized") {
     return {

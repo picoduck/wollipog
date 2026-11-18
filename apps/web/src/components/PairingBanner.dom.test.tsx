@@ -256,7 +256,7 @@ test("a link the server refuses says so above the footer, and an accepted one pa
     assert.equal(deviceToken(), TOKEN, "a bare code works too");
     assert.equal(view.credentialChanges, 2);
     await act(async () => {
-      view.latest().onmessage?.({ data: JSON.stringify({ type: "snapshot", runners: [], runs: [], pods: [], sessions: [] }) });
+      view.latest().onmessage?.({ data: JSON.stringify({ type: "snapshot", runners: [], runs: [], sessions: [] }) });
       await tick();
     });
     assertNoDomNode(view.dialog(), "the dialog closes");

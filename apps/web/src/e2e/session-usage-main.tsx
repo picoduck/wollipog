@@ -631,7 +631,7 @@ if (params.get("approval") === "checkpoint") {
 const snapshotMessage: ControlPlaneToUi = {
   type: "snapshot",
   capabilities: {
-    sessionSubscriptions: false,
+    sessionSubscriptionsV2: false,
     boundedDelivery: false,
     paginatedSessionHistory: false,
     projects: true,
@@ -643,7 +643,6 @@ const snapshotMessage: ControlPlaneToUi = {
   projects: [],
   sessions: [session],
   runs: [],
-  pods: [],
 };
 
 function usageAmount(input: number, output: number, costUsd: number, processed: number, costSource: "providerReported" | "modelPriced" | "unpriced" = "providerReported") {

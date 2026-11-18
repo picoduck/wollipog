@@ -348,7 +348,6 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * through a runner-side MCP proxy that holds the thread credential in memory, and refuses it on
    * an unsupported harness. v383 runners launched the role without the proxy. */
   assistantRole: 384,
-  podReconciliation: 52,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
   indexedHistory: 55,
@@ -9011,214 +9010,6 @@ export interface RunView {
   sessionIds: string[];
 }
 
-/* ========================================================================== */
-/* Collaboration pods                                                         */
-/* ========================================================================== */
-
-export type PodStatus = "active" | "closed";
-
-export type PodMemberRole = "lead" | "worker" | "reviewer";
-
-export type PodArbitrationMode = "manual" | "round_robin" | "lead_driven" | "event_triggered";
-
-export interface PodOrchestrationPolicy {
-  mode: PodArbitrationMode;
-  /** Conservative cross-provider prompt ceiling: one UTF-8 byte counts as one estimated token. */
-  contextTokenBudget: number;
-  /** Portion of the prompt budget reserved for deterministic summaries of omitted context. */
-  summaryTokenBudget: number;
-  /** Hard per-cycle dispatch ceiling. A human must explicitly start a new cycle after it trips. */
-  maxTurns: number;
-  /** Exact normalized member outputs allowed in one cycle before loop detection stops it. */
-  maxRepeatedOutputs: number;
-}
-
-export type PodOrchestrationStatus = "idle" | "running" | "paused" | "stopped";
-
-export interface PodOrchestrationState {
-  status: PodOrchestrationStatus;
-  runId?: string;
-  turnsUsed: number;
-  currentSessionId?: string;
-  lastSessionId?: string;
-  stopReason?: string;
-  startedAt?: number;
-  updatedAt: number;
-}
-
-export type PodOrchestrationStepStatus = "dispatching" | "running" | "settled" | "failed";
-
-export interface PodOrchestrationStep {
-  stepId: string;
-  podId: string;
-  runId: string;
-  turn: number;
-  targetSessionId: string;
-  triggerSessionId?: string;
-  selectedEntryIds: string[];
-  summarizedFromSeq?: number;
-  summarizedToSeq?: number;
-  estimatedTokens: number;
-  outputEntryId?: string;
-  status: PodOrchestrationStepStatus;
-  error?: string;
-  createdAt: number;
-  settledAt?: number;
-}
-
-export interface PodOrchestrationView {
-  policy: PodOrchestrationPolicy;
-  state: PodOrchestrationState;
-  lastStep?: PodOrchestrationStep;
-}
-
-export type PodReconciliationStatus = "running" | "applied" | "already_applied" | "conflicted" | "failed";
-
-/** Durable merge/reconcile receipt. Session titles and filesystem paths are deliberately absent;
- * the immutable git coordinates remain trustworthy after a member is renamed or deleted. */
-export interface PodReconciliation {
-  reconciliationId: string;
-  podId: string;
-  sourceSessionId: string;
-  targetSessionId: string;
-  actorId: string;
-  status: PodReconciliationStatus;
-  sourceHead?: string;
-  targetHead?: string;
-  mergeBase?: string;
-  resultHead?: string;
-  conflictPaths?: string[];
-  error?: string;
-  createdAt: number;
-  completedAt?: number;
-}
-
-export interface PodMemberView {
-  sessionId: string;
-  joinedAt: number;
-  role: PodMemberRole;
-  /** Null inherits the pod policy's contextTokenBudget. */
-  contextTokenBudget: number | null;
-  /** Highest shared-log sequence represented in a successfully delivered automatic prompt. */
-  lastContextSeq: number;
-}
-
-/** A durable collaboration group. Pods deliberately own membership independently of runs:
- * a run records one execution/workflow, while a pod may span runners and evolve over time. */
-export interface PodView {
-  id: string;
-  title: string;
-  objective: string;
-  status: PodStatus;
-  members: PodMemberView[];
-  /** Optional only for rolling control-plane/UI compatibility. New control planes always supply it. */
-  orchestration?: PodOrchestrationView;
-  /** Newest-first bounded receipts. Optional only for rolling control-plane/UI compatibility. */
-  reconciliations?: PodReconciliation[];
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface CreatePodRequest {
-  title: string;
-  objective?: string;
-  /** Existing isolated sessions to group. A session may belong to only one active pod. */
-  sessionIds: string[];
-}
-
-export interface AddPodMemberRequest {
-  sessionId: string;
-  role?: PodMemberRole;
-  contextTokenBudget?: number;
-}
-
-export interface UpdatePodMemberRequest {
-  role?: PodMemberRole;
-  /** Null clears the member override and inherits the pod policy. */
-  contextTokenBudget?: number | null;
-}
-
-export interface UpdatePodOrchestrationRequest {
-  mode?: PodArbitrationMode;
-  contextTokenBudget?: number;
-  summaryTokenBudget?: number;
-  maxTurns?: number;
-  maxRepeatedOutputs?: number;
-}
-
-export interface StartPodOrchestrationRequest {
-  /** Optional attributed seed note appended before the first automatic dispatch. */
-  instruction?: string;
-  /** Required for event-triggered mode; optional as a round-robin starting point. */
-  firstSessionId?: string;
-}
-
-export interface PodOrchestrationActionResult {
-  pod: PodView;
-  session?: SessionView;
-  step?: PodOrchestrationStep;
-  appendedEntry?: PodContextEntry;
-}
-
-export interface ReconcilePodRequest {
-  sourceSessionId: string;
-  targetSessionId: string;
-}
-
-export interface PodReconciliationActionResult {
-  pod: PodView;
-  reconciliation: PodReconciliation;
-}
-
-export type PodContextSource =
-  | { kind: "human"; actorId: string }
-  | {
-      kind: "session";
-      sessionId: string;
-      sessionTitle: string;
-      agentLabel: string;
-      fromSeq: number;
-      toSeq: number;
-    };
-
-/** Immutable, attributed shared context. Attribution is frozen so the entry remains trustworthy
- * after its source session is renamed or deleted. */
-export interface PodContextEntry {
-  id: string;
-  podId: string;
-  seq: number;
-  ts: number;
-  source: PodContextSource;
-  content: string;
-}
-
-export type AppendPodContextRequest =
-  | { kind: "note"; text: string }
-  | { kind: "member_output"; sessionId: string };
-
-export interface RelayPodRequest {
-  /** Optional coordination note. When present, it is appended to the pod log before delivery. */
-  text?: string;
-  /** Omit to relay to every member; otherwise must be a non-empty exact subset. */
-  sessionIds?: string[];
-  /** Explicit, ordered shared-log entries to compose into the prompt. */
-  contextEntryIds?: string[];
-}
-
-export interface PodRelayReceipt {
-  sessionId: string;
-  status: "delivered" | "failed";
-  error?: string;
-}
-
-export interface RelayPodResult {
-  pod: PodView;
-  /** Successfully delivered target snapshots, retained for backward compatibility. */
-  sessions: SessionView[];
-  receipts: PodRelayReceipt[];
-  appendedEntry?: PodContextEntry;
-}
-
 export type ArtifactKind = "html_preview" | "patch" | "review_report" | "screenshot" | "video" | "test_log" | "verdict";
 export const MAX_SESSION_VIDEO_BYTES = 32 * 1024 * 1024;
 export type ArtifactEncoding = "utf8" | "base64" | "json";
@@ -11959,9 +11750,6 @@ export type GitAction =
   /** Destructively restore one tracked file to HEAD (including index state). Untracked files are
    * deliberately rejected because their content is not rendered or covered by the diff hash. */
   | { kind: "discard_file"; filePath: string; diffHash: string }
-  /** Same-runner pod reconciliation. The runner resolves the source path from its own session
-   * metadata; callers never supply an arbitrary filesystem path. */
-  | { kind: "pod_reconcile"; sourceSessionId: string; message: string }
   /** Read-only import/reconciliation of review threads for the PR associated with HEAD. */
   | { kind: "github_review_sync" }
   /** Provider-selected read-only import for the change request associated with HEAD. */
@@ -12747,14 +12535,6 @@ export interface GitActionData {
   pr?: GitPrInfo;
   githubReview?: GitHubReviewSyncInfo;
   forgeReview?: ForgeReviewSyncInfo;
-  podReconciliation?: {
-    status: "applied" | "already_applied" | "conflicted";
-    sourceHead: string;
-    targetHead: string;
-    mergeBase: string;
-    resultHead?: string;
-    conflictPaths?: string[];
-  };
   reviewFindings?: ReviewFindingsResponse;
   reviewReconciliation?: GitHubReviewReconciliation;
   /** v382 (#604). */
@@ -12898,7 +12678,8 @@ export interface UiSnapshotMessage {
   sessionsComplete?: boolean;
   /** Additive UI-channel capabilities. Absent on older control planes. */
   capabilities?: {
-    sessionSubscriptions?: boolean;
+    /** Session-only subscription frames. Mixed-version dashboards use legacy fan-out. */
+    sessionSubscriptionsV2?: boolean;
     boundedDelivery?: boolean;
     paginatedSessionHistory?: boolean;
     /** Bounded initial page at the current semantic turn's start, with explicit unread range. */
@@ -12941,8 +12722,6 @@ export interface UiSnapshotMessage {
   /** Project ids whose one-time setup notice this user dismissed. */
   worktreeSetupNoticeDismissals?: string[];
   runs: RunView[];
-  /** Optional only for compatibility with pre-pod control planes. */
-  pods?: PodView[];
 }
 
 export interface UiSessionSnapshotPageMessage {
@@ -13069,21 +12848,6 @@ export interface UiRunRemovedMessage {
   runId: string;
 }
 
-export interface UiPodUpsertMessage {
-  type: "pod_upsert";
-  pod: PodView;
-}
-
-export interface UiPodRemovedMessage {
-  type: "pod_removed";
-  podId: string;
-}
-
-export interface UiPodContextEntryMessage {
-  type: "pod_context_entry";
-  entry: PodContextEntry;
-}
-
 /** Confirms that the server has atomically replaced this socket's high-volume stream selection.
  * The browser performs a cursor fetch after this ordered acknowledgement, closing the race between
  * navigation over the WebSocket and history hydration over a separate HTTP connection. */
@@ -13092,7 +12856,6 @@ export interface UiSessionSubscriptionsAppliedMessage {
   revision: number;
   /** Exact authorized selection accepted by the control plane. */
   sessionIds: string[];
-  podIds: string[];
 }
 
 /** The organization's member directory changed without changing this viewer's access (#2606): a
@@ -13124,17 +12887,13 @@ export type ControlPlaneToUi =
   | UiShellRegistryReconciledMessage
   | UiRunUpsertMessage
   | UiRunRemovedMessage
-  | UiPodUpsertMessage
-  | UiPodRemovedMessage
-  | UiPodContextEntryMessage
   | UiSessionSubscriptionsAppliedMessage
   | UiIdentityDirectoryChangedMessage
   | UiAssistantThreadUpsertMessage;
 
-/** One dashboard view can display one pod (at most 12 members today) or a larger parallel run.
+/** One dashboard view can display a parallel run.
  * Leave headroom for future run sizes without admitting multi-thousand-query subscription frames. */
 export const MAX_UI_SESSION_SUBSCRIPTIONS = 256;
-export const MAX_UI_POD_SUBSCRIPTIONS = 1;
 /** Subscription replacements one admission key (a paired device, else the user) may send per
  * window. The window survives reconnects, and the control plane closes a socket that exceeds it with
  * 1013, so dashboards pace their replacements under it instead of discovering it by disconnect. */
@@ -13150,7 +12909,6 @@ export interface UiSessionSubscriptionsMessage {
   /** Monotonic per-WebSocket replacement id. Starts at 1. */
   revision: number;
   sessionIds: string[];
-  podIds: string[];
 }
 
 /** An authenticated dashboard confirms it received the durable continuation projection. This is
@@ -13641,21 +13399,6 @@ export interface CreateSideChatRequest {
 export interface RunResponse {
   run: RunView;
   sessions: SessionView[];
-}
-
-export interface PodsResponse {
-  pods: PodView[];
-}
-
-export interface PodResponse {
-  pod: PodView;
-  sessions: SessionView[];
-}
-
-export interface PodContextPage {
-  entries: PodContextEntry[];
-  /** Pass as `before` to load the next older page. */
-  beforeSeq?: number;
 }
 
 /* ========================================================================== */

@@ -84,19 +84,19 @@ const text = (element: Element | null | undefined) => element?.textContent?.trim
 const focused = () => domWindow.document.activeElement as unknown as Element | null;
 const settle = async (ms = 10) => act(async () => { await new Promise((resolve) => setTimeout(resolve, ms)); });
 
-/** A store whose snapshot holds a pod: the lead `lead`, and members the test passes. */
-const podConnection = (lead: SessionView, members: SessionView[]): UiConnectionRuntime => ({
-  instanceId: "agents-notices-pod", runtimeKey: `agents-notices-pod-${lead.id}`,
+/** A store whose snapshot holds a run: the lead `lead`, and members the test passes. */
+const runConnection = (lead: SessionView, members: SessionView[]): UiConnectionRuntime => ({
+  instanceId: "agents-notices-run", runtimeKey: `agents-notices-run-${lead.id}`,
   createSocket: () => {
     const socket = { readyState: UI_SOCKET_OPEN, onopen: null as (() => void) | null,
       onmessage: null as ((event: { data: string }) => void) | null, onclose: null, onerror: null, send() {}, close() {} };
     setTimeout(() => {
       socket.onopen?.();
-      const snapshot = { type: "snapshot", runners: [], boxes: [], runs: [], sessions: members, pods: [{
-        id: "pod-1", title: "Parser Rewrite Pod", objective: "", status: "active", createdAt: now, updatedAt: now,
-        members: [lead, ...members].map((member, index) => ({ sessionId: member.id, joinedAt: now, role: index === 0 ? "lead" : "worker",
-          contextTokenBudget: null, lastContextSeq: 0 })),
-      }] } as unknown as UiSnapshotMessage;
+      const snapshot: UiSnapshotMessage = { type: "snapshot", runners: [], boxes: [], sessions: members, runs: [{
+        id: "run-1", title: "Parser Rewrite", prompt: "Rewrite the parser.",
+        workspaceId: lead.workspaceId, workspaceName: lead.workspaceName ?? null,
+        createdAt: now, updatedAt: now, sessionIds: [lead, ...members].map((member) => member.id),
+      }] };
       socket.onmessage?.({ data: JSON.stringify(snapshot) });
     }, 0);
     return socket;
@@ -341,34 +341,6 @@ test("a stale attention link is one info notice, and the aggregate link focuses 
   }
 });
 
-test("a pod member waiting on the person is counted, and Review in Session opens its session after this session's requests", async () => {
-  const lead = asking(permission("parser-run", "parser"));
-  const reviewer = { ...baseSession(), id: "member-review", title: "Parser Reviewer", status: "input_required",
-    pendingApproval: permission("lint") } as unknown as SessionView;
-  let view: unknown;
-  const both = await mount(<Harness initial={lead} store={podConnection(lead, [reviewer])} onView={(next) => { view = next; }} />);
-  try {
-    await settle(20);
-    assert.ok(both.rowBadges().includes("Parser Reviewer: Approval Required"), "the member's row reads its attention word");
-    assert.equal(both.sentence(), "2 workers are waiting for your approval.", "the notice counts the member as its row does");
-    await both.click(both.button("Review in Session"));
-    assert.equal(both.container.querySelector(".agents-page .worker-detail")?.getAttribute("aria-label"), "Inspect Parser",
-      "this session's own request comes first");
-  } finally {
-    await both.unmount();
-  }
-  const alone = { ...baseSession() } as SessionView;
-  const memberOnly = await mount(<Harness initial={alone} store={podConnection(alone, [reviewer])} onView={(next) => { view = next; }} />);
-  try {
-    await settle(20);
-    assert.equal(memberOnly.sentence(), "Parser Reviewer is waiting for your approval.");
-    await memberOnly.click(memberOnly.button("Review in Session"));
-    assert.deepEqual(view, { name: "session", id: "member-review" }, "a member's request is answered in its own session");
-  } finally {
-    await memberOnly.unmount();
-  }
-});
-
 test("Review in Session on a request no page carries gives the roster back while a worker page is open (#2861 review)", async () => {
   const orphan = { requestId: "gone-run", ownerToolUseId: "gone", title: "Bash: ls", options: allow };
   const panel = await mount(<Harness initial={asking(orphan)} />);
@@ -389,10 +361,10 @@ test("Review in Session on a request no page carries gives the roster back while
 });
 
 test("offline, a waiting member sharing the machine stays counted with no action (#2861 review)", async () => {
-  const lead = { ...baseSession() } as SessionView;
+  const lead = { ...baseSession(), runId: "run-1" } as SessionView;
   const reviewer = { ...baseSession(), id: "member-offline", runnerId: lead.runnerId, title: "Parser Reviewer", status: "input_required",
     pendingApproval: { ...permission("lint"), additionalRequests: [permission("format")] } } as unknown as SessionView;
-  const panel = await mount(<Harness initial={lead} runnerOnline={false} store={podConnection(lead, [reviewer])} />);
+  const panel = await mount(<Harness initial={lead} runnerOnline={false} store={runConnection(lead, [reviewer])} />);
   try {
     await settle(20);
     assert.ok(panel.rowBadges().includes("Parser Reviewer: Unverified"));

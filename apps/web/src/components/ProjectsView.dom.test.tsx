@@ -142,12 +142,11 @@ async function render(snapshot: Partial<UiSnapshotMessage> | null, client: ApiCl
     await act(async () => {
       socket.push({
         type: "snapshot",
-        capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+        capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
         runners: [runner],
         boxes: [],
         sessions: [],
         runs: [],
-        pods: [],
         ...snapshot,
       } as UiSnapshotMessage);
     });
@@ -209,7 +208,7 @@ test("a search with no match is one inline row with Clear Search, and the overvi
 
 test("an older server shows the Projects Need an Update warning, never Project Management Unavailable", async () => {
   const body = await render({
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
   });
   const notice = body.querySelector(".master-detail-state .notice.t-warning");
   assert.equal(text(notice?.querySelector(".notice-title")), "Projects Need an Update");
@@ -327,7 +326,7 @@ test("the access fact is the saved scope, and names a team only once the identit
   const loaded = new Promise((resolve) => { release = resolve; });
   const client = { ...api, getIdentity: async () => { await loaded; return identity; } } as unknown as ApiClient;
   const scoped = { ...busyProject(), audience: "organization" as const, scope: { organizationId: "org-1", owner: { kind: "team" as const, teamId: "team-1" } } };
-  const capabilities = { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, accessScopeManagement: true };
+  const capabilities = { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, accessScopeManagement: true };
   const body = await renderSelected([scoped], "Project 1", { capabilities } as Partial<UiSnapshotMessage>, client);
   const facts = () => [...body.querySelectorAll(".project-detail-meta li")].map(text);
   assert.deepEqual(facts(), ["2 Locations", "11 Sessions, 1 Running"], "no access fact while the team's name is unknown");
@@ -340,7 +339,7 @@ test("the access fact is the saved scope, and names a team only once the identit
 test("an organization-wide scope shows before the identity directory loads", async () => {
   const client = { ...api, getIdentity: () => new Promise(() => {}) } as unknown as ApiClient;
   const scoped = { ...busyProject(), scope: { organizationId: "org-1", owner: { kind: "organization" as const, organizationId: "org-1" } } };
-  const capabilities = { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, accessScopeManagement: true };
+  const capabilities = { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, accessScopeManagement: true };
   const body = await renderSelected([scoped], "Project 1", { capabilities } as Partial<UiSnapshotMessage>, client);
   assert.equal(text([...body.querySelectorAll(".project-detail-meta li")].at(-1)), "Access: Organization-Wide");
 });

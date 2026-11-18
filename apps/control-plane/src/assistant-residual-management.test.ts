@@ -152,9 +152,13 @@ test("Git withholds post-dispatch results after revocation without replaying a p
 test("Git rechecks busy-session state after asynchronous authority inspection before dispatch", async () => {
   const h = await fixture();
   try {
-    h.svc.podReconciliationMutationError = () => {
-      queueMicrotask(() => h.db.updateSessionStatus("target", "running", 3));
-      return null;
+    const getSession = h.db.getSession.bind(h.db);
+    h.db.getSession = (id) => {
+      const session = getSession(id);
+      if (id === "target" && session?.status === "idle") {
+        queueMicrotask(() => h.db.updateSessionStatus(id, "running", 3));
+      }
+      return session;
     };
     const result = await h.call("session_git", {commandId: "started-turn", payload: {action: "commit", message: "Fixture"}});
     assert.equal(result.status, 409); assert.equal(result.receipt.status, "failed");

@@ -397,6 +397,8 @@ const THEMES = ["dark", "light"] as const;
  *
  *   measured paint / legible at the device's own 2.625 ratio, both themes, portrait and landscape
  *   icon       1183-1285 / 977-1077      moreTrigger   275-284 / 218-232
+ *   (The Assistants glyph took the Automations bolt's place on the default bar in #4690. It
+ *   measures 1130-1147 / 905-943, so `icon` still trips when a third of it goes: 1130 × 2/3 = 753.)
  *   sheetIcon    451-1503 / 317-1460      sheetLabel   2079-3483 / 1425-2417
  *   (Re-measured when the labelled tab bar made the bar's icons 24px and the sheet's 20px, #1959.
  *   The floors keep the same ratios to the measured minimum as before: paint about 0.86 and
@@ -409,30 +411,17 @@ const THEMES = ["dark", "light"] as const;
  * itself, which is the mutation these floors exist for. The ratio to the measured minimum is the
  * same as sheetLabel's.
  *
- * "Pods" moved into the sheet when the default order put Projects third (#1945), and one
- * four-letter word has about half the ink of "Settings": measured 875-1032 paint / 616-731 legible
- * across both themes and landscape. Its floors keep sheetShortLabel's ratios to the measured
- * minimum (830 / 290), so losing a third of it (875 × 2/3 = 583) still trips the paint floor.
- *
  * "Assistants" (#4664) is ten narrow letters with about the ink of "Settings": measured 1747-1753
  * paint in both themes. It takes sheetShortLabel's floors, and losing a third of it
  * (1747 × 2/3 = 1165) still trips the 1330 paint floor.
  */
 const SHORT_SHEET_TITLES = new Set(["Settings", "Assistants"]);
-const TINY_SHEET_TITLES = new Set(["Pods"]);
 const MARKS = {
   icon: { paint: 1000, legible: 450, illegibleCells: 0, minContrast: CONTRAST.icon },
-  /* The Automations bolt joined the primary bar when Board became a mode of Sessions (#499).
-     It is one stroked path where the other primary glyphs are two or three, so it measures 920-936
-     paint / 729-773 legible against the icon family's 1183-1285 / 977-1077 — a floor calibrated
-     for the beefier marks would reject a bolt that is fully painted. Same ratios to the measured
-     minimum as `icon`, so losing a third of the bolt still trips it. */
-  boltIcon: { paint: 780, legible: 340, illegibleCells: 0, minContrast: CONTRAST.icon },
   moreTrigger: { paint: 245, legible: 105, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetIcon: { paint: 390, legible: 150, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetLabel: { paint: 1850, legible: 650, illegibleCells: 0, minContrast: CONTRAST.label },
   sheetShortLabel: { paint: 1330, legible: 490, illegibleCells: 0, minContrast: CONTRAST.label },
-  sheetTinyLabel: { paint: 830, legible: 290, illegibleCells: 0, minContrast: CONTRAST.label },
 } as const satisfies Record<string, Mark>;
 
 /**
@@ -442,7 +431,7 @@ const MARKS = {
  *   measured paint / legible on a developer machine, both themes, portrait and landscape, with and
  *   without the keyboard
  *   Sessions 1094-1101 / 529-654   Projects 1026-1030 / 462-546   Connections 1509-1517 / 672-803
- *   Automations 1632-1640 / 725-864   More 719-723 / 318-422
+ *   Automations 1632-1640 / 725-864   More 719-723 / 318-422   Assistants 1318-1321 / 548-708 (#4690)
  *
  * These are text, so unlike the icons they follow the machine's font rasterisation: the CI runner
  * renders text smaller (e2e/README.md), and "More" painted 668 there against 719 here, a factor of
@@ -459,6 +448,7 @@ const tabLabel = (paint: number, legible: number): Mark =>
   ({ paint, legible, illegibleCells: 2, minContrast: CONTRAST.label, fraction: 0.36 });
 const TAB_LABEL_MARKS: Record<string, Mark> = {
   Sessions: tabLabel(941, 249),
+  Assistants: tabLabel(1133, 258),
   Projects: tabLabel(882, 217),
   Connections: tabLabel(1298, 316),
   Automations: tabLabel(1403, 341),
@@ -773,18 +763,18 @@ test("no two destinations render the same glyph", async ({ page }) => {
  *
  * Selecting Inbox always meant `.rail-more-trigger.active` and `.rail-more-item.active` never
  * existed here, so `.rail-more-trigger.active > svg, .rail-more-item.active > svg { opacity: 0 }`
- * matched nothing — while in production, standing on Runs, Pods, Automations or Usage gives a blank
+ * matched nothing — while in production, standing on Runs, Automations or Usage gives a blank
  * active More control and an erased current row inside the sheet.
  */
 // The harness enables every experiment, so the overflow set is every destination off the default
 // phone bar, which experiments never change (#1959).
-const MOBILE_PRIMARY_DEFAULTS = phoneBarViews(defaultRailPreferences(), { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true, pods: true });
+const MOBILE_PRIMARY_DEFAULTS = phoneBarViews(defaultRailPreferences(), { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true });
 for (const current of GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_DEFAULTS.includes(item.id))) {
   test(`the More control reads as current on ${current.name}`, async ({ page }) => {
     await useHarness(page, { view: current.id });
     await openKeyboard(page);
     // Every overflow destination, not just one: `overflowSelected = selected === "usage"` left the
-    // single-case version green while a user on Runs, Pods or Automations saw a bar with nothing
+    // single-case version green while a user on Runs or Automations saw a bar with nothing
     // marked current at all.
     await expect(page.locator(".rail-more-trigger.active")).toHaveCount(1);
     await expect(page.locator(".rail-more-trigger")).toHaveAttribute("aria-current", "page");
@@ -988,10 +978,7 @@ async function expectEveryPrimaryDestinationUsable(page: Page) {
     // The icon, on its own: measuring the item instead let its border, and on Connections its count
     // badge, stand in for an icon that had been erased. The More trigger is three small dots inside
     // the same 24px box as a full icon, so it clears a lower floor.
-    const isAutomations = !isMoreTrigger &&
-      (await item.evaluate((element) => new URL((element as HTMLAnchorElement).href).pathname)) === "/automations";
-    await expectPainted(page, item.locator("svg"), `${label} icon`,
-      isMoreTrigger ? MARKS.moreTrigger : isAutomations ? MARKS.boltIcon : MARKS.icon);
+    await expectPainted(page, item.locator("svg"), `${label} icon`, isMoreTrigger ? MARKS.moreTrigger : MARKS.icon);
     // And the label under it (#1959), measured like a sheet row's: the tab's own words, painted.
     const tabLabel = item.locator(".rail-tab-label");
     await expect(tabLabel, `the tab at "${label}" must be labelled "${name}"`).toHaveText(name);
@@ -1120,8 +1107,7 @@ async function expectEveryDestinationReachable(page: Page, occluded: number) {
     await expectPainted(page, item.locator("svg"), `${label} icon`, MARKS.sheetIcon);
     await expectPlainText(item.locator(".menu-text"), `${label} label`);
     await expectPainted(page, item.locator(".menu-text"), `${label} label`,
-      TINY_SHEET_TITLES.has(label) ? MARKS.sheetTinyLabel
-        : SHORT_SHEET_TITLES.has(label) ? MARKS.sheetShortLabel : MARKS.sheetLabel);
+      SHORT_SHEET_TITLES.has(label) ? MARKS.sheetShortLabel : MARKS.sheetLabel);
   }
 }
 

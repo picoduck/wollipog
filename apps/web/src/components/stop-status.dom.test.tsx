@@ -88,9 +88,9 @@ const navigation: ViewNavigation = { current: () => ({ name: "inbox" }), push() 
 function snapshot(runnerStatus: "online" | "offline" | "absent", candidate: SessionView): UiSnapshotMessage {
   return {
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
     runners: runnerStatus === "absent" ? [] : [runner(runnerStatus)],
-    boxes: [], projects: [], sessions: [candidate], runs: [], pods: [],
+    boxes: [], projects: [], sessions: [candidate], runs: [],
   } as unknown as UiSnapshotMessage;
 }
 

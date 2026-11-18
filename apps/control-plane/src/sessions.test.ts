@@ -11,8 +11,6 @@ import type {
   DurableSessionCommand,
   GitSummaryInfo,
   ManagedBackgroundJobSnapshot,
-  PodContextEntry,
-  PodView,
   ProjectView,
   QueuedPromptView,
   ReconcileWorkflowActionMessage,
@@ -442,8 +440,6 @@ class FakeHub {
   sessionEventsResetCalls: { sessionId: string; events: SessionEvent[]; eventEpoch?: number }[] = [];
   sessionRemovedCalls: string[] = [];
   runChangedCalls: RunView[] = [];
-  podChangedCalls: PodView[] = [];
-  podContextEntryCalls: PodContextEntry[] = [];
   projectChangedByIdCalls: string[] = [];
   runnerChangedCalls: string[] = [];
   deliveryHandler?: (runnerId: string, msg: ControlPlaneToRunner) => boolean;
@@ -573,16 +569,6 @@ class FakeHub {
   runChanged(run: RunView): void {
     this.calls.push({ method: "runChanged", args: [run] });
     this.runChangedCalls.push(run);
-  }
-
-  podChanged(pod: PodView): void {
-    this.calls.push({ method: "podChanged", args: [pod] });
-    this.podChangedCalls.push(pod);
-  }
-
-  podContextEntry(entry: PodContextEntry): void {
-    this.calls.push({ method: "podContextEntry", args: [entry] });
-    this.podContextEntryCalls.push(entry);
   }
 
   projectChanged(_project: ProjectView): void {}
@@ -9550,18 +9536,6 @@ test("unmatched, foreign-owned, and undeliverable question policies retain the o
   }
 });
 
-function seedReadyPodSession(
-  db: ControlPlaneDb,
-  svc: SessionsService,
-  hub: FakeHub,
-  title: string,
-): string {
-  const id = seedSession(svc, hub, { useWorktree: true, title });
-  db.setWorktreePath(id, `/worktrees/${id}`);
-  db.updateSessionStatus(id, "idle", Date.now());
-  return id;
-}
-
 test("fired reminder policy edits and removal Undo can restore their observed past instant", () => {
   const { db, hub, svc } = makeHarness();
   const sessionId = seedSession(svc, hub);
@@ -12959,7 +12933,7 @@ test("a fresh steering submission id is independent from a promoted queue id", a
   assert.equal(result.data?.state, "rejected");
 });
 
-test("steering fails closed for policy, automation, and active pod ownership", async () => {
+test("steering fails closed for policy and automation ownership", async () => {
   const policyHarness = makeHarness();
   const policyId = seedSession(policyHarness.svc, policyHarness.hub, { agentId: CODEX_APP_AGENT_ID });
   policyHarness.db.updateSessionStatus(policyId, "input_required", Date.now());
@@ -12988,29 +12962,6 @@ test("steering fails closed for policy, automation, and active pod ownership", a
     "SELECT COUNT(*) AS count FROM session_steering_attempts WHERE session_id=?",
   ).get(automationId) as unknown as { count: number }).count, 0, "automation ownership rejects before persistence");
 
-  const podHarness = makeHarness();
-  const first = seedSession(podHarness.svc, podHarness.hub, {
-    agentId: CODEX_APP_AGENT_ID, useWorktree: true, title: "Steering Lead",
-  });
-  const second = seedSession(podHarness.svc, podHarness.hub, {
-    agentId: CODEX_APP_AGENT_ID, useWorktree: true, title: "Steering Builder",
-  });
-  podHarness.db.setWorktreePath(first, `/worktrees/${first}`);
-  podHarness.db.setWorktreePath(second, `/worktrees/${second}`);
-  podHarness.db.updateSessionStatus(first, "idle", Date.now());
-  podHarness.db.updateSessionStatus(second, "idle", Date.now());
-  const pod = podHarness.svc.createPod({ title: "Steering Pod", sessionIds: [first, second] }).data!.pod;
-  assert.ok(podHarness.svc.updatePodOrchestration(pod.id, {
-    mode: "round_robin", contextTokenBudget: 4096, summaryTokenBudget: 128,
-    maxTurns: 2, maxRepeatedOutputs: 2,
-  }).ok);
-  assert.equal(podHarness.svc.startPodOrchestration(
-    pod.id, { instruction: "Start", firstSessionId: first }, "device-1",
-  ).status, 201);
-  podHarness.hub.activeTurnIds.set(first, "turn-pod");
-  assert.equal((await podHarness.svc.steer(first, {
-    submissionId: "submission-pod", turnId: "turn-pod", text: "continue",
-  })).status, 409);
 });
 
 test("steering admission cannot create more recovery obligations than the dashboard projects", async () => {
@@ -15636,420 +15587,6 @@ test("createSession persists a supported non-default permission mode", () => {
   });
   assert.ok(res.ok);
   assert.equal(db.getSession(res.data!.id)!.permissionMode, "acceptEdits");
-});
-
-test("pods group isolated sessions and manual relay preflights every target before delivery", () => {
-  const { db, hub, svc } = makeHarness();
-  const first = seedSession(svc, hub, { useWorktree: true, title: "Builder" });
-  const second = seedSession(svc, hub, { useWorktree: true, title: "Reviewer" });
-  db.setWorktreePath(first, `/worktrees/${first}`);
-  db.updateSessionStatus(first, "idle", Date.now());
-  db.updateSessionStatus(second, "idle", Date.now());
-  hub.sentToRunner.length = 0;
-
-  const created = svc.createPod({
-    title: "Patch huddle",
-    objective: "Build and review one patch",
-    sessionIds: [first, second],
-  });
-  assert.equal(created.ok, true);
-  assert.deepEqual(created.data!.pod.members.map((member) => member.sessionId), [first, second]);
-  assert.equal(hub.podChangedCalls.at(-1)?.id, created.data!.pod.id);
-
-  const blocked = svc.relayPod(created.data!.pod.id, { text: "Review the current approach." });
-  assert.equal(blocked.ok, false);
-  assert.match(blocked.error ?? "", /active isolated worktree/);
-  assert.equal(hub.sentOfType("prompt_session").length, 0, "preflight failure sends to no members");
-
-  db.setWorktreePath(second, `/worktrees/${second}`);
-  const relayed = svc.relayPod(created.data!.pod.id, { text: "Review the current approach." });
-  assert.equal(relayed.ok, true);
-  assert.deepEqual(relayed.data!.receipts.map((receipt) => receipt.status), ["delivered", "delivered"]);
-  assert.equal(relayed.data!.appendedEntry?.source.kind, "human");
-  const prompts = hub.sentOfType("prompt_session");
-  assert.equal(prompts.length, 2);
-  assert.deepEqual(prompts.map((prompt) => prompt.sessionId), [first, second]);
-  assert.match(prompts[0]!.text, new RegExp(`^\\[Manual relay from pod "Patch huddle" \\(${created.data!.pod.id}\\)\\]`));
-  const coordination = JSON.parse(prompts[0]!.text.split("\n").at(-1)!) as Record<string, unknown>;
-  assert.deepEqual(coordination, {
-    kind: "coordination_note",
-    source: { kind: "human", actorId: "local" },
-    content: "Review the current approach.",
-  });
-
-  hub.sentToRunner.length = 0;
-  let sends = 0;
-  hub.deliveryHandler = () => (sends += 1) === 1;
-  const partial = svc.relayPod(created.data!.pod.id, {
-    contextEntryIds: [relayed.data!.appendedEntry!.id],
-    sessionIds: [first, second],
-  });
-  assert.equal(partial.ok, true, "a mid-delivery disconnect returns exact receipts instead of hiding the partial");
-  assert.deepEqual(partial.data!.receipts.map((receipt) => receipt.status), ["delivered", "failed"]);
-  assert.equal(partial.data!.sessions.length, 1);
-  const relayedContext = JSON.parse(hub.sentOfType("prompt_session")[0]!.text.split("\n").at(-1)!);
-  assert.equal(relayedContext.kind, "huddle_context");
-  assert.deepEqual(relayedContext.source, { kind: "human", actorId: "local" });
-  const sentBeforeInvalid = hub.sentOfType("prompt_session").length;
-  const invalidContext = svc.relayPod(created.data!.pod.id, { contextEntryIds: ["not-in-pod"] });
-  assert.equal(invalidContext.status, 409);
-  assert.equal(hub.sentOfType("prompt_session").length, sentBeforeInvalid, "invalid context sends nothing");
-});
-
-test("pod reconciliation records before delivery and preserves exact runner provenance", async () => {
-  const { db, hub, svc } = makeHarness();
-  const target = seedReadyPodSession(db, svc, hub, "Integration");
-  const source = seedReadyPodSession(db, svc, hub, "Builder");
-  const pod = svc.createPod({ title: "Merge pod", sessionIds: [target, source] }).data!.pod;
-  hub.podChangedCalls.length = 0;
-  const sourceHead = "a".repeat(40);
-  const targetHead = "b".repeat(40);
-  const mergeBase = "c".repeat(40);
-  const resultHead = "d".repeat(40);
-  hub.requestHandler = (msg) => {
-    assert.equal(msg.type, "git_action");
-    if (msg.type !== "git_action") throw new Error("unexpected request");
-    assert.equal(msg.sessionId, target);
-    assert.equal(msg.worktreePath, `/worktrees/${target}`);
-    assert.deepEqual(msg.action, {
-      kind: "pod_reconcile",
-      sourceSessionId: source,
-      message: `Merge pod member ${source} into ${target}`,
-    });
-    assert.equal(db.getPod(pod.id)?.reconciliations?.[0]?.status, "running",
-      "the durable receipt exists before runner delivery");
-    return {
-      type: "git_result",
-      requestId: msg.requestId,
-      ok: true,
-      data: { podReconciliation: { status: "applied", sourceHead, targetHead, mergeBase, resultHead } },
-    };
-  };
-
-  const applied = await svc.reconcilePod(pod.id, { sourceSessionId: source, targetSessionId: target }, "device-7");
-  assert.equal(applied.status, 201);
-  assert.equal(applied.data?.reconciliation.actorId, "device-7");
-  assert.equal(applied.data?.reconciliation.status, "applied");
-  assert.equal(applied.data?.reconciliation.resultHead, resultHead);
-  assert.deepEqual(hub.podChangedCalls.map((changed) => changed.reconciliations?.[0]?.status), ["running", "applied"]);
-
-  hub.requestHandler = (msg) => ({
-    type: "git_result",
-    requestId: msg.type === "git_action" ? msg.requestId : "unexpected",
-    ok: true,
-    data: {
-      podReconciliation: {
-        status: "conflicted",
-        sourceHead: "e".repeat(40),
-        targetHead: resultHead,
-        mergeBase,
-        conflictPaths: ["src/shared.ts"],
-      },
-    },
-  });
-  const conflicted = await svc.reconcilePod(pod.id, { sourceSessionId: target, targetSessionId: source }, "device-7");
-  assert.equal(conflicted.status, 200);
-  assert.equal(conflicted.data?.reconciliation.status, "conflicted");
-  assert.deepEqual(conflicted.data?.reconciliation.conflictPaths, ["src/shared.ts"]);
-
-  hub.requestHandler = (msg) => ({
-    type: "git_result",
-    requestId: msg.type === "git_action" ? msg.requestId : "unexpected",
-    ok: true,
-    data: { podReconciliation: { status: "applied", sourceHead, targetHead, mergeBase } },
-  });
-  const malformed = await svc.reconcilePod(pod.id, { sourceSessionId: source, targetSessionId: target }, "device-7");
-  assert.equal(malformed.status, 409);
-  assert.equal(db.getPod(pod.id)?.reconciliations?.[0]?.status, "failed");
-  assert.match(db.getPod(pod.id)?.reconciliations?.[0]?.error ?? "", /malformed reconciliation provenance/);
-});
-
-test("an active pod reconciliation locks both sessions and service restart fails it without replay", () => {
-  const { db, hub, svc } = makeHarness();
-  const target = seedReadyPodSession(db, svc, hub, "Integration");
-  const source = seedReadyPodSession(db, svc, hub, "Builder");
-  const pod = svc.createPod({ title: "Locked pod", sessionIds: [target, source] }).data!.pod;
-  assert.ok(svc.updatePodOrchestration(pod.id, { mode: "round_robin" }).ok);
-  assert.ok(db.beginPodReconciliation({
-    reconciliationId: "reconcile-lock",
-    podId: pod.id,
-    sourceSessionId: source,
-    targetSessionId: target,
-    actorId: "device-1",
-    now: 1_000,
-  }));
-  const sentBefore = hub.sentToRunner.length;
-
-  assert.match(svc.podReconciliationMutationError(source) ?? "", /locked by pod reconciliation/);
-  assert.equal(svc.prompt(source, "overlap").status, 409);
-  assert.equal(svc.restart(target).status, 409);
-  assert.equal(svc.delete(source).status, 409);
-  assert.equal(svc.updatePodMember(pod.id, source, { role: "reviewer" }).status, 409);
-  assert.equal(svc.removePodMember(pod.id, source).status, 409);
-  assert.equal(svc.relayPod(pod.id, { text: "overlap" }).status, 409);
-  assert.equal(svc.startPodOrchestration(pod.id, { firstSessionId: source }).status, 409);
-  assert.equal(svc.closePod(pod.id).status, 409);
-  assert.equal(hub.sentToRunner.length, sentBefore, "blocked mutations never reach the runner");
-
-  new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
-  const failed = db.getPodReconciliation("reconcile-lock");
-  assert.equal(failed?.status, "failed");
-  assert.match(failed?.error ?? "", /restart.*uncertain/);
-  assert.equal(hub.sentToRunner.length, sentBefore, "recovery never replays an uncertain merge");
-});
-
-test("pod context is append-only, attributed, idempotent for selected output, and survives source deletion", () => {
-  const { db, hub, svc } = makeHarness();
-  const first = seedSession(svc, hub, { useWorktree: true, title: "Builder" });
-  const second = seedSession(svc, hub, { useWorktree: true, title: "Reviewer" });
-  db.updateSessionStatus(first, "idle", Date.now());
-  db.updateSessionStatus(second, "idle", Date.now());
-  const pod = svc.createPod({ title: "Context pod", sessionIds: [first, second] }).data!.pod;
-  db.appendEvent(first, { kind: "user_message", text: "Build it", final: true }, 100);
-  db.appendEvent(first, { kind: "agent_message", text: "Patch " }, 101);
-  db.appendEvent(first, { kind: "agent_message", text: "ready" }, 102);
-
-  db.updateSessionStatus(first, "running", 103);
-  assert.equal(
-    svc.appendPodContext(pod.id, { kind: "member_output", sessionId: first }, "device-1").status,
-    409,
-    "streaming output cannot be frozen as if it were a settled turn",
-  );
-  db.updateSessionStatus(first, "idle", 104);
-  assert.equal(svc.appendPodContext(pod.id, { kind: "note", text: "   " }, "device-1").status, 400);
-
-  const shared = svc.appendPodContext(pod.id, { kind: "member_output", sessionId: first }, "device-1");
-  assert.equal(shared.status, 201);
-  assert.equal(shared.data!.entry.content, "Patch ready");
-  assert.deepEqual(shared.data!.entry.source, {
-    kind: "session",
-    sessionId: first,
-    sessionTitle: "Builder",
-    agentLabel: "Claude",
-    fromSeq: 2,
-    toSeq: 3,
-  });
-  assert.equal(hub.podContextEntryCalls.at(-1)?.id, shared.data!.entry.id);
-
-  const duplicate = svc.appendPodContext(pod.id, { kind: "member_output", sessionId: first }, "device-1");
-  assert.equal(duplicate.status, 200);
-  assert.equal(duplicate.data!.created, false);
-  assert.equal(duplicate.data!.entry.id, shared.data!.entry.id);
-  assert.equal(hub.podContextEntryCalls.length, 1, "idempotent selection is not broadcast twice");
-
-  const note = svc.appendPodContext(pod.id, { kind: "note", text: "Check edge cases" }, "device-1");
-  assert.equal(note.data!.entry.seq, 2);
-  assert.deepEqual(note.data!.entry.source, { kind: "human", actorId: "device-1" });
-  assert.equal(svc.delete(first).ok, true);
-  assert.equal(db.listPodContextEntries(pod.id)[0]?.content, "Patch ready", "frozen context survives source deletion");
-  assert.equal(svc.appendPodContext(pod.id, { kind: "note", text: "late" }, "device-1").status, 409);
-});
-
-test("round-robin pod orchestration captures outputs, advances target cursors, and stops at the durable turn cap", () => {
-  const { db, hub, svc } = makeHarness();
-  const first = seedReadyPodSession(db, svc, hub, "Lead");
-  const second = seedReadyPodSession(db, svc, hub, "Builder");
-  const pod = svc.createPod({ title: "Automatic pod", objective: "Produce and review a patch", sessionIds: [first, second] }).data!.pod;
-  assert.deepEqual(pod.members.map((member) => member.role), ["lead", "worker"]);
-  assert.equal(svc.updatePodOrchestration(pod.id, {
-    mode: "round_robin",
-    contextTokenBudget: 4096,
-    summaryTokenBudget: 128,
-    maxTurns: 2,
-    maxRepeatedOutputs: 2,
-  }).ok, true);
-  hub.sentToRunner.length = 0;
-
-  const started = svc.startPodOrchestration(pod.id, { instruction: "Start with the smallest safe change", firstSessionId: first }, "device-1");
-  assert.equal(started.status, 201);
-  assert.equal(started.data!.pod.orchestration!.state.status, "running");
-  assert.equal(started.data!.pod.orchestration!.state.currentSessionId, first);
-  assert.equal(started.data!.step!.turn, 1);
-  assert.equal(hub.sentOfType("prompt_session").at(-1)?.sessionId, first);
-  assert.ok(started.data!.step!.estimatedTokens <= 4096);
-  assert.equal(db.getPod(pod.id)!.members[0]!.lastContextSeq, 1, "seed note was represented to the first target");
-  assert.equal(svc.updatePodMember(pod.id, second, { role: "reviewer" }).status, 409);
-  assert.equal(svc.removePodMember(pod.id, second).status, 409);
-  assert.equal(svc.relayPod(pod.id, { text: "overlap" }).status, 409);
-
-  svc.onSessionEvent(first, { kind: "agent_message", text: "Implemented the parser fix", final: true });
-  svc.onSessionStatus(first, "idle");
-  let current = db.getPod(pod.id)!;
-  assert.equal(current.orchestration!.state.currentSessionId, second);
-  assert.equal(current.orchestration!.state.turnsUsed, 2);
-  assert.equal(db.getPod(pod.id)!.members[1]!.lastContextSeq, 2, "the next target saw the note and captured lead output");
-  assert.deepEqual(hub.sentOfType("prompt_session").map((message) => message.sessionId), [first, second]);
-
-  svc.onSessionEvent(second, { kind: "agent_message", text: "Reviewed the parser fix", final: true });
-  svc.onSessionStatus(second, "idle");
-  current = db.getPod(pod.id)!;
-  assert.equal(current.orchestration!.state.status, "stopped");
-  assert.equal(current.orchestration!.state.stopReason, "max_turns");
-  const steps = db.podOrchestrationSteps(pod.id, current.orchestration!.state.runId!);
-  assert.deepEqual(steps.map((step) => [step.turn, step.targetSessionId, step.status]), [
-    [1, first, "settled"],
-    [2, second, "settled"],
-  ]);
-  assert.deepEqual(db.listPodContextEntries(pod.id).map((entry) => entry.source.kind), ["human", "session", "session"]);
-});
-
-test("pod orchestration stops exact normalized ping-pong loops before another prompt", () => {
-  const { db, hub, svc } = makeHarness();
-  const first = seedReadyPodSession(db, svc, hub, "One");
-  const second = seedReadyPodSession(db, svc, hub, "Two");
-  const pod = svc.createPod({ title: "Loop guard", sessionIds: [first, second] }).data!.pod;
-  assert.ok(svc.updatePodOrchestration(pod.id, { mode: "round_robin", maxTurns: 10, maxRepeatedOutputs: 2 }).ok);
-  hub.sentToRunner.length = 0;
-  assert.ok(svc.startPodOrchestration(pod.id, { firstSessionId: first }).ok);
-  svc.onSessionEvent(first, { kind: "agent_message", text: "Same  answer", final: true });
-  svc.onSessionStatus(first, "idle");
-  svc.onSessionEvent(second, { kind: "agent_message", text: "  SAME\nANSWER  ", final: true });
-  svc.onSessionStatus(second, "idle");
-
-  const stopped = db.getPod(pod.id)!;
-  assert.equal(stopped.orchestration!.state.status, "stopped");
-  assert.match(stopped.orchestration!.state.stopReason ?? "", /^repeated_output:/);
-  assert.equal(hub.sentOfType("prompt_session").length, 2, "loop guard stops before dispatching turn three");
-});
-
-test("lead-driven and event-triggered arbitration honor roles and explicit human checkpoints", () => {
-  const { db, hub, svc } = makeHarness();
-  const lead = seedReadyPodSession(db, svc, hub, "Lead");
-  const worker = seedReadyPodSession(db, svc, hub, "Worker");
-  const reviewer = seedReadyPodSession(db, svc, hub, "Reviewer");
-  const pod = svc.createPod({ title: "Roles", sessionIds: [lead, worker, reviewer] }).data!.pod;
-  assert.ok(svc.updatePodMember(pod.id, reviewer, { role: "reviewer", contextTokenBudget: 4096 }).ok);
-  assert.ok(svc.updatePodOrchestration(pod.id, { mode: "lead_driven", maxTurns: 4 }).ok);
-  hub.sentToRunner.length = 0;
-  assert.ok(svc.startPodOrchestration(pod.id, {}).ok);
-  assert.equal(hub.sentOfType("prompt_session").at(-1)?.sessionId, lead);
-  svc.onSessionEvent(lead, { kind: "agent_message", text: "Delegate implementation", final: true });
-  svc.onSessionStatus(lead, "idle");
-  assert.equal(hub.sentOfType("prompt_session").at(-1)?.sessionId, worker);
-  svc.onSessionEvent(worker, { kind: "agent_message", text: "Implementation complete", final: true });
-  svc.onSessionStatus(worker, "idle");
-  assert.equal(hub.sentOfType("prompt_session").at(-1)?.sessionId, lead, "non-lead output returns to the lead");
-  assert.ok(svc.stopPodOrchestration(pod.id).ok);
-
-  // Settle the already-delivered lead turn before starting a fresh event-triggered cycle.
-  svc.onSessionEvent(lead, { kind: "agent_message", text: "Lead stopped", final: true });
-  svc.onSessionStatus(lead, "idle");
-  assert.ok(svc.updatePodOrchestration(pod.id, { mode: "event_triggered", maxTurns: 4 }).ok);
-  hub.sentToRunner.length = 0;
-  assert.ok(svc.startPodOrchestration(pod.id, { firstSessionId: reviewer }).ok);
-  svc.onSessionEvent(reviewer, { kind: "agent_message", text: "Review found one issue", final: true });
-  svc.onSessionStatus(reviewer, "idle");
-  assert.equal(hub.sentOfType("prompt_session").at(-1)?.sessionId, lead, "member completion triggers the lead");
-  svc.onSessionEvent(lead, { kind: "agent_message", text: "Decision recorded", final: true });
-  svc.onSessionStatus(lead, "idle");
-  const paused = db.getPod(pod.id)!;
-  assert.equal(paused.orchestration!.state.status, "paused");
-  assert.equal(paused.orchestration!.state.stopReason, "lead_turn_complete");
-});
-
-test("an interrupted automatic dispatch pauses on service restart instead of replaying", () => {
-  const { db, hub, svc } = makeHarness();
-  const first = seedReadyPodSession(db, svc, hub, "One");
-  const second = seedReadyPodSession(db, svc, hub, "Two");
-  const pod = svc.createPod({ title: "Restart-safe", sessionIds: [first, second] }).data!.pod;
-  assert.ok(svc.updatePodOrchestration(pod.id, { mode: "round_robin" }).ok);
-  assert.ok(svc.startPodOrchestration(pod.id, { firstSessionId: first }).ok);
-  const sentBeforeRestart = hub.sentOfType("prompt_session").length;
-
-  new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
-  const recovered = db.getPod(pod.id)!;
-  assert.equal(recovered.orchestration!.state.status, "paused");
-  assert.equal(recovered.orchestration!.state.stopReason, "control_plane_restart");
-  assert.equal(recovered.orchestration!.lastStep?.status, "failed");
-  assert.equal(hub.sentOfType("prompt_session").length, sentBeforeRestart, "constructor recovery never replays delivery");
-});
-
-test("automatic delivery failure stops durably and a settle-time guardrail captures output before pausing", () => {
-  const { db, hub, svc } = makeHarness();
-  const first = seedReadyPodSession(db, svc, hub, "One");
-  const second = seedReadyPodSession(db, svc, hub, "Two");
-  const pod = svc.createPod({ title: "Failure boundaries", sessionIds: [first, second] }).data!.pod;
-  assert.ok(svc.updatePodOrchestration(pod.id, { mode: "round_robin" }).ok);
-
-  hub.deliveryHandler = () => false;
-  const failed = svc.startPodOrchestration(pod.id, { firstSessionId: first });
-  assert.equal(failed.status, 409);
-  assert.equal(db.getPod(pod.id)!.orchestration!.state.status, "stopped");
-  assert.match(db.getPod(pod.id)!.orchestration!.state.stopReason ?? "", /did not receive/);
-  assert.equal(db.getSession(first)!.status, "idle", "failed prompt restores the pre-dispatch session status");
-
-  hub.deliveryHandler = undefined;
-  assert.ok(svc.startPodOrchestration(pod.id, { firstSessionId: first }).ok);
-  assert.ok(svc.setConfig(first, { maxToolCalls: 1 }).ok);
-  svc.onSessionEvent(first, { kind: "agent_message", text: "Work completed before the gate", final: true });
-  svc.onSessionEvent(first, { kind: "tool_call", toolCallId: "tool-1", title: "Edit", status: "completed" });
-  svc.onSessionStatus(first, "idle");
-  const paused = db.getPod(pod.id)!;
-  assert.equal(paused.orchestration!.state.status, "paused");
-  assert.equal(paused.orchestration!.state.stopReason, "member_requires_human_decision");
-  assert.equal(paused.orchestration!.lastStep?.status, "settled", "completed output remains auditable, not a failed step");
-  assert.equal(db.listPodContextEntries(pod.id).at(-1)?.content, "Work completed before the gate");
-  assert.equal(hub.sentOfType("prompt_session").filter((message) => message.sessionId === second).length, 0);
-});
-
-test("pod orchestration policy rejects unsafe bounds and ambiguous lead arbitration", () => {
-  const { db, hub, svc } = makeHarness();
-  const first = seedReadyPodSession(db, svc, hub, "One");
-  const second = seedReadyPodSession(db, svc, hub, "Two");
-  const pod = svc.createPod({ title: "Policy", sessionIds: [first, second] }).data!.pod;
-  assert.equal(svc.updatePodOrchestration(pod.id, { contextTokenBudget: 1024 }).status, 400);
-  assert.equal(svc.updatePodOrchestration(pod.id, { summaryTokenBudget: 4096 }).status, 400);
-  assert.ok(svc.updatePodMember(pod.id, first, { role: "worker" }).ok);
-  const ambiguous = svc.updatePodOrchestration(pod.id, { mode: "lead_driven" });
-  assert.equal(ambiguous.status, 409);
-  assert.match(ambiguous.error ?? "", /exactly one lead/);
-});
-
-test("pod membership is exclusive, bounded, mutable only while active, and closes durably", () => {
-  const { db, hub, svc } = makeHarness();
-  const ids = [
-    seedSession(svc, hub, { useWorktree: true, title: "One" }),
-    seedSession(svc, hub, { useWorktree: true, title: "Two" }),
-    seedSession(svc, hub, { useWorktree: true, title: "Three" }),
-  ];
-  const pod = svc.createPod({ title: "Pod", sessionIds: ids.slice(0, 2) }).data!.pod;
-  const duplicate = svc.createPod({ title: "Other", sessionIds: [ids[0]!, ids[2]!] });
-  assert.equal(duplicate.status, 409);
-  assert.match(duplicate.error ?? "", /already belongs/);
-
-  const added = svc.addPodMember(pod.id, { sessionId: ids[2]! });
-  assert.equal(added.ok, true);
-  assert.equal(added.data!.pod.members.length, 3);
-  assert.equal(svc.removePodMember(pod.id, ids[2]!).data!.pod.members.length, 2);
-  assert.equal(svc.removePodMember(pod.id, ids[1]!).status, 409);
-
-  const closed = svc.closePod(pod.id);
-  assert.equal(closed.data!.pod.status, "closed");
-  assert.equal(db.getPod(pod.id)?.status, "closed");
-  assert.equal(svc.addPodMember(pod.id, { sessionId: ids[2]! }).status, 409);
-  assert.equal(svc.relayPod(pod.id, { text: "late" }).status, 409);
-  const next = svc.createPod({ title: "Next pod", sessionIds: [ids[0]!, ids[2]!] });
-  assert.equal(next.ok, true, "closed history does not lock a session out of a future active pod");
-  assert.equal(svc.delete(ids[0]!).ok, true);
-  assert.equal(db.getPod(next.data!.pod.id)?.status, "closed", "session deletion closes an undersized active pod");
-  const nextPodBroadcast = hub.podChangedCalls.filter((changed) => changed.id === next.data!.pod.id).at(-1);
-  assert.equal(nextPodBroadcast?.status, "closed");
-});
-
-test("pod membership spans runners without conflating their workspace ownership", () => {
-  const { db, hub, svc } = makeHarness();
-  db.registerRunner({ ...runnerMeta(), runnerId: "runner-2", hostname: "other-host" }, Date.now(), PROTOCOL_VERSION);
-  const local = seedSession(svc, hub, { useWorktree: true, title: "Local" });
-  const remote = svc.createSession({
-    runnerId: "runner-2",
-    workspaceId: WORKSPACE_ID,
-    agentId: AGENT_ID,
-    useWorktree: true,
-    title: "Remote",
-  }).data!.id;
-  const result = svc.createPod({ title: "Cross-box pod", sessionIds: [local, remote] });
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.data!.sessions.map((session) => session.runnerId), [RUNNER_ID, "runner-2"]);
 });
 
 test("createRun persists a supported non-default permission mode on its members", () => {
@@ -20808,34 +20345,6 @@ test("cancelTurn rejects queued and starting launches instead of discarding thei
     assert.match(result.error ?? "", /only after the active turn starts/i);
     assert.equal(hub.sentOfType("interrupt_turn").length, 0);
   }
-});
-
-test("cancelTurn rejects the active auto-orchestrated pod member so truncated output cannot advance", async () => {
-  const { db, hub, svc } = makeHarness();
-  const first = seedReadyPodSession(db, svc, hub, "Lead");
-  const second = seedReadyPodSession(db, svc, hub, "Builder");
-  const pod = svc.createPod({ title: "Interrupt Guard", sessionIds: [first, second] }).data!.pod;
-  assert.ok(svc.updatePodOrchestration(pod.id, {
-    mode: "round_robin",
-    contextTokenBudget: 4096,
-    summaryTokenBudget: 128,
-    maxTurns: 2,
-    maxRepeatedOutputs: 2,
-  }).ok);
-  assert.equal(svc.startPodOrchestration(pod.id, { instruction: "Start", firstSessionId: first }, "device-1").status, 201);
-  hub.sentToRunner.length = 0;
-
-  const result = await svc.cancelTurn(first);
-
-  assert.equal(result.status, 409);
-  assert.match(result.error ?? "", /pod-orchestrated sessions/i);
-  assert.equal(hub.sentOfType("interrupt_turn").length, 0);
-  assert.equal(db.getPod(pod.id)?.orchestration?.state.currentSessionId, first);
-
-  db.updateSessionStatus(second, "running", Date.now());
-  hub.activeTurnIds.set(second, "turn-second");
-  assert.ok((await svc.cancelTurn(second)).ok, "pod membership alone does not block a non-current member");
-  assert.equal(hub.sentOfType("interrupt_turn").at(-1)?.sessionId, second);
 });
 
 test("a new control plane fails closed instead of sending interrupt_turn to a v70 runner", async () => {
