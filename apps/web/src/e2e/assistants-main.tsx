@@ -27,10 +27,11 @@ import "../styles.css";
  *
  * `?threads=owner-only` is a person who isn't an organization owner (every route answers 403),
  * `?threads=unavailable` is a control plane without the Thread API (every route answers 404),
- * `?threads=empty` one with no threads yet, and the default three threads, the first of which
+ * `?threads=empty` one with no threads yet, `?threads=long` a dozen threads with titles at the
+ * 120-character limit, and the default three threads, the first of which
  * launched two sessions, one of them waiting on a tool approval. The SPA path rides in `?path=`.
  * `window.assistantsAdvance()` finishes the running launched session, as its stream would.
- * `?confirm=N` (1–3) gives the first thread N owner confirmations waiting for its owner (#4665).
+ * `?confirm=N` (1–8) gives the first thread N owner confirmations waiting for its owner (#4665).
  */
 const SCOPE = "assistants-e2e";
 const params = new URLSearchParams(location.search);
@@ -111,13 +112,13 @@ const sessions = new Map<string, SessionView>([
 
 const access = { level: "full_access", destructive: "ask" } as const;
 
-/** `?confirm=N` (#4665): the first thread's assistant asked for N destructive commands (1–3) and waits
- * for its owner: stop a session it launched, archive another, then stop a third. Approve Once and
- * Deny settle one and republish the thread. */
+/** `?confirm=N` (#4665): the first thread's assistant asked for N destructive commands (1–8) and waits
+ * for its owner: stop a session it launched, archive another, then stop a third, and so on round the
+ * three. Approve Once and Deny settle one and republish the thread. */
 function confirmation(index: number): AssistantOwnerConfirmation {
-  const stop = index !== 1;
+  const stop = index % 3 !== 1;
   const [sessionId, label, worktree] = [["sess-flaky", "Fix the Flaky Upload Test", "flaky-upload"],
-    ["sess-deps", "Bump the Vite Group", "bump-vite"], ["sess-release", "Ship the Release Notes", "release-notes"]][index]!;
+    ["sess-deps", "Bump the Vite Group", "bump-vite"], ["sess-release", "Ship the Release Notes", "release-notes"]][index % 3]!;
   return {
     id: `aoc_${index}_${sessionId}`, threadId: "thr_triage", operation: stop ? "session_stop" : "session_archive",
     title: stop ? "Stop Session" : "Archive Session",
@@ -129,7 +130,7 @@ function confirmation(index: number): AssistantOwnerConfirmation {
     status: "pending", createdAt: NOW - minute + index, expiresAt: NOW + 59 * minute, resolvedAt: null,
   };
 }
-const confirmationCount = Math.min(3, Math.max(0, Number(params.get("confirm") ?? 0) || 0));
+const confirmationCount = Math.min(8, Math.max(0, Number(params.get("confirm") ?? 0) || 0));
 function thread(id: string, sessionId: string, overrides: Partial<AssistantThread>): AssistantThread {
   const backing = sessions.get(sessionId)!;
   return {
@@ -139,9 +140,26 @@ function thread(id: string, sessionId: string, overrides: Partial<AssistantThrea
   };
 }
 
-let threads: AssistantThread[] = scenario === "some" ? [
+/** `?threads=long`: a dozen threads whose titles run to the control plane's 120-character limit, the
+ * first being the triage thread with its launched work. */
+const LONG_TITLES = [
+  "Triage every open issue labelled flaky-test and fix what you can in the upload, terminal and session-list suites tonight",
+  "Ship the release notes for 0.37 with a migration section for the new Assistant Thread API and every renamed setting",
+  "WeeklyCleanupOfArchivedSessionsWorktreesAndOrphanedBranchesOnEveryRunnerIncludingTheOldBuildBoxThatNobodyUsesAnymore",
+];
+const longTitle = (index: number) => `${LONG_TITLES[(index - 1) % LONG_TITLES.length]!.slice(0, 116)} ${index}`;
+const triage = (overrides: Partial<AssistantThread> = {}) =>
   thread("thr_triage", "sess-triage", { status: "needs_you", launchedSessionIds: ["sess-flaky", "sess-deps"], lastActivityAt: NOW - minute,
-    ...(confirmationCount > 0 ? { confirmations: Array.from({ length: confirmationCount }, (_unused, index) => confirmation(index)) } : {}) }),
+    ...(confirmationCount > 0 ? { confirmations: Array.from({ length: confirmationCount }, (_unused, index) => confirmation(index)) } : {}),
+    ...overrides });
+
+let threads: AssistantThread[] = scenario === "long" ? [
+  triage({ title: longTitle(1) }),
+  ...Array.from({ length: 11 }, (_unused, index) => thread(`thr_long_${index + 2}`, index % 2 ? "sess-cleanup" : "sess-release", {
+    title: longTitle(index + 2), status: index % 3 === 0 ? "working" : "done", lastActivityAt: NOW - (index + 2) * minute,
+  })),
+] : scenario === "some" ? [
+  triage(),
   thread("thr_release", "sess-release", { status: "working", harness: "codex", lastActivityAt: NOW - 3 * minute }),
   thread("thr_cleanup", "sess-cleanup", { status: "done" }),
   // Archived: the list leaves it out, and a link to it opens it on its own.
