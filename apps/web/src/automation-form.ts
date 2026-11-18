@@ -43,7 +43,6 @@ export interface FormState {
   useWorktree: boolean;
   prompt: string;
   sessionId: string;
-  workflowId: string;
   misfire: "skip" | "fire_once" | "catch_up";
   catchUpRuns: string;
   runnerPolicy: "wait" | "expire" | "alternate";
@@ -70,7 +69,7 @@ export function defaults(): FormState {
     name: "", cron: "0 9 * * 1-5", timezone: localTimezone(), enabled: true,
     actionKind: "create_session", runnerId: "", workspaceId: "", agentId: "",
     model: "", effort: "", permissionMode: "", useWorktree: true, prompt: "",
-    sessionId: "", workflowId: "build-review", misfire: "skip", catchUpRuns: "2",
+    sessionId: "", misfire: "skip", catchUpRuns: "2",
     runnerPolicy: "wait", expiryMinutes: "60", fallbackRunnerId: "", fallbackWorkspaceId: "",
     fallbackAgentId: "", concurrency: "wait", maxCostUsd: "5", maxToolCalls: "50",
     pushEvents: ["failed", "expired"],
@@ -78,6 +77,7 @@ export function defaults(): FormState {
 }
 
 export function specOf(schedule: AutomationSchedule): AutomationSpec {
+  if (schedule.action.kind === "retired") throw new Error("The automation action was retired");
   return {
     name: schedule.name, cron: schedule.cron, timezone: schedule.timezone, enabled: schedule.enabled,
     misfirePolicy: schedule.misfirePolicy, runnerPolicy: schedule.runnerPolicy,
@@ -109,7 +109,7 @@ export function formFrom(spec: AutomationSpec): FormState {
   } else {
     form.runnerId = spec.action.request.runnerId;
     form.workspaceId = spec.action.request.workspaceId;
-    form.prompt = spec.action.kind === "workflow_run" ? spec.action.request.task : (spec.action.request.prompt ?? "");
+    form.prompt = spec.action.request.prompt ?? "";
     if (spec.action.kind === "create_session") {
       form.campaign = spec.action.request.campaign;
       // Automations validate their role as normal or orchestrator; an assistant role never reaches one.
@@ -126,8 +126,6 @@ export function formFrom(spec: AutomationSpec): FormState {
       form.model = spec.action.request.config?.model ?? "";
       form.effort = spec.action.request.config?.effort ?? "";
       form.permissionMode = spec.action.request.config?.permissionMode ?? "";
-    } else {
-      form.workflowId = spec.action.request.workflowId;
     }
     if (spec.runnerPolicy.kind === "alternate") {
       const target = spec.runnerPolicy.targets[0];
@@ -252,7 +250,6 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
   const baseAction = context.base?.action;
   const baseCreate = baseAction?.kind === "create_session" ? baseAction.request : undefined;
   const basePrompt = baseAction?.kind === "prompt_session" ? baseAction.request : undefined;
-  const baseWorkflow = baseAction?.kind === "workflow_run" ? baseAction.request : undefined;
   const primaryPlacement = form.actionKind === "prompt_session"
     ? {}
     : automationProjectPlacement(context.projectsSupported, projectList, {
@@ -270,33 +267,6 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
       ...(basePrompt?.config !== undefined && baseAction?.kind === "prompt_session" &&
           baseAction.sessionId === form.sessionId ? { config: basePrompt.config } : {}),
     } };
-  } else if (form.actionKind === "workflow_run") {
-    // A workflow's pinned version, agent bindings, and orchestrator are meaningful only for the
-    // workflow they were authored against. Selecting a different workflow drops them rather than
-    // pinning a version of one graph onto another.
-    const sameWorkflow = baseWorkflow?.workflowId === form.workflowId;
-    // Bindings name CONCRETE agent ids on one runner and config must be honourable by that
-    // runner's agents, so a Machine change invalidates both even when the workflow is unchanged.
-    const sameRunner = baseWorkflow?.runnerId === form.runnerId;
-    action = { kind: "workflow_run", request: {
-      runnerId: form.runnerId, workspaceId: form.workspaceId, workflowId: form.workflowId, task: form.prompt,
-      ...primaryPlacement,
-      ...(sameWorkflow && baseWorkflow?.workflowVersion !== undefined ? { workflowVersion: baseWorkflow.workflowVersion } : {}),
-      ...(sameWorkflow && sameRunner && baseWorkflow?.agentBindings !== undefined ? { agentBindings: baseWorkflow.agentBindings } : {}),
-      ...(sameWorkflow && sameRunner && baseWorkflow?.orchestratorAgentId !== undefined ? { orchestratorAgentId: baseWorkflow.orchestratorAgentId } : {}),
-      ...(baseWorkflow?.title !== undefined ? { title: baseWorkflow.title } : {}),
-      // Workflow runs default to worktrees server-side, the opposite of create-session. With no
-      // control rendered for them, absence is preserved as absence.
-      ...(baseWorkflow?.useWorktree !== undefined ? { useWorktree: baseWorkflow.useWorktree } : {}),
-      ...(sameRunner && form.runnerPolicy !== "alternate" && baseWorkflow?.config !== undefined
-        ? { config: baseWorkflow.config }
-        : {}),
-      ...(baseWorkflow?.costBudgetUsd !== undefined ? { costBudgetUsd: baseWorkflow.costBudgetUsd } : {}),
-      ...(baseWorkflow?.maxToolCalls !== undefined ? { maxToolCalls: baseWorkflow.maxToolCalls } : {}),
-    },
-      ...(sameWorkflow && sameRunner && baseAction?.kind === "workflow_run" &&
-          baseAction.installationBindings ? { installationBindings: baseAction.installationBindings } : {}),
-    };
   } else {
     const config = sessionConfig(form, baseCreate?.config);
     action = { kind: "create_session", request: {
@@ -330,10 +300,6 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
     ? context.base.runnerPolicy.targets
     : [];
   const baseFirstAlternate = baseAlternateTargets[0];
-  const sameWorkflow = baseWorkflow?.workflowId === form.workflowId;
-  // The form renders only the first target. Later targets are carried wholesale, except graph-bound
-  // workflow identities when the selected workflow changes; those agent ids belong to the old
-  // graph. The first workflow target follows the same rule below for its unrendered fields.
   const carriedAlternateTargets = form.runnerPolicy === "alternate"
     ? baseAlternateTargets.slice(1)
       .filter((target) => target.runnerId !== form.fallbackRunnerId)
@@ -348,11 +314,7 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
           );
         }
         validateAutomationAlternatePlacement(context.projectsSupported, primaryPlacement, currentPlacement);
-        return form.actionKind === "workflow_run" && !sameWorkflow
-          ? { runnerId: target.runnerId, workspaceId: target.workspaceId, ...currentPlacement }
-          : context.projectsSupported
-            ? { ...target, ...currentPlacement }
-            : targetWithoutPlacement;
+        return context.projectsSupported ? { ...target, ...currentPlacement } : targetWithoutPlacement;
       })
     : [];
   if (form.runnerPolicy === "alternate") {
@@ -373,18 +335,9 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
             ...alternatePlacement,
             ...(form.actionKind === "create_session" ? { agentId: form.fallbackAgentId } : {}),
             ...(baseFirstAlternate?.runnerId === form.fallbackRunnerId &&
-                (form.actionKind === "workflow_run" || baseFirstAlternate.agentId === form.fallbackAgentId) &&
+                baseFirstAlternate.agentId === form.fallbackAgentId &&
                 baseFirstAlternate.installationBindings
               ? { installationBindings: baseFirstAlternate.installationBindings } : {}),
-            ...(form.actionKind === "workflow_run" && sameWorkflow &&
-                baseFirstAlternate?.runnerId === form.fallbackRunnerId
-              ? {
-                  ...(baseFirstAlternate.agentBindings !== undefined
-                    ? { agentBindings: baseFirstAlternate.agentBindings } : {}),
-                  ...(baseFirstAlternate.orchestratorAgentId !== undefined
-                    ? { orchestratorAgentId: baseFirstAlternate.orchestratorAgentId } : {}),
-                }
-              : {}),
           }, ...carriedAlternateTargets],
           expireAfterMinutes: Number(form.expiryMinutes),
         };
@@ -702,7 +655,6 @@ export interface ActionNames {
   /** A machine's label, as the editor's Machine field shows it. */
   machineLabel: (runnerId: string) => string | undefined;
   sessionTitle: (sessionId: string) => string | undefined;
-  workflowName: (workflowId: string) => string | undefined;
 }
 
 /**
@@ -710,7 +662,8 @@ export interface ActionNames {
  * Code in acme-storefront on Build Server.", "Runs the Build and Review workflow in acme-storefront
  * on Build Server.", "Prompts “Nightly triage”.". The prompt or task is shown under it.
  */
-export function actionSentence(action: AutomationAction, names: ActionNames): string {
+export function actionSentence(action: AutomationSchedule["action"], names: ActionNames): string {
+  if (action.kind === "retired") return "This automation used to start a workflow run.";
   if (action.kind === "prompt_session") {
     const title = names.sessionTitle(action.sessionId);
     return title ? `Prompts “${title}”.` : "Prompts a session that isn't loaded.";
@@ -719,10 +672,6 @@ export function actionSentence(action: AutomationAction, names: ActionNames): st
   const folder = runner?.workspaces.find((workspace) => workspace.id === action.request.workspaceId)?.name;
   const machine = names.machineLabel(action.request.runnerId) ?? "a machine that isn't connected";
   const where = `in ${folder ?? "a folder that isn't available"} on ${machine}`;
-  if (action.kind === "workflow_run") {
-    const workflow = names.workflowName(action.request.workflowId);
-    return `Runs ${workflow ? `the ${workflow} workflow` : "a workflow that isn't available"} ${where}.`;
-  }
   // The agent the scheduler starts: a saved installation's agent wherever discovery now lists it
   // (its id can change or be reused), else the stored agent id (resolveSavedTarget, automations.ts).
   const saved = action.installationBindings?.agent;
@@ -736,9 +685,10 @@ export function actionSentence(action: AutomationAction, names: ActionNames): st
 }
 
 /** The prompt or task an action sends. */
-export function actionText(action: AutomationAction): string {
+export function actionText(action: AutomationSchedule["action"]): string {
+  if (action.kind === "retired") return "";
   if (action.kind === "prompt_session") return action.request.text;
-  return action.kind === "workflow_run" ? action.request.task : (action.request.prompt ?? "");
+  return action.request.prompt ?? "";
 }
 
 function joinWords(words: readonly string[], conjunction: "and" | "or"): string {

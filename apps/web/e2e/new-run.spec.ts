@@ -120,27 +120,6 @@ for (const width of [1440, 390]) {
       await page.screenshot({ path: `playwright-report/provider-accounts/new-run-account-required-light-${width}.png`, fullPage: true });
     });
 
-    test("a workflow role with no eligible account asks by its role (#4353)", async ({ page }) => {
-      await open(page, "account-priority-choice");
-      await dialog(page).getByRole("radio", { name: "Run a Workflow" }).click();
-      await dialog(page).getByRole("textbox", { name: "Task" }).fill("Build and review the account setup");
-      await chooseProject(page, "Wollipog");
-      await expect(reason(page)).toHaveText("Choose an account for Builder and Remediator Agent to continue.");
-      // A long role name wraps the reason. It must not push the buttons apart.
-      const cancel = await dialog(page).getByRole("button", { name: "Cancel", exact: true }).boundingBox();
-      const primary = await dialog(page).getByRole("button", { name: "Start Workflow", exact: true }).boundingBox();
-      expect(primary!.y, "Cancel and Start Workflow share one row").toBe(cancel!.y);
-      expect(primary!.height).toBe(cancel!.height);
-      await expect(reason(page)).toBeInViewport();
-      await page.waitForTimeout(600);
-      await page.screenshot({ path: `playwright-report/provider-accounts/new-run-workflow-account-${width}.png`, fullPage: true });
-      await dialog(page).getByRole("button", { name: /^Account for /u }).click();
-      await page.getByRole("option").filter({ hasText: "Personal" }).click();
-      await expect(reason(page)).toHaveCount(0);
-      await dialog(page).getByRole("button", { name: "Start Workflow", exact: true }).click();
-      await expect.poll(() => page.evaluate(() => JSON.parse(document.body.dataset.request ?? "{}").providerAccountBindings)).toEqual({ claude: "b" });
-    });
-
     test("a project whose memory is held by the account says so instead of promising an account (#4353)", async ({ page }) => {
       await open(page, "account-priority-memory");
       await dialog(page).getByRole("textbox", { name: "Task" }).fill("Compare the account setup");
@@ -211,10 +190,9 @@ test.describe("at 1440×900", () => {
     await open(page);
     await dialog(page).getByRole("textbox", { name: "Task" }).fill("Add retry with backoff to the uploads client");
     await chooseProject(page, "Wollipog");
-    // Six agents outgrow 900px: the body scrolls (§7.1), never a box of its own inside it.
+    await page.setViewportSize({ width: 1440, height: 720 });
+    // Six agents outgrow the shorter viewport: the body scrolls (§7.1), never a box of its own inside it.
     expect(await verticalScrollers(page), "nothing scrolls inside the body").toEqual(["modal-body"]);
-    await dialog(page).getByRole("radio", { name: "Run a Workflow" }).click();
-    expect(await verticalScrollers(page), "the workflow form fits without scrolling").toEqual([]);
     expect(await dialog(page).innerText()).not.toMatch(/runner/iu);
     await dialog(page).getByRole("button", { name: /^Location:/ }).click();
     const options = await page.getByRole("option").allInnerTexts();

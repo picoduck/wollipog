@@ -267,7 +267,7 @@ test("every Notifications and Experimental sentence ends with a period, and the 
       ["Early features. Turning one off hides it from navigation and search.", "This Device"],
     ]);
     assert.deepEqual([...experimental.container.querySelectorAll(".setting-row-desc")].map((element) => element.textContent), [
-      "Runs that coordinate several agents in a workflow graph.",
+      "Give the same task to multiple agents and compare their results.",
     ]);
   } finally {
     await notifications.unmount();

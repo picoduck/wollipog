@@ -10,7 +10,7 @@ import { FieldError } from "./FieldError.js";
 import { Skeleton } from "./common.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { ExternalLinkIcon, GlobeIcon, RefreshIcon, ReportIcon } from "./Icons.js";
-import type { SessionView, WorkflowArtifactView } from "@wollipog/protocol";
+import type { SessionView, ArtifactView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { normalizeBrowserUrl } from "../artifact-preview.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
@@ -74,7 +74,7 @@ function BrowserPanelBody({ session, openArtifact = null, onOpenArtifactHandled 
   const [openUrl, setOpenUrl] = usePanelScratchText(
     panelScratch, "browser.openUrl", "", (raw) => normalizeBrowserUrl(raw).ok,
   );
-  const [artifacts, setArtifacts] = useState<WorkflowArtifactView[]>([]);
+  const [artifacts, setArtifacts] = useState<ArtifactView[]>([]);
   const [cursor, setCursor] = useState<string | undefined>();
   // Busy from the first render: the first page is asked for as the panel mounts, and a linked
   // artifact must not be judged missing from a list that has not loaded yet.
@@ -96,7 +96,7 @@ function BrowserPanelBody({ session, openArtifact = null, onOpenArtifactHandled 
     setCursor(undefined);
     setListBusy(true);
     setListError(null);
-    void api.sessionWorkflowArtifacts(session.id).then((page) => {
+    void api.sessionArtifacts(session.id).then((page) => {
       if (generation !== generationRef.current) return;
       setArtifacts(page.artifacts);
       setCursor(page.nextCursor);
@@ -121,7 +121,7 @@ function BrowserPanelBody({ session, openArtifact = null, onOpenArtifactHandled 
     setListBusy(true);
     setListError(null);
     try {
-      const page = await api.sessionWorkflowArtifacts(session.id, cursor);
+      const page = await api.sessionArtifacts(session.id, cursor);
       if (generation !== generationRef.current) return;
       setArtifacts((current) => {
         const merged = new Map(current.map((artifact) => [artifact.artifactId, artifact]));
@@ -343,7 +343,7 @@ function BrowserAboutPopover() {
 
 /** The rows. Each carries its artifact's page key, where focus returns on Back (#2914). */
 function ArtifactList({ artifacts, onOpen }: {
-  artifacts: readonly WorkflowArtifactView[];
+  artifacts: readonly ArtifactView[];
   onOpen: (artifactId: string) => void;
 }) {
   const now = useTimelineClock(artifacts.length > 0);

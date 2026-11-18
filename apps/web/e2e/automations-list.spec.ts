@@ -35,6 +35,22 @@ async function capture(page: Page, name: string) {
   await page.screenshot({ path: join(evidenceDir, `${name}.png`) });
 }
 
+for (const width of [1440, 390]) {
+  test(`a retired action shows why it is paused at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await open(page, "dark", "list&retired-workflow");
+    for (const name of [NIGHTLY, "Build and Review the Main Branch"]) {
+      const retired = row(page, name);
+      await expect(retired.locator(".status")).toHaveText("Paused");
+      const reason = retired.getByText("The workflow action was removed.", { exact: true });
+      await expect(reason).toBeVisible();
+      expect(await reason.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await expect(retired.getByRole("switch")).toHaveCount(0);
+    }
+    await capture(page, `after-automation-list-${width}`);
+  });
+}
+
 test.describe("at 1440×900", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
@@ -49,7 +65,7 @@ test.describe("at 1440×900", () => {
       label: group.querySelector(".group-label")!.firstChild!.textContent,
       count: group.querySelector(".group-label > .count")!.textContent,
     })));
-    expect(groups).toEqual([{ label: "Scheduled", count: "4" }, { label: "Paused", count: "2" }]);
+    expect(groups).toEqual([{ label: "Scheduled", count: "3" }, { label: "Paused", count: "3" }]);
     // The first content under the header is the list, never Outbound Events.
     const first = await page.locator(".page-header").evaluate((header) => header.nextElementSibling?.querySelector(":scope > *")?.className);
     expect(first).toBe("automation-groups");

@@ -78,10 +78,9 @@ Missing or old usage readings don't disqualify an account: only a reading that s
 Selection never crosses providers.
 
 Explicit choices win. A session or child that names an account uses it, whatever the policy says or
-would skip. A run or workflow names one per member (`providerAccountIds` by agent id,
-`providerAccountBindings` by role, `orchestratorProviderAccountId`), and a member it doesn't name
+would skip. A run names one per member (`providerAccountIds` by agent id), and a member it doesn't name
 follows the policy. All of them resolve through one function (`launchProviderAccount`), and multi-agent
-runs and workflows bind the same account a session would, including a fixed default. Of automations,
+runs bind the same account a session would, including a fixed default. Of automations,
 only an Orchestrator session automation can name one; every other run resolves when it starts. The
 automation editor and an agent's Create Automation approval show that resolution from the preview below
 as an expectation, rechecked when each run starts, and a session automation with no eligible account still
@@ -151,8 +150,7 @@ of them. Unattended callers can act on this result; interactive ones offer the s
 `get_provider_account_selection` and `wollipog session accounts` list what can be named. An agent's
 refusal text names this route. Both need protocol 337 on the control plane; the tools refuse before
 sending anything to an older one, so a choice is never silently dropped. `create_run`
-(`providerAccountIds`) and `create_workflow_run` (`providerAccountBindings`) do the same per member
-and need protocol 338, for the same reason. A key that is no member is refused rather than ignored, and
+(`providerAccountIds`) does the same per member and needs protocol 338, for the same reason. A key that is no member is refused rather than ignored, and
 a refusal of a named account starts no member and names the member it was for.
 
 Agents see accounts only as opaque `accountRef` values, stable for one account on one Machine, because
@@ -207,7 +205,7 @@ and reason codes instead. These are narrowed for it:
 | Every other JSON response to that credential | No `providerAccountId` or `providerAccountLabel` anywhere in it. |
 
 Every other JSON response covers what returns or embeds a session: launches, stop, restart,
-configuration and worktree commands, `POST /api/runs`, `POST /api/workflow-runs`, and the Orchestrator's
+configuration and worktree commands, `POST /api/runs`, and the Orchestrator's
 campaign reads. It also covers a session's account-switch failure, provider-HOME refusal and wait, and
 `provider_account_switched` events on `GET /api/sessions/:id/events`, which keep their other fields. A
 reference an agent sent stays as it is. Account ids and labels are removed in the response serializer for

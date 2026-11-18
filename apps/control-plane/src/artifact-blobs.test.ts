@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { WorkflowArtifact, WorkflowArtifactView } from "@wollipog/protocol";
+import type { Artifact, ArtifactView } from "@wollipog/protocol";
 import {
   FileArtifactBlobStore,
   artifactBlobFilePath,
@@ -14,7 +14,7 @@ import {
 } from "./artifact-blob-store.js";
 import { ControlPlaneDb, MAX_SESSION_ATTACHED_ARTIFACT_BYTES, SessionArtifactQuotaError } from "./db.js";
 
-function artifact(artifactId: string, sessionId: string, data = "shared artifact bytes"): WorkflowArtifact {
+function artifact(artifactId: string, sessionId: string, data = "shared artifact bytes"): Artifact {
   const bytes = Buffer.from(data, "utf8");
   return {
     artifactId,
@@ -38,25 +38,25 @@ test("artifact rows keep metadata only while deduplicated blobs survive until th
     const db = ControlPlaneDb.open(path);
     const first = artifact("artifact-one", "session-one");
     const second = artifact("artifact-two", "session-two");
-    db.createWorkflowArtifact(first);
-    db.createWorkflowArtifact(second);
+    db.createArtifact(first);
+    db.createArtifact(second);
 
     const rows = db.raw().prepare("SELECT id, data, blob_key, size_bytes, sha256 FROM artifacts ORDER BY id")
       .all() as unknown as Array<{ id: string; data: string; blob_key: string; size_bytes: number; sha256: string }>;
     assert.deepEqual(rows.map((row) => row.data), ["", ""]);
     assert.deepEqual(new Set(rows.map((row) => row.blob_key)), new Set([first.sha256]));
-    assert.deepEqual(db.getWorkflowArtifact(first.artifactId), first);
+    assert.deepEqual(db.getArtifact(first.artifactId), first);
 
     const blobPath = artifactBlobFilePath(defaultArtifactBlobRoot(path), first.sha256);
     assert.equal(existsSync(blobPath), true);
     writeFileSync(blobPath, Buffer.from("tampered shared bytes", "utf8"));
-    assert.throws(() => db.getWorkflowArtifact(first.artifactId), /size|digest/);
+    assert.throws(() => db.getArtifact(first.artifactId), /size|digest/);
     db.raw().prepare("DELETE FROM artifacts WHERE id=?").run(first.artifactId);
-    assert.deepEqual(db.collectWorkflowArtifactBlobs(), { examined: 1, deleted: 0, retained: 1 });
+    assert.deepEqual(db.collectArtifactBlobs(), { examined: 1, deleted: 0, retained: 1 });
     assert.equal(existsSync(blobPath), true, "a shared blob remains while another metadata row references it");
 
     db.raw().prepare("DELETE FROM artifacts WHERE id=?").run(second.artifactId);
-    assert.deepEqual(db.collectWorkflowArtifactBlobs(), { examined: 1, deleted: 1, retained: 0 });
+    assert.deepEqual(db.collectArtifactBlobs(), { examined: 1, deleted: 1, retained: 0 });
     assert.equal(existsSync(blobPath), false);
     db.close();
   } finally {
@@ -71,7 +71,7 @@ test("the session attachment quota counts every author without blocking internal
     const db = ControlPlaneDb.open(path);
     const human = { ...artifact("human-image", "session-one", "image"), kind: "screenshot" as const,
       createdBy: { kind: "human" as const, id: "owner" }, metadata: { purpose: "session_attachment" } };
-    db.createWorkflowArtifact(human);
+    db.createArtifact(human);
     // Existing rows can predate the quota. Their recorded sizes still count, even when the
     // content-addressed blob itself is shared with another artifact.
     db.raw().prepare("UPDATE artifacts SET size_bytes=? WHERE id=?")
@@ -79,17 +79,17 @@ test("the session attachment quota counts every author without blocking internal
     const agent = { ...artifact("agent-image", "session-one", "different bytes"),
       kind: "screenshot" as const, createdBy: { kind: "agent" as const, id: "session-one" },
       metadata: { purpose: "session_attachment" } };
-    assert.throws(() => db.createWorkflowArtifact(agent), SessionArtifactQuotaError);
-    assert.equal(db.getWorkflowArtifact(agent.artifactId), null);
+    assert.throws(() => db.createArtifact(agent), SessionArtifactQuotaError);
+    assert.equal(db.getArtifact(agent.artifactId), null);
     assert.equal(existsSync(artifactBlobFilePath(defaultArtifactBlobRoot(path), agent.sha256)), false,
       "a rejected upload leaves no blob behind");
     const eventChunk = { ...artifact("event-chunk", "session-one", "large output"),
       metadata: { purpose: "session_event_payload" } };
-    db.createWorkflowArtifact(eventChunk);
-    assert.ok(db.getWorkflowArtifact(eventChunk.artifactId));
+    db.createArtifact(eventChunk);
+    assert.ok(db.getArtifact(eventChunk.artifactId));
     db.raw().prepare("UPDATE artifacts SET size_bytes=? WHERE id=?").run(human.sizeBytes, human.artifactId);
-    db.createWorkflowArtifact(agent);
-    assert.ok(db.getWorkflowArtifact(agent.artifactId));
+    db.createArtifact(agent);
+    assert.ok(db.getArtifact(agent.artifactId));
     db.close();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -106,14 +106,14 @@ test("retention expires only file-attached evidence and preserves shared bytes s
     const keep = { ...old, artifactId: "new-clip", createdAt: 200 };
     const prompt = { ...old, artifactId: "prompt-image", kind: "screenshot" as const,
       mimeType: "image/png", metadata: { purpose: "prompt_image" } };
-    db.createWorkflowArtifact(old);
-    db.createWorkflowArtifact(keep);
-    db.createWorkflowArtifact(prompt);
+    db.createArtifact(old);
+    db.createArtifact(keep);
+    db.createArtifact(prompt);
     const blobPath = artifactBlobFilePath(defaultArtifactBlobRoot(path), old.sha256);
     assert.equal(db.pruneExpiredSessionAttachments(100), 1);
-    assert.equal(db.getWorkflowArtifact(old.artifactId), null);
-    assert.ok(db.getWorkflowArtifact(keep.artifactId));
-    assert.ok(db.getWorkflowArtifact(prompt.artifactId));
+    assert.equal(db.getArtifact(old.artifactId), null);
+    assert.ok(db.getArtifact(keep.artifactId));
+    assert.ok(db.getArtifact(prompt.artifactId));
     assert.equal(existsSync(blobPath), true, "shared bytes remain while another artifact references them");
     assert.equal(db.pruneExpiredSessionAttachments(100), 0);
     db.close();
@@ -125,17 +125,17 @@ test("raw prompt image insertion never creates an inline base64 body", () => {
   try {
     const db = ControlPlaneDb.open(join(root, "control-plane.db"));
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
-    const view: WorkflowArtifactView = {
+    const view: ArtifactView = {
       artifactId: "prompt-image", sessionId: "session-one", kind: "screenshot", name: "prompt.png",
       mimeType: "image/png", encoding: "base64", sizeBytes: bytes.length,
       sha256: artifactBlobSha256(bytes), createdBy: { kind: "system", id: "test" }, createdAt: 1,
     };
-    db.createWorkflowArtifactBytes(view, bytes);
+    db.createArtifactBytes(view, bytes);
     const row = db.raw().prepare("SELECT data, blob_key FROM artifacts WHERE id=?").get(view.artifactId) as unknown as
       { data: string; blob_key: string };
     assert.deepEqual({ ...row }, { data: "", blob_key: view.sha256 });
-    assert.deepEqual(db.readWorkflowArtifactBytes(view.artifactId), bytes);
-    assert.equal(db.getWorkflowArtifact(view.artifactId)?.data, bytes.toString("base64"));
+    assert.deepEqual(db.readArtifactBytes(view.artifactId), bytes);
+    assert.equal(db.getArtifact(view.artifactId)?.data, bytes.toString("base64"));
     db.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -149,17 +149,17 @@ test("failed metadata inserts clean new blobs without removing shared content", 
   try {
     const db = ControlPlaneDb.open(path, { artifactBlobDir: blobRoot });
     const original = artifact("duplicate-id", "session-one");
-    db.createWorkflowArtifact(original);
-    assert.equal(db.workflowArtifactBlobRoot(), blobRoot);
+    db.createArtifact(original);
+    assert.equal(db.artifactBlobRoot(), blobRoot);
 
     const uniqueFailure = artifact("duplicate-id", "session-two", "new bytes that must be rolled back");
-    assert.throws(() => db.createWorkflowArtifact(uniqueFailure), /UNIQUE/);
+    assert.throws(() => db.createArtifact(uniqueFailure), /UNIQUE/);
     assert.equal(existsSync(artifactBlobFilePath(blobRoot, uniqueFailure.sha256)), false);
 
     const sharedFailure = artifact("duplicate-id", "session-three");
-    assert.throws(() => db.createWorkflowArtifact(sharedFailure), /UNIQUE/);
+    assert.throws(() => db.createArtifact(sharedFailure), /UNIQUE/);
     assert.equal(existsSync(artifactBlobFilePath(blobRoot, original.sha256)), true);
-    assert.deepEqual(db.getWorkflowArtifact(original.artifactId), original);
+    assert.deepEqual(db.getArtifact(original.artifactId), original);
     assert.equal(
       Number((db.raw().prepare("SELECT COUNT(*) AS count FROM artifact_blob_pending").get() as unknown as { count: number }).count),
       0,
@@ -167,7 +167,7 @@ test("failed metadata inserts clean new blobs without removing shared content", 
     db.close();
 
     const reopened = ControlPlaneDb.open(path, { artifactBlobDir: blobRoot });
-    assert.deepEqual(reopened.getWorkflowArtifact(original.artifactId), original);
+    assert.deepEqual(reopened.getArtifact(original.artifactId), original);
     reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -210,9 +210,9 @@ test("startup migrates valid inline artifacts without destroying corrupt legacy 
     assert.deepEqual({ ...migrated }, { data: "", blob_key: validKey });
     assert.deepEqual({ ...empty }, { data: "", blob_key: emptyKey });
     assert.deepEqual({ ...corrupt }, { data: "only copy", blob_key: null });
-    assert.equal(db.getWorkflowArtifact("valid-inline")?.data, validData);
-    assert.equal(db.getWorkflowArtifact("empty-inline")?.data, "");
-    assert.throws(() => db.getWorkflowArtifact("corrupt-inline"), /bytes do not match metadata/);
+    assert.equal(db.getArtifact("valid-inline")?.data, validData);
+    assert.equal(db.getArtifact("empty-inline")?.data, "");
+    assert.throws(() => db.getArtifact("corrupt-inline"), /bytes do not match metadata/);
     assert.equal(existsSync(artifactBlobFilePath(defaultArtifactBlobRoot(path), validKey)), true);
     assert.equal(existsSync(artifactBlobFilePath(defaultArtifactBlobRoot(path), emptyKey)), true);
     db.close();

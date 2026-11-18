@@ -37,7 +37,7 @@ function when(value: number | undefined, now: number): string {
 
 /**
  * Run History (#2970, docs/design-system.md §14): every run of the automation, newest first, as a
- * table of Started, Result, Started By and Took in words, with Open Session (or Open Run) and ⋯ with
+ * table of Started, Result, Started By and Took in words, with Open Session and ⋯ with
  * Run Details…. Ten rows show, and Show More adds ten. On a phone, and in any container under
  * 560px, each run is two lines: its start and result, then who started it and how long it took, or
  * why a skipped or expired run did not run. With no runs yet it is one quiet line naming the first.
@@ -185,7 +185,7 @@ export function RunDetailsDialog({ execution, now, policy, machineLabel, onOpen,
     >
       {execution.status === "ceiling_paused" && (
         <Notice tone="warning">
-          {reason} Partial or complete output may be available. {execution.runId ? "Choose Open Run to inspect it." : "Open the session to inspect it."}
+          {reason}{execution.sessionId && " Partial or complete output may be available. Open the session to inspect it."}
         </Notice>
       )}
       {error && (

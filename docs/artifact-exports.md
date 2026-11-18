@@ -1,6 +1,6 @@
-# Authenticated raw workflow artifact exports
+# Authenticated raw session artifact exports
 
-Workflow run artifact previews include **Download raw artifact**. The download is the exact
+Session artifact previews include **Download raw artifact**. The download is the exact
 validated content stored for the artifact: UTF-8 bytes for patches, reports, logs, and verdict JSON,
 or decoded PNG/JPEG/JPG/GIF/WebP bytes for screenshots. It is not a transcript projection and receives no
 operational redaction. Artifacts may contain source code, secrets, command output, personal data, or
@@ -11,8 +11,7 @@ other sensitive material; review the preview and provenance before downloading o
 `GET /api/artifacts/:artifactId/export` is an authenticated human-only route. Remote dashboards
 send the paired-device credential in `Authorization: Bearer`; the token never appears in the path,
 query, filename, or Blob URL. Agent session credentials cannot use the route. Organization viewers and operators
-may download an artifact only when its session, or its run's runner/workspace scope, is readable to
-them. Missing and out-of-scope artifacts both return a content-free `404`.
+may download an artifact only when its session is readable to them. Missing and out-of-scope artifacts both return a content-free `404`.
 
 The browser fetches the response into a temporary Blob URL and revokes that URL after the download
 has had time to start on mobile browsers. It never navigates to a token-bearing URL.
@@ -20,7 +19,7 @@ has had time to start on mobile browsers. It never navigates to a token-bearing 
 ## Integrity and response boundary
 
 Before loading the body, the control plane reads bounded SQLite metadata and the decoded byte size,
-applies the artifact's session/run scope, and rejects oversized metadata before touching the blob.
+applies the artifact's session scope, and rejects oversized metadata before touching the blob.
 It then reads the content-addressed sidecar file, re-verifies its exact size and SHA-256, and
 re-runs the original kind/MIME/encoding/name/metadata/content validation and recomputes decoded
 size and SHA-256. A corrupt, legacy-out-of-contract, or tampered row returns `422` without serving

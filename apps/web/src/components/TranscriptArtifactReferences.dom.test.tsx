@@ -4,7 +4,7 @@ import { afterEach, test } from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { WorkflowArtifactPage, WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactPage, ArtifactView } from "@wollipog/protocol";
 import { api } from "../api.js";
 import type { TimelineItem } from "../timeline.js";
 import { EventTimeline } from "./EventTimeline.js";
@@ -30,7 +30,7 @@ for (const [name, value] of Object.entries({
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
 const PNG = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 3]);
-const shot = (id: string, sessionId = "session_1"): WorkflowArtifactView => ({
+const shot = (id: string, sessionId = "session_1"): ArtifactView => ({
   artifactId: id, sessionId, kind: "screenshot", name: `${id.slice(4, 8)}.png`, mimeType: "image/png", encoding: "base64",
   sizeBytes: PNG.byteLength, sha256: createHash("sha256").update(PNG).digest("hex"),
   createdBy: { kind: "agent", id: sessionId }, createdAt: 1,
@@ -46,7 +46,7 @@ let root: Root | null = null;
 let container: HTMLElement | null = null;
 const listed: Array<string | undefined> = [];
 const exported: string[] = [];
-const priorList = api.sessionWorkflowArtifacts;
+const priorList = api.sessionArtifacts;
 const priorExport = api.artifactExport;
 
 afterEach(async () => {
@@ -56,20 +56,20 @@ afterEach(async () => {
   container = null;
   listed.length = 0;
   exported.length = 0;
-  api.sessionWorkflowArtifacts = priorList;
+  api.sessionArtifacts = priorList;
   api.artifactExport = priorExport;
   domWindow.document.body.replaceChildren();
 });
 
 /** The session's list, two pages; C is another session's and never listed here. */
-const PAGES: Record<string, WorkflowArtifactPage> = {
+const PAGES: Record<string, ArtifactPage> = {
   first: { artifacts: [shot(A), shot(D)], nextCursor: "2" },
   "2": { artifacts: [shot(B), shot(E)] },
 };
 
 async function render(items: TimelineItem[], session: string | null = "session_1") {
   const artifactSessionId = session ?? undefined;
-  api.sessionWorkflowArtifacts = async (_session, cursor) => {
+  api.sessionArtifacts = async (_session, cursor) => {
     listed.push(cursor);
     return PAGES[cursor ?? "first"]!;
   };
@@ -91,7 +91,7 @@ async function render(items: TimelineItem[], session: string | null = "session_1
 let nextId = 1;
 const prompt = (text: string): TimelineItem => ({ kind: "user_message", id: nextId++, text, createdAt: nextId });
 const reply = (text: string): TimelineItem => ({ kind: "agent_message", id: nextId++, text, createdAt: nextId });
-const attached = (artifact: WorkflowArtifactView): TimelineItem =>
+const attached = (artifact: ArtifactView): TimelineItem =>
   ({ kind: "artifact_attached", id: nextId++, artifact, createdAt: nextId });
 
 const reply$ = () => [...container!.querySelectorAll<HTMLElement>(".tl-agent-msg")].at(-1)!;

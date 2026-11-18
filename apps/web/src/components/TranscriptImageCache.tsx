@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, type ReactNode } from "react";
-import type { WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { verifyArtifactPreviewBlob } from "../artifact-preview.js";
 import { DEVICE_TOKEN_CHANGED_EVENT } from "../device-token.js";
@@ -29,7 +29,7 @@ export class TranscriptImageCache {
     });
   }
 
-  async load(artifact: WorkflowArtifactView, exportArtifact: (id: string) => Promise<Blob>): Promise<Blob> {
+  async load(artifact: ArtifactView, exportArtifact: (id: string) => Promise<Blob>): Promise<Blob> {
     const key = JSON.stringify([
       artifact.sessionId, artifact.artifactId, artifact.kind, artifact.mimeType,
       artifact.encoding, artifact.sizeBytes, artifact.sha256,

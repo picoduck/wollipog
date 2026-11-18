@@ -1,4 +1,3 @@
-import type { WorkflowEventRetentionView, UpdateWorkflowEventRetentionRequest } from "@wollipog/protocol";
 import type { AssistantOwnerConfirmationResponse, AssistantThreadListResponse } from "@wollipog/protocol";
 import type { AssistantConnectionsView, AssistantConnection, AssistantGrant, AssistantActivity } from "./assistant-connections.js";
 import { assistantThreadRoutes } from "./assistant-threads.js";
@@ -41,10 +40,6 @@ import type {
   RenameProjectLocationRequest,
   CreateTranscriptShareRequest,
   CreateTranscriptShareResult,
-  CreateWorkflowDefinitionRequest,
-  CreateWorkflowArtifactRequest,
-  CreateWorkflowRunRequest,
-  CreateWorkflowRunResult,
   DeviceView,
   DescendantRequestView,
   DescendantRequestsView,
@@ -141,14 +136,9 @@ import type {
   WorkspaceReferenceCandidate,
   WorkspaceReferenceSearchLimit,
   WorkspaceReferenceSearchMatch,
-  WorkflowArtifact,
-  WorkflowArtifactPage,
-  WorkflowDefinition,
-  WorkflowInstanceDetail,
-  WorkflowInstanceView,
+  ArtifactPage,
   UpdateProjectRequest,
   UpdateAutomationRequest,
-  DispatchWorkflowNodeResult,
   ControlPlaneInstanceInfo,
 } from "@wollipog/protocol";
 import {
@@ -459,10 +449,6 @@ export function createApiClient(transport: ApiTransport) {
 
   /** The organization's archived-history retention (#2777). `previewDays` adds what that threshold
    * would prune, for confirming a change before it is saved. */
-  workflowEventRetention: (previewDays?: number) => req<WorkflowEventRetentionView>(
-    `/api/workflow-event-retention${previewDays === undefined ? "" : `?previewDays=${previewDays}`}`),
-  updateWorkflowEventRetention: (body: UpdateWorkflowEventRetentionRequest) =>
-    req<WorkflowEventRetentionView>("/api/workflow-event-retention", { method: "PUT", body: JSON.stringify(body) }),
   archivedHistoryRetention: (previewDays?: number) => req<ArchivedHistoryRetentionView>(
     `/api/archived-history-retention${previewDays === undefined ? "" : `?previewDays=${previewDays}`}`,
   ),
@@ -1402,57 +1388,10 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify(body),
     }),
 
-  workflowDefinitions: () => req<WorkflowDefinition[]>("/api/workflows"),
-
-  workflowDefinition: (workflowId: string, version?: number) =>
-    req<WorkflowDefinition>(`/api/workflows/${encodeURIComponent(workflowId)}${version ? `?version=${version}` : ""}`),
-
-  createWorkflowDefinition: (body: CreateWorkflowDefinitionRequest) =>
-    req<WorkflowDefinition>("/api/workflows", { method: "POST", body: JSON.stringify(body) }),
-
-  createWorkflowDefinitionVersion: (workflowId: string, body: CreateWorkflowDefinitionRequest) =>
-    req<WorkflowDefinition>(`/api/workflows/${encodeURIComponent(workflowId)}/versions`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  createWorkflowRun: (body: CreateWorkflowRunRequest) =>
-    req<CreateWorkflowRunResult>("/api/workflow-runs", { method: "POST", body: JSON.stringify(body) }),
-
-  workflowInstances: (runId?: string) =>
-    req<WorkflowInstanceView[]>(`/api/workflow-instances${runId ? `?runId=${encodeURIComponent(runId)}` : ""}`),
-
-  workflowInstance: (instanceId: string) =>
-    req<WorkflowInstanceDetail>(`/api/workflow-instances/${encodeURIComponent(instanceId)}`),
-
-  dispatchWorkflowNode: (instanceId: string, nodeId: string, dispatchKey: string) =>
-    req<DispatchWorkflowNodeResult>(
-      `/api/workflow-instances/${encodeURIComponent(instanceId)}/nodes/${encodeURIComponent(nodeId)}/dispatch`,
-      { method: "POST", body: JSON.stringify({ dispatchKey }) },
-    ),
-
-  resolveWorkflowGate: (instanceId: string, nodeId: string, outcome: "success" | "failure") =>
-    req<WorkflowInstanceDetail>(
-      `/api/workflow-instances/${encodeURIComponent(instanceId)}/nodes/${encodeURIComponent(nodeId)}/resolve`,
-      { method: "POST", body: JSON.stringify({ outcome }) },
-    ),
-
-  createWorkflowArtifact: (body: CreateWorkflowArtifactRequest) =>
-    req<WorkflowArtifact>(body.kind === "screenshot" ? "/api/artifacts/screenshots" : "/api/artifacts", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  workflowArtifact: (artifactId: string) =>
-    req<WorkflowArtifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`),
-
   artifactExport: (artifactId: string) => artifactExport(transport, artifactId),
 
-  runWorkflowArtifacts: (runId: string, cursor?: string) =>
-    req<WorkflowArtifactPage>(`/api/runs/${encodeURIComponent(runId)}/artifacts${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`),
-
-  sessionWorkflowArtifacts: (sessionId: string, cursor?: string) =>
-    req<WorkflowArtifactPage>(`/api/sessions/${encodeURIComponent(sessionId)}/artifacts${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`),
+  sessionArtifacts: (sessionId: string, cursor?: string) =>
+    req<ArtifactPage>(`/api/sessions/${encodeURIComponent(sessionId)}/artifacts${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`),
 
   rediscover: (runnerId: string) =>
     req<{ ok: true }>(`/api/runners/${encodeURIComponent(runnerId)}/rediscover`, { method: "POST" }),

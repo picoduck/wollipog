@@ -82,7 +82,7 @@ or wrongly typed chunks fail closed and expose a retry action.
 Loaded text lives only in the mounted virtualized row. Hiding it, replacing its references, or
 unmounting the row releases the text and fences any pending fetch from updating discarded state.
 Raw event artifacts are unredacted source data and inherit the same paired-device/session
-authorization and private no-store response boundary as other workflow artifacts.
+authorization and private no-store response boundary as other session artifacts.
 
 See [content-addressed artifact storage](./artifact-blob-storage.md) and
 [authenticated raw artifact exports](./artifact-exports.md) for storage, backup, and authorization

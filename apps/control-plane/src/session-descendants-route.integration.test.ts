@@ -526,9 +526,9 @@ test("HTTP agent management scopes descendants and composes governance policy vi
         assert.equal(printed.mediaType, "image/png");
         assert.equal(printed.name, `${mode}-cli-capture.png`);
         assert.equal(printed.sha256, createHash("sha256").update(cliPng).digest("hex"));
-        assert.ok(liveDb!.readWorkflowArtifactBytes(String(printed.artifactId))?.equals(cliPng),
+        assert.ok(liveDb!.readArtifactBytes(String(printed.artifactId))?.equals(cliPng),
           "the stored artifact holds exactly the file's bytes");
-        const storedView = liveDb!.workflowArtifactExportPreflight(String(printed.artifactId))?.artifact;
+        const storedView = liveDb!.artifactExportPreflight(String(printed.artifactId))?.artifact;
         assert.deepEqual(
           { sessionId: storedView?.sessionId, kind: storedView?.kind, encoding: storedView?.encoding, mimeType: storedView?.mimeType, sha256: storedView?.sha256 },
           { sessionId: `${mode}-child`, kind: "screenshot", encoding: "base64", mimeType: "image/png", sha256: printed.sha256 },

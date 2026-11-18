@@ -8,7 +8,7 @@ import { join } from "node:path";
  */
 
 type PollingFixture = {
-  failure: "list" | "detail" | "trigger" | "workflow" | null;
+  failure: "list" | "detail" | "trigger" | null;
   failRefreshAfterMutation: boolean;
   mutationCalls: number;
   mutationFailure: boolean;

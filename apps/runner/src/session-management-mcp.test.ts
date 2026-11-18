@@ -957,7 +957,7 @@ test("notifications/initialized is a silent no-op; ping answers {}", async () =>
   assert.deepEqual(pong, { jsonrpc: "2.0", id: 2, result: {} });
 });
 
-test("tools/list returns the curated session and workflow tools with schemas", async () => {
+test("tools/list returns the curated session and typed decision tools with schemas", async () => {
   const { deps } = makeDeps();
   const res = await dispatch({ jsonrpc: "2.0", id: 3, method: "tools/list" }, deps);
   const tools = res!.result.tools as { name: string; description: string; inputSchema: unknown }[];
@@ -994,21 +994,9 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "list_runs",
       "list_governance_policies",
       "get_governance_policy",
-      "list_workflows",
-      "get_workflow",
-      "get_workflow_node",
-      "list_workflow_instances",
-      "get_workflow_instance",
       "upsert_governance_policy",
       "delete_governance_policy",
-      "create_workflow_definition",
-      "create_workflow_version",
-      "create_workflow_run",
-      "dispatch_workflow_node",
       "attach_session_artifact",
-      "create_workflow_artifact",
-      "complete_workflow_attempt",
-      "resolve_workflow_gate",
       "create_worktree",
       "attach_worktree",
       "select_worktree",
@@ -1341,9 +1329,8 @@ test("wait_session never turns an unreadable or cancelled session read into a ti
 test("mutating tools describe governance instead of promising a now-optional human gate", () => {
   const mutations = [
     "upsert_governance_policy", "delete_governance_policy",
-    "create_workflow_definition", "create_workflow_version", "create_workflow_run",
-    "dispatch_workflow_node", "attach_session_artifact", "create_workflow_artifact", "complete_workflow_attempt",
-    "resolve_workflow_gate", "create_session", "prompt_session", "stop_session", "restart_session",
+    "attach_session_artifact",
+    "create_session", "prompt_session", "stop_session", "restart_session",
     "stop_background_job", "release_queue_hold", "set_guardrails", "create_run", "create_worktree", "attach_worktree", "select_worktree", "discard_worktree",
   ];
   for (const name of mutations) {
@@ -1866,7 +1853,7 @@ test("a launch with no eligible account tells the agent what it can do, without 
   const text = resultText(created);
   assert.match(text, /No Claude account/u);
   assert.match(text, /PROVIDER_ACCOUNT_CHOICE_REQUIRED refusal=no_eligible_account actions=choose_account, wait retryAt=2027-/u);
-  assert.match(text, /get_provider_account_selection .*create_session providerAccountId .*--provider-account.*create_run providerAccountIds.*create_workflow_run providerAccountBindings/u);
+  assert.match(text, /get_provider_account_selection .*create_session providerAccountId .*--provider-account.*create_run providerAccountIds/u);
   assert.ok(!text.includes("person-example-com"), text);
 });
 
@@ -1914,17 +1901,13 @@ test("create_session carries a named account, and refuses it before sending to a
   assert.equal(blank.isError, true);
 });
 
-test("create_run and create_workflow_run carry named accounts, and refuse them before an older control plane (#4353)", async () => {
+test("create_run carries named accounts and refuses them before an older control plane (#4353)", async () => {
   const current = makeDeps(() => ({ status: 200, body: { run: { id: "r_1" }, sessions: [], instance: {} } }));
   current.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
   const run = { runnerId: "r1", workspaceId: "ws", agentIds: ["claude"], task: "Do it" };
-  const workflow = { runnerId: "r1", workspaceId: "ws", workflowId: "builtin:build-review", task: "Do it" };
   const accepted = await callTool(current.deps, "create_run", { ...run, providerAccountIds: { claude: "acct:aaaaaaaaaaaaaaaa" } });
   assert.equal(accepted.isError, undefined, resultText(accepted));
   assert.deepEqual((current.calls[0]?.body as { providerAccountIds?: unknown }).providerAccountIds, { claude: "acct:aaaaaaaaaaaaaaaa" });
-  const bound = await callTool(current.deps, "create_workflow_run", { ...workflow, providerAccountBindings: { claude: "acct:aaaaaaaaaaaaaaaa" } });
-  assert.equal(bound.isError, undefined, resultText(bound));
-  assert.deepEqual((current.calls[1]?.body as { providerAccountBindings?: unknown }).providerAccountBindings, { claude: "acct:aaaaaaaaaaaaaaaa" });
 
   // v337 reads a session's reference, but its run ignores this field, so the choice would silently vanish.
   const older = makeDeps(() => ({ status: 200, body: {} }));
@@ -1932,8 +1915,6 @@ test("create_run and create_workflow_run carry named accounts, and refuse them b
   const refusedRun = await callTool(older.deps, "create_run", { ...run, providerAccountIds: { claude: "acct:aaaaaaaaaaaaaaaa" } });
   assert.equal(refusedRun.isError, true);
   assert.match(resultText(refusedRun), /Choosing a provider account from an agent needs/u);
-  const refusedWorkflow = await callTool(older.deps, "create_workflow_run", { ...workflow, providerAccountBindings: { claude: "acct:aaaaaaaaaaaaaaaa" } });
-  assert.equal(refusedWorkflow.isError, true);
   assert.deepEqual(older.calls, [], "it never receives the choice");
   const plain = await callTool(older.deps, "create_run", run);
   assert.equal(plain.isError, undefined, "a run naming nothing still reaches it");
@@ -2729,7 +2710,6 @@ test("create tools return the control plane's retry instruction when an approval
   const cases = [
     { name: "create_session", args: { runnerId: "r1", agentId: "claude-code", workspaceId: "workspace" }, created: { id: "s_child" } },
     { name: "create_run", args: { runnerId: "r", workspaceId: "w", agentIds: ["a"], task: "Build" }, created: { run: { id: "run" }, sessions: [] } },
-    { name: "create_workflow_run", args: { runnerId: "r", workspaceId: "w", workflowId: "workflow", task: "Build" }, created: { run: { id: "run" }, sessions: [] } },
   ];
   // Each control plane generation answers the fence probe differently: a newer one publishes the
   // spawn fence it enforces; an older one (or one that cannot be reached) enforces the 30 s hook
@@ -3009,7 +2989,7 @@ test("compact archive and inspection responses retain lifecycle progress without
 });
 
 test("run creation tools keep the exact batch request alive until spawn approval resolves", async () => {
-  for (const name of ["create_run", "create_workflow_run"]) {
+  for (const name of ["create_run"]) {
     for (const terminal of [201, 403]) {
       let remaining = 2;
       let sleeps = 0;
@@ -3019,7 +2999,7 @@ test("run creation tools keep the exact batch request alive until spawn approval
           ? { status: 428, body: { error: "Child approval required" } }
           : { status: terminal, body: terminal === 201 ? { run: { id: "run" }, sessions: [] } : { error: "Rejected" } });
       deps.sleep = async (ms) => { assert.equal(ms, 1000); sleeps++; };
-      const result = await callTool(deps, name, { runnerId: "r", workspaceId: "w", agentIds: ["a"], workflowId: "workflow", task: "Build" });
+      const result = await callTool(deps, name, { runnerId: "r", workspaceId: "w", agentIds: ["a"], task: "Build" });
       assert.equal(result.isError === true, terminal === 403);
       assert.equal(sleeps, 2);
       const creates = calls.filter((call) => call.method === "POST");
@@ -3086,41 +3066,6 @@ test("create_run -> POST /api/runs with the full body", async () => {
   assert.deepEqual(resultJson(result).run.sessionIds, ["s_a", "s_b"]);
 });
 
-test("workflow reads are bounded, mapped, and routed to the inspection API", async () => {
-  const { deps, calls } = makeDeps((call) => {
-    if (call.url.includes("/api/workflows?")) return { status: 200, body: [{ workflowId: "wf", version: 2, name: "Review", nodes: [{ nodeId: "build", kind: "agent", role: "builder", prompt: "secretly long" }] }] };
-    if (call.url.endsWith("/api/workflows/wf")) return {
-      status: 200,
-      body: {
-        workflowId: "wf", version: 2, name: "Review", nodes: [{
-          nodeId: "build", kind: "agent", role: "builder", agentId: "claude", prompt: "x".repeat(500),
-          inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000,
-        }],
-        edges: Array.from({ length: 150 }, (_, index) => ({ edgeId: `edge-${index}`, from: "build", to: "build", on: "success" })),
-      },
-    };
-    if (call.url.includes("/api/workflow-instances/i1")) return {
-      status: 200,
-      body: { instanceId: "i1", workflowId: "wf", workflowVersion: 2, runId: "r1", status: "succeeded", nodeStates: [], definition: { workflowId: "wf", version: 2, name: "Review", nodes: [], edges: [] }, attempts: [], events: [],
-        eventHistoryPruned: { prunedAt: 100, eventCount: 1200, retentionDays: 90 } },
-    };
-    return { status: 404, body: { error: "unexpected" } };
-  });
-  const listed = resultJson(await callTool(deps, "list_workflows", { limit: 5 }));
-  assert.equal(calls[0]!.url, `${CP_URL}/api/workflows?limit=5`);
-  assert.equal(listed.workflows[0].nodes[0].prompt, undefined, "list summaries omit graph prompt bodies");
-  const definition = resultJson(await callTool(deps, "get_workflow", { workflowId: "wf" }));
-  assert.equal(definition.workflow.edges.length, 150, "exact graph inspection does not apply the generic list cap");
-  assert.equal(definition.workflow.nodes[0].promptPreview.length, 401);
-  assert.equal(definition.workflow.nodes[0].promptTruncated, true);
-  const node = resultJson(await callTool(deps, "get_workflow_node", { workflowId: "wf", nodeId: "build" }));
-  assert.equal(node.node.prompt.length, 500, "single-node inspection preserves the complete validated prompt");
-  const detail = resultJson(await callTool(deps, "get_workflow_instance", { instanceId: "i1" }));
-  assert.equal(calls[3]!.url, `${CP_URL}/api/workflow-instances/i1`);
-  assert.equal(detail.instance.definition.workflowId, "wf");
-  assert.deepEqual(detail.instance.eventHistoryPruned, { prunedAt: 100, eventCount: 1200, retentionDays: 90 });
-});
-
 test("governance policy inspection and authoring tools preserve exact validated shapes", async () => {
   const stored = {
     policyId: "review:protected", name: "Protected review", effect: "ask", priority: 50, enabled: true,
@@ -3182,36 +3127,6 @@ test("Parent Control MCP reports when descendant requests exceed its response bo
     truncated: false,
     limit: 128,
   });
-});
-
-test("workflow authoring and execution tools route exact mutation bodies", async () => {
-  const { deps, calls } = makeDeps((call) => {
-    if (call.url.endsWith("/api/workflow-runs")) return { status: 201, body: { run: { id: "r1", title: "Run", sessionIds: ["s1"] }, sessions: [{ id: "s1" }], instance: { instanceId: "i1", nodeStates: [], definition: { nodes: [], edges: [] }, attempts: [], events: [] } } };
-    if (call.url.includes("/dispatch")) return { status: 200, body: { attempt: { attemptId: "a1" }, idempotent: false } };
-    if (call.url.endsWith("/api/artifacts")) return { status: 201, body: { artifactId: "art1", data: "large", kind: "patch" } };
-    if (call.url.includes("/complete") || call.url.includes("/resolve")) return { status: 200, body: { instanceId: "i1", nodeStates: [], definition: { nodes: [], edges: [] }, attempts: [], events: [] } };
-    return { status: 201, body: { workflowId: "wf", version: call.url.includes("/versions") ? 2 : 1, name: "Flow", nodes: [], edges: [] } };
-  });
-  const spec = { name: "Flow", maxTransitions: 4, nodes: [{ nodeId: "work" }], edges: [] };
-  await callTool(deps, "create_workflow_definition", spec);
-  await callTool(deps, "create_workflow_version", { workflowId: "wf", ...spec, name: "Flow v2" });
-  await callTool(deps, "create_workflow_run", {
-    runnerId: "runner", workspaceId: "ws", workflowId: "wf", task: "Do it", agentBindings: { worker: "claude" },
-  });
-  await callTool(deps, "dispatch_workflow_node", { instanceId: "i1", nodeId: "work", dispatchKey: "i1:work:1" });
-  const artifact = resultJson(await callTool(deps, "create_workflow_artifact", {
-    runId: "r1", sessionId: "s1", kind: "patch", name: "change.diff", mimeType: "text/x-diff", encoding: "utf8", data: "+done",
-  }));
-  await callTool(deps, "complete_workflow_attempt", { attemptId: "a1", outcome: "success", outputs: { patch: "art1" } });
-  await callTool(deps, "resolve_workflow_gate", { instanceId: "i1", nodeId: "gate", outcome: "success" });
-
-  assert.equal(calls[0]!.url, `${CP_URL}/api/workflows`);
-  assert.equal(calls[1]!.url, `${CP_URL}/api/workflows/wf/versions`);
-  assert.deepEqual(calls[2]!.body.agentBindings, { worker: "claude" });
-  assert.deepEqual(calls[3]!.body, { dispatchKey: "i1:work:1" });
-  assert.equal(artifact.artifact.data, undefined, "artifact payload is never echoed into model context");
-  assert.deepEqual(calls[5]!.body, { outcome: "success", outputs: { patch: "art1" } });
-  assert.deepEqual(calls[6]!.body, { outcome: "success" });
 });
 
 /* -------------------------------------------------------------------------- */

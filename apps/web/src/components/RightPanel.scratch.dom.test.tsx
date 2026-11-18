@@ -175,7 +175,7 @@ const client = {
     return { path: dir, entries };
   },
   readSessionFile: async (_id: string, path: string) => ({ path, content: "fixture\n", size: 8 }),
-  sessionWorkflowArtifacts: async () => ({ artifacts: [] }),
+  sessionArtifacts: async () => ({ artifacts: [] }),
   sideChat: async (parentSessionId: string) => ({
     sideChat: {
       parentSessionId,

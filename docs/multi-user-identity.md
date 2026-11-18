@@ -131,7 +131,7 @@ The migration is idempotent across restarts.
 This foundation does not claim that operational redaction is safe publication. Authenticated
 [transcript exports](./transcript-exports.md) and expiring/revocable
 [transcript share links](./transcript-sharing.md) use a versioned least-data projection rather than
-normal authenticated DTOs. Authenticated [workflow artifact exports](./artifact-exports.md) instead
+normal authenticated DTOs. Authenticated [session artifact exports](./artifact-exports.md) instead
 return exact raw bytes after scope and integrity checks, with an explicit unredacted warning.
 Runner-specific rotating credentials and runner-local secret references are documented in
 [runner credentials and local secrets](./runner-credentials-and-secrets.md). External vault

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { AutomationAction, AutomationSchedule, RunnerView, WorkflowDefinition } from "@wollipog/protocol";
+import type { AutomationSchedule, RunnerView } from "@wollipog/protocol";
 import { agentDisplayName } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
 import { describeSchedule, specOf } from "../automation-form.js";
@@ -26,20 +26,17 @@ import { useAutomationPolling } from "./useAutomationPolling.js";
 export interface TargetNames {
   runners: ReadonlyMap<string, RunnerView>;
   sessionTitle: (sessionId: string) => string | undefined;
-  workflowName: (workflowId: string) => string | undefined;
 }
 
 /**
- * What an automation runs, as its list row names it (#2969): the agent, the workflow or the session,
+ * What an automation runs, as its list row names it (#2969): the agent or session,
  * by display name with its icon, and never an id. A target the lookups can't name reads as its kind.
  */
-export function actionTarget(action: AutomationAction, names: TargetNames): { icon: ReactNode; label: string } {
+export function actionTarget(action: AutomationSchedule["action"], names: TargetNames): { icon: ReactNode; label: string } {
   if (action.kind === "prompt_session") {
     return { icon: <InboxIcon size={14} aria-hidden="true" />, label: names.sessionTitle(action.sessionId) ?? "Session" };
   }
-  if (action.kind === "workflow_run") {
-    return { icon: <RunsIcon size={14} aria-hidden="true" />, label: names.workflowName(action.request.workflowId) ?? "Workflow" };
-  }
+  if (action.kind === "retired") return { icon: null, label: "The workflow action was removed." };
   // The agent the scheduler starts: a saved installation's agent wherever discovery now lists it,
   // else the stored agent (as `actionSentence` names it).
   const runner = names.runners.get(action.request.runnerId);
@@ -69,14 +66,14 @@ function viewerTimeZone(): string | undefined {
 /**
  * One automation (#2969, docs/design-system.md §5.2): a two-line row whose one open target is the
  * name, its one badge and its meta, and beside it an Enabled switch that saves at once. On a phone
- * line 2 keeps one whole fact: the next run while it is scheduled, the schedule while paused.
+ * line 2 keeps one whole fact: the next run while scheduled, the schedule while paused, or the
+ * reason when the action has been retired.
  */
-function AutomationRow({ item, now, zone, names, workflows, toggling, onOpen, onToggle }: {
+function AutomationRow({ item, now, zone, names, toggling, onOpen, onToggle }: {
   item: AutomationSchedule;
   now: number;
   zone: string | undefined;
   names: TargetNames;
-  workflows: readonly WorkflowDefinition[];
   toggling: boolean;
   onOpen: () => void;
   onToggle: () => void;
@@ -84,15 +81,16 @@ function AutomationRow({ item, now, zone, names, workflows, toggling, onOpen, on
   const titleId = `${useId().replace(/:/g, "")}-title`;
   const schedule = describeSchedule(item.cron, item.timezone, now, { viewerTimeZone: zone });
   const nextRun = item.nextFireAt !== undefined ? formatCalendarTime(item.nextFireAt, now, zone) : schedule.nextLabel;
-  const next = item.enabled ? nextRun && `Next ${nextRun}` : "Paused";
+  const retired = item.action.kind === "retired";
+  const next = retired ? undefined : item.enabled ? nextRun && `Next ${nextRun}` : "Paused";
   const target = actionTarget(item.action, names);
-  const badge = item.latestExecution?.status === "ceiling_paused" ? "last_run_ceiling_paused"
+  const badge = retired ? "paused" : item.latestExecution?.status === "ceiling_paused" ? "last_run_ceiling_paused"
     : item.latestExecution?.status === "failed" ? "last_run_failed"
-    : item.targetHealth || automationInstallationUnavailable(item, names.runners, workflows) ? "target_unavailable"
+    : item.targetHealth || automationInstallationUnavailable(item, names.runners) ? "target_unavailable"
       : null;
   return (
     <div className="row row-2 automation-row" data-automation-id={item.automationId}
-      data-phone-fact={next && item.enabled ? "next" : "schedule"}>
+      data-phone-fact={retired ? "target" : next && item.enabled ? "next" : "schedule"}>
       <button type="button" className="automation-row-open" onClick={onOpen}>
         <span className="row-body">
           <span className="row-line">
@@ -110,7 +108,7 @@ function AutomationRow({ item, now, zone, names, workflows, toggling, onOpen, on
           </span>
         </span>
       </button>
-      <span className="automation-row-trail">
+      {!retired && <span className="automation-row-trail">
         <Switch
           label="Enabled"
           describedBy={titleId}
@@ -119,40 +117,11 @@ function AutomationRow({ item, now, zone, names, workflows, toggling, onOpen, on
           className="ui-switch-standalone automation-row-switch"
           onChange={onToggle}
         />
-      </span>
+      </span>}
     </div>
   );
 }
 
-/**
- * The workflow definitions, for a workflow target's name and its roles' installations: loaded once
- * while the list holds a workflow action, and again only when it names a workflow not yet loaded, so
- * the list's poll stays one request. Until they arrive, and if they fail, a workflow reads as its kind.
- */
-function useWorkflowNames(items: readonly AutomationSchedule[]): WorkflowDefinition[] {
-  const api = useApi();
-  const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
-  const missing = useMemo(() => [...new Set(items.flatMap((item) => item.action.kind === "workflow_run"
-    ? [item.action.request.workflowId] : []))]
-    .filter((workflowId) => !workflows.some((workflow) => workflow.workflowId === workflowId))
-    .sort().join("\n"), [items, workflows]);
-  // A workflow the last load did not have is asked for once, not on every poll.
-  const asked = useRef(new Set<string>());
-  useEffect(() => {
-    const wanted = missing ? missing.split("\n").filter((workflowId) => !asked.current.has(workflowId)) : [];
-    if (!wanted.length) return;
-    let current = true;
-    void api.workflowDefinitions().then((result) => {
-      if (!current) return;
-      for (const workflowId of wanted) asked.current.add(workflowId);
-      setWorkflows(result);
-    }, () => {
-      if (current) for (const workflowId of wanted) asked.current.add(workflowId);
-    });
-    return () => { current = false; };
-  }, [api, missing]);
-  return workflows;
-}
 
 function ListSkeleton() {
   return (
@@ -200,7 +169,6 @@ export function AutomationsView() {
     setListLoaded(true);
   }, [api]);
   const { error, mutate, retry } = useAutomationPolling(load);
-  const workflows = useWorkflowNames(items);
   const now = useTimelineClock(items.length > 0);
   const zone = useMemo(viewerTimeZone, []);
 
@@ -210,8 +178,7 @@ export function AutomationsView() {
       const title = sessions.get(sessionId)?.title;
       return title ? sessionDisplayTitle(title) || undefined : undefined;
     },
-    workflowName: (workflowId) => workflows.find((workflow) => workflow.workflowId === workflowId)?.name,
-  }), [runners, sessions, workflows]);
+  }), [runners, sessions]);
 
   const scheduled = useMemo(() => items.filter((item) => item.enabled).sort(byNextRun), [items]);
   const paused = useMemo(() => items.filter((item) => !item.enabled), [items]);
@@ -234,6 +201,7 @@ export function AutomationsView() {
   }, [items]);
 
   const toggle = (item: AutomationSchedule) => {
+    if (item.action.kind === "retired") return;
     const automationId = item.automationId;
     const active = listRef.current?.ownerDocument.activeElement;
     if (active?.closest(".automation-row")?.getAttribute("data-automation-id") === automationId) {
@@ -276,7 +244,6 @@ export function AutomationsView() {
             now={now}
             zone={zone}
             names={names}
-            workflows={workflows}
             toggling={toggling.has(item.automationId)}
             onOpen={() => navigate({ name: "automation", id: item.automationId })}
             onToggle={() => toggle(item)}

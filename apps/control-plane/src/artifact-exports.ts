@@ -1,16 +1,16 @@
 import { Buffer } from "node:buffer";
-import type { WorkflowArtifact, WorkflowArtifactKind } from "@wollipog/protocol";
+import type { Artifact, ArtifactKind } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
-import { validateWorkflowArtifact } from "./workflow-artifacts.js";
+import { validateArtifact } from "./artifacts.js";
 
 const MAX_STORED_ARTIFACT_TEXT_BYTES = 8 * 1024 * 1024;
 
-export type WorkflowArtifactExportResult =
+export type ArtifactExportResult =
   | { ok: false; status: 404 | 422; error: string; code: "not_found" | "invalid_artifact" }
   | { ok: true; body: Buffer; filename: string; headers: Record<string, string> };
 
-const FALLBACK_EXTENSION: Record<Exclude<WorkflowArtifactKind, "screenshot" | "video">, string> = {
+const FALLBACK_EXTENSION: Record<Exclude<ArtifactKind, "screenshot" | "video">, string> = {
   html_preview: "html",
   patch: "patch",
   review_report: "md",
@@ -18,21 +18,15 @@ const FALLBACK_EXTENSION: Record<Exclude<WorkflowArtifactKind, "screenshot" | "v
   verdict: "json",
 };
 
-export function principalCanReadWorkflowArtifact(
+export function principalCanReadArtifact(
   db: ControlPlaneDb,
   principal: AuthPrincipal,
   artifact: { runId?: string; sessionId?: string },
 ): boolean {
-  if (artifact.runId) {
-    const scope = db.workflowRunScope(artifact.runId);
-    if (!scope?.runnerId || !db.canAccessRunner(principal, scope.runnerId)) return false;
-    if (scope.workspaceId && !db.canAccessWorkspace(principal, scope.runnerId, scope.workspaceId)) return false;
-    return true;
-  }
   return Boolean(artifact.sessionId && db.canAccessSession(principal, artifact.sessionId));
 }
 
-function storedArtifactRequest(artifact: WorkflowArtifact) {
+function storedArtifactRequest(artifact: Artifact) {
   return {
     ...(artifact.runId ? { runId: artifact.runId } : {}),
     ...(artifact.sessionId ? { sessionId: artifact.sessionId } : {}),
@@ -46,21 +40,21 @@ function storedArtifactRequest(artifact: WorkflowArtifact) {
 }
 
 /**
- * Return the exact validated artifact bytes as an authenticated attachment. Raw workflow artifacts
+ * Return the exact validated artifact bytes as an authenticated attachment. Raw session artifacts
  * are intentionally not redacted; corrupt or legacy-out-of-contract rows fail closed.
  */
-export function buildAuthorizedWorkflowArtifactExport(
+export function buildAuthorizedArtifactExport(
   db: ControlPlaneDb,
   principal: HumanPrincipal,
   artifactId: string,
-): WorkflowArtifactExportResult {
-  let preflight: ReturnType<ControlPlaneDb["workflowArtifactExportPreflight"]>;
+): ArtifactExportResult {
+  let preflight: ReturnType<ControlPlaneDb["artifactExportPreflight"]>;
   try {
-    preflight = db.workflowArtifactExportPreflight(artifactId);
+    preflight = db.artifactExportPreflight(artifactId);
   } catch {
     return { ok: false, status: 422, error: "artifact content is invalid", code: "invalid_artifact" };
   }
-  if (!preflight || !principalCanReadWorkflowArtifact(db, principal, preflight.artifact)) {
+  if (!preflight || !principalCanReadArtifact(db, principal, preflight.artifact)) {
     return { ok: false, status: 404, error: "artifact not found", code: "not_found" };
   }
   if (!Number.isSafeInteger(preflight.storedDataBytes) || preflight.storedDataBytes < 0 ||
@@ -68,17 +62,17 @@ export function buildAuthorizedWorkflowArtifactExport(
     return { ok: false, status: 422, error: "artifact content is invalid", code: "invalid_artifact" };
   }
 
-  let artifact: WorkflowArtifact | null;
+  let artifact: Artifact | null;
   try {
-    artifact = db.getWorkflowArtifact(artifactId);
+    artifact = db.getArtifact(artifactId);
   } catch {
     return { ok: false, status: 422, error: "artifact content is invalid", code: "invalid_artifact" };
   }
   if (!artifact) return { ok: false, status: 404, error: "artifact not found", code: "not_found" };
-  if (!principalCanReadWorkflowArtifact(db, principal, artifact)) {
+  if (!principalCanReadArtifact(db, principal, artifact)) {
     return { ok: false, status: 404, error: "artifact not found", code: "not_found" };
   }
-  const validated = validateWorkflowArtifact(storedArtifactRequest(artifact));
+  const validated = validateArtifact(storedArtifactRequest(artifact));
   if (!validated.ok || validated.value.data !== artifact.data || validated.value.name !== artifact.name ||
       validated.value.sizeBytes !== artifact.sizeBytes || validated.value.sha256 !== artifact.sha256) {
     return { ok: false, status: 422, error: "artifact content is invalid", code: "invalid_artifact" };

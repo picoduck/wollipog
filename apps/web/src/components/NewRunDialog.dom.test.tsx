@@ -7,11 +7,9 @@ import { Window } from "happy-dom";
 import type {
   AgentDefinition,
   CreateRunRequest,
-  CreateWorkflowRunRequest,
   ProjectView,
   RunnerView,
   UiSnapshotMessage,
-  WorkflowDefinition,
 } from "@wollipog/protocol";
 import { ApiError, api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -88,22 +86,6 @@ const runner: RunnerView = {
   protocolVersion: 63,
 };
 
-const workflow: WorkflowDefinition = {
-  workflowId: "builtin:build-review",
-  version: 1,
-  source: "builtin",
-  name: "Build + Review",
-  maxTransitions: 4,
-  edges: [],
-  createdBy: { kind: "system" },
-  createdAt: 1,
-  nodes: [
-    { nodeId: "build", kind: "agent", role: "builder", agentId: "claude", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 },
-    { nodeId: "review", kind: "agent", role: "reviewer", agentId: "codex", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 },
-    { nodeId: "approve", kind: "human_gate", role: "approver", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 },
-  ],
-};
-
 class FakeSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;
   onopen: (() => void) | null = null;
@@ -141,7 +123,6 @@ interface Fixture {
   root: Root;
   socket: FakeSocket;
   parallelRequests: CreateRunRequest[];
-  workflowRequests: CreateWorkflowRunRequest[];
   pushed: View[];
   closed: () => number;
 }
@@ -159,7 +140,6 @@ async function mountFixture(
   const root = createRoot(mountPoint);
   const socket = new FakeSocket();
   const parallelRequests: CreateRunRequest[] = [];
-  const workflowRequests: CreateWorkflowRunRequest[] = [];
   const pushed: View[] = [];
   let closed = 0;
   fixtureSequence += 1;
@@ -176,16 +156,11 @@ async function mountFixture(
   };
   const client = {
     ...api,
-    workflowDefinitions: async () => [workflow],
     ...(options.preview ? { providerAccountSelection: async (_runnerId: string, target: { agentId?: string }) => options.preview!(target.agentId ?? "") } : {}),
     createRun: async (request: CreateRunRequest) => {
       parallelRequests.push(structuredClone(request));
       if (options.failCreate) throw options.failCreate;
       return { run: { id: "parallel-run" }, sessions: [] };
-    },
-    createWorkflowRun: async (request: CreateWorkflowRunRequest) => {
-      workflowRequests.push(structuredClone(request));
-      return { run: { id: "workflow-run" }, sessions: [], instance: {} };
     },
   } as unknown as ApiClient;
 
@@ -200,7 +175,7 @@ async function mountFixture(
   });
   await act(async () => { socket.push(snapshot(snapshotOverrides)); });
   await settle();
-  return { container, mountPoint, root, socket, parallelRequests, workflowRequests, pushed, closed: () => closed };
+  return { container, mountPoint, root, socket, parallelRequests, pushed, closed: () => closed };
 }
 
 async function unmountFixture(fixture: Fixture): Promise<void> {
@@ -316,29 +291,13 @@ test("Task is the first field and focused, Title (Optional) is the last, and not
     assert.equal(labels.at(-1), "Title (Optional)");
     assert.equal(domWindow.document.activeElement, dialog(fixture.container).querySelector("textarea"));
     assertNoDomNode(dialog(fixture.container).querySelector("select"), "the dialog uses the shared Select");
-    await chooseType(fixture.container, "Run a Workflow");
-    assertNoDomNode(dialog(fixture.container).querySelector("select"), "Run a Workflow uses the shared Select");
     assert.equal(fieldLabels(fixture.container).at(-1), "Title (Optional)");
   } finally {
     await unmountFixture(fixture);
   }
 });
 
-test("the type is a Compare Agents | Run a Workflow switch with one sentence for the selected type", async () => {
-  const fixture = await mountFixture();
-  try {
-    const helper = () => dialog(fixture.container).querySelector('[role="radiogroup"][aria-label="Run Type"] + .field-helper')?.textContent;
-    assert.equal(helper(), "Each agent gets the same task in its own worktree.");
-    await chooseType(fixture.container, "Run a Workflow");
-    assert.equal(helper(), "Agents take turns as roles, and you approve between steps.");
-    assertNoDomNode(dialog(fixture.container).querySelector(".choice-row-title + .choice-row-desc"), "no preset rows remain");
-    assert.doesNotMatch(dialog(fixture.container).textContent ?? "", /Preset|Parallel Comparison|Workers start idle/u);
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("with five available agents across three drivers and one signed out, three start chosen, distinct drivers first", async () => {
+test("a filled comparison enables and submits three available agents from distinct drivers", async () => {
   const agents: AgentDefinition[] = [
     claude,
     { ...claude, id: "claude-wsl", context: { kind: "wsl", distro: "Ubuntu" } },
@@ -361,8 +320,20 @@ test("with five available agents across three drivers and one signed out, three 
     assert.equal(rows.find((row) => row.title === "Gemini")?.second, "Build Server");
     assert.ok(dialog(fixture.container).querySelector(".surface.new-run-agents"), "the agents are one surface");
     await enterTask(fixture.container);
+    assert.equal(footerReason(fixture.container), null);
     await clickPrimary(fixture.container, "Run 3 Agents");
-    assert.deepEqual(fixture.parallelRequests[0]?.agentIds, ["claude", "codex", "gemini"]);
+    assert.deepEqual(fixture.parallelRequests, [{
+      runnerId: runner.runnerId,
+      workspaceId: "workspace-1",
+      projectId: project.id,
+      projectLocationId: "location-1",
+      agentIds: ["claude", "codex", "gemini"],
+      task: "Implement the Project flow",
+      title: undefined,
+      useWorktree: true,
+    }]);
+    assert.deepEqual(fixture.pushed, [{ name: "run", id: "parallel-run" }]);
+    assert.equal(fixture.closed(), 1);
   } finally {
     await unmountFixture(fixture);
   }
@@ -466,58 +437,6 @@ test("Project's one sentence says who can see the agents' sessions", async () =>
     } finally {
       await unmountFixture(fixture);
     }
-  }
-});
-
-test("Run a Workflow names the workflow without its version and labels each role in Title Case, prebound", async () => {
-  const fixture = await mountFixture();
-  try {
-    await choose(fixture.container, "Project", "Wollipog");
-    await chooseType(fixture.container, "Run a Workflow");
-    assert.equal(trigger(fixture.container, "Workflow").getAttribute("aria-label"), "Workflow: Build + Review");
-    assert.doesNotMatch(dialog(fixture.container).textContent ?? "", /· v1/u);
-    await openSelect(fixture.container, "Workflow");
-    assert.deepEqual(openOptions(fixture.container).map(({ label, text }) => [label, text]), [["Build + Review", "Build + ReviewVersion 1"]]);
-    await act(async () => { domWindow.document.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never); });
-    assert.equal(trigger(fixture.container, "Builder Agent").getAttribute("aria-label"), "Builder Agent: Claude Code");
-    assert.equal(trigger(fixture.container, "Reviewer Agent").getAttribute("aria-label"), "Reviewer Agent: Codex App Server");
-    const roles = dialog(fixture.container).querySelector("fieldset.new-run-roles");
-    assert.equal(roles?.querySelector("legend")?.textContent, "Roles");
-    assert.deepEqual([...roles!.querySelectorAll(".facts dt, .facts dd")].map((node) => node.textContent), ["Approver", "You, in the run"]);
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("a role the person rebinds keeps that agent through a Machine update, and is sent as chosen", async () => {
-  const fixture = await mountFixture();
-  try {
-    await choose(fixture.container, "Project", "Wollipog");
-    await chooseType(fixture.container, "Run a Workflow");
-    await choose(fixture.container, "Reviewer Agent", "Claude Code");
-    // The same Machine, reported again: its agents arrive as new objects.
-    await act(async () => { fixture.socket.push(snapshot({ runners: [{ ...runner, agents: runner.agents.map((agent) => ({ ...agent })) }] })); });
-    await settle();
-    assert.equal(trigger(fixture.container, "Reviewer Agent").getAttribute("aria-label"), "Reviewer Agent: Claude Code");
-    await enterTask(fixture.container);
-    await clickPrimary(fixture.container, "Start Workflow");
-    assert.deepEqual(fixture.workflowRequests[0]?.agentBindings, { claude: "claude", codex: "claude" });
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("a role whose matching agent is signed out starts unbound, and Start Workflow says why", async () => {
-  const fixture = await mountFixture({ runners: [{ ...runner, agents: [claude, { ...codex, authStatus: "unauthenticated" }] }] });
-  try {
-    await choose(fixture.container, "Project", "Wollipog");
-    await chooseType(fixture.container, "Run a Workflow");
-    await enterTask(fixture.container);
-    assert.equal(trigger(fixture.container, "Reviewer Agent").getAttribute("aria-label"), "Reviewer Agent: Choose an Agent…");
-    assert.equal(button(fixture.container, "Start Workflow").disabled, true);
-    assert.equal(footerReason(fixture.container), "Choose an agent for every role.");
-  } finally {
-    await unmountFixture(fixture);
   }
 });
 
@@ -632,26 +551,6 @@ test("parallel run submission sends the selected exact Project identity", async 
       useWorktree: true,
     });
     assert.deepEqual(fixture.pushed.at(-1), { name: "run", id: "parallel-run" });
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("workflow run submission sends the selected exact Project identity", async () => {
-  const fixture = await mountFixture();
-  try {
-    await choose(fixture.container, "Project", "Wollipog");
-    await chooseType(fixture.container, "Run a Workflow");
-    await enterTask(fixture.container);
-    await clickPrimary(fixture.container, "Start Workflow");
-
-    assert.equal(fixture.workflowRequests.length, 1);
-    assert.equal(fixture.workflowRequests[0]?.runnerId, runner.runnerId);
-    assert.equal(fixture.workflowRequests[0]?.workspaceId, "workspace-1");
-    assert.equal(fixture.workflowRequests[0]?.projectId, project.id);
-    assert.equal(fixture.workflowRequests[0]?.projectLocationId, "location-1");
-    assert.deepEqual(fixture.workflowRequests[0]?.agentBindings, { claude: "claude", codex: "codex" });
-    assert.equal(fixture.workflowRequests[0]?.workflowVersion, 1);
   } finally {
     await unmountFixture(fixture);
   }
@@ -803,25 +702,6 @@ test("a member the policy can place names no account and shows what it expects (
     assert.match(dialog(fixture.container).textContent ?? "", /first account in the machine's Priority Order/u);
     await clickPrimary(fixture.container, "Run 2 Agents");
     assert.equal(fixture.parallelRequests[0]?.providerAccountIds, undefined, "the expected account isn't an explicit override");
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("a workflow role asks for its account by role, and rebinding the role forgets it (#4353)", async () => {
-  const fixture = await mountFixture({ runners: [accountRunner] }, { preview: noEligible });
-  try {
-    await choose(fixture.container, "Project", "No Project");
-    await chooseType(fixture.container, "Run a Workflow");
-    await settlePreviews();
-    await enterTask(fixture.container);
-    assert.equal(footerReason(fixture.container), "Choose an account for Builder Agent to continue.");
-    await openSelect(fixture.container, "Account for Builder Agent");
-    await act(async () => { fixture.container.querySelector<HTMLButtonElement>('[role="option"]:not([aria-disabled="true"])')?.click(); });
-    await settle();
-    assert.equal(footerReason(fixture.container), null);
-    await clickPrimary(fixture.container, "Start Workflow");
-    assert.deepEqual(fixture.workflowRequests[0]?.providerAccountBindings, { claude: "work" });
   } finally {
     await unmountFixture(fixture);
   }

@@ -1,7 +1,7 @@
-import type { WorkflowArtifactKind } from "@wollipog/protocol";
+import type { ArtifactKind } from "@wollipog/protocol";
 
 /** Never let an agent-authored display name choose an executable download extension. */
-export function artifactDownloadFilename(kind: WorkflowArtifactKind, mimeType: string): string {
+export function artifactDownloadFilename(kind: ArtifactKind, mimeType: string): string {
   const extension = kind === "screenshot"
     ? mimeType === "image/png" ? "png"
       : mimeType === "image/jpeg" || mimeType === "image/jpg" ? "jpg"

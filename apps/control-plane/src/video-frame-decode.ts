@@ -9,7 +9,7 @@ import { constants } from "node:fs";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { videoBytesMatchMime } from "./workflow-artifacts.js";
+import { videoBytesMatchMime } from "./artifacts.js";
 
 export const SHORT_VIDEO_PROFILE = {
   sourceBytes: 8 * 1024 * 1024,

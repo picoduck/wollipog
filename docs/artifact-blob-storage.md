@@ -1,6 +1,6 @@
-# Content-addressed workflow artifact storage
+# Content-addressed session artifact storage
 
-Workflow and large session-event artifact bytes are stored outside SQLite under a SHA-256-addressed sidecar root. The
+Session attachments and large session-event artifact bytes are stored outside SQLite under a SHA-256-addressed sidecar root. The
 default root is `<CONTROL_PLANE_DB>.artifacts` beside the database; set
 `CONTROL_PLANE_ARTIFACT_DIR` to place it on a different persistent volume. SQLite remains the source
 of truth for artifact ownership, provenance, MIME/encoding contract, exact byte size, digest, and

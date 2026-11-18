@@ -55,8 +55,6 @@
     "src/usage-routes.test.ts",
     "src/web-dist.test.ts",
     "src/wire-compat.test.ts",
-    "src/workflow-action-reconciliation-route.integration.test.ts",
-    "src/workflow-graphs.test.ts",
-    "src/workflow-persistence.test.ts"
+    "src/workflow-action-reconciliation-route.integration.test.ts"
   ]
 }

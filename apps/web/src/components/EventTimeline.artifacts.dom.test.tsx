@@ -4,7 +4,7 @@ import { test } from "node:test";
 import React, { act, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactView } from "@wollipog/protocol";
 import { api } from "../api.js";
 import type { TimelineItem } from "../timeline.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -57,7 +57,7 @@ elementPrototype.getBoundingClientRect = function (this: HTMLElement) {
 };
 
 const PNG = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 2]);
-const shot = (id: string): WorkflowArtifactView => ({
+const shot = (id: string): ArtifactView => ({
   artifactId: id, sessionId: "session_1", kind: "screenshot", name: `${id}.png`, mimeType: "image/png",
   encoding: "base64", sizeBytes: PNG.byteLength, sha256: createHash("sha256").update(PNG).digest("hex"),
   createdBy: { kind: "agent", id: "session_1" }, createdAt: 1,

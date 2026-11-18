@@ -58,7 +58,7 @@ export function seedDelegatedUiEvidence(databasePath: string, workspacePath: str
     if (!child.ok || !child.data) throw new Error(child.error ?? "child creation failed");
     db.updateSessionStatus(child.data.id, "running", Date.now());
     const bytes = readFileSync(fileURLToPath(new URL("../../public/icons/icon-192.png", import.meta.url)));
-    const artifact = svc.createWorkflowArtifact({
+    const artifact = svc.createArtifact({
       sessionId: child.data.id, kind: "screenshot", name: "evidence.png", mimeType: "image/png",
       encoding: "base64", data: bytes.toString("base64"),
     }, { kind: "agent", id: child.data.id });

@@ -31,7 +31,7 @@ export const automationPayloadSchema = object({
     object({kind: {const: "catch_up"}, maxRuns: {type: "integer", minimum: 1}}, ["kind", "maxRuns"])]},
   runnerPolicy: {oneOf: [object({kind: {const: "wait"}}, ["kind"]),
     object({kind: {const: "expire"}, afterMinutes: positive}, ["kind", "afterMinutes"]),
-    object({kind: {const: "alternate"}, targets: {type: "array", items: object({...target, agentId: text, agentBindings: {type: "object"}, orchestratorAgentId: text}, ["runnerId", "workspaceId"])}, expireAfterMinutes: positive}, ["kind", "targets"])]},
+    object({kind: {const: "alternate"}, targets: {type: "array", items: object({...target, agentId: text}, ["runnerId", "workspaceId"])}, expireAfterMinutes: positive}, ["kind", "targets"])]},
   concurrencyPolicy: {enum: ["wait", "skip", "parallel"]},
   limits: object({maxCostUsd: positive, maxToolCalls: {type: "integer", minimum: 1}}, ["maxCostUsd", "maxToolCalls"]),
   notifications: object({pushEvents: {type: "array", items: {enum: ["started", "succeeded", "failed", "expired"]}}}, ["pushEvents"]),
@@ -40,8 +40,5 @@ export const automationPayloadSchema = object({
       useWorktree: boolean, config: {type: "object"}, providerAccountId: text, role: text, orchestrator: boolean,
       campaign: {type: "object", description: "Scheduled campaign definition; shared campaign authority checks apply."}}, ["runnerId", "workspaceId", "agentId"])}, ["kind", "request"]),
     object({kind: {const: "prompt_session"}, sessionId: text, request: object({text, config: {type: "object"}, slashCommand: text}, ["text"])}, ["kind", "sessionId", "request"]),
-    object({kind: {const: "workflow_run"}, request: object({...target, workflowId: text, workflowVersion: {type: "integer"}, task: text,
-      title: text, agentBindings: {type: "object"}, orchestratorAgentId: text, config: {type: "object"},
-      useWorktree: boolean}, ["runnerId", "workspaceId", "workflowId", "task"])}, ["kind", "request"]),
   ]},
 }, ["name", "cron", "timezone", "enabled", "misfirePolicy", "runnerPolicy", "concurrencyPolicy", "limits", "notifications", "action"]);

@@ -1,4 +1,4 @@
-import type { WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactView } from "@wollipog/protocol";
 
 export type ArtifactPreviewClass = "html" | "image" | "video" | "json" | "markdown" | "text" | "unsupported";
 
@@ -29,7 +29,7 @@ export function normalizeBrowserUrl(input: string): BrowserUrlResult {
   return { ok: true, url: parsed.href };
 }
 
-export function classifyArtifactPreview(artifact: Pick<WorkflowArtifactView, "kind" | "mimeType" | "encoding">): ArtifactPreviewClass {
+export function classifyArtifactPreview(artifact: Pick<ArtifactView, "kind" | "mimeType" | "encoding">): ArtifactPreviewClass {
   if (artifact.kind === "html_preview" && artifact.mimeType === "text/html" && artifact.encoding === "utf8") return "html";
   if (artifact.kind === "screenshot" && artifact.mimeType.startsWith("image/") && artifact.encoding === "base64") return "image";
   if (artifact.kind === "video" && ["video/mp4", "video/webm"].includes(artifact.mimeType) && artifact.encoding === "base64") return "video";
@@ -62,7 +62,7 @@ export class ArtifactVerificationError extends Error {
 }
 
 /** Validate the exact authenticated response before any bytes reach a renderer. */
-export async function verifyArtifactPreviewBlob(artifact: WorkflowArtifactView, blob: Blob): Promise<ArrayBuffer> {
+export async function verifyArtifactPreviewBlob(artifact: ArtifactView, blob: Blob): Promise<ArrayBuffer> {
   if (!Number.isSafeInteger(artifact.sizeBytes) || artifact.sizeBytes < 0 || blob.size !== artifact.sizeBytes) {
     throw new ArtifactVerificationError("Artifact preview length does not match its immutable metadata.");
   }

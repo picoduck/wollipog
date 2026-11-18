@@ -85,13 +85,13 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
   - A creator shares what it has not spent across its open child slots plus one share it keeps
     for itself, in whole cents. Once no share reaches one cent, child creation is refused with a
     message naming the shared thread budget.
-  - A session in a launched tree cannot start runs or workflows. An agent may lower a tree member's
+  - A session in a launched tree cannot start runs. An agent may lower a tree member's
     cost budget but never raise or clear it.
   - Deleting a session never refunds its spend, whether one at a time or with its Machine: the
     thread keeps the deleted session's final cost inside its own tree.
-- A thread cannot start runs, workflows or Orchestrators, whose children it could not count.
+- A thread cannot start runs or Orchestrators, whose children it could not count.
   This holds even when an Orchestrator would come from a saved default. Its connection also
-  cannot call `auto_create`, `auto_update`, `auto_enable`, `auto_test`, `workflow_run`,
+  cannot call `auto_create`, `auto_update`, `auto_enable`, `auto_test`,
   `session_role`, `session_adopt` or `session_fork`, since scheduled work, a converted role, an
   adopted session or a fork (materialized on the runner without that session creation) would run
   outside these limits. The owner can still do any of these directly.

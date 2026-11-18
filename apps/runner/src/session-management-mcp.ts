@@ -295,7 +295,7 @@ function providerAccountChoiceSuffix(data: Json): string {
   const retryAt = typeof selection.retryAt === "number" ? ` retryAt=${new Date(selection.retryAt).toISOString()}` : "";
   return ` [${PROVIDER_ACCOUNT_CHOICE_REQUIRED} refusal=${String(selection.refusal)} actions=${actions}${retryAt}] ` +
     "choose_account: read get_provider_account_selection (wollipog session accounts) and pass an accountRef whose canName is true " +
-    "as create_session providerAccountId (wollipog session create --provider-account), create_run providerAccountIds or create_workflow_run providerAccountBindings.";
+    "as create_session providerAccountId (wollipog session create --provider-account), or create_run providerAccountIds.";
 }
 
 /** A control plane below v337 can't read an account reference. Sending one would be refused as an
@@ -1193,43 +1193,6 @@ async function readSessionEventPage(
   }
 }
 
-function mapWorkflowNode(node: Json, includePrompt = false): Json {
-  const prompt = typeof node?.prompt === "string" ? node.prompt : undefined;
-  return {
-    nodeId: node?.nodeId,
-    kind: node?.kind,
-    role: node?.role,
-    ...(node?.agentId !== undefined ? { agentId: node.agentId } : {}),
-    ...(node?.policyId !== undefined ? { policyId: node.policyId } : {}),
-    ...(prompt !== undefined
-      ? includePrompt
-        ? { prompt }
-        : { promptPreview: truncate(prompt, MAX_LINE), promptTruncated: prompt.length > MAX_LINE }
-      : {}),
-    inputs: capArray(node?.inputs, 16),
-    outputs: capArray(node?.outputs, 16),
-    retry: node?.retry,
-    timeoutMs: node?.timeoutMs,
-    ...(node?.stopCondition !== undefined ? { stopCondition: node.stopCondition } : {}),
-  };
-}
-
-function mapWorkflowDefinition(definition: Json, includeGraph = false): Json {
-  return {
-    workflowId: definition?.workflowId,
-    version: definition?.version,
-    name: definition?.name,
-    description: definition?.description ?? null,
-    source: definition?.source,
-    maxTransitions: definition?.maxTransitions,
-    createdBy: definition?.createdBy,
-    createdAt: definition?.createdAt,
-    ...(includeGraph
-      ? { nodes: capArray(definition?.nodes, 64).map((node) => mapWorkflowNode(node)), edges: capArray(definition?.edges, 256) }
-      : { nodes: capArray(definition?.nodes).map((node) => ({ nodeId: node?.nodeId, kind: node?.kind, role: node?.role, agentId: node?.agentId, policyId: node?.policyId })) }),
-  };
-}
-
 function mapGovernancePolicy(policy: Json): Json {
   return {
     policyId: policy?.policyId,
@@ -1245,40 +1208,6 @@ function mapGovernancePolicy(policy: Json): Json {
     updatedAt: policy?.updatedAt,
   };
 }
-
-function mapWorkflowInstance(instance: Json, includeDetail = false): Json {
-  return {
-    instanceId: instance?.instanceId,
-    workflowId: instance?.workflowId,
-    workflowVersion: instance?.workflowVersion,
-    runId: instance?.runId,
-    status: instance?.status,
-    transitionCount: instance?.transitionCount,
-    nodeStates: capArray(instance?.nodeStates),
-    createdBy: instance?.createdBy,
-    createdAt: instance?.createdAt,
-    updatedAt: instance?.updatedAt,
-    completedAt: instance?.completedAt ?? null,
-    ...(instance?.eventHistoryPruned ? { eventHistoryPruned: instance.eventHistoryPruned } : {}),
-    ...(includeDetail
-      ? {
-          definition: mapWorkflowDefinition(instance?.definition, true),
-          attempts: capArray(instance?.attempts),
-          events: capArray(instance?.events),
-          attemptsTruncated: instance?.attemptsTruncated ?? false,
-          eventsTruncated: instance?.eventsTruncated ?? false,
-        }
-      : {}),
-  };
-}
-
-const WORKFLOW_SPEC_PROPERTIES: Json = {
-  name: { type: "string" },
-  description: { type: "string" },
-  maxTransitions: { type: "integer", minimum: 1, maximum: 1000 },
-  nodes: { type: "array", minItems: 1, maxItems: 64, items: { type: "object" } },
-  edges: { type: "array", maxItems: 256, items: { type: "object" } },
-};
 
 const GOVERNANCE_POLICY_PROPERTIES: Json = {
   policyId: { type: "string" },
@@ -3529,97 +3458,6 @@ export const TOOLS: McpTool[] = [
       return textResult({ policy: mapGovernancePolicy(policy) });
     },
   },
-  {
-    name: "list_workflows",
-    description: "List the latest immutable workflow definitions and their graph roles.",
-    inputSchema: {
-      type: "object",
-      properties: { limit: { type: "integer", minimum: 1, maximum: 100 } },
-      additionalProperties: false,
-    },
-    handler: async (args, deps) => {
-      const limit = Math.min(100, Math.max(1, typeof args?.limit === "number" ? Math.floor(args.limit) : 100));
-      const r = await cpFetch(deps, "GET", `/api/workflows?limit=${limit}`);
-      if (!r.ok) return errorResult(r.message);
-      return textResult({ workflows: capArray(r.data).map((definition) => mapWorkflowDefinition(definition)) });
-    },
-  },
-  {
-    name: "get_workflow",
-    description: "Inspect one workflow definition with exact topology and contracts plus bounded prompt previews.",
-    inputSchema: {
-      type: "object",
-      properties: { workflowId: { type: "string" }, version: { type: "integer", minimum: 1 } },
-      required: ["workflowId"],
-      additionalProperties: false,
-    },
-    handler: async (args, deps) => {
-      if (typeof args?.workflowId !== "string" || !args.workflowId) return errorResult("workflowId is required");
-      const query = typeof args.version === "number" ? `?version=${Math.floor(args.version)}` : "";
-      const r = await cpFetch(deps, "GET", `/api/workflows/${encodeURIComponent(args.workflowId)}${query}`);
-      if (!r.ok) return errorResult(r.message);
-      return textResult({ workflow: mapWorkflowDefinition(r.data, true) });
-    },
-  },
-  {
-    name: "get_workflow_node",
-    description: "Inspect one exact workflow node, including its complete validated prompt and artifact contracts.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        workflowId: { type: "string" },
-        version: { type: "integer", minimum: 1 },
-        nodeId: { type: "string" },
-      },
-      required: ["workflowId", "nodeId"],
-      additionalProperties: false,
-    },
-    handler: async (args, deps) => {
-      if (typeof args?.workflowId !== "string" || !args.workflowId || typeof args?.nodeId !== "string" || !args.nodeId) {
-        return errorResult("workflowId and nodeId are required");
-      }
-      const query = typeof args.version === "number" ? `?version=${Math.floor(args.version)}` : "";
-      const r = await cpFetch(deps, "GET", `/api/workflows/${encodeURIComponent(args.workflowId)}${query}`);
-      if (!r.ok) return errorResult(r.message);
-      const node = capArray(r.data?.nodes, 64).find((candidate) => candidate?.nodeId === args.nodeId);
-      if (!node) return errorResult(`workflow node '${args.nodeId}' was not found`);
-      return textResult({ node: mapWorkflowNode(node, true) });
-    },
-  },
-  {
-    name: "list_workflow_instances",
-    description: "List workflow instances, optionally restricted to one run, with node status summaries.",
-    inputSchema: {
-      type: "object",
-      properties: { runId: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100 } },
-      additionalProperties: false,
-    },
-    handler: async (args, deps) => {
-      const query = new URLSearchParams();
-      if (typeof args?.runId === "string" && args.runId) query.set("runId", args.runId);
-      query.set("limit", String(Math.min(100, Math.max(1, typeof args?.limit === "number" ? Math.floor(args.limit) : 100))));
-      const r = await cpFetch(deps, "GET", `/api/workflow-instances?${query.toString()}`);
-      if (!r.ok) return errorResult(r.message);
-      return textResult({ instances: capArray(r.data).map((instance) => mapWorkflowInstance(instance)) });
-    },
-  },
-  {
-    name: "get_workflow_instance",
-    description: "Inspect one workflow instance with its graph, attempts, events, and exact ready or waiting nodes.",
-    inputSchema: {
-      type: "object",
-      properties: { instanceId: { type: "string" } },
-      required: ["instanceId"],
-      additionalProperties: false,
-    },
-    handler: async (args, deps) => {
-      if (typeof args?.instanceId !== "string" || !args.instanceId) return errorResult("instanceId is required");
-      const r = await cpFetch(deps, "GET", `/api/workflow-instances/${encodeURIComponent(args.instanceId)}`);
-      if (!r.ok) return errorResult(r.message);
-      return textResult({ instance: mapWorkflowInstance(r.data, true) });
-    },
-  },
-
   /* ---------------- MUTATIONS (each call parks on a human card) ----------- */
   {
     name: "upsert_governance_policy",
@@ -3655,122 +3493,6 @@ export const TOOLS: McpTool[] = [
       const r = await cpFetch(deps, "DELETE", `/api/governance/policies/${encodeURIComponent(args.policyId)}`);
       if (!r.ok) return errorResult(r.message);
       return textResult({ deleted: true, policyId: args.policyId });
-    },
-  },
-  {
-    name: "create_workflow_definition",
-    description: "Create a validated custom workflow definition at immutable version 1. Subject to session permissions and governance policies.",
-    inputSchema: {
-      type: "object",
-      properties: WORKFLOW_SPEC_PROPERTIES,
-      required: ["name", "maxTransitions", "nodes", "edges"],
-      additionalProperties: false,
-    },
-    handler: async (args, deps) => {
-      const body = {
-        name: args?.name,
-        ...(args?.description !== undefined ? { description: args.description } : {}),
-        maxTransitions: args?.maxTransitions,
-        nodes: args?.nodes,
-        edges: args?.edges,
-      };
-      const r = await cpFetch(deps, "POST", "/api/workflows", body);
-      if (!r.ok) return errorResult(r.message);
-      return textResult({ workflow: mapWorkflowDefinition(r.data, true) });
-    },
-  },
-  {
-    name: "create_workflow_version",
-    description: "Create the next immutable version of an existing custom workflow definition. Subject to session permissions and governance policies.",
-    inputSchema: {
-      type: "object",
-      properties: { workflowId: { type: "string" }, ...WORKFLOW_SPEC_PROPERTIES },
-      required: ["workflowId", "name", "maxTransitions", "nodes", "edges"],
-      additionalProperties: false,
-    },
-    handler: async (args, deps) => {
-      if (typeof args?.workflowId !== "string" || !args.workflowId) return errorResult("workflowId is required");
-      const body = {
-        name: args.name,
-        ...(args.description !== undefined ? { description: args.description } : {}),
-        maxTransitions: args.maxTransitions,
-        nodes: args.nodes,
-        edges: args.edges,
-      };
-      const r = await cpFetch(deps, "POST", `/api/workflows/${encodeURIComponent(args.workflowId)}/versions`, body);
-      if (!r.ok) return errorResult(r.message);
-      return textResult({ workflow: mapWorkflowDefinition(r.data, true) });
-    },
-  },
-  {
-    name: "create_workflow_run",
-    description: "Create a role-bound workflow run whose workers wait for exact node dispatch. A pending human approval returns after about 45 seconds, stating how long the control plane keeps it pending between calls; repeat the identical call promptly, without ending your turn, to keep waiting. Subject to session permissions and governance policies.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        runnerId: { type: "string" },
-        workspaceId: { type: "string" },
-        workflowId: { type: "string" },
-        workflowVersion: { type: "integer", minimum: 1 },
-        task: { type: "string" },
-        title: { type: "string" },
-        useWorktree: { type: "boolean" },
-        agentBindings: { type: "object", additionalProperties: { type: "string" } },
-        providerAccountBindings: { type: "object", additionalProperties: { type: "string" }, description: "An accountRef from get_provider_account_selection whose canName is true, by the role's key in agentBindings. Overrides the Machine's account policy for that role; omit a role to let the policy choose" },
-        costBudgetUsd: { type: "number", minimum: 0 },
-        maxToolCalls: { type: "number", minimum: 0 },
-      },
-      required: ["runnerId", "workspaceId", "workflowId", "task"],
-      additionalProperties: false,
-    },
-    handler: async (args, deps) => {
-      if (typeof args?.runnerId !== "string" || typeof args?.workspaceId !== "string" ||
-          typeof args?.workflowId !== "string" || typeof args?.task !== "string" || !args.task.trim()) {
-        return errorResult("runnerId, workspaceId, workflowId, and a non-empty task are required");
-      }
-      const body: Json = {
-        runnerId: args.runnerId,
-        workspaceId: args.workspaceId,
-        workflowId: args.workflowId,
-        task: args.task,
-      };
-      for (const key of ["workflowVersion", "title", "useWorktree", "agentBindings", "providerAccountBindings", "costBudgetUsd", "maxToolCalls"]) {
-        if (args[key] !== undefined) body[key] = args[key];
-      }
-      if (args.providerAccountBindings !== undefined) {
-        const compatibilityError = await providerAccountChoiceCompatibilityError(deps, "memberProviderAccountChoice");
-        if (compatibilityError) return compatibilityError;
-      }
-      const r = await createWithSpawnApproval(deps, "the same create_workflow_run call", "/api/workflow-runs", body);
-      if (!r.ok) return errorResult(r.message);
-      return textResult({
-        run: { id: r.data?.run?.id, title: r.data?.run?.title, sessionIds: capArray(r.data?.run?.sessionIds) },
-        sessions: capArray(r.data?.sessions).map(mapSession),
-        instance: mapWorkflowInstance(r.data?.instance, true),
-      });
-    },
-  },
-  {
-    name: "dispatch_workflow_node",
-    description: "Dispatch one ready workflow agent node with a caller-stable idempotency key. Subject to session permissions and governance policies.",
-    inputSchema: {
-      type: "object",
-      properties: { instanceId: { type: "string" }, nodeId: { type: "string" }, dispatchKey: { type: "string" } },
-      required: ["instanceId", "nodeId", "dispatchKey"],
-      additionalProperties: false,
-    },
-    handler: async (args, deps) => {
-      if (![args?.instanceId, args?.nodeId, args?.dispatchKey].every((value) => typeof value === "string" && value)) {
-        return errorResult("instanceId, nodeId, and dispatchKey are required");
-      }
-      const r = await cpFetch(
-        deps,
-        "POST",
-        `/api/workflow-instances/${encodeURIComponent(args.instanceId)}/nodes/${encodeURIComponent(args.nodeId)}/dispatch`,
-        { dispatchKey: args.dispatchKey },
-      );
-      if (!r.ok) return errorResult(r.message);
-      return textResult(r.data);
     },
   },
   {
@@ -3848,89 +3570,6 @@ export const TOOLS: McpTool[] = [
           sha256: r.data.sha256,
         },
       });
-    },
-  },
-  {
-    name: "create_workflow_artifact",
-    description: "Publish an immutable, attributed workflow artifact for a run or worker session. For an image file use attach_session_artifact instead, which reads the file from disk. Subject to session permissions and governance policies.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        runId: { type: "string" },
-        sessionId: { type: "string" },
-        kind: { type: "string", enum: ["html_preview", "patch", "review_report", "screenshot", "test_log", "verdict"] },
-        name: { type: "string" },
-        mimeType: { type: "string" },
-        encoding: { type: "string", enum: ["utf8", "base64", "json"] },
-        data: { type: "string" },
-        metadata: { type: "object" },
-      },
-      required: ["kind", "name", "mimeType", "encoding", "data"],
-      additionalProperties: false,
-    },
-    handler: async (args, deps) => {
-      if (!args?.runId && !args?.sessionId) return errorResult("runId or sessionId is required");
-      const body: Json = {};
-      for (const key of ["runId", "sessionId", "kind", "name", "mimeType", "encoding", "data", "metadata"]) {
-        if (args[key] !== undefined) body[key] = args[key];
-      }
-      const path = args.kind === "screenshot" ? "/api/artifacts/screenshots" : "/api/artifacts";
-      const r = await cpFetch(deps, "POST", path, body);
-      if (!r.ok) return errorResult(r.message);
-      return textResult({ artifact: { ...r.data, data: undefined } });
-    },
-  },
-  {
-    name: "complete_workflow_attempt",
-    description: "Complete an awaiting workflow attempt with exact artifact-contract bindings. Subject to session permissions and governance policies.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        attemptId: { type: "string" },
-        outcome: { type: "string", enum: ["success", "failure", "accepted", "changes_requested", "rejected"] },
-        outputs: { type: "object", additionalProperties: { type: "string" } },
-        error: { type: "string" },
-      },
-      required: ["attemptId", "outcome"],
-      additionalProperties: false,
-    },
-    handler: async (args, deps) => {
-      if (typeof args?.attemptId !== "string" || !args.attemptId || typeof args?.outcome !== "string") {
-        return errorResult("attemptId and outcome are required");
-      }
-      const body: Json = { outcome: args.outcome };
-      if (args.outputs !== undefined) body.outputs = args.outputs;
-      if (args.error !== undefined) body.error = args.error;
-      const r = await cpFetch(deps, "POST", `/api/workflow-attempts/${encodeURIComponent(args.attemptId)}/complete`, body);
-      if (!r.ok) return errorResult(r.message);
-      return textResult({ instance: mapWorkflowInstance(r.data, true) });
-    },
-  },
-  {
-    name: "resolve_workflow_gate",
-    description: "Resolve a waiting human workflow gate; named policy decisions remain non-bypassable. Subject to session permissions and governance policies.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        instanceId: { type: "string" },
-        nodeId: { type: "string" },
-        outcome: { type: "string", enum: ["success", "failure"] },
-      },
-      required: ["instanceId", "nodeId", "outcome"],
-      additionalProperties: false,
-    },
-    handler: async (args, deps) => {
-      if (![args?.instanceId, args?.nodeId, args?.outcome].every((value) => typeof value === "string" && value)) {
-        return errorResult("instanceId, nodeId, and outcome are required");
-      }
-      const r = await cpFetch(
-        deps,
-        "POST",
-        `/api/workflow-instances/${encodeURIComponent(args.instanceId)}/nodes/${encodeURIComponent(args.nodeId)}/resolve`,
-        { outcome: args.outcome },
-      );
-      if (!r.ok) return errorResult(r.message);
-      return textResult({ instance: mapWorkflowInstance(r.data, true) });
     },
   },
   {

@@ -798,7 +798,7 @@ export function ExperimentalPanel({
     <SettingsGroup intro={phone ? EXPERIMENT_OFF_EFFECT : undefined}>
       <SwitchRow
         title={EXPERIMENT_COPY.multiAgent.name}
-        description="Runs that coordinate several agents in a workflow graph."
+        description="Give the same task to multiple agents and compare their results."
         checked={flags.multiAgent}
         onClick={() => onToggle("multiAgent", !flags.multiAgent)}
       />

@@ -46,13 +46,13 @@ test.describe("at 1440×900", () => {
 
   test("rows are 56px two-line rows with the badge on the title's line", async ({ page }) => {
     await open(page, "loaded");
-    await expect(page.locator(".surface > .row")).toHaveCount(4);
+    await expect(page.locator(".surface > .row")).toHaveCount(3);
     const geometry = await rowGeometry(page, LONG_TITLE);
     expect(geometry.row.height).toBe(56);
     expect(geometry.badge, "a running comparison carries its badge").not.toBeNull();
     expect(geometry.badge!.bottom, "the badge is on line 1").toBeLessThanOrEqual(geometry.meta!.top + 1);
     await expect(row(page, LONG_TITLE).locator(".status")).toHaveText("Running");
-    await expect(row(page, "Build and review the settings export screen").locator(".status")).toHaveText("Awaiting Decision");
+    await expect(row(page, "Build and review the settings export screen")).toHaveCount(0);
     await expect(row(page, "Pick a date library for the scheduler").locator(".status")).toHaveCount(0);
   });
 });
@@ -90,7 +90,7 @@ test.describe("at 390×844", () => {
       });
       return { title: element.querySelector(".row-title")?.textContent ?? "", items };
     }));
-    expect(rows).toHaveLength(4);
+    expect(rows).toHaveLength(3);
     for (const row of rows) {
       const shown = row.items.filter((item) => item.visible);
       expect(shown[0]?.type, `${row.title}: the type leads line 2`).toBe(true);
@@ -120,7 +120,7 @@ test.describe("at 390×844", () => {
 test("reconnecting keeps the last-known rows dimmed under Reconnecting…, and they still open", async ({ page }) => {
   await open(page, "reconnecting");
   await expect(page.locator(".page").getByRole("status")).toHaveText("Reconnecting…");
-  await expect(page.locator(".is-stale .surface > .row")).toHaveCount(4);
+  await expect(page.locator(".is-stale .surface > .row")).toHaveCount(3);
   await row(page, "Pick a date library for the scheduler").click();
   await expect(page.locator("body")).toHaveAttribute("data-opened", JSON.stringify({ name: "run", id: "run-dates" }));
 });

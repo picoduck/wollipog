@@ -320,7 +320,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerAccountSelectionPolicy: 334,
   /** v337 (#4353): a control plane reads an agent's account reference and lists the accounts it may name. */
   providerAccountAgentChoice: 337,
-  /** v338 (#4353): a run or workflow names an account per member. An older control plane ignores it on a run. */
+  /** v338 (#4353): a run names an account per member. An older control plane ignores it on a run. */
   memberProviderAccountChoice: 338,
   providerLogin: 171,
   providerAccountRemoval: 188,
@@ -793,11 +793,11 @@ export interface TargetHarnessInstallation {
   available: boolean;
 }
 
-/** Immutable workflow-artifact metadata carried into a cloud handoff. Artifact bytes remain in
+/** Immutable artifact metadata carried into a cloud handoff. Artifact bytes remain in
  * the existing authorized artifact store; adapter access is an operator-owned integration. */
 export interface ExecutionHandoffArtifactRef {
   artifactId: string;
-  kind: WorkflowArtifactKind;
+  kind: ArtifactKind;
   sizeBytes: number;
   sha256: string;
 }
@@ -6482,7 +6482,7 @@ export type SessionEventPayload =
     }
   | { kind: "agent_message"; text: string; final?: boolean; messageId?: string; parentToolUseId?: string }
   /** Control-plane-authored row for a file attachment. Bytes remain in the private artifact store. */
-  | { kind: "artifact_attached"; artifact: WorkflowArtifactView }
+  | { kind: "artifact_attached"; artifact: ArtifactView }
   /** Content-free evidence that live top-level output reached a successful turn boundary.
    * `agent_message.final` completes an individual message, which may occur mid-turn. */
   | { kind: "agent_response_completed" }
@@ -9010,44 +9010,44 @@ export interface RunView {
   sessionIds: string[];
 }
 
-export type WorkflowArtifactKind = "html_preview" | "patch" | "review_report" | "screenshot" | "video" | "test_log" | "verdict";
+export type ArtifactKind = "html_preview" | "patch" | "review_report" | "screenshot" | "video" | "test_log" | "verdict";
 export const MAX_SESSION_VIDEO_BYTES = 32 * 1024 * 1024;
-export type WorkflowArtifactEncoding = "utf8" | "base64" | "json";
-export type WorkflowArtifactMetadataValue = string | number | boolean | null;
+export type ArtifactEncoding = "utf8" | "base64" | "json";
+export type ArtifactMetadataValue = string | number | boolean | null;
 
-export interface WorkflowArtifactView {
+export interface ArtifactView {
   artifactId: string;
   runId?: string;
   sessionId?: string;
-  kind: WorkflowArtifactKind;
+  kind: ArtifactKind;
   name: string;
   mimeType: string;
-  encoding: WorkflowArtifactEncoding;
+  encoding: ArtifactEncoding;
   sizeBytes: number;
   sha256: string;
   createdBy: GovernanceActor;
-  metadata?: Record<string, WorkflowArtifactMetadataValue>;
+  metadata?: Record<string, ArtifactMetadataValue>;
   createdAt: number;
 }
 
-export interface WorkflowArtifact extends WorkflowArtifactView {
+export interface Artifact extends ArtifactView {
   data: string;
 }
 
-export interface WorkflowArtifactPage {
-  artifacts: WorkflowArtifactView[];
+export interface ArtifactPage {
+  artifacts: ArtifactView[];
   nextCursor?: string;
 }
 
-export interface CreateWorkflowArtifactRequest {
+export interface CreateArtifactRequest {
   runId?: string;
   sessionId?: string;
-  kind: WorkflowArtifactKind;
+  kind: ArtifactKind;
   name: string;
   mimeType: string;
-  encoding: WorkflowArtifactEncoding;
+  encoding: ArtifactEncoding;
   data: string;
-  metadata?: Record<string, WorkflowArtifactMetadataValue>;
+  metadata?: Record<string, ArtifactMetadataValue>;
 }
 
 /** Body of POST /api/sessions/:id/artifacts/screenshots. The session comes from the route and the
@@ -9057,206 +9057,11 @@ export interface AttachSessionScreenshotRequest {
   mimeType: string;
   /** Base64 of the exact file bytes. */
   data: string;
-  metadata?: Record<string, WorkflowArtifactMetadataValue>;
+  metadata?: Record<string, ArtifactMetadataValue>;
 }
 
 /** Body of POST /api/sessions/:id/artifacts/videos; the route fixes kind and encoding. */
 export type AttachSessionVideoRequest = AttachSessionScreenshotRequest;
-
-/* -------------------------- Durable workflows --------------------------- */
-
-export type WorkflowNodeKind = "agent" | "human_gate" | "policy_gate";
-export type WorkflowEdgeCondition = "success" | "failure" | "accepted" | "changes_requested" | "always";
-export type WorkflowDefinitionSource = "custom" | "builtin";
-
-export interface WorkflowArtifactContract {
-  /** Stable graph-local handle used to wire a producer to one or more consumers. */
-  name: string;
-  kind: WorkflowArtifactKind;
-  required?: boolean;
-}
-
-export interface WorkflowRetryPolicy {
-  /** Includes the first attempt. A value of one disables retries. */
-  maxAttempts: number;
-  backoffMs: number;
-}
-
-export type WorkflowStopCondition =
-  | { kind: "verdict"; artifact: string; outcomes: Array<"accepted" | "changes_requested" | "rejected"> }
-  | { kind: "attempt_limit"; maxAttempts: number };
-
-export interface WorkflowNodeDefinition {
-  nodeId: string;
-  kind: WorkflowNodeKind;
-  role: string;
-  /** Required only for agent nodes. This is resolved against the run's runner at dispatch time. */
-  agentId?: string;
-  /** Required only for policy gates. Built-in policy ids remain valid inputs. */
-  policyId?: string;
-  prompt?: string;
-  inputs: WorkflowArtifactContract[];
-  outputs: WorkflowArtifactContract[];
-  retry: WorkflowRetryPolicy;
-  timeoutMs: number;
-  stopCondition?: WorkflowStopCondition;
-}
-
-export interface WorkflowEdgeDefinition {
-  edgeId: string;
-  from: string;
-  to: string;
-  on: WorkflowEdgeCondition;
-}
-
-export interface WorkflowDefinitionSpec {
-  name: string;
-  description?: string;
-  /** Bounds cyclic review loops even when every individual node keeps succeeding. */
-  maxTransitions: number;
-  nodes: WorkflowNodeDefinition[];
-  edges: WorkflowEdgeDefinition[];
-}
-
-export interface WorkflowDefinition extends WorkflowDefinitionSpec {
-  workflowId: string;
-  version: number;
-  source: WorkflowDefinitionSource;
-  createdBy: GovernanceActor;
-  createdAt: number;
-}
-
-export * from "./workflow-event-retention.js";
-export type WorkflowInstanceStatus = "queued" | "running" | "waiting_gate" | "succeeded" | "failed" | "stopped";
-export type WorkflowNodeStatus = "pending" | "ready" | "running" | "waiting_gate" | "succeeded" | "failed" | "skipped" | "stopped";
-export type WorkflowAttemptStatus = "dispatching" | "running" | "awaiting_output" | "succeeded" | "failed" | "timed_out" | "cancelled";
-export type WorkflowNodeOutcome = "success" | "failure" | "accepted" | "changes_requested" | "rejected";
-
-export interface WorkflowNodeState {
-  nodeId: string;
-  status: WorkflowNodeStatus;
-  attemptCount: number;
-  sessionId?: string;
-  startedAt?: number;
-  completedAt?: number;
-  error?: string;
-  readyAt?: number;
-  outcome?: WorkflowNodeOutcome;
-}
-
-export interface WorkflowInstanceView {
-  /** Event history removed by the separate opt-in completion-age retention policy. */
-  eventHistoryPruned?: import("./workflow-event-retention.js").WorkflowEventHistoryPruned;
-  instanceId: string;
-  workflowId: string;
-  workflowVersion: number;
-  runId: string;
-  status: WorkflowInstanceStatus;
-  transitionCount: number;
-  nodeStates: WorkflowNodeState[];
-  createdBy: GovernanceActor;
-  createdAt: number;
-  updatedAt: number;
-  completedAt?: number;
-}
-
-export interface WorkflowAttemptView {
-  attemptId: string;
-  instanceId: string;
-  nodeId: string;
-  attempt: number;
-  status: WorkflowAttemptStatus;
-  dispatchKey: string;
-  sessionId?: string;
-  startedAt: number;
-  deadlineAt: number;
-  completedAt?: number;
-  error?: string;
-}
-
-export type WorkflowEventKind =
-  | "instance_created"
-  | "instance_status_changed"
-  | "node_status_changed"
-  | "attempt_started"
-  | "attempt_status_changed"
-  | "attempt_finished"
-  | "gate_resolved";
-
-export interface WorkflowEventView {
-  eventId: number;
-  instanceId: string;
-  seq: number;
-  kind: WorkflowEventKind;
-  nodeId?: string;
-  attemptId?: string;
-  actor: GovernanceActor;
-  detail?: Record<string, WorkflowArtifactMetadataValue>;
-  createdAt: number;
-}
-
-export interface WorkflowInstanceDetail extends WorkflowInstanceView {
-  definition: WorkflowDefinition;
-  attempts: WorkflowAttemptView[];
-  events: WorkflowEventView[];
-  attemptsTruncated?: boolean;
-  eventsTruncated?: boolean;
-}
-
-export interface CreateWorkflowDefinitionRequest extends WorkflowDefinitionSpec {}
-
-/** Creates the next immutable version of an existing custom workflow id. */
-export interface CreateWorkflowDefinitionVersionRequest extends WorkflowDefinitionSpec {}
-
-export interface CreateWorkflowInstanceRequest {
-  workflowId: string;
-  /** Omit to instantiate the latest immutable version. */
-  workflowVersion?: number;
-  runId: string;
-}
-
-/** Launch a run whose worker sessions remain idle until their graph nodes are dispatched. */
-export interface CreateWorkflowRunRequest {
-  runnerId: string;
-  workspaceId: string;
-  /** Exact durable Project assignment. Omit both fields for legacy exact-Location inference. */
-  projectId?: string | null;
-  projectLocationId?: string | null;
-  workflowId: string;
-  /** Omit to bind the latest immutable workflow version. */
-  workflowVersion?: number;
-  task: string;
-  title?: string;
-  useWorktree?: boolean;
-  config?: SessionConfig;
-  costBudgetUsd?: number;
-  maxToolCalls?: number;
-  /** Graph agent id to concrete runner agent id. Omitted entries use the graph id verbatim. */
-  agentBindings?: Record<string, string>;
-  /** Optional manager agent started with the workflow instance id; workers receive no initial prompt. */
-  orchestratorAgentId?: string;
-  /** Protocol v338: the account a role uses instead of the Machine's policy, by graph agent id, as in
-   * `agentBindings`. A person names an account id; an agent names an opaque reference. */
-  providerAccountBindings?: Record<string, string>;
-  /** Protocol v338: the same for `orchestratorAgentId`. */
-  orchestratorProviderAccountId?: string;
-}
-
-export interface CreateWorkflowRunResult {
-  run: RunView;
-  sessions: SessionView[];
-  instance: WorkflowInstanceDetail;
-}
-
-export interface DispatchWorkflowNodeRequest {
-  /** Caller-generated retry key. Repeating it returns the original attempt and never re-sends. */
-  dispatchKey: string;
-}
-
-export interface DispatchWorkflowNodeResult {
-  attempt: WorkflowAttemptView;
-  idempotent: boolean;
-}
 
 /* ========================================================================== */
 /* Durable automations                                                        */
@@ -9279,11 +9084,11 @@ export interface SavedHarnessInstallation {
   installationId: string;
 }
 
-/** Keys are `agent`, `role:<graph agent id>`, or `orchestrator`. */
+/** A create-session automation pins its installation under the `agent` key. */
 export type AutomationInstallationBindings = Record<string, SavedHarnessInstallation>;
 
 /** Explicit runner-local mappings only. Display-name/path matching is never used to infer that two
- * targets are equivalent. `agentId` applies to create-session; bindings apply to workflow-run. */
+ * targets are equivalent. */
 export interface AutomationRunnerTarget {
   runnerId: string;
   workspaceId: string;
@@ -9291,8 +9096,6 @@ export interface AutomationRunnerTarget {
   projectId?: string | null;
   projectLocationId?: string | null;
   agentId?: string;
-  agentBindings?: Record<string, string>;
-  orchestratorAgentId?: string;
   installationBindings?: AutomationInstallationBindings;
 }
 
@@ -9300,7 +9103,7 @@ export interface AutomationRunnerTarget {
  * advances it; `parallel` is available only for actions that create an independent target. */
 export type AutomationConcurrencyPolicy = "wait" | "skip" | "parallel";
 
-/** Every unattended execution has finite incremental ceilings. Independent create/workflow actions
+/** Every unattended execution has finite incremental ceilings. Independent create-session actions
  * use these values; a prompt action keeps the strictest existing, request, or incremental ceiling. */
 export interface AutomationLimits {
   maxCostUsd: number;
@@ -9331,8 +9134,13 @@ export type AutomationSessionRequest = Pick<CreateSessionRequest,
 
 export type AutomationAction =
   | { kind: "create_session"; request: AutomationSessionRequest; installationBindings?: AutomationInstallationBindings }
-  | { kind: "prompt_session"; sessionId: string; request: Omit<PromptRequest, "images"> }
-  | { kind: "workflow_run"; request: CreateWorkflowRunRequest; installationBindings?: AutomationInstallationBindings };
+  | { kind: "prompt_session"; sessionId: string; request: Omit<PromptRequest, "images"> };
+
+/** Historical schedules whose action was removed are permanently paused. */
+export type RetiredAutomationAction = { kind: "retired"; reason: "workflow_removed" };
+
+export const RETIRED_WORKFLOW_AUTOMATION_REASON =
+  "This automation is paused because workflow runs were removed. To replace it with a campaign automation, create an automation with the Orchestrator session role.";
 
 export interface AutomationSpec {
   name: string;
@@ -9352,7 +9160,8 @@ export interface AutomationSpec {
 export interface CreateAutomationRequest extends AutomationSpec {}
 export interface UpdateAutomationRequest extends AutomationSpec {}
 
-export interface AutomationSchedule extends AutomationSpec {
+export interface AutomationSchedule extends Omit<AutomationSpec, "action"> {
+  action: AutomationAction | RetiredAutomationAction;
   automationId: string;
   /** Monotonic version incremented for every edit. */
   revision: number;
@@ -9625,7 +9434,7 @@ export interface AutomationExecution {
   /** Schedule revision and complete secret-free spec captured transactionally at claim time. */
   automationRevision: number;
   specSnapshot?: AutomationSpec;
-  actionKind: AutomationAction["kind"];
+  actionKind: AutomationSchedule["action"]["kind"];
   status: AutomationExecutionStatus;
   governancePause?: AutomationGovernancePause;
   /** Legacy rows retain the original at-most-once boundary; v53 rows use the durable command
@@ -9634,8 +9443,6 @@ export interface AutomationExecution {
   actor: GovernanceActor;
   runnerId?: string;
   sessionId?: string;
-  runId?: string;
-  workflowInstanceId?: string;
   error?: string;
   createdAt: number;
   startedAt?: number;
@@ -9668,19 +9475,8 @@ export interface AutomationAuditEvent {
   executionId?: string;
   kind: AutomationAuditEventKind;
   actor: GovernanceActor;
-  detail?: Record<string, WorkflowArtifactMetadataValue>;
+  detail?: Record<string, ArtifactMetadataValue>;
   createdAt: number;
-}
-
-export interface CompleteWorkflowAttemptRequest {
-  outcome: WorkflowNodeOutcome;
-  /** Exact output-contract name to immutable workflow-artifact id. */
-  outputs?: Record<string, string>;
-  error?: string;
-}
-
-export interface ResolveWorkflowGateRequest {
-  outcome: "success" | "failure";
 }
 
 /* ========================================================================== */
@@ -13147,7 +12943,7 @@ export interface CreateSessionRequest {
   useWorktree?: boolean;
   /** Preferred v60 selection. If supplied, it must belong to runnerId and agrees with useWorktree. */
   executionTargetId?: string;
-  /** Cloud-only source session and existing workflow artifacts to transfer/prove. */
+  /** Cloud-only source session and existing session artifacts to transfer/prove. */
   executionHandoff?: { sourceSessionId?: string; artifactIds?: string[] };
   config?: SessionConfig;
   /** Session role, independent of `config.permissionMode`. Omitted by older clients, which encode

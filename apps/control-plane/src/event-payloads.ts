@@ -6,12 +6,12 @@ import {
   validateEventPayloadReferences,
   type EventPayloadReference,
   type SessionEventPayload,
-  type WorkflowArtifactView,
+  type ArtifactView,
 } from "@wollipog/protocol";
 import { artifactBlobSha256Async } from "./artifact-blob-store.js";
 import type { ControlPlaneDb } from "./db.js";
 
-type EventPayloadDb = Pick<ControlPlaneDb, "createWorkflowArtifactBytes" | "deleteWorkflowArtifact">;
+type EventPayloadDb = Pick<ControlPlaneDb, "createArtifactBytes" | "deleteArtifact">;
 type EventPayloadStagingDb = Pick<
   ControlPlaneDb,
   "stageArtifactBlob" | "releaseStagedArtifactBlob" | "createStagedEventPayloadArtifacts"
@@ -99,7 +99,7 @@ function eventPayloadArtifact(
   field: EventTextField,
   chunk: { index: number; count: number; sizeBytes: number; sha256: string; artifactId: string },
   createdAt: number,
-): WorkflowArtifactView {
+): ArtifactView {
   return {
     artifactId: chunk.artifactId,
     sessionId,
@@ -125,7 +125,7 @@ function externalizedPayload(
   payload: SessionEventPayload,
   field: EventTextField,
   preview: string,
-  artifacts: readonly WorkflowArtifactView[],
+  artifacts: readonly ArtifactView[],
 ): SessionEventPayload {
   const references: EventPayloadReference[] = artifacts.map((artifact) => ({
     artifactId: artifact.artifactId,
@@ -171,7 +171,7 @@ export function externalizeSessionEventPayload(
     return { payload: sanitized as unknown as SessionEventPayload, artifactIds: [] };
   }
   const chunks = splitEventPayloadBytes(bytes);
-  const artifacts: WorkflowArtifactView[] = [];
+  const artifacts: ArtifactView[] = [];
   try {
     for (let index = 0; index < chunks.length; index++) {
       const chunk = chunks[index]!;
@@ -180,7 +180,7 @@ export function externalizeSessionEventPayload(
         index, count: chunks.length, sizeBytes: chunk.byteLength, sha256,
         artifactId: artifactIdForChunk(index, sha256),
       }, createdAt);
-      db.createWorkflowArtifactBytes(artifact, chunk);
+      db.createArtifactBytes(artifact, chunk);
       artifacts.push(artifact);
     }
   } catch (error) {
@@ -254,10 +254,10 @@ export async function stageSessionEventPayload(
   };
 }
 
-export function cleanupEventPayloadArtifacts(db: Pick<ControlPlaneDb, "deleteWorkflowArtifact">, artifactIds: readonly string[]): void {
+export function cleanupEventPayloadArtifacts(db: Pick<ControlPlaneDb, "deleteArtifact">, artifactIds: readonly string[]): void {
   for (const artifactId of artifactIds) {
     try {
-      db.deleteWorkflowArtifact(artifactId);
+      db.deleteArtifact(artifactId);
     } catch {
       // Startup orphan recovery owns any artifact a failed immediate cleanup could not remove.
     }

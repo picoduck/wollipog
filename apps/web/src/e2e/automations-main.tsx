@@ -17,7 +17,6 @@ import type {
   RunnerView,
   SessionView,
   UiSnapshotMessage,
-  WorkflowDefinition,
 } from "@wollipog/protocol";
 import { AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE, AUTOMATION_TARGET_UNAVAILABLE } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
@@ -26,7 +25,6 @@ import { AutomationsView } from "../components/AutomationsView.js";
 import { AutomationEditor } from "../components/AutomationEditor.js";
 import { AutomationDetail } from "../components/AutomationDetail.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
-import { setExperimentFlag } from "../experiments.js";
 import { viewFromPath, viewPath, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -189,67 +187,6 @@ if (alternateRunner) items[0]!.runnerPolicy = { kind: "alternate", targets: [{
   } },
 }] };
 
-const workflowSwitchRunner: RunnerView | null = params.has("workflow-machine-switch") ? {
-  ...runner,
-  runnerId: "runner-2",
-  hostname: "second-box",
-  protocolVersion: 175,
-  agents: [
-    { ...runner.agents[0]!, name: "Configured Agent", driver: "acp", installation: undefined },
-    { ...runner.agents[0]!, id: "new-agent", name: "Discovered Agent", installation: {
-      id: "system", path: "/usr/bin/agent", via: "path", selection: "selected",
-    } },
-  ],
-  workspaces: [{ id: "workspace-2", name: "Second", path: "/home/misko/second" }],
-} : null;
-const workflowDefinitions: WorkflowDefinition[] = workflowSwitchRunner ? [{
-  workflowId: "workflow-1", version: 1, name: "Audit Workflow", source: "custom",
-  maxTransitions: 1, createdBy: { kind: "human", id: "e2e" }, createdAt: 1, edges: [],
-  nodes: [{ nodeId: "audit", kind: "agent", role: "auditor", agentId: "agent-1",
-    inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
-}] : [];
-if (workflowSwitchRunner) {
-  runner.protocolVersion = 175;
-  runner.agents[0]!.installation = {
-    id: "system", path: "/usr/bin/agent", via: "path", selection: "selected",
-  };
-  items[0]!.action = { kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "workspace-1", workflowId: "workflow-1", task: "Audit",
-    agentBindings: { "agent-1": "agent-1" },
-    ...(params.has("orchestrator-bound") || params.has("orchestrator-unbound")
-      ? { orchestratorAgentId: "agent-1" } : {}),
-  }, installationBindings: { "role:agent-1": {
-    driver: "claude-code", context: { kind: "native" }, installationId: "system",
-  }, ...(params.has("orchestrator-bound") ? { orchestrator: {
-    driver: "claude-code" as const, context: { kind: "native" as const }, installationId: "system",
-  } } : {}) } };
-}
-
-if (params.has("inherited-alternate-pins") && workflowSwitchRunner) {
-  const oldAgent = runner.agents[0]!;
-  const newAgent = { ...oldAgent, id: "new-agent", name: "New Agent", driver: "codex-app-server" as const,
-    installation: { id: "new", path: "/usr/bin/codex", via: "path" as const, selection: "selected" as const } };
-  runner.agents.push(newAgent);
-  workflowSwitchRunner.agents = [oldAgent, newAgent];
-  items[0]!.runnerPolicy = { kind: "alternate", targets: [{
-    runnerId: "runner-2", workspaceId: "workspace-2",
-    installationBindings: {
-      "role:agent-1": { driver: "claude-code", context: { kind: "native" }, installationId: "system" },
-      orchestrator: { driver: "claude-code", context: { kind: "native" }, installationId: "system" },
-    },
-  }] };
-}
-
-// Every saved workflow pin, primary and alternate, names an installation the Machines no longer have.
-if (params.has("unavailable-pins")) {
-  const first = items[0]!;
-  const bindings = [
-    ...(first.action.kind === "workflow_run" ? [first.action.installationBindings] : []),
-    ...(first.runnerPolicy.kind === "alternate" ? first.runnerPolicy.targets.map((target) => target.installationBindings) : []),
-  ];
-  for (const binding of bindings.flatMap((entry) => Object.values(entry ?? {}))) binding.installationId = "missing";
-}
-
 // The Automation editor's scenarios (#2967).
 // `other-machine-offline`: the first automation falls back to another machine, which is offline.
 const offlineRunner: RunnerView | null = params.has("other-machine-offline") ? {
@@ -264,27 +201,15 @@ if (offlineRunner) items[0]!.runnerPolicy = { kind: "alternate", targets: [{
   runnerId: "runner-offline", workspaceId: "workspace-backup", agentId: "agent-backup",
 }], expireAfterMinutes: 30 };
 
-// `review-workflow`: the first automation runs a build-and-review workflow with a human approval.
-if (params.has("review-workflow")) {
-  runner.agents.push({ ...runner.agents[0]!, id: "agent-review", name: "Review Agent", driver: "codex-app-server" });
-  const step = { inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 3_600_000 };
-  workflowDefinitions.push({
-    workflowId: "build-review", version: 2, name: "Build and Review", source: "custom", maxTransitions: 4,
-    createdBy: { kind: "human", id: "e2e" }, createdAt: 1, edges: [],
-    nodes: [
-      { nodeId: "build", kind: "agent", role: "builder", agentId: "agent-1", ...step },
-      { nodeId: "review", kind: "agent", role: "reviewer", agentId: "agent-review", ...step },
-      { nodeId: "approve", kind: "human_gate", role: "approver", ...step },
-    ],
-  });
-  items[0]!.action = { kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "workspace-1", workflowId: "build-review", workflowVersion: 2,
-    task: "Implement the dependency updates, then review them before they merge.",
-  } };
+const retiredAction = { kind: "retired", reason: "workflow_removed" } as const;
+if (params.has("retired-workflow")) {
+  items[0] = {
+    ...items[0]!,
+    action: retiredAction,
+    enabled: false,
+    nextFireAt: undefined,
+  };
 }
-
-// `experiment-off`: Multi-Agent Runs is turned off in Settings › Experimental on this device.
-setExperimentFlag("multiAgent", !params.has("experiment-off"));
 
 const triggerItems: AutomationTriggerView[] = [{
   triggerId: "atr_issue_intake",
@@ -377,7 +302,7 @@ if (params.has("ceiling-run")) {
   });
 }
 
-// The Automations list's scenarios (#2969). `list` adds a fuller list: agents, a workflow and a
+// The Automations list's scenarios (#2969). `list` adds a fuller list: agents and a
 // session by name, scheduled and paused, each with its next run in this browser's own zone.
 // `needs-attention` gives the first a failed last run and another an unavailable target.
 const viewerZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -404,10 +329,6 @@ if (params.has("list")) {
     { ...runner.agents[0]!, id: "claude", name: "Claude Code", driver: "claude-code" },
     { ...runner.agents[0]!, id: "codex", name: "Codex", driver: "codex-app-server" },
   );
-  if (!workflowDefinitions.some((workflow) => workflow.workflowId === "build-review")) workflowDefinitions.push({
-    workflowId: "build-review", version: 1, name: "Build and Review", source: "custom", maxTransitions: 4,
-    createdBy: { kind: "human", id: "e2e" }, createdAt: 1, edges: [], nodes: [],
-  });
   listSessions.push({
     id: "s_release_notes", title: "Release notes for 4.2", preview: null, agentId: "claude", agentName: "Claude Code",
     driver: "claude-code", status: "idle", pendingApproval: null, runnerId: "runner-1",
@@ -420,15 +341,13 @@ if (params.has("list")) {
   const agent = (agentId: string, prompt: string): AutomationSchedule["action"] => ({
     kind: "create_session", request: { runnerId: "runner-1", workspaceId: "workspace-1", agentId, prompt, useWorktree: true },
   });
-  items[0] = { ...items[0]!, timezone: viewerZone, nextFireAt: nextLocal(0, [2]) };
+  items[0] = { ...items[0]!, timezone: viewerZone, nextFireAt: items[0]!.enabled ? nextLocal(0, [2]) : undefined };
   items.push(
     local("automation-morning-triage", "Morning Issue Triage", "0 9 * * 1-5", true,
       agent("codex", "Triage new issues."), nextLocal(0, [9], { weekdays: [1, 2, 3, 4, 5] })),
     local("automation-health-check", "Hourly Health Check", "0 * * * *", true,
       agent("claude", "Check the build."), nextLocal(0, [])),
-    local("automation-build-review", "Build and Review the Main Branch", "0 9 * * 1", true, { kind: "workflow_run", request: {
-      runnerId: "runner-1", workspaceId: "workspace-1", workflowId: "build-review", task: "Build and review main.",
-    } }, nextLocal(0, [9], { weekdays: [1] })),
+    local("automation-build-review", "Build and Review the Main Branch", "0 9 * * 1", false, retiredAction),
     local("automation-release-notes", "Release Notes Follow-Up", "0 10 1 * *", false,
       { kind: "prompt_session", sessionId: "s_release_notes", request: { text: "Update the release notes." } }),
   );
@@ -444,7 +363,7 @@ if (params.has("list-empty")) items.length = 0;
 
 // Run History (#2970). `run-history` gives the first automation a fuller history relative to now: a
 // signed delivery, a scheduled success, a failure with runner receipts and a retry, a skip, an
-// expiry, a workflow run, a legacy run and eight older successes, so Show More has five more to add.
+// expiry, a legacy run and nine older successes, so Show More has five more to add.
 // `no-runs` has none, with its next run tomorrow at 2:00 AM in this browser's zone.
 if (params.has("run-history")) {
   /** 2:00 AM local, `days` before the last 2:00 AM that is at least an hour ago. */
@@ -483,10 +402,8 @@ if (params.has("run-history")) {
       sessionId: undefined, runnerId: undefined, error: "execution 'axe_failed' is still active" }),
     scheduled("axe_expired", twoAm(3), { status: "expired", deliveryMode: "legacy_at_most_once", startedAt: undefined, completedAt: twoAm(3) + 60 * minutes,
       sessionId: undefined, runnerId: undefined, error: AUTOMATION_TARGET_UNAVAILABLE }),
-    scheduled("axe_workflow", twoAm(4), { actionKind: "workflow_run", sessionId: undefined, runId: "run_build_review",
-      completedAt: twoAm(4) + 65 * minutes }),
     scheduled("axe_legacy", twoAm(5), { deliveryMode: "legacy_at_most_once" }),
-    ...Array.from({ length: 8 }, (_, index) => scheduled(`axe_older_${index}`, twoAm(6 + index))),
+    ...Array.from({ length: 9 }, (_, index) => scheduled(`axe_older_${index}`, twoAm(5 + index))),
   );
 }
 if (params.has("no-runs")) {
@@ -597,7 +514,7 @@ const outboundDeliveries: Record<string, OutboundEventDeliveryView[]> = {
 const outboundSecret = `wollipogwhsec_${"e2eSigningSecret".repeat(3)}`;
 
 const fixtureRunners = () => [runner, ...(alternateRunner ? [alternateRunner] : []),
-  ...(workflowSwitchRunner ? [workflowSwitchRunner] : []), ...(offlineRunner ? [offlineRunner] : [])];
+  ...(offlineRunner ? [offlineRunner] : [])];
 let liveSocket: FixtureSocket | null = null;
 /** Set by `automationsDisconnect()`: the connection drops and stays down. */
 let disconnected = false;
@@ -682,7 +599,7 @@ if (params.has("rediscover")) Object.assign(window, { automationsRediscover: () 
 
 // Opt-in fault injection for recovery tests; ordinary fixture scenarios keep their API behavior.
 const pollingFixture = params.has("polling-recovery") ? {
-  failure: null as "list" | "detail" | "trigger" | "workflow" | null,
+  failure: null as "list" | "detail" | "trigger" | null,
   failRefreshAfterMutation: false,
   mutationCalls: 0,
   mutationFailure: false,
@@ -843,10 +760,6 @@ const client = {
   deleteOutboundEventSubscription: async (subscriptionId: string) => {
     outboundSubscriptions.splice(outboundSubscriptions.findIndex((subscription) => subscription.subscriptionId === subscriptionId), 1);
     return { revoked: true };
-  },
-  workflowDefinitions: async () => {
-    if (pollingFixture?.failure === "workflow") throw new Error("Synthetic post-mutation refresh failure");
-    return workflowDefinitions;
   },
 } as unknown as ApiClient;
 

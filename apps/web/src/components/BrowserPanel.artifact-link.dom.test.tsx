@@ -4,7 +4,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionView, WorkflowArtifactPage, WorkflowArtifactView } from "@wollipog/protocol";
+import type { SessionView, ArtifactPage, ArtifactView } from "@wollipog/protocol";
 import { api } from "../api.js";
 import { BrowserPanel } from "./BrowserPanel.js";
 import type { BrowserArtifactRequest } from "./right-panel-state.js";
@@ -24,7 +24,7 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
-function log(id: string): WorkflowArtifactView {
+function log(id: string): ArtifactView {
   const text = `${id} body`;
   return {
     artifactId: id, sessionId: "session_1", kind: "test_log", name: `${id}.log`, mimeType: "text/plain",
@@ -34,7 +34,7 @@ function log(id: string): WorkflowArtifactView {
 }
 
 // Three pages of two, the way the list pages a long session's artifacts.
-const PAGES: Record<string, WorkflowArtifactPage> = {
+const PAGES: Record<string, ArtifactPage> = {
   first: { artifacts: [log("a1"), log("a2")], nextCursor: "p2" },
   p2: { artifacts: [log("a3"), log("a4")], nextCursor: "p3" },
   p3: { artifacts: [log("a5"), log("a6")] },
@@ -44,7 +44,7 @@ let root: Root | null = null;
 let container: HTMLElement | null = null;
 const listed: Array<string | undefined> = [];
 const handled: number[] = [];
-const priorList = api.sessionWorkflowArtifacts;
+const priorList = api.sessionArtifacts;
 const priorExport = api.artifactExport;
 afterEach(async () => {
   if (root) await act(async () => root!.unmount());
@@ -53,13 +53,13 @@ afterEach(async () => {
   container = null;
   listed.length = 0;
   handled.length = 0;
-  api.sessionWorkflowArtifacts = priorList;
+  api.sessionArtifacts = priorList;
   api.artifactExport = priorExport;
 });
 
 const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
 async function render(openArtifact: BrowserArtifactRequest | null) {
-  api.sessionWorkflowArtifacts = async (_session: string, cursor?: string) => {
+  api.sessionArtifacts = async (_session: string, cursor?: string) => {
     listed.push(cursor);
     return PAGES[cursor ?? "first"]!;
   };

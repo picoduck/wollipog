@@ -133,7 +133,6 @@ export const PANEL_NOTICE_RANK = {
   inventoryError: 4,
   earlierActivityUnloaded: 5,
   ambiguousIdentity: 6,
-  workflowDetailsUnavailable: 7,
   olderHistoryTruncated: 8,
   backgroundWorkLost: 9,
   // A handoff hold waiting on work this list has no row for (#3752), just after lost work.

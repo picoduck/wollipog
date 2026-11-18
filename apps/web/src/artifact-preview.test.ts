@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, webcrypto } from "node:crypto";
 import test from "node:test";
-import type { WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactView } from "@wollipog/protocol";
 import {
   ArtifactVerificationError,
   classifyArtifactPreview,
@@ -36,7 +36,7 @@ test("artifact preview classification is exact rather than MIME-sniffed", () => 
   assert.equal(classifyArtifactPreview({ kind: "review_report", mimeType: "text/markdown", encoding: "utf8" }), "markdown");
 });
 
-function artifact(bytes: Uint8Array, overrides: Partial<WorkflowArtifactView> = {}): WorkflowArtifactView {
+function artifact(bytes: Uint8Array, overrides: Partial<ArtifactView> = {}): ArtifactView {
   return {
     artifactId: "artifact_1",
     sessionId: "session_1",
@@ -87,7 +87,7 @@ test("bytes that are not the artifact's fail with a verification error a preview
     artifactId: "a", kind: "test_log", name: "log", mimeType: "text/plain", encoding: "utf8",
     sizeBytes: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex"),
     createdBy: { kind: "system" }, createdAt: 1,
-  } as WorkflowArtifactView;
+  } as ArtifactView;
   await assert.rejects(verifyArtifactPreviewBlob(artifact, new Blob(["tampered"], { type: "text/plain" })), ArtifactVerificationError);
   await assert.rejects(verifyArtifactPreviewBlob(artifact, new Blob(["expected"], { type: "text/html" })), ArtifactVerificationError);
   await assert.rejects(verifyArtifactPreviewBlob(artifact, new Blob(["expectee"], { type: "text/plain" })), ArtifactVerificationError);

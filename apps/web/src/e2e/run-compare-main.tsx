@@ -166,9 +166,6 @@ const navigation: ViewNavigation = {
 
 const client = {
   ...api,
-  workflowInstances: async () => [],
-  workflowDefinitions: async () => [],
-  runWorkflowArtifacts: async () => ({ artifacts: [] }),
   getSessionEventPage: async (id: string) => {
     const events = pages.get(id) ?? [];
     return { events, eventEpoch: 0, nextAfter: events.at(-1)?.seq ?? 0, cacheComplete: true } as SessionEventsResponse;

@@ -93,7 +93,7 @@ async function harness(t: { after(fn: () => unknown): void }) {
   db.createSession({ id: "child", parentSessionId: "root", runnerId: "r", workspaceId: "w", agentId: "child-agent", title: "Synthetic Child",
     useWorktree: false, driver: "claude-code", scope: audience, config: { model: "claude-opus-5-5", costBudgetUsd: 2, maxToolCalls: 10 }, now: 4 });
   db.updateSessionStatus("child", "running", 5);
-  db.createWorkflowArtifactBytes({ artifactId: "source", sessionId: "child", kind: "video", name: "Paced.webm", mimeType: "video/webm",
+  db.createArtifactBytes({ artifactId: "source", sessionId: "child", kind: "video", name: "Paced.webm", mimeType: "video/webm",
     encoding: "base64", sha256: sha(source), sizeBytes: source.length, createdBy: { kind: "agent", id: "child" },
     metadata: { purpose: "session_attachment" }, createdAt: 6 }, source);
   const normalized = normalizeWorkflowDecisionSnapshot({ category: "ui_evidence_approval",

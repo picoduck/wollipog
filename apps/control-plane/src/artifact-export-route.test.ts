@@ -3,11 +3,11 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import Fastify from "fastify";
 import type { HumanPrincipal } from "./identity.js";
-import type { RunnerMetadata, WorkflowArtifact } from "@wollipog/protocol";
+import type { RunnerMetadata, Artifact } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { registerAuthGate } from "./http-auth.js";
 import { isAllowedOrigin } from "./net.js";
-import { registerWorkflowArtifactExportRoute } from "./artifact-export-route.js";
+import { registerArtifactExportRoute } from "./artifact-export-route.js";
 
 const TOKEN = "d".repeat(43);
 const runner: RunnerMetadata = {
@@ -26,13 +26,13 @@ test("the real artifact export route requires paired auth and returns exact hard
   const identity = db.localIdentityContext();
   const principal: HumanPrincipal = { kind: "human", actorId: identity.userId, ...identity, role: "viewer" };
   const data = "raw log with <script>alert(1)</script>\n";
-  const artifact: WorkflowArtifact = {
+  const artifact: Artifact = {
     artifactId: "artifact-route", sessionId: "artifact-route-session", kind: "test_log",
     name: "raw test.log", mimeType: "text/plain", encoding: "utf8", data,
     sizeBytes: Buffer.byteLength(data), sha256: createHash("sha256").update(data).digest("hex"),
     createdBy: { kind: "human", id: identity.userId }, createdAt: 2,
   };
-  db.createWorkflowArtifact(artifact);
+  db.createArtifact(artifact);
 
   const app = Fastify();
   const authenticated = (authorization: string | undefined) => authorization === `Bearer ${TOKEN}`;
@@ -42,7 +42,7 @@ test("the real artifact export route requires paired auth and returns exact hard
       : null,
     isAllowedOrigin,
   });
-  registerWorkflowArtifactExportRoute(app, {
+  registerArtifactExportRoute(app, {
     db,
     requestHuman: (req) => authenticated(req.headers.authorization) ? principal : null,
   });

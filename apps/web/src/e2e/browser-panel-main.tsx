@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { ControlPlaneToUi, SessionView, WorkflowArtifactKind, WorkflowArtifactPage, WorkflowArtifactView } from "@wollipog/protocol";
+import type { ControlPlaneToUi, SessionView, ArtifactKind, ArtifactPage, ArtifactView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
@@ -121,7 +121,7 @@ async function sha256(bytes: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-interface ArtifactFixture { kind: WorkflowArtifactKind; name: string; mimeType: string; ageMs: number; bytes: Uint8Array }
+interface ArtifactFixture { kind: ArtifactKind; name: string; mimeType: string; ageMs: number; bytes: Uint8Array }
 
 const fixtures: Record<string, ArtifactFixture> = {
   a1: { kind: "review_report", name: "Review of the Browser panel rebuild", mimeType: "text/markdown", ageMs: 4 * minute, bytes: padded(REPORT, 6_212) },
@@ -135,9 +135,9 @@ const fixtures: Record<string, ArtifactFixture> = {
 };
 
 /** Filled by `start` before the first render, once every fixture's checksum is known. */
-let artifacts: WorkflowArtifactView[] = [];
+let artifacts: ArtifactView[] = [];
 
-async function describeFixtures(): Promise<WorkflowArtifactView[]> {
+async function describeFixtures(): Promise<ArtifactView[]> {
   fixtures.a5!.bytes = await screenshotBytes();
   return Promise.all(Object.entries(fixtures).map(async ([id, fixture]) => ({
     artifactId: id, sessionId: session.id, kind: fixture.kind, name: fixture.name, mimeType: fixture.mimeType,
@@ -148,7 +148,7 @@ async function describeFixtures(): Promise<WorkflowArtifactView[]> {
 }
 
 const scenario = params.get("artifacts") ?? "list";
-const listArtifacts = async (_sessionId: string, cursor?: string): Promise<WorkflowArtifactPage> => {
+const listArtifacts = async (_sessionId: string, cursor?: string): Promise<ArtifactPage> => {
   if (scenario === "loading") return new Promise(() => undefined);
   if (scenario === "empty") return { artifacts: [] };
   if (scenario === "error") throw new Error("GET /api/sessions/browser-panel-e2e/artifacts failed: 503 Service Unavailable");
@@ -165,7 +165,7 @@ const exportArtifact = async (artifactId: string): Promise<Blob> => {
   return new Blob([bytes as BlobPart], { type: fixture.mimeType });
 };
 
-const client: ApiClient = { ...api, sessionWorkflowArtifacts: listArtifacts, artifactExport: exportArtifact };
+const client: ApiClient = { ...api, sessionArtifacts: listArtifacts, artifactExport: exportArtifact };
 
 /** The store only has to connect: nothing here reads a runner. */
 class FixtureSocket implements UiSocket {

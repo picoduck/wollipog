@@ -4,7 +4,7 @@ import { afterEach, test } from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactView } from "@wollipog/protocol";
 import { api } from "../api.js";
 import type { TimelineItem } from "../timeline.js";
 import { EventTimeline } from "./EventTimeline.js";
@@ -33,7 +33,7 @@ for (const [name, value] of Object.entries({
 const PNG = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
 const PNG_SHA = createHash("sha256").update(PNG).digest("hex");
 
-function screenshot(id: string, overrides: Partial<WorkflowArtifactView> = {}): WorkflowArtifactView {
+function screenshot(id: string, overrides: Partial<ArtifactView> = {}): ArtifactView {
   return {
     artifactId: id,
     sessionId: "session_1",
@@ -50,7 +50,7 @@ function screenshot(id: string, overrides: Partial<WorkflowArtifactView> = {}): 
 }
 
 let nextId = 1;
-const attached = (artifact: WorkflowArtifactView): TimelineItem =>
+const attached = (artifact: ArtifactView): TimelineItem =>
   ({ kind: "artifact_attached", id: nextId++, artifact, createdAt: nextId });
 const prompt = (text: string): TimelineItem => ({ kind: "user_message", id: nextId++, text, createdAt: nextId });
 const reply = (text: string): TimelineItem => ({ kind: "agent_message", id: nextId++, text, createdAt: nextId });
@@ -70,7 +70,7 @@ afterEach(async () => {
   domWindow.document.body.innerHTML = "";
 });
 
-async function render(items: TimelineItem[], onOpenArtifact?: (artifact: WorkflowArtifactView) => void) {
+async function render(items: TimelineItem[], onOpenArtifact?: (artifact: ArtifactView) => void) {
   api.artifactExport = async (id: string) => {
     exported.push(id);
     return new Blob([PNG], { type: "image/png" });

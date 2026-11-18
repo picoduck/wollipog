@@ -3,9 +3,6 @@ import type { DatabaseSync } from "node:sqlite";
 // Install after the older column migrations. None of these indexes touches session_events:
 // write savings on a periodic retained-history scan must not add work to streaming ingest.
 const INDEXES = /* sql */ `
-CREATE INDEX IF NOT EXISTS idx_workflow_attempts_deadline_active
-  ON workflow_attempts(deadline_at, attempt_id)
-  WHERE status IN ('dispatching','running','awaiting_output');
 CREATE INDEX IF NOT EXISTS idx_session_stop_intents_pending
   ON session_stop_intents(last_attempt_at, session_id)
   WHERE archive_after_stop=1 AND failed_at IS NULL;

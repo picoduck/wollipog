@@ -165,7 +165,7 @@ export function NewTriggerDialog({ automation, kind, publicOrigin, onCreated, on
   }, [created]);
 
   const kindLabel = TRIGGER_KIND_LABEL[kind];
-  const takesDetails = automation.action.kind !== "workflow_run";
+  const takesDetails = automation.action.kind !== "retired";
   const update = (change: Partial<TriggerDraft>) => setDraft((current) => ({ ...current, ...change }));
 
   const submit = async (event?: FormEvent) => {
@@ -562,7 +562,9 @@ export function AutomationTriggers({ automation, triggers, publicOrigin, now, di
     <section className="section" aria-labelledby="automation-triggers">
       <div className="section-head">
         <h2 className="section-title" id="automation-triggers" tabIndex={-1}>Triggers</h2>
-        <div className="actions"><AddTriggerMenu disabled={disabled} onChoose={onAddingChange} /></div>
+        {automation.action.kind !== "retired" && (
+          <div className="actions"><AddTriggerMenu disabled={disabled} onChoose={onAddingChange} /></div>
+        )}
       </div>
       <p className="section-note">{TRIGGERS_HELP}</p>
       {triggers.length === 0

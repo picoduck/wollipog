@@ -93,7 +93,7 @@ const client = {
   ...api,
   sideChat: async () => ({ sideChat: related }),
   getSessionEventPage: async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true }),
-  sessionWorkflowArtifacts: async () => ({ artifacts: [] }),
+  sessionArtifacts: async () => ({ artifacts: [] }),
 } as unknown as ApiClient;
 
 function gitStatus(): GitStatus {

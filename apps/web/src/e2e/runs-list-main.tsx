@@ -4,8 +4,6 @@ import type {
   ControlPlaneToUi,
   RunView,
   SessionView,
-  WorkflowDefinition,
-  WorkflowInstanceView,
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -28,7 +26,7 @@ document.documentElement.setAttribute("data-theme", params.get("theme") === "lig
 const NOW = Date.now();
 const MINUTE = 60_000;
 
-function member(id: string, agentId: string, agentName: string, driver: SessionView["driver"], status: SessionView["status"], runId: string): SessionView {
+function member(id: string, agentId: string, agentName: string, driver: SessionView["driver"], status: SessionView["status"], runId: string | null): SessionView {
   return {
     id, runnerId: "runner-1", workspaceId: "ws-wollipog", workspaceName: "Wollipog", projectId: null, agentId, agentName,
     title: agentName, status, column: "review", runId, useWorktree: true, worktreePath: null, archived: false,
@@ -39,11 +37,6 @@ function member(id: string, agentId: string, agentName: string, driver: SessionV
 }
 
 const runs: RunView[] = [
-  {
-    id: "run-review", title: "Build and review the settings export screen", prompt: "Build the export screen.",
-    workspaceId: "ws-wollipog", workspaceName: "Wollipog", createdAt: NOW - 2 * MINUTE, updatedAt: NOW,
-    sessionIds: ["s-builder", "s-reviewer"],
-  },
   {
     id: "run-search", title: "Compare three approaches to indexing session search across machines and projects",
     prompt: "Index session search.", workspaceId: "ws-wollipog", workspaceName: "Wollipog", createdAt: NOW - 6 * MINUTE,
@@ -62,8 +55,9 @@ const runs: RunView[] = [
 ];
 
 const sessions: SessionView[] = [
-  member("s-builder", "claude", "Claude Code", "claude-code", "idle", "run-review"),
-  member("s-reviewer", "codex", "Codex", "codex-app-server", "idle", "run-review"),
+  // The upgrade removes the workflow's grouping but leaves its two sessions.
+  member("s-builder", "claude", "Claude Code", "claude-code", "idle", null),
+  member("s-reviewer", "codex", "Codex", "codex-app-server", "idle", null),
   member("s-search-claude", "claude", "Claude Code", "claude-code", "running", "run-search"),
   member("s-search-codex", "codex", "Codex", "codex-app-server", "idle", "run-search"),
   member("s-search-opencode", "opencode", "OpenCode", "acp", "idle", "run-search"),
@@ -74,18 +68,6 @@ const sessions: SessionView[] = [
   member("s-dates-claude", "claude", "Claude Code", "claude-code", "idle", "run-dates"),
   member("s-dates-codex", "codex", "Codex", "codex-app-server", "completed", "run-dates"),
 ];
-
-const instances = [{
-  instanceId: "instance-review", workflowId: "builtin:build-review", workflowVersion: 1, runId: "run-review",
-  status: "waiting_gate", transitionCount: 2, createdBy: { kind: "human", id: "local" }, createdAt: NOW - 2 * MINUTE,
-  updatedAt: NOW, nodeStates: [
-    { nodeId: "build", status: "succeeded", attemptCount: 1, sessionId: "s-builder" },
-    { nodeId: "review", status: "succeeded", attemptCount: 1, sessionId: "s-reviewer" },
-    { nodeId: "approve", status: "waiting_gate", attemptCount: 0 },
-  ],
-}] as WorkflowInstanceView[];
-
-const definitions = [{ workflowId: "builtin:build-review", name: "Build and Review" }] as WorkflowDefinition[];
 
 const snapshot = {
   type: "snapshot",
@@ -130,8 +112,6 @@ const navigation: ViewNavigation = {
 
 const client = {
   ...api,
-  workflowInstances: async () => instances,
-  workflowDefinitions: async () => definitions,
 } as unknown as ApiClient;
 
 createRoot(document.getElementById("root")!).render(

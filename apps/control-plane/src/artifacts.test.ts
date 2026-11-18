@@ -1,7 +1,7 @@
 import { webmHeaderCorpus } from "@wollipog/test-support/webm-header-corpus";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { screenshotBytesMatchMime, validateWorkflowArtifact, videoBytesMatchMime } from "./workflow-artifacts.js";
+import { screenshotBytesMatchMime, validateArtifact, videoBytesMatchMime } from "./artifacts.js";
 
 const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(12)]);
 const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
@@ -14,7 +14,7 @@ test("GIF and WebP validation compares every signature byte exactly", () => {
       [0, 1, 2, 3, 8, 9, 10, 11]],
   ];
   for (const [mimeType, bytes, offsets] of cases) {
-    const validate = (data: Buffer) => validateWorkflowArtifact({
+    const validate = (data: Buffer) => validateArtifact({
       sessionId: "session", kind: "screenshot", name: "image", mimeType, encoding: "base64", data: data.toString("base64"),
     });
     assert.equal(screenshotBytesMatchMime(mimeType, bytes), true);
@@ -33,7 +33,7 @@ test("GIF and WebP validation compares every signature byte exactly", () => {
 test("MP4 validation compares the signature and every supported major brand byte exactly", () => {
   for (const brand of ["isom", "iso2", "mp41", "mp42", "avc1", "M4V ", "dash"]) {
     const bytes = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from(`ftyp${brand}`), Buffer.alloc(12)]);
-    const validate = (data: Buffer) => validateWorkflowArtifact({
+    const validate = (data: Buffer) => validateArtifact({
       sessionId: "session", kind: "video", name: "clip", mimeType: "video/mp4", encoding: "base64", data: data.toString("base64"),
     });
     assert.equal(videoBytesMatchMime("video/mp4", bytes), true, brand);
@@ -60,7 +60,7 @@ test("validates and content-addresses each workflow artifact contract", () => {
     { kind: "video", encoding: "base64", mimeType: "video/mp4", data: mp4.toString("base64") },
   ] as const;
   for (const input of cases) {
-    const result = validateWorkflowArtifact({ runId: "r1", ...input, name: `${input.kind}.artifact`, metadata: { attempt: 1 } });
+    const result = validateArtifact({ runId: "r1", ...input, name: `${input.kind}.artifact`, metadata: { attempt: 1 } });
     assert.equal(result.ok, true, input.kind);
     if (!result.ok) continue;
     assert.match(result.value.sha256, /^[a-f0-9]{64}$/);
@@ -70,7 +70,7 @@ test("validates and content-addresses each workflow artifact contract", () => {
 });
 
 test("video validation accepts MP4 and WebM signatures and rejects spoofed or oversized media", () => {
-  const make = (mimeType: string, data: Buffer) => validateWorkflowArtifact({
+  const make = (mimeType: string, data: Buffer) => validateArtifact({
     sessionId: "session", kind: "video", name: "clip", mimeType, encoding: "base64", data: data.toString("base64"),
   });
   assert.equal(make("video/mp4", mp4).ok, true);
@@ -83,7 +83,7 @@ test("video validation accepts MP4 and WebM signatures and rejects spoofed or ov
 test("WebM validation uses the common bounded-header corpus", () => {
   for (const { name, bytes, accepted } of webmHeaderCorpus()) {
     assert.equal(videoBytesMatchMime("video/webm", bytes), accepted, name);
-    assert.equal(validateWorkflowArtifact({
+    assert.equal(validateArtifact({
       sessionId: "session", kind: "video", name: "clip", mimeType: "video/webm",
       encoding: "base64", data: bytes.toString("base64"),
     }).ok, accepted, name);
@@ -94,26 +94,26 @@ test("WebM validation uses the common bounded-header corpus", () => {
 
 test("artifact validation rejects ambiguous encodings, spoofed images, invalid JSON, and oversized data", () => {
   const base = { sessionId: "s1", name: "artifact.txt" };
-  assert.match((validateWorkflowArtifact({ ...base, kind: "patch", encoding: "base64", mimeType: "text/x-diff", data: "eA==" }) as { error: string }).error, /utf8/);
-  assert.match((validateWorkflowArtifact({ ...base, kind: "screenshot", encoding: "base64", mimeType: "image/png", data: "eA==" }) as { error: string }).error, /bytes/);
-  assert.match((validateWorkflowArtifact({ ...base, kind: "screenshot", encoding: "base64", mimeType: "image/png", data: "not base64" }) as { error: string }).error, /base64/);
-  assert.match((validateWorkflowArtifact({ ...base, kind: "verdict", encoding: "json", mimeType: "application/json", data: "[]" }) as { error: string }).error, /JSON object/);
-  assert.match((validateWorkflowArtifact({ ...base, kind: "html_preview", encoding: "utf8", mimeType: "image/svg+xml", data: "<svg/>" }) as { error: string }).error, /MIME/);
-  assert.match((validateWorkflowArtifact({ ...base, kind: "html_preview", encoding: "utf8", mimeType: "text/html", data: "x".repeat(2 * 1024 * 1024 + 1) }) as { error: string }).error, /size/);
-  assert.match((validateWorkflowArtifact({ ...base, kind: "test_log", encoding: "utf8", mimeType: "text/plain", data: "x".repeat(8 * 1024 * 1024 + 1) }) as { error: string }).error, /size/);
+  assert.match((validateArtifact({ ...base, kind: "patch", encoding: "base64", mimeType: "text/x-diff", data: "eA==" }) as { error: string }).error, /utf8/);
+  assert.match((validateArtifact({ ...base, kind: "screenshot", encoding: "base64", mimeType: "image/png", data: "eA==" }) as { error: string }).error, /bytes/);
+  assert.match((validateArtifact({ ...base, kind: "screenshot", encoding: "base64", mimeType: "image/png", data: "not base64" }) as { error: string }).error, /base64/);
+  assert.match((validateArtifact({ ...base, kind: "verdict", encoding: "json", mimeType: "application/json", data: "[]" }) as { error: string }).error, /JSON object/);
+  assert.match((validateArtifact({ ...base, kind: "html_preview", encoding: "utf8", mimeType: "image/svg+xml", data: "<svg/>" }) as { error: string }).error, /MIME/);
+  assert.match((validateArtifact({ ...base, kind: "html_preview", encoding: "utf8", mimeType: "text/html", data: "x".repeat(2 * 1024 * 1024 + 1) }) as { error: string }).error, /size/);
+  assert.match((validateArtifact({ ...base, kind: "test_log", encoding: "utf8", mimeType: "text/plain", data: "x".repeat(8 * 1024 * 1024 + 1) }) as { error: string }).error, /size/);
 });
 
 test("patch and test-log artifacts accept one maximum-sized event payload chunk", () => {
   const data = "x".repeat(8 * 1024 * 1024);
-  assert.equal(validateWorkflowArtifact({ sessionId: "s1", kind: "test_log", name: "event.txt", encoding: "utf8", mimeType: "text/plain", data }).ok, true);
-  assert.equal(validateWorkflowArtifact({ sessionId: "s1", kind: "patch", name: "event.diff", encoding: "utf8", mimeType: "text/x-diff", data }).ok, true);
+  assert.equal(validateArtifact({ sessionId: "s1", kind: "test_log", name: "event.txt", encoding: "utf8", mimeType: "text/plain", data }).ok, true);
+  assert.equal(validateArtifact({ sessionId: "s1", kind: "patch", name: "event.diff", encoding: "utf8", mimeType: "text/x-diff", data }).ok, true);
 });
 
 test("artifact validation rejects missing ownership, path-like names, unknown fields, and unsafe metadata", () => {
   const valid = { sessionId: "s1", kind: "test_log", name: "tests.log", mimeType: "text/plain", encoding: "utf8", data: "ok" };
-  assert.match((validateWorkflowArtifact({ ...valid, sessionId: undefined }) as { error: string }).error, /runId or sessionId/);
-  assert.match((validateWorkflowArtifact({ ...valid, name: "../tests.log" }) as { error: string }).error, /name/);
-  assert.match((validateWorkflowArtifact({ ...valid, extra: true }) as { error: string }).error, /unsupported/);
-  assert.match((validateWorkflowArtifact({ ...valid, metadata: { bad_key: { nested: true } } }) as { error: string }).error, /metadata/);
-  assert.match((validateWorkflowArtifact({ ...valid, metadata: { constructor: "pollute" } }) as { error: string }).error, /metadata/);
+  assert.match((validateArtifact({ ...valid, sessionId: undefined }) as { error: string }).error, /runId or sessionId/);
+  assert.match((validateArtifact({ ...valid, name: "../tests.log" }) as { error: string }).error, /name/);
+  assert.match((validateArtifact({ ...valid, extra: true }) as { error: string }).error, /unsupported/);
+  assert.match((validateArtifact({ ...valid, metadata: { bad_key: { nested: true } } }) as { error: string }).error, /metadata/);
+  assert.match((validateArtifact({ ...valid, metadata: { constructor: "pollute" } }) as { error: string }).error, /metadata/);
 });

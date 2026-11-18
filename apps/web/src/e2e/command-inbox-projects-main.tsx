@@ -64,7 +64,6 @@ import { InboxView } from "../components/InboxView.js";
 import { NewSessionDialog, type NewSessionPreset } from "../components/NewSessionDialog.js";
 import { ProjectsView } from "../components/ProjectsView.js";
 import { RunDetail } from "../components/RunsView.js";
-import type { WorkflowInstanceDetail } from "@wollipog/protocol";
 import { SessionDetail } from "../components/SessionDetail.js";
 import { ShellDock } from "../components/ShellDock.js";
 import { SessionTerminalsProvider } from "../session-terminals.js";
@@ -87,7 +86,7 @@ import { DIFF_SECTIONS_STATUS_FILES, diffSectionsDiff } from "./diff-sections-fi
 import { checkoutFindings, inMemoryReviewFindings } from "./review-findings-fixture.js";
 import { SIDE_CHAT_STATES, installSideChatFixture, type SideChatFixtureState } from "./side-chat-fixture.js";
 import { installInboxTriageFixture } from "./inbox-triage-fixture.js";
-import type { WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactView } from "@wollipog/protocol";
 
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
 const SESSION_SUMMARIES = FIXTURE_QUERY.get("sessionSummaries") === "1";
@@ -1665,8 +1664,8 @@ function runArtifactScreenshot(): Promise<Uint8Array> {
 }
 
 const RUN_ARTIFACT_SOURCES: ReadonlyArray<{
-  id: string; kind: WorkflowArtifactView["kind"]; name: string; mimeType: string; ageMinutes: number;
-  author: WorkflowArtifactView["createdBy"]; body: () => Promise<Uint8Array>;
+  id: string; kind: ArtifactView["kind"]; name: string; mimeType: string; ageMinutes: number;
+  author: ArtifactView["createdBy"]; body: () => Promise<Uint8Array>;
 }> = [
   { id: "run-art-report", kind: "review_report", name: "Final QA report", mimeType: "text/markdown", ageMinutes: 6,
     author: { kind: "agent", id: "session-alpha" },
@@ -1684,13 +1683,13 @@ const RUN_ARTIFACT_SOURCES: ReadonlyArray<{
     body: async () => runArtifactText.encode(JSON.stringify({ verdict: "pass", gate: "qa", blocking: 0, retried: ["sign-in"] })) },
 ];
 
-let runArtifactsLoaded: Promise<Array<{ view: WorkflowArtifactView; bytes: Uint8Array }>> | null = null;
-function runArtifacts(): Promise<Array<{ view: WorkflowArtifactView; bytes: Uint8Array }>> {
+let runArtifactsLoaded: Promise<Array<{ view: ArtifactView; bytes: Uint8Array }>> | null = null;
+function runArtifacts(): Promise<Array<{ view: ArtifactView; bytes: Uint8Array }>> {
   runArtifactsLoaded ??= Promise.all(RUN_ARTIFACT_SOURCES.map(async (source) => {
     const bytes = await source.body();
     const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
     const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-    const view: WorkflowArtifactView = {
+    const view: ArtifactView = {
       artifactId: source.id, runId: activeRun.id, kind: source.kind, name: source.name, mimeType: source.mimeType,
       encoding: source.kind === "screenshot" ? "base64" : source.kind === "verdict" ? "json" : "utf8",
       sizeBytes: bytes.byteLength, sha256, createdBy: source.author, createdAt: Date.now() - source.ageMinutes * 60_000,
@@ -1712,19 +1711,6 @@ function rowColumnsReminder(): SessionReminderView {
     reminderId: "reminder-snoozed", sessionId: "session-snoozed", scheduledFor: returns.getTime(),
     timeZone: "Asia/Tokyo", originalExpression: "in 2 days", wakePolicy: "regardless", state: "pending",
     revision: 1, createdAt: Date.now() - 60_000, updatedAt: Date.now() - 60_000,
-  };
-}
-
-function prunedWorkflowFixture(): WorkflowInstanceDetail {
-  return {
-    instanceId: "workflow-pruned", workflowId: "workflow", workflowVersion: 1, runId: activeRun.id,
-    status: "succeeded", transitionCount: 3, createdBy: { kind: "system" }, createdAt: 1, updatedAt: 2, completedAt: 2,
-    eventHistoryPruned: { prunedAt: Date.UTC(2026, 9, 16), eventCount: 1_284, retentionDays: 90 },
-    nodeStates: [{ nodeId: "build", status: "succeeded", attemptCount: 1, outcome: "success", completedAt: 2 }],
-    definition: { workflowId: "workflow", version: 1, source: "custom", name: "Build and Review", maxTransitions: 20,
-      edges: [], createdBy: { kind: "system" }, createdAt: 1, nodes: [{ nodeId: "build", kind: "agent", role: "Builder",
-        agentId: "codex", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }] },
-    attempts: [], events: [],
   };
 }
 
@@ -2681,8 +2667,6 @@ const client = {
     if (!fixture) throw new Error("not a git repository");
     return { summary: structuredClone(fixture.summary) };
   },
-  workflowInstances: async () => [],
-  workflowDefinitions: async () => [],
   projectLocationWorktreeSetup: async (_projectId: string, locationId: string) => ({
     locationId,
     status: { status: "valid" as const, hash: "a".repeat(64) },
@@ -2713,13 +2697,8 @@ const client = {
       status: "available" as const,
     },
   }),
-  runWorkflowArtifacts: async (_runId: string, cursor?: string) => {
-    if (!RUN_ARTIFACTS) return { artifacts: [], nextCursor: undefined };
-    const views = (await runArtifacts()).map((candidate) => candidate.view);
-    return cursor ? { artifacts: views.slice(4) } : { artifacts: views.slice(0, 4), nextCursor: "run-artifacts-2" };
-  },
   ...(RUN_ARTIFACTS ? {
-    sessionWorkflowArtifacts: async (sessionId: string) => ({
+    sessionArtifacts: async (sessionId: string) => ({
       artifacts: (await runArtifacts()).map((candidate) => ({ ...candidate.view, sessionId })),
     }),
   } : {}),
@@ -3607,11 +3586,6 @@ const client = {
       return { locationId, status: structuredClone(LOCATION_SETUP[locationId]!), path: ".wollipog.json" as const, detected: ["pnpm"] };
     },
     dismissWorktreeSetupNotice: async () => undefined,
-  } : {}),
-  // Keep this scenario's complete read responses together, independent of the default run mocks.
-  ...(FIXTURE_QUERY.get("workflowPruned") === "1" ? {
-    workflowInstances: async () => [prunedWorkflowFixture()],
-    workflowInstance: async () => prunedWorkflowFixture(),
   } : {}),
 } as ApiClient;
 

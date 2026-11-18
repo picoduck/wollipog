@@ -12,12 +12,7 @@ import { AgentIcon } from "./AgentIcon.js";
 import { Modal } from "./common.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import {
-  defaultWorkflowBindings,
-  workflowBindingsComplete,
-  type RunWorkMode,
-} from "../workflow-presets.js";
-import { ChoiceRows, SegmentedControl, Select, type SelectOption } from "./ui/ChoiceControls.js";
+import { ChoiceRows, Select, type SelectOption } from "./ui/ChoiceControls.js";
 import { matchesShortcut } from "../shortcuts.js";
 import {
   NO_PROJECT_SELECTION,
@@ -28,7 +23,6 @@ import {
 import { machineOptionLabels } from "../runners.js";
 import { machineDisplayNames } from "../machine-display-names.js";
 import {
-  RUN_TYPE_DESCRIPTION,
   agentNeedsAccountChoice,
   choosableRunAgentIds,
   defaultRunAgentIds,
@@ -38,24 +32,18 @@ import {
   runAgentChoices,
   runLocationOptions,
   runVisibilitySentence,
-  selectableRunAgentIds,
-  workflowHumanRoles,
-  workflowRoleFields,
 } from "../run-dialog-choices.js";
 
 /** A failed create request in one sentence (§8.5, §13.2); the server's words stay behind Show Details. */
-function startFailureSentence(error: unknown, mode: RunWorkMode): string {
+function startFailureSentence(error: unknown): string {
   if (!(error instanceof ApiError)) return "Wollipog couldn't reach the server. Check your connection and try again.";
   if (error.status === 403) return "You don't have permission to start a run here.";
-  return mode === "workflow"
-    ? "The workflow didn't start. Check the choices above and try again."
-    : "The run didn't start. Check the choices above and try again.";
+  return "The run didn't start. Check the choices above and try again.";
 }
 
 /**
  * New Multi-Agent Run (#2978; docs/design-system.md §3.1, §7.1–§7.3, §7.5, §8.1, §8.4–§8.5, §12,
- * §13.2, §17): the type, the task, where it runs, then the agents (Compare Agents) or the workflow
- * and its roles (Run a Workflow), and an optional title last. The primary stays disabled with its
+ * §13.2, §17): the task, where it runs, the agents, and an optional title last. The primary stays disabled with its
  * reason in the footer until the run can start; a server error is a danger notice at the body's end.
  * With no Machine online a warning leads the body and the form stays visible. On a phone it is a
  * full-height sheet. While the run is starting the dialog cannot be dismissed, so the person always
@@ -111,18 +99,9 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
     [machine, runner?.agents, runner?.protocolVersion, runner?.providerAccountDefaults],
   );
   const selectableIds = useMemo(() => choosableRunAgentIds(runner?.agents ?? [], runner?.providerAccountDefaults), [runner?.agents, runner?.providerAccountDefaults]);
-  const prebindableIds = useMemo(() => selectableRunAgentIds(runner?.agents ?? [], runner?.providerAccountDefaults), [runner?.agents, runner?.providerAccountDefaults]);
   const [workspaceId, setWorkspaceId] = useState(runner?.workspaces[0]?.id ?? "");
   const [agentIds, setAgentIds] = useState<string[]>(() => defaultRunAgentIds(runner?.agents ?? [], runner?.providerAccountDefaults));
-  const [mode, setMode] = useState<RunWorkMode>("parallel");
-  const [workflows, setWorkflows] = useState<Awaited<ReturnType<typeof api.workflowDefinitions>> | null>(null);
-  const [workflowsFailure, setWorkflowsFailure] = useState<string | null>(null);
-  const [workflowId, setWorkflowId] = useState("builtin:build-review");
-  const workflow = workflows?.find((candidate) => candidate.workflowId === workflowId);
-  const [agentBindings, setAgentBindings] = useState<Record<string, string>>({});
-  // By agent for Compare Agents and by role for a workflow: the two are different requests.
   const [memberAccounts, setMemberAccounts] = useState<Record<string, string>>({});
-  const [roleAccounts, setRoleAccounts] = useState<Record<string, string>>({});
   const [missingAccounts, setMissingAccounts] = useState<Record<string, string>>({});
   const [accountRefresh, setAccountRefresh] = useState(0);
   const reportMissingAccount = useCallback((member: string, name: string | null) => {
@@ -149,7 +128,6 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
     if (id !== runnerId) {
       // Accounts belong to their Machine, so a choice never carries to another one.
       setMemberAccounts({});
-      setRoleAccounts({});
     }
     setRunnerId(id);
     const r = runners.get(id);
@@ -220,41 +198,6 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
     setAgentIds((current) => current.filter((id) => selectableIds.includes(id)));
   }, [selectableIds]);
 
-  useEffect(() => {
-    let current = true;
-    void api.workflowDefinitions()
-      .then((definitions) => {
-        if (!current) return;
-        setWorkflows(definitions);
-        if (!definitions.some((definition) => definition.workflowId === workflowId)) {
-          setWorkflowId(definitions[0]?.workflowId ?? "");
-        }
-      })
-      .catch((cause: unknown) => {
-        if (!current) return;
-        setWorkflows([]);
-        setWorkflowsFailure(cause instanceof Error && cause.message ? cause.message : String(cause));
-      });
-    return () => { current = false; };
-    // The definition catalog is immutable per version; load once per dialog.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api]);
-
-  // A role is prebound only to an agent this run can start. A choice the person made stays while
-  // that agent can still start, so a Machine's routine update does not undo it.
-  useEffect(() => {
-    setAgentBindings((current) => {
-      const next = defaultWorkflowBindings(workflow, (runner?.agents ?? []).filter((agent) => prebindableIds.includes(agent.id)));
-      for (const { key } of workflowRoleFields(workflow)) {
-        const chosen = current[key];
-        if (chosen && selectableIds.includes(chosen)) next[key] = chosen;
-      }
-      return next;
-    });
-  }, [workflow, runner?.agents, selectableIds, prebindableIds]);
-
-  const roleFields = workflowRoleFields(workflow);
-  const humanRoles = workflowHumanRoles(workflow);
   const chosenAgentIds = agentIds.filter((id) => selectableIds.includes(id));
   const blockedReason = newRunBlockedReason({
     task,
@@ -266,15 +209,10 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
     runners,
     runnerId: runner?.status === "online" ? runnerId : "",
     workspaceId,
-    mode,
     agentCount: chosenAgentIds.length,
-    workflowChosen: Boolean(workflow),
-    workflowBound: Boolean(workflow && workflowBindingsComplete(workflow, agentBindings) &&
-      Object.values(agentBindings).every((id) => selectableIds.includes(id))),
     accountChoiceMissing: Object.values(missingAccounts)[0] ?? null,
   });
   const reasonId = `${ids}-reason`;
-  const typeHelperId = `${ids}-type`;
   const projectHelperId = `${ids}-project`;
   const visibility = projectsSupported ? runVisibilitySentence(selectedProject, projectSelection === NO_PROJECT_SELECTION) : null;
 
@@ -293,26 +231,14 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
         workspaceId,
       });
       const namedMembers = memberAccountsRequest(memberAccounts, Object.fromEntries(chosenAgentIds.map((id) => [id, id])), runner);
-      const namedRoles = memberAccountsRequest(roleAccounts, agentBindings, runner);
-      const { run } = mode === "parallel"
-        ? await api.createRun({
-            ...placement,
-            agentIds: chosenAgentIds,
-            task: task.trim(),
-            title: title.trim() || undefined,
-            useWorktree: true,
-            ...(namedMembers ? { providerAccountIds: namedMembers } : {}),
-          })
-        : await api.createWorkflowRun({
-            ...placement,
-            workflowId: workflow!.workflowId,
-            workflowVersion: workflow!.version,
-            task: task.trim(),
-            title: title.trim() || undefined,
-            useWorktree: true,
-            agentBindings,
-            ...(namedRoles ? { providerAccountBindings: namedRoles } : {}),
-          });
+      const { run } = await api.createRun({
+        ...placement,
+        agentIds: chosenAgentIds,
+        task: task.trim(),
+        title: title.trim() || undefined,
+        useWorktree: true,
+        ...(namedMembers ? { providerAccountIds: namedMembers } : {}),
+      });
       starting.current = false;
       if (!mounted.current) return;
       navigate({ name: "run", id: run.id });
@@ -321,7 +247,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
       starting.current = false;
       if (!mounted.current) return;
       setFailure({
-        sentence: startFailureSentence(cause, mode),
+        sentence: startFailureSentence(cause),
         detail: cause instanceof Error && cause.message ? cause.message : String(cause),
       });
       setBusy(false);
@@ -368,12 +294,6 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
     </div>
   );
 
-  const roleOptions: SelectOption<string>[] =agentChoices.map(({ option, description, disabledReason }) => ({
-    value: option.agent.id,
-    label: option.label,
-    ...(disabledReason ? { disabled: true, disabledReason } : { description }),
-  }));
-
   return (
     <Modal
       title="New Multi-Agent Run"
@@ -388,16 +308,14 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
           <BusyButton
             className="btn primary"
             busy={busy}
-            progress={mode === "workflow" ? "Starting the workflow…" : "Starting the agents…"}
+            progress="Starting the agents…"
             disabled={Boolean(blockedReason)}
             aria-describedby={blockedReason ? reasonId : undefined}
             onClick={() => void submit()}
           >
-            {mode === "workflow"
-              ? "Start Workflow"
-              : chosenAgentIds.length === 0
-                ? "Run Agents"
-                : `Run ${chosenAgentIds.length} Agent${chosenAgentIds.length === 1 ? "" : "s"}`}
+            {chosenAgentIds.length === 0
+              ? "Run Agents"
+              : `Run ${chosenAgentIds.length} Agent${chosenAgentIds.length === 1 ? "" : "s"}`}
           </BusyButton>
         </>
       }
@@ -425,27 +343,12 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
         </Notice>
       )}
       <div className="form">
-        <div className="field">
-          <SegmentedControl<RunWorkMode>
-            className="block"
-            label="Run Type"
-            value={mode}
-            onChange={setMode}
-            describedBy={typeHelperId}
-            options={[
-              { value: "parallel", label: "Compare Agents" },
-              { value: "workflow", label: "Run a Workflow" },
-            ]}
-          />
-          <p className="field-helper" id={typeHelperId}>{RUN_TYPE_DESCRIPTION[mode]}</p>
-        </div>
-
         <label className="field">
           <span>Task</span>
           <textarea
             value={task}
             rows={3}
-            placeholder={mode === "parallel" ? "e.g. Add retry with backoff to the uploads client" : "e.g. Build and review the uploads retry change"}
+            placeholder="e.g. Add retry with backoff to the uploads client"
             autoFocus
             onChange={(e) => setTask(e.target.value)}
             onKeyDown={(e) => {
@@ -503,115 +406,43 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
           </div>
         )}
 
-        {mode === "parallel" ? (
-          <div className="field">
-            <span id={`${ids}-agents`}>Agents</span>
-            {!runner ? (
-              <p className="field-helper">{agentsPlaceholder}</p>
-            ) : agentChoices.length === 0 ? (
-              <p className="field-helper">{`No agents are set up on ${machine}.`}</p>
-            ) : (
-              <ChoiceRows<string>
-                multiple
-                className="surface new-run-agents"
-                label="Agents"
-                labelledBy={`${ids}-agents`}
-                value={chosenAgentIds}
-                onChange={toggleAgent}
-                options={agentChoices.map(({ option, description, disabledReason }) => ({
-                  value: option.agent.id,
-                  title: option.label,
-                  icon: <AgentIcon driver={option.agent.driver ?? "acp"} agentName={option.agent.name} size={16} />,
-                  ...(disabledReason ? { disabled: true, disabledReason } : { description }),
-                }))}
-              />
-            )}
-            {runner && chosenAgentIds.map((id) => (
-              <RunMemberAccount
-                key={id}
-                runner={runner}
-                agentId={id}
-                member={id}
-                projectId={selectedProject?.id}
-                projectsSupported={projectsSupported}
-                workspaceId={workspaceId || undefined}
-                refresh={accountRefresh}
-                accountId={memberAccounts[id] ?? ""}
-                onChoose={(accountId) => setMemberAccounts((current) => ({ ...current, [id]: accountId }))}
-                onMissing={reportMissingAccount}
-              />
-            ))}
-          </div>
-        ) : (
-          <>
-            <div className="field">
-              <span>Workflow</span>
-              <Select<string>
-                label="Workflow"
-                value={workflow ? workflow.workflowId : null}
-                onChange={setWorkflowId}
-                options={(workflows ?? []).map((definition) => ({
-                  value: definition.workflowId,
-                  label: definition.name,
-                  description: `Version ${definition.version}`,
-                }))}
-                placeholder={workflows?.length === 0 ? "No Workflows" : "Choose a Workflow…"}
-                disabled={!workflows?.length}
-              />
-              {workflow?.description && <p className="field-helper">{workflow.description}</p>}
-            </div>
-            {workflowsFailure && (
-              <Notice tone="danger" compact details={<code>{workflowsFailure}</code>}>
-                Wollipog couldn't load the workflows. Close New Multi-Agent Run and open it again to retry.
-              </Notice>
-            )}
-            {workflow && (
-              <fieldset className="new-run-roles">
-                <legend>Roles</legend>
-                {!runner ? (
-                  <p className="field-helper">{agentsPlaceholder}</p>
-                ) : roleFields.map((role) => (
-                  <div className="field" key={role.key}>
-                    <span>{role.label}</span>
-                    <Select<string>
-                      label={role.label}
-                      value={agentBindings[role.key] || null}
-                      onChange={(agentId) => {
-                        setAgentBindings((current) => ({ ...current, [role.key]: agentId }));
-                        // Another agent may be another provider's, which this account can't serve.
-                        setRoleAccounts(({ [role.key]: _previous, ...rest }) => rest);
-                      }}
-                      options={roleOptions}
-                      placeholder="Choose an Agent…"
-                    />
-                    {agentBindings[role.key] && (
-                      <RunMemberAccount
-                        runner={runner}
-                        agentId={agentBindings[role.key]!}
-                        member={role.key}
-                        memberName={role.label}
-                        projectId={selectedProject?.id}
-                        projectsSupported={projectsSupported}
-                        workspaceId={workspaceId || undefined}
-                        refresh={accountRefresh}
-                        accountId={roleAccounts[role.key] ?? ""}
-                        onChoose={(accountId) => setRoleAccounts((current) => ({ ...current, [role.key]: accountId }))}
-                        onMissing={reportMissingAccount}
-                      />
-                    )}
-                  </div>
-                ))}
-                {humanRoles.length > 0 && (
-                  <dl className="facts">
-                    {humanRoles.map((role) => (
-                      <div key={role}><dt>{role}</dt><dd>You, in the run</dd></div>
-                    ))}
-                  </dl>
-                )}
-              </fieldset>
-            )}
-          </>
-        )}
+        <div className="field">
+          <span id={`${ids}-agents`}>Agents</span>
+          {!runner ? (
+            <p className="field-helper">{agentsPlaceholder}</p>
+          ) : agentChoices.length === 0 ? (
+            <p className="field-helper">{`No agents are set up on ${machine}.`}</p>
+          ) : (
+            <ChoiceRows<string>
+              multiple
+              className="surface new-run-agents"
+              label="Agents"
+              labelledBy={`${ids}-agents`}
+              value={chosenAgentIds}
+              onChange={toggleAgent}
+              options={agentChoices.map(({ option, description, disabledReason }) => ({
+                value: option.agent.id,
+                title: option.label,
+                icon: <AgentIcon driver={option.agent.driver ?? "acp"} agentName={option.agent.name} size={16} />,
+                ...(disabledReason ? { disabled: true, disabledReason } : { description }),
+              }))}
+            />
+          )}
+          {runner && chosenAgentIds.map((id) => (
+            <RunMemberAccount
+              key={id}
+              runner={runner}
+              agentId={id}
+              projectId={selectedProject?.id}
+              projectsSupported={projectsSupported}
+              workspaceId={workspaceId || undefined}
+              refresh={accountRefresh}
+              accountId={memberAccounts[id] ?? ""}
+              onChoose={(accountId) => setMemberAccounts((current) => ({ ...current, [id]: accountId }))}
+              onMissing={reportMissingAccount}
+            />
+          ))}
+        </div>
 
         <label className="field">
           <span>Title (Optional)</span>
@@ -631,13 +462,9 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
  * itself when the policy can't place it (#4353). The project matters: a policy won't move a project's
  * account-held memory, and the run would refuse. A choice someone made stays until they change it, even
  * if the policy could place the member again. */
-function RunMemberAccount({ runner, agentId, member, memberName, projectId, projectsSupported, workspaceId, refresh, accountId, onChoose, onMissing }: {
+function RunMemberAccount({ runner, agentId, projectId, projectsSupported, workspaceId, refresh, accountId, onChoose, onMissing }: {
   runner: RunnerView;
   agentId: string;
-  /** This member's key in the request. */
-  member: string;
-  /** The field's name for it, when it isn't the agent's own: a workflow's role. */
-  memberName?: string;
   projectId: string | undefined;
   projectsSupported: boolean;
   workspaceId: string | undefined;
@@ -652,23 +479,23 @@ function RunMemberAccount({ runner, agentId, member, memberName, projectId, proj
   const accounts = (runner.providerAccounts ?? []).filter((account) => account.provider === provider);
   const preview = useProviderAccountSelection(runner.runnerId, provider && accounts.length > 0 ? { agentId, ...providerAccountPreviewPlacement({ projectsSupported, projectId, workspaceId }) } : null,
     `${providerAccountSelectionRefreshKey(runner, runner.status === "online")}\0${refresh}`);
-  const name = memberName ?? (agent ? agentDisplayName(agent) : agentId);
+  const name = agent ? agentDisplayName(agent) : agentId;
   const needsChoice = accounts.length > 0 && (preview?.status === "choice_required" ||
     (agent !== undefined && agentNeedsAccountChoice(agent, runner.providerAccountDefaults)));
   // A choice counts only while it can still start, so one that signs out asks again rather than launching.
   const chosen = accounts.some((account) => account.id === accountId && !memberAccountUnusable(account, agent)) ? accountId : "";
   const missing = needsChoice && !chosen;
   useEffect(() => {
-    onMissing(member, missing ? name : null);
-    return () => onMissing(member, null);
-  }, [member, missing, name, onMissing]);
+    onMissing(agentId, missing ? name : null);
+    return () => onMissing(agentId, null);
+  }, [agentId, missing, name, onMissing]);
   const titles = maskedAccountTitles(accounts.map((account) => account.label));
   // Bound to this exact account list: another Machine or Agent offers other accounts, hidden again.
   const [revealed, toggleRevealed] = useAccountIdentifierReveal(
     JSON.stringify([runner.runnerId, agentId, chosen, accounts.map((account) => [account.id, account.label])]),
   );
   if (!needsChoice && !chosen) {
-    return preview && accounts.length > 1 ? <ExpectedProviderAccount runner={runner} preview={preview} providerName={memberName ?? (agent ? agentDisplayName(agent) : undefined)} /> : null;
+    return preview && accounts.length > 1 ? <ExpectedProviderAccount runner={runner} preview={preview} providerName={agent ? agentDisplayName(agent) : undefined} /> : null;
   }
   const label = `Account for ${name}`;
   return (

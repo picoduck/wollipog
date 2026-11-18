@@ -103,7 +103,7 @@ export function registerAssistantSessionContent(operations: AssistantOperations,
     }});
   adapter.register({name: "session_artifacts", description: "List authorized session attachment/artifact metadata and exact hashes using the owner service. Listing does not inspect evidence or approve it.",
     properties: {cursor: str, limit: {type: "integer", minimum: 1, maximum: 100}},
-    run: a => result(svc.sessionWorkflowArtifacts(text(a, "sessionId"), a.cursor as string | undefined, a.limit === undefined ? 50 : a.limit as number))});
+    run: a => result(svc.sessionArtifacts(text(a, "sessionId"), a.cursor as string | undefined, a.limit === undefined ? 50 : a.limit as number))});
   adapter.register({name: "transcript_shares", description: "Inspect metadata for existing transcript shares. No bearer capability or public conversation bytes are returned. Share credential issuance/revocation stays on the authenticated owner path.",
     run: (a, ctx) => {const r = listAuthorizedTranscriptShares(db, ctx.owner, text(a, "sessionId")); return r.ok ? {status: 200, body: {shares: r.value}} : {status: r.status, body: {error: r.error}};}});
   adapter.register({name: "reminder_get", description: "Read the granting owner's reminder for this authorized session, including indefinite Someday reminders.",

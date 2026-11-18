@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, SESSION_HISTORY_PREVIEW_BYTE_BUDGET, type WorkflowArtifactView, type ControlPlaneToRunner } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, SESSION_HISTORY_PREVIEW_BYTE_BUDGET, type ArtifactView, type ControlPlaneToRunner } from "@wollipog/protocol";
 import { SessionStore } from "../../runner/src/session-store.js";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -115,11 +115,11 @@ test("hydration handoff uses proven CP identities including CP-only rows, never 
       turnStartSeq: preview.turnStartSeq, handoffSeq: 22, handoffFirstSeq: 22, handoffLastSeq: 221, limit: 200 };
     assert.equal(f.reader.handoff("s1", 0, read), null, "incomplete cache cannot prove the handoff identity");
     const bytes = Buffer.from("synthetic attachment");
-    const artifact: WorkflowArtifactView = { artifactId: "a1", sessionId: "s1", kind: "test_log",
+    const artifact: ArtifactView = { artifactId: "a1", sessionId: "s1", kind: "test_log",
       name: "synthetic.txt", mimeType: "text/plain", encoding: "utf8", sizeBytes: bytes.length,
       sha256: createHash("sha256").update(bytes).digest("hex"), createdBy: { kind: "system", id: "fixture" },
       metadata: { purpose: "session_attachment" }, createdAt: 2 };
-    f.db.createWorkflowArtifactBytes(artifact, bytes);
+    f.db.createArtifactBytes(artifact, bytes);
     f.db.appendEvent("s1", { kind: "artifact_attached", artifact }, 2);
     let after = 1;
     while (after < f.tail) {

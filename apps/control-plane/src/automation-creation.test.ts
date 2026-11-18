@@ -13,7 +13,6 @@ import { AutomationCreationService } from "./automation-creation.js";
 import { AutomationsService } from "./automations.js";
 import { registerAutomationCreationRoutes } from "./automation-creation-routes.js";
 import { isAgentControlApiRouteAllowed } from "./auth.js";
-import { BUILD_REVIEW_WORKFLOW } from "./workflow-graphs.js";
 
 const metadata: RunnerMetadata = { runnerId: "runner", hostname: "test", os: "linux", version: "test",
   workspaces: [{ id: "repo", name: "Example", path: "/example" }], agents: [{ id: "agent", name: "Agent",
@@ -299,39 +298,6 @@ for (const status of ["pending", "approved"] as const) test(`interrupted ${statu
   } finally { h.db.close(); }
 });
 
-test("expiration restores idle safely for a session in a workflow attempt", (t) => {
-  let now = Date.now();
-  t.mock.method(Date, "now", () => now);
-  const h = harness();
-  try {
-    h.db.updateSessionStatus("self", "idle", now);
-    h.db.createRun({ id: "run", title: "Workflow", prompt: "Inspect", runnerId: "runner", workspaceId: "repo", now });
-    const definition = h.db.createWorkflowDefinition({ workflowId: "expiry-workflow", ...BUILD_REVIEW_WORKFLOW,
-      source: "custom", createdBy: { kind: "human", id: h.owner }, createdAt: now });
-    h.db.createWorkflowInstance({ instanceId: "instance", definition, runId: "run", createdBy: { kind: "human", id: h.owner }, now });
-    h.db.createWorkflowAttempt({ attemptId: "attempt", instanceId: "instance", nodeId: "build", attempt: 1,
-      status: "running", dispatchKey: "instance:build:1", sessionId: "self", startedAt: now, deadlineAt: now + 48 * 60 * 60_000 });
-    const decision = h.request().data!;
-    now += 24 * 60 * 60_000;
-    const failingNotifier = new SessionsService(h.db, h.hub, { info() {}, warn() {}, error() {} },
-      () => { throw new Error("test persistent notification failure"); });
-    assert.doesNotThrow(() => failingNotifier.retryDuePrompts(now));
-    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
-    assert.equal(h.db.getSession("self")!.status, "idle");
-    assert.deepEqual(h.warnings, []);
-    assert.equal(h.db.getWorkflowAttempt("attempt")!.status, "awaiting_output");
-    const snapshot = () => ({
-      audit: h.db.listGovernanceAudit("self"),
-      workflow: h.db.listWorkflowEvents("instance"),
-    });
-    const settled = snapshot();
-    assert.equal(h.db.automationExpirationEffects().length, 1);
-    for (let retry = 0; retry < 3; retry++) failingNotifier.retryDuePrompts(now);
-    assert.deepEqual(snapshot(), settled, "Notification retries must not repeat workflow or audit effects");
-    h.sessions.expireAutomationCreationDecisions(now);
-    assert.equal(h.db.automationExpirationEffects().length, 0);
-  } finally { h.db.close(); }
-});
 
 for (const deadline of ["approval", "proposal"] as const) test(`future outbox scheduling does not expire an automation ${deadline} early`, (t) => {
   const start = Date.now();
@@ -500,27 +466,6 @@ test("calendar-impossible schedules fail as a validation result before creating 
   } finally { h.db.close(); }
 });
 
-test("workflow roles resolve disjoint defaults independently without storing shared overrides", () => {
-  const h = harness();
-  try {
-    h.db.registerRunner({ ...metadata, agents: [...metadata.agents, { ...metadata.agents[0]!, id: "second-agent",
-      capabilities: { ...metadata.agents[0]!.capabilities!, models: [{ id: "second-model", default: true, efforts: ["high"] }] } }] }, Date.now(), PROTOCOL_VERSION);
-    h.db.createWorkflowDefinition({ workflowId: "mixed-workflow", name: "Mixed Defaults", maxTransitions: 3,
-      nodes: ["agent", "second-agent"].map((agentId, index) => ({ nodeId: `inspect-${index}`, kind: "agent" as const,
-        role: `inspector-${index}`, agentId, inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 })),
-      edges: [], source: "custom", createdBy: { kind: "system", id: "test" }, createdAt: Date.now() });
-    const input = spec(); input.action = { kind: "workflow_run", request: { runnerId: "runner", workspaceId: "repo", workflowId: "mixed-workflow", task: "Inspect" } };
-    const result = h.request("mixed-workflow", "mixed-workflow", input);
-    assert.equal(result.ok, true, result.error ?? "Disjoint defaults should not be chained");
-    const snapshot = result.data!.resourceSnapshot;
-    if (snapshot.category !== "automation_creation") assert.fail();
-    assert.equal(snapshot.spec.action.request.config, undefined);
-    assert.deepEqual(snapshot.effectiveTargets.map((target) => target.config.model), ["model", "second-model"]);
-    assert.equal(h.resolve(result.data!.occurrenceId).ok, true);
-    assert.equal(h.service.execute("self", result.data!.occurrenceId, result.data!.resourceDigest, h.principal).ok, true);
-  } finally { h.db.close(); }
-});
-
 test("prompt automation defaults stay inherited after the target owner changes session settings", () => {
   const h = harness();
   try {
@@ -534,6 +479,7 @@ test("prompt automation defaults stay inherited after the target owner changes s
     assert.equal(executed.ok, true);
     h.db.raw().prepare("UPDATE sessions SET permission_mode='read-only' WHERE id='target'").run();
     const saved = h.db.getAutomation(executed.data!.automationCreationResult!.automationId)!;
+    assert.equal(saved.action.kind, "prompt_session");
     assert.equal(saved.action.request.config, undefined, "Future normal prompts must not reapply the previous permission mode");
   } finally { h.db.close(); }
 });
@@ -579,27 +525,6 @@ test("paused, alternate-machine and prompt-session configurations preserve norma
     const promptDecision = h.request("prompt", "prompt", prompt).data!;
     assert.equal(h.resolve(promptDecision.occurrenceId).ok, true);
     assert.equal(h.service.execute("self", promptDecision.occurrenceId, promptDecision.resourceDigest, h.principal).ok, true);
-  } finally { h.db.close(); }
-});
-
-test("workflow proposals pin the reviewed definition version and validate all agent roles", () => {
-  const h = harness();
-  try {
-    h.db.createWorkflowDefinition({ workflowId: "workflow", name: "Health", maxTransitions: 2,
-      nodes: [{ nodeId: "inspect", kind: "agent", role: "inspector", agentId: "agent", inputs: [], outputs: [],
-        retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 }], edges: [], source: "custom",
-      createdBy: { kind: "system", id: "test" }, createdAt: Date.now() });
-    const input = spec(); input.action = { kind: "workflow_run", request: { runnerId: "runner", workspaceId: "repo", workflowId: "workflow", task: "Inspect CI" } };
-    const proposed = h.request("workflow", "workflow", input);
-    assert.equal(proposed.ok, true, proposed.error ?? "Workflow should be admitted");
-    const decision = proposed.data!;
-    assert.equal(decision.resourceSnapshot.category, "automation_creation");
-    if (decision.resourceSnapshot.category !== "automation_creation" || decision.resourceSnapshot.spec.action.kind !== "workflow_run") assert.fail();
-    assert.equal(decision.resourceSnapshot.spec.action.request.workflowVersion, 1);
-    assert.equal(decision.resourceSnapshot.spec.action.request.useWorktree, true);
-    assert.equal(h.resolve(decision.occurrenceId).ok, true);
-    const executed = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
-    assert.equal(executed.ok, true, executed.error ?? "Pinned workflow should be stable");
   } finally { h.db.close(); }
 });
 

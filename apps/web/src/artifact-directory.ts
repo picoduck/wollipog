@@ -1,8 +1,8 @@
-import type { WorkflowArtifactPage, WorkflowArtifactView } from "@wollipog/protocol";
+import type { ArtifactPage, ArtifactView } from "@wollipog/protocol";
 
 export type ArtifactResolution =
   | { state: "pending" }
-  | { state: "resolved"; artifact: WorkflowArtifactView }
+  | { state: "resolved"; artifact: ArtifactView }
   | { state: "missing" };
 
 const PENDING: ArtifactResolution = Object.freeze({ state: "pending" });
@@ -17,7 +17,7 @@ const MISSING: ArtifactResolution = Object.freeze({ state: "missing" });
  * read counts as missing too, so a reply never shows an error for an id it merely mentions.
  */
 export class SessionArtifactDirectory {
-  private readonly known = new Map<string, WorkflowArtifactView>();
+  private readonly known = new Map<string, ArtifactView>();
   private readonly missing = new Set<string>();
   /** Asked about and not yet known; looked for by the next load. */
   private readonly wanted = new Set<string>();
@@ -30,7 +30,7 @@ export class SessionArtifactDirectory {
 
   constructor(
     private readonly sessionId: string,
-    private readonly listArtifacts: (sessionId: string, cursor?: string) => Promise<WorkflowArtifactPage>,
+    private readonly listArtifacts: (sessionId: string, cursor?: string) => Promise<ArtifactPage>,
   ) {}
 
   subscribe = (listener: () => void): (() => void) => {
@@ -41,7 +41,7 @@ export class SessionArtifactDirectory {
   getVersion = (): number => this.version;
 
   /** Artifacts the transcript already holds: an attachment needs no list read to be named. */
-  remember(artifacts: Iterable<WorkflowArtifactView>): void {
+  remember(artifacts: Iterable<ArtifactView>): void {
     let changed = false;
     for (const artifact of artifacts) {
       if (artifact.sessionId !== undefined && artifact.sessionId !== this.sessionId) continue;

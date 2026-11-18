@@ -41,7 +41,7 @@ async function harness(protocolVersion = PROTOCOL_VERSION) {
   const operations = createAssistantOperations(db);
   registerAssistantSessionOperations(operations, db, svc);
   // Operations a thread may not call; registered here only to reach the gate.
-  for (const name of ["auto_create", "session_role", "session_adopt", "session_fork", "workflow_run"]) {
+  for (const name of ["auto_create", "session_role", "session_adopt", "session_fork"]) {
     operations.register({ name, description: "fixture", inputSchema: { type: "object" }, metadata: true,
       resolveTarget: () => ({ kind: "fixture", id: name }), ownerCanAccess: () => true, execute: () => ({ done: true }) });
   }
@@ -270,7 +270,7 @@ test("a thread cannot schedule work or start runs that would escape its limits",
     assert.equal(scheduled.result.isError, true);
     assert.match(scheduled.result.content[0].text, /cannot call auto_create/);
     const issued = h.db.assistantConnections.create(h.owner, "Outside Assistant", { operations: "all", projects: "all" });
-    for (const name of ["session_role", "session_adopt", "session_fork", "workflow_run"]) {
+    for (const name of ["session_role", "session_adopt", "session_fork"]) {
       assert.throws(() => h.operations.authorize(thread.connectionId!, name, { kind: "fixture", id: name }), /Wollipog Assistant thread cannot call/u, name);
       assert.doesNotThrow(() => h.operations.authorize(issued.connection.id, name, { kind: "fixture", id: name }), name);
     }
@@ -279,10 +279,10 @@ test("a thread cannot schedule work or start runs that would escape its limits",
     const run = assistantCallContext.run({ connectionId: thread.connectionId! }, () => h.svc.createRun({
       runnerId: "r", workspaceId: "w", agentIds: ["claude"], task: "Fan out" }));
     assert.equal(run.status, 409);
-    assert.match(run.error ?? "", /cannot start runs or workflows/);
+    assert.match(run.error ?? "", /cannot start runs/);
     // Outside a thread's call the same request is not refused for this reason.
     const ordinary = h.svc.createRun({ runnerId: "r", workspaceId: "w", agentIds: ["claude"], task: "Fan out" });
-    assert.doesNotMatch(ordinary.error ?? "", /cannot start runs or workflows/);
+    assert.doesNotMatch(ordinary.error ?? "", /cannot start runs/);
   } finally { await h.close(); }
 });
 
@@ -568,6 +568,6 @@ test("#4671: the owner's lower cap on a worker is kept, and agents cannot raise 
     // A run from inside the tree would start several sessions at once outside this reservation.
     const run = h.svc.createRun({ runnerId: "r", workspaceId: "w", agentIds: ["claude"], task: "Fan out" }, { parentSessionId: h.worker });
     assert.equal(run.status, 409);
-    assert.match(run.error ?? "", /creates child sessions one at a time and cannot start runs or workflows/);
+    assert.match(run.error ?? "", /creates child sessions one at a time and cannot start runs/);
   } finally { await h.close(); }
 });

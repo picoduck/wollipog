@@ -1,10 +1,10 @@
+import { RETIRED_WORKFLOW_AUTOMATION_REASON } from "@wollipog/protocol";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   AutomationExecution,
   AutomationSchedule,
   AutomationTriggerKind,
   AutomationTriggerView,
-  WorkflowDefinition,
 } from "@wollipog/protocol";
 import { AUTOMATION_INSTALLATION_UNAVAILABLE } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
@@ -72,7 +72,7 @@ function viewerTimeZone(): string | undefined {
  * One automation's page, `/automations/~<id>` (#2968): the detail bar with Pause or Resume, Edit
  * and ⋯; the one notice that needs the person; three facts at a glance; what it does; its rules and
  * limits; then its triggers and run history. It reads this automation alone: its detail and its
- * triggers, and the workflow definitions only for a workflow action.
+ * triggers.
  */
 export function AutomationDetail({ automationId }: { automationId: string }) {
   const api = useApi();
@@ -86,7 +86,6 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
   const phone = useIsMobile();
   const [stored, setStored] = useState<Stored>({ state: "loading" });
   const [triggers, setTriggers] = useState<AutomationTriggerView[]>([]);
-  const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
   /** The kind New Trigger is open for: Add Trigger and the bar's ⋯ both open it. */
   const [newTriggerKind, setNewTriggerKind] = useState<AutomationTriggerKind | null>(null);
   /** The run whose Run Details is open, by id, so the dialog follows that run through each poll. */
@@ -140,8 +139,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
     if (removed && actionsInFlight.current === 0) pageTitleElement()?.focus();
   });
 
-  // One complete read. The automation commits as soon as it arrives, independently of its triggers
-  // and workflows, but the read stays busy until every request settles, even when one fails.
+  // The automation commits as soon as it arrives, independently of its triggers, but the read stays busy until both requests settle.
   const load = useCallback(async (current: () => boolean) => {
     const triggersLoaded = api.automationTriggers(automationId)
       .then((result) => { if (current()) setTriggers(result.triggers); });
@@ -160,13 +158,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
       throw cause;
     }
     if (current()) setStored({ state: "loaded", automation: detail.automation, executions: detail.executions });
-    // A workflow action's roles resolve against its definition (Agent Unavailable); nothing else
-    // needs the workflows.
-    const workflowsLoaded = detail.automation.action.kind === "workflow_run"
-      ? api.workflowDefinitions().then((result) => { if (current()) setWorkflows(result); })
-      : Promise.resolve();
-    const results = await Promise.allSettled([triggersLoaded, workflowsLoaded]);
-    for (const result of results) if (result.status === "rejected") throw result.reason;
+    await triggersLoaded;
   }, [api, automationId]);
 
   const { busy, error, mutate, retry, reread } = useAutomationPolling(load);
@@ -234,14 +226,15 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
   const viewerZone = viewerTimeZone();
   const schedule = describeSchedule(automation.cron, automation.timezone, now, { viewerTimeZone: viewerZone });
   const showZone = viewerZone !== automation.timezone;
+  const retired = automation.action.kind === "retired";
   const statusBadge = <StatusBadge meta={statusMeta("automation",
-    latest?.status === "ceiling_paused" ? "last_run_ceiling_paused" : lastRunFailed ? "last_run_failed" : automation.enabled ? "enabled" : "paused")} />;
+    retired ? "paused" : latest?.status === "ceiling_paused" ? "last_run_ceiling_paused" : lastRunFailed ? "last_run_failed" : automation.enabled ? "enabled" : "paused")} />;
   const primaryRunnerId = automation.action.kind === "prompt_session"
     ? sessions.get(automation.action.sessionId)?.runnerId
-    : automation.action.request.runnerId;
+    : automation.action.kind === "create_session" ? automation.action.request.runnerId : undefined;
   const primaryMachine = primaryRunnerId === undefined ? undefined : machineLabel(primaryRunnerId);
   const nextRunWords = automation.nextFireAt !== undefined ? when(automation.nextFireAt, now) : schedule.nextLabel;
-  const installationUnavailable = automationInstallationUnavailable(automation, runners, workflows);
+  const installationUnavailable = automationInstallationUnavailable(automation, runners);
 
   const edit = () => navigate({ name: "automations", editor: { kind: "edit", automationId } });
   const openSession = (sessionId: string) => navigate({ name: "session", id: sessionId });
@@ -322,9 +315,11 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
   const pauseLabel = automation.enabled ? "Pause" : "Resume";
   const menu: PageMenuAction[] = [
     // On a phone the bar holds only the pencil and ⋯, so Pause and Resume move here (§15.1).
-    ...(phone ? [{ label: pauseLabel, disabled: busy, onClick: togglePause }] : []),
-    { label: "Add Webhook Trigger…", disabled: busy, onClick: () => setNewTriggerKind("webhook") },
-    { label: "Add Chat-Ops Trigger…", disabled: busy, onClick: () => setNewTriggerKind("chatops") },
+    ...(phone && !retired ? [{ label: pauseLabel, disabled: busy, onClick: togglePause }] : []),
+    ...(!retired ? [
+      { label: "Add Webhook Trigger…", disabled: busy, onClick: () => setNewTriggerKind("webhook") },
+      { label: "Add Chat-Ops Trigger…", disabled: busy, onClick: () => setNewTriggerKind("chatops") },
+    ] : []),
     {
       label: "Copy Link",
       disabled: !linkUrl,
@@ -406,7 +401,6 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
     runners,
     machineLabel,
     sessionTitle: (sessionId: string) => sessions.get(sessionId)?.title || undefined,
-    workflowName: (workflowId: string) => workflows.find((workflow) => workflow.workflowId === workflowId)?.name,
   };
   const text = actionText(automation.action);
   const offlineLabel = automation.action.kind === "prompt_session"
@@ -423,12 +417,21 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
         backLabel={backLabel("automations")}
         onBack={toList}
         status={phone ? undefined : statusBadge}
-        secondary={phone ? undefined : { label: pauseLabel, disabled: busy, onClick: togglePause }}
-        primary={{ label: "Edit", icon: <EditIcon />, iconOnPhone: true, onClick: edit }}
+        secondary={phone || retired ? undefined : { label: pauseLabel, disabled: busy, onClick: togglePause }}
+        primary={retired ? undefined : { label: "Edit", icon: <EditIcon />, iconOnPhone: true, onClick: edit }}
         menu={menu}
       />
       {/* On a phone the bar is the app bar, so the badge sits under it (§15.1). */}
       {phone && <div className="automation-status">{statusBadge}</div>}
+      {retired && (
+        <Notice className="automation-notice-slot" tone="warning" title="Workflow Runs Removed" actions={
+          <button type="button" className="btn sm" onClick={() => navigate({ name: "automations", editor: { kind: "new" } })}>
+            New Automation
+          </button>
+        }>
+          {RETIRED_WORKFLOW_AUTOMATION_REASON}
+        </Notice>
+      )}
       <SessionNoticeSlot
         sessionId={`automation:${automationId}`}
         entries={notices}

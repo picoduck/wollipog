@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { videoBytesMatchMime } from "./workflow-artifacts.js";
+import { videoBytesMatchMime } from "./artifacts.js";
 
 export const PACED_VIDEO_PREPARATION_PROFILE = Object.freeze({
   id: "paced-silent-video-preparation-v1",

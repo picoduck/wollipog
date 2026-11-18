@@ -2266,8 +2266,7 @@ instead of approving evidence it may not have shown.
 A child makes an item reviewable by attaching the capture to its own session with
 `attach_session_artifact` (`path`, optional `name`), or from a shell with
 `wollipog artifact attach --file <path>`. Protocol v169. The file is read on the runner host and
-uploaded directly, so its bytes never enter the model's context; passing an image as base64 through
-`create_workflow_artifact` costs tens of thousands of tokens per capture and is not a usable path.
+uploaded directly, so its bytes never enter the model's context.
 
 Use the returned `artifactId`, `mediaType`, and `sha256` in a `ui_evidence_approval` item's
 snapshot. For a raster screenshot artifact, the item does not need a `uri` or an evidence-bucket

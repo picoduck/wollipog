@@ -155,7 +155,6 @@ test("only a legacy run that was delivered reads as sent without receipts, never
   const legacy = { deliveryMode: "legacy_at_most_once" } as const;
   assert.equal(sentWithoutReceipts(run({ ...legacy, startedAt: AT, sessionId: "s-1" })), true);
   assert.equal(sentWithoutReceipts(run({ ...legacy, status: "failed", sessionId: "s-1" })), true);
-  assert.equal(sentWithoutReceipts(run({ ...legacy, runId: "run-1" })), true);
   // The control plane claims skips and expiries without a delivery mode, so they read as legacy.
   for (const status of ["skipped", "expired"] as const) {
     assert.equal(sentWithoutReceipts(run({ ...legacy, status, startedAt: AT, sessionId: "s-1" })), false, status);
@@ -165,8 +164,7 @@ test("only a legacy run that was delivered reads as sent without receipts, never
   assert.equal(sentWithoutReceipts(run({ deliveryMode: "receipted_v53", startedAt: AT, sessionId: "s-1" })), false);
 });
 
-test("a run opens its workflow run, else its session, else nothing", () => {
-  assert.deepEqual(runOpenTarget(run({ runId: "run-1", sessionId: "s-1" })), { label: "Open Run", view: { name: "run", id: "run-1" } });
+test("a run opens its session or campaign when available", () => {
   assert.deepEqual(runOpenTarget(run({ sessionId: "s-1" })), { label: "Open Session", view: { name: "session", id: "s-1" } });
   assert.deepEqual(runOpenTarget(run({ sessionId: "s-1", campaignSessionId: "s-1" })),
     { label: "Open Campaign", view: { name: "session", id: "s-1", campaign: true } });

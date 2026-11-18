@@ -21,8 +21,6 @@ import {
 } from "@wollipog/protocol";
 import { AgentDefaultsPanel } from "../components/AgentDefaultsPanel.js";
 import { ArchivedHistoryRetentionPanel } from "../components/ArchivedHistoryRetentionPanel.js";
-import { WorkflowEventRetentionPanel } from "../components/WorkflowEventRetentionPanel.js";
-import { WORKFLOW_EVENT_RETENTION_LIMITS, type WorkflowEventRetentionView } from "@wollipog/protocol";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { interceptLeave, interceptTraversal } from "../leave-guard.js";
@@ -242,12 +240,6 @@ let retentionState: Pick<ArchivedHistoryRetentionView, "retentionDays" | "source
  * `Date.now()`: a spec asserting the schedule must pin the page clock before it, as
  * archived-history-retention.spec.ts does. */
 const RETENTION_ARMED_AT = Date.UTC(2026, 9, 17, 9, 30);
-const workflowRetentionMode = new URLSearchParams(window.location.search).get("workflowRetention");
-let workflowRetentionState: Pick<WorkflowEventRetentionView, "retentionDays" | "source" | "prunesFrom"> = {
-  retentionDays: workflowRetentionMode === "on" ? 90 : null,
-  source: workflowRetentionMode === "on" ? "organization" : "default",
-  prunesFrom: workflowRetentionMode === "on" ? RETENTION_ARMED_AT : null,
-};
 /**
  * Settings › Orchestrator › Decision Model (#4101). `decision=chosen` stores an explicit agent,
  * `decision=viewer` reads it without owner or admin permission, and `decisionTest=fail` ends Test
@@ -298,15 +290,6 @@ function decisionModelResponse(path: string, init?: RequestInit): Response {
   return json(decisionState);
 }
 
-function workflowRetentionView(previewDays: number | null): WorkflowEventRetentionView {
-  return { ...workflowRetentionState, environmentDays: null, canManage: workflowRetentionMode !== "viewer",
-    nextRunAt: Date.UTC(2026, 9, 16, 10, 0), limits: WORKFLOW_EVENT_RETENTION_LIMITS,
-    eligible: workflowRetentionState.retentionDays === null ? { instances: 0, events: 0 } : { instances: 24, events: 17_500 },
-    lastRun: workflowRetentionMode === "on" ? { finishedAt: Date.UTC(2026, 9, 16, 9, 0), instances: 8, events: 4_800 } : null,
-    ...(previewDays === null ? {} : { preview: { retentionDays: previewDays,
-      eligible: { instances: 24, events: 17_500 }, prunesFrom: RETENTION_ARMED_AT } }) };
-}
-
 function retentionView(previewDays: number | null): ArchivedHistoryRetentionView {
   const counts = (days: number) => days >= 180 ? { sessions: 41, events: 182_340 } : { sessions: 128, events: 604_115 };
   return {
@@ -326,14 +309,6 @@ const harnessDefaultsTransport: ApiTransport = {
   publicOrigin: window.location.origin,
   close() {},
   async request(path, init) {
-    if (path.startsWith("/api/workflow-event-retention")) {
-      if (init?.method === "PUT") {
-        const { retentionDays } = JSON.parse(String(init.body)) as { retentionDays: number | null };
-        workflowRetentionState = { retentionDays, source: "organization", prunesFrom: retentionDays === null ? null : RETENTION_ARMED_AT };
-      }
-      const preview = new URL(path, window.location.origin).searchParams.get("previewDays");
-      return Response.json(workflowRetentionView(preview === null ? null : Number(preview)));
-    }
     // Behavior › Evidence (#3023). Unstubbed, the read fell through to the agent defaults below and
     // every Behavior capture showed a load failure. `artifact=save-fails` makes a change fail the way
     // a dropped connection does, for the danger notice and its Retry.
@@ -777,7 +752,7 @@ function Harness() {
               ),
               storage: (
                 <FeedbackProvider>
-                  <ApiProvider client={harnessDefaultsApi}><ArchivedHistoryRetentionPanel /><WorkflowEventRetentionPanel /></ApiProvider>
+                  <ApiProvider client={harnessDefaultsApi}><ArchivedHistoryRetentionPanel /></ApiProvider>
                 </FeedbackProvider>
               ),
               // The production panel with injected state, like Notifications above. Storage is

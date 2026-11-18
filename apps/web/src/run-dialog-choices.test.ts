@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AgentDefinition, ProjectView, RunnerView, WorkflowDefinition } from "@wollipog/protocol";
+import type { AgentDefinition, ProjectView, RunnerView } from "@wollipog/protocol";
 import {
   agentNeedsAccountChoice,
   choosableRunAgentIds,
@@ -11,11 +11,9 @@ import {
   newRunBlockedReason,
   runLocationOptions,
   selectableRunAgentIds,
-  workflowHumanRoles,
-  workflowRoleFields,
   type NewRunBlockInput,
 } from "./run-dialog-choices.js";
-import { bindableAgents, defaultAgentId, installationFor } from "./automation-installations.js";
+import { defaultAgentId, installationFor } from "./automation-installations.js";
 
 const agent = (id: string, driver: AgentDefinition["driver"], overrides: Partial<AgentDefinition> = {}): AgentDefinition => ({
   id, name: id, command: id, args: [], env: {}, driver, available: true, ...overrides,
@@ -28,13 +26,11 @@ test("automatic run and automation choices use the effective default without sel
   const runner = { agents: [a], protocolVersion: 283 } as RunnerView;
   assert.deepEqual(defaultRunAgentIds([a]), []);
   assert.equal(defaultAgentId([a]), "");
-  assert.deepEqual(bindableAgents(runner), []);
   assert.equal(installationFor(runner, a.id), null);
   const defaults = [{ provider: "claude" as const, accountId: "b", revision: 1 }];
   runner.providerAccountDefaults = defaults;
   assert.deepEqual(defaultRunAgentIds([a], defaults), [a.id]);
   assert.equal(defaultAgentId([a], defaults), a.id);
-  assert.equal(bindableAgents(runner).length, 1);
   assert.equal(installationFor(runner, a.id)?.installationId, "cli");
   assert.equal(a.defaultProviderAccountId, "a");
   const implicit = { ...a, defaultProviderAccountId: undefined, providerAccountReadiness: {
@@ -79,32 +75,6 @@ test("an unverified agent is never selectable, and an available native harness r
     agent("claude-acp", "acp", { name: "Claude Code (ACP)" }),
     agent("claude-native", "claude-code", { name: "Claude Code" }),
   ]), ["claude-native"]);
-});
-
-const definition = (nodes: WorkflowDefinition["nodes"]): WorkflowDefinition => ({
-  workflowId: "wf", version: 3, source: "custom", name: "Build", maxTransitions: 4, edges: [],
-  createdBy: { kind: "system" }, createdAt: 1, nodes,
-});
-const node = (nodeId: string, kind: WorkflowDefinition["nodes"][number]["kind"], role: string, agentId?: string) => ({
-  nodeId, kind, role, ...(agentId ? { agentId } : {}), inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1,
-});
-
-test("workflowRoleFields labels each bound agent by the roles of its steps, in Title Case", () => {
-  const built = definition([
-    node("build", "agent", "builder", "claude"),
-    node("review", "agent", "code_reviewer", "codex"),
-    node("address", "agent", "remediator", "claude"),
-    node("gate", "human_gate", "approver"),
-    node("lint", "agent", "", "lint-agent"),
-  ]);
-  assert.deepEqual(workflowRoleFields(built), [
-    { key: "claude", label: "Builder and Remediator Agent" },
-    { key: "codex", label: "Code Reviewer Agent" },
-    // No role on its steps: the key names it, without a second "Agent".
-    { key: "lint-agent", label: "Lint Agent" },
-  ]);
-  assert.deepEqual(workflowHumanRoles(built), ["Approver"]);
-  assert.deepEqual(workflowRoleFields(undefined), []);
 });
 
 test("Location options name the folder on its Machine and never a connection id", () => {
@@ -155,7 +125,7 @@ test("newRunBlockedReason follows the fields' order and names the fix", () => {
   const project = { id: "p", name: "P", locations: [location] } as unknown as ProjectView;
   const ready: NewRunBlockInput = {
     task: "Do it", machinesOnline: true, placedByMachine: false, projectChosen: true, project, location, runners,
-    runnerId: "r", workspaceId: "w", mode: "parallel", agentCount: 2, workflowChosen: false, workflowBound: false,
+    runnerId: "r", workspaceId: "w", agentCount: 2,
   };
   assert.equal(newRunBlockedReason(ready), null);
   assert.equal(newRunBlockedReason({ ...ready, machinesOnline: false }), "Bring a machine online to continue.");
@@ -166,9 +136,6 @@ test("newRunBlockedReason follows the fields' order and names the fix", () => {
   assert.equal(newRunBlockedReason({ ...ready, runners: new Map() }), "Bring one of this project's machines online to continue.");
   assert.equal(newRunBlockedReason({ ...ready, location: null }), "Choose a location to continue.");
   assert.equal(newRunBlockedReason({ ...ready, agentCount: 0 }), "Choose at least one agent.");
-  assert.equal(newRunBlockedReason({ ...ready, mode: "workflow" }), "Choose a workflow to continue.");
-  assert.equal(newRunBlockedReason({ ...ready, mode: "workflow", workflowChosen: true }), "Choose an agent for every role.");
-  assert.equal(newRunBlockedReason({ ...ready, mode: "workflow", workflowChosen: true, workflowBound: true }), null);
   assert.equal(newRunBlockedReason({ ...ready, placedByMachine: true, runnerId: "" }), "Choose a machine to continue.");
   assert.equal(newRunBlockedReason({ ...ready, placedByMachine: true, workspaceId: "" }), "Choose a folder to continue.");
 });
@@ -225,9 +192,8 @@ test("a launch names accounts only for members still in it, and accounts that ca
 
 test("the primary waits for a member's account, after the fields above it (#4353)", () => {
   const input = { task: "Do it", machinesOnline: true, placedByMachine: true, projectChosen: true, project: null, location: null,
-    runners: new Map(), runnerId: "r1", workspaceId: "w1", mode: "parallel" as const, agentCount: 1, workflowChosen: true, workflowBound: true };
+    runners: new Map(), runnerId: "r1", workspaceId: "w1", agentCount: 1 };
   assert.equal(newRunBlockedReason(input), null);
   assert.equal(newRunBlockedReason({ ...input, accountChoiceMissing: "Claude Code" }), "Choose an account for Claude Code to continue.");
   assert.equal(newRunBlockedReason({ ...input, agentCount: 0, accountChoiceMissing: "Claude Code" }), "Choose at least one agent.");
-  assert.equal(newRunBlockedReason({ ...input, mode: "workflow", accountChoiceMissing: "Builder Agent" }), "Choose an account for Builder Agent to continue.");
 });

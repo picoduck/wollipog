@@ -251,7 +251,6 @@ const names = {
   runners,
   machineLabel: (runnerId: string) => runnerId === "runner-1" ? "Build Server" : undefined,
   sessionTitle: (sessionId: string) => sessionId === "s-1" ? "Nightly triage" : undefined,
-  workflowName: (workflowId: string) => workflowId === "build-review" ? "Build and Review" : undefined,
 };
 
 test("actionSentence names what runs where by display names, never ids", () => {
@@ -260,11 +259,6 @@ test("actionSentence names what runs where by display names, never ids", () => {
   } };
   assert.equal(actionSentence(create, names), "Starts Claude Code in acme-storefront on Build Server.");
   assert.equal(actionText(create), "Sweep.");
-  const workflow: AutomationAction = { kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "workspace-1", workflowId: "build-review", task: "Review it.",
-  } };
-  assert.equal(actionSentence(workflow, names), "Runs the Build and Review workflow in acme-storefront on Build Server.");
-  assert.equal(actionText(workflow), "Review it.");
   const prompt: AutomationAction = { kind: "prompt_session", sessionId: "s-1", request: { text: "Triage." } };
   assert.equal(actionSentence(prompt, names), "Prompts “Nightly triage”.");
   assert.equal(actionText(prompt), "Triage.");
@@ -279,9 +273,6 @@ test("actionSentence says what it cannot name instead of showing an id", () => {
   for (const id of ["runner-9", "workspace-9", "agent-9"]) assert.ok(!sentence.includes(id));
   assert.equal(actionSentence({ kind: "prompt_session", sessionId: "s-9", request: { text: "" } }, names),
     "Prompts a session that isn't loaded.");
-  assert.equal(actionSentence({ kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "workspace-1", workflowId: "gone", task: "",
-  } }, names), "Runs a workflow that isn't available in acme-storefront on Build Server.");
 });
 
 test("actionSentence never names an agent by its id, even beside an indistinguishable namesake", () => {

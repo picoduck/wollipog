@@ -43,7 +43,6 @@ test(`${surface} refreshes immediately after Strict Mode cleans up a pending ini
   const client: ApiClient = {
     ...api,
     automations: async () => { if (surface === "automations") calls += 1; return { automations: [] }; },
-    workflowDefinitions: async () => [],
     outboundEventSubscriptions: async () => { if (surface === "outbound") calls += 1; return []; },
   };
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -84,7 +83,6 @@ for (const surface of ["automations", "outbound", "side-chat", "descendants"] as
     const client: ApiClient = {
       ...api,
       automations: async () => { await count(); return { automations: [] }; },
-      workflowDefinitions: async () => [],
       outboundEventSubscriptions: async () => { if (surface === "outbound") await count(); return []; },
       sideChat: async () => { await count(); return { sideChat: { parentSessionId: parent.id, session: child, createdAt: 1 } }; },
       getSessionEventPage: async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true }),

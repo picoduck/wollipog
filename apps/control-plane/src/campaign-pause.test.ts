@@ -201,7 +201,7 @@ test("server notices queue during pause without reviving a stopped provider; an 
     assert.equal(db.getSession("child")!.status, "stopped");
     assert.equal(svc.prompt("child", "Ordinary work should be refused.").ok, false);
     assert.ok(svc.prompt("child", "The merge closure list changed; recheck it before enqueueing.", [],
-      undefined, undefined, undefined, "session", false, undefined, undefined, true).ok);
+      undefined, undefined, undefined, false, undefined, undefined, true).ok);
     assert.equal(db.getSession("child")!.status, "stopped", "staging a notice must not restore runtime status");
     const pending = db.raw().prepare("SELECT COUNT(*) AS n FROM session_prompt_commands WHERE session_id='child' AND state='pending'").get() as { n: number };
     assert.equal(pending.n, 1);

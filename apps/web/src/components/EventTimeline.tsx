@@ -1,6 +1,6 @@
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { useShowAgentLogs } from "../agent-logs.js";
-import type { AgentDefinition, AgentDriverKind, InPlaceHandoffTurn, WorkflowArtifactView } from "@wollipog/protocol";
+import type { AgentDefinition, AgentDriverKind, InPlaceHandoffTurn, ArtifactView } from "@wollipog/protocol";
 import { Profiler, createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { isWorkspaceReference, normalizeSourcePath, type PlanEntry, type SourceLocation } from "@wollipog/protocol";
 import { type TurnUsage,
@@ -507,7 +507,7 @@ export function layoutTranscriptArtifacts(
   turns: TimelineTurns,
   previous?: ReadonlyMap<string, TranscriptArtifactSlot>,
 ): Map<string, TranscriptArtifactSlot> {
-  const groups = new Map<number, { artifacts: WorkflowArtifactView[]; seen: Set<string> }>();
+  const groups = new Map<number, { artifacts: ArtifactView[]; seen: Set<string> }>();
   const placed: Array<{ key: string; turn: number; index: number | null }> = [];
   for (const row of rows) {
     if (row.kind !== "item" || row.item.kind !== "artifact_attached") continue;
@@ -522,10 +522,10 @@ export function layoutTranscriptArtifacts(
     group.seen.add(artifact.artifactId);
     placed.push({ key: row.key, turn, index: group.artifacts.push(artifact) - 1 });
   }
-  const sameGroup = (a: readonly WorkflowArtifactView[], b: readonly WorkflowArtifactView[]) =>
+  const sameGroup = (a: readonly ArtifactView[], b: readonly ArtifactView[]) =>
     a.length === b.length && a.every((artifact, index) => artifact === b[index]);
   // One array per turn, reused from the last layout while its artifacts are the same.
-  const stableGroups = new Map<number, readonly WorkflowArtifactView[]>();
+  const stableGroups = new Map<number, readonly ArtifactView[]>();
   const slots = new Map<string, TranscriptArtifactSlot>();
   for (const { key, turn, index } of placed) {
     const artifacts = groups.get(turn)!.artifacts;
@@ -762,7 +762,7 @@ export const EventTimeline = memo(function EventTimeline({
    * roster's (#2857). Must be identity-stable. */
   subagentStatus?: SubagentStatusContextValue;
   /** An attachment's Open in Browser: Browser → Artifacts on it (#3924). Must be identity-stable. */
-  onOpenArtifact?: (artifact: WorkflowArtifactView) => void;
+  onOpenArtifact?: (artifact: ArtifactView) => void;
   /**
    * The session whose artifacts a reply's cited ids name (#3970). Without it ids stay text, as in a
    * public shared transcript, which never resolves them.
@@ -920,7 +920,7 @@ function EventTimelineBody({
   const artifactDirectory = useArtifactDirectory();
   useEffect(() => {
     if (!artifactDirectory) return;
-    const attached = new Set<WorkflowArtifactView>();
+    const attached = new Set<ArtifactView>();
     for (const slot of artifactSlots.values()) for (const artifact of slot.group) attached.add(artifact);
     artifactDirectory.remember(attached);
   }, [artifactDirectory, artifactSlots]);

@@ -132,13 +132,12 @@ const DELIVERY_SELECTORS = ["session_id", "branch", "pull_request"] as const;
 
 function actionPrompt(action: AutomationAction): string {
   if (action.kind === "create_session") return action.request.prompt ?? "";
-  if (action.kind === "prompt_session") return action.request.text ?? "";
-  return action.request.task;
+  return action.request.text ?? "";
 }
 
 function validateTriggerDeliveryPolicy(
   value: unknown,
-  action: AutomationAction,
+  action: AutomationSchedule["action"],
 ): ServiceResult<AutomationTriggerDeliveryPolicy | undefined> {
   if (value === undefined) return ok(undefined);
   if (!object(value) || !keysOnly(value, ["allowPrompt", "parameterNames", "missingReferences", "sessionSelectors"]) ||
@@ -156,7 +155,7 @@ function validateTriggerDeliveryPolicy(
   if (!policy.allowPrompt && !policy.parameterNames.length && !policy.sessionSelectors?.length) {
     return fail("automation trigger delivery policy must allow at least one delivery field");
   }
-  if (action.kind === "workflow_run" || (action.kind === "create_session" && action.request.campaign)) {
+  if (action.kind === "retired" || (action.kind === "create_session" && action.request.campaign)) {
     return fail("automation trigger delivery fields are available only for session actions");
   }
   if (policy.sessionSelectors?.length && action.kind !== "prompt_session") {
@@ -180,15 +179,10 @@ function validateTriggerDeliveryPolicy(
 
 function validateTarget(value: unknown, kind: AutomationAction["kind"]): value is AutomationRunnerTarget {
   if (!object(value) || !keysOnly(value, [
-    "runnerId", "workspaceId", "projectId", "projectLocationId", "agentId", "agentBindings", "orchestratorAgentId", "installationBindings",
+    "runnerId", "workspaceId", "projectId", "projectLocationId", "agentId", "installationBindings",
   ]) || !boundedString(value.runnerId) || !boundedString(value.workspaceId) || !validProjectAssignment(value)) return false;
   if (kind === "create_session" && !boundedString(value.agentId)) return false;
-  if (kind === "workflow_run" && value.agentId !== undefined) return false;
-  if (value.agentBindings !== undefined && (!object(value.agentBindings) ||
-      Object.keys(value.agentBindings).length > 32 ||
-      Object.entries(value.agentBindings).some(([key, entry]) => !boundedString(key) || !boundedString(entry)))) return false;
-  return (value.orchestratorAgentId === undefined || boundedString(value.orchestratorAgentId)) &&
-    validInstallationBindings(value.installationBindings);
+  return validInstallationBindings(value.installationBindings);
 }
 
 function validInstallationBindings(value: unknown): value is AutomationInstallationBindings | undefined {
@@ -226,13 +220,11 @@ function optionalString(value: unknown, max: number): boolean {
   return value === undefined || (typeof value === "string" && value.length <= max);
 }
 
-function validBindings(value: unknown): boolean {
-  return value === undefined || (object(value) && Object.keys(value).length <= 32 &&
-    Object.entries(value).every(([key, entry]) => boundedString(key) && boundedString(entry)));
-}
-
 function validateAction(value: unknown): string | null {
   if (!object(value) || !boundedString(value.kind, 32)) return "automation action is malformed";
+  if (value.kind === "workflow_run" || value.kind === "retired") {
+    return "Workflow runs were removed. Create a campaign automation instead.";
+  }
   if (value.kind === "create_session") {
     if (!keysOnly(value, ["kind", "request", "installationBindings"]) || !object(value.request) ||
         !validInstallationBindings(value.installationBindings)) return "create-session action is malformed";
@@ -259,23 +251,6 @@ function validateAction(value: unknown): string | null {
         (!(typeof value.request.text === "string" && value.request.text.trim()) &&
           !(typeof value.request.slashCommand === "string" && value.request.slashCommand.trim()))) {
       return "prompt-session action requires a target and text or slash command, and cannot persist images";
-    }
-  } else if (value.kind === "workflow_run") {
-    if (!keysOnly(value, ["kind", "request", "installationBindings"]) || !object(value.request) ||
-        !validInstallationBindings(value.installationBindings)) return "workflow-run action is malformed";
-    const request = value.request;
-    if (!keysOnly(request, ["runnerId", "workspaceId", "projectId", "projectLocationId", "workflowId", "workflowVersion", "task", "title",
-      "useWorktree", "config", "costBudgetUsd", "maxToolCalls", "agentBindings", "orchestratorAgentId"]) ||
-        !boundedString(request.runnerId) || !boundedString(request.workspaceId) || !boundedString(request.workflowId) ||
-        !validProjectAssignment(request) ||
-        !boundedString(request.task, 65_536) || !optionalString(request.title, 120) ||
-        (request.workflowVersion !== undefined && (!Number.isInteger(request.workflowVersion) || Number(request.workflowVersion) < 1)) ||
-        (request.useWorktree !== undefined && typeof request.useWorktree !== "boolean") || !validConfig(request.config) ||
-        !validBindings(request.agentBindings) ||
-        (request.orchestratorAgentId !== undefined && !boundedString(request.orchestratorAgentId)) ||
-        (request.costBudgetUsd !== undefined && (!Number.isFinite(request.costBudgetUsd) || Number(request.costBudgetUsd) <= 0)) ||
-        (request.maxToolCalls !== undefined && (!Number.isInteger(request.maxToolCalls) || Number(request.maxToolCalls) < 1))) {
-      return "workflow-run action requires a secret-free runner, workspace, workflow, task, and exact Project assignment when supplied";
     }
   } else {
     return "automation action kind is unsupported";
@@ -358,7 +333,6 @@ export function validateAutomationSpec(value: unknown): ServiceResult<Automation
 
 export function automationCapabilityError(
   db: ControlPlaneDb,
-  sessions: SessionsService,
   spec: AutomationSpec,
 ): string | null {
   if (spec.action.kind === "create_session") {
@@ -385,49 +359,6 @@ export function automationCapabilityError(
       }
     }
     return null;
-  }
-  if (spec.action.kind !== "workflow_run") return null;
-  const request = spec.action.request;
-  const primary: AutomationRunnerTarget = {
-    runnerId: request.runnerId,
-    workspaceId: request.workspaceId,
-    ...(request.agentBindings ? { agentBindings: request.agentBindings } : {}),
-    ...(request.orchestratorAgentId ? { orchestratorAgentId: request.orchestratorAgentId } : {}),
-    ...(spec.action.installationBindings ? { installationBindings: spec.action.installationBindings } : {}),
-  };
-  const targets = spec.runnerPolicy.kind === "alternate"
-    ? [primary, ...spec.runnerPolicy.targets]
-    : [primary];
-  for (const target of targets) {
-    const agentBindings = { ...(request.agentBindings ?? {}), ...(target.agentBindings ?? {}) };
-    const definition = db.getWorkflowDefinition(request.workflowId, request.workflowVersion);
-    let unavailableBinding = false;
-    for (const node of definition?.nodes ?? []) {
-      if (node.kind !== "agent") continue;
-      const saved = target.installationBindings?.[`role:${node.agentId!}`];
-      if (!saved) continue;
-      const resolved = db.resolveSavedHarnessInstallation(target.runnerId, saved);
-      if (!resolved) { unavailableBinding = true; break; }
-      agentBindings[node.agentId!] = resolved;
-    }
-    if (unavailableBinding) continue;
-    const chosenOrchestrator = target.orchestratorAgentId ?? request.orchestratorAgentId;
-    const orchestratorPin = chosenOrchestrator ? target.installationBindings?.orchestrator : undefined;
-    const orchestrator = orchestratorPin
-      ? db.resolveSavedHarnessInstallation(target.runnerId, orchestratorPin)
-      : chosenOrchestrator;
-    if (orchestratorPin && !orchestrator) continue;
-    const error = sessions.workflowRunCapabilityError({
-      ...request,
-      runnerId: target.runnerId,
-      workspaceId: target.workspaceId,
-      ...(Object.keys(agentBindings).length ? { agentBindings } : {}),
-      ...(orchestrator ? { orchestratorAgentId: orchestrator } : {}),
-    });
-    if (error) {
-      const identity = `${target.runnerId}/${target.workspaceId}`;
-      return `automation target ${JSON.stringify(identity)} cannot honor workflow config: ${error}`;
-    }
   }
   return null;
 }
@@ -503,44 +434,7 @@ export function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, prev
       },
     };
   }
-  const action = spec.action;
-  const oldAction = previous?.action.kind === "workflow_run" &&
-    previous.action.request.workflowId === action.request.workflowId &&
-    previous.action.request.workflowVersion === action.request.workflowVersion
-    ? previous.action : undefined;
-  const definition = db.getWorkflowDefinition(action.request.workflowId, action.request.workflowVersion);
-  if (!definition) return spec;
-  const ids = (bindings: Record<string, string>, orchestrator?: string) => ({
-    ...Object.fromEntries(definition.nodes.filter((node) => node.kind === "agent")
-      .map((node) => [`role:${node.agentId!}`, bindings[node.agentId!] ?? node.agentId!])),
-    ...(orchestrator ? { orchestrator } : {}),
-  });
-  const primary = pin(action.request.runnerId,
-    ids(action.request.agentBindings ?? {}, action.request.orchestratorAgentId),
-    previous && !oldAction ? undefined : action.installationBindings,
-    oldAction ? { runnerId: oldAction.request.runnerId,
-      ids: ids(oldAction.request.agentBindings ?? {}, oldAction.request.orchestratorAgentId),
-      bindings: oldAction.installationBindings } : undefined, true);
-  return {
-    ...spec,
-    action: { ...action, installationBindings: primary },
-    runnerPolicy: spec.runnerPolicy.kind !== "alternate" ? spec.runnerPolicy : {
-      ...spec.runnerPolicy,
-      targets: spec.runnerPolicy.targets.map((target) => {
-        const oldTarget = previous?.runnerPolicy.kind === "alternate"
-          ? previous.runnerPolicy.targets.find((candidate) => candidate.runnerId === target.runnerId) : undefined;
-        const bindings = pin(target.runnerId,
-          ids({ ...(action.request.agentBindings ?? {}), ...(target.agentBindings ?? {}) },
-            target.orchestratorAgentId ?? action.request.orchestratorAgentId),
-          previous && !oldAction ? undefined : target.installationBindings,
-          oldTarget && oldAction ? { runnerId: oldTarget.runnerId,
-            ids: ids({ ...(oldAction.request.agentBindings ?? {}), ...(oldTarget.agentBindings ?? {}) },
-              oldTarget.orchestratorAgentId ?? oldAction.request.orchestratorAgentId),
-            bindings: oldTarget.installationBindings } : undefined, true);
-        return { ...target, installationBindings: bindings };
-      }),
-    },
-  };
+  return spec;
 }
 
 interface DuePlan {
@@ -657,7 +551,7 @@ export class AutomationsService {
     }
     const campaignError = this.campaignError(spec, actor, assistantOperation);
     if (campaignError) return fail(campaignError, 409);
-    const capabilityError = automationCapabilityError(this.db, this.sessions, spec);
+    const capabilityError = automationCapabilityError(this.db, spec);
     if (capabilityError) return fail(capabilityError, 409);
     let nextFireAt: number | null = null;
     try {
@@ -696,7 +590,7 @@ export class AutomationsService {
     const campaignError = spec.enabled ? this.campaignError(spec, actor, assistantOperation) : null;
     if (campaignError) return fail(campaignError, 409);
     // Always allow disabling so capability drift cannot trap a failing automation in the enabled state.
-    const capabilityError = spec.enabled ? automationCapabilityError(this.db, this.sessions, spec) : null;
+    const capabilityError = spec.enabled ? automationCapabilityError(this.db, spec) : null;
     if (capabilityError) return fail(capabilityError, 409);
     let nextFireAt: number | null = null;
     try {
@@ -832,7 +726,9 @@ export class AutomationsService {
   }> {
     const { automationId: _automationId, revision: _revision, nextFireAt: _nextFireAt,
       lastFiredAt: _lastFiredAt, createdBy: _createdBy, createdAt: _createdAt,
-      updatedAt: _updatedAt, targetHealth: _targetHealth, ...storedSpec } = schedule;
+      updatedAt: _updatedAt, targetHealth: _targetHealth, action: storedAction, ...fieldsOfSpec } = schedule;
+    if (storedAction.kind === "retired") return fail("The automation action was retired", 409);
+    const storedSpec: AutomationSpec = { ...fieldsOfSpec, action: storedAction };
     const policy = trigger.deliveryPolicy;
     if (!policy) return ok({ spec: storedSpec });
     const currentPolicy = validateTriggerDeliveryPolicy(policy, storedSpec.action);
@@ -874,10 +770,8 @@ export class AutomationsService {
       `${prompt ? `\n\n${prompt}` : ""}`;
     if (action.kind === "create_session") {
       action = { ...action, request: { ...action.request, prompt: materializedPrompt } };
-    } else if (action.kind === "prompt_session") {
-      action = { ...action, request: { ...action.request, text: materializedPrompt } };
     } else {
-      action = { ...action, request: { ...action.request, task: materializedPrompt } };
+      action = { ...action, request: { ...action.request, text: materializedPrompt } };
     }
 
     const fields: AutomationTriggerDeliveryMetadata["fields"] = [
@@ -956,17 +850,7 @@ export class AutomationsService {
       const automation = this.db.getAutomation(execution.automationId);
       let terminal: "succeeded" | "failed" | null = null;
       let error: string | undefined;
-      if (execution.workflowInstanceId) {
-        const instance = this.db.getWorkflowInstance(execution.workflowInstanceId);
-        if (!instance) {
-          terminal = "failed";
-          error = "workflow instance no longer exists";
-        } else if (instance.status === "succeeded") terminal = "succeeded";
-        else if (instance.status === "failed" || instance.status === "stopped") {
-          terminal = "failed";
-          error = `workflow instance ${instance.status}`;
-        }
-      } else if (execution.sessionId &&
+      if (execution.sessionId &&
           !(execution.deliveryMode === "receipted_v53" && execution.actionKind === "prompt_session")) {
         const session = this.db.getSession(execution.sessionId);
         if (!session) {
@@ -1056,10 +940,6 @@ export class AutomationsService {
       ...commands.filter((command) => command.supersededBy === undefined)
         .map((command) => ({ sessionId: command.sessionId, commandId: command.commandId,
           startedAt: command.startedAt, completedAt: command.completedAt })),
-      ...(execution.workflowInstanceId ? this.db.listWorkflowAttempts(execution.workflowInstanceId)
-        .filter((attempt) => ["dispatching", "running", "awaiting_output"].includes(attempt.status))
-        .flatMap((attempt) => attempt.sessionId ? [{ sessionId: attempt.sessionId, startedAt: attempt.startedAt,
-          completedAt: attempt.completedAt, commandId: undefined }] : []) : []),
       ...(execution.deliveryMode !== "receipted_v53" && execution.sessionId && execution.startedAt !== undefined
         ? [{ sessionId: execution.sessionId, startedAt: execution.startedAt, completedAt: execution.completedAt,
           commandId: undefined }] : []),
@@ -1082,8 +962,7 @@ export class AutomationsService {
         if (evidence.commandId === undefined) {
           return this.db.hasRunnerGovernanceTripInWindow(sessionId, evidence, since, until);
         }
-        // CP-dispatched attempts (including workflows with launch commands) and legacy
-        // execution sources retain their original bounded window for ordinary durable prompts.
+        // Legacy execution sources retain their original bounded window for ordinary durable prompts.
         // Launch IDs cannot use this path: only the separate prompt-command table resolves here.
         const prompt = this.db.getSessionPromptCommand(evidence.commandId);
         return prompt?.sessionId === sessionId && prompt.runnerId === session.runnerId &&
@@ -1097,11 +976,6 @@ export class AutomationsService {
         if (commandId) this.db.recordAutomationCampaignCommandPause(commandId, { sessionId, ...trip }, now);
         continue;
       }
-      if (execution.actionKind === "workflow_run") {
-        this.failWorkflowExecution(execution, commands, sessionId,
-          commands.find((command) => command.sessionId === sessionId && command.supersededBy === undefined)?.commandId,
-          `runner governance paused ${trip.kind} at ${trip.threshold}`, now);
-      }
       const settled = this.db.settleAutomationExecution({
         executionId: execution.executionId, status: "ceiling_paused",
         governancePause: { sessionId, ...trip },
@@ -1113,38 +987,6 @@ export class AutomationsService {
       return true;
     }
     return false;
-  }
-
-  /** Governance changes the receipt classification, not a failed workflow's cleanup boundary.
-   * Stop all siblings and finish the instance before settlement releases its concurrency slot. */
-  private failWorkflowExecution(
-    execution: AutomationExecution,
-    commands: AutomationCommandRecord[],
-    sourceSessionId: string,
-    sourceCommandId: string | undefined,
-    error: string,
-    now: number,
-  ): void {
-    this.db.terminalizeAutomationExecutionCommands(execution.executionId, sourceCommandId ?? "", error, now);
-    const siblings = new Map(commands.filter((command) => command.sessionId !== sourceSessionId &&
-      !["completed", "rejected", "uncertain"].includes(command.state))
-      .map((command) => [command.sessionId, command.runnerId]));
-    if (execution.workflowInstanceId) {
-      const instance = this.db.getWorkflowInstance(execution.workflowInstanceId);
-      if (instance && !["succeeded", "failed", "stopped"].includes(instance.status)) {
-        for (const attempt of instance.attempts) {
-          if (!attempt.sessionId || attempt.sessionId === sourceSessionId ||
-              !["dispatching", "running", "awaiting_output"].includes(attempt.status)) continue;
-          const sibling = this.db.getSession(attempt.sessionId);
-          if (sibling) siblings.set(sibling.id, sibling.runnerId);
-        }
-        this.db.finishWorkflowInstance({ instanceId: execution.workflowInstanceId, status: "failed",
-          error, actor: { kind: "system", id: "automation-outbox" }, now });
-      }
-    }
-    for (const [sessionId, runnerId] of siblings) {
-      this.hub.sendToRunner(runnerId, { type: "cancel_session", sessionId });
-    }
   }
 
   private reconcileExecution(executionId: string, now: number): void {
@@ -1160,10 +1002,7 @@ export class AutomationsService {
       (command.state === "rejected" || command.state === "uncertain") && command.supersededBy === undefined &&
       !this.db.automationCampaignCommandPaused(command.commandId));
     if (failed) {
-      if (execution.actionKind === "workflow_run") {
-        this.failWorkflowExecution(execution, commands, failed.sessionId, failed.commandId,
-          failed.lastError ?? `workflow sibling '${failed.commandId}' became ${failed.state}`, now);
-      } else if (execution.actionKind === "create_session" && execution.sessionId && failed.state === "rejected") {
+      if (execution.actionKind === "create_session" && execution.sessionId && failed.state === "rejected") {
         // A genuine failed launch stops its root. Validated campaign governance cancellation
         // was classified above; it keeps the root resumable instead.
         const root = this.db.getSession(execution.sessionId);
@@ -1310,21 +1149,7 @@ export class AutomationsService {
         agentId: first.agentId,
       } });
     }
-    const definition = this.db.getWorkflowDefinition(
-      automation.action.request.workflowId,
-      automation.action.request.workflowVersion,
-    );
-    if (!definition) return fail("staged workflow definition no longer exists", 409);
-    const roles = [...new Set(definition.nodes.filter((node) => node.kind === "agent").map((node) => node.agentId!))];
-    if (parsed.length < roles.length) return fail("staged workflow launch plan is incomplete", 409);
-    const agentBindings = Object.fromEntries(roles.map((role, index) => [role, parsed[index]!.spec.agentId]));
-    const orchestratorAgentId = parsed[roles.length]?.spec.agentId;
-    return ok({ target: {
-      runnerId,
-      workspaceId: first.workspaceId ?? automation.action.request.workspaceId,
-      ...(Object.keys(agentBindings).length ? { agentBindings } : {}),
-      ...(orchestratorAgentId ? { orchestratorAgentId } : {}),
-    } });
+    return fail("The automation action was retired", 409);
   }
 
   private executionSchedule(execution: AutomationExecution): AutomationSchedule | null {
@@ -1401,6 +1226,7 @@ export class AutomationsService {
     nextFireAt: number,
     now: number,
   ): boolean {
+    if (automation.action.kind === "retired") return false;
     const active = this.db.activeAutomationExecution(automation.automationId);
     if (active && automation.concurrencyPolicy === "wait") return false;
     if (active && automation.concurrencyPolicy === "skip") {
@@ -1409,7 +1235,7 @@ export class AutomationsService {
     }
     let current = automation;
     if (automation.action.kind === "create_session") {
-      const pinned = pinAutomationSpec(this.db, automation, automation);
+      const pinned = pinAutomationSpec(this.db, { ...automation, action: automation.action }, automation);
       if (JSON.stringify(pinned.action) !== JSON.stringify(automation.action) ||
           JSON.stringify(pinned.runnerPolicy) !== JSON.stringify(automation.runnerPolicy)) {
         const updated = this.db.pinLegacyAutomationSpec(automation, pinned, now);
@@ -1510,13 +1336,13 @@ export class AutomationsService {
       // a sole installation since acceptance. Pin both the live schedule and that snapshot before
       // target resolution; neither write changes the cron cursor or admits an explicit empty map.
       if (current.action.kind === "create_session") {
-        const livePin = pinAutomationSpec(this.db, current, current);
+        const livePin = pinAutomationSpec(this.db, { ...current, action: current.action }, current);
         if (JSON.stringify(livePin.action) !== JSON.stringify(current.action) ||
             JSON.stringify(livePin.runnerPolicy) !== JSON.stringify(current.runnerPolicy)) {
           if (!this.db.pinLegacyAutomationSpec(current, livePin, now)) return invocation;
         }
       }
-      const pinned = pinAutomationSpec(this.db, automation, automation);
+      const pinned = pinAutomationSpec(this.db, { ...automation, action: automation.action }, automation);
       if (JSON.stringify(pinned.action) !== JSON.stringify(automation.action) ||
           JSON.stringify(pinned.runnerPolicy) !== JSON.stringify(automation.runnerPolicy)) {
         if (!this.db.pinLegacyAutomationTriggerInvocationSpec(invocation.invocationId, invocation.specJson,
@@ -1557,6 +1383,7 @@ export class AutomationsService {
     eventKind: "misfire_skipped" | "concurrency_skipped" | "execution_status_changed",
     scheduledFor = expectedNextFireAt,
   ): boolean {
+    if (automation.action.kind === "retired") return false;
     return Boolean(this.db.claimAutomationExecution({
       executionId: shortId("axe_"), automationId: automation.automationId, expectedNextFireAt,
       scheduledFor, nextFireAt, actionKind: automation.action.kind, status,
@@ -1589,16 +1416,7 @@ export class AutomationsService {
           ? { installationBindings: automation.action.installationBindings } : {}),
       };
     } else {
-      const request = automation.action.request;
-      primary = {
-        runnerId: request.runnerId, workspaceId: request.workspaceId,
-        ...(request.projectId !== undefined ? { projectId: request.projectId } : {}),
-        ...(request.projectLocationId !== undefined ? { projectLocationId: request.projectLocationId } : {}),
-        ...(request.agentBindings ? { agentBindings: request.agentBindings } : {}),
-        ...(request.orchestratorAgentId ? { orchestratorAgentId: request.orchestratorAgentId } : {}),
-        ...(automation.action.installationBindings
-          ? { installationBindings: automation.action.installationBindings } : {}),
-      };
+      return fail("The automation action was retired", 409);
     }
     const candidates = automation.runnerPolicy.kind === "alternate"
       ? [primary, ...automation.runnerPolicy.targets]
@@ -1615,7 +1433,6 @@ export class AutomationsService {
         installationUnavailable = true;
         continue;
       }
-      if (automation.action.kind === "workflow_run" && !this.workflowTargetCompatible(automation, resolved)) continue;
       return ok({ target: resolved });
     }
     return fail(installationUnavailable ? AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE : AUTOMATION_TARGET_UNAVAILABLE, 409);
@@ -1634,34 +1451,7 @@ export class AutomationsService {
         : target.agentId;
       return agentId ? { ...target, agentId } : null;
     }
-    if (automation.action.kind !== "workflow_run") return target;
-    const request = automation.action.request;
-    const definition = this.db.getWorkflowDefinition(request.workflowId, request.workflowVersion);
-    if (!definition) return target;
-    const bindings = { ...(request.agentBindings ?? {}), ...(target.agentBindings ?? {}) };
-    for (const role of new Set(definition.nodes.filter((node) => node.kind === "agent")
-      .map((node) => node.agentId!))) {
-      const reference = saved?.[`role:${role}`];
-      if (!reference) {
-        const agentId = bindings[role] ?? role;
-        if (this.db.getRunner(target.runnerId)?.agents.some((agent) =>
-          agent.id === agentId && agent.installation)) return null;
-        continue;
-      }
-      const agentId = this.db.resolveSavedHarnessInstallation(target.runnerId, reference);
-      if (!agentId) return null;
-      bindings[role] = agentId;
-    }
-    const chosenOrchestrator = target.orchestratorAgentId ?? request.orchestratorAgentId;
-    const orchestratorPin = chosenOrchestrator ? saved?.orchestrator : undefined;
-    const orchestrator = orchestratorPin
-      ? this.db.resolveSavedHarnessInstallation(target.runnerId, orchestratorPin)
-      : chosenOrchestrator;
-    if (!orchestratorPin && orchestrator && this.db.getRunner(target.runnerId)?.agents.some((agent) =>
-      agent.id === orchestrator && agent.installation)) return null;
-    if (orchestratorPin && !orchestrator) return null;
-    return { ...target, agentBindings: bindings,
-      ...(orchestrator ? { orchestratorAgentId: orchestrator } : {}) };
+    return target;
   }
 
   private projectTargetCompatible(target: AutomationRunnerTarget): boolean {
@@ -1675,32 +1465,11 @@ export class AutomationsService {
       location.availability !== "runner_removed");
   }
 
-  private workflowTargetCompatible(
-    automation: AutomationSchedule,
-    target: AutomationRunnerTarget,
-  ): boolean {
-    if (automation.action.kind !== "workflow_run") return false;
-    const request = automation.action.request;
-    const definition = this.db.getWorkflowDefinition(request.workflowId, request.workflowVersion);
-    // Definition lookup is runner-independent; let the action service return the authoritative
-    // not-found error instead of misreporting every online runner as incompatible.
-    if (!definition) return true;
-    const bindings = { ...(request.agentBindings ?? {}), ...(target.agentBindings ?? {}) };
-    const roles = new Set(definition.nodes
-      .filter((node) => node.kind === "agent")
-      .map((node) => node.agentId!));
-    for (const roleId of roles) {
-      if (!this.db.getAgentLaunch(target.runnerId, bindings[roleId] ?? roleId)) return false;
-    }
-    const orchestrator = target.orchestratorAgentId ?? request.orchestratorAgentId;
-    return !orchestrator || Boolean(this.db.getAgentLaunch(target.runnerId, orchestrator));
-  }
-
   private deliveryOptions(
     automation: AutomationSchedule,
     execution: AutomationExecution,
     ids: Pick<PreStagedDeliveryOptions,
-      "sessionId" | "runId" | "workflowInstanceId" | "memberSessionIds" | "memberSessionId">,
+      "sessionId">,
     now: number,
     target: AutomationRunnerTarget,
     commandSnapshots?: DurableSessionCommand[],
@@ -1743,15 +1512,11 @@ export class AutomationsService {
         executionId: execution.executionId,
         runnerId: plan.runnerId,
         ...(plan.sessionId ? { sessionId: plan.sessionId } : {}),
-        ...(plan.runId ? { runId: plan.runId } : {}),
-        ...(plan.workflowInstanceId ? { workflowInstanceId: plan.workflowInstanceId } : {}),
         planJson: JSON.stringify({
           target,
           resources: {
             runnerId: plan.runnerId,
             ...(plan.sessionId ? { sessionId: plan.sessionId } : {}),
-            ...(plan.runId ? { runId: plan.runId } : {}),
-            ...(plan.workflowInstanceId ? { workflowInstanceId: plan.workflowInstanceId } : {}),
           },
         }),
         commands,
@@ -1848,7 +1613,6 @@ export class AutomationsService {
       return;
     }
     let result: ServiceResult<unknown>;
-    let controlPlaneWorkflow: { runId: string; workflowInstanceId: string; status: string } | undefined;
     if (automation.action.kind === "create_session") {
       const request = automation.action.request;
       const created = this.sessions.createSession({
@@ -1885,28 +1649,7 @@ export class AutomationsService {
         );
       }
     } else {
-      const request = automation.action.request;
-      const agentBindings = { ...(request.agentBindings ?? {}), ...(target.agentBindings ?? {}) };
-      const launched = this.sessions.createWorkflowRun({
-        ...request, runnerId: target.runnerId, workspaceId: target.workspaceId,
-        ...(target.projectId !== undefined ? { projectId: target.projectId } : {}),
-        ...(target.projectLocationId !== undefined ? { projectLocationId: target.projectLocationId } : {}),
-        ...(Object.keys(agentBindings).length ? { agentBindings } : {}),
-        ...(target.orchestratorAgentId ? { orchestratorAgentId: target.orchestratorAgentId } : {}),
-        costBudgetUsd: automation.limits.maxCostUsd, maxToolCalls: automation.limits.maxToolCalls,
-      }, { kind: "system", id: `automation:${automation.automationId}` }, this.deliveryOptions(automation, execution, {
-        runId: `r_auto_${execution.executionId}`,
-        workflowInstanceId: `wfi_auto_${execution.executionId}`,
-        memberSessionId: (index) => `s_auto_${execution.executionId}_${String(index).padStart(3, "0")}`,
-      }, now, target, commandSnapshots), automationLauncher(this.db, automation, execution.executionId));
-      result = launched;
-      if (launched.data) {
-        controlPlaneWorkflow = {
-          runId: launched.data.run.id,
-          workflowInstanceId: launched.data.instance.instanceId,
-          status: launched.data.instance.status,
-        };
-      }
+      result = fail("The automation action was retired", 409);
     }
     if (!result.ok) {
       const staged = this.db.listAutomationCommands(execution.executionId);
@@ -1924,21 +1667,7 @@ export class AutomationsService {
       if (failed) this.emit(automation, failed, "failed");
       return;
     }
-    if (controlPlaneWorkflow && this.db.listAutomationCommands(execution.executionId).length === 0) {
-      const terminal = controlPlaneWorkflow.status === "succeeded" ? "succeeded"
-        : controlPlaneWorkflow.status === "failed" || controlPlaneWorkflow.status === "stopped" ? "failed" : "running";
-      const settled = this.db.settleAutomationExecution({
-        executionId: execution.executionId,
-        status: terminal,
-        actor: { kind: "system", id: `automation:${automation.automationId}` },
-        runnerId: target.runnerId,
-        runId: controlPlaneWorkflow.runId,
-        workflowInstanceId: controlPlaneWorkflow.workflowInstanceId,
-        ...(terminal === "failed" ? { error: `workflow instance ${controlPlaneWorkflow.status}` } : {}),
-        now,
-      });
-      if (settled) this.emit(automation, settled, terminal === "running" ? "started" : terminal);
-    }
+
   }
 
   private emit(

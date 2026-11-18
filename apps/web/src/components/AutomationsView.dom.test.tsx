@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { specOf } from "../automation-form.js";
 import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -19,13 +20,11 @@ import type {
   RunnerView,
   SessionView,
   UiSnapshotMessage,
-  WorkflowDefinition,
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { viewPath, type View, type ViewNavigation } from "../navigation.js";
 import { setExperimentFlag } from "../experiments.js";
-import { MULTI_AGENT_OFF_HELPER } from "./AutomationEditor.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 
 type FeedbackContextValue = React.ContextType<typeof FeedbackContext>;
@@ -230,7 +229,6 @@ async function mountFixture(
   outboundSubscriptions: OutboundEventSubscriptionView[] = [],
   outboundDeliveries: Record<string, OutboundEventDeliveryView[]> = {},
   runnerViews: RunnerView[] = runners,
-  workflowViews: WorkflowDefinition[] = [],
   clientOverrides: Partial<ApiClient> = {},
 ): Promise<Fixture> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -283,7 +281,6 @@ async function mountFixture(
       triggerViews[id] = [...(triggerViews[id] ?? []), trigger];
       return { trigger, secret: `wollipogwhsec_${"A".repeat(43)}` };
     },
-    workflowDefinitions: async () => workflowViews,
     outboundEventSubscriptions: async () => [...outboundSubscriptions],
     outboundEventDeliveries: async (subscriptionId: string) => outboundDeliveries[subscriptionId] ?? [],
     createOutboundEventSubscription: async (request: CreateOutboundEventSubscriptionRequest) => {
@@ -825,307 +822,6 @@ test("editing a pinned automation shows its rediscovered installation instead of
   }
 });
 
-test("a workflow role named orchestrator keeps a role binding separate from its orchestrator", async () => {
-  const manual = { ...runners[0]!.agents[0]!, id: "manual", driver: "acp" as const,
-    installation: undefined };
-  const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
-    ...runners[0]!.agents[0]!, id: "orchestrator", installation: {
-      id: "system", path: "/usr/bin/claude", via: "path" as const,
-      selection: "selected" as const,
-    },
-  }, manual] };
-  const stored = schedule("role-orchestrator", "Workflow Sweep");
-  stored.action = { kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
-  } };
-  const workflow: WorkflowDefinition = {
-    workflowId: "graph-1", version: 1, name: "Graph", source: "custom",
-    maxTransitions: 1, createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
-    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "orchestrator",
-      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
-  };
-  const fixture = await mountFixture([stored], {}, {}, [], {}, [machine], [workflow]);
-  try {
-    await openPage(fixture, "Workflow Sweep");
-    await openEdit(fixture);
-    await act(async () => { button(fixture.container, "Use Current Installation").click(); });
-    await saveChanges(fixture);
-    const action = fixture.updates[0]?.spec.action;
-    assert.equal(action?.kind === "workflow_run" && action.request.agentBindings?.orchestrator, "orchestrator");
-    assert.equal(action?.kind === "workflow_run" && action.request.orchestratorAgentId, undefined);
-    assert.equal(action?.kind === "workflow_run" &&
-      action.installationBindings?.["role:orchestrator"]?.installationId, "system");
-    await reopenEdit(fixture, "Workflow Sweep");
-    await choose(fixture.container, "Worker Agent",
-      agentOptions(machine.agents).find((option) => option.agent.id === "manual")!.label);
-    await saveChanges(fixture);
-    const configAction = fixture.updates[1]?.spec.action;
-    assert.equal(configAction?.kind === "workflow_run" &&
-      configAction.request.agentBindings?.orchestrator, "manual");
-    assert.equal(configAction?.kind === "workflow_run" &&
-      configAction.installationBindings?.["role:orchestrator"], undefined);
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("switching workflows does not call a new discovered role's installation saved and unavailable", async () => {
-  const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
-    ...runners[0]!.agents[0]!, installation: {
-      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
-    },
-  }] };
-  const stored = schedule("workflow-switch", "Workflow Switch");
-  stored.action = { kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "old-graph", task: "Build",
-  } };
-  const workflow = (workflowId: string): WorkflowDefinition => ({
-    workflowId, version: 1, name: workflowId, source: "custom", maxTransitions: 1,
-    createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
-    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "rich-agent",
-      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
-  });
-  const fixture = await mountFixture([stored], {}, {}, [], {}, [machine],
-    [workflow("old-graph"), workflow("new-graph")]);
-  try {
-    await openPage(fixture, "Workflow Switch");
-    await openEdit(fixture);
-    await choose(fixture.container, "Workflow", "new-graph");
-    assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ROLE_WARNING);
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("switching workflow Machines stops displaying the old Machine's installation binding", async () => {
-  const oldMachine = { ...runners[0]!, protocolVersion: 175, agents: [{
-    ...runners[0]!.agents[0]!, installation: {
-      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
-    },
-  }] };
-  const newMachine = { ...runners[1]!, protocolVersion: 175, agents: [
-    { ...runners[0]!.agents[0]!, driver: "acp" as const, installation: undefined },
-    { ...runners[1]!.agents[0]!, id: "new-agent", installation: {
-      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
-    } },
-  ] };
-  const stored = schedule("workflow-machine", "Workflow Machine");
-  stored.action = { kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
-    agentBindings: { "rich-agent": "rich-agent" },
-  }, installationBindings: { "role:rich-agent": {
-    driver: "claude-code", context: { kind: "native" }, installationId: "system",
-  } } };
-  const workflow: WorkflowDefinition = {
-    workflowId: "graph-1", version: 1, name: "Graph", source: "custom", maxTransitions: 1,
-    createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
-    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "rich-agent",
-      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
-  };
-  const fixture = await mountFixture([stored], {}, {}, [], {}, [oldMachine, newMachine], [workflow]);
-  try {
-    await openPage(fixture, "Workflow Machine");
-    await openEdit(fixture);
-    await choose(fixture.container, "Machine", "runner-2");
-    assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ROLE_WARNING);
-    assert.match(choiceTrigger(fixture.container, "Worker Agent")?.getAttribute("aria-label") ?? "",
-      /Worker Agent: Rich Agent/,
-    "the new Machine's same-id installation must not replace the role shown in the editor");
-    await saveChanges(fixture);
-    const action = fixture.updates[0]?.spec.action;
-    assert.equal(action?.kind === "workflow_run" && action.request.runnerId, "runner-2");
-    assert.equal(action?.kind === "workflow_run" && action.request.agentBindings, undefined);
-    assert.equal(action?.kind === "workflow_run" && action.installationBindings, undefined);
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("switching alternate workflow Machines clears the old alternate installation display", async () => {
-  const oldAlternate = { ...runners[1]!, protocolVersion: 175, agents: [{
-    ...runners[1]!.agents[0]!, id: "rich-agent", installation: {
-      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
-    },
-  }] };
-  const newAlternate = { ...runners[2]!, protocolVersion: 175, agents: [
-    { ...runners[2]!.agents[0]!, id: "rich-agent", name: "Configured Alternate",
-      driver: "acp" as const, installation: undefined },
-    { ...runners[2]!.agents[0]!, id: "new-agent", name: "Discovered Alternate", installation: {
-      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
-    } },
-  ] };
-  const stored = schedule("alternate-workflow-machine", "Alternate Workflow Machine");
-  stored.action = { kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
-  } };
-  stored.runnerPolicy = { kind: "alternate", targets: [{
-    runnerId: "runner-2", workspaceId: "runner-2-workspace",
-    agentBindings: { "rich-agent": "rich-agent" },
-    installationBindings: { "role:rich-agent": {
-      driver: "claude-code", context: { kind: "native" }, installationId: "system",
-    } },
-  }] };
-  const workflow: WorkflowDefinition = {
-    workflowId: "graph-1", version: 1, name: "Graph", source: "custom", maxTransitions: 1,
-    createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
-    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "rich-agent",
-      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
-  };
-  const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, oldAlternate, newAlternate], [workflow]);
-  try {
-    await openPage(fixture, "Alternate Workflow Machine");
-    await openEdit(fixture);
-    await choose(fixture.container, "Other Machine", "runner-3");
-    assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ALTERNATE_ROLE_WARNING);
-    assert.match(choiceTrigger(fixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "",
-      /Other Worker Agent: Configured Alternate/);
-    await saveChanges(fixture);
-    const policy = fixture.updates[0]?.spec.runnerPolicy;
-    assert.equal(policy?.kind, "alternate");
-    assert.equal(policy?.kind === "alternate" && policy.targets[0]?.runnerId, "runner-3");
-    assert.equal(policy?.kind === "alternate" && policy.targets[0]?.installationBindings, undefined);
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("alternate workflow selectors follow the effective primary choice after a Machine switch", async () => {
-  const alternate = { ...runners[1]!, agents: [
-    { ...runners[0]!.agents[0]! },
-    { ...runners[0]!.agents[1]! },
-  ] };
-  const newPrimary = { ...runners[2]!, agents: [{
-    ...runners[2]!.agents[0]!, id: "rich-agent", driver: "acp" as const,
-  }] };
-  const stored = schedule("primary-switch-alternate", "Primary Switch Alternate");
-  stored.action = { kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
-    agentBindings: { "rich-agent": "other-agent" }, orchestratorAgentId: "other-agent",
-  } };
-  stored.runnerPolicy = { kind: "alternate", targets: [{
-    runnerId: "runner-2", workspaceId: "runner-2-workspace",
-  }] };
-  const workflow: WorkflowDefinition = {
-    workflowId: "graph-1", version: 1, name: "Graph", source: "custom", maxTransitions: 1,
-    createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
-    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "rich-agent",
-      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
-  };
-  const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, alternate, newPrimary], [workflow]);
-  try {
-    await openPage(fixture, "Primary Switch Alternate");
-    await openEdit(fixture);
-    assert.match(choiceTrigger(fixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "",
-      /Other Worker Agent: Codex App Server/);
-    await choose(fixture.container, "Worker Agent", "Claude Code");
-    assert.match(choiceTrigger(fixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "",
-      /Other Worker Agent: Claude Code/,
-    "the alternate must follow an edited primary role when it has no override");
-    await choose(fixture.container, "Machine", "runner-3");
-    assert.match(choiceTrigger(fixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "",
-      /Other Worker Agent: Claude Code/,
-    "the alternate must not keep the old primary role override after that override is dropped");
-    assert.equal(choiceTrigger(fixture.container, "Other Orchestrator Agent"), undefined,
-      "the alternate must not display an orchestrator that the new primary request drops");
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("inherited alternate installation pins display edited primary workflow identities", async () => {
-  const installedAgents = runners[0]!.agents.slice(0, 2).map((agent, index) => ({
-    ...agent,
-    installation: {
-      id: index === 0 ? "claude-system" : "codex-system",
-      path: index === 0 ? "/usr/bin/claude" : "/usr/bin/codex",
-      via: "path" as const,
-      selection: "selected" as const,
-    },
-  }));
-  const primary = { ...runners[0]!, protocolVersion: 175, agents: installedAgents };
-  const alternate = { ...runners[1]!, protocolVersion: 175, agents: installedAgents };
-  const oldPin = { driver: "claude-code" as const, context: { kind: "native" as const }, installationId: "claude-system" };
-  const stored = schedule("inherited-alternate-pins", "Inherited Alternate Pins");
-  stored.action = { kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
-    agentBindings: { "rich-agent": "rich-agent" }, orchestratorAgentId: "rich-agent",
-  }, installationBindings: { "role:rich-agent": oldPin, orchestrator: oldPin } };
-  stored.runnerPolicy = { kind: "alternate", targets: [{
-    runnerId: "runner-2", workspaceId: "runner-2-workspace",
-    installationBindings: { "role:rich-agent": oldPin, orchestrator: oldPin },
-  }] };
-  const workflow: WorkflowDefinition = {
-    workflowId: "graph-1", version: 1, name: "Graph", source: "custom", maxTransitions: 1,
-    createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
-    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "rich-agent",
-      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
-  };
-  const fixture = await mountFixture([stored], {}, {}, [], {}, [primary, alternate], [workflow]);
-  try {
-    await openPage(fixture, "Inherited Alternate Pins");
-    await openEdit(fixture);
-    const alternateRole = () => choiceTrigger(fixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "";
-    const alternateOrchestrator = () => choiceTrigger(fixture.container, "Other Orchestrator Agent")?.getAttribute("aria-label") ?? "";
-    assert.match(alternateRole(), /Claude Code/);
-    assert.match(alternateOrchestrator(), /Claude Code/);
-
-    await choose(fixture.container, "Worker Agent", "Codex App Server");
-    await choose(fixture.container, "Orchestrator Agent", "Codex App Server");
-    assert.match(alternateRole(), /Codex App Server/, "inherited role must display the identity that saving will pin");
-    assert.match(alternateOrchestrator(), /Codex App Server/, "inherited Orchestrator must follow the primary edit");
-    assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ALTERNATE_ROLE_OR_ORCHESTRATOR_WARNING);
-
-    await saveChanges(fixture);
-    const saved = fixture.updates[0]?.spec;
-    assert.equal(saved?.action.kind, "workflow_run");
-    assert.equal(saved.action.request.agentBindings?.["rich-agent"], "other-agent");
-    assert.equal(saved.action.request.orchestratorAgentId, "other-agent");
-    assert.equal(saved.runnerPolicy.kind, "alternate");
-    assert.equal(saved.runnerPolicy.targets[0]?.agentBindings?.["rich-agent"], undefined);
-    assert.equal(saved.runnerPolicy.targets[0]?.orchestratorAgentId, undefined);
-  } finally {
-    await unmountFixture(fixture);
-  }
-
-  const missingAlternate = { ...alternate, agents: [installedAgents[0]!] };
-  const unavailableFixture = await mountFixture([stored], {}, {}, [], {}, [primary, missingAlternate], [workflow]);
-  try {
-    await openPage(unavailableFixture, "Inherited Alternate Pins");
-    await openEdit(unavailableFixture);
-    await choose(unavailableFixture.container, "Worker Agent", "Codex App Server");
-    await choose(unavailableFixture.container, "Orchestrator Agent", "Codex App Server");
-    assert.match(choiceTrigger(unavailableFixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "",
-      /other-agent \(Unavailable\)/);
-    assert.match(choiceTrigger(unavailableFixture.container, "Other Orchestrator Agent")?.getAttribute("aria-label") ?? "",
-      /other-agent \(Unavailable\)/);
-    assert.equal([...unavailableFixture.container.querySelectorAll(".notice.t-warning")]
-      .filter((alert) => SAVED_ALTERNATE_ROLE_OR_ORCHESTRATOR_WARNING.test(alert.textContent ?? ""))
-      .length, 2, "both inherited identities remain fail closed when the edited choice is missing");
-  } finally {
-    await unmountFixture(unavailableFixture);
-  }
-});
-
-test("the automation card flags an unbound primary workflow orchestrator", async () => {
-  const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
-    ...runners[0]!.agents[0]!, installation: {
-      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
-    },
-  }] };
-  const stored = schedule("unbound-orchestrator", "Unbound Orchestrator");
-  stored.action = { kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
-    orchestratorAgentId: "rich-agent",
-  } };
-  const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
-  try {
-    await openPage(fixture, "Unbound Orchestrator");
-    assert.match(fixture.container.textContent ?? "", CARD_INSTALLATION_ALERT);
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
 test("an unavailable alternate installation is visible on the automation card", async () => {
   const alternate = { ...runners[1]!, protocolVersion: 175, agents: [{
     ...runners[1]!.agents[0]!, installation: {
@@ -1274,18 +970,17 @@ test("each row names the automation, one badge, its schedule in words, its next 
     latestExecution: { status: "succeeded" as const, at: now - DAY },
     targetHealth: { scheduledFor: now + 3 * DAY, firstSeenAt: now, error: "runner-1 is offline" },
   };
-  const workflow = { ...workflowAutomation("automation-workflow", "Build Graph"), enabled: false };
+  const workflow = { ...schedule("automation-workflow", "Build Graph", false), enabled: false };
   const prompt = { ...schedule("automation-prompt", "Triage Prompt"), enabled: false };
   prompt.action = { kind: "prompt_session", sessionId: "session-xyz", request: { text: "Triage." } };
   const unloaded = { ...schedule("automation-unloaded", "Unloaded Prompt"), enabled: false };
   unloaded.action = { kind: "prompt_session", sessionId: "session-gone", request: { text: "Triage." } };
-  const graph = { workflowId: "graph-1", version: 1, name: "Build and Review", nodes: [] } as unknown as WorkflowDefinition;
   snapshotSessions = [{
     id: "session-xyz", title: "Nightly triage\nsecond line", preview: null, agentId: "rich-agent", agentName: "Rich Agent",
     driver: "claude-code", status: "idle", pendingApproval: null, runnerId: "runner-1",
   } as unknown as SessionView];
   const fixture = await mountFixture([agent, failedAndWaiting, waiting, workflow, prompt, unloaded],
-    {}, {}, [], {}, runners, [graph]);
+    {}, {}, [], {}, runners);
   try {
     const meta = (name: string) => [...rowOf(fixture.container, name).querySelectorAll(".automation-row-meta > span")]
       .map((item) => item.textContent);
@@ -1297,7 +992,7 @@ test("each row names the automation, one badge, its schedule in words, its next 
     assert.deepEqual(badges("Nightly Sweep"), [], "no badge while nothing needs attention");
     assert.deepEqual(badges("Failed and Waiting"), ["Last Run Failed"], "a failed run outranks an unavailable target");
     assert.deepEqual(badges("Waiting"), ["Target Unavailable"]);
-    assert.deepEqual(meta("Build Graph"), ["Every day at 2:00 AM", "Paused", "Build and Review"]);
+    assert.deepEqual(meta("Build Graph"), ["Every day at 2:00 AM", "Paused", "Rich Agent"]);
     assert.deepEqual(meta("Triage Prompt").at(-1), "Nightly triage", "a session reads by its display title");
     assert.deepEqual(meta("Unloaded Prompt").at(-1), "Session", "a session that isn't loaded reads as its kind");
     // Each row's one icon per meta item, 14px, and no middle dots.
@@ -1380,7 +1075,7 @@ for (const strict of [false, true]) {
     ];
     const stored = structuredClone(items[0]!);
     strictMode = strict;
-    const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+    const fixture = await mountFixture(items, {}, {}, [], {}, runners, {
       updateAutomation: async (id: string, spec: AutomationSpec) => {
         fixture.updates.push({ id, spec: structuredClone(spec) });
         const index = items.findIndex((item) => item.automationId === id);
@@ -1423,7 +1118,7 @@ for (const strict of [false, true]) {
 }
 
 test("a failed toggle keeps the row where it was and names what didn't happen", async () => {
-  const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, [], {
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, {
     updateAutomation: async () => { throw new Error("Pause refused"); },
   });
   try {
@@ -1444,7 +1139,7 @@ test("a toggle that settles after the list unmounts changes nothing on screen", 
   const consoleError = console.error;
   console.error = (...args: unknown[]) => { errors.push(args); };
   strictMode = true;
-  const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, [], {
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, {
     updateAutomation: async () => {
       await new Promise<void>((resolve) => { release = resolve; });
       throw new Error("Late failure");
@@ -1493,7 +1188,7 @@ test("with the connection lost after a load, the rows stay dimmed under Reconnec
 
 test("a failed list request shows Couldn't Load Automations with Retry and the raw error behind Show Details", async () => {
   let fail = true;
-  const fixture = await mountFixture([], {}, {}, [], {}, runners, [], {
+  const fixture = await mountFixture([], {}, {}, [], {}, runners, {
     automations: async () => {
       if (fail) throw new Error("Synthetic list failure");
       return { automations: [schedule("automation-a", "Alpha")] };
@@ -1519,7 +1214,7 @@ test("a failed list request shows Couldn't Load Automations with Retry and the r
 
 test("until the first response the list is five skeleton rows; an empty list has exactly one New Automation", async () => {
   let release: (() => void) | undefined;
-  const fixture = await mountFixture([], {}, {}, [], {}, runners, [], {
+  const fixture = await mountFixture([], {}, {}, [], {}, runners, {
     automations: async () => {
       await new Promise<void>((resolve) => { release = resolve; });
       return { automations: [] };
@@ -1552,14 +1247,13 @@ test("one list poll makes one request, however many automations it lists", async
     setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
   }, async () => {
     const fixture = await mountFixture([
-      schedule("automation-a", "Alpha"), schedule("automation-b", "Beta", false), workflowAutomation("automation-c", "Gamma"),
-    ], {}, {}, [], {}, runners, [], {
+      schedule("automation-a", "Alpha"), schedule("automation-b", "Beta", false), schedule("automation-c", "Gamma"),
+    ], {}, {}, [], {}, runners, {
       automations: async () => {
         reads.push("/api/automations");
         return { automations: [schedule("automation-a", "Alpha"), schedule("automation-b", "Beta", false),
-          workflowAutomation("automation-c", "Gamma")] };
+          schedule("automation-c", "Gamma")] };
       },
-      workflowDefinitions: async () => { reads.push("/api/workflows"); return []; },
     });
     try {
       assert.deepEqual(reads.filter((read) => read === "/api/automations"), ["/api/automations"]);
@@ -1583,7 +1277,7 @@ test("the list's poll pauses while the tab is hidden and skips a poll while one 
     setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
   }, async () => {
     strictMode = true;
-    const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, [], {
+    const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, {
       automations: async () => {
         reads += 1;
         if (hold) await hold;
@@ -1716,7 +1410,7 @@ test("failed page reads stay busy until every request settles and a mutation the
     setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
     clearInterval: () => {},
   }, async () => {
-    const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
+    const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, {
       automation: async () => {
         detailCalls += 1;
         if (failDetails) throw new Error("Detail unavailable");
@@ -1858,13 +1552,9 @@ async function invokePolls(intervals: Set<() => void>): Promise<void> {
 }
 
 /** The page's reads, with a workflow action where the workflow read is the one under test. */
-function pageItem(endpoint: "detail" | "trigger" | "workflow"): AutomationSchedule {
-  return endpoint === "workflow" ? workflowAutomation("automation-a", "Alpha") : schedule("automation-a", "Alpha");
-}
-
-for (const failedEndpoint of ["detail", "trigger", "workflow"] as const) {
+for (const failedEndpoint of ["detail", "trigger"] as const) {
   test(`polling recovery clears a ${failedEndpoint} error only after the complete refresh`, async () => {
-    const items = [pageItem(failedEndpoint)];
+    const items = [schedule("automation-a", "Alpha")];
     const intervals = new Set<() => void>();
     let fail = false;
     let holdRecovery = false;
@@ -1877,8 +1567,7 @@ for (const failedEndpoint of ["detail", "trigger", "workflow"] as const) {
       const reject = (endpoint: typeof failedEndpoint) => {
         if (fail && endpoint === failedEndpoint) throw new Error("Polling unavailable");
       };
-      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
-        workflowDefinitions: async () => { reject("workflow"); return []; },
+      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, {
         automation: async (id) => {
           detailCalls++;
           reject("detail");
@@ -1926,27 +1615,27 @@ for (const failedEndpoint of ["detail", "trigger", "workflow"] as const) {
 
 test("partial polling recovery retains the remaining failure and a later complete poll clears it", async () => {
   const intervals = new Set<() => void>();
-  let failure: "trigger" | "workflow" | null = null;
+  let failure: "trigger" | "detail" | null = null;
   await withScopedClockOverrides(domWindow, {
     setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
   }, async () => {
-    const fixture = await mountAt(pageRoute("automation-a"), [pageItem("workflow")], {}, {}, [], {}, runners, [], {
+    const fixture = await mountAt(pageRoute("automation-a"), [schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, {
       automationTriggers: async () => {
         if (failure === "trigger") throw new Error("Triggers unavailable");
         return { triggers: [] };
       },
-      workflowDefinitions: async () => {
-        if (failure === "workflow") throw new Error("Workflow unavailable");
-        return [];
+      automation: async () => {
+        if (failure === "detail") throw new Error("Detail unavailable");
+        return { automation: schedule("automation-a", "Alpha"), executions: [], events: [] };
       },
     });
     try {
       failure = "trigger";
       await invokePolls(intervals);
       assert.equal(pageError(fixture), "Triggers unavailable");
-      failure = "workflow";
+      failure = "detail";
       await invokePolls(intervals);
-      assert.equal(pageError(fixture), "Workflow unavailable");
+      assert.equal(pageError(fixture), "Detail unavailable");
       failure = null;
       await invokePolls(intervals);
       assert.equal(pageError(fixture), null);
@@ -1960,7 +1649,7 @@ test("the list's failed read shows above it, and the next complete read clears i
   await withScopedClockOverrides(domWindow, {
     setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
   }, async () => {
-    const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, [], {
+    const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, {
       automations: async () => {
         if (fail) throw new Error("List unavailable");
         return { automations: [schedule("automation-a", "Alpha")] };
@@ -1987,7 +1676,7 @@ for (const pollFails of [false, true]) {
     await withScopedClockOverrides(domWindow, {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
     }, async () => {
-      const fixture = await mountAt(pageRoute("automation-a"), [item], {}, {}, [], {}, runners, [], {
+      const fixture = await mountAt(pageRoute("automation-a"), [item], {}, {}, [], {}, runners, {
         automationTriggers: async () => {
           if (holdPoll) {
             await new Promise<void>((resolve) => { release = resolve; });
@@ -2034,7 +1723,7 @@ for (const oldPollFails of [false, true]) {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
       clearInterval: () => { intervals.clear(); },
     }, async () => {
-      const fixture = await mountAt(pageRoute("automation-a"), [item], {}, {}, [], {}, runners, [], {
+      const fixture = await mountAt(pageRoute("automation-a"), [item], {}, {}, [], {}, runners, {
         automationTriggers: async () => {
           if (holdOld) {
             await new Promise<void>((resolve) => { release = resolve; });
@@ -2089,10 +1778,10 @@ for (const surface of ["list", "page"] as const) {
       clearInterval: () => { intervals.clear(); },
     }, async () => {
       const fixture = surface === "list"
-        ? await mountFixture([], {}, {}, [], {}, runners, [], {
+        ? await mountFixture([], {}, {}, [], {}, runners, {
           automations: async () => { await read(); return { automations: [] }; },
         })
-        : await mountAt(pageRoute("automation-a"), [item], {}, {}, [], {}, runners, [], {
+        : await mountAt(pageRoute("automation-a"), [item], {}, {}, [], {}, runners, {
           automation: async () => { await read(); return { automation: item, executions: [], events: [] }; },
         });
       hold = true;
@@ -2117,7 +1806,7 @@ for (const mutationFails of [false, true]) {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
       clearInterval: () => { intervals.clear(); },
     }, async () => {
-      const fixture = await mountAt(pageRoute("automation-a"), [item], {}, {}, [], {}, runners, [], {
+      const fixture = await mountAt(pageRoute("automation-a"), [item], {}, {}, [], {}, runners, {
         automation: async () => { oldReads++; return { automation: item, executions: [], events: [] }; },
         updateAutomation: async () => {
           await new Promise<void>((resolve) => { release = resolve; });
@@ -2138,14 +1827,13 @@ for (const mutationFails of [false, true]) {
   });
 }
 
-for (const failedEndpoint of ["detail", "trigger", "workflow"] as const) {
+for (const failedEndpoint of ["detail", "trigger"] as const) {
   test(`accepted Pause recovers its post-mutation ${failedEndpoint} read error`, async () => {
-    const items = [pageItem(failedEndpoint)];
+    const items = [schedule("automation-a", "Alpha")];
     const intervals = new Set<() => void>();
     let fail = false;
     let writes = 0;
-    const reads: Record<string, number> = failedEndpoint === "workflow"
-      ? { workflow: 0, detail: 0, trigger: 0 } : { detail: 0, trigger: 0 };
+    const reads: Record<string, number> = { detail: 0, trigger: 0 };
     const read = (endpoint: string) => {
       reads[endpoint] = (reads[endpoint] ?? 0) + 1;
       if (fail && endpoint === failedEndpoint) throw new Error("Accepted Pause refresh failed");
@@ -2153,8 +1841,7 @@ for (const failedEndpoint of ["detail", "trigger", "workflow"] as const) {
     await withScopedClockOverrides(domWindow, {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
     }, async () => {
-      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
-        workflowDefinitions: async () => { read("workflow"); return []; },
+      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, {
         automation: async () => { read("detail"); return { automation: items[0]!, executions: [], events: [] }; },
         automationTriggers: async () => { read("trigger"); return { triggers: [] }; },
         updateAutomation: async (_id, spec) => {
@@ -2196,7 +1883,7 @@ for (const outcome of ["accepted", "rejected", "unknown acceptance"] as const) {
     await withScopedClockOverrides(domWindow, {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
     }, async () => {
-      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
+      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, {
         updateAutomation: async (_id, spec) => {
           writes++;
           // A transport failure after the server changes state still does not prove acceptance
@@ -2220,7 +1907,7 @@ for (const outcome of ["accepted", "rejected", "unknown acceptance"] as const) {
 }
 
 test("post-mutation read recovery needs a complete visible refresh", async () => {
-  const items = [pageItem("workflow")];
+  const items = [schedule("automation-a", "Alpha")];
   const intervals = new Set<() => void>();
   let fail = false;
   let hold = false;
@@ -2230,10 +1917,10 @@ test("post-mutation read recovery needs a complete visible refresh", async () =>
   await withScopedClockOverrides(domWindow, {
     setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
   }, async () => {
-    const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
+    const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, {
       automation: async () => { detailReads++; return { automation: structuredClone(items[0]!), executions: [], events: [] }; },
-      workflowDefinitions: async () => { if (fail) throw new Error("Post-action workflow unavailable"); return []; },
       automationTriggers: async () => {
+        if (fail) throw new Error("Post-action trigger read unavailable");
         if (hold) await new Promise<void>((resolve) => { release = resolve; });
         return { triggers: [] };
       },
@@ -2243,21 +1930,21 @@ test("post-mutation read recovery needs a complete visible refresh", async () =>
     try {
       await act(async () => { button(fixture.container, "Pause").click(); });
       await act(settle);
-      assert.equal(pageError(fixture), "Post-action workflow unavailable");
+      assert.equal(pageError(fixture), "Post-action trigger read unavailable");
       await invokePolls(intervals);
-      assert.equal(pageError(fixture), "Post-action workflow unavailable", "another failed refresh is not recovery");
+      assert.equal(pageError(fixture), "Post-action trigger read unavailable", "another failed refresh is not recovery");
       fail = false;
       const beforeHidden = detailReads;
       Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "hidden" });
       await invokePolls(intervals);
       assert.equal(detailReads, beforeHidden);
-      assert.equal(pageError(fixture), "Post-action workflow unavailable");
+      assert.equal(pageError(fixture), "Post-action trigger read unavailable");
       Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "visible" });
       hold = true;
       items[0] = { ...items[0]!, name: "Fresh Name" };
       await invokePolls(intervals);
       assert.equal(pageTitle(fixture.container), "Fresh Name");
-      assert.equal(pageError(fixture), "Post-action workflow unavailable", "a partial read cannot clear it");
+      assert.equal(pageError(fixture), "Post-action trigger read unavailable", "a partial read cannot clear it");
       const beforeBusy = detailReads;
       await invokePolls(intervals);
       assert.equal(detailReads, beforeBusy, "busy polls preserve serialization");
@@ -2277,7 +1964,7 @@ test("post-mutation read recovery needs a complete visible refresh", async () =>
 
 for (const recoveryFails of [false, true]) {
   test(`a ${recoveryFails ? "failed" : "healthy"} read recovery cannot overwrite a newer failed action`, async () => {
-    const items = [pageItem("workflow")];
+    const items = [schedule("automation-a", "Alpha")];
     const intervals = new Set<() => void>();
     let failAfterWrite = false;
     let holdRecovery = false;
@@ -2286,9 +1973,9 @@ for (const recoveryFails of [false, true]) {
     await withScopedClockOverrides(domWindow, {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
     }, async () => {
-      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
-        workflowDefinitions: async () => { if (failAfterWrite) throw new Error("Old post-action read failed"); return []; },
+      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, {
         automationTriggers: async () => {
+          if (failAfterWrite) throw new Error("Old post-action read failed");
           if (holdRecovery) {
             await new Promise<void>((resolve) => { release = resolve; });
             if (recoveryFails) throw new Error("Old recovery failed");
@@ -2324,7 +2011,7 @@ for (const recoveryFails of [false, true]) {
 
 for (const obsoleteReadFails of [false, true]) {
   test(`API replacement revokes an accepted write's obsolete ${obsoleteReadFails ? "failed" : "healthy"} recovery`, async () => {
-    const items = [pageItem("workflow")];
+    const items = [schedule("automation-a", "Alpha")];
     const intervals = new Set<() => void>();
     let hold = false;
     let failAfterWrite = false;
@@ -2334,15 +2021,15 @@ for (const obsoleteReadFails of [false, true]) {
     await withScopedClockOverrides(domWindow, {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => { intervals.clear(); },
     }, async () => {
-      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
+      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, {
         automation: async () => { detailReads++; return { automation: structuredClone(items[0]!), executions: [], events: [] }; },
-        workflowDefinitions: async () => {
+        automationTriggers: async () => {
           if (failAfterWrite) throw new Error("Accepted-write refresh failed");
           if (hold) {
             await new Promise<void>((resolve) => { release = resolve; });
             if (obsoleteReadFails) throw new Error("Obsolete accepted-write refresh failed");
           }
-          return [];
+          return { triggers: [] };
         },
         updateAutomation: async (_id, spec) => { writes++; items[0] = { ...items[0]!, ...spec }; failAfterWrite = true; return items[0]!; },
       });
@@ -2355,7 +2042,7 @@ for (const obsoleteReadFails of [false, true]) {
         await invokePolls(intervals);
         assert.ok(release, "the old client's recovery is in flight");
         await fixture.replaceClient({
-          workflowDefinitions: async () => [],
+          automationTriggers: async () => ({ triggers: [] }),
           updateAutomation: async () => { throw new Error("Replacement Resume failed"); },
         });
         await act(async () => { button(fixture.container, "Resume").click(); });
@@ -2406,25 +2093,6 @@ const NEW_ROUTE: View = { name: "automations", editor: { kind: "new" } };
 const editRoute = (automationId: string): View => ({ name: "automations", editor: { kind: "edit", automationId } });
 const pageRoute = (id: string): View => ({ name: "automation", id });
 
-function workflowAutomation(id: string, name: string): AutomationSchedule {
-  const stored = schedule(id, name);
-  stored.action = { kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
-  } };
-  return stored;
-}
-
-const reviewGraph: WorkflowDefinition = {
-  workflowId: "graph-1", version: 1, name: "Graph", source: "custom", maxTransitions: 1,
-  createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
-  nodes: [
-    { nodeId: "build", kind: "agent", role: "builder", agentId: "rich-agent",
-      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 },
-    { nodeId: "approve", kind: "human_gate", role: "approver",
-      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 },
-  ],
-};
-
 test("New Automation opens the editor in the list's place and returns to the list; Edit returns to the automation's page", async () => {
   const fixture = await mountFixture([schedule("automation-1", "Nightly")]);
   try {
@@ -2460,14 +2128,14 @@ test("New Automation opens the editor in the list's place and returns to the lis
 
 test("each editor route opens directly, in four sections, with no native select for any action", async () => {
   for (const view of [NEW_ROUTE, editRoute("automation-1")]) {
-    const fixture = await mountAt(view, [schedule("automation-1", "Nightly")], {}, {}, [], {}, runners, [reviewGraph]);
+    const fixture = await mountAt(view, [schedule("automation-1", "Nightly")], {}, {}, [], {}, runners);
     try {
       const root = editorRoot(fixture.container);
       assert.equal(editorTitle(fixture.container), view.name === "automations" && view.editor?.kind === "new"
         ? "New Automation" : "Edit Nightly");
       assert.deepEqual([...root.querySelectorAll(".section-title")].map((title) => title.textContent),
         ["What to Run", "When to Run", "Limits", "Notifications"]);
-      for (const action of ["Prompt a Session", "Run a Workflow", "Start a Session"]) {
+      for (const action of ["Prompt a Session", "Start a Session"]) {
         await chooseAction(fixture.container, action);
         await choose(fixture.container, "If the Machine Is Offline", action === "Prompt a Session"
           ? "Give Up After a While" : "Use Another Machine");
@@ -2480,7 +2148,7 @@ test("each editor route opens directly, in four sections, with no native select 
 });
 
 test("an edit route for an automation that no longer exists says so and offers Back", async () => {
-  const fixture = await mountAt(editRoute("gone"), [], {}, {}, [], {}, runners, [], {
+  const fixture = await mountAt(editRoute("gone"), [], {}, {}, [], {}, runners, {
     automation: async () => { throw new ApiError("automation not found", 404); },
   });
   try {
@@ -2494,7 +2162,7 @@ test("an edit route for an automation that no longer exists says so and offers B
 
 test("a new automation starts on the first online machine, and switching the action keeps Folder and Agent filled", async () => {
   const offline: RunnerView = { ...runners[0]!, status: "offline" };
-  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [offline, runners[1]!], [reviewGraph]);
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [offline, runners[1]!]);
   try {
     assert.equal(shownValue(fixture.container, "Machine"), "runner-2");
     const machine = choiceTrigger(fixture.container, "Machine")!;
@@ -2503,7 +2171,7 @@ test("a new automation starts on the first online machine, and switching the act
       .find((option) => option.querySelector('[id$="-label"]')?.textContent === "runner-1");
     assert.match(offlineOption?.textContent ?? "", /Offline/, "an offline machine carries its badge in the list");
     await act(async () => { machine.click(); });
-    for (const action of ["Prompt a Session", "Run a Workflow", "Start a Session"]) {
+    for (const action of ["Prompt a Session", "Start a Session"]) {
       await chooseAction(fixture.container, action);
       if (action === "Prompt a Session") continue;
       assert.equal(shownValue(fixture.container, "Folder"), "runner-2-workspace", `${action} keeps a Folder`);
@@ -2551,7 +2219,7 @@ test("a save refused for the other machine marks Other Machine; any other refusa
     { runnerId: "runner-2", workspaceId: "runner-2-workspace", agentId: "alternate-agent" },
   ], expireAfterMinutes: 60 };
   let refusal = "alternate runner policy requires unique explicit compatible targets and an optional bounded expiry";
-  const fixture = await mountAt(editRoute("alternate-refused"), [stored], {}, {}, [], {}, runners, [], {
+  const fixture = await mountAt(editRoute("alternate-refused"), [stored], {}, {}, [], {}, runners, {
     updateAutomation: async () => { throw new ApiError(refusal, 400); },
   });
   try {
@@ -2588,7 +2256,7 @@ test("a save refused for the other machine marks Other Machine; any other refusa
 
 test("on an edit route the save bar appears with a change, discards it, saves it and turns into the error bar", async () => {
   let fail = false;
-  const fixture = await mountAt(editRoute("automation-1"), [schedule("automation-1", "Nightly")], {}, {}, [], {}, runners, [], {
+  const fixture = await mountAt(editRoute("automation-1"), [schedule("automation-1", "Nightly")], {}, {}, [], {}, runners, {
     updateAutomation: async (_id: string, spec: AutomationSpec) => {
       if (fail) throw new Error("Synthetic failure");
       fixture.updates.push({ id: "automation-1", spec: structuredClone(spec) });
@@ -2625,7 +2293,7 @@ test("on an edit route the save bar appears with a change, discards it, saves it
 test("a new automation's save bar shows Cancel and Create Automation at once, and Create keeps its label while busy", async () => {
   let release: () => void = () => {};
   const creates: AutomationSpec[] = [];
-  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, runners, [], {
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, runners, {
     createAutomation: async (spec: AutomationSpec) => {
       creates.push(structuredClone(spec));
       await new Promise<void>((resolve) => { release = resolve; });
@@ -2656,51 +2324,6 @@ test("a new automation's save bar shows Cancel and Create Automation at once, an
     assertNoDomNode(cancelled.container.querySelector(".automation-editor"));
   } finally {
     await unmountFixture(cancelled);
-  }
-});
-
-test("with Multi-Agent Runs off, a stored workflow action keeps its choice, says why and saves unchanged", async () => {
-  setExperimentFlag("multiAgent", false);
-  try {
-    const stored = workflowAutomation("workflow-off", "Workflow Off");
-    const fixture = await mountAt(editRoute("workflow-off"), [stored], {}, {}, [], {}, runners, [reviewGraph]);
-    try {
-      const helper = [...fixture.container.querySelectorAll<HTMLElement>(".field-helper")]
-        .find((item) => item.textContent === MULTI_AGENT_OFF_HELPER);
-      assert.ok(helper, "the helper sentence renders");
-      assertNoDomNode(helper.closest(".notice"), "it is a helper, not a notice");
-      const workflowRow = [...fixture.container.querySelectorAll(".choice-row")]
-        .find((row) => row.querySelector(".choice-row-title")?.textContent === "Run a Workflow");
-      const input = workflowRow?.querySelector("input");
-      assert.equal(input?.checked, true);
-      assert.ok(input?.getAttribute("aria-describedby")?.split(" ").includes(helper.id),
-        "Run a Workflow is described by the helper");
-      assert.ok(helper.previousElementSibling?.classList.contains("choice-rows"), "it sits directly under the choices");
-      // Roles are named by what they do, and a human step is the person.
-      assert.ok(choiceTrigger(fixture.container, "Builder Agent"));
-      const approver = [...fixture.container.querySelectorAll("label")]
-        .find((label) => label.childNodes[0]?.textContent === "Approver")?.querySelector("input");
-      assert.equal(approver?.value, "You, in the run");
-      assert.equal(approver?.readOnly, true);
-
-      await setLabeledInput(fixture.container, "Name", "Workflow Still Off");
-      await saveChanges(fixture);
-      assert.deepEqual(fixture.updates[0]?.spec.action, stored.action);
-    } finally {
-      await unmountFixture(fixture);
-    }
-
-    const fresh = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, runners, [reviewGraph]);
-    try {
-      assert.deepEqual([...fresh.container.querySelectorAll(".choice-row-title")].map((title) => title.textContent),
-        ["Start a Session", "Prompt a Session"]);
-      assert.equal([...fresh.container.querySelectorAll(".field-helper")]
-        .some((item) => item.textContent === MULTI_AGENT_OFF_HELPER), false);
-    } finally {
-      await unmountFixture(fresh);
-    }
-  } finally {
-    setExperimentFlag("multiAgent", true);
   }
 });
 
@@ -2735,11 +2358,10 @@ test("switching or reselecting the action never replaces a stored machine, folde
     runnerId: "runner-gone", workspaceId: "gone-workspace", agentId: "gone-agent", prompt: "Sweep.",
     useWorktree: false, config: { model: "opus" },
   }, installationBindings: { agent: { driver: "claude-code", context: { kind: "native" }, installationId: "system" } } };
-  const fixture = await mountAt(editRoute("missing-machine"), [stored], {}, {}, [], {}, runners, [reviewGraph]);
+  const fixture = await mountAt(editRoute("missing-machine"), [stored], {}, {}, [], {}, runners);
   try {
     await chooseAction(fixture.container, "Start a Session");
     await chooseAction(fixture.container, "Prompt a Session");
-    await chooseAction(fixture.container, "Run a Workflow");
     await chooseAction(fixture.container, "Start a Session");
     await setLabeledInput(fixture.container, "Name", "Missing Machine Renamed");
     await saveChanges(fixture);
@@ -2755,9 +2377,9 @@ test("switching or reselecting the action never replaces a stored machine, folde
   if (gone.action.kind !== "create_session") throw new Error("expected create-session action");
   gone.action.request.workspaceId = "gone-workspace";
   gone.action.request.agentId = "gone-agent";
-  const kept = await mountAt(editRoute("missing-folder"), [gone], {}, {}, [], {}, runners, [reviewGraph]);
+  const kept = await mountAt(editRoute("missing-folder"), [gone], {}, {}, [], {}, runners);
   try {
-    await chooseAction(kept.container, "Run a Workflow");
+    await chooseAction(kept.container, "Prompt a Session");
     await chooseAction(kept.container, "Start a Session");
     await setLabeledInput(kept.container, "Name", "Missing Folder Renamed");
     await saveChanges(kept);
@@ -2781,7 +2403,7 @@ test("a create that settles after the person left does not navigate away from wh
   } as FeedbackContextValue;
   let fixture: Fixture;
   try {
-    fixture = await mountFixture([schedule("automation-1", "Nightly")], {}, {}, [], {}, runners, [], {
+    fixture = await mountFixture([schedule("automation-1", "Nightly")], {}, {}, [], {}, runners, {
       createAutomation: async (spec: AutomationSpec) => {
         await new Promise<void>((resolve) => { release = resolve; });
         return { ...schedule("created", spec.name), ...spec };
@@ -3107,7 +2729,7 @@ function accountPreview(overrides: Partial<ProviderAccountSelectionPreview>): Pr
 async function mountAccountEditor(preview: ProviderAccountSelectionPreview, overrides: Partial<ApiClient> = {}) {
   const targets: unknown[] = [];
   const creates: AutomationSpec[] = [];
-  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [ACCOUNT_MACHINE], [], {
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [ACCOUNT_MACHINE], {
     providerAccountSelection: async (runnerId: string, target: unknown) => {
       targets.push({ runnerId, target });
       return preview;
@@ -3256,7 +2878,7 @@ test("with no accounts left, a saved policy's refusal still shows for both roles
   const creates: AutomationSpec[] = [];
   const empty = accountPreview({ status: "choice_required", source: "none", accountId: undefined, refusal: "empty_order", candidates: [] });
   const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [{ ...ACCOUNT_MACHINE, providerAccounts: [],
-    providerAccountDefaults: [{ provider: "claude", accountId: null, revision: 2, mode: "priority", priorityAccountIds: [] }] }], [], {
+    providerAccountDefaults: [{ provider: "claude", accountId: null, revision: 2, mode: "priority", priorityAccountIds: [] }] }], {
     ...ORCHESTRATOR_SETTINGS,
     providerAccountSelection: async (_runnerId: string, target: unknown) => { targets.push(target); return empty; },
     createAutomation: async (spec: AutomationSpec) => {
@@ -3289,7 +2911,7 @@ test("an older runner's view omits accounts and policies, so its refusal is stil
   const older = { ...runners[0]!, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts - 1 };
   assert.equal(older.providerAccounts, undefined);
   assert.equal(older.providerAccountDefaults, undefined);
-  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [older], [], {
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [older], {
     providerAccountSelection: async (_runnerId: string, target: unknown) => {
       targets.push(target);
       return accountPreview({ status: "choice_required", source: "none", accountId: undefined,
@@ -3328,7 +2950,7 @@ test("a named account no longer on the machine says each run is refused (#4512)"
   const stored = schedule("gone-account", "Gone Account");
   if (stored.action.kind !== "create_session") throw new Error("expected create-session action");
   stored.action.request.providerAccountId = "removed";
-  const fixture = await mountAt(editRoute(stored.automationId), [stored], {}, {}, [], {}, [ACCOUNT_MACHINE], [], {
+  const fixture = await mountAt(editRoute(stored.automationId), [stored], {}, {}, [], {}, [ACCOUNT_MACHINE], {
     providerAccountSelection: async () => accountPreview({}),
   });
   try {
@@ -3344,7 +2966,7 @@ test("an account named by opaque reference is never called missing (#4512)", asy
   if (stored.action.kind !== "create_session") throw new Error("expected create-session action");
   stored.action.request.providerAccountId = "acct:0123456789abcdef";
   const targets: unknown[] = [];
-  const fixture = await mountAt(editRoute(stored.automationId), [stored], {}, {}, [], {}, [ACCOUNT_MACHINE], [], {
+  const fixture = await mountAt(editRoute(stored.automationId), [stored], {}, {}, [], {}, [ACCOUNT_MACHINE], {
     providerAccountSelection: async (_runnerId: string, target: unknown) => { targets.push(target); return accountPreview({}); },
   });
   try {
@@ -3359,15 +2981,14 @@ test("an account named by opaque reference is never called missing (#4512)", asy
 });
 
 test("an agent's Create Automation approval shows what Default is expected to resolve to (#4512)", async () => {
-  const { automationId: _id, revision: _revision, createdBy: _by, createdAt: _at, updatedAt: _updated, ...spec } =
-    schedule("proposed", "Proposed");
+  const spec = specOf(schedule("proposed", "Proposed"));
   summarySnapshot = {
     category: "automation_creation", targetDigest: "a".repeat(64), effectiveTargets: [], requestedSpecDigest: "b".repeat(64),
     nextFireAt: 1, expiresAt: 2, spec,
   };
   const targets: unknown[] = [];
   try {
-    const fixture = await mountFixture([], {}, {}, [], {}, [ACCOUNT_MACHINE], [], {
+    const fixture = await mountFixture([], {}, {}, [], {}, [ACCOUNT_MACHINE], {
       providerAccountSelection: async (_runnerId: string, target: unknown) => {
         targets.push(target);
         return accountPreview({});

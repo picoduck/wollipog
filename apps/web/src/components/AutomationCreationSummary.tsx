@@ -27,18 +27,17 @@ export function AutomationCreationSummary({ snapshot }: { snapshot: AutomationCr
   const hasStore = useHasStore();
   const { spec } = snapshot;
   const action = spec.action;
+  if (action.kind !== "create_session" && action.kind !== "prompt_session") {
+    return <p>This request contains a retired action. Create a campaign automation instead.</p>;
+  }
   const prompt = action.kind === "prompt_session" ? action.request.text :
-    action.kind === "create_session" ? action.request.prompt : action.request.task;
+    action.request.prompt;
   return <section aria-label="Create Automation Details">
     <p>Approve creating this automation once. Scheduled runs keep their own permissions, limits and approval requirements.</p>
     <dl className="facts">
       <div><dt>Name</dt><dd>{spec.name}</dd></div>
-      <div><dt>Action</dt><dd>{action.kind === "create_session" ? "Create Session" : action.kind === "prompt_session" ? "Prompt Existing Session" : "Start Workflow Run"}</dd></div>
+      <div><dt>Action</dt><dd>{action.kind === "create_session" ? "Create Session" : "Prompt Existing Session"}</dd></div>
       {action.kind === "prompt_session" && action.request.slashCommand && <div><dt>Slash Command</dt><dd><code>{action.request.slashCommand}</code></dd></div>}
-      {action.kind === "workflow_run" && <>
-        <div><dt>Workflow</dt><dd>{action.request.workflowId}</dd></div>
-        <div><dt>Workflow Version</dt><dd>{action.request.workflowVersion}</dd></div>
-      </>}
       {action.kind === "create_session" && action.request.campaign && <>
         <div><dt>Session Role</dt><dd>Orchestrator</dd></div>
         <div><dt>Orchestrator Control</dt><dd>{action.request.campaign.controlMode === "full_control" ? "Full Control" : "Custom"}</dd></div>
@@ -79,7 +78,7 @@ export function AutomationCreationSummary({ snapshot }: { snapshot: AutomationCr
     </>}
     <details>
       <summary>Full Configuration</summary>
-      <p>Includes exact installation bindings, alternate targets, workflow settings, notifications, concurrency and recovery policies.</p>
+      <p>Includes exact installation bindings, alternate targets, notifications, concurrency and recovery policies.</p>
       <div className="code-well"><pre>{JSON.stringify(spec, null, 2)}</pre></div>
     </details>
     {!spec.enabled && <p>The automation will stay paused until a person enables it.</p>}

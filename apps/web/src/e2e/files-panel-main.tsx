@@ -174,7 +174,7 @@ const client: ApiClient = {
       truncated: params.get("truncated") === "1",
     };
   },
-  sessionWorkflowArtifacts: async () => ({ artifacts: [] }),
+  sessionArtifacts: async () => ({ artifacts: [] }),
 };
 
 /** The store only has to connect: the panel reads its runner from it, and none is needed here. */

@@ -233,12 +233,9 @@ test("a request is never attributed to an owner that is unresolved or ambiguous"
   assert.equal(subagentStatusMeta(reused, subagentStatusContext(asking, true)).label, "Running");
 });
 
-test("members sit under their run's title, workflow members under Workflow when the run is not loaded", () => {
-  const workflow = [{ nodeStates: [{ nodeId: "review", sessionId: "wf", status: "running", attemptCount: 1 }] }] as never;
-  const run = memberMetadata({ runId: "r1" }, { title: "Release Audit", sessionIds: ["a", "b"] }, workflow);
+test("members sit under their run's title", () => {
+  const run = memberMetadata({ runId: "r1" }, { title: "Release Audit", sessionIds: ["a", "b"] });
   assert.deepEqual(run.get("a"), { group: { id: "run:r1", name: "Release Audit" }, runTitle: "Release Audit" });
-  assert.equal(run.get("wf")?.group?.name, "Release Audit");
-  assert.equal(memberMetadata({ runId: "r1" }, undefined, workflow).get("wf")?.group?.name, "Workflow");
 });
 
 test("groups keep their first row's order, count every filtered row, and page across groups", () => {

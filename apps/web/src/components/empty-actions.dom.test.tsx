@@ -238,7 +238,6 @@ test("the empty state's New Automation creates, even after an edit was cancelled
     automations: async () => ({ automations: items }),
     automation: automationRead(() => items),
     automationTriggers: async () => ({ triggers: [] }),
-    workflowDefinitions: async () => [],
     createAutomation: async (spec: AutomationSpec) => { created.push(structuredClone(spec)); return {} as never; },
     updateAutomation: async (id: string) => { updated.push(id); return {} as never; },
     deleteAutomation: async (id: string) => { items = items.filter((item) => item.automationId !== id); return {} as never; },
@@ -289,7 +288,6 @@ test("an edit route for a deleted automation offers nothing to save", async () =
     automations: async () => ({ automations: [] }),
     automation: async () => { throw new ApiError("automation not found", 404); },
     automationTriggers: async () => ({ triggers: [] }),
-    workflowDefinitions: async () => [],
     updateAutomation: async (id: string) => { updated.push(id); return {} as never; },
   } as unknown as Partial<ApiClient>, <AutomationsRoute />, undefined, {
     ...automationsNavigation,
@@ -413,7 +411,6 @@ test("serialized polling lists a newly discovered automation that Edit can then 
       },
       automation: automationRead(() => items),
       automationTriggers: async () => ({ triggers: [] }),
-      workflowDefinitions: async () => [],
       outboundEventSubscriptions: async () => [],
     } as unknown as Partial<ApiClient>, <AutomationsRoute />, undefined, automationsNavigation);
     await act(async () => { socket.push(snapshot()); });
@@ -442,43 +439,6 @@ test("serialized polling lists a newly discovered automation that Edit can then 
   });
 });
 
-test("a workflow-definition failure cannot keep a deleted automation on screen", async () => {
-  // The list and the workflow definitions used to share a `Promise.all`, so a rejected workflow
-  // fetch discarded a successful list. The deleted automation stayed, the editor stayed open on it,
-  // and Save sent `updateAutomation` for an ID the control plane no longer had.
-  // The automation page reads the workflows for a workflow action, independently of the automation
-  // itself (#2968): deleting it still leaves its page for the list, and the list drops it.
-  const workflowAutomation = automation("automation-1", "Nightly");
-  workflowAutomation.action = { kind: "workflow_run", request: {
-    runnerId: "runner-1", workspaceId: "workspace-1", workflowId: "graph-1", task: "go",
-  } };
-  let items = [workflowAutomation];
-  const updated: string[] = [];
-  const { container, socket, unmount } = await mount({
-    automations: async () => ({ automations: items }),
-    automation: automationRead(() => items),
-    automationTriggers: async () => ({ triggers: [] }),
-    workflowDefinitions: async () => { throw new Error("workflow service is down"); },
-    updateAutomation: async (id: string) => { updated.push(id); return {} as never; },
-    deleteAutomation: async (id: string) => {
-      items = items.filter((item) => item.automationId !== id);
-      return {} as never;
-    },
-  } as unknown as Partial<ApiClient>, <AutomationsRoute />, undefined, automationsNavigation);
-  await act(async () => { socket.push(snapshot()); });
-
-  await settleReads();
-  await openAutomation(container, "Nightly");
-  assert.match(container.textContent ?? "", /workflow service is down/, "the failed read is the page's notice");
-  await deleteFromPage(container);
-
-  assertNoDomNode(container.querySelector(".automation-detail"),
-    "an unrelated service being down must not keep a deleted automation's page open");
-  assertNoDomNode(container.querySelector(".automation-row"), "and the list no longer holds it");
-  assert.deepEqual(updated, []);
-  await unmount();
-});
-
 test("deleting an automation from its page leaves the others alone", async () => {
   // With one automation, an implementation that closed whenever the list became EMPTY would pass
   // the earlier test while being wrong. Two automations tell them apart.
@@ -487,7 +447,6 @@ test("deleting an automation from its page leaves the others alone", async () =>
     automations: async () => ({ automations: items }),
     automation: automationRead(() => items),
     automationTriggers: async () => ({ triggers: [] }),
-    workflowDefinitions: async () => [],
     deleteAutomation: async (id: string) => {
       items = items.filter((item) => item.automationId !== id);
       return {} as never;

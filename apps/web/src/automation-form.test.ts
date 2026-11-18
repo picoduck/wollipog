@@ -68,26 +68,6 @@ test("a prompt-session spec keeps its slash command and config", () => {
   }));
 });
 
-test("a workflow-run spec keeps every field the form does not render", () => {
-  assertRoundTrips(baseSpec({
-    kind: "workflow_run",
-    request: {
-      runnerId: "local-dev",
-      workspaceId: "wollipog",
-      workflowId: "build-review",
-      workflowVersion: 1,
-      task: "Fix the failing test.",
-      title: "Nightly",
-      useWorktree: true,
-      config: { model: "opus[1m]" },
-      costBudgetUsd: 12,
-      maxToolCalls: 900,
-      agentBindings: { build: "claude-native", review: "codex-native" },
-      orchestratorAgentId: "claude-native",
-    },
-  }));
-});
-
 test("an unrelated edit does not disturb config or worktree placement", () => {
   const spec = baseSpec({
     kind: "create_session",
@@ -131,25 +111,6 @@ test("a create-session automation with no selections stores no config", () => {
   assert(saved.action.kind === "create_session");
   assert.equal(saved.action.request.config, undefined);
   assert.equal(saved.action.request.useWorktree, true);
-});
-
-test("switching the selected workflow drops bindings that belonged to the old graph", () => {
-  const spec = baseSpec({
-    kind: "workflow_run",
-    request: {
-      runnerId: "local-dev", workspaceId: "wollipog", workflowId: "build-review", workflowVersion: 3,
-      task: "Go.", agentBindings: { build: "claude-native" }, orchestratorAgentId: "claude-native",
-      costBudgetUsd: 12,
-    },
-  });
-  const switched = { ...formFrom(spec), workflowId: "other-workflow" };
-  const saved = buildSpec(switched, { ...CONTEXT, base: spec });
-  assert(saved.action.kind === "workflow_run");
-  assert.equal(saved.action.request.workflowVersion, undefined);
-  assert.equal(saved.action.request.agentBindings, undefined);
-  assert.equal(saved.action.request.orchestratorAgentId, undefined);
-  // Workflow-independent ceilings still survive the switch.
-  assert.equal(saved.action.request.costBudgetUsd, 12);
 });
 
 test("switching action kind does not carry the previous action's fields", () => {
@@ -225,24 +186,6 @@ test("a retargeted prompt session drops the previous session's config", () => {
   // The prompt path validates config against the TARGET session's agent.
   assert.equal(saved.action.request.config, undefined);
   assert.equal(saved.action.request.slashCommand, "/review");
-});
-
-test("moving a workflow automation to another machine drops runner-scoped carry-overs", () => {
-  const spec = baseSpec({
-    kind: "workflow_run",
-    request: {
-      runnerId: "local-dev", workspaceId: "wollipog", workflowId: "build-review", task: "Go.",
-      config: { model: "opus[1m]" }, agentBindings: { build: "claude-native" },
-      orchestratorAgentId: "claude-native", costBudgetUsd: 12,
-    },
-  });
-  const moved = { ...formFrom(spec), runnerId: "other-machine" };
-  const saved = buildSpec(moved, { ...CONTEXT, base: spec });
-  assert(saved.action.kind === "workflow_run");
-  assert.equal(saved.action.request.config, undefined);
-  assert.equal(saved.action.request.agentBindings, undefined);
-  assert.equal(saved.action.request.orchestratorAgentId, undefined);
-  assert.equal(saved.action.request.costBudgetUsd, 12);
 });
 
 test("an omitted useWorktree stays omitted when the control is untouched", () => {
@@ -321,27 +264,6 @@ test("empty alternate capability lists reject rather than wave values through", 
   assert.equal(alternateConfigError({ model: "opus[1m]" }, empty), null);
 });
 
-test("a workflow automation drops runner-scoped config once an alternate can run it", () => {
-  const spec = baseSpec({
-    kind: "workflow_run",
-    request: {
-      runnerId: "local-dev", workspaceId: "wollipog", workflowId: "build-review", task: "Go.",
-      config: { model: "opus[1m]" }, costBudgetUsd: 12,
-    },
-  });
-  // Only the runner policy changes; the runner itself is untouched, so `sameRunner` still holds.
-  const withAlternate = {
-    ...formFrom(spec), runnerPolicy: "alternate" as const,
-    fallbackRunnerId: "other", fallbackWorkspaceId: "ws",
-  };
-  const saved = buildSpec(withAlternate, { ...CONTEXT, base: spec });
-  assert(saved.action.kind === "workflow_run");
-  // A workflow's agents come from its graph, so the client cannot know which agent runs on the
-  // alternate and cannot validate against it. Carrying the config would fail at failover.
-  assert.equal(saved.action.request.config, undefined);
-  assert.equal(saved.action.request.costBudgetUsd, 12);
-});
-
 test("an alternate policy with multiple targets survives an unchanged edit", () => {
   const spec: AutomationSpec = {
     ...baseSpec({
@@ -357,33 +279,6 @@ test("an alternate policy with multiple targets survives an unchanged edit", () 
         { runnerId: "alternate-a", workspaceId: "a-ws", agentId: "claude-a" },
         { runnerId: "alternate-b", workspaceId: "b-ws", agentId: "claude-b" },
         { runnerId: "alternate-c", workspaceId: "c-ws", agentId: "claude-c" },
-      ],
-      expireAfterMinutes: 60,
-    },
-  };
-
-  assertRoundTrips(spec);
-});
-
-test("multi-target workflow bindings survive an unchanged edit", () => {
-  const spec: AutomationSpec = {
-    ...baseSpec({
-      kind: "workflow_run",
-      request: {
-        runnerId: "primary", workspaceId: "primary-ws", workflowId: "build-review", task: "Sweep.",
-      },
-    }),
-    runnerPolicy: {
-      kind: "alternate",
-      targets: [
-        {
-          runnerId: "alternate-a", workspaceId: "a-ws",
-          agentBindings: { build: "claude-a", review: "codex-a" }, orchestratorAgentId: "claude-a",
-        },
-        {
-          runnerId: "alternate-b", workspaceId: "b-ws",
-          agentBindings: { build: "claude-b", review: "codex-b" }, orchestratorAgentId: "claude-b",
-        },
       ],
       expireAfterMinutes: 60,
     },

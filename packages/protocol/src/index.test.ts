@@ -92,7 +92,6 @@ import {
   type ControlPlaneToUi,
   type CreateSessionRequest,
   type CreateRunRequest,
-  type CreateWorkflowRunRequest,
   type AutomationRunnerTarget,
   type ProjectLocationView,
   type ProjectView,
@@ -1273,10 +1272,6 @@ test("durable Project transport is additive to legacy snapshots and session crea
     runnerId: "runner-1", workspaceId: "workspace-1", projectId: project.id,
     projectLocationId: project.locations[0]!.id, agentIds: ["agent-1"], task: "Build",
   } satisfies CreateRunRequest;
-  const projectWorkflow = {
-    runnerId: "runner-1", workspaceId: "workspace-1", projectId: project.id,
-    projectLocationId: project.locations[0]!.id, workflowId: "workflow-1", task: "Build",
-  } satisfies CreateWorkflowRunRequest;
   const alternateTarget = {
     runnerId: "runner-2", workspaceId: "workspace-2", projectId: project.id,
     projectLocationId: "location-2", agentId: "agent-1",
@@ -1294,7 +1289,6 @@ test("durable Project transport is additive to legacy snapshots and session crea
   assert.equal(legacyCreate.projectId, undefined);
   assert.equal(projectCreate.projectLocationId, "location-1");
   assert.equal(projectRun.projectId, "project-1");
-  assert.equal(projectWorkflow.projectLocationId, "location-1");
   assert.equal(alternateTarget.projectLocationId, "location-2");
 });
 
