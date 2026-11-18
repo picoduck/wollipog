@@ -3,7 +3,7 @@
 Session list views carry a versioned `attention` projection from the control plane. It contains
 human-owned action occurrences with canonical request ranks and stable occurrence times, meaningful
 work time, the latest live result revision and its owner, and the receiving user's exact result
-acknowledgment. Sorting never loads transcripts. Lifecycle, unread state, stalls, and board placement
+acknowledgment. Sorting never loads transcripts. Lifecycle, unread state, wait conditions, and board placement
 remain independent.
 
 The default order is Needs Your Input, Ready for Review, Working, then Quiet. Requests use canonical
