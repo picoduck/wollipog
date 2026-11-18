@@ -184,7 +184,7 @@ test("switching off Show Pods in Navigation leaves the rail and renumbers at onc
 
     await act(async () => { reset(container).click(); });
     assert.deepEqual(rows(container).map(rowTitle), [
-      "Sessions", "Automations", "Projects", "Assistants", "Multi-Agent Runs", "Pods", "Connections", "Agent Skills",
+      "Sessions", "Assistants", "Automations", "Projects", "Multi-Agent Runs", "Pods", "Connections", "Agent Skills",
       "Archived Sessions", "Usage and Cost",
     ], "the default order");
     assert.equal(control(container, "Show Pods in Navigation").getAttribute("aria-checked"), "true");

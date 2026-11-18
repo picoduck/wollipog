@@ -629,11 +629,11 @@ Rules
 
 - **Rail (desktop).** 64px, `--bg-elev`, hairline right edge. Square items at `--control-h-lg` (40px;
   48px on touch tablets), 20px outline icons,
-  4px gap, 12px gap plus a hairline between groups: *Work* (Sessions, Automations, Projects),
+  4px gap, 12px gap plus a hairline between groups: *Work* (Sessions, Assistants, Automations, Projects),
   *Oversight* (Multi-Agent Runs, Pods, Connections, Agent Skills), *Records* (Archived Sessions,
   Usage and Cost). That is also the default rail order and digit order; a saved order is kept. Settings is pinned
   at the bottom. Active: `--accent` icon, 3px `--accent` bar on the left edge, `--surface-selected`
-  fill. Hover: `--bg-elev-2`. Digit hints appear only in the tooltip ("Automations  2"), not as
+  fill. Hover: `--bg-elev-2`. Digit hints appear only in the tooltip ("Assistants  2"), not as
   8px superscripts. One attention mark per item (§11.4). Archived uses an outline archive-box glyph.
   The instance switcher (Tauri) replaces the brand tile at the top as a 32px monogram tile with a
   status corner dot.
@@ -697,7 +697,7 @@ Rules
   from `viewTitle` ("Agent Skills – Wollipog"; a Session, Multi-Agent Run or Pod by its own title),
   and the desktop app copies it to the native window for the taskbar and window switcher.
 - **One name per destination**, used for the rail tooltip, `aria-label`, page title, phone app bar,
-  More sheet, palette, shortcut reference and Settings › Appearance › Navigation: Sessions,
+  More sheet, palette, shortcut reference and Settings › Appearance › Navigation: Sessions, Assistants,
   Automations, Projects, Multi-Agent Runs, Pods, Connections, Agent Skills, Archived Sessions, Usage
   and Cost, Settings. Each `GLOBAL_VIEW_ITEMS` entry carries that one `name`, its page `description`
   (§4.2) and its `group`; back controls read "Back to <name>". "Inbox" is retired from all copy.
@@ -3547,7 +3547,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 
 | Element | Phone behavior |
 | --- | --- |
-| Rail | Bottom tab bar, 56px + safe area, **labeled** (24px icon + 11px label). Default slots: Sessions, Projects, Connections, Automations, More. Experimental destinations never take a primary slot by default. Active: accent icon and label plus a tinted pill behind the icon (not a bar below it). `phoneBarViews()` in `rail-preferences.ts` is the one source for the slots: an optional per-instance `phoneBar` list replaces the default, and a hidden or turned-off slot is filled in place by the next visible non-experimental destination in rail order. From 600px the tabs keep a 480px centered measure. |
+| Rail | Bottom tab bar, 56px + safe area, **labeled** (24px icon + 11px label). Default slots: Sessions, Assistants, Projects, Connections, More. Experimental destinations never take a primary slot by default. Active: accent icon and label plus a tinted pill behind the icon (not a bar below it). `phoneBarViews()` in `rail-preferences.ts` is the one source for the slots: an optional per-instance `phoneBar` list replaces the default, and a hidden or turned-off slot is filled in place by the next visible non-experimental destination in rail order. From 600px the tabs keep a 480px centered measure. |
 | More | A real bottom sheet with a scrim and a 48px "More" title row over a 1px `--border` hairline; rows 48px with icons; the title and the rows' content start at the 16px gutter, as in every menu sheet; Settings last after a full-width separator. It holds every other visible destination in rail order. A tap opens it focused on the sheet itself, with no ring; closing it hands focus back to More only from the keyboard (Escape, or Enter on a row). At 420px tall and below the rows form two columns, so every row fits a 568×320 screen. While a destination in the sheet needs the user, the More tab carries one mark for them all (§11.4). |
 | App bar | 48px: ‹ Back (on detail routes) or nothing, title 16/600 (truncates), trailing icons (search, primary `+`, ⋯), in that order to the eye and to Tab. The `+` is an `.icon-btn` like Search, never a filled primary: transparent at rest, `--text-dim`, named and titled by the primary's label. Icons are 36px visual with 44px hit areas, as in the settled phone session header. No page description. |
 | Page header actions | Primary as `+` icon (accessible name "New Skill"), all others in ⋯ sheet. |

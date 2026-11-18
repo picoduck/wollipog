@@ -269,9 +269,9 @@ test("the collision check reports a contextual binding that shadows Search on on
 test("PR4 rail, search, create, and focus-zone shortcuts replace the retired sidebar binding", () => {
   const expected = [
     ["navigate-inbox", "1"],
-    ["navigate-automations", "2"],
-    ["navigate-projects", "3"],
-    ["navigate-assistants", "4"],
+    ["navigate-assistants", "2"],
+    ["navigate-automations", "3"],
+    ["navigate-projects", "4"],
     ["navigate-runs", "5"],
     ["navigate-pods", "6"],
     ["navigate-connections", "7"],

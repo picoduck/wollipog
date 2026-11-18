@@ -233,7 +233,7 @@ test("an empty query shows Recent, Go To and Actions; arrows move across section
   const [recent, goTo, actions] = ui.sections();
   assert.deepEqual(recent, ["Recent", ["Other work", "Fix the login bug"]]);
   assert.equal(goTo![0], "Go To");
-  assert.deepEqual((goTo![1] as string[]).slice(0, 3), ["Sessions", "Automations", "Projects"]);
+  assert.deepEqual((goTo![1] as string[]).slice(0, 3), ["Sessions", "Assistants", "Automations"]);
   assert.ok((goTo![1] as string[]).includes("Appearance"), "Settings sections are named by themselves");
   assert.ok(!(goTo![1] as string[]).includes("Usage and Cost"), "a hidden destination is not listed");
   assert.deepEqual(actions, ["Actions", ["Switch to Board View", "Show Navigation Labels"]]);
