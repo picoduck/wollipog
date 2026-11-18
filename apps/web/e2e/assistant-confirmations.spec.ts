@@ -77,7 +77,7 @@ test("the Inbox sums up a thread's requests in one line, and Review opens the th
   const served = await serveThreads(page, [thread("thr_cleanup", CLEANUP, "session-alpha", 1)]);
   await openInbox(page);
   const row = threadRow(page, CLEANUP);
-  await expect(row).toContainText("1 Waiting");
+  await expect(row).toContainText("1 Approval");
   await expect(row).toContainText(/Expires /);
   // The Inbox only points at the requests; they are answered in their thread, where each is whole.
   await expect(approvals(page).getByRole("button", { name: "Approve Once" })).toHaveCount(0);
@@ -106,8 +106,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expectPageNoHorizontalOverflow(page);
     // One line for each thread, with how many requests it has waiting.
     await expect(block.getByRole("listitem")).toHaveCount(2);
-    await expect(threadRow(page, CLEANUP)).toContainText("6 Waiting");
-    await expect(threadRow(page, RELEASE)).toContainText("2 Waiting");
+    await expect(threadRow(page, CLEANUP)).toContainText("6 Approvals");
+    await expect(threadRow(page, RELEASE)).toContainText("2 Approvals");
     // A long thread title ends in an ellipsis; its count and Review stay whole.
     const title = threadRow(page, CLEANUP).getByText(CLEANUP, { exact: true });
     expect(await title.evaluate((element) => getComputedStyle(element).textOverflow)).toBe("ellipsis");
@@ -138,7 +138,7 @@ test("beside the preview, in the narrowest 280px Sessions list, the lines wrap w
   await expectNoHorizontalOverflow(block, "The approvals");
   for (const row of await block.getByRole("listitem").all()) {
     await expectFullyInViewport(row.getByRole("button", { name: "Review", exact: true }), "Review");
-    await expect(row).toContainText(/\d Waiting/);
+    await expect(row).toContainText(/\d Approvals?/);
     // The title over its count, expiry and Review: two rows at most, never a third.
     expect((await row.boundingBox())!.height, "a thread's line wraps at most once").toBeLessThanOrEqual(56);
   }

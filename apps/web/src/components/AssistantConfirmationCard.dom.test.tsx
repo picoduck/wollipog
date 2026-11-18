@@ -118,7 +118,7 @@ test("approvals follow thread events and are read again when the connection retu
   await event(thread([request("aoc_1", "Archive Session"), request("aoc_2", "Stop Session")]));
   assert.equal(reads, 2);
   assert.deepEqual(titles(), ["Archive Session, Stop Session"]);
-  assert.match(container.querySelector(".assistant-approvals-meta")!.textContent!, /^2 Waiting/);
+  assert.match(container.querySelector(".assistant-approvals-meta")!.textContent!, /^2 Approvals/);
   // Thread activity that leaves them unchanged does not.
   await event(thread([request("aoc_2", "Stop Session"), request("aoc_1", "Archive Session")]));
   assert.equal(reads, 2);

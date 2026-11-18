@@ -204,7 +204,7 @@ export function AssistantConfirmationsNotice() {
             <li key={thread.threadId} className="assistant-approvals-row" aria-labelledby={titleId}>
               <span className="assistant-approvals-title" id={titleId} title={title}>{title}</span>
               <span className="assistant-approvals-meta">
-                <span className="request-card-kind">{thread.confirmations.length} Waiting</span>
+                <span className="request-card-kind">{thread.confirmations.length} {thread.confirmations.length === 1 ? "Approval" : "Approvals"}</span>
                 <span className="assistant-approvals-expiry">Expires {formatClock(thread.expiresAt)}</span>
                 <button type="button" className="btn sm primary" aria-describedby={titleId}
                   onClick={() => navigate({ name: "assistants", threadId: thread.threadId })}>
