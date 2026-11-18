@@ -2120,9 +2120,12 @@ queued behind a turn that had never started.
     queue (they must be sent again); and approved decisions the session has not yet consumed are
     revoked and must be requested again.
 - **The job is reported, too.** A listed job with no terminal status for more than an hour carries
-  `stalledSince` in the session's job inventory and reads **Stalled** in the Background Work panel.
-  That is a report, not proof it ended. A finished job whose result cannot be returned because a
-  sibling from the same turn is unfinished waits passively (the session reads **Waiting on External
+  `stalledSince` in the session's job inventory. That is a control-plane fact for campaign safety,
+  not proof it ended and not a badge: past it the job no longer counts as a campaign child's wait.
+  The Background Work panel reads the job **Running** at any age while the connected runner lists
+  it and the session's background work is current, **Unverified** once that evidence is gone, and
+  **Lost** when a runner restart orphaned it (see Tracked Waits and Their Liveness Contracts). A
+  finished job whose result cannot be returned because a sibling from the same turn is unfinished waits passively (the session reads **Waiting on External
   Job**) while its parent turn runs and until an hour has passed since it finished
   (`BACKGROUND_HANDOFF_WAIT_MAX_MS`, the runner's default handoff bound; #3073). After both, it is a
   `continuation_blocked` delivery, shown as **Result Blocked**. A dashboard's **Acknowledge** clears
