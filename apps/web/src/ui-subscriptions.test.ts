@@ -152,8 +152,8 @@ test("post-ack recovery waits for the exact current stream selection", () => {
     mode: "targeted", requestedRevision: 1, appliedRevision: 1, sessionIds: ["s1"],
   }, ["s1", "s2"]), null, "stale ack for the prior view cannot open recovery race");
   assert.equal(subscriptionRecoveryRevision({
-    mode: "targeted", requestedRevision: 2, appliedRevision: 2, sessionIds: ["s1", "s2"], podIds: ["p1"],
-  }, ["s2", "s1"], ["p1"]), 2);
+    mode: "targeted", requestedRevision: 2, appliedRevision: 2, sessionIds: ["s1", "s2"],
+  }, ["s2", "s1"]), 2);
 });
 
 test("busy sessions join every targeted subscription after required detail streams", () => {
